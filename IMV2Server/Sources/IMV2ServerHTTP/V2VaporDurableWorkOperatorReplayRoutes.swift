@@ -6,6 +6,8 @@ import Vapor
 public struct V2DurableWorkReplayHTTPRequest: Content, Sendable {
     public let operationID: UUID
     public let targetKind: V2DurableWorkReplayTargetKind
+    /// 个人事件来源库的已配置房间分片标识；其他工作必须为空。
+    public let sourceShardID: String?
     public let sourceEventID: String
     public let targetUserID: String?
     public let projectionKind: String?
@@ -14,6 +16,7 @@ public struct V2DurableWorkReplayHTTPRequest: Content, Sendable {
     public init(
         operationID: UUID,
         targetKind: V2DurableWorkReplayTargetKind,
+        sourceShardID: String? = nil,
         sourceEventID: String,
         targetUserID: String? = nil,
         projectionKind: String? = nil,
@@ -21,6 +24,7 @@ public struct V2DurableWorkReplayHTTPRequest: Content, Sendable {
     ) {
         self.operationID = operationID
         self.targetKind = targetKind
+        self.sourceShardID = sourceShardID
         self.sourceEventID = sourceEventID
         self.targetUserID = targetUserID
         self.projectionKind = projectionKind
@@ -47,6 +51,8 @@ public struct V2DurableWorkReplayHTTPRequest: Content, Sendable {
 public struct V2DurableWorkEventReplayHTTPRequest: Content, Sendable {
     public let operationID: UUID
     public let targetKind: V2DurableWorkReplayTargetKind
+    /// 个人事件来源库的已配置房间分片标识；其他工作必须为空。
+    public let sourceShardID: String?
     public let sourceEventID: String
     public let reason: V2DurableWorkReplayReason
     public let limit: Int
@@ -54,12 +60,14 @@ public struct V2DurableWorkEventReplayHTTPRequest: Content, Sendable {
     public init(
         operationID: UUID,
         targetKind: V2DurableWorkReplayTargetKind,
+        sourceShardID: String? = nil,
         sourceEventID: String,
         reason: V2DurableWorkReplayReason,
         limit: Int
     ) {
         self.operationID = operationID
         self.targetKind = targetKind
+        self.sourceShardID = sourceShardID
         self.sourceEventID = sourceEventID
         self.reason = reason
         self.limit = limit
@@ -130,7 +138,7 @@ public struct V2VaporDurableWorkOperatorReplayRoutes: Sendable {
             }
             let result: V2DurableWorkEventReplayResult
             do {
-                result = try await service.replayEvent(command)
+                result = try await service.replayEvent(command, sourceShardID: input.sourceShardID)
             } catch is V2DurableWorkReplayValidationError {
                 throw Abort(.badRequest)
             } catch {
@@ -138,7 +146,7 @@ public struct V2VaporDurableWorkOperatorReplayRoutes: Sendable {
                 // disclose row identity or exception text on the operator API.
                 throw Abort(.serviceUnavailable)
             }
-            let response = Response(status: .ok)
+            let response = Response(status: .ok, headers: ["Cache-Control": "no-store", "Pragma": "no-cache"])
             try response.content.encode(V2DurableWorkEventReplayHTTPResponse(result))
             return response
         }
@@ -155,7 +163,7 @@ public struct V2VaporDurableWorkOperatorReplayRoutes: Sendable {
             }
             let result: V2DurableWorkReplayResult
             do {
-                result = try await service.replay(command)
+                result = try await service.replay(command, sourceShardID: input.sourceShardID)
             } catch V2DurableWorkReplayStoreError.idempotencyConflict {
                 throw Abort(.conflict)
             } catch is V2DurableWorkReplayValidationError {

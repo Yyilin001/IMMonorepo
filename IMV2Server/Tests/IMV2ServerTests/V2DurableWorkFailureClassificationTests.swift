@@ -9,7 +9,7 @@ struct V2DurableWorkFailureClassificationTests {
 
     @Test("Transient failures retry without ever pausing and cap their backoff")
     func transientFailuresNeverPause() {
-        for attempt in [1, 3, 10, 50, 10_000] {
+        for attempt in [1, 3, 10, 50, 10_000, Int(Int32.max), Int.max - 1, Int.max] {
             let disposition = policy.disposition(
                 attempt: attempt, claimToken: claimToken, now: base, kind: .transient
             )
@@ -39,10 +39,6 @@ struct V2DurableWorkFailureClassificationTests {
 
     @Test("Only proven invariant violations are classified as deterministic")
     func classifierStaysConservative() {
-        #expect(
-            v2DurableWorkFailureKind(for: V2FanoutDeliveryError.inboxAlreadyCommitted)
-                == .deterministic
-        )
         #expect(
             v2DurableWorkFailureKind(for: V2RoomWriteStoreError.corruptPersistenceState)
                 == .deterministic

@@ -461,7 +461,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         scheduledDelay = selectedDelay
         flushTask = Task { [weak self] in
             do {
-                try await Task.sleep(for: delay)
+                try await v2Sleep(for: delay)
             } catch {
                 return
             }

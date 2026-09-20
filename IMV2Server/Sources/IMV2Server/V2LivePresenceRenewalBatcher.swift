@@ -195,7 +195,7 @@ public actor V2LivePresenceRenewalBatcher {
         scheduledFlushID = flushID
         scheduledFlushIsImmediate = delay == .zero
         scheduledFlush = Task {
-            do { try await Task.sleep(for: delay) }
+            do { try await v2Sleep(for: delay) }
             catch { return }
             await self.flush(scheduledID: flushID)
         }

@@ -357,7 +357,7 @@ struct V2NetworkTLSByteConnection: V2TLSByteConnection {
 ///
 /// 连接工厂的生产实现使用 TLS 1.3 和平台信任校验，网络进入 `.ready` 后才发送握手。
 /// 每轮连接持有独立代际与接收缓冲，异步操作恢复时核对代际，防止旧回调影响替换连接。
-public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabilityHintSource, V2GroupEventAvailabilityHintSource, V2LiveActivityEventSource, V2RealtimeConnection {
+public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabilityHintSource, V2GroupEventAvailabilityHintSource, V2AccountRoomChangeSource, V2LiveActivityEventSource, V2RealtimeConnection {
     /// 每代创建新字节连接的工厂。
     private let connectionFactory: @Sendable () -> any V2TLSByteConnection
     /// 当前连接允许占用的在途关联槽位上限。
@@ -398,6 +398,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     private struct PendingResponse {
         /// 区分相同请求号不同生命周期的内部身份。
         let id: UUID
+        let command: V2FrameCommand
         /// 调用者等待句柄；nil 表示调用者已取消但线上请求仍占位。
         var continuation: CheckedContinuation<V2Frame, Error>?
         /// 独立超时任务，取消等待者后仍保留。
@@ -420,6 +421,8 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     // slot remain owned by this connection until the reply or generation close.
     /// 按协议请求号保存关联记录，包括 continuation 已清空的取消请求；这些记录仍占用容量。
     private var responseWaiters: [UInt64: PendingResponse] = [:]
+    private var accountRoomInbox = V2AccountRoomChangeInbox()
+    private var accountRoomWaiter: Waiter<V2AccountRoomChange>?
     /// 唯一用户同步提示等待者。
     private var availabilityWaiter: Waiter<V2SyncAvailabilityHint>?
     /// 待消费的用户同步提示，保留较高水位。
@@ -650,6 +653,40 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         })
     }
 
+    public func nextAccountRoomChange() async throws -> V2AccountRoomChange {
+        try Task.checkCancellation()
+        if let expected = V2ConnectionRequestScope.connectionID, expected != connectionID {
+            throw V2TLSFrameConnectionError.connectionClosed
+        }
+        guard authenticatedVersion != nil, connection != nil else { throw V2TLSFrameConnectionError.notConnected }
+        guard accountRoomInbox.epoch != nil else { throw V2AccountRoomChangeError.notStarted }
+        guard accountRoomWaiter == nil else { throw V2TLSFrameConnectionError.concurrentAvailabilityConsumer }
+        if let value = accountRoomInbox.next() { return value }
+        let id = UUID()
+        let generation = connectionID
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                guard !Task.isCancelled else { continuation.resume(throwing: CancellationError()); return }
+                accountRoomWaiter = .init(id: id, continuation: continuation)
+            }
+        }, onCancel: {
+            Task { await self.cancelAccountRoomWait(id: id, generation: generation) }
+        })
+    }
+
+    private func cancelAccountRoomWait(id: UUID, generation: UUID?) {
+        guard connectionID == generation, accountRoomWaiter?.id == id else { return }
+        let waiter = accountRoomWaiter
+        accountRoomWaiter = nil
+        waiter?.resume(throwing: CancellationError())
+    }
+
+    private func deliverAccountRoomChange() {
+        guard let waiter = accountRoomWaiter, let value = accountRoomInbox.next() else { return }
+        accountRoomWaiter = nil
+        waiter.resume(returning: value)
+    }
+
     /// 先分离连接状态并请求取消，再等待捕获的读取与发送任务退出。
     ///
     /// 等待在清理函数之外进行，避免读取任务因失败关闭连接时等待自己。分离后新连接可以开始，
@@ -776,7 +813,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
                     do { try await connection.send(bytes) }
                     catch { await self?.failRequest(frame.requestID, id: id, generation: generation) }
                 }
-                responseWaiters[frame.requestID] = .init(id: id, continuation: continuation, deadline: deadline, sendTask: sendTask)
+                responseWaiters[frame.requestID] = .init(id: id, command: frame.command, continuation: continuation, deadline: deadline, sendTask: sendTask)
             }
         }, onCancel: {
             Task { await self.cancelRequest(frame.requestID, id: id, generation: generation) }
@@ -851,6 +888,12 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
                 } else {
                     pendingGroupEventAvailabilityHint = value
                 }
+            case .accountRoomChanged(let change):
+                try accountRoomInbox.accept(change)
+                deliverAccountRoomChange()
+            case .accountRoomResyncRequired(let reset):
+                try accountRoomInbox.accept(reset)
+                deliverAccountRoomChange()
             case .presenceChanged(let state):
                 let value = try V2LiveActivityEvent.presence(.init(roomID: .init(state.roomID), targetUserID: .init(state.targetUserID), isOnline: state.isOnline, expiresAt: Date(timeIntervalSince1970: TimeInterval(state.expiresAtMs) / 1_000)))
                 acceptLiveActivityEvent(value)
@@ -865,9 +908,22 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         guard frame.flags.isEmpty || frame.flags == [.headerBoundRequestID] else {
             throw V2TLSFrameConnectionError.unsupportedFrameFlags
         }
-        guard let waiter = responseWaiters.removeValue(forKey: frame.requestID) else {
+        guard let waiter = responseWaiters[frame.requestID] else {
             throw V2TLSFrameConnectionError.unexpectedResponse
         }
+        if waiter.command == .accountRoomChangesStart {
+            let envelope = try V2ProtobufFrameCodec.decode(frame, maximumMessageDepth: maximumProtobufMessageDepth)
+            switch envelope.body {
+            case .accountRoomChangesReady(let ready):
+                // Install before resuming the caller: the next frame may already
+                // be buffered in this same read, ahead of its consumer task.
+                guard waiter.continuation != nil else { throw V2TLSFrameConnectionError.connectionClosed }
+                try accountRoomInbox.begin(epoch: ready.connectionEpoch)
+            case .error: break
+            default: throw V2TLSFrameConnectionError.unexpectedResponse
+            }
+        }
+        responseWaiters.removeValue(forKey: frame.requestID)
         waiter.deadline.cancel()
         waiter.sendTask.cancel()
         waiter.continuation?.resume(returning: frame)
@@ -1017,6 +1073,9 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         groupEventAvailabilityWaiter?.resume(throwing: error)
         groupEventAvailabilityWaiter = nil
         pendingGroupEventAvailabilityHint = nil
+        accountRoomWaiter?.resume(throwing: error)
+        accountRoomWaiter = nil
+        accountRoomInbox = .init()
         liveActivityWaiter?.resume(throwing: error)
         liveActivityWaiter = nil
         pendingLiveActivityEvents.removeAll(keepingCapacity: false)
@@ -1105,7 +1164,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
 /// 缺少 Apple Network 或 Security 框架时的占位连接实现。
 ///
 /// 保留纯协议与持久化测试所需的接口，所有网络操作明确报告未连接，不降级到非 TLS 传输。
-public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabilityHintSource, V2GroupEventAvailabilityHintSource, V2RealtimeConnection {
+public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabilityHintSource, V2GroupEventAvailabilityHintSource, V2AccountRoomChangeSource, V2RealtimeConnection {
     /// 创建占位实现，只检查 protobuf 深度为正，不创建 socket 或保存端点配置。
     public init(
         endpoint _: V2RealtimeEndpoint,
@@ -1132,6 +1191,10 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
 
     /// 占位实现没有房间事件提示来源，始终抛出 notConnected。
     public func nextGroupEventAvailabilityHint() async throws -> V2GroupEventAvailabilityHint {
+        throw V2TLSFrameConnectionError.notConnected
+    }
+
+    public func nextAccountRoomChange() async throws -> V2AccountRoomChange {
         throw V2TLSFrameConnectionError.notConnected
     }
 

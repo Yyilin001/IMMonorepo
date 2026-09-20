@@ -44,7 +44,7 @@ public struct V2ForwardDeliveryRuntime: Sendable {
                         case .continueImmediately: break
                         case .yield: await Task.yield()
                         case .sleep(let duration):
-                            do { try await Task.sleep(for: duration) } catch { return }
+                            do { try await v2Sleep(for: duration) } catch { return }
                         }
                     }
                 }

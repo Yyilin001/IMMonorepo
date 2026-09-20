@@ -14,7 +14,7 @@ struct V2GroupRoomCommandOutboxTests {
         let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
         do {
             let engine = V2GroupRoomCommandOutboxEngine(store: store, transport: ScriptedGroupTransport(results: []))
-            let command = try await engine.enqueueCreation(title: "upload recovery", deliveryMode: .standardFanout, initialMemberUserIDs: [.init(uuid: UUID()), .init(uuid: UUID())])
+            let command = try await engine.enqueueCreation(title: "upload recovery", capacityClass: .standard, initialMemberUserIDs: [.init(uuid: UUID()), .init(uuid: UUID())])
             let pool = await store.databasePool
             try await pool.write { try $0.execute(sql: "UPDATE v2_pending_group_room_creations SET uploaded_member_count = ?", arguments: [count]) }
             #expect(try await pool.read { try String.fetchOne($0, sql: "SELECT typeof(uploaded_member_count) FROM v2_pending_group_room_creations") } == "real")
@@ -40,7 +40,7 @@ struct V2GroupRoomCommandOutboxTests {
         let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
         do {
             let engine = V2GroupRoomCommandOutboxEngine(store: store, transport: ScriptedGroupTransport(results: []))
-            let command = try await engine.enqueueCreation(title: "upload recovery", deliveryMode: .standardFanout, initialMemberUserIDs: [.init(uuid: UUID()), .init(uuid: UUID())])
+            let command = try await engine.enqueueCreation(title: "upload recovery", capacityClass: .standard, initialMemberUserIDs: [.init(uuid: UUID()), .init(uuid: UUID())])
             let pool = await store.databasePool
             try await pool.write { db in
                 try db.execute(sql: "PRAGMA ignore_check_constraints = ON")
@@ -74,7 +74,7 @@ struct V2GroupRoomCommandOutboxTests {
         let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
         do {
             let engine = V2GroupRoomCommandOutboxEngine(store: store, transport: ScriptedGroupTransport(results: []), now: { Date(timeIntervalSince1970: 1_000) })
-            let command = try await engine.enqueueCreation(title: "clock recovery", deliveryMode: .standardFanout, initialMemberUserIDs: [])
+            let command = try await engine.enqueueCreation(title: "clock recovery", capacityClass: .standard, initialMemberUserIDs: [])
             if path == "resume" { try await store.beginCancellingGroupRoomCreation(operationID: command.operationID, now: Date(timeIntervalSince1970: 1_000)) }
             let before = try await store.pendingGroupRoomCreations()
             func transition(at date: Date) async throws {
@@ -119,7 +119,7 @@ struct V2GroupRoomCommandOutboxTests {
         let first = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
         let firstEngine = V2GroupRoomCommandOutboxEngine(store: first, transport: transport, makeUUID: { operation }, now: { started })
 
-        let command = try await firstEngine.enqueueCreation(title: " 项目群 ", deliveryMode: .standardFanout, initialMemberUserIDs: [member])
+        let command = try await firstEngine.enqueueCreation(title: " 项目群 ", capacityClass: .standard, initialMemberUserIDs: [member])
         #expect(command.title == "项目群")
         #expect(try await firstEngine.flushOnce() == .retryScheduled(command.operationID))
         let retried = try #require(await first.pendingGroupRoomCreations().first)
@@ -144,7 +144,7 @@ struct V2GroupRoomCommandOutboxTests {
         let binding = V2LocalInstallationBinding(value: UUID(uuidString: "00000000-0000-0000-0000-000000000705")!)
         let store = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-v2-group-rejected-\(UUID().uuidString).sqlite"), installationBinding: binding)
         let engine = V2GroupRoomCommandOutboxEngine(store: store, transport: ScriptedGroupTransport(results: [.rejected]), makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000706")! }, now: Date.init)
-        let command = try await engine.enqueueCreation(title: "项目群", deliveryMode: .standardFanout, initialMemberUserIDs: [])
+        let command = try await engine.enqueueCreation(title: "项目群", capacityClass: .standard, initialMemberUserIDs: [])
         #expect(try await engine.flushOnce() == .rejected(command.operationID, code: "INVALID_ARGUMENT"))
         #expect(try await engine.flushOnce() == .idle)
     }
@@ -162,13 +162,13 @@ struct V2GroupRoomCommandOutboxTests {
             makeUUID: { firstOperation }
         )
 
-        let original = try await firstEngine.enqueueCreation(title: " 项目群 ", deliveryMode: .standardFanout, initialMemberUserIDs: [])
+        let original = try await firstEngine.enqueueCreation(title: " 项目群 ", capacityClass: .standard, initialMemberUserIDs: [])
         let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
         let restartedEngine = V2GroupRoomCommandOutboxEngine(
             store: restartedStore,
             transport: ScriptedGroupTransport(results: [])
         )
-        let reused = try await restartedEngine.enqueueCreation(title: "项目群", deliveryMode: .standardFanout, initialMemberUserIDs: [])
+        let reused = try await restartedEngine.enqueueCreation(title: "项目群", capacityClass: .standard, initialMemberUserIDs: [])
 
         #expect(reused.operationID == original.operationID)
         let pending = try await restartedStore.pendingGroupRoomCreations()
@@ -188,7 +188,7 @@ struct V2GroupRoomCommandOutboxTests {
         )
         let transport = ScriptedGroupTransport(results: [.created(roomID)])
         let engine = V2GroupRoomCommandOutboxEngine(store: store, transport: transport, makeUUID: { operation }, now: Date.init)
-        let command = try await engine.enqueueCreation(title: "大群", deliveryMode: .standardFanout, initialMemberUserIDs: members)
+        let command = try await engine.enqueueCreation(title: "大群", capacityClass: .standard, initialMemberUserIDs: members)
         // One scheduler quantum performs exactly one authenticated step:
         // prepare, one bounded member page, or finalize.
         #expect(try await engine.flushOnce() == .retryScheduled(command.operationID))
@@ -212,7 +212,7 @@ struct V2GroupRoomCommandOutboxTests {
         )
         let transport = ScriptedGroupTransport(results: [.created(roomID)])
         let engine = V2GroupRoomCommandOutboxEngine(store: store, transport: transport, makeUUID: { operation }, now: Date.init)
-        let command = try await engine.enqueueCreation(title: "租期恢复", deliveryMode: .standardFanout, initialMemberUserIDs: members)
+        let command = try await engine.enqueueCreation(title: "租期恢复", capacityClass: .standard, initialMemberUserIDs: members)
         #expect(try await engine.flushOnce() == .retryScheduled(command.operationID))
         for _ in 0 ..< 8 { #expect(try await engine.flushOnce() == .retryScheduled(command.operationID)) }
         #expect(try #require(await store.pendingGroupRoomCreations().first).uploadedMemberCount == 4_096)
@@ -241,7 +241,7 @@ struct V2GroupRoomCommandOutboxTests {
         )
         let operation = UUID(uuidString: "00000000-0000-0000-0000-000000005200")!
         let engine = V2GroupRoomCommandOutboxEngine(store: store, transport: ScriptedGroupTransport(results: []), makeUUID: { operation }, now: Date.init)
-        let command = try await engine.enqueueCreation(title: "取消群", deliveryMode: .standardFanout, initialMemberUserIDs: [])
+        let command = try await engine.enqueueCreation(title: "取消群", capacityClass: .standard, initialMemberUserIDs: [])
         try await engine.requestCancellation(operationID: command.operationID)
         #expect(try await engine.flushOnce() == .cancelled(command.operationID))
         #expect(try #require(await store.pendingGroupRoomCreations().first).state == .cancelled)
@@ -259,7 +259,7 @@ struct V2GroupRoomCommandOutboxTests {
         let operation = UUID(uuidString: "00000000-0000-0000-0000-000000005201")!
         let transport = ScriptedGroupTransport(results: [], rejectsCancellationAsFrozen: true)
         let engine = V2GroupRoomCommandOutboxEngine(store: store, transport: transport, makeUUID: { operation }, now: Date.init)
-        let command = try await engine.enqueueCreation(title: "冻结群", deliveryMode: .standardFanout, initialMemberUserIDs: [])
+        let command = try await engine.enqueueCreation(title: "冻结群", capacityClass: .standard, initialMemberUserIDs: [])
         try await engine.requestCancellation(operationID: command.operationID)
 
         #expect(try await engine.flushOnce() == .cancellationRefused(command.operationID))
@@ -311,7 +311,7 @@ private actor ScriptedGroupTransport: V2ClientGroupMessagingTransport {
     func finalizeGroupRoomCreation(operationID: GroupRoomOperationID) throws -> V2ClientGroupRoom {
         guard !results.isEmpty else { throw V2RealtimeTransportError.unexpectedResponse }
         switch results.removeFirst() {
-        case .created(let roomID): return .init(roomID: roomID, title: stagedTitle, deliveryMode: .standardFanout, memberUserIDs: [], memberCount: UInt32(stagedMemberCount + 1), createdAt: .distantPast)
+        case .created(let roomID): return .init(roomID: roomID, title: stagedTitle, capacityClass: .standard, memberUserIDs: [], memberCount: UInt32(stagedMemberCount + 1), createdAt: .distantPast)
         case .retryableFailure: throw V2RealtimeTransportError.unexpectedResponse
         case .rejected: throw V2RealtimeTransportError.server(code: "INVALID_ARGUMENT", retryable: false, retryAfterSeconds: 0, currentRevision: 0)
         }

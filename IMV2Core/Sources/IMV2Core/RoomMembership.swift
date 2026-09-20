@@ -67,7 +67,7 @@ public struct V2ChangeRoomMembershipCommand: Equatable, Sendable {
     }
 }
 
-/// 成员变更后的版本、事件及扇出结果，调用方应从同一权威事务构造。
+/// 成员变更后的版本与事件结果，调用方应从同一权威事务构造。
 public struct V2RoomMembershipChange: Equatable, Sendable {
     /// 目标房间。
     public let roomID: RoomID
@@ -81,8 +81,6 @@ public struct V2RoomMembershipChange: Equatable, Sendable {
     public let roomSequence: UInt64
     /// 对应成员变更事件身份。
     public let eventID: EventID
-    /// 对应扇出计划身份。
-    public let fanoutPlanID: FanoutPlanID
     /// 变更创建时间，构造器不校验日期。
     public let createdAt: Date
 
@@ -91,7 +89,7 @@ public struct V2RoomMembershipChange: Equatable, Sendable {
     /// - Throws: 任一数值越界时抛出 outOfRange。
     ///
     /// 不验证相对旧版本的递增关系、目标实际成员状态、日期或提交状态。
-    public init(roomID: RoomID, targetUserID: UserID, action: V2RoomMembershipAction, membershipRevision: UInt64, roomSequence: UInt64, eventID: EventID, fanoutPlanID: FanoutPlanID, createdAt: Date) throws {
+    public init(roomID: RoomID, targetUserID: UserID, action: V2RoomMembershipAction, membershipRevision: UInt64, roomSequence: UInt64, eventID: EventID, createdAt: Date) throws {
         guard membershipRevision > 0, membershipRevision <= UInt64(Int64.max),
               roomSequence > 0, roomSequence <= UInt64(Int64.max)
         else { throw V2RevisionValidationError.outOfRange }
@@ -101,7 +99,6 @@ public struct V2RoomMembershipChange: Equatable, Sendable {
         self.membershipRevision = membershipRevision
         self.roomSequence = roomSequence
         self.eventID = eventID
-        self.fanoutPlanID = fanoutPlanID
         self.createdAt = createdAt
     }
 }

@@ -47,7 +47,7 @@ public enum V2MessageReactionOutcome: Equatable, Sendable {
     /// 触发限流；关联值为建议的重试等待秒数。
     case rateLimited(retryAfterSeconds: Int)
     /// 依赖的扇出准入暂时不可用。
-    case unavailable(FanoutAdmissionUnavailableReason)
+    case unavailable(V2CommandAdmissionUnavailableReason)
 }
 
 /// 消息表态的持久化边界。
@@ -58,32 +58,31 @@ public protocol V2MessageReactionStore: Sendable {
     ///   - command: 待执行的表态命令。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 本次变更的来源事件标识。
-    ///   - planID: 本次变更的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 表态处理结果。
     /// - Throws: 房间/消息不存在、非成员、消息已撤回或持久化失败时抛出。
-    func change(command: V2ChangeMessageReactionCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2MessageReactionOutcome
+    func change(command: V2ChangeMessageReactionCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageReactionOutcome
 }
 
-/// 为一次表态变更生成来源事件与扇出计划标识。
+/// 为一次表态变更生成来源事件标识。
 public struct V2MessageReactionIDFactory: Sendable {
     private let makeUUID: @Sendable () -> UUID
     /// 创建标识工厂。
     ///
     /// - Parameter makeUUID: UUID 生成器，默认使用 `UUID.init`。
     public init(makeUUID: @escaping @Sendable () -> UUID = UUID.init) { self.makeUUID = makeUUID }
-    /// 生成一对全新的来源事件与扇出计划标识。
+    /// 生成一对全新的来源事件标识。
     ///
-    /// - Returns: 来源事件标识与扇出计划标识。
+    /// - Returns: 来源事件标识。
     /// - Throws: UUID 生成失败时抛出。
-    public func make() throws -> (eventID: EventID, planID: FanoutPlanID) {
-        try (.init(makeUUID().uuidString), .init(makeUUID().uuidString))
+    public func make() throws -> EventID {
+        try .init(makeUUID().uuidString)
     }
 }
 
 /// 消息表态服务。
 ///
-/// 它把已认证请求转换为存储命令，并为每次调用分配稳定的来源事件与扇出计划标识。
+/// 它把已认证请求转换为存储命令，并为每次调用分配稳定的来源事件标识。
 public struct V2MessageReactionService: Sendable {
     private let store: any V2MessageReactionStore
     private let capacityProfile: V2CapacityProfile
@@ -107,8 +106,8 @@ public struct V2MessageReactionService: Sendable {
     /// - Returns: 表态处理结果。
     /// - Throws: 存储拒绝或持久化失败时抛出。
     public func change(_ request: V2AuthenticatedMessageReaction) async throws -> V2MessageReactionOutcome {
-        let ids = try identifiers.make()
-        return try await store.change(command: .init(roomID: request.roomID, actorUserID: request.actorUserID, operationID: request.operationID, messageID: request.messageID, reaction: request.reaction, action: request.action), capacityProfile: capacityProfile, eventID: ids.eventID, planID: ids.planID, now: now())
+        let eventID = try identifiers.make()
+        return try await store.change(command: .init(roomID: request.roomID, actorUserID: request.actorUserID, operationID: request.operationID, messageID: request.messageID, reaction: request.reaction, action: request.action), capacityProfile: capacityProfile, eventID: eventID, now: now())
     }
 }
 

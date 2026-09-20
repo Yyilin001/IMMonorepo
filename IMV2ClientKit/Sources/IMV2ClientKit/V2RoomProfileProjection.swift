@@ -3,7 +3,7 @@ import IMV2Core
 
 /// 精简的群身份信息与本设备观察到的最新成员修订。
 ///
-/// 它刻意不包含成员列表：扇出绝不会把庞大名册复制进每个接收者的同步历史。
+/// 个人发现事件只保存房间身份，不把完整成员名册复制进个人同步历史。
 public struct V2ClientRoomProfileProjection: Equatable, Sendable {
     /// 来源事件标识。
     public let sourceEventID: EventID
@@ -13,13 +13,9 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
     public let title: String
     /// 群主用户。
     public let ownerUserID: UserID
-    /// 房间投递模式。
-    public let deliveryMode: V2GroupDeliveryMode
-    /// 服务端宣告的权威副本形态。
-    ///
-    /// 客户端据此决定该房间是否按房间游标恢复，而不是从投递模式推断：投递模式描述用哪种
-    /// 扇出规划器且在房间创建后不可变，权威副本形态可以按房间推进。
-    public let deliveryAuthority: V2ClientRoomDeliveryAuthority
+    /// 房间容量等级。
+    public let capacityClass: V2GroupCapacityClass
+
     /// 成员修订。
     public let membershipRevision: UInt64
     /// 房间创建时刻。
@@ -32,22 +28,20 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
     ///   - roomID: 目标房间。
     ///   - title: 房间标题。
     ///   - ownerUserID: 群主用户。
-    ///   - deliveryMode: 投递模式。
-    ///   - deliveryAuthority: 权威副本形态。
+    ///   - capacityClass: 群容量等级。
     ///   - membershipRevision: 成员修订。
     ///   - createdAt: 房间创建时刻。
     init(
         sourceEventID: EventID, roomID: RoomID, title: String,
-        ownerUserID: UserID, deliveryMode: V2GroupDeliveryMode,
-        deliveryAuthority: V2ClientRoomDeliveryAuthority,
+        ownerUserID: UserID, capacityClass: V2GroupCapacityClass,
+
         membershipRevision: UInt64, createdAt: Date
     ) {
         self.sourceEventID = sourceEventID
         self.roomID = roomID
         self.title = title
         self.ownerUserID = ownerUserID
-        self.deliveryMode = deliveryMode
-        self.deliveryAuthority = deliveryAuthority
+        self.capacityClass = capacityClass
         self.membershipRevision = membershipRevision
         self.createdAt = createdAt
     }
@@ -67,15 +61,14 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
             let title: String
             let ownerUserID: String
             let membershipRevision: UInt64
-            let deliveryMode: String
+            let capacityClass: String
             // 权威副本形态是服务端宣告的必需字段：项目未上线，不保留"缺字段就按投递模式
             // 推断"的静默回退，缺失或未知值一律按不可解码处理。
-            let deliveryAuthority: String
+
             let createdAtMilliseconds: Int64
             enum CodingKeys: String, CodingKey {
                 case eventType = "event_type"; case roomID = "room_id"; case title
-                case ownerUserID = "owner_user_id"; case membershipRevision = "membership_revision"; case deliveryMode = "delivery_mode"; case createdAtMilliseconds = "created_at_ms"
-                case deliveryAuthority = "delivery_authority"
+                case ownerUserID = "owner_user_id"; case membershipRevision = "membership_revision"; case capacityClass = "capacity_class"; case createdAtMilliseconds = "created_at_ms"
             }
         }
         let payload: Wire
@@ -95,14 +88,10 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
             roomID = try .init(payload.roomID)
             title = normalizedTitle
             ownerUserID = try .init(payload.ownerUserID)
-            guard let mode = V2GroupDeliveryMode(rawValue: payload.deliveryMode) else {
+            guard let mode = V2GroupCapacityClass(rawValue: payload.capacityClass) else {
                 throw V2ClientProjectionError.invalidMessagePayload
             }
-            deliveryMode = mode
-            guard let authority = V2ClientRoomDeliveryAuthority(rawValue: payload.deliveryAuthority) else {
-                throw V2ClientProjectionError.invalidMessagePayload
-            }
-            deliveryAuthority = authority
+            capacityClass = mode
             membershipRevision = payload.membershipRevision
             createdAt = Date(timeIntervalSince1970: TimeInterval(payload.createdAtMilliseconds) / 1_000)
         } catch { throw V2ClientProjectionError.invalidMessagePayload }

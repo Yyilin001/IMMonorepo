@@ -13,7 +13,7 @@ controlled experiment.
 
 ## Preconditions
 
-- IM_V2_DIRECT_FANOUT_MODE=room_log
+- Use the current room-log-only server; the retired fanout-mode selector must not be configured.
 - IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE=room or shard_only
 - One gateway replica for the benchmark. Credits are process-local, so each
   replica may retain at most one partially unused batch per active shard.
@@ -23,8 +23,7 @@ controlled experiment.
 per-room command window while batching the durable shard admission reserve.
 `shard_only` is the direct-room-log-only experiment: the durable shard command
 window becomes the command-capacity authority for ordinary direct messages,
-and the per-room counter is no longer rewritten. It is rejected at startup
-outside `room_log` mode and is not the default after the A/B regression.
+and the per-room counter is no longer rewritten. It is not the default after the A/B regression.
 
 Set IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE=32 for the initial load
 test. The accepted range is 1...128; 0 is the default and disables the

@@ -4,7 +4,7 @@ import FoundationNetworking
 #endif
 import IMV2Core
 
-/// 账户因子验证后取得的一次性断言，直接交给设备凭证签发流程。
+/// 账户因子验证后取得的短期断言，直接交给设备凭证签发流程。
 ///
 /// 不得写入 Keychain、数据库或诊断信息；此值类型仅校验字符串形式，不验证签发者、有效期或是否已使用。
 public struct V2AccountAssertion: Equatable, Sendable {
@@ -37,6 +37,8 @@ public enum V2AccountAuthenticationError: Error, Equatable, Sendable {
     case invalidDisplayName
     /// 密码 UTF-8 长度不在 12 到 1024 字节之间。
     case invalidPassword
+    /// 恢复码必须为生成时提供的 64 位小写十六进制字符串。
+    case invalidRecoveryCode
     /// 断言为空白或包含不允许的 ASCII 控制字符。
     case invalidAssertion
     /// 成功响应的内容类型或响应体格式不符合约定。
@@ -45,17 +47,21 @@ public enum V2AccountAuthenticationError: Error, Equatable, Sendable {
     case authenticationRejected
     /// 服务端返回 409，映射为账户已存在。
     case accountAlreadyExists
+    /// 注册的公开 ID 已被占用。
+    case publicHandleAlreadyExists
+    /// 登录或来源地址被限流；缺少有效等待时间时为 nil。
+    case rateLimited(retryAfterSeconds: Int?)
     /// 除 CancellationError 外的传输失败，不携带密码或请求体。
     case networkFailure
     /// 未单独处理的 HTTP 状态码。
     case serverStatus(Int)
 }
 
-/// 使用短期密码参数完成账户注册或认证并取得一次性断言的边界。
+/// 使用短期密码参数完成账户注册或认证并取得短期断言的边界。
 ///
 /// 调用方不应将密码持久化到偏好设置、日志或 Keychain，也不应在可观察应用状态中长期保留它。
 public protocol V2PasswordAccountAuthenticating: Sendable {
-    /// 注册账户并返回绑定设备的一次性断言。
+    /// 注册账户并返回绑定设备的短期断言。
     ///
     /// - Parameters:
     ///   - accountHandle: 登录账户名。
@@ -66,7 +72,7 @@ public protocol V2PasswordAccountAuthenticating: Sendable {
     /// - Returns: 供设备凭证签发使用的账户断言。
     /// - Throws: 输入校验、服务端业务或传输错误。
     func register(accountHandle: String, password: String, publicHandle: String, displayName: String, deviceID: DeviceID) async throws -> V2AccountAssertion
-    /// 验证已有账户的密码并返回绑定设备的一次性断言。
+    /// 验证已有账户的密码并返回绑定设备的短期断言。
     ///
     /// - Parameters:
     ///   - accountHandle: 登录账户名。
@@ -126,7 +132,7 @@ public actor V2OneTimePasswordAccountAssertionProvider: V2DeviceBoundAccountAsse
     /// 取走并清除暂存密码，为指定设备请求账户断言。
     ///
     /// - Parameter deviceID: 本次账户因子结果绑定的设备身份。
-    /// - Returns: 认证器返回的一次性断言原始值。
+    /// - Returns: 认证器返回的短期断言原始值。
     /// - Throws: 密码已取用时报告 authenticationRejected；注册缺少公开标识或显示名时报告 invalidPublicHandle；其余认证错误传播。
     ///
     /// 即使参数检查或网络请求失败，密码也不会放回，不能在同一提供者上自动重试。
@@ -211,7 +217,7 @@ public struct V2HTTPPasswordAccountAuthenticator: V2PasswordAccountAuthenticatin
     /// 不裁剪或规范化输入，也不在成功后检查任务取消；调用所有者负责后续生命周期校验。
     private func send(accountHandle: String, password: String, deviceID: DeviceID, publicHandle: String?, displayName: String?, to endpoint: URL) async throws -> V2AccountAssertion {
         guard Self.isValidAccountHandle(accountHandle) else { throw V2AccountAuthenticationError.invalidAccountHandle }
-        guard password.utf8.count >= 12, password.utf8.count <= 1_024 else { throw V2AccountAuthenticationError.invalidPassword }
+        guard password.utf8.count >= 12, password.utf8.count <= 1_024, !password.utf8.contains(0) else { throw V2AccountAuthenticationError.invalidPassword }
         var request = URLRequest(url: endpoint, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 15)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -232,7 +238,19 @@ public struct V2HTTPPasswordAccountAuthenticator: V2PasswordAccountAuthenticatin
         case 200 where V2HTTPContract.isJSON(response): break
         case 200: throw V2AccountAuthenticationError.invalidResponse
         case 401: throw V2AccountAuthenticationError.authenticationRejected
-        case 409: throw V2AccountAuthenticationError.accountAlreadyExists
+        case 409:
+            guard V2HTTPContract.isJSON(response),
+                  let error = try? JSONDecoder().decode(AccountErrorBody.self, from: data) else {
+                throw V2AccountAuthenticationError.serverStatus(409)
+            }
+            switch error.code {
+            case "account_handle_taken": throw V2AccountAuthenticationError.accountAlreadyExists
+            case "public_handle_taken": throw V2AccountAuthenticationError.publicHandleAlreadyExists
+            default: throw V2AccountAuthenticationError.serverStatus(409)
+            }
+        case 429:
+            let seconds = response.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init)
+            throw V2AccountAuthenticationError.rateLimited(retryAfterSeconds: seconds.flatMap { $0 > 0 ? $0 : nil })
         default: throw V2AccountAuthenticationError.serverStatus(response.statusCode)
         }
         guard let body = try? JSONDecoder().decode(AssertionResponse.self, from: data) else {
@@ -277,3 +295,5 @@ private struct AssertionResponse: Decodable {
     /// 待进一步进行断言字符串校验的敏感原始值。
     let accountAssertion: String
 }
+
+private struct AccountErrorBody: Decodable { let code: String }

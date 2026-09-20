@@ -47,11 +47,10 @@ struct V2ShardAdmissionLeaseServiceTests {
         #expect(issued.generation == renewed.generation)
         #expect(renewed.validUntil == now.addingTimeInterval(60))
         let state = try #require(await store.state(for: key))
-        #expect(state.outstandingFanoutUnits == 0)
         #expect(state.lease == renewed)
     }
 
-    @Test("expired replacement advances the fence, resets only windows and retains outstanding work")
+    @Test("expired replacement advances the fence, resets the command window")
     func expiredReplacementRetainsOutstandingWork() async throws {
         let now = Date(timeIntervalSince1970: 1_750_000_100)
         let profile = try profile()
@@ -60,13 +59,9 @@ struct V2ShardAdmissionLeaseServiceTests {
             id: try .init("00000000-0000-0000-0000-000000000102"),
             generation: 7,
             validUntil: now.addingTimeInterval(-1),
-            commandWindow: .init(limit: 10, used: 8),
-            fanoutWindow: .init(limit: 100, used: 80),
-            maxOutstandingFanoutUnits: 100,
-            maxOutstandingPlans: 10
-        )
+            commandWindow: .init(limit: 10, used: 8))
         let store = InMemoryV2ShardAdmissionLeaseStore(seed: [
-            (key, try .init(lease: oldLease, outstandingFanoutUnits: 45, outstandingPlans: 3)),
+            (key, try .init(lease: oldLease)),
         ])
         let service = V2ShardAdmissionLeaseService(
             store: store,
@@ -79,10 +74,7 @@ struct V2ShardAdmissionLeaseServiceTests {
         #expect(replacement.id != oldLease.id)
         #expect(replacement.generation == 8)
         #expect(replacement.commandWindow.used == 0)
-        #expect(replacement.fanoutWindow.used == 0)
         let state = try #require(await store.state(for: key))
-        #expect(state.outstandingFanoutUnits == 45)
-        #expect(state.outstandingPlans == 3)
     }
 
     @Test("stale renewals and early replacements are rejected")
@@ -110,12 +102,7 @@ struct V2ShardAdmissionLeaseServiceTests {
             limits: .init(
                 maxEligibleMembers: 100,
                 maxCommandsPerWindow: 10,
-                maxFanoutUnitsPerWindow: 100,
-                maxOutstandingFanoutUnits: 100,
-                maxOutstandingPlans: 10,
-                maxEnumerationPageSize: 10,
-                maxPlannerConcurrency: 1,
-                maxDeliveryConcurrency: 1,
+
                 retryAfterSeconds: 3
             )
         )

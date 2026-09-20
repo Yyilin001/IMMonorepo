@@ -11,14 +11,14 @@ struct V2SendMessageServiceTests {
         let generator = V2SecureProcessUUIDGenerator()
         let factory = V2AcceptanceIDFactory()
         let base = Date(timeIntervalSince1970: 1_750_000_000)
-        _ = try generator.makeOrderedTriple(at: base)
+        _ = try generator.makeOrderedPair(at: base)
         let invalidSeconds: [Double] = [.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, -1, 1e14, -1e14, -1e12, 281_474_976_710.656, 946_684_800 - 211_813_488_000, 946_684_800 + 9_223_371_331_200 - 10]
         for seconds in invalidSeconds {
             let invalid = Date(timeIntervalSince1970: seconds)
-            #expect(throws: V2AcceptanceIdentifierError.invalidTimestamp) { try generator.makeOrderedTriple(at: invalid) }
+            #expect(throws: V2AcceptanceIdentifierError.invalidTimestamp) { try generator.makeOrderedPair(at: invalid) }
             #expect(throws: V2AcceptanceIdentifierError.invalidTimestamp) { try factory.make(at: invalid) }
         }
-        let recovered = try generator.makeOrderedTriple(at: base.addingTimeInterval(-60))
+        let recovered = try generator.makeOrderedPair(at: base.addingTimeInterval(-60))
         var uuid = recovered.0.uuid
         let milliseconds = withUnsafeBytes(of: &uuid) { $0.prefix(6).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) } }
         #expect(milliseconds == 1_750_000_000_000)
@@ -31,9 +31,9 @@ struct V2SendMessageServiceTests {
         for (seconds, expected) in cases {
             // Keep the extreme valid future timestamp out of the shared production generator.
             let generator = V2SecureProcessUUIDGenerator()
-            let triple = try generator.makeOrderedTriple(at: Date(timeIntervalSince1970: seconds))
-            #expect(Set([triple.0, triple.1, triple.2]).count == 3)
-            for value in [triple.0, triple.1, triple.2] {
+            let pair = try generator.makeOrderedPair(at: Date(timeIntervalSince1970: seconds))
+            #expect(Set([pair.0, pair.1]).count == 2)
+            for value in [pair.0, pair.1] {
                 var uuid = value.uuid
                 withUnsafeBytes(of: &uuid) { bytes in
                     #expect(bytes[6] >> 4 == 7)
@@ -68,9 +68,9 @@ struct V2SendMessageServiceTests {
             }
         }
         let acceptedAt = Date(timeIntervalSince1970: 1_645_557_742)
-        let triple = try generator.makeOrderedTriple(at: acceptedAt)
-        #expect(Set([triple.0, triple.1, triple.2]).count == 3)
-        for value in [triple.0, triple.1, triple.2] {
+        let pair = try generator.makeOrderedPair(at: acceptedAt)
+        #expect(Set([pair.0, pair.1]).count == 2)
+        for value in [pair.0, pair.1] {
             var uuid = value.uuid
             withUnsafeBytes(of: &uuid) { bytes in
                 #expect(bytes[6] >> 4 == 7)
@@ -84,7 +84,7 @@ struct V2SendMessageServiceTests {
 
         // A local wall-clock correction cannot move subsequently generated
         // identifiers into an older B-tree range.
-        let afterClockRollback = try generator.makeOrderedTriple(
+        let afterClockRollback = try generator.makeOrderedPair(
             at: acceptedAt.addingTimeInterval(-60)
         ).0
         var rollbackUUID = afterClockRollback.uuid
@@ -93,27 +93,27 @@ struct V2SendMessageServiceTests {
         }
         #expect(rollbackMilliseconds == 1_645_557_742_000)
 
-        // The production path expands one 256-bit HMAC result into three
+        // The production path expands one 256-bit HMAC result into two
         // disjoint UUIDv7 random regions. Exercise that shared generator under
         // contention so a future layout change cannot overlap regions or
         // reuse a counter value unnoticed.
-        let triples = try await withThrowingTaskGroup(
-            of: [(UUID, UUID, UUID)].self,
-            returning: [(UUID, UUID, UUID)].self
+        let pairs = try await withThrowingTaskGroup(
+            of: [(UUID, UUID)].self,
+            returning: [(UUID, UUID)].self
         ) { group in
             for _ in 0..<8 {
                 group.addTask {
                     try (0..<256).map { _ in
-                        try generator.makeOrderedTriple(at: acceptedAt)
+                        try generator.makeOrderedPair(at: acceptedAt)
                     }
                 }
             }
-            var result: [(UUID, UUID, UUID)] = []
+            var result: [(UUID, UUID)] = []
             result.reserveCapacity(2_048)
             for try await batch in group { result.append(contentsOf: batch) }
             return result
         }
-        let flattened = triples.flatMap { [$0.0, $0.1, $0.2] }
+        let flattened = pairs.flatMap { [$0.0, $0.1] }
         #expect(Set(flattened).count == flattened.count)
         for value in flattened {
             var uuid = value.uuid
@@ -162,12 +162,7 @@ struct V2SendMessageServiceTests {
         fixture.profile = try RoomCapacityProfile(
             maxEligibleMembers: 10,
             maxCommandsPerWindow: 0,
-            maxFanoutUnitsPerWindow: 10,
-            maxOutstandingFanoutUnits: 10,
-            maxOutstandingPlans: 10,
-            maxEnumerationPageSize: 10,
-            maxPlannerConcurrency: 1,
-            maxDeliveryConcurrency: 1,
+
             retryAfterSeconds: 7
         )
         let store = InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.senderID])
@@ -979,6 +974,33 @@ struct V2SendMessageServiceTests {
         #expect(await store.maximumInFlightBatchCount() == 2)
     }
 
+    @Test("sharded adaptive configuration accepts representable maximum thresholds",
+          arguments: [2, 3, 128], [Int.max - 1, Int.max])
+    func shardedAdaptiveThresholdBounds(laneCount: Int, threshold: Int) async {
+        let store = ConcurrentAtomicBatchTestStore()
+        let batcher = V2ShardedSendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(
+                maximumBatchSize: 2,
+                maximumDelay: .milliseconds(1),
+                adaptiveDelayPolicy: .init(
+                    highActivityMaximumDelay: .milliseconds(2),
+                    minimumRequestsInWindow: threshold,
+                    observationWindow: .seconds(1)
+                ),
+                maximumInFlightBatches: laneCount,
+                maximumPendingRequests: Int.max
+            ),
+            laneCount: laneCount
+        )
+        let snapshot = await batcher.snapshot()
+        #expect(snapshot.laneCount == laneCount)
+        #expect(snapshot.pendingRequests == 0)
+        #expect(snapshot.inFlightBatches == 0)
+        #expect(!snapshot.highActivityDelayScheduled)
+        #expect(await store.maximumInFlightBatchCount() == 0)
+    }
+
     @Test("room-keyed lanes are stable and execute independent rooms concurrently")
     func shardedAdmissionKeepsRoomAffinityAndRunsLanesConcurrently() async throws {
         let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
@@ -1226,12 +1248,12 @@ private actor AcceptedAtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
     func atomicBatchPartitions(
         requests: [V2RoomWriteRequest]
     ) -> [V2AtomicRoomWriteBatchPartition?] {
-        requests.map { _ in .largeGroupHybrid }
+        requests.map { _ in .large }
     }
 
     func atomicBatchSupportsRepeatedRooms(
         in partition: V2AtomicRoomWriteBatchPartition
-    ) -> Bool { partition == .largeGroupHybrid }
+    ) -> Bool { partition == .large }
 
     func accept(
         command: V2SendMessageCommand,
@@ -1274,8 +1296,8 @@ private actor AcceptedAtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
             clientMessageID: command.clientMessageID,
             text: command.text,
             mediaPresentations: [],
-            groupDeliveryMode: .largeGroupHybrid,
-            usesRoomEventLog: true,
+            groupCapacityClass: .large,
+
             sourceEventID: identifiers.eventID,
             acceptedMembershipRevision: 1,
             createdAt: now
@@ -1320,14 +1342,13 @@ private actor AtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
         requests.map { !preclassifiedClientMessageIDs.contains($0.command.clientMessageID) }
     }
 
-
     func atomicBatchPartitions(
         requests: [V2RoomWriteRequest]
     ) -> [V2AtomicRoomWriteBatchPartition?] {
         requests.map { request in
             guard !preclassifiedClientMessageIDs.contains(request.command.clientMessageID)
             else { return nil }
-            if repeatedRoomBatchingEnabled { return .largeGroupHybrid }
+            if repeatedRoomBatchingEnabled { return .large }
             return acceleratedClientMessageIDs.contains(request.command.clientMessageID)
                 ? .accelerated : .standard
         }
@@ -1336,7 +1357,7 @@ private actor AtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
     func atomicBatchSupportsRepeatedRooms(
         in partition: V2AtomicRoomWriteBatchPartition
     ) -> Bool {
-        repeatedRoomBatchingEnabled && partition == .largeGroupHybrid
+        repeatedRoomBatchingEnabled && partition == .large
     }
 
     func accept(
@@ -1433,9 +1454,9 @@ private struct Fixture: Sendable {
     let shardState: ShardAdmissionState
 
     init() throws {
-        profile = try RoomCapacityProfile(maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 10, maxOutstandingFanoutUnits: 10, maxOutstandingPlans: 10, maxEnumerationPageSize: 10, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 7)
-        roomState = try V2RoomCommandState(roomID: roomID, nextRoomSequence: 1, admission: .init(eligibleMemberCount: 3, commandWindow: .init(limit: 10), fanoutWindow: .init(limit: 10), outstandingFanoutUnits: 0, outstandingPlans: 0))
-        shardState = try ShardAdmissionState(lease: .init(id: try ShardAdmissionLeaseID("00000000-0000-0000-0000-000000000004"), generation: 1, validUntil: now.addingTimeInterval(60), commandWindow: .init(limit: 10), fanoutWindow: .init(limit: 10), maxOutstandingFanoutUnits: 10, maxOutstandingPlans: 10), outstandingFanoutUnits: 0, outstandingPlans: 0)
+        profile = try RoomCapacityProfile(maxEligibleMembers: 10, maxCommandsPerWindow: 10,    retryAfterSeconds: 7)
+        roomState = try V2RoomCommandState(roomID: roomID, nextRoomSequence: 1, admission: .init(eligibleMemberCount: 3, commandWindow: .init(limit: 10)))
+        shardState = try ShardAdmissionState(lease: .init(id: try ShardAdmissionLeaseID("00000000-0000-0000-0000-000000000004"), generation: 1, validUntil: now.addingTimeInterval(60), commandWindow: .init(limit: 10)))
     }
 
     func nextUUID() -> UUID { UUID() }

@@ -1,5 +1,7 @@
 # 普通消息变更的历史受众与预留结算
 
+> 历史记录：本文的逐用户扇出、预留结算和测试数字属于旧实现，已被房间日志单一模型替代，不作为当前部署或性能结论。当前实施与验收见[房间日志实施记录](room-log-only-implementation.md)。
+
 对应 B03/D07。当前修复针对新创建的普通编辑、作者撤回、reaction 的 personal fanout。后续批次已补齐 [reaction actor 与普通变更的房间读取授权](message-mutation-read-contract.md)。新编辑还已接通[完整替换与版本缺口](message-edit-replacement-contract.md)。完整 B03 仍需要其他内容入口、snapshot、媒体遵守相同授权，以及旧积压恢复。
 
 ## 冻结的受众

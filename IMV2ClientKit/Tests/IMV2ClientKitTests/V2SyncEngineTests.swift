@@ -7,6 +7,181 @@ import Testing
 
 @Suite("V2 client sync")
 struct V2SyncEngineTests {
+    @Test("applied room sequence validates all sources before aggregation", arguments:
+        ["group_event_cursors", "group_events", "message_projections", "reaction_versions", "group_pinned_messages", "group_announcements", "group_role_policies", "group_member_roles"],
+        [1.5, Double(Int64.max)])
+    func appliedRoomSequenceStorage(tableSuffix: String, value: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "room-applied-storage-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "client.sqlite"), installationBinding: testInstallationBinding)
+        var reaction = try #require(JSONSerialization.jsonObject(with: reactionPayload(action: "add")) as? [String: Any])
+        reaction["room_id"] = announcementRoom.rawValue
+        let records = try [
+            pinFact(sequence: 1, source: UUID().uuidString, pinned: true, roomSequence: 20),
+            announcementFact(sequence: 2, revision: 2, body: "announcement", roomSequence: 20),
+            rolePolicyFact(sequence: 3, revision: 2, permissions: [], roomSequence: 20),
+            V2ClientSyncRecord(sequence: 4, sourceEventID: .init(uuid: UUID()), projectionKind: "group_capability", payload: JSONSerialization.data(withJSONObject: [
+                "event_type": "group.member_role_changed", "room_id": announcementRoom.rawValue,
+                "target_user_id": UUID().uuidString, "role": "admin", "membership_revision": 2, "room_sequence": 20])),
+            V2ClientSyncRecord(sequence: 5, sourceEventID: .init(uuid: UUID()), projectionKind: "message_reaction", payload: JSONSerialization.data(withJSONObject: reaction))
+        ]
+        _ = try await store.apply(announcementBatch(records))
+        let events = try [UInt64(100), 200].map { sequence in
+            try V2ClientGroupEvent(sourceEventID: .init(uuid: UUID()), roomSequence: sequence, projectionKind: "message",
+                payload: messagePayload(roomID: announcementRoom.rawValue, roomSequence: sequence, text: "message"))
+        }
+        _ = try await store.applyGroupEventPage(.init(roomID: announcementRoom, events: events, nextRoomSequence: 200, hasMore: false))
+        #expect(try await store.roomAppliedRoomSequence(roomID: announcementRoom) == 200)
+        let table = "v2_" + tableSuffix
+        let column = tableSuffix == "group_event_cursors" ? "applied_room_sequence" : "room_sequence"
+        let original = try await store.databasePool.write { db in
+            let original = try #require(try Int64.fetchOne(db, sql: "SELECT MIN(\(column)) FROM \(table)"))
+            try db.execute(sql: "UPDATE \(table) SET \(column) = ? WHERE \(column) = ?", arguments: [value, original])
+            return original
+        }
+        await #expect(throws: V2ClientSyncError.storageRangeExceeded) { try await store.roomAppliedRoomSequence(roomID: announcementRoom) }
+        #expect(try await store.roomAppliedRoomSequence(roomID: .init(uuid: UUID())) == 0)
+        let raw = try await store.databasePool.read { try Double.fetchOne($0, sql: "SELECT \(column) FROM \(table) WHERE typeof(\(column)) = 'real'") }
+        #expect(raw == value)
+        try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET \(column) = ? WHERE typeof(\(column)) = 'real'", arguments: [original]) }
+        #expect(try await store.roomAppliedRoomSequence(roomID: announcementRoom) == 200)
+        try await store.databasePool.write { db in
+            try db.execute(sql: "UPDATE v2_group_event_cursors SET applied_room_sequence = ?", arguments: [Int64.max])
+        }
+        #expect(try await store.roomAppliedRoomSequence(roomID: announcementRoom) == UInt64(Int64.max))
+        try await store.databasePool.write { db in
+            for suffix in ["group_events", "message_projections", "reaction_versions", "group_member_roles"] {
+                try db.execute(sql: "DELETE FROM v2_\(suffix)")
+            }
+            for suffix in ["group_pinned_messages", "group_announcements", "group_role_policies"] {
+                try db.execute(sql: "UPDATE v2_\(suffix) SET room_sequence = NULL")
+            }
+            try db.execute(sql: "UPDATE v2_group_event_cursors SET applied_room_sequence = 0")
+        }
+        #expect(try await store.roomAppliedRoomSequence(roomID: announcementRoom) == 0)
+        try await store.close()
+    }
+
+    @Test("announcement and policy effects reject corrupt receipt and baseline integers",
+          arguments: ["announcement-receipt-revision", "announcement-receipt-sequence", "announcement-current-revision", "announcement-current-sequence", "role-receipt-revision", "role-receipt-sequence", "role-current-revision", "role-current-sequence", "role-baseline", "role-global", "role-global-receipt-revision", "role-global-older"],
+          [1.5, Double(Int64.max)])
+    func effectStorageTypes(location: String, value: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-effect-storage-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: testInstallationBinding)
+        let role = location.hasPrefix("role-"), receipt = location.contains("-receipt-"), baseline = location == "role-baseline"
+        let receipts = role ? "v2_role_policy_effects" : "v2_announcement_effects"
+        let table = location.contains("-global") ? "v2_group_permission_revisions" : baseline ? "v2_group_role_policy_baselines" : receipt ? receipts : role ? "v2_group_role_policies" : "v2_group_announcements"
+        let column = baseline ? "permission_revision" : location.hasSuffix("sequence") ? "room_sequence" : "revision"
+        do {
+            let first = try role ? rolePolicyFact(sequence: 1, revision: 2, permissions: [], roomSequence: 20)
+                : announcementFact(sequence: 1, revision: 2, body: "original", roomSequence: 20)
+            _ = try await store.apply(announcementBatch([first]))
+            let second: V2ClientSyncRecord
+            if receipt {
+                second = try .init(sequence: 2, sourceEventID: first.sourceEventID, projectionKind: first.projectionKind, payload: first.payload)
+            } else {
+                second = try role ? rolePolicyFact(sequence: 2, revision: location == "role-global-older" ? 1 : 3, permissions: [], roomSequence: location == "role-global-older" ? 10 : 30)
+                    : announcementFact(sequence: 2, revision: 3, body: "new", roomSequence: 30)
+            }
+            let pool = await store.databasePool
+            let original = try await pool.write { db in
+                if receipt {
+                    // Retain the independent effect ledger after removing the old
+                    // personal-log fixture, so a new delivery reaches receipt comparison.
+                    try db.execute(sql: "DELETE FROM v2_sync_events")
+                }
+                if baseline {
+                    try db.execute(sql: """
+                        INSERT INTO v2_group_role_policy_baselines
+                            (room_id, permission_revision, membership_revision, room_sequence, admin_permissions, member_permissions)
+                        SELECT room_id, 2, 0, 20, permissions, permissions FROM v2_group_role_policies
+                        """)
+                }
+                let old = try #require(try Int64.fetchOne(db, sql: "SELECT \(column) FROM \(table)"))
+                try db.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [value])
+                return old
+            }
+            let cursor = try await store.cursor()
+            await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { _ = try await store.apply(announcementBatch([second])) }
+            #expect(try await store.cursor() == cursor)
+            try await pool.read { db in
+                let stored = try Double.fetchOne(db, sql: "SELECT \(column) FROM \(table)")
+                let type = try String.fetchOne(db, sql: "SELECT typeof(\(column)) FROM \(table)")
+                let count = try Int.fetchOne(db, sql: "SELECT count(*) FROM \(receipts)")
+                #expect(type == "real" && stored == value && count == 1)
+            }
+            try await pool.write { db in try db.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [original]) }
+            _ = try await store.apply(announcementBatch([second]))
+            #expect(try await store.cursor()?.appliedSequence == 2)
+            if location.contains("-global") {
+                let revision = try await pool.read { try Int64.fetchOne($0, sql: "SELECT revision FROM v2_group_permission_revisions") }
+                #expect(revision == (receipt || location == "role-global-older" ? 2 : 3))
+            }
+            #expect(try await pool.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM \(receipts)") } == (receipt ? 1 : 2))
+            try await store.close()
+        } catch { try? await store.close(); throw error }
+    }
+
+    @Test("reset rollback and snapshot search preparation reject REAL fences",
+          arguments: ["generation", "applied_sequence", "server_acknowledged_sequence", "search_generation", "search_index_version"],
+          [1.5, Double(Int64.max)])
+    func resetFenceStorageTypes(field: String, value: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-reset-fence-storage-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: testInstallationBinding)
+        let search = field.hasPrefix("search_")
+        let table = search ? "v2_message_search_state" : "v2_reset_rollback"
+        let column = search ? String(field.dropFirst(7)) : field
+        do {
+            let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
+            let message = MessageID(uuid: UUID()), room = RoomID(uuid: UUID())
+            let item = try V2SnapshotProjectionItem(key: .init(projectionKind: "message", entityKey: message.rawValue), sourceEventID: .init(uuid: UUID()), sequence: 10,
+                payload: snapshotMessagePayload(messageID: message.rawValue, roomID: room.rawValue, text: "snapshot", revision: 1, isWithdrawn: false))
+            let fixture = try makeSnapshotFixture(reset: reset, pages: [.init(items: [item])])
+            try await store.beginReset(reset)
+            try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
+            try await store.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
+            let before = try await store.cursor(), pool = await store.databasePool
+            let original = try await pool.write { db in
+                let old = try #require(try Int64.fetchOne(db, sql: "SELECT \(column) FROM \(table)"))
+                // ACK above applied violates the relation check; other REAL fixtures do not.
+                if field == "server_acknowledged_sequence" { try db.execute(sql: "PRAGMA ignore_check_constraints = ON") }
+                defer { if field == "server_acknowledged_sequence" { try? db.execute(sql: "PRAGMA ignore_check_constraints = OFF") } }
+                try db.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [value])
+                return old
+            }
+            await #expect(throws: V2ClientSyncError.storageRangeExceeded) {
+                if search { try await store.prepareSnapshotActivation(fixture.manifest) }
+                else { try await store.cancelReset(reset) }
+            }
+            #expect(try await store.cursor() == before)
+            #expect(try await store.nextSnapshotPageIndex(for: fixture.manifest) == 1)
+            try await pool.read { db in
+                let type = try String.fetchOne(db, sql: "SELECT typeof(\(column)) FROM \(table)")
+                let stored = try Double.fetchOne(db, sql: "SELECT \(column) FROM \(table)")
+                let prepared = try Int.fetchOne(db, sql: "SELECT activation_prepared FROM v2_snapshot_import")
+                let rollback = try Int.fetchOne(db, sql: "SELECT count(*) FROM v2_reset_rollback")
+                #expect(type == "real" && stored == value && prepared == 0 && rollback == 1)
+            }
+            try await pool.write { db in try db.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [original]) }
+            if search {
+                try await store.prepareSnapshotActivation(fixture.manifest)
+                try await store.activateAcknowledgedSnapshot(fixture.manifest)
+                #expect(try await store.cursor()?.appliedSequence == 10)
+            } else {
+                try await store.cancelReset(reset)
+                #expect(try await store.cursor()?.state == .ready)
+                #expect(try await store.cursor()?.generation == 1)
+                #expect(try await store.cursor()?.appliedSequence == 0)
+            }
+            try await store.close()
+        } catch { try? await store.close(); throw error }
+    }
+
     @Test("policy recovery does not truncate fractional persisted counters or fences", arguments: ["attempt_count", "membership_revision", "generation"])
     func fractionalPolicyRecoveryBounds(column: String) async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: "im-policy-fraction-\(UUID())")
@@ -61,6 +236,69 @@ struct V2SyncEngineTests {
         } catch {
             try? await store.close()
             throw error
+        }
+    }
+
+    @Test("snapshot import rejects REAL storage before changing resumable state",
+          arguments: ["generation", "base_sequence", "page_count", "total_items", "total_bytes", "next_page_index", "applied_items", "applied_bytes"],
+          [1.5, Double(Int64.max)])
+    func snapshotImportStorageTypes(field: String, value: Double) async throws {
+        for phase in ["apply", "prepare", "activate"] {
+            let directory = FileManager.default.temporaryDirectory.appending(path: "im-snapshot-storage-\(UUID())")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: testInstallationBinding)
+            do {
+                let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
+                let message = MessageID(uuid: UUID()), room = RoomID(uuid: UUID())
+                let item = try V2SnapshotProjectionItem(key: .init(projectionKind: "message", entityKey: message.rawValue), sourceEventID: .init(uuid: UUID()), sequence: 10,
+                    payload: snapshotMessagePayload(messageID: message.rawValue, roomID: room.rawValue, text: "snapshot", revision: 1, isWithdrawn: false))
+                let fixture = try makeSnapshotFixture(reset: reset, pages: [.init(items: [item])])
+                let initial = V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base")
+                try await store.beginReset(reset)
+                try await store.beginSnapshotImport(fixture.manifest, initialDigest: initial)
+                if phase != "apply" { try await store.applySnapshotPage(fixture.pages[0], for: fixture.manifest) }
+                if phase == "activate" { try await store.prepareSnapshotActivation(fixture.manifest) }
+                let pool = await store.databasePool
+                let cursor = try await store.cursor()
+                let original = try await pool.write { db in
+                    let old = try #require(try Int64.fetchOne(db, sql: "SELECT \(field) FROM v2_snapshot_import"))
+                    // Only page-index injection needs to bypass next_page_index <= page_count.
+                    // Other REAL values pass the current numeric CHECK constraints unchanged.
+                    if field == "next_page_index" { try db.execute(sql: "PRAGMA ignore_check_constraints = ON") }
+                    defer { if field == "next_page_index" { try? db.execute(sql: "PRAGMA ignore_check_constraints = OFF") } }
+                    try db.execute(sql: "UPDATE v2_snapshot_import SET \(field) = ?", arguments: [value])
+                    return old
+                }
+                if ["generation", "base_sequence", "page_count", "total_items", "total_bytes"].contains(field) {
+                    await #expect(throws: V2ClientSyncError.storageRangeExceeded) { _ = try await store.importedSnapshotManifest(for: reset) }
+                    await #expect(throws: V2ClientSyncError.storageRangeExceeded) { try await store.beginSnapshotImport(fixture.manifest, initialDigest: initial) }
+                }
+                if field != "applied_items" && field != "applied_bytes" {
+                    await #expect(throws: V2ClientSyncError.storageRangeExceeded) { _ = try await store.nextSnapshotPageIndex(for: fixture.manifest) }
+                }
+                await #expect(throws: V2ClientSyncError.storageRangeExceeded) {
+                    switch phase {
+                    case "apply": try await store.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
+                    case "prepare": try await store.prepareSnapshotActivation(fixture.manifest)
+                    default: try await store.activateAcknowledgedSnapshot(fixture.manifest)
+                    }
+                }
+                #expect(try await store.cursor() == cursor)
+                try await pool.read { db in
+                    let storedType = try String.fetchOne(db, sql: "SELECT typeof(\(field)) FROM v2_snapshot_import")
+                    let storedValue = try Double.fetchOne(db, sql: "SELECT \(field) FROM v2_snapshot_import")
+                    #expect(storedType == "real")
+                    #expect(storedValue == value)
+                }
+                // Repair only the injected fixture, then resume the exact import.
+                try await pool.write { db in try db.execute(sql: "UPDATE v2_snapshot_import SET \(field) = ?", arguments: [original]) }
+                if phase == "apply" { try await store.applySnapshotPage(fixture.pages[0], for: fixture.manifest) }
+                if phase != "activate" { try await store.prepareSnapshotActivation(fixture.manifest) }
+                try await store.activateAcknowledgedSnapshot(fixture.manifest)
+                #expect(try await store.cursor()?.appliedSequence == 10)
+                try await store.close()
+            } catch { try? await store.close(); throw error }
         }
     }
 
@@ -243,13 +481,13 @@ struct V2SyncEngineTests {
     func backgroundFeedsSharePageBudget() async throws {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
         let transport = BoundedSyncProbe(results: try [1, 2, 3].map { .ready(try boundedSyncBatch($0, hasMore: true)) })
-        let rooms = BackgroundGroupEventStoreFake(roomIDs: try ["room-a", "room-b", "room-c"].map(RoomID.init))
-        let roomTransport = BackgroundGroupEventTransportFake()
-        let runner = V2BackgroundSyncRunner(connection: BoundedSyncConnection(), syncEngine: .init(transport: transport, store: store, capabilityProfile: "base"), roomSync: .init(transport: roomTransport, store: rooms), budget: .init(maximumPages: 4))
+        let runner = V2BackgroundSyncRunner(connection: BoundedSyncConnection(), syncEngine: .init(transport: transport, store: store, capabilityProfile: "base"), roomSync: { pages in
+            #expect(pages == 2)
+            return .init(processedPageCount: pages, didCommitNewRecords: true, stopReason: .pageLimit)
+        }, budget: .init(maximumPages: 4))
         let result = try await runner.run()
         #expect(result.processedPageCount == 4 && result.didCommitNewRecords && result.stopReason == .pageLimit)
         #expect(await transport.tokens.count == 2)
-        #expect(await roomTransport.requestedRoomIDs().count == 2)
         try await store.close()
     }
 
@@ -406,7 +644,7 @@ struct V2SyncEngineTests {
         try await store.close()
     }
 
-    @Test("snapshot terminal state accepts its later source event without new search work", arguments: ["personal", "preview", "room"], ["valid", "bad-text", "legacy-reply"])
+    @Test("snapshot terminal state accepts its later source event without new search work", arguments: ["personal", "room"], ["valid", "bad-text", "legacy-reply"])
     func terminalSnapshotReplay(_ feed: String, state: String) async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: "im-terminal-snapshot-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -437,7 +675,6 @@ struct V2SyncEngineTests {
         func apply() async throws {
             switch feed {
             case "personal": _ = try await reopened.apply(batch)
-            case "preview": _ = try await reopened.applyForegroundGroupEventPreviewPage(page)
             default: _ = try await reopened.applyGroupEventPage(page)
             }
         }
@@ -447,7 +684,7 @@ struct V2SyncEngineTests {
             #expect(try await pool.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM v2_message_effects") } == 0)
         } else {
             try await apply()
-            _ = try await reopened.applyForegroundGroupEventPreviewPage(page)
+            _ = try await reopened.applyRoomPageOrExpectRejectedOlderCursor(page)
             let value = try #require(await reopened.messages(in: room).first)
             #expect(value.isWithdrawn && value.messageRevision == 3 && value.text == "[removed]" && value.replyTo == nil)
             #expect(try await pool.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM v2_message_effects") } == 1)
@@ -496,9 +733,9 @@ struct V2SyncEngineTests {
         replacement["state"] = state; body["replacement"] = replacement
         let room = try RoomID(#require(state["room_id"] as? String))
         var original = state; original["message_revision"] = 1; original["text"] = "original attachment text"
-        _ = try await store.applyForegroundGroupEventPreviewPage(.init(roomID: room, events: [.init(sourceEventID: origin, roomSequence: 1, projectionKind: "message", payload: JSONSerialization.data(withJSONObject: original))], nextRoomSequence: 1, hasMore: false))
+        _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(.init(roomID: room, events: [.init(sourceEventID: origin, roomSequence: 1, projectionKind: "message", payload: JSONSerialization.data(withJSONObject: original))], nextRoomSequence: 1, hasMore: false))
         let page = try V2ClientGroupEventPage(roomID: room, events: [try .init(sourceEventID: eventID, roomSequence: 3, projectionKind: "message", payload: try JSONSerialization.data(withJSONObject: body))], nextRoomSequence: 3, hasMore: false)
-        _ = try await store.applyForegroundGroupEventPreviewPage(page)
+        _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(page)
         let value = try #require(await store.messages(in: room).first)
         #expect(value.messageRevision == 3 && value.text == "authorized current")
         #expect(value.media.map(\.mediaID) == [try .init(media)])
@@ -510,16 +747,77 @@ struct V2SyncEngineTests {
         #expect(value.forwardedFrom?.messageID == expectedForwardedMessage && value.forwardedFrom?.senderUserID == expectedForwardedUser)
         let pool = try DatabasePool(path: url.path)
         try await pool.write { try $0.execute(sql: "DELETE FROM v2_message_search_jobs") }
-        _ = try await store.applyForegroundGroupEventPreviewPage(page)
+        _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(page)
         #expect(try await pool.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM v2_message_search_jobs") } == 0)
         state["mention_user_ids"] = [UUID().uuidString]; replacement["state"] = state; body["replacement"] = replacement
-        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
-            try await store.applyForegroundGroupEventPreviewPage(.init(roomID: room, events: [.init(sourceEventID: eventID, roomSequence: 3, projectionKind: "message", payload: JSONSerialization.data(withJSONObject: body))], nextRoomSequence: 3, hasMore: false))
+        await #expect(throws: V2ClientSyncError.invalidRecordOrdering) {
+            try await store.applyGroupEventPage(.init(roomID: room, events: [.init(sourceEventID: eventID, roomSequence: 3, projectionKind: "message", payload: JSONSerialization.data(withJSONObject: body))], nextRoomSequence: 3, hasMore: false))
         }
         #expect(try await store.messages(in: room).first == value)
         try await pool.close(); try await store.close()
     }
 
+
+    @Test("message effects reject REAL revisions before replay or mutation", arguments:
+        ["receipt", "accept-stone", "stone-repeat", "stone-baseline", "edit-stone", "complete-stone", "edit-baseline"],
+        [1.5, Double(Int64.max)])
+    func messageEffectStorageTypes(path: String, value: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "message-storage-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "client.sqlite"), installationBinding: testInstallationBinding)
+        let origin = EventID(uuid: UUID())
+        let stoneSource = EventID(uuid: UUID())
+        let stone = try JSONSerialization.data(withJSONObject: ["event_type": "message.withdrawn",
+            "room_id": "00000000-0000-0000-0000-000000000220", "message_id": "00000000-0000-0000-0000-000000000001", "message_revision": 3])
+        func batch(_ sequence: UInt64, _ source: EventID, _ payload: Data) throws -> V2ClientSyncBatch {
+            try .init(generation: 1, records: [.init(sequence: sequence, sourceEventID: source, projectionKind: "message", payload: payload)],
+                nextSyncToken: .init("integer"), receipt: .init("integer"), hasMore: false, capabilityProfile: "base")
+        }
+        let hasStone = path.contains("stone") && path != "stone-baseline"
+        _ = try await store.apply(batch(1, hasStone ? stoneSource : origin, hasStone ? stone : messagePayload(text: "before")))
+        let table = path == "receipt" ? "v2_message_effects" : hasStone ? "v2_message_tombstones" : "v2_message_projections"
+        let before = try await store.cursor()
+        let countsBefore = try await store.databasePool.read { db in
+            try ["v2_message_effects", "v2_message_projections", "v2_message_tombstones", "v2_message_search_jobs"].map {
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \($0)")
+            }
+        }
+        try await store.databasePool.write { db in
+            if path == "receipt" { try db.execute(sql: "DELETE FROM v2_sync_events") }
+            try db.execute(sql: "UPDATE \(table) SET message_revision = ?", arguments: [value])
+        }
+        let payload: Data
+        switch path {
+        case "receipt", "accept-stone": payload = messagePayload(text: "before")
+        case "stone-repeat", "stone-baseline": payload = stone
+        case "complete-stone": payload = try completeEditPayload(origin: origin.rawValue, revision: 2)
+        default: payload = editPayload(text: "after", revision: 2)
+        }
+        let incoming = try batch(2, path == "receipt" ? origin : .init(uuid: UUID()), payload)
+        await #expect(throws: V2ClientSyncError.storageRangeExceeded) { try await store.apply(incoming) }
+        #expect(try await store.cursor() == before)
+        let after = try await store.databasePool.read { db in
+            let counts = try ["v2_message_effects", "v2_message_projections", "v2_message_tombstones", "v2_message_search_jobs"].map {
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \($0)")
+            }
+            let raw = try Double.fetchOne(db, sql: "SELECT message_revision FROM \(table)")
+            let type = try String.fetchOne(db, sql: "SELECT typeof(message_revision) FROM \(table)")
+            return (counts, raw, type)
+        }
+        #expect(after.0 == countsBefore)
+        #expect(after.1 == value)
+        #expect(after.2 == "real")
+        try await store.databasePool.write { db in
+            try db.execute(sql: "UPDATE \(table) SET message_revision = ?", arguments: [hasStone ? 3 : 1])
+        }
+        _ = try await store.apply(incoming)
+        #expect(try await store.cursor()?.appliedSequence == 2)
+        let messages = try await store.messages(in: .init("00000000-0000-0000-0000-000000000220"))
+        if hasStone || path == "stone-baseline" { #expect(messages.allSatisfy { $0.isWithdrawn && $0.text == "[removed]" }) }
+        else { #expect(messages.first?.text == (path == "edit-baseline" ? "after" : "before")) }
+        try await store.close()
+    }
 
     @Test("replacement failures roll back cursor, projection and effect claim", arguments: ["room", "sequence", "origin", "same-revision", "terminal"])
     func completeEditReplacementRollback(_ defect: String) async throws {
@@ -555,10 +853,10 @@ struct V2SyncEngineTests {
         try await pool.close(); try await store.close()
     }
 
-    @Test("real owner-produced complete edits materialize in ClientKit", arguments: ["shared", "inline"])
-    func realOwnerReplacementFixture(_ variant: String) async throws {
+    @Test("real owner-produced room-log edits materialize in ClientKit")
+    func realOwnerReplacementFixture() async throws {
         guard let root = ProcessInfo.processInfo.environment["IMV2_REPLACEMENT_TEST_FIXTURE_DIRECTORY"] else { return }
-        let fixture = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: root).appending(path: variant + ".json"))) as? [String: Any])
+        let fixture = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: root).appending(path: "room-log.json"))) as? [String: Any])
         let accepted = try #require(fixture["accepted"] as? [String: Any])
         let edit = try #require(fixture["edit"] as? [String: Any])
         let room = try RoomID(#require(edit["room_id"] as? String))
@@ -578,7 +876,7 @@ struct V2SyncEngineTests {
     }
 
 
-    @Test("complete edit replacements bridge authorized gaps and late baselines across all feeds", arguments: ["personal", "preview", "room"], [false, true])
+    @Test("complete edit replacements bridge authorized gaps and late baselines across all feeds", arguments: ["personal", "room"], [false, true])
     func completeEditReplacementGap(_ feed: String, baselineFirst: Bool) async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: "im-replacement-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -590,12 +888,11 @@ struct V2SyncEngineTests {
         let accepted = try V2ClientSyncRecord(sequence: 1, sourceEventID: origin, projectionKind: "message", payload: messagePayload(text: "original"))
         let edit = try V2ClientSyncRecord(sequence: 3, sourceEventID: .init(uuid: UUID()), projectionKind: "message", payload: try completeEditPayload(origin: origin.rawValue))
         if baselineFirst {
-            _ = try await store.applyForegroundGroupEventPreviewPage(.init(roomID: room, events: [.init(sourceEventID: origin, roomSequence: 1, projectionKind: "message", payload: accepted.payload)], nextRoomSequence: 1, hasMore: false))
+            _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(.init(roomID: room, events: [.init(sourceEventID: origin, roomSequence: 1, projectionKind: "message", payload: accepted.payload)], nextRoomSequence: 1, hasMore: false))
         }
         let page = try V2ClientGroupEventPage(roomID: room, events: [try .init(sourceEventID: edit.sourceEventID, roomSequence: 3, projectionKind: "message", payload: edit.payload)], nextRoomSequence: 3, hasMore: false)
         switch feed {
         case "personal": _ = try await store.apply(.init(generation: 1, records: [.init(sequence: 1, sourceEventID: edit.sourceEventID, projectionKind: "message", payload: edit.payload)], nextSyncToken: .init("replace"), receipt: .init("replace-receipt"), hasMore: false, capabilityProfile: "base"))
-        case "preview": _ = try await store.applyForegroundGroupEventPreviewPage(page)
         default: _ = try await store.applyGroupEventPage(page)
         }
         let value = try #require(await store.messages(in: room).first)
@@ -603,17 +900,17 @@ struct V2SyncEngineTests {
         #expect(value.roomSequence == 1 && value.timelineSequence == 1)
         try await store.close()
         let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
-        _ = try await reopened.applyForegroundGroupEventPreviewPage(.init(roomID: room, events: [.init(sourceEventID: origin, roomSequence: 1, projectionKind: "message", payload: accepted.payload)], nextRoomSequence: 1, hasMore: false))
-        _ = try await reopened.applyForegroundGroupEventPreviewPage(page)
+        _ = try await reopened.applyRoomPageOrExpectRejectedOlderCursor(.init(roomID: room, events: [.init(sourceEventID: origin, roomSequence: 1, projectionKind: "message", payload: accepted.payload)], nextRoomSequence: 1, hasMore: false))
+        _ = try await reopened.applyRoomPageOrExpectRejectedOlderCursor(page)
         #expect(try await reopened.messages(in: room).first == value)
         let conflict = try completeEditPayload(origin: UUID().uuidString)
-        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
-            try await reopened.applyForegroundGroupEventPreviewPage(.init(roomID: room, events: [.init(sourceEventID: edit.sourceEventID, roomSequence: 3, projectionKind: "message", payload: conflict)], nextRoomSequence: 3, hasMore: false))
+        await #expect(throws: V2ClientSyncError.invalidRecordOrdering) {
+            try await reopened.applyGroupEventPage(.init(roomID: room, events: [.init(sourceEventID: edit.sourceEventID, roomSequence: 3, projectionKind: "message", payload: conflict)], nextRoomSequence: 3, hasMore: false))
         }
         let stone = try JSONSerialization.data(withJSONObject: ["event_type":"message.withdrawn", "room_id":room.rawValue, "message_id":value.messageID.rawValue, "message_revision":4])
-        _ = try await reopened.applyForegroundGroupEventPreviewPage(.init(roomID: room, events: [.init(sourceEventID: .init(uuid: UUID()), roomSequence: 4, projectionKind: "message", payload: stone)], nextRoomSequence: 4, hasMore: false))
+        _ = try await reopened.applyRoomPageOrExpectRejectedOlderCursor(.init(roomID: room, events: [.init(sourceEventID: .init(uuid: UUID()), roomSequence: 4, projectionKind: "message", payload: stone)], nextRoomSequence: 4, hasMore: false))
         let late = try completeEditPayload(origin: origin.rawValue, revision: 2)
-        _ = try await reopened.applyForegroundGroupEventPreviewPage(.init(roomID: room, events: [.init(sourceEventID: .init(uuid: UUID()), roomSequence: 2, projectionKind: "message", payload: late)], nextRoomSequence: 2, hasMore: false))
+        _ = try await reopened.applyRoomPageOrExpectRejectedOlderCursor(.init(roomID: room, events: [.init(sourceEventID: .init(uuid: UUID()), roomSequence: 2, projectionKind: "message", payload: late)], nextRoomSequence: 2, hasMore: false))
         #expect(try await reopened.messages(in: room).first?.isWithdrawn == true)
         try await reopened.close()
     }
@@ -644,36 +941,27 @@ struct V2SyncEngineTests {
     }
 
 
-    @Test("scanned-through room cursors persist hidden ranges without manufacturing events", arguments: [false, true], [false, true])
-    func scannedRoomCursorPersistence(preview: Bool, empty: Bool) async throws {
+    @Test("scanned-through room cursors persist hidden ranges without manufacturing events", arguments: [false, true])
+    func scannedRoomCursorPersistence(empty: Bool) async throws {
         let url = temporaryDatabaseURL()
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
         let roomID = RoomID(uuid: UUID())
         let event = try V2ClientGroupEvent(sourceEventID: .init(uuid: UUID()), roomSequence: 3, projectionKind: "message",
             payload: try messagePayload(roomID: roomID.rawValue, roomSequence: 3, messageID: UUID().uuidString, text: "visible"))
         let page = try V2ClientGroupEventPage(roomID: roomID, events: empty ? [] : [event], nextRoomSequence: 5, hasMore: false)
-        if preview {
-            let engine = V2ForegroundGroupEventPreviewEngine(transport: GroupEventTransportFake(page: page), store: store)
-            #expect(try await engine.synchronizeOnePage(roomID: roomID).appliedEventCount == (empty ? 0 : 1))
-            #expect(try await engine.cursor(roomID: roomID) == 5)
-            #expect(try await store.groupEventCursor(roomID: roomID) == 0)
-            #expect(try await store.cursor() == nil)
-        } else {
-            let engine = V2GroupEventSyncEngine(transport: GroupEventTransportFake(page: page), store: store)
-            #expect(try await engine.synchronizeOnePage(roomID: roomID).appliedEventCount == (empty ? 0 : 1))
-            #expect(try await store.groupEventCursor(roomID: roomID) == 5)
-            let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
-            #expect(try await reopened.groupEventCursor(roomID: roomID) == 5)
-            #expect(try await reopened.applyGroupEventPage(page) == 5)
-        }
+        let engine = V2GroupEventSyncEngine(transport: GroupEventTransportFake(page: page), store: store)
+        #expect(try await engine.synchronizeOnePage(roomID: roomID).appliedEventCount == (empty ? 0 : 1))
+        #expect(try await store.groupEventCursor(roomID: roomID) == 5)
+        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
+        #expect(try await reopened.groupEventCursor(roomID: roomID) == 5)
+        #expect(try await reopened.applyGroupEventPage(page) == 5)
         #expect(try await store.messages(in: roomID).count == (empty ? 0 : 1))
         let invalid = try V2ClientGroupEvent(sourceEventID: .init(uuid: UUID()), roomSequence: 6, projectionKind: "message", payload: Data([1]))
         let broken = try V2ClientGroupEventPage(roomID: roomID, events: [invalid], nextRoomSequence: 9, hasMore: false)
         await #expect(throws: (any Error).self) {
-            if preview { _ = try await store.applyForegroundGroupEventPreviewPage(broken) }
-            else { _ = try await store.applyGroupEventPage(broken) }
+            _ = try await store.applyGroupEventPage(broken)
         }
-        #expect(try await store.groupEventCursor(roomID: roomID) == (preview ? 0 : 5))
+        #expect(try await store.groupEventCursor(roomID: roomID) == 5)
         #expect(try await store.messages(in: roomID).count == (empty ? 0 : 1))
     }
 
@@ -809,7 +1097,8 @@ struct V2SyncEngineTests {
 
     @Test("private activity is projected separately from messages and disables only the direct composer")
     func privateTimelineActivityAndCapabilityAreApplied() async throws {
-        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let databaseURL = temporaryDatabaseURL()
+        let store = try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: testInstallationBinding)
         let roomID = "00000000-0000-0000-0000-000000000210"
         let activity = try V2ClientSyncRecord(
             sequence: 1,
@@ -829,6 +1118,7 @@ struct V2SyncEngineTests {
             payload: try JSONSerialization.data(withJSONObject: [
                 "room_id": roomID,
                 "can_send": false,
+                "state_version": 2,
                 "updated_at_ms": 1_750_000_000_000,
             ])
         )
@@ -839,6 +1129,63 @@ struct V2SyncEngineTests {
         #expect(projected.kind == .directMessageRestricted)
         #expect(projected.timelineSequence == 2)
         #expect(try await store.directSendingCapability(roomID: .init(roomID))?.canSend == false)
+
+        // Public room pages are identical on both local installations. Only
+        // the addressed installation receives the personal activity above.
+        let peer = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let events = try [UInt64(1), 3].map { sequence in
+            try V2ClientGroupEvent(
+                sourceEventID: .init(String(format: "00000000-0000-0000-0000-%012d", 700 + sequence)),
+                roomSequence: sequence, projectionKind: "message",
+                payload: messagePayload(roomID: roomID, roomSequence: sequence,
+                    messageID: String(format: "00000000-0000-0000-0000-%012d", 710 + sequence),
+                    text: "public-\(sequence)"))
+        }
+        let page = try V2ClientGroupEventPage(roomID: .init(roomID), events: events, nextRoomSequence: 3, hasMore: false)
+        _ = try await store.applyGroupEventPage(page)
+        _ = try await peer.applyGroupEventPage(page)
+        let reopened = try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: testInstallationBinding)
+        _ = try await reopened.applyGroupEventPage(page)
+        let localTimeline = try await reopened.conversationTimelinePage(in: .init(roomID), limit: 10)
+        #expect((localTimeline.messages.map(\.timelineSequence) + localTimeline.activities.map(\.timelineSequence)).sorted() == [1, 2, 3])
+        #expect(localTimeline.activities.count == 1)
+        #expect(localTimeline.messages.map(\.text).sorted() == ["public-1", "public-3"])
+        #expect(try await reopened.groupEventCursor(roomID: .init(roomID)) == 3)
+        #expect(try await reopened.directSendingCapability(roomID: .init(roomID))?.canSend == false)
+        #expect(try await peer.timelineActivities(in: .init(roomID)).isEmpty)
+        #expect(try await peer.directSendingCapability(roomID: .init(roomID)) == nil)
+        #expect(try await peer.messages(in: .init(roomID)).map(\.text).sorted() == ["public-1", "public-3"])
+    }
+
+    @Test("direct capability uses room versions across reordered and same-millisecond events")
+    func directCapabilityVersionsConverge() async throws {
+        let databaseURL = temporaryDatabaseURL()
+        let store = try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: testInstallationBinding)
+        let roomID = try RoomID("00000000-0000-0000-0000-000000000210")
+        func record(_ sequence: UInt64, version: UInt64, canSend: Bool) throws -> V2ClientSyncRecord {
+            try .init(sequence: sequence, sourceEventID: .init(uuid: UUID()),
+                projectionKind: "direct_sending_capability",
+                payload: JSONSerialization.data(withJSONObject: [
+                    "room_id": roomID.rawValue, "state_version": version,
+                    "can_send": canSend, "updated_at_ms": 1_750_000_000_000,
+                ]))
+        }
+        let records = try [record(1, version: 4, canSend: true),
+                           record(2, version: 3, canSend: false),
+                           record(3, version: 4, canSend: true)]
+        _ = try await store.apply(.init(generation: 1, records: records,
+            nextSyncToken: .init("version-token"), receipt: .init("version-receipt"), hasMore: false, capabilityProfile: "base"))
+        #expect(try await store.directSendingCapability(roomID: roomID)?.canSend == true)
+        _ = try await store.apply(.init(generation: 1, records: [record(4, version: 5, canSend: false)],
+            nextSyncToken: .init("version-token-2"), receipt: .init("version-receipt-2"), hasMore: false, capabilityProfile: "base"))
+        let reopened = try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: testInstallationBinding)
+        #expect(try await reopened.directSendingCapability(roomID: roomID)?.stateVersion == 5)
+        #expect(try await reopened.directSendingCapability(roomID: roomID)?.canSend == false)
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
+            _ = try await reopened.apply(.init(generation: 1, records: [record(5, version: 5, canSend: true)],
+                nextSyncToken: .init("conflict-token"), receipt: .init("conflict-receipt"), hasMore: false, capabilityProfile: "base"))
+        }
+        #expect(try await reopened.directSendingCapability(roomID: roomID)?.canSend == false)
     }
 
     @Test("conversation timeline uses stable keyset pages across messages and activities")
@@ -1004,8 +1351,8 @@ struct V2SyncEngineTests {
                 "event_type": "room.created", "room_id": roomID, "title": "项目群",
                 "owner_user_id": "00000000-0000-0000-0000-000000000269",
                 "membership_revision": 1,
-                "delivery_mode": "standard_fanout",
-                "delivery_authority": "fanout",
+                "capacity_class": "standard",
+
                 "created_at_ms": 1_750_000_000_000,
             ])
         )
@@ -1030,8 +1377,8 @@ struct V2SyncEngineTests {
                 "owner_user_id": "00000000-0000-0000-0000-000000000272",
                 "target_user_id": "00000000-0000-0000-0000-000000000273",
                 "action": "add", "membership_revision": 2,
-                "delivery_mode": "standard_fanout",
-                "delivery_authority": "fanout",
+                "capacity_class": "standard",
+
                 "created_at_ms": 1_750_000_000_000, "server_created_at_ms": 1_750_000_001_000,
             ])
         )
@@ -1040,11 +1387,11 @@ struct V2SyncEngineTests {
         let profile = try #require(await store.roomProfile(roomID: .init(roomID)))
         #expect(profile.title == "后加入的群")
         #expect(profile.membershipRevision == 2)
-        #expect(profile.deliveryMode == .standardFanout)
+        #expect(profile.capacityClass == .standard)
     }
 
     @Test("a room profile without its required delivery mode is rejected")
-    func roomProfileRejectsMissingDeliveryMode() async throws {
+    func roomProfileRejectsMissingCapacityClass() async throws {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
         let record = try V2ClientSyncRecord(
             sequence: 1,
@@ -1141,23 +1488,21 @@ struct V2SyncEngineTests {
                 displayName: "对端",
                 accountKind: .regular
             )
-        )
+        , roomCreatedAt: Date(timeIntervalSince1970: 1_750_000_000))
 
         #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10) == [room])
         #expect(try await store.isKnownRoomLogRoom(roomID: room))
-        #expect(try await store.groupEventAccess(roomID: room) == .init(delivery: .durableRoomLog, isAuthorized: true))
+        #expect(try await store.groupEventAccess(roomID: room) == .init(isAuthorized: true))
 
         // 撤销事件授权后必须立刻停止拉取：游标同步不能成为历史授权的旁路。
         try await store.markRoomEventUnauthorized(roomID: room)
         #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10).isEmpty)
         #expect(try await store.isKnownRoomLogRoom(roomID: room) == false)
-        #expect(try await store.groupEventAccess(roomID: room) == .init(delivery: .durableRoomLog, isAuthorized: false))
+        #expect(try await store.groupEventAccess(roomID: room) == .init(isAuthorized: false))
     }
 
-    @Test("cursor enrollment follows the server-declared authority, not the delivery mode")
-    func enrollmentFollowsDeclaredAuthority() async throws {
-        // 标准群将来会以 room_log 出现而不改投递模式（该字段在房间创建后不可变）。客户端
-        // 必须按服务端宣告的权威副本形态纳管，否则推广时要么漏拉、要么需要客户端发版。
+    @Test("every authorized room enrolls even with a legacy authority")
+    func enrollmentUsesRoomLogsForBothCapacityClasses() async throws {
         let databaseURL = temporaryDatabaseURL()
         let store = try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: testInstallationBinding)
         let standardRoom = "00000000-0000-0000-0000-000000000280"
@@ -1165,56 +1510,35 @@ struct V2SyncEngineTests {
 
         _ = try await store.apply(.init(
             generation: 1,
-            records: [try roomProjection(roomID: standardRoom, mode: "standard_fanout", authority: "fanout", revision: 1, sequence: 1)],
+            records: [try roomProjection(roomID: standardRoom, mode: "standard", revision: 1, sequence: 1)],
             nextSyncToken: .init("standard-token"),
             receipt: .init("standard-receipt"),
             hasMore: false,
             capabilityProfile: "base"
         ))
-        #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10).isEmpty)
+        #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10) == [try .init(standardRoom)])
         #expect(try await store.groupEventAccess(roomID: .init(standardRoom)) == .init(
-            delivery: .foregroundPreview, isAuthorized: true
+            isAuthorized: true
         ))
 
-        // 同样的标准投递模式，但服务端宣告日志是权威副本：必须纳入游标同步。
         _ = try await store.apply(.init(
             generation: 1,
-            records: [try roomProjection(roomID: logRoom, mode: "standard_fanout", authority: "room_log", revision: 1, sequence: 2)],
+            records: [try roomProjection(roomID: logRoom, mode: "large", revision: 1, sequence: 2)],
             nextSyncToken: .init("log-token"),
             receipt: .init("log-receipt"),
             hasMore: false,
             capabilityProfile: "base"
         ))
-        #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10) == [try .init(logRoom)])
+        #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10) == [try .init(standardRoom), try .init(logRoom)])
         #expect(try await store.isKnownRoomLogRoom(roomID: .init(logRoom)))
         #expect(try await store.groupEventAccess(roomID: .init(logRoom)) == .init(
-            delivery: .durableRoomLog, isAuthorized: true
+            isAuthorized: true
         ))
     }
 
-    @Test("a projection without the declared authority is rejected")
-    func enrollmentRejectsMissingAuthority() async throws {
-        // 项目未上线：不保留"缺字段就推断"的静默回退。服务端必须宣告权威副本形态，
-        // 缺失即视为不可解码的投影，而不是猜一个。
-        let databaseURL = temporaryDatabaseURL()
-        let store = try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: testInstallationBinding)
-        let hybridRoom = "00000000-0000-0000-0000-000000000282"
 
-        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
-            _ = try await store.apply(.init(
-                generation: 1,
-                records: [try roomProjection(roomID: hybridRoom, mode: "large_group_hybrid", authority: nil, revision: 1, sequence: 1)],
-                nextSyncToken: .init("legacy-token"),
-                receipt: .init("legacy-receipt"),
-                hasMore: false,
-                capabilityProfile: "base"
-            ))
-        }
-        #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10).isEmpty)
-    }
-
-    @Test("the declared authority only advances towards the room log")
-    func authorityNeverDowngrades() async throws {
+    @Test("membership updates retain room-log enrollment")
+    func membershipUpdatesRetainRoomLogEnrollment() async throws {
         // 少拉一次会让客户端收不到只写日志的房间内容；多拉一次只是幂等重复。
         let databaseURL = temporaryDatabaseURL()
         let store = try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: testInstallationBinding)
@@ -1223,7 +1547,7 @@ struct V2SyncEngineTests {
         _ = try await store.apply(.init(
             generation: 1,
             records: [
-                try roomProjection(roomID: room, mode: "standard_fanout", authority: "room_log", revision: 1, sequence: 1)
+                try roomProjection(roomID: room, mode: "standard", revision: 1, sequence: 1)
             ],
             nextSyncToken: .init("advance-token"),
             receipt: .init("advance-receipt"),
@@ -1232,7 +1556,7 @@ struct V2SyncEngineTests {
         ))
         #expect(try await store.isKnownRoomLogRoom(roomID: .init(room)))
 
-        // 后续成员事件带回较弱的形态：不得把已经按日志恢复的房间退回个人流。
+        // 成员修订更新后仍保留该房间的持久补拉资格。
         _ = try await store.apply(.init(
             generation: 1,
             records: [
@@ -1240,7 +1564,7 @@ struct V2SyncEngineTests {
                     sequence: 2,
                     sourceEventID: .init("00000000-0000-0000-0000-000000000284"),
                     projectionKind: "membership",
-                    payload: try roomProjectionPayload(roomID: room, mode: "standard_fanout", authority: "fanout", revision: 2)
+                    payload: try roomProjectionPayload(roomID: room, mode: "standard", revision: 2)
                 )
             ],
             nextSyncToken: .init("advance-token-2"),
@@ -1265,8 +1589,8 @@ struct V2SyncEngineTests {
                 "owner_user_id": "00000000-0000-0000-0000-000000000276",
                 "target_user_id": "00000000-0000-0000-0000-000000000277",
                 "action": "add", "membership_revision": 2,
-                "delivery_mode": "large_group_hybrid",
-                "delivery_authority": "room_log",
+                "capacity_class": "large",
+
                 "created_at_ms": 1_750_000_000_000, "server_created_at_ms": 1_750_000_001_000,
             ])
         )
@@ -1275,15 +1599,13 @@ struct V2SyncEngineTests {
         #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10) == [try .init(roomID)])
         try await store.markRoomEventUnauthorized(roomID: .init(roomID))
         #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10).isEmpty)
-        #expect(try await store.roomProfile(roomID: .init(roomID))?.deliveryMode == .largeGroupHybrid)
+        #expect(try await store.roomProfile(roomID: .init(roomID))?.capacityClass == .large)
         #expect(try await store.groupEventAccess(roomID: .init(roomID)) == .init(
-            delivery: .durableRoomLog,
             isAuthorized: false
         ))
 
         let reopenedStore = try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: testInstallationBinding)
         #expect(try await reopenedStore.groupEventAccess(roomID: .init(roomID)) == .init(
-            delivery: .durableRoomLog,
             isAuthorized: false
         ))
         #expect(try await reopenedStore.knownRoomLogRoomIDs(after: nil, limit: 10).isEmpty)
@@ -1297,8 +1619,8 @@ struct V2SyncEngineTests {
                 "owner_user_id": "00000000-0000-0000-0000-000000000276",
                 "target_user_id": "00000000-0000-0000-0000-000000000277",
                 "action": "add", "membership_revision": 3,
-                "delivery_mode": "large_group_hybrid",
-                "delivery_authority": "room_log",
+                "capacity_class": "large",
+
                 "created_at_ms": 1_750_000_000_000, "server_created_at_ms": 1_750_000_002_000,
             ])
         )
@@ -1311,7 +1633,6 @@ struct V2SyncEngineTests {
             capabilityProfile: "base"
         ))
         #expect(try await reopenedStore.groupEventAccess(roomID: .init(roomID)) == .init(
-            delivery: .durableRoomLog,
             isAuthorized: true
         ))
         #expect(try await reopenedStore.knownRoomLogRoomIDs(after: nil, limit: 10) == [try .init(roomID)])
@@ -1335,8 +1656,8 @@ struct V2SyncEngineTests {
         #expect(try await store.messages(in: roomID).map(\.text) == ["从群日志拉取"])
     }
 
-    @Test("snapshot reset preserves the authorized hybrid room-log projection and cursor")
-    func snapshotPreservesHybridRoomLogOwnership() async throws {
+    @Test("snapshot reset preserves room-log content under legacy and current profiles", arguments: [false, true])
+    func snapshotPreservesHybridRoomLogOwnership(legacy: Bool) async throws {
         let store = try GRDBV2LocalSyncStore(
             databaseURL: temporaryDatabaseURL(),
             installationBinding: testInstallationBinding
@@ -1351,8 +1672,8 @@ struct V2SyncEngineTests {
             "target_user_id": "00000000-0000-0000-0000-0000000002b3",
             "action": "add",
             "membership_revision": 2,
-            "delivery_mode": "large_group_hybrid",
-            "delivery_authority": "room_log",
+            "capacity_class": legacy ? "standard" : "large",
+
             "created_at_ms": 1_750_000_000_000,
             "server_created_at_ms": 1_750_000_001_000,
         ])
@@ -1424,21 +1745,21 @@ struct V2SyncEngineTests {
         #expect(try await store.applyGroupEventPage(roomPage) == 10)
         // The snapshot preserved revision 2 and its receipts. A delayed
         // accepted preview must not compare its old body with edited content.
-        _ = try await store.applyForegroundGroupEventPreviewPage(.init(roomID: roomID, events: [roomEvent], nextRoomSequence: 7, hasMore: false))
+        _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(.init(roomID: roomID, events: [roomEvent], nextRoomSequence: 7, hasMore: false))
         #expect(try await store.messages(in: roomID).first?.text == "room-log-edited")
         #expect(try await store.groupAnnouncement(roomID: roomID)?.body == "hybrid announcement")
         #expect(try await store.groupRolePolicies(roomID: roomID).first?.permissions == [])
         #expect(try await store.groupRolePolicies(roomID: roomID).first?.revision == 5)
         let changedPolicy = try rolePolicyFact(sequence: 1, revision: 5, permissions: ["send_messages"], roomSequence: 10, room: roomID)
         let changedPolicyEvent = try V2ClientGroupEvent(sourceEventID: changedPolicy.sourceEventID, roomSequence: 10, projectionKind: changedPolicy.projectionKind, payload: changedPolicy.payload)
-        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
-            try await store.applyForegroundGroupEventPreviewPage(.init(roomID: roomID, events: [changedPolicyEvent], nextRoomSequence: 10, hasMore: false))
+        await #expect(throws: V2ClientSyncError.invalidRecordOrdering) {
+            try await store.applyGroupEventPage(.init(roomID: roomID, events: [changedPolicyEvent], nextRoomSequence: 10, hasMore: false))
         }
         var altered = try #require(JSONSerialization.jsonObject(with: announcement.payload) as? [String: Any])
         altered["body"] = "altered receipt"
         let conflict = try V2ClientGroupEvent(sourceEventID: announcement.sourceEventID, roomSequence: 9, projectionKind: "group_capability", payload: JSONSerialization.data(withJSONObject: altered))
-        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
-            try await store.applyForegroundGroupEventPreviewPage(.init(roomID: roomID, events: [conflict], nextRoomSequence: 9, hasMore: false))
+        await #expect(throws: V2ClientSyncError.invalidRecordOrdering) {
+            try await store.applyGroupEventPage(.init(roomID: roomID, events: [conflict], nextRoomSequence: 9, hasMore: false))
         }
     }
 
@@ -1460,8 +1781,8 @@ struct V2SyncEngineTests {
         #expect(try await store.messages(in: roomID).map(\.text) == ["前台轮询"])
     }
 
-    @Test("a standard-group foreground preview stays outside durable group cursors and personal ACKs")
-    func standardGroupForegroundPreviewIsTransientAndIdempotent() async throws {
+    @Test("legacy group profiles recover through the room log without advancing personal ACKs")
+    func legacyGroupRoomLogRecoveryIsIdempotent() async throws {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
         let roomID: RoomID = try .init("00000000-0000-0000-0000-00000000028a")
         let profile = try V2ClientSyncRecord(
@@ -1473,8 +1794,8 @@ struct V2SyncEngineTests {
                 "owner_user_id": "00000000-0000-0000-0000-00000000028c",
                 "target_user_id": "00000000-0000-0000-0000-00000000028d",
                 "action": "add", "membership_revision": 2,
-                "delivery_mode": "standard_fanout",
-                "delivery_authority": "fanout",
+                "capacity_class": "standard",
+
                 "created_at_ms": 1_750_000_000_000, "server_created_at_ms": 1_750_000_001_000,
             ])
         )
@@ -1492,22 +1813,22 @@ struct V2SyncEngineTests {
             projectionKind: "message",
             payload: messagePayload(roomID: roomID.rawValue, roomSequence: 3, messageID: "00000000-0000-0000-0000-000000000291", text: "前台预览")
         )
-        let transport = GroupEventTransportFake(page: try .init(roomID: roomID, events: [preview], nextRoomSequence: 3, hasMore: false))
-        let engine = V2ForegroundGroupEventPreviewEngine(transport: transport, store: store)
+        let recovered = try V2ClientGroupEvent(sourceEventID: delivered.sourceEventID, roomSequence: 2, projectionKind: "message", payload: delivered.payload)
+        let transport = GroupEventTransportFake(page: try .init(roomID: roomID, events: [recovered, preview], nextRoomSequence: 3, hasMore: false))
+        let engine = V2GroupEventSyncEngine(transport: transport, store: store)
 
         #expect(try await store.groupEventAccess(roomID: roomID) == .init(
-            delivery: .foregroundPreview,
             isAuthorized: true
         ))
-        #expect(try await engine.synchronizeOnePage(roomID: roomID) == .init(appliedEventCount: 1, hasMore: false))
-        #expect(await transport.requestedCursors() == [2])
+        #expect(try await engine.synchronizeOnePage(roomID: roomID) == .init(appliedEventCount: 2, hasMore: false))
+        #expect(await transport.requestedCursors() == [0])
         #expect(try await store.messages(in: roomID).map(\.text) == ["可靠投递", "前台预览"])
-        #expect(try await store.groupEventCursor(roomID: roomID) == 0)
+        #expect(try await store.groupEventCursor(roomID: roomID) == 3)
         #expect(try await store.cursor()?.appliedSequence == 2)
 
-        // A retry is safe and still does not create a durable room-log ACK.
-        #expect(try await engine.synchronizeOnePage(roomID: roomID).appliedEventCount == 1)
-        #expect(try await store.groupEventCursor(roomID: roomID) == 0)
+        // Replaying the same page keeps the durable room cursor and personal cursor stable.
+        #expect(try await engine.synchronizeOnePage(roomID: roomID).appliedEventCount == 0)
+        #expect(try await store.groupEventCursor(roomID: roomID) == 3)
     }
 
     @Test("a forbidden hybrid room revokes event access without blocking normal synchronization")
@@ -1523,44 +1844,23 @@ struct V2SyncEngineTests {
                 "owner_user_id": "00000000-0000-0000-0000-000000000280",
                 "target_user_id": "00000000-0000-0000-0000-000000000281",
                 "action": "remove", "membership_revision": 3,
-                "delivery_mode": "large_group_hybrid",
-                "delivery_authority": "room_log",
+                "capacity_class": "large",
+
                 "created_at_ms": 1_750_000_000_000, "server_created_at_ms": 1_750_000_001_000,
             ])
         )
         _ = try await store.apply(.init(generation: 1, records: [record], nextSyncToken: .init("removed-hybrid-token"), receipt: .init("removed-hybrid-receipt"), hasMore: false, capabilityProfile: "base"))
         let engine = V2GroupEventSyncEngine(transport: ForbiddenGroupEventTransport(), store: store)
 
-        _ = try await engine.synchronizeBackgroundKnownRooms(maximumPages: 1)
+        await #expect(throws: V2RealtimeTransportError.self) {
+            _ = try await engine.synchronizeOnePage(roomID: .init(roomID))
+        }
+        try await store.markRoomEventUnauthorized(roomID: .init(roomID))
 
         #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10).isEmpty)
         #expect(try await store.groupEventAccess(roomID: .init(roomID)) == .init(
-            delivery: .durableRoomLog,
             isAuthorized: false
         ))
-    }
-
-    @Test("background hybrid maintenance is page-bounded and round-robin fair")
-    func backgroundHybridMaintenanceIsBoundedAndFair() async throws {
-        let first = try RoomID("00000000-0000-0000-0000-0000000002a0")
-        let second = try RoomID("00000000-0000-0000-0000-0000000002a1")
-        let store = BackgroundGroupEventStoreFake(roomIDs: [first, second])
-        let transport = BackgroundGroupEventTransportFake()
-        let engine = V2GroupEventSyncEngine(transport: transport, store: store)
-
-        let firstPass = try await engine.synchronizeBackgroundKnownRooms(maximumPages: 3)
-        #expect(firstPass == .init(processedPageCount: 2, appliedEventCount: 0, mayHaveRemainingWork: true))
-        #expect(await transport.requestedRoomIDs() == [first, second])
-
-        let secondPass = try await engine.synchronizeBackgroundKnownRooms(maximumPages: 1)
-        #expect(secondPass == .init(processedPageCount: 1, appliedEventCount: 0, mayHaveRemainingWork: true))
-        #expect(await transport.requestedRoomIDs() == [first, second, first])
-
-        // Scheduling position is owned by the store, so a replacement engine
-        // continues from the next room instead of resetting to the first.
-        let replacementEngine = V2GroupEventSyncEngine(transport: transport, store: store)
-        _ = try await replacementEngine.synchronizeBackgroundKnownRooms(maximumPages: 1)
-        #expect(await transport.requestedRoomIDs() == [first, second, first, second])
     }
 
     @Test("local store applies an incremental batch once and accepts an exact retry")
@@ -1627,8 +1927,8 @@ struct V2SyncEngineTests {
                     "title": "Empty Group",
                     "owner_user_id": "00000000-0000-0000-0000-000000000406",
                     "membership_revision": 1,
-                    "delivery_mode": "standard_fanout",
-                    "delivery_authority": "fanout",
+                    "capacity_class": "standard",
+
                     "created_at_ms": 1_750_000_001_500,
                 ])
             ),
@@ -1787,7 +2087,7 @@ struct V2SyncEngineTests {
         #expect(try await store.events().isEmpty)
     }
 
-    @Test("message effects converge across preview, personal and durable room feeds after reopen", arguments: ["preview-first", "personal-first", "room-first", "legacy-upgrade"])
+    @Test("message effects converge across personal effects and durable room logs after reopen", arguments: ["personal-first", "room-first"])
     func messageEffectsAreSharedAcrossFeeds(order: String) async throws {
         let url = temporaryDatabaseURL()
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
@@ -1799,23 +2099,16 @@ struct V2SyncEngineTests {
         let page = try V2ClientGroupEventPage(roomID: .init("00000000-0000-0000-0000-000000000220"), events: records.map { try .init(sourceEventID: $0.sourceEventID, roomSequence: $0.sequence, projectionKind: $0.projectionKind, payload: $0.payload) }, nextRoomSequence: 3, hasMore: false)
         let batch = try V2ClientSyncBatch(generation: 1, records: records, nextSyncToken: .init("effects-token"), receipt: .init("effects-receipt"), hasMore: false, capabilityProfile: "base")
         switch order {
-        case "preview-first": _ = try await store.applyForegroundGroupEventPreviewPage(page)
         case "room-first": _ = try await store.applyGroupEventPage(page)
         default: _ = try await store.apply(batch)
         }
         let pool = try DatabasePool(path: url.path)
         try await pool.write { db in try db.execute(sql: "DELETE FROM v2_message_search_jobs") }
         try await store.close()
-        if order == "legacy-upgrade" {
-            try await pool.write { db in
-                try db.execute(sql: "DROP TABLE v2_message_effects")
-                try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'recordSharedMessageEffects'")
-            }
-        }
         let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
         _ = try await reopened.apply(batch)
-        _ = try await reopened.applyForegroundGroupEventPreviewPage(page)
-        _ = try await reopened.applyGroupEventPage(page)
+        _ = try await reopened.applyRoomPageOrExpectRejectedOlderCursor(page)
+        _ = try await reopened.applyRoomPageOrExpectRejectedOlderCursor(page)
         let message = try #require(await reopened.messages(in: page.roomID).first)
         #expect(message.isWithdrawn && message.messageRevision == 3 && message.text == "[removed]")
         #expect(try await reopened.groupEventCursor(roomID: page.roomID) == 3)
@@ -1825,7 +2118,7 @@ struct V2SyncEngineTests {
         // JSON whitespace/order is transport spelling, while changed semantic
         // text under the same event identity must roll back the new cursor.
         let spelling = try JSONSerialization.data(withJSONObject: JSONSerialization.jsonObject(with: records[1].payload), options: [.prettyPrinted, .sortedKeys])
-        _ = try await reopened.applyForegroundGroupEventPreviewPage(.init(roomID: page.roomID, events: [.init(sourceEventID: records[1].sourceEventID, roomSequence: 2, projectionKind: "message", payload: spelling)], nextRoomSequence: 2, hasMore: false))
+        _ = try await reopened.applyRoomPageOrExpectRejectedOlderCursor(.init(roomID: page.roomID, events: [.init(sourceEventID: records[1].sourceEventID, roomSequence: 2, projectionKind: "message", payload: spelling)], nextRoomSequence: 2, hasMore: false))
         let conflict = try V2ClientSyncRecord(sequence: 4, sourceEventID: records[1].sourceEventID, projectionKind: "message", payload: editPayload(text: "conflict", revision: 2))
         await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
             try await reopened.apply(.init(generation: 1, records: [conflict], nextSyncToken: .init("conflict"), receipt: .init("conflict-receipt"), hasMore: false, capabilityProfile: "base"))
@@ -1838,7 +2131,7 @@ struct V2SyncEngineTests {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
         let room = try RoomID("00000000-0000-0000-0000-000000000220")
         if hasBaseline {
-            _ = try await store.applyForegroundGroupEventPreviewPage(.init(roomID: room, events: [try .init(sourceEventID: .init("late-edit-base"), roomSequence: 1, projectionKind: "message", payload: messagePayload(text: "before"))], nextRoomSequence: 1, hasMore: false))
+            _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(.init(roomID: room, events: [try .init(sourceEventID: .init("late-edit-base"), roomSequence: 1, projectionKind: "message", payload: messagePayload(text: "before"))], nextRoomSequence: 1, hasMore: false))
         }
         let stone = try JSONSerialization.data(withJSONObject: ["event_type": "message.withdrawn", "message_id": "00000000-0000-0000-0000-000000000001", "room_id": room.rawValue, "message_revision": 3])
         let records = try [V2ClientSyncRecord(sequence: 1, sourceEventID: .init("late-edit-stone"), projectionKind: "message", payload: stone),
@@ -1879,6 +2172,25 @@ struct V2SyncEngineTests {
         #expect(message.roomSequence == 1)
     }
 
+    @Test("withdrawing the newest message moves effective activity back without erasing history")
+    func withdrawnLatestFallsBackToPreviousEffectiveActivity() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let older = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init("older-effective"), projectionKind: "message",
+            payload: messagePayload(roomSequence: 1, messageID: "00000000-0000-0000-0000-000000000002", text: "older", createdAtMilliseconds: 1000))
+        let newer = try V2ClientSyncRecord(sequence: 2, sourceEventID: .init("newer-effective"), projectionKind: "message",
+            payload: messagePayload(roomSequence: 2, messageID: "00000000-0000-0000-0000-000000000001", text: "newer", createdAtMilliseconds: 2000))
+        _ = try await store.apply(.init(generation: 1, records: [older, newer], nextSyncToken: .init("effective-1"), receipt: .init("effective-receipt-1"), hasMore: false, capabilityProfile: "base"))
+        let before = try await store.conversationListPage(isArchived: false, before: nil, limit: 10)
+        #expect(before.entries.first?.lastMessage?.text == "newer")
+        let withdrawn = try V2ClientSyncRecord(sequence: 3, sourceEventID: .init("withdraw-effective"), projectionKind: "message", payload: withdrawalPayload())
+        _ = try await store.apply(.init(generation: 1, records: [withdrawn], nextSyncToken: .init("effective-2"), receipt: .init("effective-receipt-2"), hasMore: false, capabilityProfile: "base"))
+        let after = try await store.conversationListPage(isArchived: false, before: nil, limit: 10)
+        #expect(after.entries.first?.lastMessage?.text == "older")
+        #expect(after.entries.first?.lastActivity == Date(timeIntervalSince1970: 1))
+        let history = try await store.messages(in: .init("00000000-0000-0000-0000-000000000220"))
+        #expect(history.count == 2 && history.last?.isWithdrawn == true)
+    }
+
     @Test("withdrawal clears independently projected reactions")
     func withdrawalClearsIndependentReactions() async throws {
         let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
@@ -1917,6 +2229,59 @@ struct V2SyncEngineTests {
         #expect(try await store.events().map(\.sourceEventID) == [accepted.sourceEventID, redacted.sourceEventID])
     }
 
+    @Test("reaction receipt and ordering reject noninteger room versions", arguments:
+        ["receipt", "new-remove", "late-add"], [1.5, Double(Int64.max)])
+    func reactionStorageTypes(path: String, value: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "reaction-storage-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "client.sqlite"), installationBinding: testInstallationBinding)
+        let source = EventID(uuid: UUID())
+        let initialAction = path == "late-add" ? "remove" : "add"
+        func batch(_ sequence: UInt64, _ source: EventID, _ action: String) throws -> V2ClientSyncBatch {
+            try .init(generation: 1, records: [.init(sequence: sequence, sourceEventID: source,
+                projectionKind: "message_reaction", payload: reactionPayload(action: action))],
+                nextSyncToken: .init("reaction-storage"), receipt: .init("reaction-storage"), hasMore: false, capabilityProfile: "base")
+        }
+        _ = try await store.apply(batch(1, source, initialAction))
+        let before = try await store.cursor()
+        let table = path == "receipt" ? "v2_reaction_effects" : "v2_reaction_versions"
+        try await store.databasePool.write { db in
+            // Exercise the independent effect receipt without the delivery fixture.
+            if path == "receipt" { try db.execute(sql: "DELETE FROM v2_sync_events") }
+            try db.execute(sql: "UPDATE \(table) SET room_sequence = ?", arguments: [value])
+        }
+        let incoming = try batch(2, path == "receipt" ? source : .init(uuid: UUID()), path == "new-remove" ? "remove" : "add")
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.apply(incoming) }
+        #expect(try await store.cursor() == before)
+        let state = try await store.databasePool.read { db in
+            let raw = try Double.fetchOne(db, sql: "SELECT room_sequence FROM \(table)")
+            let type = try String.fetchOne(db, sql: "SELECT typeof(room_sequence) FROM \(table)")
+            let receipts = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v2_reaction_effects")
+            let reactions = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v2_message_reactions")
+            return (raw, type, receipts, reactions)
+        }
+        #expect(state.0 == value)
+        #expect(state.1 == "real")
+        #expect(state.2 == 1)
+        #expect(state.3 == (path == "late-add" ? 0 : 1))
+        try await store.databasePool.write { db in
+            try db.execute(sql: "UPDATE \(table) SET room_sequence = ?", arguments: [path == "late-add" ? 3 : 2])
+        }
+        _ = try await store.apply(incoming)
+        #expect(try await store.cursor()?.appliedSequence == 2)
+        let after = try await store.databasePool.read { db in
+            let action = try String.fetchOne(db, sql: "SELECT action FROM v2_reaction_versions")
+            let count = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v2_message_reactions")
+            let receipts = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v2_reaction_effects")
+            return (action, count, receipts)
+        }
+        #expect(after.0 == (path == "receipt" ? "add" : "remove"))
+        #expect(after.1 == (path == "receipt" ? 1 : 0))
+        #expect(after.2 == (path == "receipt" ? 1 : 2))
+        try await store.close()
+    }
+
     @Test("reaction removals fence older additions across feeds and restart", arguments: ["remove-first", "add-first"])
     func orderedReactionEffects(order: String) async throws {
         let url = temporaryDatabaseURL()
@@ -1929,7 +2294,7 @@ struct V2SyncEngineTests {
         }
         let add = try record(2, 20, "add", event: "reaction-add"), remove = try record(3, 30, "remove", event: "reaction-remove")
         let early = order == "remove-first" ? remove : add
-        _ = try await store.applyForegroundGroupEventPreviewPage(.init(roomID: room, events: [.init(sourceEventID: early.sourceEventID, roomSequence: order == "remove-first" ? 30 : 20, projectionKind: early.projectionKind, payload: early.payload)], nextRoomSequence: order == "remove-first" ? 30 : 20, hasMore: false))
+        _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(.init(roomID: room, events: [.init(sourceEventID: early.sourceEventID, roomSequence: order == "remove-first" ? 30 : 20, projectionKind: early.projectionKind, payload: early.payload)], nextRoomSequence: order == "remove-first" ? 30 : 20, hasMore: false))
         let base = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init("reaction-base"), projectionKind: "message", payload: messagePayload(text: "reaction base"))
         let cursor = try await store.apply(.init(generation: 1, records: [base, add, remove], nextSyncToken: .init("reaction-order"), receipt: .init("reaction-order-receipt"), hasMore: false, capabilityProfile: "base"))
         #expect(cursor.appliedSequence == 3)
@@ -1938,7 +2303,7 @@ struct V2SyncEngineTests {
         let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
         let readd = try record(4, 40, "add", event: "reaction-readd")
         _ = try await reopened.apply(.init(generation: 1, records: [readd], nextSyncToken: .init("reaction-readd"), receipt: .init("reaction-readd-receipt"), hasMore: false, capabilityProfile: "base"))
-        _ = try await reopened.applyForegroundGroupEventPreviewPage(.init(roomID: room, events: [.init(sourceEventID: remove.sourceEventID, roomSequence: 30, projectionKind: remove.projectionKind, payload: remove.payload)], nextRoomSequence: 30, hasMore: false))
+        _ = try await reopened.applyRoomPageOrExpectRejectedOlderCursor(.init(roomID: room, events: [.init(sourceEventID: remove.sourceEventID, roomSequence: 30, projectionKind: remove.projectionKind, payload: remove.payload)], nextRoomSequence: 30, hasMore: false))
         #expect(try await reopened.reactions(for: message).count == 1)
         let conflict = try record(5, 30, "add", event: "reaction-remove")
         await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
@@ -1947,34 +2312,6 @@ struct V2SyncEngineTests {
         #expect(try await reopened.cursor()?.appliedSequence == 4)
     }
 
-    @Test("reaction migration backfills ordered facts and restarts old unversioned snapshot staging", arguments: [false, true])
-    func reactionMigrationRestartsSnapshot(prepared: Bool) async throws {
-        let url = temporaryDatabaseURL()
-        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
-        let add = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init("migration-reaction-add"), projectionKind: "message_reaction", payload: reactionPayload(action: "add"))
-        let remove = try V2ClientSyncRecord(sequence: 2, sourceEventID: .init("migration-reaction-remove"), projectionKind: "message_reaction", payload: reactionPayload(action: "remove"))
-        _ = try await store.apply(.init(generation: 1, records: [add, remove], nextSyncToken: .init("migration-reactions"), receipt: .init("migration-reactions-receipt"), hasMore: false, capabilityProfile: "base"))
-        let reset = try V2ClientResetRequired(snapshotID: .init("reaction-upgrade-snapshot"), generation: 2, baseSequence: 0, expiresAt: .distantFuture)
-        let fixture = try makeSnapshotFixture(reset: reset, pages: [])
-        try await store.beginReset(reset)
-        try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 0, capabilityProfile: "base"))
-        if prepared { try await store.prepareSnapshotActivation(fixture.manifest) }
-        try await store.close()
-        let old = try DatabasePool(path: url.path)
-        try await old.write { db in
-            for table in ["v2_reaction_versions", "v2_reaction_effects", "v2_snapshot_shadow_reaction_versions", "v2_snapshot_shadow_reaction_effects"] { try db.execute(sql: "DROP TABLE \(table)") }
-            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'orderReactionEffects'")
-        }
-        try old.close()
-        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
-        #expect(try await reopened.cursor()?.pendingReset == reset)
-        #expect(try await reopened.importedSnapshotManifest(for: reset) == nil)
-        #expect(try await reopened.reactions(for: .init("00000000-0000-0000-0000-000000000001")).isEmpty)
-        try await reopened.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 0, capabilityProfile: "base"))
-        try await reopened.prepareSnapshotActivation(fixture.manifest)
-        try await reopened.activateAcknowledgedSnapshot(fixture.manifest)
-        #expect(try await reopened.cursor()?.generation == 2)
-    }
 
     @Test("reaction version must come from the payload and match a room envelope")
     func reactionVersionBoundary() async throws {
@@ -1986,7 +2323,7 @@ struct V2SyncEngineTests {
             try await store.apply(.init(generation: 1, records: [missing], nextSyncToken: .init("missing-reaction"), receipt: .init("missing-reaction-receipt"), hasMore: false, capabilityProfile: "base"))
         }
         await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
-            try await store.applyForegroundGroupEventPreviewPage(.init(roomID: .init("00000000-0000-0000-0000-000000000220"), events: [.init(sourceEventID: missing.sourceEventID, roomSequence: 99, projectionKind: "message_reaction", payload: reactionPayload(action: "add"))], nextRoomSequence: 99, hasMore: false))
+            try await store.applyGroupEventPage(.init(roomID: .init("00000000-0000-0000-0000-000000000220"), events: [.init(sourceEventID: missing.sourceEventID, roomSequence: 99, projectionKind: "message_reaction", payload: reactionPayload(action: "add"))], nextRoomSequence: 99, hasMore: false))
         }
     }
 
@@ -2066,12 +2403,6 @@ struct V2SyncEngineTests {
         let pending = V2PendingMessageCommand(roomID: try .init("00000000-0000-0000-0000-000000009002"), clientMessageID: try .init("00000000-0000-0000-0000-000000009003"), text: "keep this outbox", state: .pending, attemptCount: 0, nextAttemptAt: .distantPast, acceptedMessageID: nil, acceptedRoomSequence: nil, terminalCode: nil)
         try await store.enqueue(pending)
         try await store.close()
-        let legacy = try DatabasePool(path: url.path)
-        try await legacy.write { db in
-            try db.execute(sql: "DROP TABLE v2_sync_rebuild_requests")
-            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'recordSnapshotRebuildIntent'")
-        }
-        try legacy.close()
         store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
         #expect(try await !store.requiresSnapshotRebuild())
         #expect(try await store.cursor()?.appliedSequence == 1)
@@ -2516,7 +2847,7 @@ struct V2SyncEngineTests {
             .init(roomID: roomID, messageID: messageID, actorUserID: actorID, reaction: reaction)
         ]))
         if removed {
-            _ = try await store.applyForegroundGroupEventPreviewPage(.init(roomID: roomID, events: [try .init(sourceEventID: .init("old-reaction-add"), roomSequence: 2, projectionKind: "message_reaction", payload: reactionPayload(action: "add"))], nextRoomSequence: 2, hasMore: false))
+            _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(.init(roomID: roomID, events: [try .init(sourceEventID: .init("old-reaction-add"), roomSequence: 2, projectionKind: "message_reaction", payload: reactionPayload(action: "add"))], nextRoomSequence: 2, hasMore: false))
             #expect(try await store.reactions(for: messageID).isEmpty)
         }
     }
@@ -2767,13 +3098,21 @@ struct V2SyncEngineTests {
             baseSequence: 7,
             expiresAt: .distantFuture
         )
-        let transport = FakeTransport(pullResult: .resetRequired(reset))
+        let afterSnapshot = try V2ClientSyncRecord(sequence: 8, sourceEventID: .init(uuid: UUID()),
+            projectionKind: "message", payload: messagePayload(text: "after snapshot"))
+        let transport = FakeTransport(pullResult: .resetRequired(reset), afterSnapshot: .ready(try .init(
+            generation: 2, records: [afterSnapshot], nextSyncToken: .init("after-snapshot"),
+            receipt: .init("after-snapshot-receipt"), hasMore: false, capabilityProfile: "base")))
         let engine = V2SyncEngine(transport: transport, store: store, capabilityProfile: "base")
         let recorder = AvailabilityFlushRecorder()
         let runner = V2AvailabilityDrivenSyncRunner(
             source: OneHintThenStopSource(),
             syncEngine: engine,
-            afterSynchronization: { await recorder.record() }
+            afterSynchronization: {
+                let applied = try await store.cursor()?.appliedSequence
+                #expect(applied == 8)
+                await recorder.record()
+            }
         )
 
         await #expect(throws: AvailabilityStop.finished) {
@@ -2781,6 +3120,7 @@ struct V2SyncEngineTests {
         }
 
         #expect(try await store.cursor()?.state == .ready)
+        #expect(try await store.cursor()?.appliedSequence == 8)
         #expect(await transport.snapshotAcknowledgementCount() == 1)
         #expect(await recorder.count() == 1)
     }
@@ -2806,29 +3146,6 @@ struct V2SyncEngineTests {
         }
     }
 
-    @Test("message effect migration resumes a snapshot staged by the previous schema", arguments: [false, true])
-    func messageEffectMigrationPreservesSnapshot(prepared: Bool) async throws {
-        let url = temporaryDatabaseURL()
-        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
-        let reset = try V2ClientResetRequired(snapshotID: .init("effect-upgrade-snapshot"), generation: 2, baseSequence: 0, expiresAt: .distantFuture)
-        let fixture = try makeSnapshotFixture(reset: reset, pages: [])
-        try await store.beginReset(reset)
-        try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 0, capabilityProfile: "base"))
-        if prepared { try await store.prepareSnapshotActivation(fixture.manifest) }
-        try await store.close()
-        let old = try DatabasePool(path: url.path)
-        try await old.write { db in
-            try db.execute(sql: "DROP TABLE v2_message_effects")
-            try db.execute(sql: "DROP TABLE v2_snapshot_shadow_message_effects")
-            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'recordSharedMessageEffects'")
-        }
-        try old.close()
-        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
-        try await reopened.prepareSnapshotActivation(fixture.manifest)
-        try await reopened.activateAcknowledgedSnapshot(fixture.manifest)
-        #expect(try await reopened.cursor()?.generation == 2)
-        try await reopened.cleanupRetiredSnapshotTables()
-    }
 
     @Test("prepared snapshot fences local projection writers until cancellation")
     func preparedSnapshotFencesProjectionWrites() async throws {
@@ -2859,7 +3176,7 @@ struct V2SyncEngineTests {
                     displayName: "准备阶段 fence",
                     accountKind: .regular
                 )
-            )
+            , roomCreatedAt: Date(timeIntervalSince1970: 1_750_000_000))
         }
         try await store.cancelReset(reset)
         try await store.cacheDirectRoomIdentity(
@@ -2870,17 +3187,23 @@ struct V2SyncEngineTests {
                 displayName: "准备阶段 fence",
                 accountKind: .regular
             )
-        )
+        , roomCreatedAt: Date(timeIntervalSince1970: 1_750_000_000))
     }
 }
 
 private actor FakeTransport: V2ClientSyncTransport {
     private let pullResult: V2ClientPullResult
+    private let afterSnapshot: V2ClientPullResult?
     private var acknowledgementsLog: [Acknowledgement] = []
     private var snapshotAcknowledgements = 0
 
-    init(pullResult: V2ClientPullResult) { self.pullResult = pullResult }
-    func pull(syncToken _: V2SyncToken?, maxRecords _: Int, requireSnapshot _: Bool) -> V2ClientPullResult { pullResult }
+    init(pullResult: V2ClientPullResult, afterSnapshot: V2ClientPullResult? = nil) {
+        self.pullResult = pullResult; self.afterSnapshot = afterSnapshot
+    }
+    func pull(syncToken _: V2SyncToken?, maxRecords _: Int, requireSnapshot _: Bool) -> V2ClientPullResult {
+        if snapshotAcknowledgements > 0, let afterSnapshot { return afterSnapshot }
+        return pullResult
+    }
     func acknowledge(generation: UInt64, highestContiguousSequence: UInt64, receipt: V2SyncReceipt) { acknowledgementsLog.append(.init(generation: generation, sequence: highestContiguousSequence, receipt: receipt)) }
     func fetchSnapshotManifest(for reset: V2ClientResetRequired) throws -> V2ClientSnapshotManifest {
         try makeSnapshotFixture(reset: reset, pages: []).manifest
@@ -2917,7 +3240,6 @@ private struct ForbiddenGroupEventTransport: V2ClientGroupEventTransport {
 private actor BackgroundGroupEventStoreFake: V2LocalGroupEventStore {
     private var roomIDs: [RoomID]
     private var cursors: [RoomID: UInt64] = [:]
-    private var backgroundCursor: RoomID?
 
     init(roomIDs: [RoomID]) {
         self.roomIDs = roomIDs
@@ -2930,9 +3252,6 @@ private actor BackgroundGroupEventStoreFake: V2LocalGroupEventStore {
         } ?? sorted
         return matching.prefix(limit).map { $0 }
     }
-    func lastKnownRoomLogRoomID() -> RoomID? { roomIDs.max { $0.rawValue < $1.rawValue } }
-    func hybridGroupBackgroundCursor() -> RoomID? { backgroundCursor }
-    func setHybridGroupBackgroundCursor(_ roomID: RoomID?) { backgroundCursor = roomID }
     func isKnownRoomLogRoom(roomID: RoomID) -> Bool { roomIDs.contains(roomID) }
     func markRoomEventUnauthorized(roomID: RoomID) { roomIDs.removeAll { $0 == roomID } }
     func groupEventCursor(roomID: RoomID) -> UInt64 { cursors[roomID, default: 0] }
@@ -3424,24 +3743,24 @@ private actor RebuildSnapshotTransport: V2ClientSyncTransport {
 }
 
 extension V2SyncEngineTests {
-    @Test("announcement effects converge across preview, personal and room feeds after restart", arguments: [false, true])
-    func announcementCrossFeedOrder(previewFirst: Bool) async throws {
+    @Test("announcement effects converge across personal effects and room logs after restart", arguments: [false, true])
+    func announcementCrossFeedOrder(roomFirst: Bool) async throws {
         let url = temporaryDatabaseURL()
         var store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
         let latest = try announcementFact(sequence: 1, revision: 2, body: "new", roomSequence: 20)
         let preview = try announcementPage(latest, sequence: 20)
-        if previewFirst { _ = try await store.applyForegroundGroupEventPreviewPage(preview) }
+        if roomFirst { _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(preview) }
         _ = try await store.apply(announcementBatch([latest]))
-        if !previewFirst { _ = try await store.applyForegroundGroupEventPreviewPage(preview) }
+        if !roomFirst { _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(preview) }
         let old = try announcementFact(sequence: 2, revision: 1, body: "old", roomSequence: 10)
-        _ = try await store.applyGroupEventPage(announcementPage(old, sequence: 10))
+        _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(announcementPage(old, sequence: 10))
         _ = try await store.applyGroupEventPage(preview)
         _ = try await store.apply(announcementBatch([old]))
         #expect(try await store.groupAnnouncement(roomID: announcementRoom)?.body == "new")
         #expect(try await store.groupEventCursor(roomID: announcementRoom) == 20)
         try await store.close()
         store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
-        _ = try await store.applyForegroundGroupEventPreviewPage(announcementPage(old, sequence: 10))
+        _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(announcementPage(old, sequence: 10))
         for invalid in [
             try announcementFact(sequence: 3, revision: 2, body: "conflict", roomSequence: 20, source: "another-source"),
             try announcementFact(sequence: 3, revision: 1, body: "altered old fact", roomSequence: 10),
@@ -3457,7 +3776,7 @@ extension V2SyncEngineTests {
         try database.close()
     }
 
-    @Test("legacy announcement source sequence stays unknown until supplied and cannot change")
+    @Test("announcement source sequence is enriched once and room replay remains immutable")
     func announcementSourceBoundary() async throws {
         let url = temporaryDatabaseURL()
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
@@ -3466,12 +3785,14 @@ extension V2SyncEngineTests {
         let db = try DatabasePool(path: url.path)
         #expect(try await db.read { try Int.fetchOne($0, sql: "SELECT room_sequence FROM v2_group_announcements") } == nil)
         let enriched = try announcementFact(sequence: 1, revision: 1, body: "legacy", roomSequence: 10)
-        _ = try await store.applyForegroundGroupEventPreviewPage(announcementPage(enriched, sequence: 10))
-        _ = try await store.applyForegroundGroupEventPreviewPage(announcementPage(legacy, sequence: 10))
+        _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(announcementPage(enriched, sequence: 10))
+        await #expect(throws: V2ClientSyncError.invalidRecordOrdering) {
+            try await store.applyGroupEventPage(announcementPage(legacy, sequence: 10))
+        }
         #expect(try await db.read { try Int.fetchOne($0, sql: "SELECT room_sequence FROM v2_group_announcements") } == 10)
         let changed = try announcementFact(sequence: 1, revision: 1, body: "legacy", roomSequence: 11)
-        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.applyForegroundGroupEventPreviewPage(announcementPage(changed, sequence: 11)) }
-        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.applyForegroundGroupEventPreviewPage(announcementPage(enriched, sequence: 11)) }
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.applyGroupEventPage(announcementPage(changed, sequence: 11)) }
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.applyGroupEventPage(announcementPage(enriched, sequence: 11)) }
         let wrongRoom = try V2ClientGroupEventPage(roomID: try .init("00000000-0000-0000-0000-000000009999"), events: try announcementPage(enriched, sequence: 10).events, nextRoomSequence: 10, hasMore: false)
         await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.applyGroupEventPage(wrongRoom) }
         var object = try #require(JSONSerialization.jsonObject(with: enriched.payload) as? [String: Any])
@@ -3499,71 +3820,16 @@ extension V2SyncEngineTests {
         let engine = V2SyncEngine(transport: try ProjectionSnapshotTransport(reset: reset, pages: [.init(items: [item])]), store: store, capabilityProfile: "base")
         _ = try await engine.synchronizeOnce()
         try await engine.completePendingReset()
-        _ = try await store.applyForegroundGroupEventPreviewPage(announcementPage(old, sequence: 10))
+        _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(announcementPage(old, sequence: 10))
         let late = try announcementFact(sequence: 1, revision: 2, body: "late", roomSequence: 20)
-        _ = try await store.applyForegroundGroupEventPreviewPage(announcementPage(late, sequence: 20))
+        _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(announcementPage(late, sequence: 20))
         #expect(try await store.groupAnnouncement(roomID: announcementRoom)?.body == "")
         #expect(try await store.groupAnnouncement(roomID: announcementRoom)?.revision == 3)
         let conflict = try announcementFact(sequence: 1, revision: 1, body: "conflicting old receipt", roomSequence: 10)
-        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.applyForegroundGroupEventPreviewPage(announcementPage(conflict, sequence: 10)) }
+        await #expect(throws: V2ClientSyncError.invalidRecordOrdering) { try await store.applyGroupEventPage(announcementPage(conflict, sequence: 10)) }
         try await store.close()
     }
 
-    @Test("announcement migration preserves unknown proof and outbox while reimporting old staging", arguments: [false, true])
-    func announcementMigration(prepared: Bool) async throws {
-        let url = temporaryDatabaseURL()
-        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
-        let latest = try announcementFact(sequence: 1, revision: 2, body: "keep live", roomSequence: 20)
-        _ = try await store.apply(announcementBatch([latest]))
-        let removedRoom = try RoomID("00000000-0000-0000-0000-000000009999")
-        var removedPayload = try #require(JSONSerialization.jsonObject(with: latest.payload) as? [String: Any])
-        removedPayload["room_id"] = removedRoom.rawValue
-        let removed = try V2ClientSyncRecord(sequence: 2, sourceEventID: .init("removed-announcement"), projectionKind: "group_capability", payload: JSONSerialization.data(withJSONObject: removedPayload))
-        _ = try await store.apply(announcementBatch([removed]))
-        let pending = V2PendingMessageCommand(roomID: announcementRoom, clientMessageID: try .init("00000000-0000-0000-0000-00000000AAAA"), text: "keep outbox", state: .pending, attemptCount: 0, nextAttemptAt: .distantPast, acceptedMessageID: nil, acceptedRoomSequence: nil, terminalCode: nil)
-        try await store.enqueue(pending)
-        let reset = try V2ClientResetRequired(snapshotID: .init("announcement-upgrade"), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
-        let replacement = try announcementFact(sequence: 8, revision: 3, body: "new baseline", roomSequence: nil)
-        let item = try V2SnapshotProjectionItem(key: .init(projectionKind: "group_capability", entityKey: "announcement:\(announcementRoom.rawValue)"), sourceEventID: replacement.sourceEventID, sequence: replacement.sequence, payload: replacement.payload)
-        let fixture = try makeSnapshotFixture(reset: reset, pages: [.init(items: [item])])
-        try await store.beginReset(reset)
-        try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
-        try await store.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
-        if prepared { try await store.prepareSnapshotActivation(fixture.manifest) }
-        try await store.close()
-        let legacy = try DatabasePool(path: url.path)
-        try await legacy.write { db in
-            for table in ["v2_group_announcements", "v2_snapshot_shadow_group_announcements"] {
-                try db.execute(sql: "ALTER TABLE \(table) RENAME TO temporary_announcement")
-                try db.execute(sql: "CREATE TABLE \(table) (room_id TEXT PRIMARY KEY, body TEXT NOT NULL, revision INTEGER NOT NULL CHECK (revision > 0), room_sequence INTEGER NOT NULL CHECK (room_sequence > 0), updated_at REAL NOT NULL)")
-                try db.execute(sql: "INSERT INTO \(table) SELECT lower(room_id), body, revision, 999, updated_at FROM temporary_announcement")
-                try db.execute(sql: "DROP TABLE temporary_announcement")
-            }
-            try db.execute(sql: "INSERT INTO v2_group_announcements VALUES ('00000000-0000-0000-0000-00000000abcd', 'unlogged legacy', 4, 999, 4)")
-            try db.execute(sql: "DELETE FROM v2_group_announcements WHERE room_id = ?", arguments: [removedRoom.rawValue])
-            try db.execute(sql: "DROP TABLE v2_announcement_effects")
-            try db.execute(sql: "DROP TABLE v2_snapshot_shadow_announcement_effects")
-            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'orderAnnouncementEffects'")
-        }
-        try legacy.close()
-        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
-        #expect(try await reopened.cursor()?.pendingReset == reset)
-        #expect(try await reopened.importedSnapshotManifest(for: reset) == nil)
-        #expect(try await reopened.pendingMessageCommands() == [pending])
-        #expect(try await reopened.groupAnnouncement(roomID: removedRoom) == nil)
-        #expect(try await reopened.groupAnnouncement(roomID: announcementRoom)?.body == "keep live")
-        let db = try DatabasePool(path: url.path)
-        #expect(try await db.read { try Int.fetchOne($0, sql: "SELECT room_sequence FROM v2_group_announcements WHERE room_id = ?", arguments: [announcementRoom.rawValue]) } == 20)
-        #expect(try await db.read { try Int.fetchOne($0, sql: "SELECT room_sequence FROM v2_group_announcements WHERE room_id = '00000000-0000-0000-0000-00000000ABCD'") } == nil)
-        try db.close()
-        try await reopened.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
-        try await reopened.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
-        try await reopened.prepareSnapshotActivation(fixture.manifest)
-        try await reopened.activateAcknowledgedSnapshot(fixture.manifest)
-        #expect(try await reopened.groupAnnouncement(roomID: announcementRoom)?.body == "new baseline")
-        #expect(try await reopened.pendingMessageCommands() == [pending])
-        try await reopened.close()
-    }
 }
 
 private let announcementRoom = try! RoomID("00000000-0000-0000-0000-000000ABCDEF")
@@ -3581,18 +3847,18 @@ private func announcementBatch(_ records: [V2ClientSyncRecord]) throws -> V2Clie
 
 extension V2SyncEngineTests {
     @Test("role policies preserve explicit empty values and independent ordering across feeds and restart", arguments: [false, true])
-    func rolePolicyEffectOrdering(previewFirst: Bool) async throws {
+    func rolePolicyEffectOrdering(roomFirst: Bool) async throws {
         let url = temporaryDatabaseURL()
         var store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
         #expect(try await store.groupRolePolicies(roomID: announcementRoom).isEmpty)
         let empty = try rolePolicyFact(sequence: 1, revision: 5, permissions: [], roomSequence: 50)
-        if previewFirst { _ = try await store.applyForegroundGroupEventPreviewPage(announcementPage(empty, sequence: 50)) }
+        if roomFirst { _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(announcementPage(empty, sequence: 50)) }
         _ = try await store.apply(announcementBatch([empty]))
-        if !previewFirst { _ = try await store.applyForegroundGroupEventPreviewPage(announcementPage(empty, sequence: 50)) }
+        if !roomFirst { _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(announcementPage(empty, sequence: 50)) }
         let admin = try rolePolicyFact(sequence: 2, revision: 4, role: "admin", permissions: ["invite_members"], roomSequence: 40)
         _ = try await store.apply(announcementBatch([admin]))
         let old = try rolePolicyFact(sequence: 3, revision: 2, permissions: ["send_messages"], roomSequence: 20)
-        _ = try await store.applyGroupEventPage(announcementPage(old, sequence: 20))
+        _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(announcementPage(old, sequence: 20))
         _ = try await store.applyGroupEventPage(announcementPage(empty, sequence: 50))
         _ = try await store.apply(announcementBatch([old]))
         var policies = try await store.groupRolePolicies(roomID: announcementRoom)
@@ -3628,15 +3894,17 @@ extension V2SyncEngineTests {
         let db = try DatabasePool(path: url.path)
         #expect(try await db.read { try Int.fetchOne($0, sql: "SELECT room_sequence FROM v2_group_role_policies") } == nil)
         let enriched = try rolePolicyFact(sequence: 1, revision: 2, permissions: ["invite_members", "send_messages"], roomSequence: 20)
-        _ = try await store.applyForegroundGroupEventPreviewPage(announcementPage(enriched, sequence: 20))
-        _ = try await store.applyForegroundGroupEventPreviewPage(announcementPage(legacy, sequence: 20))
+        _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(announcementPage(enriched, sequence: 20))
+        await #expect(throws: V2ClientSyncError.invalidRecordOrdering) {
+            try await store.applyGroupEventPage(announcementPage(legacy, sequence: 20))
+        }
         #expect(try await db.read { try Int.fetchOne($0, sql: "SELECT room_sequence FROM v2_group_role_policies") } == 20)
         await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
-            try await store.applyForegroundGroupEventPreviewPage(announcementPage(enriched, sequence: 21))
+            try await store.applyGroupEventPage(announcementPage(enriched, sequence: 21))
         }
         let changed = try rolePolicyFact(sequence: 1, revision: 2, permissions: ["send_messages", "invite_members"], roomSequence: 21)
         await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
-            try await store.applyForegroundGroupEventPreviewPage(announcementPage(changed, sequence: 21))
+            try await store.applyGroupEventPage(announcementPage(changed, sequence: 21))
         }
         let wrongRoom = try V2ClientGroupEventPage(roomID: try .init("00000000-0000-0000-0000-000000009999"), events: try announcementPage(enriched, sequence: 20).events, nextRoomSequence: 20, hasMore: false)
         await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.applyGroupEventPage(wrongRoom) }
@@ -3651,6 +3919,269 @@ extension V2SyncEngineTests {
         let normalized = try V2ClientSyncRecord(sequence: 1, sourceEventID: enriched.sourceEventID, projectionKind: "group_capability", payload: try JSONSerialization.data(withJSONObject: object))
         #expect(try V2LocalRolePolicyEffect(record: normalized).digest == V2LocalRolePolicyEffect(record: legacy).digest)
         try db.close()
+        try await store.close()
+    }
+
+    @Test("reaction snapshot merges latest add or removal across both banks", arguments: 0..<8)
+    func reactionSnapshotLatestState(scenario: Int) async throws {
+        let liveNewer = scenario & 1 != 0
+        let newestRemoves = scenario & 2 != 0
+        let withdrawn = scenario & 4 != 0
+        let directory = FileManager.default.temporaryDirectory.appending(path: "reaction-snapshot-order-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "client.sqlite")
+        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
+        func fact(sequence: UInt64, newer: Bool) throws -> V2ClientSyncRecord {
+            let removes = newer ? newestRemoves : !newestRemoves
+            var payload = try #require(JSONSerialization.jsonObject(with: reactionPayload(action: removes ? "remove" : "add")) as? [String: Any])
+            payload["room_id"] = announcementRoom.rawValue
+            payload["room_sequence"] = newer ? 30 : 20
+            return try .init(sequence: sequence, sourceEventID: .init(uuid: UUID()), projectionKind: "message_reaction", payload: JSONSerialization.data(withJSONObject: payload))
+        }
+        let live = try fact(sequence: 1, newer: liveNewer)
+        let incoming = try fact(sequence: 8, newer: !liveNewer)
+        _ = try await store.apply(announcementBatch([live]))
+        let member = try policyRecoveryMembership(sequence: 9, revision: 2)
+        var items = try [
+            V2SnapshotProjectionItem(key: .init(projectionKind: "room", entityKey: announcementRoom.rawValue), sourceEventID: member.sourceEventID, sequence: 9, payload: member.payload),
+            V2SnapshotProjectionItem(key: .init(projectionKind: "message_reaction", entityKey: "00000000-0000-0000-0000-000000000001:00000000-0000-0000-0000-000000000222:👍"), sourceEventID: incoming.sourceEventID, sequence: 8, payload: incoming.payload)
+        ]
+        if withdrawn {
+            items.append(try .init(key: .init(projectionKind: "message", entityKey: "00000000-0000-0000-0000-000000000001"), sourceEventID: .init(uuid: UUID()), sequence: 7,
+                payload: snapshotMessagePayload(messageID: "00000000-0000-0000-0000-000000000001", roomID: announcementRoom.rawValue, text: "[removed]", revision: 3, isWithdrawn: true)))
+        }
+        items.sort { $0.key < $1.key }
+        let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
+        let fixture = try makeSnapshotFixture(reset: reset, pages: [.init(items: items)])
+        try await store.beginReset(reset)
+        try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
+        try await store.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
+        try await store.prepareSnapshotActivation(fixture.manifest)
+        try await store.activateAcknowledgedSnapshot(fixture.manifest)
+        try await store.close()
+        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
+        let state = try await reopened.databasePool.read { db in
+            let version = try Int64.fetchOne(db, sql: "SELECT room_sequence FROM v2_reaction_versions")
+            let action = try String.fetchOne(db, sql: "SELECT action FROM v2_reaction_versions")
+            let count = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v2_message_reactions")
+            return (version, action, count)
+        }
+        #expect(state.0 == 30)
+        #expect(state.1 == (newestRemoves ? "remove" : "add"))
+        #expect(state.2 == (newestRemoves || withdrawn ? 0 : 1))
+        let older = liveNewer ? incoming : live
+        let replay = try V2ClientSyncRecord(sequence: 11, sourceEventID: older.sourceEventID, projectionKind: older.projectionKind, payload: older.payload)
+        _ = try await reopened.apply(.init(generation: 2, records: [replay], nextSyncToken: .init("reaction-replay"), receipt: .init("reaction-replay"), hasMore: false, capabilityProfile: "base"))
+        #expect(try await reopened.databasePool.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM v2_message_reactions") } == (newestRemoves || withdrawn ? 0 : 1))
+        try await reopened.close()
+    }
+
+    @Test("reaction snapshot rejects same-version and reused-source conflicts", arguments: ["same-version", "same-source", "historical-source"])
+    func reactionSnapshotSourceConflicts(scenario: String) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "reaction-snapshot-conflict-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "client.sqlite"), installationBinding: testInstallationBinding)
+        func fact(_ sequence: UInt64, roomSequence: Int, source: EventID, action: String) throws -> V2ClientSyncRecord {
+            var payload = try #require(JSONSerialization.jsonObject(with: reactionPayload(action: action)) as? [String: Any])
+            payload["room_id"] = announcementRoom.rawValue; payload["room_sequence"] = roomSequence
+            return try .init(sequence: sequence, sourceEventID: source, projectionKind: "message_reaction", payload: JSONSerialization.data(withJSONObject: payload))
+        }
+        let source = EventID(uuid: UUID())
+        let old = try fact(1, roomSequence: 20, source: source, action: "add")
+        var records = [old]
+        if scenario == "historical-source" { records.append(try fact(2, roomSequence: 30, source: .init(uuid: UUID()), action: "remove")) }
+        _ = try await store.apply(announcementBatch(records))
+        let incoming = try fact(8, roomSequence: scenario == "same-source" ? 30 : 20,
+            source: scenario == "same-version" ? .init(uuid: UUID()) : source, action: "remove")
+        let member = try policyRecoveryMembership(sequence: 9, revision: 2)
+        let items = try [
+            V2SnapshotProjectionItem(key: .init(projectionKind: "room", entityKey: announcementRoom.rawValue), sourceEventID: member.sourceEventID, sequence: 9, payload: member.payload),
+            V2SnapshotProjectionItem(key: .init(projectionKind: "message_reaction", entityKey: "00000000-0000-0000-0000-000000000001:00000000-0000-0000-0000-000000000222:👍"), sourceEventID: incoming.sourceEventID, sequence: 8, payload: incoming.payload)
+        ].sorted { $0.key < $1.key }
+        let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
+        let fixture = try makeSnapshotFixture(reset: reset, pages: [.init(items: items)])
+        try await store.beginReset(reset)
+        try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
+        try await store.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
+        let before = try await store.cursor()
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.prepareSnapshotActivation(fixture.manifest) }
+        #expect(try await store.cursor() == before)
+        let state = try await store.databasePool.read { db in
+            let version = try Int64.fetchOne(db, sql: "SELECT room_sequence FROM v2_reaction_versions")
+            let count = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v2_message_reactions")
+            let prepared = try Bool.fetchOne(db, sql: "SELECT activation_prepared FROM v2_snapshot_import")
+            return (version, count, prepared)
+        }
+        #expect(state.0 == (scenario == "historical-source" ? 30 : 20))
+        #expect(state.1 == (scenario == "historical-source" ? 0 : 1))
+        #expect(state.2 == false)
+        try await store.close()
+    }
+
+    @Test("reaction snapshot checks stored sequences before retaining receipts", arguments:
+        ["live-state", "live-receipt", "shadow-state", "shadow-receipt"], [1.5, Double(Int64.max)])
+    func reactionSnapshotStorageTypes(location: String, value: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "reaction-snapshot-storage-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "client.sqlite"), installationBinding: testInstallationBinding)
+        var payload = try #require(JSONSerialization.jsonObject(with: reactionPayload(action: "add")) as? [String: Any])
+        payload["room_id"] = announcementRoom.rawValue
+        let old = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init(uuid: UUID()), projectionKind: "message_reaction", payload: JSONSerialization.data(withJSONObject: payload))
+        _ = try await store.apply(announcementBatch([old]))
+        let member = try policyRecoveryMembership(sequence: 9, revision: 2)
+        var items = [try V2SnapshotProjectionItem(key: .init(projectionKind: "room", entityKey: announcementRoom.rawValue), sourceEventID: member.sourceEventID, sequence: 9, payload: member.payload)]
+        if location != "live-state" {
+            items.append(try .init(key: .init(projectionKind: "message_reaction", entityKey: "00000000-0000-0000-0000-000000000001:00000000-0000-0000-0000-000000000222:👍"), sourceEventID: old.sourceEventID, sequence: 8, payload: old.payload))
+        }
+        let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
+        let fixture = try makeSnapshotFixture(reset: reset, pages: [.init(items: items.sorted { $0.key < $1.key })])
+        try await store.beginReset(reset)
+        try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
+        try await store.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
+        let table = (location.hasPrefix("shadow") ? "v2_snapshot_shadow_" : "v2_") + (location.hasSuffix("receipt") ? "reaction_effects" : "reaction_versions")
+        let before = try await store.cursor()
+        try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET room_sequence = ?", arguments: [value]) }
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.prepareSnapshotActivation(fixture.manifest) }
+        #expect(try await store.cursor() == before)
+        let after = try await store.databasePool.read { db in
+            let raw = try Double.fetchOne(db, sql: "SELECT room_sequence FROM \(table)")
+            let type = try String.fetchOne(db, sql: "SELECT typeof(room_sequence) FROM \(table)")
+            let visible = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v2_message_reactions")
+            let prepared = try Bool.fetchOne(db, sql: "SELECT activation_prepared FROM v2_snapshot_import")
+            return (raw, type, visible, prepared)
+        }
+        #expect(after.0 == value)
+        #expect(after.1 == "real")
+        #expect(after.2 == 1)
+        #expect(after.3 == false)
+        try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET room_sequence = 2") }
+        try await store.prepareSnapshotActivation(fixture.manifest)
+        try await store.activateAcknowledgedSnapshot(fixture.manifest)
+        #expect(try await store.cursor()?.generation == 2)
+        let merged = try await store.databasePool.read { db in
+            let sequence = try Int64.fetchOne(db, sql: "SELECT room_sequence FROM v2_reaction_versions")
+            let receipts = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v2_reaction_effects")
+            return (sequence, receipts)
+        }
+        #expect(merged.0 == 2)
+        #expect(merged.1 == 1)
+        try await store.close()
+    }
+
+    @Test("snapshot effect receipts validate stored versions before retention filters", arguments:
+        ["announcement-live-revision", "announcement-live-sequence", "announcement-shadow-revision", "announcement-shadow-sequence",
+         "role-live-revision", "role-live-sequence", "role-shadow-revision", "role-shadow-sequence"], [1.5, Double(Int64.max)])
+    func snapshotReceiptStorageTypes(location: String, value: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "snapshot-receipt-storage-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "client.sqlite"), installationBinding: testInstallationBinding)
+        let role = location.hasPrefix("role"), shadow = location.contains("shadow")
+        let old = try role ? rolePolicyFact(sequence: 1, revision: 2, permissions: [], roomSequence: 20)
+            : announcementFact(sequence: 1, revision: 2, body: "old", roomSequence: 20)
+        let incoming = try role ? rolePolicyFact(sequence: 8, revision: 3, permissions: [], roomSequence: 30)
+            : announcementFact(sequence: 8, revision: 3, body: "new", roomSequence: 30)
+        _ = try await store.apply(announcementBatch([old]))
+        let member = try policyRecoveryMembership(sequence: 9, revision: 2)
+        let key = role ? "permissions:\(announcementRoom.rawValue):member" : "announcement:\(announcementRoom.rawValue)"
+        let items = try [
+            V2SnapshotProjectionItem(key: .init(projectionKind: "room", entityKey: announcementRoom.rawValue), sourceEventID: member.sourceEventID, sequence: 9, payload: member.payload),
+            V2SnapshotProjectionItem(key: .init(projectionKind: "group_capability", entityKey: key), sourceEventID: incoming.sourceEventID, sequence: 8, payload: incoming.payload)
+        ].sorted { $0.key < $1.key }
+        let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
+        let fixture = try makeSnapshotFixture(reset: reset, pages: [.init(items: items)])
+        try await store.beginReset(reset)
+        try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
+        try await store.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
+        let suffix = role ? "role_policy_effects" : "announcement_effects"
+        let table = (shadow ? "v2_snapshot_shadow_" : "v2_") + suffix
+        let stateTable = role ? "v2_group_role_policies" : "v2_group_announcements"
+        let column = location.hasSuffix("sequence") ? "room_sequence" : "revision"
+        let before = try await store.cursor()
+        try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [value]) }
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.prepareSnapshotActivation(fixture.manifest) }
+        #expect(try await store.cursor() == before)
+        let after = try await store.databasePool.read { db in
+            let raw = try Double.fetchOne(db, sql: "SELECT \(column) FROM \(table)")
+            let type = try String.fetchOne(db, sql: "SELECT typeof(\(column)) FROM \(table)")
+            let revision = try Int64.fetchOne(db, sql: "SELECT revision FROM \(stateTable)")
+            let prepared = try Bool.fetchOne(db, sql: "SELECT activation_prepared FROM v2_snapshot_import")
+            return (raw, type, revision, prepared)
+        }
+        #expect(after.0 == value)
+        #expect(after.1 == "real")
+        #expect(after.2 == 2)
+        #expect(after.3 == false)
+        let original = (shadow ? 3 : 2) * (column == "room_sequence" ? 10 : 1)
+        try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [original]) }
+        try await store.prepareSnapshotActivation(fixture.manifest)
+        try await store.activateAcknowledgedSnapshot(fixture.manifest)
+        #expect(try await store.cursor()?.generation == 2)
+        let merged = try await store.databasePool.read { db in
+            let revision = try Int64.fetchOne(db, sql: "SELECT revision FROM \(stateTable)")
+            let receipts = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v2_\(suffix)")
+            return (revision, receipts)
+        }
+        #expect(merged.0 == 3)
+        #expect(merged.1 == 2)
+        try await store.close()
+    }
+
+    @Test("policy snapshot checks both banks before version ordering", arguments:
+        ["live-revision", "live-sequence", "shadow-revision", "shadow-sequence", "live-global", "shadow-global"],
+        [1, 2, 3].flatMap { revision in [1.5, Double(Int64.max)].map { (revision, $0) } })
+    func policySnapshotStorageTypes(location: String, scenario: (Int, Double)) async throws {
+        let (incomingRevision, value) = scenario
+        let directory = FileManager.default.temporaryDirectory.appending(path: "policy-snapshot-storage-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "client.sqlite"), installationBinding: testInstallationBinding)
+        let old = try rolePolicyFact(sequence: 1, revision: 2, permissions: ["send_messages"], roomSequence: 20)
+        _ = try await store.apply(announcementBatch([old]))
+        let incoming = try rolePolicyFact(sequence: 8, revision: incomingRevision, permissions: ["send_messages"], roomSequence: incomingRevision * 10)
+        let member = try policyRecoveryMembership(sequence: 9, revision: 2)
+        let items = try [
+            V2SnapshotProjectionItem(key: .init(projectionKind: "room", entityKey: announcementRoom.rawValue), sourceEventID: member.sourceEventID, sequence: 9, payload: member.payload),
+            V2SnapshotProjectionItem(key: .init(projectionKind: "group_capability", entityKey: "permissions:\(announcementRoom.rawValue):member"), sourceEventID: incoming.sourceEventID, sequence: 8, payload: incoming.payload)
+        ].sorted { $0.key < $1.key }
+        let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
+        let fixture = try makeSnapshotFixture(reset: reset, pages: [.init(items: items)])
+        try await store.beginReset(reset)
+        try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
+        try await store.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
+        let shadow = location.hasPrefix("shadow")
+        let table = (shadow ? "v2_snapshot_shadow_" : "v2_") + (location.hasSuffix("global") ? "group_permission_revisions" : "group_role_policies")
+        let column = location.hasSuffix("sequence") ? "room_sequence" : "revision"
+        let before = try await store.cursor()
+        try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [value]) }
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.prepareSnapshotActivation(fixture.manifest) }
+        #expect(try await store.cursor() == before)
+        let after = try await store.databasePool.read { db in
+            let raw = try Double.fetchOne(db, sql: "SELECT \(column) FROM \(table)")
+            let type = try String.fetchOne(db, sql: "SELECT typeof(\(column)) FROM \(table)")
+            let prepared = try Bool.fetchOne(db, sql: "SELECT activation_prepared FROM v2_snapshot_import")
+            let receipts = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v2_role_policy_effects")
+            return (raw, type, prepared, receipts)
+        }
+        #expect(after.0 == value)
+        #expect(after.1 == "real")
+        #expect(after.2 == false)
+        #expect(after.3 == 1)
+        let original = (shadow ? incomingRevision : 2) * (column == "room_sequence" ? 10 : 1)
+        try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [original]) }
+        try await store.prepareSnapshotActivation(fixture.manifest)
+        try await store.activateAcknowledgedSnapshot(fixture.manifest)
+        #expect(try await store.cursor()?.generation == 2)
+        let merged = try await store.databasePool.read { db in
+            let role = try Int64.fetchOne(db, sql: "SELECT revision FROM v2_group_role_policies WHERE role = 'member'")
+            let global = try Int64.fetchOne(db, sql: "SELECT revision FROM v2_group_permission_revisions")
+            return (role, global)
+        }
+        #expect(merged.0 == Int64(max(2, incomingRevision)))
+        #expect(merged.1 == Int64(max(2, incomingRevision)))
         try await store.close()
     }
 
@@ -3669,64 +4200,16 @@ extension V2SyncEngineTests {
         let engine = V2SyncEngine(transport: try ProjectionSnapshotTransport(reset: reset, pages: [.init(items: items)]), store: store, capabilityProfile: "base")
         _ = try await engine.synchronizeOnce()
         try await engine.completePendingReset()
-        _ = try await store.applyForegroundGroupEventPreviewPage(announcementPage(old, sequence: 20))
+        _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(announcementPage(old, sequence: 20))
         let policies = try await store.groupRolePolicies(roomID: announcementRoom)
         #expect(policies.first(where: { $0.role == .member })?.permissions == [])
         #expect(policies.first(where: { $0.role == .admin })?.permissions == [.inviteMembers])
         #expect(policies.allSatisfy { $0.revision == 5 })
         let conflict = try rolePolicyFact(sequence: 1, revision: 2, permissions: [], roomSequence: 20)
-        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.applyForegroundGroupEventPreviewPage(announcementPage(conflict, sequence: 20)) }
+        await #expect(throws: V2ClientSyncError.invalidRecordOrdering) { try await store.applyGroupEventPage(announcementPage(conflict, sequence: 20)) }
         try await store.close()
     }
 
-    @Test("policy migration preserves observed legacy values and outbox but leaves missing roles unknown", arguments: [false, true])
-    func rolePolicyMigration(prepared: Bool) async throws {
-        let url = temporaryDatabaseURL()
-        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
-        let admin = try rolePolicyFact(sequence: 1, revision: 4, role: "admin", permissions: ["invite_members"], roomSequence: 40)
-        let empty = try rolePolicyFact(sequence: 2, revision: 5, permissions: [], roomSequence: 50)
-        _ = try await store.apply(announcementBatch([admin, empty]))
-        let pending = V2PendingMessageCommand(roomID: announcementRoom, clientMessageID: try .init("00000000-0000-0000-0000-00000000AAAA"), text: "keep policy outbox", state: .pending, attemptCount: 0, nextAttemptAt: .distantPast, acceptedMessageID: nil, acceptedRoomSequence: nil, terminalCode: nil)
-        try await store.enqueue(pending)
-        let reset = try V2ClientResetRequired(snapshotID: .init("policy-upgrade"), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
-        let item = try V2SnapshotProjectionItem(key: .init(projectionKind: "group_capability", entityKey: "permissions:\(announcementRoom.rawValue):member"), sourceEventID: empty.sourceEventID, sequence: empty.sequence, payload: empty.payload)
-        let fixture = try makeSnapshotFixture(reset: reset, pages: [.init(items: [item])])
-        try await store.beginReset(reset)
-        try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
-        try await store.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
-        if prepared { try await store.prepareSnapshotActivation(fixture.manifest) }
-        try await store.close()
-        let db = try DatabasePool(path: url.path)
-        try await db.write { db in
-            try db.execute(sql: "DROP TABLE v2_group_role_policies; DROP TABLE v2_role_policy_effects; DROP TABLE v2_snapshot_shadow_group_role_policies; DROP TABLE v2_snapshot_shadow_role_policy_effects")
-            try db.execute(sql: "CREATE TABLE v2_group_role_permissions (room_id TEXT NOT NULL, role TEXT NOT NULL, permission TEXT NOT NULL, revision INTEGER NOT NULL, room_sequence INTEGER NOT NULL, PRIMARY KEY(room_id, role, permission))")
-            try db.execute(sql: "CREATE TABLE v2_snapshot_shadow_group_role_permissions AS SELECT * FROM v2_group_role_permissions")
-            try db.execute(sql: "INSERT INTO v2_group_role_permissions VALUES (?, 'admin', 'invite_members', 4, 999)", arguments: [announcementRoom.rawValue.lowercased()])
-            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'orderRolePolicyEffects'")
-        }
-        try db.close()
-        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
-        let policies = try await reopened.groupRolePolicies(roomID: announcementRoom)
-        #expect(policies.count == 1)
-        #expect(policies.first?.role == .admin)
-        #expect(policies.first?.permissions == [.inviteMembers])
-        #expect(policies.first?.revision == 5)
-        #expect(try await reopened.pendingMessageCommands() == [pending])
-        #expect(try await reopened.cursor()?.pendingReset == reset)
-        let check = try DatabasePool(path: url.path)
-        #expect(try await check.read { try Int.fetchOne($0, sql: "SELECT room_sequence FROM v2_group_role_policies") } == nil)
-        #expect(try await check.read { try String.fetchOne($0, sql: "SELECT source_event_id FROM v2_group_role_policies") } == nil)
-        #expect(try await check.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM v2_snapshot_import") } == 0)
-        #expect(try await check.read { try $0.tableExists("v2_snapshot_shadow_group_role_permissions") } == false)
-        try check.close()
-        try await reopened.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
-        try await reopened.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
-        try await reopened.prepareSnapshotActivation(fixture.manifest)
-        try await reopened.activateAcknowledgedSnapshot(fixture.manifest)
-        #expect(try await reopened.groupRolePolicies(roomID: announcementRoom).first?.permissions == [])
-        #expect(try await reopened.pendingMessageCommands() == [pending])
-        try await reopened.close()
-    }
 }
 
 private func rolePolicyFact(sequence: UInt64, revision: Int, role: String = "member", permissions: [String], roomSequence: Int?, source: String? = nil, room: RoomID = announcementRoom) throws -> V2ClientSyncRecord {
@@ -3922,6 +4405,327 @@ extension V2SyncEngineTests {
         try await unbound.close()
     }
 
+    @Test("snapshot initialization and preparation reject corrupt membership fences", arguments:
+        ["begin-member", "begin-removed", "prepare-member", "prepare-removed"], [1.5, 9_223_372_036_854_775_808.0])
+    func snapshotMembershipFenceStorage(scenario: String, value: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "snapshot-member-fence-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "client.sqlite")
+        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding, userID: policyRecoveryUser)
+        let removed = scenario.hasSuffix("removed"), preparing = scenario.hasPrefix("prepare")
+        let record = try policyRecoveryMembership(sequence: 1, revision: 2, action: removed ? "remove" : "add")
+        _ = try await store.apply(announcementBatch([record]))
+        let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
+        let fixture = try makeSnapshotFixture(reset: reset, pages: [])
+        let digest = V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base")
+        try await store.beginReset(reset)
+        if preparing { try await store.beginSnapshotImport(fixture.manifest, initialDigest: digest) }
+        let table = preparing ? "v2_snapshot_shadow_room_membership_states" : "v2_room_membership_states"
+        try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET membership_revision = ?", arguments: [value]) }
+        let before = try await store.cursor()
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
+            if preparing { try await store.prepareSnapshotActivation(fixture.manifest) }
+            else { try await store.beginSnapshotImport(fixture.manifest, initialDigest: digest) }
+        }
+        #expect(try await store.cursor() == before)
+        let state = try await store.databasePool.read { db in
+            let raw = try Double.fetchOne(db, sql: "SELECT membership_revision FROM \(table)")
+            let type = try String.fetchOne(db, sql: "SELECT typeof(membership_revision) FROM \(table)")
+            let prepared = try Bool.fetchOne(db, sql: "SELECT activation_prepared FROM v2_snapshot_import")
+            let shadows = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sqlite_master WHERE name = 'v2_snapshot_shadow_room_membership_states'")
+            return (raw, type, prepared, shadows)
+        }
+        #expect(state.0 == value)
+        #expect(state.1 == "real")
+        #expect(state.2 == (preparing ? false : nil))
+        #expect(state.3 == (preparing ? 1 : 0))
+        try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET membership_revision = 2") }
+        if !preparing { try await store.beginSnapshotImport(fixture.manifest, initialDigest: digest) }
+        try await store.prepareSnapshotActivation(fixture.manifest)
+        try await store.activateAcknowledgedSnapshot(fixture.manifest)
+        try await store.close()
+        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding, userID: policyRecoveryUser)
+        let membership = try await reopened.databasePool.read { db in
+            let revision = try Int64.fetchOne(db, sql: "SELECT membership_revision FROM v2_room_membership_states")
+            let isMember = try Bool.fetchOne(db, sql: "SELECT is_member FROM v2_room_membership_states")
+            return (revision, isMember)
+        }
+        #expect(membership.0 == 2)
+        #expect(membership.1 == !removed)
+        let rejoin = try policyRecoveryMembership(sequence: 11, revision: 3)
+        _ = try await reopened.apply(.init(generation: 2, records: [rejoin], nextSyncToken: .init("rejoined"), receipt: .init("rejoined"), hasMore: false, capabilityProfile: "base"))
+        #expect(try await reopened.databasePool.read { try Int64.fetchOne($0, sql: "SELECT membership_revision FROM v2_room_membership_states") } == 3)
+        try await reopened.close()
+    }
+
+    @Test("snapshot rejects corrupt room projection counters and discards removed history", arguments:
+        ["moderation", "control", "timeline"],
+        [("live", 1.5), ("live", 9_223_372_036_854_775_808.0), ("shadow", 1.5), ("shadow", 9_223_372_036_854_775_808.0), ("removed", 1.5), ("removed", 9_223_372_036_854_775_808.0)])
+    func snapshotRoomProjectionStorage(kind: String, scenario: (String, Double)) async throws {
+        let (phase, value) = scenario
+        let directory = FileManager.default.temporaryDirectory.appending(path: "snapshot-room-projection-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "client.sqlite")
+        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
+        let membership = try policyRecoveryMembership(sequence: 1, revision: 2)
+        let timeline = kind == "timeline"
+        let column = timeline ? "timeline_sequence" : "room_sequence"
+        let table = "v2_" + (timeline ? "timeline_activity_projections" : (kind == "control" ? "room_control_projections" : "moderation_projections"))
+        var payload: [String: Any] = ["room_id": announcementRoom.rawValue, "server_created_at_ms": 1000, column: 20]
+        payload["event_type"] = timeline ? "direct_message_restricted" : (kind == "control" ? "room.frozen" : "member.muted")
+        if !timeline { payload["actor_user_id"] = policyRecoveryUser.rawValue }
+        if kind == "moderation" { payload["target_user_id"] = UserID(uuid: UUID()).rawValue; payload["mute_until_ms"] = 2000 }
+        let event = try V2ClientSyncRecord(sequence: 2, sourceEventID: .init(uuid: UUID()), projectionKind: timeline ? "timeline_activity" : "moderation", payload: JSONSerialization.data(withJSONObject: payload))
+        _ = try await store.apply(announcementBatch([membership, event]))
+        let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
+        let item = try V2SnapshotProjectionItem(key: .init(projectionKind: "room", entityKey: announcementRoom.rawValue), sourceEventID: membership.sourceEventID, sequence: 1, payload: membership.payload)
+        let fixture = try makeSnapshotFixture(reset: reset, pages: phase == "removed" ? [] : [.init(items: [item])])
+        try await store.beginReset(reset)
+        try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
+        for page in fixture.pages { try await store.applySnapshotPage(page, for: fixture.manifest) }
+        let target = phase == "shadow" ? "v2_snapshot_shadow_" + table.dropFirst(3) : table
+        try await store.databasePool.write { db in
+            if phase == "shadow" { try db.execute(sql: "INSERT INTO \(target) SELECT * FROM \(table)") }
+            try db.execute(sql: "UPDATE \(target) SET \(column) = ?", arguments: [value])
+        }
+        if phase != "removed" {
+            let before = try await store.cursor()
+            await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.prepareSnapshotActivation(fixture.manifest) }
+            #expect(try await store.cursor() == before)
+            let state = try await store.databasePool.read { db in
+                let raw = try Double.fetchOne(db, sql: "SELECT \(column) FROM \(target)")
+                let type = try String.fetchOne(db, sql: "SELECT typeof(\(column)) FROM \(target)")
+                let prepared = try Bool.fetchOne(db, sql: "SELECT activation_prepared FROM v2_snapshot_import")
+                return (raw, type, prepared)
+            }
+            #expect(state.0 == value)
+            #expect(state.1 == "real")
+            #expect(state.2 == false)
+            try await store.databasePool.write { try $0.execute(sql: "UPDATE \(target) SET \(column) = 20") }
+        }
+        try await store.prepareSnapshotActivation(fixture.manifest)
+        try await store.activateAcknowledgedSnapshot(fixture.manifest)
+        try await store.close()
+        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
+        let restored = try await reopened.databasePool.read { try Int64.fetchOne($0, sql: "SELECT \(column) FROM \(table)") }
+        #expect(restored == (phase == "removed" ? nil : 20))
+        #expect(try await reopened.cursor()?.generation == 2)
+        try await reopened.close()
+    }
+
+    @Test("snapshot validates message rows and related history before copying", arguments:
+        ["live-room_sequence", "live-timeline_sequence", "live-message_revision", "shadow-room_sequence", "shadow-timeline_sequence", "shadow-message_revision", "live-stone", "shadow-stone", "live-receipt"],
+        [1.5, 9_223_372_036_854_775_808.0])
+    func snapshotMessageStorage(location: String, value: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "snapshot-message-storage-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "client.sqlite"), installationBinding: testInstallationBinding)
+        let message = "00000000-0000-0000-0000-000000000001"
+        let membership = try policyRecoveryMembership(sequence: 1, revision: 2)
+        let accepted = try V2ClientSyncRecord(sequence: 2, sourceEventID: .init(uuid: UUID()), projectionKind: "message", payload: messagePayload(roomID: announcementRoom.rawValue, roomSequence: 7, messageID: message, text: "before"))
+        let withdrawn = try V2ClientSyncRecord(sequence: 3, sourceEventID: .init(uuid: UUID()), projectionKind: "message", payload: JSONSerialization.data(withJSONObject: ["event_type": "message.withdrawn", "message_id": message, "room_id": announcementRoom.rawValue, "message_revision": 3]))
+        _ = try await store.apply(announcementBatch([membership, accepted, withdrawn]))
+        let items = try [
+            V2SnapshotProjectionItem(key: .init(projectionKind: "room", entityKey: announcementRoom.rawValue), sourceEventID: membership.sourceEventID, sequence: 1, payload: membership.payload),
+            V2SnapshotProjectionItem(key: .init(projectionKind: "message", entityKey: message), sourceEventID: accepted.sourceEventID, sequence: 8, payload: snapshotMessagePayload(messageID: message, roomID: announcementRoom.rawValue, text: "[removed]", revision: 3, isWithdrawn: true))
+        ].sorted { $0.key < $1.key }
+        let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
+        let fixture = try makeSnapshotFixture(reset: reset, pages: [.init(items: items)])
+        try await store.beginReset(reset)
+        try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
+        try await store.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
+        let suffix = location.split(separator: "-").last!
+        let table = (location.hasPrefix("shadow") ? "v2_snapshot_shadow_" : "v2_") + (suffix == "stone" ? "message_tombstones" : (suffix == "receipt" ? "message_effects" : "message_projections"))
+        let column = suffix == "stone" || suffix == "receipt" ? "message_revision" : String(suffix)
+        let original = try await store.databasePool.write { db in
+            let row = try #require(try Row.fetchOne(db, sql: "SELECT rowid AS rid, \(column) FROM \(table) LIMIT 1"))
+            let id: Int64 = row["rid"], integer: Int64 = row[column]
+            try db.execute(sql: "UPDATE \(table) SET \(column) = ? WHERE rowid = ?", arguments: [value, id])
+            return (id, integer)
+        }
+        let before = try await store.cursor()
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.prepareSnapshotActivation(fixture.manifest) }
+        #expect(try await store.cursor() == before)
+        let state = try await store.databasePool.read { db in
+            let raw = try Double.fetchOne(db, sql: "SELECT \(column) FROM \(table) WHERE rowid = ?", arguments: [original.0])
+            let type = try String.fetchOne(db, sql: "SELECT typeof(\(column)) FROM \(table) WHERE rowid = ?", arguments: [original.0])
+            let prepared = try Bool.fetchOne(db, sql: "SELECT activation_prepared FROM v2_snapshot_import")
+            return (raw, type, prepared)
+        }
+        #expect(state.0 == value)
+        #expect(state.1 == "real")
+        #expect(state.2 == false)
+        try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET \(column) = ? WHERE rowid = ?", arguments: [original.1, original.0]) }
+        try await store.prepareSnapshotActivation(fixture.manifest)
+        try await store.activateAcknowledgedSnapshot(fixture.manifest)
+        #expect(try await store.cursor()?.generation == 2)
+        let restored = try #require(try await store.messages(in: announcementRoom).first)
+        #expect(restored.isWithdrawn && restored.messageRevision == 3)
+        try await store.close()
+    }
+
+    @Test("recovery results cannot cross snapshot activation with unchanged membership", arguments: ["body", "state", "unavailable", "retry", "finish", "summary", "directory"])
+    func recoveryBodySnapshotGenerationFence(action: String) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "recovery-snapshot-fence-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "client.sqlite"), installationBinding: testInstallationBinding, userID: policyRecoveryUser)
+        let membership = try policyRecoveryMembership(sequence: 1, revision: 2)
+        _ = try await store.apply(announcementBatch([membership]))
+        let scope = try await store.beginRoomRecoveryScan(userID: policyRecoveryUser)
+        try await store.enqueueRoomRecovery(roomID: announcementRoom, targetHead: 20, priority: 0, scope: scope, now: .now)
+        let initial = try #require(try await store.roomRecoveryWork(scope: scope, limit: 1, oldestFirst: true, now: .now).first)
+        _ = try await store.commitRoomRecoveryState(.init(roomID: announcementRoom, ownerEpoch: 1, viewerMembershipRevision: 2, head: 20,
+            trimmedThrough: 0, readThrough: 0, latestOwnMessageSequence: 0), work: initial, now: .now)
+        let directoryRequest = try await store.roomRecoveryScan(scope: scope)
+        let old = try #require(try await store.roomRecoveryWork(scope: scope, limit: 1, oldestFirst: true, now: .now).first)
+        let announcement = try announcementFact(sequence: 2, revision: 2, body: "refetched after reset", roomSequence: 20)
+        let page = try announcementPage(announcement, sequence: 20)
+        let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
+        let item = try V2SnapshotProjectionItem(key: .init(projectionKind: "room", entityKey: announcementRoom.rawValue), sourceEventID: membership.sourceEventID, sequence: 1, payload: membership.payload)
+        let fixture = try makeSnapshotFixture(reset: reset, pages: [.init(items: [item])])
+        try await store.beginReset(reset)
+        try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
+        for snapshotPage in fixture.pages { try await store.applySnapshotPage(snapshotPage, for: fixture.manifest) }
+        try await store.prepareSnapshotActivation(fixture.manifest)
+        try await store.activateAcknowledgedSnapshot(fixture.manifest)
+        #expect(try await store.cursor()?.generation == 2)
+        await #expect(throws: action == "directory" ? V2RoomRecoveryPersistenceError.stalePage : .staleScope) {
+            switch action {
+            case "directory":
+                try await store.commitRoomRecoveryDirectoryPage(.init(rooms: [], nextCursor: nil, topologyGeneration: "one"),
+                    expectedCursor: directoryRequest.cursor, request: directoryRequest, now: .now)
+            case "state":
+                _ = try await store.commitRoomRecoveryState(.init(roomID: announcementRoom, ownerEpoch: 1, viewerMembershipRevision: 2,
+                    head: 21, trimmedThrough: 0, readThrough: 0, latestOwnMessageSequence: 0), work: old, now: .now)
+            case "unavailable": _ = try await store.commitRoomRecoveryUnavailable(old)
+            case "retry": try await store.retryRoomRecoveryWork(old, at: .distantFuture)
+            case "finish": _ = try await store.finishRoomRecoveryWork(old)
+            case "summary":
+                let request = try await store.beginRoomLatestVisibleRequest(scope: scope)
+                _ = try await store.commitRoomLatestVisible(.init(roomID: announcementRoom, ownerEpoch: 1,
+                    membershipRevision: 2, head: 20, latest: nil), request: request, work: old)
+            default: _ = try await store.applyRoomRecoveryPage(page, work: old)
+            }
+        }
+        #expect(try await store.groupEventCursor(roomID: announcementRoom) == 0)
+        #expect(try await store.groupAnnouncement(roomID: announcementRoom) == nil)
+        if action == "directory" {
+            #expect(try await !store.roomRecoveryScan(scope: scope).directoryComplete)
+            let freshDirectory = try await store.roomRecoveryScan(scope: scope)
+            try await store.commitRoomRecoveryDirectoryPage(.init(rooms: [], nextCursor: nil, topologyGeneration: "one"),
+                expectedCursor: freshDirectory.cursor, request: freshDirectory, now: .now)
+            #expect(try await store.roomRecoveryScan(scope: scope).directoryComplete)
+        }
+        let current = try #require(try await store.roomRecoveryWork(scope: scope, limit: 1, oldestFirst: true, now: .now).first)
+        #expect(current.requestRevision == old.requestRevision)
+        _ = try await store.applyRoomRecoveryPage(page, work: current)
+        #expect(try await store.groupEventCursor(roomID: announcementRoom) == 20)
+        #expect(try await store.groupAnnouncement(roomID: announcementRoom)?.body == "refetched after reset")
+        try await store.close()
+    }
+
+    @Test("snapshot validates retained room log counters without retaining removed rooms", arguments:
+        ["room_sequence", "applied_room_sequence", "log_trimmed_through_room_sequence"],
+        [(1.5, false), (9_223_372_036_854_775_808.0, false), (1.5, true), (9_223_372_036_854_775_808.0, true)])
+    func snapshotRoomLogStorage(column: String, scenario: (Double, Bool)) async throws {
+        let (value, removed) = scenario
+        let directory = FileManager.default.temporaryDirectory.appending(path: "snapshot-log-storage-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "client.sqlite")
+        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding, userID: policyRecoveryUser)
+        let membership = try policyRecoveryMembership(sequence: 1, revision: 2)
+        _ = try await store.apply(announcementBatch([membership]))
+        let announcement = try announcementFact(sequence: 2, revision: 2, body: "retained", roomSequence: 20)
+        try await store.applyGroupEventPage(announcementPage(announcement, sequence: 20))
+        let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
+        let item = try V2SnapshotProjectionItem(key: .init(projectionKind: "room", entityKey: announcementRoom.rawValue), sourceEventID: membership.sourceEventID, sequence: 1, payload: membership.payload)
+        let fixture = try makeSnapshotFixture(reset: reset, pages: removed ? [] : [.init(items: [item])])
+        try await store.beginReset(reset)
+        try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
+        for page in fixture.pages { try await store.applySnapshotPage(page, for: fixture.manifest) }
+        let table = column == "room_sequence" ? "v2_group_events" : "v2_group_event_cursors"
+        try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [value]) }
+        if column == "applied_room_sequence" {
+            await #expect(throws: V2ClientSyncError.storageRangeExceeded) { try await store.groupEventCursor(roomID: announcementRoom) }
+        } else if column == "log_trimmed_through_room_sequence" {
+            await #expect(throws: V2ClientSyncError.storageRangeExceeded) { try await store.roomLogTrimmedThroughSequence(roomID: announcementRoom) }
+        }
+        if !removed {
+            let before = try await store.cursor()
+            await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.prepareSnapshotActivation(fixture.manifest) }
+            #expect(try await store.cursor() == before)
+            let state = try await store.databasePool.read { db in
+                let raw = try Double.fetchOne(db, sql: "SELECT \(column) FROM \(table)")
+                let type = try String.fetchOne(db, sql: "SELECT typeof(\(column)) FROM \(table)")
+                let prepared = try Bool.fetchOne(db, sql: "SELECT activation_prepared FROM v2_snapshot_import")
+                return (raw, type, prepared)
+            }
+            #expect(state.0 == value)
+            #expect(state.1 == "real")
+            #expect(state.2 == false)
+            try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [column == "log_trimmed_through_room_sequence" ? 0 : 20]) }
+        }
+        try await store.prepareSnapshotActivation(fixture.manifest)
+        try await store.activateAcknowledgedSnapshot(fixture.manifest)
+        try await store.close()
+        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding, userID: policyRecoveryUser)
+        #expect(try await reopened.groupEventCursor(roomID: announcementRoom) == (removed ? 0 : 20))
+        #expect(try await reopened.roomLogTrimmedThroughSequence(roomID: announcementRoom) == 0)
+        #expect(try await reopened.groupAnnouncement(roomID: announcementRoom)?.body == (removed ? nil : "retained"))
+        #expect(try await reopened.databasePool.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM v2_group_events") } == (removed ? 0 : 1))
+        try await reopened.close()
+    }
+
+    @Test("snapshot validates policy baseline eligibility before filtering", arguments:
+        ["baseline-membership", "baseline-permission", "baseline-sequence", "live-membership", "incoming-membership"],
+        [1.5, 9_223_372_036_854_775_808.0])
+    func policySnapshotEligibilityStorage(location: String, value: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "policy-eligibility-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "client.sqlite"), installationBinding: testInstallationBinding, userID: policyRecoveryUser)
+        let membership = try policyRecoveryMembership(sequence: 1, revision: 2)
+        _ = try await store.apply(announcementBatch([membership]))
+        let request = try await store.requestRolePolicyBaseline(roomID: announcementRoom)
+        #expect(try await store.completeRolePolicyBaseline(policyRecoveryBaseline(revision: 8), for: request))
+        let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
+        let item = try V2SnapshotProjectionItem(key: .init(projectionKind: "room", entityKey: announcementRoom.rawValue), sourceEventID: membership.sourceEventID, sequence: 1, payload: membership.payload)
+        let fixture = try makeSnapshotFixture(reset: reset, pages: [.init(items: [item])])
+        try await store.beginReset(reset)
+        try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
+        try await store.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
+        let table = location.hasPrefix("baseline") ? "v2_group_role_policy_baselines" :
+            (location.hasPrefix("incoming") ? "v2_snapshot_shadow_room_profile_projections" : "v2_room_profile_projections")
+        let column = location.hasSuffix("sequence") ? "room_sequence" : (location.hasSuffix("permission") ? "permission_revision" : "membership_revision")
+        let original = location.hasSuffix("sequence") ? 80 : (location.hasSuffix("permission") ? 8 : 2)
+        try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [value]) }
+        let before = try await store.cursor()
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.prepareSnapshotActivation(fixture.manifest) }
+        #expect(try await store.cursor() == before)
+        let state = try await store.databasePool.read { db in
+            let raw = try Double.fetchOne(db, sql: "SELECT \(column) FROM \(table)")
+            let type = try String.fetchOne(db, sql: "SELECT typeof(\(column)) FROM \(table)")
+            let prepared = try Bool.fetchOne(db, sql: "SELECT activation_prepared FROM v2_snapshot_import")
+            return (raw, type, prepared)
+        }
+        #expect(state.0 == value)
+        #expect(state.1 == "real")
+        #expect(state.2 == false)
+        try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [original]) }
+        try await store.prepareSnapshotActivation(fixture.manifest)
+        try await store.activateAcknowledgedSnapshot(fixture.manifest)
+        let policies = try await store.groupRolePolicies(roomID: announcementRoom)
+        #expect(policies.count == 2)
+        #expect(policies.allSatisfy { $0.revision == 8 && $0.permissions.isEmpty })
+        #expect(try await store.cursor()?.generation == 2)
+        try await store.close()
+    }
+
     @Test("snapshot fences recovery requests and preserves only eligible policy observations", arguments: [false, true])
     func policyRecoverySnapshotFences(removeRoom: Bool) async throws {
         let url = temporaryDatabaseURL()
@@ -3956,7 +4760,7 @@ extension V2SyncEngineTests {
             let current = try #require(try await store.pendingRolePolicyBaselineRequests().first)
             #expect(current != inFlight)
             let conflict = try rolePolicyFact(sequence: 1, revision: 7, permissions: [], roomSequence: 70)
-            await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.applyForegroundGroupEventPreviewPage(announcementPage(conflict, sequence: 70)) }
+            await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.applyGroupEventPage(announcementPage(conflict, sequence: 70)) }
             #expect(try await store.completeRolePolicyBaseline(policyRecoveryBaseline(revision: 8), for: current))
         }
         try await store.close()
@@ -3970,52 +4774,10 @@ private func policyRecoveryBaseline(revision: UInt64, membership: UInt64 = 2, ad
 private func policyRecoveryMembership(sequence: UInt64, revision: Int, action: String = "add", lowercased: Bool = false) throws -> V2ClientSyncRecord {
     let room = lowercased ? announcementRoom.rawValue.lowercased() : announcementRoom.rawValue
     let user = lowercased ? policyRecoveryUser.rawValue.lowercased() : policyRecoveryUser.rawValue
-    return try .init(sequence: sequence, sourceEventID: .init("policy-membership-\(revision)"), projectionKind: "membership", payload: JSONSerialization.data(withJSONObject: ["event_type": "membership_changed", "room_id": room, "title": "Policy recovery", "owner_user_id": policyRecoveryUser.rawValue, "target_user_id": user, "action": action, "membership_revision": revision, "delivery_mode": "standard_fanout", "delivery_authority": "fanout", "created_at_ms": 1_000, "server_created_at_ms": revision * 1_000]))
+    return try .init(sequence: sequence, sourceEventID: .init("policy-membership-\(revision)"), projectionKind: "membership", payload: JSONSerialization.data(withJSONObject: ["event_type": "membership_changed", "room_id": room, "title": "Policy recovery", "owner_user_id": policyRecoveryUser.rawValue, "target_user_id": user, "action": action, "membership_revision": revision, "capacity_class": "standard", "created_at_ms": 1_000, "server_created_at_ms": revision * 1_000]))
 }
 
 extension V2SyncEngineTests {
-    @Test("policy recovery schema upgrade preserves pending reset and commands while rebuilding staging", arguments: [false, true])
-    func policyRecoverySchemaUpgrade(prepared: Bool) async throws {
-        let url = temporaryDatabaseURL()
-        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding, userID: policyRecoveryUser)
-        let membership = try policyRecoveryMembership(sequence: 1, revision: 2)
-        let policy = try rolePolicyFact(sequence: 2, revision: 4, permissions: ["send_messages"], roomSequence: 40)
-        _ = try await store.apply(announcementBatch([membership, policy]))
-        let pending = V2PendingMessageCommand(roomID: announcementRoom, clientMessageID: try .init("00000000-0000-0000-0000-00000000AAAA"), text: "keep during recovery upgrade", state: .pending, attemptCount: 0, nextAttemptAt: .distantPast, acceptedMessageID: nil, acceptedRoomSequence: nil, terminalCode: nil)
-        try await store.enqueue(pending)
-        let reset = try V2ClientResetRequired(snapshotID: .init("policy-recovery-upgrade"), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
-        let item = try V2SnapshotProjectionItem(key: .init(projectionKind: "room", entityKey: announcementRoom.rawValue), sourceEventID: membership.sourceEventID, sequence: 1, payload: membership.payload)
-        let fixture = try makeSnapshotFixture(reset: reset, pages: [.init(items: [item])])
-        try await store.beginReset(reset)
-        try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
-        try await store.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
-        if prepared { try await store.prepareSnapshotActivation(fixture.manifest) }
-        try await store.close()
-        let db = try DatabasePool(path: url.path)
-        try await db.write { db in
-            try db.execute(sql: "DROP TABLE v2_group_role_policy_baselines; DROP TABLE v2_snapshot_shadow_group_role_policy_baselines; DROP TABLE v2_role_policy_recovery_requests")
-            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'recordRolePolicyRecovery'")
-        }
-        try db.close()
-        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding, userID: policyRecoveryUser)
-        #expect(try await reopened.cursor()?.pendingReset == reset)
-        #expect(try await reopened.pendingMessageCommands() == [pending])
-        #expect(try await reopened.groupRolePolicies(roomID: announcementRoom).first?.permissions == [.sendMessages])
-        #expect(try await reopened.pendingRolePolicyBaselineRequests().isEmpty)
-        let check = try DatabasePool(path: url.path)
-        #expect(try await check.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM v2_snapshot_import") } == 0)
-        try check.close()
-        try await reopened.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
-        try await reopened.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
-        try await reopened.prepareSnapshotActivation(fixture.manifest)
-        try await reopened.activateAcknowledgedSnapshot(fixture.manifest)
-        #expect(try await reopened.enqueueMissingRolePolicyBaselines() == 1)
-        let request = try #require(try await reopened.pendingRolePolicyBaselineRequests().first)
-        #expect(try await reopened.completeRolePolicyBaseline(policyRecoveryBaseline(revision: 8), for: request))
-        #expect(try await reopened.groupRolePolicies(roomID: announcementRoom).count == 2)
-        #expect(try await reopened.pendingMessageCommands() == [pending])
-        try await reopened.close()
-    }
 }
 
 extension V2SyncEngineTests {
@@ -4257,39 +5019,6 @@ private actor BlockingPolicyRunnerTransport: V2ClientGroupRolePolicyBaselineTran
 }
 
 extension V2SyncEngineTests {
-    @Test("retry scheduling migration preserves an existing recovery request identity and fences")
-    func policyRunnerScheduleMigration() async throws {
-        let url = temporaryDatabaseURL()
-        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding, userID: policyRecoveryUser)
-        _ = try await store.apply(announcementBatch([policyRecoveryMembership(sequence: 1, revision: 2)]))
-        let request = try await store.requestRolePolicyBaseline(roomID: announcementRoom)
-        try await store.close()
-        let db = try DatabasePool(path: url.path)
-        try await db.write { db in
-            try db.execute(sql: "ALTER TABLE v2_role_policy_recovery_requests RENAME TO temporary_policy_requests")
-            try db.execute(sql: """
-                CREATE TABLE v2_role_policy_recovery_requests (
-                    room_id TEXT PRIMARY KEY, request_id TEXT NOT NULL,
-                    installation_binding TEXT NOT NULL, user_id TEXT NOT NULL,
-                    membership_revision INTEGER NOT NULL CHECK (membership_revision > 0),
-                    membership_source_event_id TEXT NOT NULL,
-                    generation INTEGER NOT NULL CHECK (generation > 0)
-                )
-                """)
-            try db.execute(sql: "INSERT INTO v2_role_policy_recovery_requests SELECT room_id, request_id, installation_binding, user_id, membership_revision, membership_source_event_id, generation FROM temporary_policy_requests")
-            try db.execute(sql: "DROP TABLE temporary_policy_requests")
-            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'scheduleRolePolicyRecovery'")
-        }
-        try db.close()
-        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding, userID: policyRecoveryUser)
-        #expect(try await reopened.pendingRolePolicyBaselineRequests() == [request])
-        #expect(try await reopened.dueRolePolicyBaselineRequests(at: Date(timeIntervalSince1970: 0)) == [request])
-        let runner = V2RolePolicyRecoveryRunner(store: reopened, transport: PolicyRunnerTransport())
-        #expect(try await runner.recoverOnce() == 1)
-        #expect(try await reopened.pendingRolePolicyBaselineRequests().isEmpty)
-        #expect(try await reopened.groupRolePolicies(roomID: announcementRoom).count == 2)
-        try await reopened.close()
-    }
 }
 
 extension V2SyncEngineTests {
@@ -4417,16 +5146,86 @@ private func pinFact(sequence: UInt64, source: String, pinned: Bool, roomSequenc
 }
 
 extension V2SyncEngineTests {
+    @Test("pin sequence storage rejects REAL in events and snapshot merge", arguments:
+        ["receipt", "current", "snapshot-live", "snapshot-receipt", "snapshot-shadow", "snapshot-shadow-receipt"],
+        [1.5, Double(Int64.max)])
+    func pinStorageTypes(path: String, value: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "pin-storage-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "client.sqlite"), installationBinding: testInstallationBinding)
+        let old = try pinFact(sequence: 1, source: UUID().uuidString, pinned: true, roomSequence: 20)
+        _ = try await store.apply(announcementBatch([old]))
+        let snapshot = path.hasPrefix("snapshot")
+        var manifest: V2ClientSnapshotManifest?
+        if snapshot {
+            let member = try policyRecoveryMembership(sequence: 9, revision: 2)
+            let items = try [
+                V2SnapshotProjectionItem(key: .init(projectionKind: "room", entityKey: announcementRoom.rawValue), sourceEventID: member.sourceEventID, sequence: 9, payload: member.payload),
+                V2SnapshotProjectionItem(key: .init(projectionKind: "group_capability", entityKey: "pin:\(announcementRoom.rawValue):\(pinMessage.rawValue)"), sourceEventID: old.sourceEventID, sequence: 8, payload: old.payload)
+            ].sorted { $0.key < $1.key }
+            let reset = try V2ClientResetRequired(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
+            let fixture = try makeSnapshotFixture(reset: reset, pages: [.init(items: items)])
+            manifest = fixture.manifest
+            try await store.beginReset(reset)
+            try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
+            try await store.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
+        }
+        let shadow = path.contains("shadow")
+        let table = (shadow ? "v2_snapshot_shadow_" : "v2_") + (path.contains("receipt") ? "pin_effects" : "group_pinned_messages")
+        let before = try await store.cursor()
+        try await store.databasePool.write { db in
+            if path == "receipt" { try db.execute(sql: "DELETE FROM v2_sync_events") }
+            try db.execute(sql: "UPDATE \(table) SET room_sequence = ?", arguments: [value])
+        }
+        let next = try pinFact(sequence: 2, source: path == "receipt" ? old.sourceEventID.rawValue : UUID().uuidString,
+            pinned: path == "receipt", roomSequence: path == "receipt" ? 20 : 30)
+        if let manifest {
+            await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.prepareSnapshotActivation(manifest) }
+        } else {
+            await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.apply(announcementBatch([next])) }
+        }
+        #expect(try await store.cursor() == before)
+        let state = try await store.databasePool.read { db in
+            let raw = try Double.fetchOne(db, sql: "SELECT room_sequence FROM \(table)")
+            let type = try String.fetchOne(db, sql: "SELECT typeof(room_sequence) FROM \(table)")
+            let receipts = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v2_pin_effects")
+            let pinned = try Bool.fetchOne(db, sql: "SELECT is_pinned FROM v2_group_pinned_messages")
+            return (raw, type, receipts, pinned)
+        }
+        #expect(state.0 == value)
+        #expect(state.1 == "real")
+        #expect(state.2 == 1)
+        #expect(state.3 == true)
+        try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET room_sequence = 20") }
+        if let manifest {
+            try await store.prepareSnapshotActivation(manifest)
+            try await store.activateAcknowledgedSnapshot(manifest)
+            #expect(try await store.cursor()?.generation == 2)
+            let invalidIndexes = try await store.databasePool.read { db in
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'v2_group_pinned_messages' AND sql LIKE '%typeof(room_sequence)%'")
+            }
+            #expect(invalidIndexes == 1)
+            try await store.databasePool.write { try $0.execute(sql: "UPDATE v2_group_pinned_messages SET room_sequence = 1.5") }
+            await #expect(throws: V2ClientSyncError.storageRangeExceeded) { try await store.roomAppliedRoomSequence(roomID: announcementRoom) }
+            try await store.databasePool.write { try $0.execute(sql: "UPDATE v2_group_pinned_messages SET room_sequence = 20") }
+            #expect(try await store.roomAppliedRoomSequence(roomID: announcementRoom) == 20)
+
+        } else { _ = try await store.apply(announcementBatch([next])) }
+        #expect(try await store.pinnedMessageIDs(roomID: announcementRoom).isEmpty == (path == "current"))
+        try await store.close()
+    }
+
     @Test("pin effects share ordering, negative state and identity across all incremental feeds and restart", arguments: [false, true])
-    func pinEffectOrdering(previewFirst: Bool) async throws {
+    func pinEffectOrdering(roomFirst: Bool) async throws {
         let url = temporaryDatabaseURL()
         var store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
         let latest = try pinFact(sequence: 1, source: "pin-latest", pinned: false, roomSequence: 50)
-        if previewFirst { _ = try await store.applyForegroundGroupEventPreviewPage(announcementPage(latest, sequence: 50)) }
+        if roomFirst { _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(announcementPage(latest, sequence: 50)) }
         _ = try await store.apply(announcementBatch([latest]))
-        if !previewFirst { _ = try await store.applyForegroundGroupEventPreviewPage(announcementPage(latest, sequence: 50)) }
+        if !roomFirst { _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(announcementPage(latest, sequence: 50)) }
         let old = try pinFact(sequence: 2, source: "pin-old", pinned: true, roomSequence: 20)
-        _ = try await store.applyGroupEventPage(announcementPage(old, sequence: 20))
+        _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(announcementPage(old, sequence: 20))
         _ = try await store.applyGroupEventPage(announcementPage(latest, sequence: 50))
         _ = try await store.apply(announcementBatch([old]))
         #expect(try await store.pinnedMessageIDs(roomID: announcementRoom).isEmpty)
@@ -4451,7 +5250,7 @@ extension V2SyncEngineTests {
         try db.close(); try await store.close()
     }
 
-    @Test("a legacy pin receipt is reconsidered when the room log supplies its actual source version")
+    @Test("a partial pin receipt is reconsidered when the room log supplies its source version")
     func pinLegacySourceEnrichment() async throws {
         let url = temporaryDatabaseURL()
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
@@ -4468,12 +5267,12 @@ extension V2SyncEngineTests {
         let replay = try V2ClientSyncRecord(sequence: 3, sourceEventID: old.sourceEventID, projectionKind: old.projectionKind, payload: old.payload)
         _ = try await store.apply(announcementBatch([replay]))
         #expect(try await store.pinnedMessageIDs(roomID: announcementRoom).isEmpty)
-        _ = try await store.applyForegroundGroupEventPreviewPage(announcementPage(old, sequence: 20))
+        _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(announcementPage(old, sequence: 20))
         #expect(try await store.pinnedMessageIDs(roomID: announcementRoom) == [pinMessage])
         _ = try await store.applyGroupEventPage(announcementPage(newer, sequence: 30))
         #expect(try await store.pinnedMessageIDs(roomID: announcementRoom).isEmpty)
-        _ = try await store.applyForegroundGroupEventPreviewPage(announcementPage(old, sequence: 20))
-        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.applyForegroundGroupEventPreviewPage(announcementPage(old, sequence: 21)) }
+        _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(announcementPage(old, sequence: 20))
+        await #expect(throws: V2ClientSyncError.invalidRecordOrdering) { try await store.applyGroupEventPage(announcementPage(old, sequence: 21)) }
         let db = try DatabasePool(path: url.path)
         #expect(try await db.read { try Int.fetchOne($0, sql: "SELECT room_sequence FROM v2_group_pinned_messages") } == 30)
         #expect(try await db.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM v2_pin_effects WHERE room_sequence IS NOT NULL") } == 2)
@@ -4516,18 +5315,17 @@ extension V2SyncEngineTests {
         if hybrid {
             let membership = try policyRecoveryMembership(sequence: 9, revision: 2)
             var value = try #require(JSONSerialization.jsonObject(with: membership.payload) as? [String: Any])
-            value["delivery_mode"] = V2GroupDeliveryMode.largeGroupHybrid.rawValue
-            value["delivery_authority"] = V2ClientRoomDeliveryAuthority.roomLog.rawValue
+            value["capacity_class"] = V2GroupCapacityClass.large.rawValue
             items.append(try .init(key: .init(projectionKind: "room", entityKey: announcementRoom.rawValue), sourceEventID: membership.sourceEventID, sequence: 9, payload: JSONSerialization.data(withJSONObject: value)))
         }
         let reset = try V2ClientResetRequired(snapshotID: .init("pin-snapshot"), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
         let engine = V2SyncEngine(transport: try ProjectionSnapshotTransport(reset: reset, pages: [.init(items: items)]), store: store, capabilityProfile: "base")
         _ = try await engine.synchronizeOnce(); try await engine.completePendingReset()
         #expect(try await store.pinnedMessageIDs(roomID: announcementRoom).isEmpty)
-        _ = try await store.applyForegroundGroupEventPreviewPage(announcementPage(old, sequence: 20))
+        _ = try await store.applyRoomPageOrExpectRejectedOlderCursor(announcementPage(old, sequence: 20))
         #expect(try await store.pinnedMessageIDs(roomID: announcementRoom).isEmpty)
         let conflict = try pinFact(sequence: 1, source: old.sourceEventID.rawValue, pinned: false, roomSequence: 20)
-        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.applyForegroundGroupEventPreviewPage(announcementPage(conflict, sequence: 20)) }
+        await #expect(throws: V2ClientSyncError.invalidRecordOrdering) { try await store.applyGroupEventPage(announcementPage(conflict, sequence: 20)) }
         let db = try DatabasePool(path: url.path)
         #expect(try await db.read { try Int.fetchOne($0, sql: "SELECT room_sequence FROM v2_group_pinned_messages") } == 50)
         try db.close(); try await store.close()
@@ -4535,65 +5333,6 @@ extension V2SyncEngineTests {
 }
 
 extension V2SyncEngineTests {
-    @Test("pin migration discards personal source guesses, preserves outbox and reimports staging", arguments: [false, true])
-    func pinEffectMigration(prepared: Bool) async throws {
-        let url = temporaryDatabaseURL()
-        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
-        let old = try pinFact(sequence: 1, source: "migration-pin", pinned: true, roomSequence: 20)
-        let latest = try pinFact(sequence: 2, source: "migration-unpin", pinned: false, roomSequence: nil)
-        _ = try await store.apply(announcementBatch([old, latest]))
-        _ = try await store.applyGroupEventPage(announcementPage(latest, sequence: 50))
-        let removedMessage = try MessageID("ABCDEF00-0000-0000-0000-000000001111")
-        _ = try await store.apply(announcementBatch([pinFact(sequence: 3, source: "migration-purged", pinned: true, roomSequence: 15, message: removedMessage)]))
-        let pending = V2PendingMessageCommand(roomID: announcementRoom, clientMessageID: try .init("00000000-0000-0000-0000-00000000AAAA"), text: "keep pin outbox", state: .pending, attemptCount: 0, nextAttemptAt: .distantPast, acceptedMessageID: nil, acceptedRoomSequence: nil, terminalCode: nil)
-        try await store.enqueue(pending)
-        let reset = try V2ClientResetRequired(snapshotID: .init("pin-upgrade"), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
-        let incoming = try pinFact(sequence: 8, source: "migration-snapshot", pinned: true, roomSequence: 80)
-        let item = try V2SnapshotProjectionItem(key: .init(projectionKind: "group_capability", entityKey: "pin:\(announcementRoom.rawValue):\(pinMessage.rawValue)"), sourceEventID: incoming.sourceEventID, sequence: 8, payload: incoming.payload)
-        let fixture = try makeSnapshotFixture(reset: reset, pages: [.init(items: [item])])
-        try await store.beginReset(reset)
-        try await store.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
-        try await store.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
-        if prepared { try await store.prepareSnapshotActivation(fixture.manifest) }
-        try await store.close()
-        let unknownMessage = "ABCDEF00-0000-0000-0000-000000002222"
-        let db = try DatabasePool(path: url.path)
-        try await db.write { db in
-            for table in ["v2_group_pinned_messages", "v2_snapshot_shadow_group_pinned_messages"] {
-                try db.execute(sql: "ALTER TABLE \(table) RENAME TO temporary_pins")
-                try db.execute(sql: "CREATE TABLE \(table) (room_id TEXT NOT NULL, message_id TEXT NOT NULL, is_pinned INTEGER NOT NULL CHECK (is_pinned IN (0, 1)), room_sequence INTEGER NOT NULL CHECK (room_sequence > 0), updated_at REAL NOT NULL, PRIMARY KEY (room_id, message_id))")
-                try db.execute(sql: "INSERT INTO \(table) SELECT lower(room_id), lower(message_id), is_pinned, 999, updated_at FROM temporary_pins")
-                try db.execute(sql: "DROP TABLE temporary_pins")
-            }
-            try db.execute(sql: "CREATE INDEX v2_group_pinned_messages_room_idx ON v2_group_pinned_messages (room_id, is_pinned DESC, updated_at DESC)")
-            try db.execute(sql: "INSERT INTO v2_group_pinned_messages VALUES (?, ?, 1, 999, 1)", arguments: [announcementRoom.rawValue.lowercased(), unknownMessage.lowercased()])
-            // Simulate a stale old last-arrival value. Trusted room-log source
-            // 50 must beat the positive source 20 despite personal cursor 999.
-            try db.execute(sql: "UPDATE v2_group_pinned_messages SET is_pinned = 1 WHERE message_id = ?", arguments: [pinMessage.rawValue.lowercased()])
-            try db.execute(sql: "DELETE FROM v2_group_pinned_messages WHERE message_id = ?", arguments: [removedMessage.rawValue.lowercased()])
-            try db.execute(sql: "DROP TABLE v2_pin_effects")
-            try db.execute(sql: "DROP TABLE v2_snapshot_shadow_pin_effects")
-            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'orderPinnedMessageEffects'")
-        }
-        try db.close()
-        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
-        #expect(try await reopened.cursor()?.pendingReset == reset)
-        #expect(try await reopened.importedSnapshotManifest(for: reset) == nil)
-        #expect(try await reopened.pendingMessageCommands() == [pending])
-        #expect(try await reopened.pinnedMessageIDs(roomID: announcementRoom) == [MessageID(unknownMessage)])
-        let migrated = try DatabasePool(path: url.path)
-        #expect(try await migrated.read { try Int.fetchOne($0, sql: "SELECT room_sequence FROM v2_group_pinned_messages WHERE message_id = ?", arguments: [pinMessage.rawValue]) } == 50)
-        #expect(try await migrated.read { try Int.fetchOne($0, sql: "SELECT room_sequence FROM v2_group_pinned_messages WHERE message_id = ?", arguments: [unknownMessage]) } == nil)
-        #expect(try await migrated.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM v2_pin_effects WHERE message_id = ?", arguments: [removedMessage.rawValue]) } == 0)
-        try migrated.close()
-        try await reopened.beginSnapshotImport(fixture.manifest, initialDigest: V2SnapshotV3Digest.initial(baseSequence: 10, capabilityProfile: "base"))
-        try await reopened.applySnapshotPage(fixture.pages[0], for: fixture.manifest)
-        try await reopened.prepareSnapshotActivation(fixture.manifest)
-        try await reopened.activateAcknowledgedSnapshot(fixture.manifest)
-        #expect(try await reopened.pinnedMessageIDs(roomID: announcementRoom) == [pinMessage])
-        #expect(try await reopened.pendingMessageCommands() == [pending])
-        try await reopened.close()
-    }
 
     @Test("pin snapshot source reuse fails even if the previous message is absent from the new bank")
     func pinSnapshotSourceConflict() async throws {
@@ -4724,7 +5463,6 @@ private actor BoundedSyncConnection: V2RealtimeSessionConnecting {
 private func roomProjection(
     roomID: String,
     mode: String,
-    authority: String?,
     revision: Int,
     sequence: Int64
 ) throws -> V2ClientSyncRecord {
@@ -4732,17 +5470,16 @@ private func roomProjection(
         sequence: UInt64(sequence),
         sourceEventID: .init(uuid: UUID()),
         projectionKind: "membership",
-        payload: try roomProjectionPayload(roomID: roomID, mode: mode, authority: authority, revision: revision)
+        payload: try roomProjectionPayload(roomID: roomID, mode: mode, revision: revision)
     )
 }
 
 private func roomProjectionPayload(
     roomID: String,
     mode: String,
-    authority: String?,
     revision: Int
 ) throws -> Data {
-    var payload: [String: Any] = [
+    let payload: [String: Any] = [
         "event_type": "membership_changed",
         "room_id": roomID,
         "title": "推广房间",
@@ -4750,10 +5487,206 @@ private func roomProjectionPayload(
         "action": "add",
         "target_user_id": "00000000-0000-0000-0000-0000000002a1",
         "membership_revision": revision,
-        "delivery_mode": mode,
+        "capacity_class": mode,
         "created_at_ms": 1_750_000_000_000,
         "server_created_at_ms": 1_750_000_001_000,
     ]
-    if let authority { payload["delivery_authority"] = authority }
     return try JSONSerialization.data(withJSONObject: payload)
+}
+
+
+extension V2SyncEngineTests {
+    @Test("membership revisions survive removal and reject late grants and removals")
+    func membershipRevisionOrdering() async throws {
+        let url = temporaryDatabaseURL()
+        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding, userID: policyRecoveryUser)
+        _ = try await store.apply(announcementBatch([policyRecoveryMembership(sequence: 1, revision: 2)]))
+        _ = try await store.apply(announcementBatch([policyRecoveryMembership(sequence: 2, revision: 4, action: "remove")]))
+        _ = try await store.apply(announcementBatch([policyRecoveryMembership(sequence: 3, revision: 3)]))
+        #expect(try await store.roomProfile(roomID: announcementRoom) == nil)
+        try await store.close()
+        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding, userID: policyRecoveryUser)
+        _ = try await reopened.apply(announcementBatch([policyRecoveryMembership(sequence: 4, revision: 8)]))
+        _ = try await reopened.apply(announcementBatch([policyRecoveryMembership(sequence: 5, revision: 7, action: "remove")]))
+        #expect(try await reopened.roomProfile(roomID: announcementRoom)?.membershipRevision == 8)
+        try await reopened.close()
+    }
+
+    @Test("snapshot revocation remains negative and allows a later rejoin", arguments: [false, true])
+    func membershipRevocationSnapshot(staleSnapshot: Bool) async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding, userID: policyRecoveryUser)
+        let joined = try policyRecoveryMembership(sequence: 1, revision: 2)
+        let removed = try policyRecoveryMembership(sequence: 2, revision: 4, action: "remove")
+        _ = try await store.apply(announcementBatch(staleSnapshot ? [joined, removed] : [joined]))
+        let fact = staleSnapshot ? joined : removed
+        let item = try V2SnapshotProjectionItem(key: .init(projectionKind: "room", entityKey: announcementRoom.rawValue), sourceEventID: fact.sourceEventID, sequence: fact.sequence, payload: fact.payload)
+        let reset = try V2ClientResetRequired(snapshotID: .init("membership-negative"), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
+        let engine = V2SyncEngine(transport: try ProjectionSnapshotTransport(reset: reset, pages: [.init(items: [item])]), store: store, capabilityProfile: "base")
+        _ = try await engine.synchronizeOnce(); try await engine.completePendingReset()
+        #expect(try await store.roomProfile(roomID: announcementRoom) == nil)
+        let late = try policyRecoveryMembership(sequence: 11, revision: 3)
+        _ = try await store.apply(.init(generation: 2, records: [late], nextSyncToken: .init("member-late"), receipt: .init("member-late"), hasMore: false, capabilityProfile: "base"))
+        #expect(try await store.roomProfile(roomID: announcementRoom) == nil)
+        let rejoin = try policyRecoveryMembership(sequence: 12, revision: 5)
+        _ = try await store.apply(.init(generation: 2, records: [rejoin], nextSyncToken: .init("member-rejoin"), receipt: .init("member-rejoin"), hasMore: false, capabilityProfile: "base"))
+        #expect(try await store.roomProfile(roomID: announcementRoom)?.membershipRevision == 5)
+        try await store.close()
+    }
+}
+
+
+extension V2SyncEngineTests {
+}
+
+
+extension V2SyncEngineTests {
+    @Test("snapshot viewer revision separates own membership from newer roster changes")
+    func snapshotViewerMembershipRevision() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding, userID: policyRecoveryUser)
+        let ownJoin = try policyRecoveryMembership(sequence: 1, revision: 8)
+        var value = try #require(JSONSerialization.jsonObject(with: ownJoin.payload) as? [String: Any])
+        value["membership_revision"] = 10
+        value["target_user_id"] = UUID().uuidString
+        value["viewer_membership_revision"] = 8
+        value["viewer_membership_source_event_id"] = ownJoin.sourceEventID.rawValue
+        value["viewer_is_member"] = true
+        let item = try V2SnapshotProjectionItem(key: .init(projectionKind: "room", entityKey: announcementRoom.rawValue), sourceEventID: .init("other-member-10"), sequence: 10, payload: JSONSerialization.data(withJSONObject: value))
+        let reset = try V2ClientResetRequired(snapshotID: .init("viewer-state"), generation: 2, baseSequence: 10, expiresAt: .distantFuture)
+        let engine = V2SyncEngine(transport: try ProjectionSnapshotTransport(reset: reset, pages: [.init(items: [item])]), store: store, capabilityProfile: "base")
+        _ = try await engine.synchronizeOnce(); try await engine.completePendingReset()
+        _ = try await store.apply(.init(generation: 2, records: [policyRecoveryMembership(sequence: 11, revision: 7, action: "remove")], nextSyncToken: .init("viewer-old"), receipt: .init("viewer-old"), hasMore: false, capabilityProfile: "base"))
+        #expect(try await store.roomProfile(roomID: announcementRoom)?.membershipRevision == 10)
+        _ = try await store.apply(.init(generation: 2, records: [policyRecoveryMembership(sequence: 12, revision: 9, action: "remove")], nextSyncToken: .init("viewer-removed"), receipt: .init("viewer-removed"), hasMore: false, capabilityProfile: "base"))
+        #expect(try await store.roomProfile(roomID: announcementRoom) == nil)
+        try await store.close()
+    }
+
+    @Test("late room content cannot recreate a revoked conversation")
+    func revokedMembershipDiscardsLateContent() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding, userID: policyRecoveryUser)
+        _ = try await store.apply(announcementBatch([policyRecoveryMembership(sequence: 1, revision: 2), policyRecoveryMembership(sequence: 2, revision: 4, action: "remove")]))
+        let message = try V2ClientSyncRecord(sequence: 3, sourceEventID: .init("late-room-body"), projectionKind: "message", payload: messagePayload(roomID: announcementRoom.rawValue, text: "late body"))
+        _ = try await store.apply(announcementBatch([message]))
+        #expect(try await store.messages(in: announcementRoom).isEmpty)
+        #expect(try await store.roomProfile(roomID: announcementRoom) == nil)
+        try await store.close()
+    }
+}
+
+
+extension V2SyncEngineTests {
+    @Test("legacy minimal moderation removal still revokes membership")
+    func minimalMembershipRevocation() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding, userID: policyRecoveryUser)
+        _ = try await store.apply(announcementBatch([policyRecoveryMembership(sequence: 1, revision: 2)]))
+        let removal = try V2ClientSyncRecord(sequence: 2, sourceEventID: .init("minimal-removal"), projectionKind: "membership", payload: JSONSerialization.data(withJSONObject: [
+            "event_type": "membership_changed", "room_id": announcementRoom.rawValue,
+            "target_user_id": policyRecoveryUser.rawValue, "action": "remove", "membership_revision": 3
+        ]))
+        _ = try await store.apply(announcementBatch([removal]))
+        #expect(try await store.roomProfile(roomID: announcementRoom) == nil)
+        #expect(try await store.groupEventAccess(roomID: announcementRoom)?.isAuthorized == false)
+        try await store.close()
+    }
+}
+
+// Test-only delivery of delayed pages. The production writer is always used;
+// an older page must be rejected and must not roll the durable cursor back.
+private extension GRDBV2LocalSyncStore {
+    func applyRoomPageOrExpectRejectedOlderCursor(_ page: V2ClientGroupEventPage) async throws -> UInt64 {
+        let cursor = try groupEventCursor(roomID: page.roomID)
+        if page.nextRoomSequence < cursor {
+            #expect(throws: V2ClientSyncError.invalidRecordOrdering) {
+                try applyGroupEventPage(page)
+            }
+            #expect(try groupEventCursor(roomID: page.roomID) == cursor)
+            return cursor
+        }
+        return try applyGroupEventPage(page)
+    }
+}
+
+
+extension V2SyncEngineTests {
+    @Test("baseline completion validates global and observed role versions before clearing work", arguments:
+        ["global", "role-revision", "role-sequence"],
+        [8, 9].flatMap { revision in [1.5, Double(Int64.max)].map { (revision, $0) } })
+    func policyCompletionStorageTypes(field: String, scenario: (Int, Double)) async throws {
+        let (revision, value) = scenario
+        let directory = FileManager.default.temporaryDirectory.appending(path: "policy-complete-storage-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "client.sqlite"), installationBinding: testInstallationBinding, userID: policyRecoveryUser)
+        _ = try await store.apply(announcementBatch([
+            policyRecoveryMembership(sequence: 1, revision: 2),
+            rolePolicyFact(sequence: 2, revision: 8, permissions: [], roomSequence: 80)
+        ]))
+        let initial = try await store.requestRolePolicyBaseline(roomID: announcementRoom)
+        #expect(try await store.completeRolePolicyBaseline(policyRecoveryBaseline(revision: 8), for: initial))
+        let pending = try await store.requestRolePolicyBaseline(roomID: announcementRoom)
+        let table = field == "global" ? "v2_group_permission_revisions" : "v2_group_role_policies"
+        let column = field == "role-sequence" ? "room_sequence" : "revision"
+        let cursor = try await store.cursor()
+        try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [value]) }
+        let baseline = try policyRecoveryBaseline(revision: UInt64(revision))
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.completeRolePolicyBaseline(baseline, for: pending) }
+        #expect(try await store.pendingRolePolicyBaselineRequests() == [pending])
+        #expect(try await store.cursor() == cursor)
+        let after = try await store.databasePool.read { db in
+            let raw = try Double.fetchOne(db, sql: "SELECT \(column) FROM \(table)")
+            let type = try String.fetchOne(db, sql: "SELECT typeof(\(column)) FROM \(table)")
+            let baseline = try Int64.fetchOne(db, sql: "SELECT permission_revision FROM v2_group_role_policy_baselines")
+            return (raw, type, baseline)
+        }
+        #expect(after.0 == value)
+        #expect(after.1 == "real")
+        #expect(after.2 == 8)
+        try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [field == "role-sequence" ? 80 : 8]) }
+        #expect(try await store.completeRolePolicyBaseline(baseline, for: pending))
+        #expect(try await store.pendingRolePolicyBaselineRequests().isEmpty)
+        let global = try await store.databasePool.read { try Int64.fetchOne($0, sql: "SELECT revision FROM v2_group_permission_revisions") }
+        #expect(global == Int64(revision))
+        try await store.close()
+    }
+
+    @Test(arguments: ["room", "permission_revision", "membership_revision", "room_sequence"], [1.5, Double(Int64.max)])
+    func policyRecoveryStoredRealFences(field: String, value: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-policy-real-fences-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"),
+            installationBinding: testInstallationBinding, userID: policyRecoveryUser)
+        do {
+            _ = try await store.apply(announcementBatch([policyRecoveryMembership(sequence: 1, revision: 2)]))
+            let initial = try await store.requestRolePolicyBaseline(roomID: announcementRoom)
+            #expect(try await store.completeRolePolicyBaseline(policyRecoveryBaseline(revision: 8), for: initial))
+            let pending = try await store.requestRolePolicyBaseline(roomID: announcementRoom)
+            let table = field == "room" ? "v2_room_profile_projections" : "v2_group_role_policy_baselines"
+            let column = field == "room" ? "membership_revision" : field
+            try await store.databasePool.write {
+                try $0.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [value])
+            }
+            if field == "room" {
+                await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.requestRolePolicyBaseline(roomID: announcementRoom) }
+                await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.resumeRolePolicyBaseline(roomID: announcementRoom) }
+                await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.recordRolePolicyRecoveryFailure(.pause, for: pending) }
+            } else {
+                await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { try await store.groupRolePolicies(roomID: announcementRoom) }
+            }
+            await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
+                try await store.completeRolePolicyBaseline(policyRecoveryBaseline(revision: 9), for: pending)
+            }
+            #expect(try await store.pendingRolePolicyBaselineRequests() == [pending])
+            let preserved = try await store.databasePool.read { try Double.fetchOne($0, sql: "SELECT \(column) FROM \(table)") }
+            #expect(preserved == value)
+            let original: Int64 = field == "permission_revision" ? 8 : field == "room_sequence" ? 80 : 2
+            try await store.databasePool.write { try $0.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [original]) }
+            #expect(try await store.completeRolePolicyBaseline(policyRecoveryBaseline(revision: 9), for: pending))
+            #expect(try await store.pendingRolePolicyBaselineRequests().isEmpty)
+            try await store.close()
+        } catch {
+            try? await store.close()
+            throw error
+        }
+    }
 }

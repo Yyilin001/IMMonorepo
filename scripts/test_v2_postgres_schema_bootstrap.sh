@@ -8,25 +8,55 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 compose_file="${repo_root}/IMV2/docker-compose.isolated-tests.yml"
 schema_file="${repo_root}/IMV2/sql/schema.sql"
 schema_contract_query="${repo_root}/IMV2/scripts/current_v2_schema_contract.sql"
-project_name="imv2-schema-bootstrap-regression"
+project_name="imv2-schema-bootstrap-regression-$$"
+bootstrap_db="imv2_bootstrap_$$"
+restore_db="imv2_restore_$$"
+work_dir="$(mktemp -d)"
 
-command -v docker >/dev/null 2>&1 || {
-  printf 'missing required command: docker\n' >&2
-  exit 1
-}
-
-compose=(docker compose --project-name "${project_name}" --file "${compose_file}")
-cleanup() {
-  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
-
-"${compose[@]}" up --detach --wait postgres
-
-psql() {
-  "${compose[@]}" exec -T postgres \
-    psql -v ON_ERROR_STOP=1 -U im_v2_test -d im_v2_test "$@"
-}
+# Native mode uses standard PGHOST/PGPORT/PGUSER credentials and creates only
+# uniquely named disposable databases. The connection must allow CREATE DATABASE.
+if [[ "${IMV2_SCHEMA_BOOTSTRAP_NATIVE:-0}" == '1' ]]; then
+  command -v psql >/dev/null
+  admin_psql() { command psql -v ON_ERROR_STOP=1 -d postgres "$@"; }
+  psql() { command psql -v ON_ERROR_STOP=1 -d "${bootstrap_db}" "$@"; }
+  restore_psql() { command psql -v ON_ERROR_STOP=1 -d "${restore_db}" "$@"; }
+  dump_schema() { command pg_dump --schema-only --schema=im_v2 --no-owner --no-privileges --no-comments -d "$1"; }
+  dump_topology() { command pg_dump --data-only --table=im_v2.room_recovery_topology --table=im_v2.control_housekeeping_cursor --no-owner --no-privileges -d "$1"; }
+  bootstrap_created=0
+  restore_created=0
+  cleanup() {
+    if [[ "${bootstrap_created}" == 1 ]]; then
+      admin_psql -c "DROP DATABASE IF EXISTS ${bootstrap_db}" >/dev/null 2>&1 || true
+    fi
+    if [[ "${restore_created}" == 1 ]]; then
+      admin_psql -c "DROP DATABASE IF EXISTS ${restore_db}" >/dev/null 2>&1 || true
+    fi
+    rm -rf "${work_dir}"
+  }
+  trap cleanup EXIT
+  admin_psql -c "CREATE DATABASE ${bootstrap_db} TEMPLATE template0" >/dev/null
+  bootstrap_created=1
+  admin_psql -c "CREATE DATABASE ${restore_db} TEMPLATE template0" >/dev/null
+  restore_created=1
+else
+  command -v docker >/dev/null 2>&1 || {
+    printf 'missing required command: docker\n' >&2
+    exit 1
+  }
+  compose=(docker compose --project-name "${project_name}" --file "${compose_file}")
+  cleanup() {
+    "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+    rm -rf "${work_dir}"
+  }
+  trap cleanup EXIT
+  "${compose[@]}" up --detach --wait postgres
+  bootstrap_db=im_v2_test
+  psql() { "${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2_test -d "${bootstrap_db}" "$@"; }
+  restore_psql() { "${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2_test -d "${restore_db}" "$@"; }
+  dump_schema() { "${compose[@]}" exec -T postgres pg_dump --schema-only --schema=im_v2 --no-owner --no-privileges --no-comments -U im_v2_test -d "$1"; }
+  dump_topology() { "${compose[@]}" exec -T postgres pg_dump --data-only --table=im_v2.room_recovery_topology --table=im_v2.control_housekeeping_cursor --no-owner --no-privileges -U im_v2_test -d "$1"; }
+  psql -c "CREATE DATABASE ${restore_db} TEMPLATE template0" >/dev/null
+fi
 scalar() {
   psql -tAc "$1" | tr -d '[:space:]'
 }
@@ -51,14 +81,18 @@ assert_scalar() {
   fi
 }
 
+# Current schema adds quota intents, operation aliases, and owner receipts.
+# Their seven indexes plus cancellation history add eight to the prior baseline.
+# Terminal forward inbox/export compaction adds two bounded-scan indexes.
+# Durable housekeeping adds a singleton cursor and its primary-key index.
 assert_scalar 'im_v2 relation count' \
-  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '123'
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '153'
 assert_scalar 'im_v2 index count' \
-  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '301'
+  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '360'
 assert_scalar 'im_v2 application trigger count' \
-  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '8'
+  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '29'
 assert_scalar 'im_v2 function count' \
-  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '8'
+  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '27'
 
 normalize_schema() {
   awk '
@@ -73,11 +107,61 @@ normalize_schema() {
   '
 }
 
-diff --unified \
-  <(normalize_schema < "${schema_file}") \
-  <("${compose[@]}" exec -T postgres \
-      pg_dump --schema-only --schema=im_v2 --no-owner --no-privileges --no-comments \
-      -U im_v2_test -d im_v2_test | normalize_schema)
+# Compare database-normalized DDL, not source formatting/order. A separate
+# restore also verifies that every dependency in the canonical schema survives
+# a normal PostgreSQL schema export/import.
+dump_schema "${bootstrap_db}" > "${work_dir}/bootstrap.sql"
+restore_psql < "${work_dir}/bootstrap.sql" >/dev/null
+# Topology and housekeeping cursor values are required runtime state, not DDL. Preserve the
+# actual value in this export/restore check instead of fabricating a new one.
+dump_topology "${bootstrap_db}" > "${work_dir}/topology.sql"
+restore_psql < "${work_dir}/topology.sql" >/dev/null
+dump_schema "${restore_db}" > "${work_dir}/restored.sql"
+normalize_schema < "${work_dir}/bootstrap.sql" > "${work_dir}/bootstrap.normalized.sql"
+normalize_schema < "${work_dir}/restored.sql" > "${work_dir}/restored.normalized.sql"
+diff --unified "${work_dir}/bootstrap.normalized.sql" "${work_dir}/restored.normalized.sql"
+
+test "$(restore_psql -tA < "${schema_contract_query}" | tr -d '[:space:]')" = 't'
+test "$(restore_psql -tAc 'SELECT count(*) = 1 AND bool_and(singleton AND rotation = 0) FROM im_v2.control_housekeeping_cursor' | tr -d '[:space:]')" = 't'
+psql -c 'ALTER TABLE im_v2.control_housekeeping_cursor DROP CONSTRAINT control_housekeeping_cursor_rotation_check' >/dev/null
+test "$(current_schema_contract)" = 'f'
+psql -c 'ALTER TABLE im_v2.control_housekeeping_cursor ADD CONSTRAINT control_housekeeping_cursor_rotation_check CHECK (rotation >= 0)' >/dev/null
+test "$(current_schema_contract)" = 't'
+
+
+psql -c 'ALTER TABLE im_v2.room_owner_migrations DISABLE TRIGGER room_owner_migrations_identity_guard' >/dev/null
+test "$(current_schema_contract)" = 'f'
+psql -c 'ALTER TABLE im_v2.room_owner_migrations ENABLE TRIGGER room_owner_migrations_identity_guard' >/dev/null
+test "$(current_schema_contract)" = 't'
+
+psql -c 'CREATE INDEX rooms_last_event_at_idx ON im_v2.rooms(last_event_at DESC, room_id)' >/dev/null
+test "$(current_schema_contract)" = 'f'
+psql -c 'DROP INDEX im_v2.rooms_last_event_at_idx' >/dev/null
+test "$(current_schema_contract)" = 't'
+
+psql -c 'DROP INDEX im_v2.messages_latest_visible_idx' >/dev/null
+test "$(current_schema_contract)" = 'f'
+psql -c 'CREATE INDEX messages_latest_visible_idx ON im_v2.messages(room_id)' >/dev/null
+test "$(current_schema_contract)" = 'f'
+psql -c 'DROP INDEX im_v2.messages_latest_visible_idx' >/dev/null
+psql -c 'CREATE INDEX messages_latest_visible_idx ON im_v2.messages(room_id, room_sequence DESC, message_id DESC) WHERE withdrawn_at IS NULL' >/dev/null
+test "$(current_schema_contract)" = 't'
+
+psql -c 'DROP INDEX im_v2.messages_visible_membership_idx' >/dev/null
+test "$(current_schema_contract)" = 'f'
+psql -c 'CREATE INDEX messages_visible_membership_idx ON im_v2.messages(room_id)' >/dev/null
+test "$(current_schema_contract)" = 'f'
+psql -c 'DROP INDEX im_v2.messages_visible_membership_idx' >/dev/null
+psql -c "CREATE INDEX messages_visible_membership_idx ON im_v2.messages(room_id, accepted_membership_revision, room_sequence DESC) WHERE accepted_event_storage = 'message_row' AND withdrawn_at IS NULL" >/dev/null
+test "$(current_schema_contract)" = 't'
+
+psql -c 'DROP INDEX im_v2.room_events_accepted_membership_idx' >/dev/null
+test "$(current_schema_contract)" = 'f'
+psql -c 'CREATE INDEX room_events_accepted_membership_idx ON im_v2.room_events(room_id)' >/dev/null
+test "$(current_schema_contract)" = 'f'
+psql -c 'DROP INDEX im_v2.room_events_accepted_membership_idx' >/dev/null
+psql -c "CREATE INDEX room_events_accepted_membership_idx ON im_v2.room_events(room_id, committed_membership_revision, room_sequence DESC) WHERE event_type = 'message.accepted'" >/dev/null
+test "$(current_schema_contract)" = 't'
 
 psql -c 'CREATE TABLE im_v2.local_schema_migrations (migration_id TEXT PRIMARY KEY)' >/dev/null
 test "$(current_schema_contract)" = 'f'

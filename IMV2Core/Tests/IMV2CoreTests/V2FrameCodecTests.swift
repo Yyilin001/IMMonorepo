@@ -3,6 +3,31 @@ import Testing
 @testable import IMV2Core
 
 struct V2FrameCodecTests {
+    @Test(arguments: [-1, Int(UInt32.max) + 1, Int.max])
+    func rejectsPayloadLimitsOutsideWireRange(limit: Int) {
+        #expect(throws: V2FrameCodecError.invalidLimits) {
+            _ = try V2FrameLimits(maximumPayloadBytes: limit, acceptedVersions: [1])
+        }
+    }
+
+    @Test(arguments: [0, 32, Int(UInt32.max)])
+    func maximumDeclaredLengthIsCheckedWithoutAllocatingPayload(limit: Int) throws {
+        let limits = try V2FrameLimits(maximumPayloadBytes: limit, acceptedVersions: [1])
+        let empty = V2Frame(version: 1, command: .clientHello, requestID: UInt64.max, payload: Data())
+        let encoded = try V2FrameCodec.encode(empty, limits: limits)
+        #expect(try V2FrameCodec.decodeExactlyOne(encoded, limits: limits) == empty)
+        var header = encoded
+        header.replaceSubrange(14..<18, with: [0xff, 0xff, 0xff, 0xff])
+        var decoder = V2FrameDecoder(limits: limits)
+        if limit == Int(UInt32.max) {
+            #expect(try decoder.append(header).isEmpty)
+            #expect(decoder.hasBufferedBytes)
+            #expect(throws: V2FrameCodecError.trailingPartialFrame) { try decoder.finish() }
+        } else {
+            #expect(throws: V2FrameCodecError.declaredPayloadTooLarge(Int(UInt32.max))) { _ = try decoder.append(header) }
+        }
+    }
+
     @Test("a frame round-trips across arbitrary TLS byte boundaries")
     func fragmentedRoundTrip() throws {
         let limits = try V2FrameLimits(maximumPayloadBytes: 32, acceptedVersions: [1])

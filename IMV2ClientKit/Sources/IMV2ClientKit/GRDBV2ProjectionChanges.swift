@@ -65,8 +65,12 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
             table.hasPrefix("v2_contact_profile_search") || table.hasPrefix("sqlite_") { return .none }
         let conversation: V2ProjectionScopes = [.conversations, .conversationDetails]
         switch table {
+        case "v2_room_recovery_work", "v2_room_recovery_scan":
+            return .none
+        case "v2_room_sync_states", "v2_room_latest_visible":
+            return .init(scopes: conversation, requiresImmediateRefresh: kind == .delete)
         case "v2_sync_rebuild_requests", "v2_sync_cursor", "v2_sync_events", "v2_group_events", "v2_group_event_cursors",
-             "v2_hybrid_group_background_state", "v2_snapshot_import", "v2_reset_rollback",
+             "v2_snapshot_import", "v2_reset_rollback",
              "v2_local_installation", "v2_push_intent", "v2_message_search_jobs", "v2_message_search_state", "v2_message_effects", "v2_reaction_versions", "v2_reaction_effects", "v2_announcement_effects", "v2_pin_effects", "v2_role_policy_effects":
             return .none
         // Derived summary rows may be deleted/reinserted for an ordinary new

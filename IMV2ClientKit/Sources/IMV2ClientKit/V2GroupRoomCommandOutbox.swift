@@ -14,7 +14,7 @@ public struct V2PendingGroupRoomCreation: Equatable, Sendable {
     /// 房间标题，已去除首尾空白。
     public let title: String
     /// 房间投递模式。
-    public let deliveryMode: V2GroupDeliveryMode
+    public let capacityClass: V2GroupCapacityClass
     /// 初始成员（不含群主），已排序存放。
     public let initialMemberUserIDs: [UserID]
     /// 服务端分阶段草稿已持久化确认的受众条目数量。
@@ -42,7 +42,7 @@ public struct V2PendingGroupRoomCreation: Equatable, Sendable {
     /// - Parameters:
     ///   - operationID: 建群操作标识。
     ///   - title: 房间标题。
-    ///   - deliveryMode: 投递模式。
+    ///   - capacityClass: 投递模式。
     ///   - initialMemberUserIDs: 初始成员列表。
     ///   - uploadedMemberCount: 已确认上传的成员数量，默认零。
     ///   - state: 当前状态。
@@ -52,7 +52,7 @@ public struct V2PendingGroupRoomCreation: Equatable, Sendable {
     ///   - terminalCode: 终态错误码。
     /// - Throws: 任一字段或状态组合不合法时抛出
     ///   ``V2ClientCommandError/commandConflict``。
-    public init(operationID: GroupRoomOperationID, title: String, deliveryMode: V2GroupDeliveryMode, initialMemberUserIDs: [UserID], uploadedMemberCount: Int = 0, state: State, attemptCount: Int, nextAttemptAt: Date, createdRoomID: RoomID?, terminalCode: String?) throws {
+    public init(operationID: GroupRoomOperationID, title: String, capacityClass: V2GroupCapacityClass, initialMemberUserIDs: [UserID], uploadedMemberCount: Int = 0, state: State, attemptCount: Int, nextAttemptAt: Date, createdRoomID: RoomID?, terminalCode: String?) throws {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty,
               normalizedTitle.utf8.count <= V2CreateGroupRoomCommand.maximumTitleUTF8Bytes,
@@ -71,7 +71,7 @@ public struct V2PendingGroupRoomCreation: Equatable, Sendable {
         else { throw V2ClientCommandError.commandConflict }
         self.operationID = operationID
         self.title = normalizedTitle
-        self.deliveryMode = deliveryMode
+        self.capacityClass = capacityClass
         self.initialMemberUserIDs = initialMemberUserIDs.sorted()
         self.uploadedMemberCount = uploadedMemberCount
         self.state = state
@@ -234,14 +234,14 @@ public actor V2GroupRoomCommandOutboxEngine {
     ///
     /// - Parameters:
     ///   - title: 房间标题。
-    ///   - deliveryMode: 投递模式。
+    ///   - capacityClass: 投递模式。
     ///   - initialMemberUserIDs: 初始成员列表。
     /// - Returns: 入队或复用后的意图。
     /// - Throws: 意图构造失败或持久化失败时抛出。
-    public func enqueueCreation(title: String, deliveryMode: V2GroupDeliveryMode, initialMemberUserIDs: [UserID]) async throws -> V2PendingGroupRoomCreation {
+    public func enqueueCreation(title: String, capacityClass: V2GroupCapacityClass, initialMemberUserIDs: [UserID]) async throws -> V2PendingGroupRoomCreation {
         let command = try V2PendingGroupRoomCreation(
             operationID: .init(makeUUID().uuidString), title: title,
-            deliveryMode: deliveryMode,
+            capacityClass: capacityClass,
             initialMemberUserIDs: initialMemberUserIDs, state: .pending,
             attemptCount: 0, nextAttemptAt: now(), createdRoomID: nil, terminalCode: nil
         )
@@ -339,7 +339,7 @@ public actor V2GroupRoomCommandOutboxEngine {
             let created = try await transport.finalizeGroupRoomCreation(operationID: command.operationID)
             try Task.checkCancellation()
             guard created.title == command.title,
-                  created.deliveryMode == command.deliveryMode,
+                  created.capacityClass == command.capacityClass,
                   created.memberCount >= command.initialMemberUserIDs.count + 1,
                   created.memberUserIDs.isEmpty
             else { throw V2RealtimeTransportError.unexpectedResponse }

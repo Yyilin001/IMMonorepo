@@ -1,3 +1,4 @@
+import IMV2ClientKit
 import SwiftUI
 import UIKit
 
@@ -92,6 +93,7 @@ struct V2RootView: View {
                             deviceSessionsStore: store.deviceSessionsStore,
                             groupInvitationStore: store.groupInvitationStore,
                             localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
+                            passwordLifecycleClient: store.passwordLifecycleClient(),
                             signOut: { await store.signOut() }
                         )
                         .environment(\.v2MediaThumbnailCache, store.mediaThumbnailCache)
@@ -240,6 +242,7 @@ private struct V2SignInView: View {
     @State private var mode: V2AppStore.PasswordMode = .signIn
     @State private var inputValidationMessage: String?
     @State private var actionTask: Task<Void, Never>?
+    @State private var securityPresented = false
 
     init(
         store: V2AppStore,
@@ -306,6 +309,10 @@ private struct V2SignInView: View {
                 .accessibilityIdentifier("v2.password.submit")
             }
 
+            Section {
+                Button("找回账号与账号安全") { securityPresented = true }
+                    .accessibilityIdentifier("v2.security.open")
+            }
             if let feedbackMessage {
                 Section {
                     Text(feedbackMessage)
@@ -317,6 +324,11 @@ private struct V2SignInView: View {
         }
         .scrollContentBackground(.hidden)
         .navigationTitle("登录")
+        .sheet(isPresented: $securityPresented) {
+            if let client = store.passwordLifecycleClient() {
+                NavigationStack { V2AccountSecurityView(client: client, initialAction: .recover) }
+            }
+        }
         .onAppear {
             if let feedbackMessage {
                 announceV2AccessibilityAnnouncement(feedbackMessage)
@@ -357,6 +369,7 @@ private struct V2SignInView: View {
 
 private struct V2SignedInRootView: View {
     private enum PresentedSettingsSheet: String, Identifiable {
+        case accountSecurity
         case privacy
         case publicIdentity
         case deviceSessions
@@ -373,6 +386,7 @@ private struct V2SignedInRootView: View {
     let deviceSessionsStore: V2DeviceSessionsStore?
     let groupInvitationStore: V2GroupInvitationStore?
     let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
+    let passwordLifecycleClient: V2PasswordLifecycleClient?
     let signOut: @MainActor @Sendable () async -> Void
     @State private var signOutTask: Task<Void, Never>?
     @State private var presentedSettingsSheet: PresentedSettingsSheet?
@@ -390,6 +404,7 @@ private struct V2SignedInRootView: View {
                     openPublicIdentity: { presentedSettingsSheet = .publicIdentity },
                     openDeviceSessions: { presentedSettingsSheet = .deviceSessions },
                     openPrivacySettings: { presentedSettingsSheet = .privacy },
+                    openAccountSecurity: { presentedSettingsSheet = .accountSecurity },
                     signOut: {
                         guard signOutTask == nil else { return }
                         signOutTask = Task {
@@ -413,6 +428,10 @@ private struct V2SignedInRootView: View {
             .onDisappear { signOutTask?.cancel() }
             .sheet(item: $presentedSettingsSheet) { sheet in
                 switch sheet {
+                case .accountSecurity:
+                    if let passwordLifecycleClient {
+                        NavigationStack { V2AccountSecurityView(client: passwordLifecycleClient, passwordChanged: signOut) }
+                    }
                 case .privacy:
                     NavigationStack {
                         V2PrivacySettingsView(

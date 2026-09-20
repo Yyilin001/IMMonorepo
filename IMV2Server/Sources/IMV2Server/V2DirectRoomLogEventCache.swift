@@ -503,8 +503,7 @@ public final class V2DirectRoomLogEventCache: Sendable {
     }
 
     private static func isEligible(_ message: V2AcceptedMessage) -> Bool {
-        message.usesRoomEventLog &&
-            message.groupDeliveryMode != .standardFanout &&
+        message.groupCapacityClass != .standard &&
             message.media.isEmpty &&
             message.mentions.isEmpty &&
             message.replyTo == nil &&

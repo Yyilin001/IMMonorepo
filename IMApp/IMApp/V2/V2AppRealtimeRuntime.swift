@@ -567,7 +567,7 @@ actor V2RealtimeDirectConversationOpener: V2DirectConversationOpening {
         let operationID = try DirectRoomOperationID(makeUUID().uuidString)
         let opened = try await transport.openDirectRoom(operationID: operationID, targetUserID: publicIdentity.userID)
         try Task.checkCancellation()
-        try await localStore.cacheDirectRoomIdentity(roomID: opened.roomID, publicIdentity: publicIdentity)
+        try await localStore.cacheDirectRoomIdentity(roomID: opened.roomID, publicIdentity: publicIdentity, roomCreatedAt: opened.createdAt)
         return opened.roomID.rawValue
     }
 }
@@ -598,10 +598,10 @@ actor V2OutboxGroupConversationCreator: V2GroupConversationCreating {
             // first transport attempt rather than rejecting a user action just
             // because this foreground connection is presently unavailable.
         }
-        guard let deliveryMode = V2GroupDeliveryPolicy().deliveryMode(forInitialMemberCount: members.count + 1) else {
+        guard let capacityClass = V2GroupCapacityPolicy().capacityClass(forInitialMemberCount: members.count + 1) else {
             return .rejected(code: "GROUP_MEMBER_LIMIT_REACHED")
         }
-        let command = try await outbox.enqueueCreation(title: title, deliveryMode: deliveryMode, initialMemberUserIDs: members)
+        let command = try await outbox.enqueueCreation(title: title, capacityClass: capacityClass, initialMemberUserIDs: members)
         // A staged creation has at least Begin and Finalize, plus one bounded
         // Append per audience page. Calling the durable engine only once made
         // a healthy foreground creation look offline after Begin succeeded.
@@ -931,20 +931,17 @@ actor V2OutboxRelationshipChanger: V2RelationshipChanging {
 /// 其持久化投递权威仍是常规扇出。
 actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing {
     private let groupEventSync: V2GroupEventSyncEngine
-    private let foregroundGroupPreview: V2ForegroundGroupEventPreviewEngine
     private let localStore: GRDBV2LocalSyncStore
     private let subscriptionTransport: any V2ClientGroupEventSubscriptionTransport
     private let wakeSource: any V2GroupEventAvailabilityHintSource
 
     init(
         groupEventSync: V2GroupEventSyncEngine,
-        foregroundGroupPreview: V2ForegroundGroupEventPreviewEngine,
         localStore: GRDBV2LocalSyncStore,
         subscriptionTransport: any V2ClientGroupEventSubscriptionTransport,
         wakeSource: any V2GroupEventAvailabilityHintSource
     ) {
         self.groupEventSync = groupEventSync
-        self.foregroundGroupPreview = foregroundGroupPreview
         self.localStore = localStore
         self.subscriptionTransport = subscriptionTransport
         self.wakeSource = wakeSource
@@ -959,12 +956,7 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
         }
         let progress: V2GroupEventSyncProgress
         do {
-            switch access.delivery {
-            case .durableRoomLog:
-                progress = try await groupEventSync.synchronizeOnePage(roomID: parsedRoomID)
-            case .foregroundPreview:
-                progress = try await foregroundGroupPreview.synchronizeOnePage(roomID: parsedRoomID)
-            }
+            progress = try await groupEventSync.synchronizeOnePage(roomID: parsedRoomID)
         } catch let error as V2RealtimeTransportError {
             guard case .server(let code, _, _, _) = error, code == "FORBIDDEN" else { throw error }
             try await localStore.markRoomEventUnauthorized(roomID: parsedRoomID)
@@ -981,13 +973,7 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
             return .notHybridRoom
         }
         do {
-            let cursor: UInt64
-            switch access.delivery {
-            case .durableRoomLog:
-                cursor = try await localStore.groupEventCursor(roomID: parsedRoomID)
-            case .foregroundPreview:
-                cursor = try await foregroundGroupPreview.cursor(roomID: parsedRoomID)
-            }
+            let cursor = try await localStore.groupEventCursor(roomID: parsedRoomID)
             let subscription = try await subscriptionTransport.subscribeToGroupEvents(
                 roomID: parsedRoomID,
                 afterRoomSequence: cursor
@@ -1018,8 +1004,7 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
                   $1.roomSequence == $0.roomSequence + 1
               }),
               let access = try await localStore.groupEventAccess(roomID: roomID),
-              access.isAuthorized,
-              access.delivery == .durableRoomLog
+              access.isAuthorized
         else { return false }
         let cursor = try await localStore.groupEventCursor(roomID: roomID)
         if wake.highWatermark <= cursor { return true }
@@ -1040,12 +1025,12 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
     func unsubscribe(roomID: String) async {
         guard let parsedRoomID = try? RoomID(roomID) else { return }
         try? await subscriptionTransport.unsubscribeFromGroupEvents(roomID: parsedRoomID)
-        await foregroundGroupPreview.forget(roomID: parsedRoomID)
     }
 }
 
 struct V2AppRealtimeRuntime {
     let runtime: V2ClientRuntime
+    let roomRecovery: V2RoomRecoveryRunner
     let backgroundSync: V2BackgroundSyncRunner
     let projectionChangeNotifier: V2ProjectionChangeNotifier
     let sender: any V2ConversationSending
@@ -1053,8 +1038,6 @@ struct V2AppRealtimeRuntime {
     let messageReactionChanger: any V2MessageReactionChanging
     let messageEditor: any V2MessageEditing
     let readReceiptReporter: any V2ConversationReadReporting
-    /// 会话列表未读的本地目录；按有界轮转从服务端摘要补齐。
-    let conversationUnreadDirectory: V2ClientConversationUnreadDirectory
     let conversationStateChanger: any V2ConversationStateChanging
     let messageFavoriter: any V2MessageFavoriting
     let groupMessagePinner: any V2GroupMessagePinning
@@ -1136,16 +1119,23 @@ struct V2AppRealtimeRuntime {
         let syncEngine = V2SyncEngine(transport: transport, store: localStore, capabilityProfile: "base", operationGate: syncOwnership)
         let backgroundConnection = V2TLSFrameConnection(endpoint: configuration.realtimeEndpoint, frameLimits: frameLimits)
         let backgroundTransport = V2ProtobufSyncTransport(wire: backgroundConnection, protocolVersion: UInt8(IMV2ProtocolVersion.current))
+        let backgroundPersonalSync = V2SyncEngine(transport: backgroundTransport, store: localStore, capabilityProfile: "base", maxRecords: 100, operationGate: syncOwnership)
+        let backgroundRecovery = V2RoomRecoveryRunner(
+            engine: V2RoomRecoveryEngine(transport: backgroundTransport, latestVisible: backgroundTransport, store: localStore,
+                groupEvents: V2GroupEventSyncEngine(transport: backgroundTransport, store: localStore, pageSize: 100)),
+            source: backgroundConnection, personalSync: backgroundPersonalSync)
         backgroundSync = V2BackgroundSyncRunner(
             connection: V2RealtimeSessionCoordinator(authSession: authSession, connection: backgroundConnection, supportedCapabilityProfiles: ["base"]),
-            syncEngine: V2SyncEngine(transport: backgroundTransport, store: localStore, capabilityProfile: "base", maxRecords: 100, operationGate: syncOwnership),
-            roomSync: V2GroupEventSyncEngine(transport: backgroundTransport, store: localStore, pageSize: 100)
+            syncEngine: backgroundPersonalSync,
+            roomSync: { pages in
+                let credentials = try await authSession.realtimeCredentials()
+                try await authSession.requireAuthenticatedEpoch(authEpoch)
+                return try await backgroundRecovery.runBounded(userID: credentials.userID, maximumPages: pages)
+            }
         )
         let groupEventSync = V2GroupEventSyncEngine(transport: transport, store: localStore)
-        let foregroundGroupPreview = V2ForegroundGroupEventPreviewEngine(transport: transport, store: localStore)
         let activeHybridGroupSynchronizer = V2RealtimeActiveHybridGroupSynchronizer(
             groupEventSync: groupEventSync,
-            foregroundGroupPreview: foregroundGroupPreview,
             localStore: localStore,
             subscriptionTransport: transport,
             wakeSource: connection
@@ -1160,12 +1150,8 @@ struct V2AppRealtimeRuntime {
                 guard let access = try await localStore.groupEventAccess(roomID: roomID), access.isAuthorized else {
                     throw V2RealtimeTransportError.server(code: "FORBIDDEN", retryable: false, retryAfterSeconds: 0, currentRevision: nil)
                 }
-                switch access.delivery {
-                case .durableRoomLog: return try await localStore.groupEventCursor(roomID: roomID)
-                case .foregroundPreview: return try await foregroundGroupPreview.cursor(roomID: roomID)
-                }
-            },
-            didUnsubscribeRoom: { roomID in await foregroundGroupPreview.forget(roomID: roomID) }
+                return try await localStore.groupEventCursor(roomID: roomID)
+            }
         )
         self.roomSubscriptions = roomSubscriptions
         let coordinator = V2RealtimeSessionCoordinator(
@@ -1193,7 +1179,9 @@ struct V2AppRealtimeRuntime {
             .init { if case .idle = try await readReceiptOutbox.flushOnce() { return false }; return true },
             .init { if case .idle = try await conversationCapabilitiesOutbox.flushOnce() { return false }; return true },
         ])
-        let roomCatchUpWorker = V2RoomLogCatchUpWorker(engine: groupEventSync)
+        let roomRecoveryEngine = V2RoomRecoveryEngine(transport: transport, latestVisible: transport, store: localStore, groupEvents: groupEventSync)
+        let roomCatchUpWorker = V2RoomRecoveryRunner(engine: roomRecoveryEngine, source: connection, personalSync: syncEngine)
+        self.roomRecovery = roomCatchUpWorker
         let activity = V2DefaultClientRuntimeActivity(
             syncEngine: syncEngine,
             availabilitySource: connection,
@@ -1248,7 +1236,11 @@ struct V2AppRealtimeRuntime {
                 guard let connectionID else { throw V2TLSFrameConnectionError.notConnected }
                 try await roomSubscriptions.run(connectionID: connectionID)
             },
-            roomCatchUpLoop: { try await roomCatchUpWorker.run() },
+            roomCatchUpLoop: {
+                let credentials = try await authSession.realtimeCredentials()
+                try await authSession.requireAuthenticatedEpoch(authEpoch)
+                try await roomCatchUpWorker.run(userID: credentials.userID)
+            },
             policyRecoveryLoop: {
                 // A fresh loop owner per authenticated connection prevents an
                 // old cancelled read from owning the replacement session.
@@ -1263,9 +1255,6 @@ struct V2AppRealtimeRuntime {
         messageReactionChanger = V2OutboxMessageReactionChanger(outbox: reactionOutbox)
         messageEditor = V2OutboxMessageEditor(outbox: editOutbox)
         readReceiptReporter = V2OutboxConversationReadReporter(outbox: readReceiptOutbox)
-        conversationUnreadDirectory = V2ClientConversationUnreadDirectory(
-            transport: transport, store: localStore, watermarks: localStore
-        )
         conversationStateChanger = V2OutboxConversationStateChanger(outbox: conversationCapabilitiesOutbox)
         messageFavoriter = V2OutboxMessageFavoriter(outbox: conversationCapabilitiesOutbox)
         groupMessagePinner = V2OutboxGroupMessagePinner(outbox: groupCapabilitiesOutbox)

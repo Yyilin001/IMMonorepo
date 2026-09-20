@@ -16,7 +16,7 @@ struct V2CachedDurableWorkMetricsSourceTests {
             source: source, minimumRefreshInterval: 5,
             now: { clock.now() }, monotonicNow: { clock.monotonicNow() }
         )
-        #expect(await cached.durableWorkMetricsSnapshot().readyRoomOutboxRows == 42)
+        #expect(await cached.durableWorkMetricsSnapshot().readyUserStateEventRows == 42)
         clock.set(jumped)
         clock.advanceMonotonic(by: .milliseconds(4_500))
         #expect(await cached.durableWorkMetricsSnapshot().isAvailable)
@@ -24,7 +24,7 @@ struct V2CachedDurableWorkMetricsSourceTests {
         clock.advanceMonotonic(by: .milliseconds(750))
         let fallback = await cached.durableWorkMetricsSnapshot()
         #expect(!fallback.isAvailable && fallback.servedFromLastKnownGood)
-        #expect(fallback.readyRoomOutboxRows == 42)
+        #expect(fallback.readyUserStateEventRows == 42)
         #expect(fallback.lastSuccessfulRefreshAgeSeconds == 5)
         #expect(await source.loadCount() == 2)
         // Repairing wall time does not make a cached failure fresh success.
@@ -33,7 +33,7 @@ struct V2CachedDurableWorkMetricsSourceTests {
         #expect(await source.loadCount() == 2)
         clock.advanceMonotonic(by: .seconds(5))
         let recovered = await cached.durableWorkMetricsSnapshot()
-        #expect(recovered.isAvailable && recovered.readyRoomOutboxRows == 99)
+        #expect(recovered.isAvailable && recovered.readyUserStateEventRows == 99)
         #expect(!recovered.servedFromLastKnownGood)
         #expect(await source.loadCount() == 3)
     }
@@ -65,7 +65,7 @@ struct V2CachedDurableWorkMetricsSourceTests {
         clock.advance(by: 2)
         let fallback = await cached.durableWorkMetricsSnapshot()
         #expect(!fallback.isAvailable && fallback.servedFromLastKnownGood)
-        #expect(fallback.readyRoomOutboxRows == 42)
+        #expect(fallback.readyUserStateEventRows == 42)
         #expect(fallback.lastSuccessfulRefreshAgeSeconds == 2)
     }
 
@@ -77,17 +77,17 @@ struct V2CachedDurableWorkMetricsSourceTests {
         let upstream = ClockChangingMetricsSource(clock: clock, failureTime: Date(timeIntervalSince1970: seconds))
         let cached = V2CachedDurableWorkMetricsSource(source: upstream, minimumRefreshInterval: 1, now: { clock.now() }, monotonicNow: { clock.monotonicNow() })
         let initial = await cached.durableWorkMetricsSnapshot()
-        #expect(initial.isAvailable && initial.readyRoomOutboxRows == 42)
+        #expect(initial.isAvailable && initial.readyUserStateEventRows == 42)
         clock.advance(by: 2)
         let failed = await cached.durableWorkMetricsSnapshot()
         #expect(!failed.isAvailable)
         #expect(!failed.servedFromLastKnownGood)
-        #expect(failed.readyRoomOutboxRows == 0)
+        #expect(failed.readyUserStateEventRows == 0)
         // Recover inside the original success's TTL: a failed refresh must
         // not make that older snapshot healthy again merely due to clock repair.
         clock.set(baseline.addingTimeInterval(0.5))
         let recovered = await cached.durableWorkMetricsSnapshot()
-        #expect(recovered.isAvailable && recovered.readyRoomOutboxRows == 99)
+        #expect(recovered.isAvailable && recovered.readyUserStateEventRows == 99)
         #expect(!recovered.servedFromLastKnownGood)
     }
 
@@ -140,7 +140,7 @@ struct V2CachedDurableWorkMetricsSourceTests {
 
         let first = await cached.durableWorkMetricsSnapshot()
         #expect(first.isAvailable)
-        #expect(first.readyRoomOutboxRows == 42)
+        #expect(first.readyUserStateEventRows == 42)
 
         clock.advance(by: 1)
         await withTaskGroup(of: V2DurableWorkMetricsSnapshot.self) { group in
@@ -151,7 +151,7 @@ struct V2CachedDurableWorkMetricsSourceTests {
                 #expect(!snapshot.isAvailable)
                 #expect(snapshot.servedFromLastKnownGood)
                 #expect(snapshot.lastSuccessfulRefreshAgeSeconds == 1)
-                #expect(snapshot.readyRoomOutboxRows == 42)
+                #expect(snapshot.readyUserStateEventRows == 42)
             }
         }
         #expect(await upstream.loadCount() == 2)
@@ -160,7 +160,7 @@ struct V2CachedDurableWorkMetricsSourceTests {
         let recovered = await cached.durableWorkMetricsSnapshot()
         #expect(recovered.isAvailable)
         #expect(!recovered.servedFromLastKnownGood)
-        #expect(recovered.readyRoomOutboxRows == 99)
+        #expect(recovered.readyUserStateEventRows == 99)
         #expect(await upstream.loadCount() == 3)
     }
 
@@ -168,9 +168,8 @@ struct V2CachedDurableWorkMetricsSourceTests {
     func aggregatesShardMetrics() async {
         let control = FixedMetricsSource(.init(
             isAvailable: true,
-            readyRoomOutboxRows: 2,
-            terminalFanoutCompletionUnits: 6,
-            oldestTerminalFanoutCompletionAgeSeconds: 12,
+            readyUserStateEventRows: 2,
+            oldestUnfinishedUserStateEventAgeSeconds: 12,
             pendingDeviceRevocationEvents: 3,
             pendingRevokedDeviceProjectionCleanupEvents: 4
         ))
@@ -198,9 +197,8 @@ struct V2CachedDurableWorkMetricsSourceTests {
             sources: [control, firstShard, secondShard]
         ).durableWorkMetricsSnapshot()
         #expect(aggregate.isAvailable)
-        #expect(aggregate.readyRoomOutboxRows == 2)
-        #expect(aggregate.terminalFanoutCompletionUnits == 6)
-        #expect(aggregate.oldestTerminalFanoutCompletionAgeSeconds == 12)
+        #expect(aggregate.readyUserStateEventRows == 2)
+        #expect(aggregate.oldestUnfinishedUserStateEventAgeSeconds == 12)
         #expect(aggregate.pendingDeviceRevocationEvents == 3)
         #expect(aggregate.pendingRevokedDeviceProjectionCleanupEvents == 4)
         #expect(aggregate.userSyncLogEstimatedRows == 11)
@@ -215,7 +213,7 @@ struct V2CachedDurableWorkMetricsSourceTests {
             sources: [control, FixedMetricsSource(.unavailable)]
         ).durableWorkMetricsSnapshot()
         #expect(!partial.isAvailable)
-        #expect(partial.readyRoomOutboxRows == 0)
+        #expect(partial.readyUserStateEventRows == 0)
         #expect(partial.userSyncLogRelationBytes == 0)
     }
 }
@@ -232,7 +230,7 @@ private actor CountingMetricsSource: V2DurableWorkMetricsSource {
     func durableWorkMetricsSnapshot() async -> V2DurableWorkMetricsSnapshot {
         count += 1
         await Task.yield()
-        return .init(isAvailable: true, readyRoomOutboxRows: count)
+        return .init(isAvailable: true, readyUserStateEventRows: count)
     }
 
     func loadCount() -> Int { count }
@@ -245,16 +243,16 @@ private actor FirstThenSuspendingMetricsSource: V2DurableWorkMetricsSource {
         count += 1
         switch count {
         case 1:
-            return .init(isAvailable: true, readyRoomOutboxRows: 42)
+            return .init(isAvailable: true, readyUserStateEventRows: 42)
         case 2:
             do {
                 try await Task.sleep(for: .seconds(60))
-                return .init(isAvailable: true, readyRoomOutboxRows: 77)
+                return .init(isAvailable: true, readyUserStateEventRows: 77)
             } catch {
                 return .unavailable
             }
         default:
-            return .init(isAvailable: true, readyRoomOutboxRows: 99)
+            return .init(isAvailable: true, readyUserStateEventRows: 99)
         }
     }
 
@@ -285,8 +283,8 @@ private actor ClockChangingMetricsSource: V2DurableWorkMetricsSource {
     func loadCount() -> Int { calls }
     func durableWorkMetricsSnapshot() -> V2DurableWorkMetricsSnapshot {
         calls += 1
-        if calls == 1 { return .init(isAvailable: true, readyRoomOutboxRows: 42) }
+        if calls == 1 { return .init(isAvailable: true, readyUserStateEventRows: 42) }
         if calls == 2 { clock.set(failureTime); return .unavailable }
-        return .init(isAvailable: true, readyRoomOutboxRows: 99)
+        return .init(isAvailable: true, readyUserStateEventRows: 99)
     }
 }

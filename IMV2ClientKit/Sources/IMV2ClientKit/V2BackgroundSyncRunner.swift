@@ -26,8 +26,8 @@ public actor V2BackgroundSyncRunner {
     private let connection: any V2RealtimeSessionConnecting
     /// 处理个人增量的同步引擎。
     private let syncEngine: V2SyncEngine
-    /// 可选可靠房间日志引擎，与个人增量共享页面和时间预算。
-    private let roomSync: V2GroupEventSyncEngine?
+    /// 可选有界房间恢复操作，与个人增量共享目录/正文页面和时间预算。
+    private let roomSync: (@Sendable (Int) async throws -> V2IncrementalSyncResult)?
     /// 一次共享后台操作的默认预算。
     private let budget: V2BackgroundSyncBudget
     /// 当前共享后台操作及其身份。
@@ -40,9 +40,9 @@ public actor V2BackgroundSyncRunner {
     /// - Parameters:
     ///   - connection: 专用后台会话连接。
     ///   - syncEngine: 个人增量引擎。
-    ///   - roomSync: 可选房间日志引擎。
+    ///   - roomSync: 接收剩余页数的有界恢复操作；调用方负责通知消费与任务排空。
     ///   - budget: 一次共享操作的页面和时间预算。
-    public init(connection: any V2RealtimeSessionConnecting, syncEngine: V2SyncEngine, roomSync: V2GroupEventSyncEngine? = nil, budget: V2BackgroundSyncBudget = .init()) {
+    public init(connection: any V2RealtimeSessionConnecting, syncEngine: V2SyncEngine, roomSync: (@Sendable (Int) async throws -> V2IncrementalSyncResult)? = nil, budget: V2BackgroundSyncBudget = .init()) {
         self.connection = connection
         self.syncEngine = syncEngine
         self.roomSync = roomSync
@@ -135,7 +135,7 @@ public actor V2BackgroundSyncRunner {
     ///
     /// 成功、异常或超时均请求取消组内任务并断开连接，任务组退出仍需等待子任务收尾，
     /// 因此工作截止时间不是方法返回的硬性时间上限。
-    private static func catchUp(connection: any V2RealtimeSessionConnecting, engine: V2SyncEngine, roomSync: V2GroupEventSyncEngine?, budget: V2BackgroundSyncBudget, callerDeadline: ContinuousClock.Instant?) async throws -> V2IncrementalSyncResult {
+    private static func catchUp(connection: any V2RealtimeSessionConnecting, engine: V2SyncEngine, roomSync: (@Sendable (Int) async throws -> V2IncrementalSyncResult)?, budget: V2BackgroundSyncBudget, callerDeadline: ContinuousClock.Instant?) async throws -> V2IncrementalSyncResult {
         let ownDeadline = ContinuousClock.now.advanced(by: budget.workDuration)
         let deadline = min(ownDeadline, callerDeadline ?? ownDeadline)
         return try await withThrowingTaskGroup(of: V2IncrementalSyncResult.self) { group in
@@ -149,10 +149,10 @@ public actor V2BackgroundSyncRunner {
                 guard personal.stopReason != .resetPending, let roomSync,
                       budget.maximumPages > personal.processedPageCount else { return personal }
                 try Task.checkCancellation()
-                let rooms = try await roomSync.synchronizeBackgroundKnownRooms(maximumPages: budget.maximumPages - personal.processedPageCount)
+                let rooms = try await roomSync(budget.maximumPages - personal.processedPageCount)
                 return .init(processedPageCount: personal.processedPageCount + rooms.processedPageCount,
-                             didCommitNewRecords: personal.didCommitNewRecords || rooms.appliedEventCount > 0,
-                             stopReason: personal.stopReason == .pageLimit || rooms.mayHaveRemainingWork ? .pageLimit : .caughtUp)
+                             didCommitNewRecords: personal.didCommitNewRecords || rooms.didCommitNewRecords,
+                             stopReason: personal.stopReason == .pageLimit || rooms.stopReason != .caughtUp ? .pageLimit : .caughtUp)
             }
             group.addTask {
                 try await ContinuousClock().sleep(until: deadline)

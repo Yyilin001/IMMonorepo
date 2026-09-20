@@ -10,6 +10,24 @@ public protocol V2SyncDriving: Sendable {
     func completePendingReset() async throws
 }
 
+extension V2SyncDriving {
+    /// Snapshot activation proves only its base sequence. Pull again to cover
+    /// personal events committed while that artifact was built or downloaded.
+    public func synchronizeIncludingResets() async throws -> UInt64 {
+        while true {
+            try Task.checkCancellation()
+            let result = try await synchronizeUntilCaughtUp()
+            try Task.checkCancellation()
+            switch result {
+            case .resetPending:
+                try await completePendingReset()
+            case .synchronized(let applied, let hasMore):
+                if !hasMore { return applied }
+            }
+        }
+    }
+}
+
 /// 消费在线可用性提示并驱动同步的运行循环。
 ///
 /// 应用拥有调用 run 的任务，通过前后台策略控制生命周期。提示只触发正常拉取与确认，不是持久化投递凭据。
@@ -43,19 +61,14 @@ public struct V2AvailabilityDrivenSyncRunner: Sendable {
     /// - Throws: 提示来源、同步、快照恢复、取消检查或后续操作错误，均结束本轮运行并向上抛出。
     ///
     /// 提示内容在此被忽略，真实状态由同步引擎重新读取。增量返回 resetPending 时先完成恢复，
-    /// 避免后续工作读取尚未切换的旧投影；完成后不会立即再次追赶增量，而是执行后续闭包并等待下一次提示。
+    /// 避免后续工作读取尚未切换的旧投影；继续补齐快照基线之后的个人事件，再执行后续闭包。
     ///
-    /// 进入循环时若已取消则正常返回；提示返回后不额外检查取消，取消响应依赖同步实现，后续闭包之前有显式检查。
+    /// 快照激活后继续增量追赶；只有明确没有更多个人事件后才执行后续闭包。
     /// 本方法没有定时唤醒，也不在内部自动重启失败循环。
     public func run() async throws {
         while !Task.isCancelled {
             _ = try await source.nextAvailabilityHint()
-            if case .resetPending = try await syncEngine.synchronizeUntilCaughtUp() {
-                // A reset can be requested at any time, not only during the
-                // initial connection catch-up. Do not run post-sync effects
-                // against the fenced pre-reset projection.
-                try await syncEngine.completePendingReset()
-            }
+            _ = try await syncEngine.synchronizeIncludingResets()
             try Task.checkCancellation()
             try await afterSynchronization()
         }

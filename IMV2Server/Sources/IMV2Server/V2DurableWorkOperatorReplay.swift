@@ -5,10 +5,8 @@ import IMV2Core
 ///
 /// 该词表是封闭集合，使控制面无法把任意表更新变成管理接口。
 public enum V2DurableWorkReplayTargetKind: String, CaseIterable, Codable, Equatable, Sendable {
-    /// 房间发件箱。
-    case roomOutbox = "room_outbox"
-    /// 扇出投递。
-    case fanoutDelivery = "fanout_delivery"
+    /// 可靠个人状态事件。
+    case userStateEvent = "user_state_event"
     /// 内容审核。
     case contentReview = "content_review"
     /// 媒体扫描。
@@ -41,14 +39,14 @@ public struct V2DurableWorkReplayTarget: Equatable, Sendable {
     public let sourceEventID: EventID
     /// 目标用户；仅部分类型需要。
     public let targetUserID: UserID?
-    /// 投影类型；仅扇出投递需要。
+    /// 投影类型；仅个人事件需要。
     public let projectionKind: String?
 
     /// 按工作类型校验并保存目标描述。
     ///
-    /// 房间发件箱、内容审核、媒体扫描与媒体清理不允许携带用户或投影类型；
-    /// 回执偏好传播与用户投影必须携带用户且不允许投影类型；扇出投递则两者都必须给出，
-    /// 且投影类型不超过 64 字节。
+    /// 内容审核、媒体扫描与媒体清理不允许携带用户或投影类型；
+    /// 回执偏好传播与用户投影必须携带用户且不允许投影类型；个人事件则两者都必须给出，
+    /// 且投影类型必须属于可靠个人事件的封闭词表。
     ///
     /// - Parameters:
     ///   - kind: 目标工作类型。
@@ -64,7 +62,7 @@ public struct V2DurableWorkReplayTarget: Equatable, Sendable {
         projectionKind: String? = nil
     ) throws {
         switch kind {
-        case .roomOutbox, .contentReview, .mediaScan, .mediaPurge:
+        case .contentReview, .mediaScan, .mediaPurge:
             guard targetUserID == nil, projectionKind == nil else {
                 throw V2DurableWorkReplayValidationError.invalidTargetShape
             }
@@ -72,11 +70,10 @@ public struct V2DurableWorkReplayTarget: Equatable, Sendable {
             guard targetUserID != nil, projectionKind == nil else {
                 throw V2DurableWorkReplayValidationError.invalidTargetShape
             }
-        case .fanoutDelivery:
+        case .userStateEvent:
             guard targetUserID != nil,
                   let projectionKind,
-                  !projectionKind.isEmpty,
-                  projectionKind.utf8.count <= 64
+                  V2UserStateEventKind(rawValue: projectionKind) != nil
             else { throw V2DurableWorkReplayValidationError.invalidTargetShape }
         }
         self.kind = kind
@@ -157,7 +154,7 @@ public enum V2DurableWorkReplayStoreError: Error, Equatable, Sendable {
 /// 一次"按来源事件"的批量运维重放命令。
 ///
 /// 这是把"修好根因之后还要逐行重放"的运维负担降下来的一步：同一个来源事件可能对应
-/// 多条暂停行（典型是扇出投递的一条事件、多个目标），按事件重放一次即可推进有界的一批。
+/// 多条暂停行（例如同一次成员变化需要通知多个用户），按事件重放一次即可推进有界的一批。
 /// 选择面仍然是**精确且可枚举**的：只有这一个事件，没有扫描、没有自由筛选、没有自由文本。
 public struct V2DurableWorkEventReplayCommand: Equatable, Sendable {
     /// 单次批量允许重放的最大行数。
@@ -176,7 +173,7 @@ public struct V2DurableWorkEventReplayCommand: Equatable, Sendable {
 
     /// 校验并保存批量重放命令。
     ///
-    /// 只接受按事件定位工作的类型：房间发件箱、扇出投递、内容审核、媒体扫描与媒体清理。
+    /// 只接受按事件定位工作的类型：个人事件、内容审核、媒体扫描与媒体清理。
     /// 回执偏好传播与用户投影是按用户定位的，批量语义不明确，必须继续逐目标重放。
     ///
     /// - Parameters:
@@ -195,7 +192,7 @@ public struct V2DurableWorkEventReplayCommand: Equatable, Sendable {
         limit: Int
     ) throws {
         switch kind {
-        case .roomOutbox, .fanoutDelivery, .contentReview, .mediaScan, .mediaPurge:
+        case .userStateEvent, .contentReview, .mediaScan, .mediaPurge:
             break
         case .readReceiptPreferencePropagation, .userProjection:
             throw V2DurableWorkReplayValidationError.invalidTargetShape
@@ -277,24 +274,28 @@ public protocol V2DurableWorkReplayStore: Sendable {
 /// 运维重放服务，固定运维主体后转交存储。
 public struct V2DurableWorkOperatorReplayService: Sendable {
     private let store: any V2DurableWorkReplayStore
+    private let roomOwnerStores: [String: any V2DurableWorkReplayStore]
     private let operatorPrincipal: String
     private let now: @Sendable () -> Date
 
     /// 组合重放存储与运维主体。
     ///
     /// - Parameters:
-    ///   - store: 执行重放的持久化存储。
+    ///   - store: 控制库内工作的重放存储。
+    ///   - roomOwnerStores: 房间分片到来源库重放存储的映射，个人事件必须明确选择来源。
     ///   - operatorPrincipal: 运维主体标识，需满足 ``isValidPrincipal(_:)``。
     ///   - now: 可注入的当前时刻读取函数。
     ///
     /// 主体格式非法时直接失败，避免把未校验的身份带入审计记录。
     public init(
         store: any V2DurableWorkReplayStore,
+        roomOwnerStores: [String: any V2DurableWorkReplayStore] = [:],
         operatorPrincipal: String,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         precondition(V2DurableWorkOperatorReplayService.isValidPrincipal(operatorPrincipal))
         self.store = store
+        self.roomOwnerStores = roomOwnerStores
         self.operatorPrincipal = operatorPrincipal
         self.now = now
     }
@@ -304,8 +305,8 @@ public struct V2DurableWorkOperatorReplayService: Sendable {
     /// - Parameter command: 重放命令。
     /// - Returns: 重放结果。
     /// - Throws: 存储实现抛出的错误。
-    public func replay(_ command: V2DurableWorkReplayCommand) async throws -> V2DurableWorkReplayResult {
-        try await store.replay(command, operatorPrincipal: operatorPrincipal, now: now())
+    public func replay(_ command: V2DurableWorkReplayCommand, sourceShardID: String? = nil) async throws -> V2DurableWorkReplayResult {
+        try await selectedStore(kind: command.target.kind, sourceShardID: sourceShardID).replay(command, operatorPrincipal: operatorPrincipal, now: now())
     }
 
     /// 执行一次按来源事件的批量重放。
@@ -313,8 +314,19 @@ public struct V2DurableWorkOperatorReplayService: Sendable {
     /// - Parameter command: 批量重放命令。
     /// - Returns: 本次批量重放结论。
     /// - Throws: 存储实现抛出的错误。
-    public func replayEvent(_ command: V2DurableWorkEventReplayCommand) async throws -> V2DurableWorkEventReplayResult {
-        try await store.replayEvent(command, operatorPrincipal: operatorPrincipal, now: now())
+    public func replayEvent(_ command: V2DurableWorkEventReplayCommand, sourceShardID: String? = nil) async throws -> V2DurableWorkEventReplayResult {
+        try await selectedStore(kind: command.kind, sourceShardID: sourceShardID).replayEvent(command, operatorPrincipal: operatorPrincipal, now: now())
+    }
+
+    private func selectedStore(kind: V2DurableWorkReplayTargetKind, sourceShardID: String?) throws -> any V2DurableWorkReplayStore {
+        if kind == .userStateEvent {
+            guard let sourceShardID, let owner = roomOwnerStores[sourceShardID] else {
+                throw V2DurableWorkReplayValidationError.invalidTargetShape
+            }
+            return owner
+        }
+        guard sourceShardID == nil else { throw V2DurableWorkReplayValidationError.invalidTargetShape }
+        return store
     }
 
     /// 校验运维主体格式。

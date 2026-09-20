@@ -1,6 +1,6 @@
 # Direct preplanned fan-out rollout runbook
 
-状态：current-2 已实现；启用前必须完成空库/故障/负载验证并保留可回滚 binary。
+状态：历史记录，仅适用于旧 current-2 二进制；当前代码已删除 planner/preplanned/fanout 模式。本文件的配置和回退步骤不得用于当前部署。当前方案见[会话同步设计](../../../docs/reviews/client-owned-conversation-sync-plan.md)。
 
 ## 配置与范围
 

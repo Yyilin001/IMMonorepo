@@ -40,12 +40,13 @@ public struct PostgresV2GroupEventWakeStore: V2GroupEventWakeStore {
             try await sql.raw("""
                 WITH candidates AS (
                     SELECT room_id
-                    FROM im_v2.group_event_wake_outbox
-                    WHERE (state = 'pending' AND next_attempt_at <= \(bind: now))
-                       OR (state = 'leased' AND lease_expires_at <= \(bind: now))
+                    FROM im_v2.group_event_wake_outbox AS wake
+                    WHERE ((state = 'pending' AND next_attempt_at <= \(bind: now))
+                       OR (state = 'leased' AND lease_expires_at <= \(bind: now)))
+                      AND \(roomWritable(skipLocked: true))
                     ORDER BY next_attempt_at, updated_at
                     LIMIT \(bind: limit)
-                    FOR UPDATE SKIP LOCKED
+                    FOR UPDATE OF wake SKIP LOCKED
                 )
                 UPDATE im_v2.group_event_wake_outbox AS wake
                 SET state = 'leased',
@@ -107,10 +108,11 @@ public struct PostgresV2GroupEventWakeStore: V2GroupEventWakeStore {
         // Revision fencing is intentional: an UPSERT that observed a newer
         // event changes revision/state before this delete can run.
         try await sql.raw("""
-            DELETE FROM im_v2.group_event_wake_outbox
+            DELETE FROM im_v2.group_event_wake_outbox AS wake
             WHERE room_id = \(bind: roomID)
               AND lease_token = \(bind: lease.claimToken)
               AND revision = \(bind: Int64(lease.revision))
+              AND \(roomWritable(skipLocked: false))
             """).run()
     }
 
@@ -130,7 +132,7 @@ public struct PostgresV2GroupEventWakeStore: V2GroupEventWakeStore {
               v2PostgresTimestampCanEncode(nextAttemptAt)
         else { throw V2GroupEventWakeStoreError.corruptPersistenceState }
         try await sql.raw("""
-            UPDATE im_v2.group_event_wake_outbox
+            UPDATE im_v2.group_event_wake_outbox AS wake
             SET state = 'pending',
                 lease_token = NULL,
                 lease_expires_at = NULL,
@@ -139,8 +141,19 @@ public struct PostgresV2GroupEventWakeStore: V2GroupEventWakeStore {
             WHERE room_id = \(bind: roomID)
               AND lease_token = \(bind: lease.claimToken)
               AND revision = \(bind: Int64(lease.revision))
+              AND \(roomWritable(skipLocked: false))
             """).run()
     }
+    // Keep the room lock until the queue mutation commits. Claiming skips
+    // busy rooms; terminal/retry callbacks wait and recheck the durable marker.
+    private func roomWritable(skipLocked: Bool) -> SQLQueryString {
+        """
+        (SELECT true FROM im_v2.rooms AS room
+         WHERE room.room_id = wake.room_id AND room.migration_fence_id IS NULL
+         FOR SHARE OF room \(unsafeRaw: skipLocked ? "SKIP LOCKED" : ""))
+        """
+    }
+
 }
 
 /// 群事件唤醒存储错误。

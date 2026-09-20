@@ -14,7 +14,7 @@ struct V2RoutedGroupMessagingStoreTests {
         let owner = GroupCreationOwnerStoreFake()
         let routed = try V2RoutedGroupMessagingStore(intentStore: intentStore, ownerStores: ["rooms-a": owner])
         let command = try V2StagedGroupRoomCommand(actorUserID: members[0], operationID: .init(uuid: UUID()),
-            title: "manifest", deliveryMode: .standardFanout, stagedMemberCount: expectedCount - 1)
+            title: "manifest", capacityClass: .standard, stagedMemberCount: expectedCount - 1)
         let ids = try groupCreationIDs(suffix: "e")
         var slices: [V2GroupRoomCreationManifestSlice]
         switch scenario {
@@ -32,7 +32,7 @@ struct V2RoutedGroupMessagingStoreTests {
         let now = Date(timeIntervalSince1970: 1_750_000_000)
         await #expect(throws: V2GroupRoomCreationIntentStoreError.corruptPersistenceState) {
             try await routed.createStaged(command: command, capacityProfile: profile, roomShardID: "ignored",
-                roomID: ids.roomID, eventID: ids.eventID, planID: ids.planID, now: now)
+                roomID: ids.roomID, eventID: ids.eventID, now: now)
         }
         let prefixCount = scenario == "repeated" || scenario == "overlap" ? 1 : 0
         #expect(await owner.stagedPages().count == prefixCount)
@@ -48,7 +48,7 @@ struct V2RoutedGroupMessagingStoreTests {
         }
         await intentStore.configureSlices(slices)
         let recovered = try await routed.createStaged(command: command, capacityProfile: profile, roomShardID: "ignored",
-            roomID: ids.roomID, eventID: ids.eventID, planID: ids.planID, now: now)
+            roomID: ids.roomID, eventID: ids.eventID, now: now)
         guard case .created(let group) = recovered else { throw V2GroupRoomCreationIntentStoreError.corruptPersistenceState }
         #expect(group.roomID == ids.roomID && group.memberCount == expectedCount)
         #expect(await intentStore.finalizedRoomIDs() == [ids.roomID])
@@ -80,7 +80,6 @@ struct V2RoutedGroupMessagingStoreTests {
             roomShardID: "ignored-client-candidate",
             roomID: firstIDs.roomID,
             eventID: firstIDs.eventID,
-            planID: firstIDs.planID,
             now: .init(timeIntervalSince1970: 100)
         )
         guard case .created(let firstGroup) = first else {
@@ -94,7 +93,6 @@ struct V2RoutedGroupMessagingStoreTests {
             roomShardID: "another-ignored-candidate",
             roomID: retryIDs.roomID,
             eventID: retryIDs.eventID,
-            planID: retryIDs.planID,
             now: .init(timeIntervalSince1970: 101)
         )
         guard case .created(let retryGroup) = retry else {
@@ -114,7 +112,6 @@ struct V2RoutedGroupMessagingStoreTests {
         let unselectedCalls = firstCalls.isEmpty ? firstCalls : secondCalls
         #expect(selectedCalls.map(\.roomID) == [firstIDs.roomID, firstIDs.roomID])
         #expect(selectedCalls.map(\.eventID) == [firstIDs.eventID, firstIDs.eventID])
-        #expect(selectedCalls.map(\.planID) == [firstIDs.planID, firstIDs.planID])
         #expect(unselectedCalls.isEmpty)
     }
 
@@ -134,7 +131,6 @@ struct V2RoutedGroupMessagingStoreTests {
             roomShardID: "rooms-a",
             roomID: ids.roomID,
             eventID: ids.eventID,
-            planID: ids.planID,
             now: .init(timeIntervalSince1970: 200)
         )
 
@@ -144,7 +140,6 @@ struct V2RoutedGroupMessagingStoreTests {
             roomShardID: "rooms-a",
             roomID: try .init("00000000-0000-0000-0000-00000000d003"),
             eventID: try .init("00000000-0000-0000-0000-00000000d004"),
-            planID: try .init("00000000-0000-0000-0000-00000000d005"),
             now: .init(timeIntervalSince1970: 201)
         )
 
@@ -173,7 +168,7 @@ struct V2RoutedGroupMessagingStoreTests {
                 "00000000-0000-0000-0000-00000000e002"
             ),
             title: "六百人真实群",
-            deliveryMode: .largeGroupHybrid,
+            capacityClass: .large,
             stagedMemberCount: 599
         )
         let ids = try groupCreationIDs(suffix: "e")
@@ -183,7 +178,6 @@ struct V2RoutedGroupMessagingStoreTests {
             roomShardID: "ignored",
             roomID: ids.roomID,
             eventID: ids.eventID,
-            planID: ids.planID,
             now: .init(timeIntervalSince1970: 300)
         )
         guard case .created(let group) = outcome else {
@@ -279,7 +273,7 @@ private actor GroupCreationIntentStoreFake: V2GroupRoomCreationIntentStore {
             operationID: intent.operationID,
             roomID: intent.roomID,
             eventID: intent.eventID,
-            planID: intent.planID,
+
             roomShardID: intent.roomShardID,
             routeEpoch: intent.routeEpoch,
             requestFingerprint: intent.requestFingerprint,
@@ -299,7 +293,6 @@ private actor GroupCreationOwnerStoreFake:
     struct Call: Equatable, Sendable {
         let roomID: RoomID
         let eventID: EventID
-        let planID: FanoutPlanID
         let roomShardID: String
     }
 
@@ -313,7 +306,6 @@ private actor GroupCreationOwnerStoreFake:
         roomShardID: String,
         roomID: RoomID,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) throws -> V2CreateGroupRoomOutcome {
         try record(
@@ -321,7 +313,7 @@ private actor GroupCreationOwnerStoreFake:
             roomShardID: roomShardID,
             roomID: roomID,
             eventID: eventID,
-            planID: planID,
+
             now: now
         )
     }
@@ -333,7 +325,6 @@ private actor GroupCreationOwnerStoreFake:
         roomShardID: String,
         roomID: RoomID,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) throws -> V2CreateGroupRoomOutcome {
         guard validatedMemberUserIDs == command.allMemberUserIDs else {
@@ -344,7 +335,7 @@ private actor GroupCreationOwnerStoreFake:
             roomShardID: roomShardID,
             roomID: roomID,
             eventID: eventID,
-            planID: planID,
+
             now: now
         )
     }
@@ -369,7 +360,7 @@ private actor GroupCreationOwnerStoreFake:
             roomID: intent.roomID,
             ownerUserID: command.actorUserID,
             title: command.title,
-            deliveryMode: command.deliveryMode,
+            capacityClass: command.capacityClass,
             memberUserIDs: [command.actorUserID],
             memberCount: command.allMemberCount,
             createdAt: now
@@ -383,20 +374,20 @@ private actor GroupCreationOwnerStoreFake:
         roomShardID: String,
         roomID: RoomID,
         eventID: EventID,
-        planID: FanoutPlanID,
+
         now: Date
     ) throws -> V2CreateGroupRoomOutcome {
         recorded.append(.init(
             roomID: roomID,
             eventID: eventID,
-            planID: planID,
+
             roomShardID: roomShardID
         ))
         return .created(try .init(
             roomID: roomID,
             ownerUserID: command.actorUserID,
             title: command.title,
-            deliveryMode: command.deliveryMode,
+            capacityClass: command.capacityClass,
             memberUserIDs: command.allMemberUserIDs,
             createdAt: now
         ))
@@ -410,7 +401,7 @@ private func makeGroupCommand(title: String) throws -> V2CreateGroupRoomCommand 
         actorUserID: .init("00000000-0000-0000-0000-00000000f001"),
         operationID: .init("00000000-0000-0000-0000-00000000f002"),
         title: title,
-        deliveryMode: .standardFanout,
+        capacityClass: .standard,
         initialMemberUserIDs: [
             .init("00000000-0000-0000-0000-00000000f003"),
         ]
@@ -419,11 +410,10 @@ private func makeGroupCommand(title: String) throws -> V2CreateGroupRoomCommand 
 
 private func groupCreationIDs(
     suffix: Character
-) throws -> (roomID: RoomID, eventID: EventID, planID: FanoutPlanID) {
+) throws -> (roomID: RoomID, eventID: EventID) {
     try (
         .init("00000000-0000-0000-0000-00000000\(suffix)003"),
-        .init("00000000-0000-0000-0000-00000000\(suffix)004"),
-        .init("00000000-0000-0000-0000-00000000\(suffix)005")
+        .init("00000000-0000-0000-0000-00000000\(suffix)004")
     )
 }
 
@@ -433,12 +423,7 @@ private func groupCreationProfile(
     try .init(id: "standard", limits: .init(
         maxEligibleMembers: maxMembers,
         maxCommandsPerWindow: 100,
-        maxFanoutUnitsPerWindow: 10_000,
-        maxOutstandingFanoutUnits: 10_000,
-        maxOutstandingPlans: 100,
-        maxEnumerationPageSize: 100,
-        maxPlannerConcurrency: 2,
-        maxDeliveryConcurrency: 2,
+
         retryAfterSeconds: 1
     ))
 }

@@ -5,6 +5,67 @@ import Testing
 
 @Suite("V2 direct room identity cache")
 struct V2DirectRoomIdentityCacheTests {
+    @Test func emptyDirectProfileKeepsCreationActivityAcrossUpdates() async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory
+            .appending(path: "direct-creation-\(UUID()).sqlite"), installationBinding: .init(value: UUID()))
+        let room = RoomID(uuid: UUID()), user = UserID(uuid: UUID())
+        func record(_ sequence: UInt64, created: Int64 = 1_750_000_000_000) throws -> V2ClientSyncRecord {
+            try .init(sequence: sequence, sourceEventID: .init(uuid: UUID()), projectionKind: "direct_room_profile",
+                payload: JSONSerialization.data(withJSONObject: [
+                    "room_id": room.rawValue, "target_user_id": user.rawValue,
+                    "public_handle": "creation_user", "display_name": "name-\(sequence)", "account_kind": "regular",
+                    "revision": sequence, "room_created_at_ms": created,
+                    "updated_at_ms": 1_750_000_000_000 + Int64(sequence) * 100_000,
+                ]))
+        }
+        for sequence: UInt64 in [1, 2] {
+            _ = try await store.apply(.init(generation: 1, records: [record(sequence)], nextSyncToken: .init("token-\(sequence)"),
+                receipt: .init("receipt-\(sequence)"), hasMore: false, capabilityProfile: "base"))
+            let page = try await store.conversationListPage(isArchived: false, before: nil, limit: 10)
+            #expect(page.entries.first?.lastActivity == Date(timeIntervalSince1970: 1_750_000_000))
+        }
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
+            _ = try await store.apply(.init(generation: 1, records: [record(3, created: 1_750_000_000_001)],
+                nextSyncToken: .init("bad"), receipt: .init("bad"), hasMore: false, capabilityProfile: "base"))
+        }
+    }
+
+    @Test("late direct profiles converge without replacing a newer hydrated profile")
+    func directProfileVersionsConverge() async throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-profile-order-\(UUID().uuidString).sqlite")
+        let binding = V2LocalInstallationBinding(value: UUID())
+        let room = RoomID(uuid: UUID()), user = UserID(uuid: UUID())
+        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        func record(_ sequence: UInt64, _ revision: UInt64, _ name: String) throws -> V2ClientSyncRecord {
+            try .init(sequence: sequence, sourceEventID: .init(uuid: UUID()), projectionKind: "direct_room_profile",
+                payload: JSONSerialization.data(withJSONObject: [
+                    "room_id": room.rawValue, "target_user_id": user.rawValue,
+                    "public_handle": "profile_user", "display_name": name, "account_kind": "regular",
+                    "revision": revision, "room_created_at_ms":1750000000000,"updated_at_ms": 1750000000000,
+                ]))
+        }
+        let hydrated = try V2ProfileView(userID: user,
+            publicIdentity: .init(userID: user, handle: .init("profile_user"), displayName: "hydrated", accountKind: .regular),
+            avatar: .init(mediaID: .init(uuid: UUID())), state: .active, revision: #require(V2ProfileRevision(rawValue: 10)),
+            visibilityRevision: #require(V2ProfileRevision(rawValue: 10)))
+        try await store.saveProfileView(hydrated)
+        _ = try await store.apply(.init(generation: 1,
+            records: [record(1, 4, "current"), record(2, 3, "old"), record(3, 4, "current")],
+            nextSyncToken: .init("profile-order"), receipt: .init("profile-order"), hasMore: false, capabilityProfile: "base"))
+        #expect(try await store.profileView(userID: user) == hydrated)
+        #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10) == [room])
+        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
+            _ = try await reopened.apply(.init(generation: 1, records: [record(4, 4, "conflict")],
+                nextSyncToken: .init("profile-conflict"), receipt: .init("profile-conflict"), hasMore: false, capabilityProfile: "base"))
+        }
+        #expect(try await reopened.profileView(userID: user) == hydrated)
+        _ = try await reopened.apply(.init(generation: 1, records: [record(4, 10, "hydrated")],
+            nextSyncToken: .init("same-profile-version"), receipt: .init("same-profile-version"), hasMore: false, capabilityProfile: "base"))
+        #expect(try await reopened.profileView(userID: user) == hydrated)
+
+    }
+
     @Test("an explicitly resolved direct identity survives a local-store restart and refreshes in place")
     func persistsResolvedIdentity() async throws {
         let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-direct-identity-\(UUID().uuidString).sqlite")
@@ -17,14 +78,23 @@ struct V2DirectRoomIdentityCacheTests {
             accountKind: .regular
         )
         let first = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        try await first.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: identity, updatedAt: Date(timeIntervalSince1970: 1_750_000_000))
+        try await first.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: identity, roomCreatedAt: Date(timeIntervalSince1970: 1_750_000_000), updatedAt: Date(timeIntervalSince1970: 1_750_000_000))
 
         let restarted = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        #expect(try await restarted.directRoomIdentities() == [.init(roomID: roomID, publicIdentity: identity, updatedAt: Date(timeIntervalSince1970: 1_750_000_000))])
+        #expect(try await restarted.directRoomIdentities() == [.init(roomID: roomID, publicIdentity: identity, updatedAt: Date(timeIntervalSince1970: 1_750_000_000), roomCreatedAt: Date(timeIntervalSince1970: 1_750_000_000))])
 
         let refreshed = try V2PublicIdentity(userID: identity.userID, handle: identity.handle, displayName: "更新名称", accountKind: identity.accountKind)
-        try await restarted.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: refreshed, updatedAt: Date(timeIntervalSince1970: 1_750_000_100))
+        try await restarted.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: refreshed, roomCreatedAt: Date(timeIntervalSince1970: 1_750_000_000), updatedAt: Date(timeIntervalSince1970: 1_750_000_100))
         #expect(try await restarted.directRoomIdentities().first?.publicIdentity.displayName == "更新名称")
+        let created = Date(timeIntervalSince1970: 1_750_000_000)
+        #expect(try await restarted.conversationListPage(isArchived: false, before: nil, limit: 10).entries.first?.lastActivity == created)
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
+            try await restarted.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: refreshed,
+                roomCreatedAt: created.addingTimeInterval(1))
+        }
+        #expect(try await restarted.directRoomIdentities().first?.roomCreatedAt == created)
+        #expect(try await restarted.conversationListPage(isArchived: false, before: nil, limit: 10).entries.first?.lastActivity == created)
+
     }
 
     @Test("a direct room identity owns a durable room-event cursor and remembers a forbidden pull")
@@ -37,11 +107,11 @@ struct V2DirectRoomIdentityCacheTests {
             handle: .init("room_log_peer"), displayName: "私聊对方", accountKind: .regular
         )
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        try await store.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: identity)
+        try await store.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: identity, roomCreatedAt: Date(timeIntervalSince1970: 1_750_000_000))
 
         #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10) == [roomID])
         #expect(try await store.groupEventAccess(roomID: roomID) == .init(
-            delivery: .durableRoomLog, isAuthorized: true
+            isAuthorized: true
         ))
         let payload = try JSONSerialization.data(withJSONObject: [
             "event_type": "message.accepted",
@@ -67,11 +137,11 @@ struct V2DirectRoomIdentityCacheTests {
         try await store.markRoomEventUnauthorized(roomID: roomID)
         #expect(try await store.knownRoomLogRoomIDs(after: nil, limit: 10).isEmpty)
         #expect(try await store.groupEventAccess(roomID: roomID) == .init(
-            delivery: .durableRoomLog, isAuthorized: false
+            isAuthorized: false
         ))
         let restarted = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
         #expect(try await restarted.groupEventAccess(roomID: roomID) == .init(
-            delivery: .durableRoomLog, isAuthorized: false
+            isAuthorized: false
         ))
         #expect(try await restarted.groupEventCursor(roomID: roomID) == 1)
     }
@@ -90,10 +160,10 @@ struct V2DirectRoomIdentityCacheTests {
             accountKind: .customerSupport
         )
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        try await store.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: cached, updatedAt: Date(timeIntervalSince1970: 1_750_000_000))
+        try await store.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: cached, roomCreatedAt: Date(timeIntervalSince1970: 1_750_000_000), updatedAt: Date(timeIntervalSince1970: 1_750_000_000))
         let sourceEventID: EventID = try .init("00000000-0000-0000-0000-000000000d14")
         let payload = Data("""
-            {"room_id":"\(roomID.rawValue)","target_user_id":"\(userID.rawValue)","public_handle":"\(synced.handle.rawValue)","display_name":"\(synced.displayName)","account_kind":"customer_support","revision":2,"updated_at_ms":1750000001000}
+            {"room_id":"\(roomID.rawValue)","target_user_id":"\(userID.rawValue)","public_handle":"\(synced.handle.rawValue)","display_name":"\(synced.displayName)","account_kind":"customer_support","revision":2,"room_created_at_ms":1750000000000,"updated_at_ms":1750000001000}
             """.utf8)
         _ = try await store.apply(.init(
             generation: 1,
@@ -103,11 +173,11 @@ struct V2DirectRoomIdentityCacheTests {
             hasMore: false,
             capabilityProfile: "base"
         ))
-        #expect(try await store.directRoomIdentities() == [.init(roomID: roomID, publicIdentity: synced, updatedAt: Date(timeIntervalSince1970: 1_750_000_001))])
+        #expect(try await store.directRoomIdentities() == [.init(roomID: roomID, publicIdentity: synced, updatedAt: Date(timeIntervalSince1970: 1_750_000_001), roomCreatedAt: Date(timeIntervalSince1970: 1_750_000_000))])
         #expect(try await store.profileView(userID: userID)?.publicIdentity == synced)
 
         let snapshotPayload = Data("""
-            {"room_id":"\(roomID.rawValue)","target_user_id":"\(userID.rawValue)","public_handle":"\(synced.handle.rawValue)","display_name":"\(synced.displayName)","account_kind":"customer_support","revision":2,"updated_at_ms":1750000001000}
+            {"room_id":"\(roomID.rawValue)","target_user_id":"\(userID.rawValue)","public_handle":"\(synced.handle.rawValue)","display_name":"\(synced.displayName)","account_kind":"customer_support","revision":2,"room_created_at_ms":1750000000000,"updated_at_ms":1750000001000}
             """.utf8)
         let reset = try V2ClientResetRequired(
             snapshotID: .init("direct-profile-snapshot"),
@@ -161,7 +231,7 @@ struct V2DirectRoomIdentityCacheTests {
                 roomID: roomID,
                 publicIdentity: synced,
                 updatedAt: Date(timeIntervalSince1970: 1_750_000_001)
-            )
+            , roomCreatedAt: Date(timeIntervalSince1970: 1_750_000_000))
         ])
         #expect(try await store.profileView(userID: userID)?.publicIdentity == synced)
     }
@@ -181,7 +251,7 @@ struct V2DirectRoomIdentityCacheTests {
         try await store.cacheDirectRoomIdentity(
             roomID: roomID,
             publicIdentity: identity,
-            updatedAt: Date(timeIntervalSince1970: 1_750_000_000)
+            roomCreatedAt: Date(timeIntervalSince1970: 1_750_000_000), updatedAt: Date(timeIntervalSince1970: 1_750_000_000)
         )
         let roomEventPayload = try JSONSerialization.data(withJSONObject: [
             "event_type": "message.accepted",
@@ -231,7 +301,7 @@ struct V2DirectRoomIdentityCacheTests {
                 roomID: roomID,
                 publicIdentity: identity,
                 updatedAt: Date(timeIntervalSince1970: 1_750_000_000)
-            )
+            , roomCreatedAt: Date(timeIntervalSince1970: 1_750_000_000))
         ])
         #expect(try await store.groupEventCursor(roomID: roomID) == 1)
         #expect(try await store.messages(in: roomID).map(\.text) == ["重置时保留的私聊"])
@@ -245,7 +315,7 @@ struct V2DirectRoomIdentityCacheTests {
         let userID = try UserID("00000000-0000-0000-0000-000000000d63")
         let identity = try V2PublicIdentity(userID: userID, handle: .init("snapshot_disabled"), displayName: "停用前", accountKind: .regular)
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        try await store.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: identity, updatedAt: Date(timeIntervalSince1970: 1_750_000_000))
+        try await store.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: identity, roomCreatedAt: Date(timeIntervalSince1970: 1_750_000_000), updatedAt: Date(timeIntervalSince1970: 1_750_000_000))
 
         let reset = try V2ClientResetRequired(
             snapshotID: .init("direct-cache-invalidation-snapshot"),
@@ -342,7 +412,7 @@ struct V2DirectRoomIdentityCacheTests {
         let userID = "00000000-0000-0000-0000-000000000d22"
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
         let directProfile = Data("""
-            {"room_id":"\(lowerRoomID)","target_user_id":"\(userID)","public_handle":"direct_user","display_name":"对方","account_kind":"regular","revision":1,"updated_at_ms":1750000000000}
+            {"room_id":"\(lowerRoomID)","target_user_id":"\(userID)","public_handle":"direct_user","display_name":"对方","account_kind":"regular","revision":1,"room_created_at_ms":1750000000000,"updated_at_ms":1750000000000}
             """.utf8)
         let acceptedMessage = Data("""
             {"event_type":"message.accepted","message_id":"00000000-0000-0000-0000-000000000d23","room_id":"\(upperRoomID)","room_sequence":1,"message_revision":1,"sender_user_id":"\(userID)","text":"离线重放","media_ids":[],"mention_user_ids":[],"mentions_everyone":false,"server_created_at_ms":1750000000000}
@@ -372,7 +442,7 @@ struct V2DirectRoomIdentityCacheTests {
         let userID = try UserID("00000000-0000-0000-0000-000000000d43")
         let identity = try V2PublicIdentity(userID: userID, handle: .init("disabled_user"), displayName: "停用前", accountKind: .regular)
         let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        try await store.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: identity, updatedAt: Date(timeIntervalSince1970: 1_750_000_000))
+        try await store.cacheDirectRoomIdentity(roomID: roomID, publicIdentity: identity, roomCreatedAt: Date(timeIntervalSince1970: 1_750_000_000), updatedAt: Date(timeIntervalSince1970: 1_750_000_000))
         let invalidation = Data("{\"user_id\":\"\(userID.rawValue)\",\"minimum_profile_revision\":2,\"profile_state\":\"suspended\"}".utf8)
 
         _ = try await store.apply(.init(

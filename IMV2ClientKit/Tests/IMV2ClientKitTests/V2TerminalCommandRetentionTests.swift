@@ -184,7 +184,7 @@ struct V2TerminalCommandRetentionTests {
             try await store.enqueue(try V2PendingGroupRoomCreation(
                 operationID: operationID,
                 title: title,
-                deliveryMode: .standardFanout,
+                capacityClass: .standard,
                 initialMemberUserIDs: [],
                 state: .pending,
                 attemptCount: 0,

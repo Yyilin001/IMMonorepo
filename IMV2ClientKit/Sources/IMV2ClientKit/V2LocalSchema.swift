@@ -2,8 +2,8 @@ import Foundation
 
 /// 全新设备本地 V2 投影数据库的规范 schema。
 ///
-/// 该应用尚未发布，因此只支持显式注册且经过测试的迁移：
-/// 这些迁移会保留待处理命令与已提交的投影效果，而不会静默接受任意旧版布局。
+/// 该应用尚未发布，数据库直接创建当前完整结构，不执行历史布局升级。
+/// 当前版本重启时继续使用原数据库，保留待处理命令及已提交的投影效果。
 extension GRDBV2LocalSyncStore {
     static let pinnedMessageProjectionSchemaSQL = """
         CREATE TABLE v2_group_pinned_messages (
@@ -145,8 +145,12 @@ extension GRDBV2LocalSyncStore {
         CREATE TABLE v2_direct_read_receipt_projections (
                 room_id TEXT PRIMARY KEY,
                 reader_user_id TEXT NOT NULL,
-                read_through_room_sequence INTEGER NOT NULL CHECK (read_through_room_sequence > 0),
-                recorded_at REAL NOT NULL
+                read_through_room_sequence INTEGER NOT NULL CHECK (read_through_room_sequence >= 0),
+                recorded_at REAL NOT NULL,
+                is_visible INTEGER NOT NULL CHECK (is_visible IN (0, 1)),
+                reader_preference_revision INTEGER NOT NULL CHECK (reader_preference_revision >= 0),
+                viewer_preference_revision INTEGER NOT NULL CHECK (viewer_preference_revision >= 0),
+                CHECK (is_visible = 1 OR read_through_room_sequence = 0)
             );
 
         CREATE TABLE v2_room_read_watermarks (
@@ -155,33 +159,14 @@ extension GRDBV2LocalSyncStore {
                 recorded_at REAL NOT NULL
             );
 
-        -- 服务端会话摘要的本地副本。会话列表是本地优先的，所以未读数必须先落在这里，
-        -- 界面才能按房间标识取到它；未读数的权威仍在服务端。
-        CREATE TABLE v2_room_unread_directory (
-                room_id TEXT PRIMARY KEY,
-                head INTEGER NOT NULL CHECK (head >= 0),
-                unread_count INTEGER NOT NULL CHECK (unread_count >= 0),
-                last_event_at REAL NOT NULL,
-                cycle INTEGER NOT NULL CHECK (cycle >= 0),
-                recorded_at REAL NOT NULL
-            );
-
-        -- 全房间轮转游标。游标为空表示下一轮从最新活动重新开始；cycle 用于在一轮结束后
-        -- 淘汰本轮没再出现的房间，避免离开的房间永久留在目录里。
-        CREATE TABLE v2_room_unread_rotation (
-                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                cursor TEXT,
-                cycle INTEGER NOT NULL CHECK (cycle >= 0),
-                updated_at REAL NOT NULL
-            );
-
         CREATE TABLE v2_direct_room_identities (
             room_id TEXT PRIMARY KEY,
             target_user_id TEXT NOT NULL,
             public_handle TEXT NOT NULL CHECK (length(public_handle) BETWEEN 3 AND 32),
             display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 80),
             account_kind TEXT NOT NULL CHECK (account_kind IN ('regular', 'system', 'customer_support')),
-            updated_at REAL NOT NULL
+            updated_at REAL NOT NULL,
+            room_created_at REAL NOT NULL CHECK (room_created_at >= 0)
         );
 
         CREATE TABLE v2_direct_room_profile_projections (
@@ -192,10 +177,11 @@ extension GRDBV2LocalSyncStore {
             display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 80),
             revision INTEGER NOT NULL CHECK (revision > 0),
             account_kind TEXT NOT NULL CHECK (account_kind IN ('regular', 'system', 'customer_support')),
-            updated_at REAL NOT NULL
+            updated_at REAL NOT NULL,
+            room_created_at REAL NOT NULL CHECK (room_created_at >= 0)
         );
 
-        CREATE TABLE v2_direct_sending_capabilities (room_id TEXT PRIMARY KEY, can_send INTEGER NOT NULL CHECK (can_send IN (0, 1)), updated_at REAL NOT NULL);
+        CREATE TABLE v2_direct_sending_capabilities (room_id TEXT PRIMARY KEY, can_send INTEGER NOT NULL CHECK (can_send IN (0, 1)), state_version INTEGER NOT NULL CHECK (state_version > 0), updated_at REAL NOT NULL);
 
         CREATE TABLE v2_forward_message_chunks (
                 operation_id TEXT PRIMARY KEY,
@@ -258,6 +244,19 @@ extension GRDBV2LocalSyncStore {
                 PRIMARY KEY (room_id, room_sequence)
             );
 
+        CREATE TABLE v2_member_effects (
+                source_event_id TEXT PRIMARY KEY NOT NULL,
+                room_id TEXT NOT NULL, user_id TEXT NOT NULL,
+                membership_revision INTEGER NOT NULL CHECK (membership_revision > 0),
+                action TEXT NOT NULL CHECK (action IN ('add', 'remove', 'role')),
+                role TEXT CHECK (role IN ('admin', 'member')),
+                room_sequence INTEGER CHECK (room_sequence > 0),
+                projection_sequence INTEGER NOT NULL CHECK (projection_sequence > 0),
+                canonical_digest BLOB NOT NULL CHECK (length(canonical_digest) = 32),
+                CHECK ((action = 'role' AND role IS NOT NULL) OR (action <> 'role' AND role IS NULL)),
+                UNIQUE (room_id, user_id, membership_revision)
+            );
+
         CREATE TABLE v2_group_member_roles (
                 room_id TEXT NOT NULL, user_id TEXT NOT NULL,
                 role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
@@ -279,11 +278,8 @@ extension GRDBV2LocalSyncStore {
 
         \(rolePolicyRecoverySchemaSQL);
         \(pushIntentSchemaSQL);
-
-        CREATE TABLE v2_hybrid_group_background_state (
-                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                after_room_id TEXT NULL
-            );
+        \(roomRecoverySchemaSQL)
+        \(roomLatestVisibleSchemaSQL)
 
         CREATE TABLE v2_local_installation (
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -411,7 +407,7 @@ extension GRDBV2LocalSyncStore {
         CREATE TABLE v2_pending_group_room_creations (
                 operation_id TEXT PRIMARY KEY, title TEXT NOT NULL,
                 initial_member_user_ids TEXT NOT NULL,
-                delivery_mode TEXT NOT NULL CHECK (delivery_mode IN ('standard_fanout', 'large_group_hybrid')),
+                capacity_class TEXT NOT NULL CHECK (capacity_class IN ('standard', 'large')),
                 uploaded_member_count INTEGER NOT NULL DEFAULT 0 CHECK (uploaded_member_count >= 0),
                 state TEXT NOT NULL CHECK (state IN ('pending', 'cancelling', 'finalizing', 'cancelled', 'acknowledged', 'rejected')),
                 attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0), next_attempt_at REAL NOT NULL, created_at REAL NOT NULL,
@@ -631,7 +627,7 @@ extension GRDBV2LocalSyncStore {
             CHECK ((state = 'active') OR (public_handle IS NULL AND avatar_media_id IS NULL))
         );
 
-        CREATE TABLE v2_read_receipt_preference (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), allows_direct_read_receipts INTEGER NOT NULL CHECK (allows_direct_read_receipts IN (0, 1)), allows_group_read_receipts INTEGER NOT NULL CHECK (allows_group_read_receipts IN (0, 1)), updated_at REAL NOT NULL);
+        CREATE TABLE v2_read_receipt_preference (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), preference_revision INTEGER NOT NULL CHECK (preference_revision > 0), allows_direct_read_receipts INTEGER NOT NULL CHECK (allows_direct_read_receipts IN (0, 1)), allows_group_read_receipts INTEGER NOT NULL CHECK (allows_group_read_receipts IN (0, 1)), updated_at REAL NOT NULL);
 
         CREATE TABLE v2_relationship_projections (
                 target_user_id TEXT PRIMARY KEY,
@@ -658,17 +654,21 @@ extension GRDBV2LocalSyncStore {
             server_created_at REAL NOT NULL
         );
 
+        CREATE TABLE v2_room_membership_states (
+            room_id TEXT PRIMARY KEY,
+            membership_revision INTEGER NOT NULL CHECK (membership_revision > 0),
+            source_event_id TEXT NOT NULL,
+            is_member INTEGER NOT NULL CHECK (is_member IN (0, 1))
+        );
+
         CREATE TABLE v2_room_profile_projections (
                 room_id TEXT PRIMARY KEY,
                 source_event_id TEXT NOT NULL UNIQUE,
                 title TEXT NOT NULL,
                 owner_user_id TEXT NOT NULL,
                 membership_revision INTEGER NOT NULL DEFAULT 1 CHECK (membership_revision > 0),
-                delivery_mode TEXT NOT NULL CHECK (delivery_mode IN ('standard_fanout', 'large_group_hybrid')),
-                -- 服务端宣告的权威副本形态；决定客户端是否按房间游标恢复该房间。
-                -- 默认取 room_log 是刻意的失败方向：多拉一次只是重复（消息投影幂等），
-                -- 少拉一次则是客户端收不到只写日志的房间内容。
-                delivery_authority TEXT NOT NULL DEFAULT 'room_log' CHECK (delivery_authority IN ('fanout', 'room_log')),
+                capacity_class TEXT NOT NULL CHECK (capacity_class IN ('standard', 'large')),
+
                 is_group_event_authorized INTEGER NOT NULL DEFAULT 1 CHECK (is_group_event_authorized IN (0, 1)),
                 created_at REAL NOT NULL
             );
@@ -767,6 +767,19 @@ extension GRDBV2LocalSyncStore {
 
         CREATE INDEX v2_forward_message_plans_terminal_cleanup_idx ON v2_forward_message_plans (updated_at) WHERE state IN ('completed', 'cancelled');
 
+        -- Sparse indexes retain only invalid stored sequences; empty for valid data.
+        CREATE INDEX v2_group_event_cursors_invalid_sequence_idx ON v2_group_event_cursors (room_id) WHERE (typeof(applied_room_sequence) <> 'integer' OR applied_room_sequence < 0);
+        CREATE INDEX v2_group_events_invalid_sequence_idx ON v2_group_events (room_id) WHERE (typeof(room_sequence) <> 'integer' OR room_sequence < 1);
+        CREATE INDEX v2_message_projections_invalid_sequence_idx ON v2_message_projections (room_id) WHERE (typeof(room_sequence) <> 'integer' OR room_sequence < 1);
+        CREATE INDEX v2_reaction_versions_invalid_sequence_idx ON v2_reaction_versions (room_id) WHERE (typeof(room_sequence) <> 'integer' OR room_sequence < 1);
+        CREATE INDEX v2_group_pinned_messages_invalid_sequence_idx ON v2_group_pinned_messages (room_id) WHERE room_sequence IS NOT NULL AND (typeof(room_sequence) <> 'integer' OR room_sequence < 1);
+        CREATE INDEX v2_group_announcements_invalid_sequence_idx ON v2_group_announcements (room_id) WHERE room_sequence IS NOT NULL AND (typeof(room_sequence) <> 'integer' OR room_sequence < 1);
+        CREATE INDEX v2_group_role_policies_invalid_sequence_idx ON v2_group_role_policies (room_id) WHERE room_sequence IS NOT NULL AND (typeof(room_sequence) <> 'integer' OR room_sequence < 1);
+        CREATE INDEX v2_group_member_roles_invalid_sequence_idx ON v2_group_member_roles (room_id) WHERE (typeof(room_sequence) <> 'integer' OR room_sequence < 1);
+        CREATE INDEX v2_reaction_versions_sequence_idx ON v2_reaction_versions (room_id, room_sequence);
+        CREATE INDEX v2_group_member_roles_sequence_idx ON v2_group_member_roles (room_id, room_sequence);
+        CREATE INDEX v2_group_pinned_messages_sequence_idx ON v2_group_pinned_messages (room_id, room_sequence);
+
         CREATE INDEX v2_group_pinned_messages_room_idx ON v2_group_pinned_messages (room_id, is_pinned DESC, updated_at DESC);
 
         CREATE INDEX v2_message_favorites_room_idx ON v2_message_favorites (room_id, is_favorited, updated_at DESC);
@@ -807,9 +820,9 @@ extension GRDBV2LocalSyncStore {
 
         CREATE INDEX v2_pending_group_room_creations_idempotency_expiry_idx ON v2_pending_group_room_creations (created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_group_room_creations_intent_with_delivery_mode_idx
+        CREATE INDEX v2_pending_group_room_creations_intent_with_capacity_class_idx
                 ON v2_pending_group_room_creations
-                (title, delivery_mode, initial_member_user_ids, created_at, operation_id)
+                (title, capacity_class, initial_member_user_ids, created_at, operation_id)
                 WHERE state IN ('pending', 'finalizing');
 
         CREATE INDEX v2_pending_group_room_creations_ready_idx
@@ -947,7 +960,7 @@ extension GRDBV2LocalSyncStore {
                 (state, updated_at DESC, target_user_id ASC);
 
         CREATE INDEX v2_room_profile_authorized_delivery_idx
-                ON v2_room_profile_projections (delivery_mode, room_id)
+                ON v2_room_profile_projections (capacity_class, room_id)
                 WHERE is_group_event_authorized = 1;
 
         CREATE INDEX v2_timeline_activity_room_order_idx ON v2_timeline_activity_projections (room_id, timeline_sequence, source_event_id);
@@ -992,6 +1005,7 @@ extension GRDBV2LocalSyncStore {
             BEGIN
                 DELETE FROM v2_conversation_list_entries
                 WHERE room_id = OLD.room_id
+                  AND NOT EXISTS (SELECT 1 FROM v2_room_latest_visible WHERE room_id = OLD.room_id)
                   AND NOT EXISTS (SELECT 1 FROM v2_conversation_summaries WHERE room_id = OLD.room_id)
                   AND NOT EXISTS (SELECT 1 FROM v2_room_profile_projections WHERE room_id = OLD.room_id)
                   AND NOT EXISTS (SELECT 1 FROM v2_direct_room_profile_projections WHERE room_id = OLD.room_id);
@@ -1007,8 +1021,8 @@ extension GRDBV2LocalSyncStore {
                     COALESCE(
                         (SELECT message.server_created_at FROM v2_conversation_summaries AS summary JOIN v2_message_projections AS message ON message.message_id = summary.message_id WHERE summary.room_id = NEW.room_id),
                         (SELECT created_at FROM v2_room_profile_projections WHERE room_id = NEW.room_id),
-                        (SELECT updated_at FROM v2_direct_room_profile_projections WHERE room_id = NEW.room_id),
-                        NEW.updated_at
+                        (SELECT room_created_at FROM v2_direct_room_profile_projections WHERE room_id = NEW.room_id),
+                        NEW.room_created_at
                     ),
                     COALESCE((SELECT is_pinned FROM v2_conversation_states WHERE room_id = NEW.room_id), 0),
                     COALESCE((SELECT is_archived FROM v2_conversation_states WHERE room_id = NEW.room_id), 0),
@@ -1018,12 +1032,12 @@ extension GRDBV2LocalSyncStore {
             END;
 
         CREATE TRIGGER v2_conversation_list_direct_cache_update
-            AFTER UPDATE OF updated_at ON v2_direct_room_identities
+            AFTER UPDATE OF room_created_at ON v2_direct_room_identities
             WHEN NOT EXISTS (SELECT 1 FROM v2_conversation_summaries WHERE room_id = NEW.room_id)
              AND NOT EXISTS (SELECT 1 FROM v2_room_profile_projections WHERE room_id = NEW.room_id)
              AND NOT EXISTS (SELECT 1 FROM v2_direct_room_profile_projections WHERE room_id = NEW.room_id)
             BEGIN
-                UPDATE v2_conversation_list_entries SET last_activity = NEW.updated_at WHERE room_id = NEW.room_id;
+                UPDATE v2_conversation_list_entries SET last_activity = NEW.room_created_at WHERE room_id = NEW.room_id;
             END;
 
         CREATE TRIGGER v2_conversation_list_direct_profile_delete
@@ -1033,12 +1047,13 @@ extension GRDBV2LocalSyncStore {
                 SET last_activity = COALESCE(
                     (SELECT message.server_created_at FROM v2_conversation_summaries AS summary JOIN v2_message_projections AS message ON message.message_id = summary.message_id WHERE summary.room_id = OLD.room_id),
                     (SELECT created_at FROM v2_room_profile_projections WHERE room_id = OLD.room_id),
-                    (SELECT updated_at FROM v2_direct_room_identities WHERE room_id = OLD.room_id),
+                    (SELECT room_created_at FROM v2_direct_room_identities WHERE room_id = OLD.room_id),
                     last_activity
                 )
                 WHERE room_id = OLD.room_id;
                 DELETE FROM v2_conversation_list_entries
                 WHERE room_id = OLD.room_id
+                  AND NOT EXISTS (SELECT 1 FROM v2_room_latest_visible WHERE room_id = OLD.room_id)
                   AND NOT EXISTS (SELECT 1 FROM v2_conversation_summaries WHERE room_id = OLD.room_id)
                   AND NOT EXISTS (SELECT 1 FROM v2_room_profile_projections WHERE room_id = OLD.room_id)
                   AND NOT EXISTS (SELECT 1 FROM v2_direct_room_identities WHERE room_id = OLD.room_id);
@@ -1054,7 +1069,7 @@ extension GRDBV2LocalSyncStore {
                     COALESCE(
                         (SELECT message.server_created_at FROM v2_conversation_summaries AS summary JOIN v2_message_projections AS message ON message.message_id = summary.message_id WHERE summary.room_id = NEW.room_id),
                         (SELECT created_at FROM v2_room_profile_projections WHERE room_id = NEW.room_id),
-                        NEW.updated_at
+                        NEW.room_created_at
                     ),
                     COALESCE((SELECT is_pinned FROM v2_conversation_states WHERE room_id = NEW.room_id), 0),
                     COALESCE((SELECT is_archived FROM v2_conversation_states WHERE room_id = NEW.room_id), 0),
@@ -1064,11 +1079,11 @@ extension GRDBV2LocalSyncStore {
             END;
 
         CREATE TRIGGER v2_conversation_list_direct_profile_update
-            AFTER UPDATE OF updated_at ON v2_direct_room_profile_projections
+            AFTER UPDATE OF room_created_at ON v2_direct_room_profile_projections
             WHEN NOT EXISTS (SELECT 1 FROM v2_conversation_summaries WHERE room_id = NEW.room_id)
              AND NOT EXISTS (SELECT 1 FROM v2_room_profile_projections WHERE room_id = NEW.room_id)
             BEGIN
-                UPDATE v2_conversation_list_entries SET last_activity = NEW.updated_at WHERE room_id = NEW.room_id;
+                UPDATE v2_conversation_list_entries SET last_activity = NEW.room_created_at WHERE room_id = NEW.room_id;
             END;
 
         CREATE TRIGGER v2_conversation_list_room_profile_delete
@@ -1077,13 +1092,14 @@ extension GRDBV2LocalSyncStore {
                 UPDATE v2_conversation_list_entries
                 SET last_activity = COALESCE(
                     (SELECT message.server_created_at FROM v2_conversation_summaries AS summary JOIN v2_message_projections AS message ON message.message_id = summary.message_id WHERE summary.room_id = OLD.room_id),
-                    (SELECT updated_at FROM v2_direct_room_profile_projections WHERE room_id = OLD.room_id),
-                    (SELECT updated_at FROM v2_direct_room_identities WHERE room_id = OLD.room_id),
+                    (SELECT room_created_at FROM v2_direct_room_profile_projections WHERE room_id = OLD.room_id),
+                    (SELECT room_created_at FROM v2_direct_room_identities WHERE room_id = OLD.room_id),
                     last_activity
                 )
                 WHERE room_id = OLD.room_id;
                 DELETE FROM v2_conversation_list_entries
                 WHERE room_id = OLD.room_id
+                  AND NOT EXISTS (SELECT 1 FROM v2_room_latest_visible WHERE room_id = OLD.room_id)
                   AND NOT EXISTS (SELECT 1 FROM v2_conversation_summaries WHERE room_id = OLD.room_id)
                   AND NOT EXISTS (SELECT 1 FROM v2_direct_room_profile_projections WHERE room_id = OLD.room_id)
                   AND NOT EXISTS (SELECT 1 FROM v2_direct_room_identities WHERE room_id = OLD.room_id);
@@ -1137,13 +1153,14 @@ extension GRDBV2LocalSyncStore {
                 UPDATE v2_conversation_list_entries
                 SET last_activity = COALESCE(
                     (SELECT created_at FROM v2_room_profile_projections WHERE room_id = OLD.room_id),
-                    (SELECT updated_at FROM v2_direct_room_profile_projections WHERE room_id = OLD.room_id),
-                    (SELECT updated_at FROM v2_direct_room_identities WHERE room_id = OLD.room_id),
+                    (SELECT room_created_at FROM v2_direct_room_profile_projections WHERE room_id = OLD.room_id),
+                    (SELECT room_created_at FROM v2_direct_room_identities WHERE room_id = OLD.room_id),
                     last_activity
                 )
                 WHERE room_id = OLD.room_id;
                 DELETE FROM v2_conversation_list_entries
                 WHERE room_id = OLD.room_id
+                  AND NOT EXISTS (SELECT 1 FROM v2_room_latest_visible WHERE room_id = OLD.room_id)
                   AND NOT EXISTS (SELECT 1 FROM v2_room_profile_projections WHERE room_id = OLD.room_id)
                   AND NOT EXISTS (SELECT 1 FROM v2_direct_room_profile_projections WHERE room_id = OLD.room_id)
                   AND NOT EXISTS (SELECT 1 FROM v2_direct_room_identities WHERE room_id = OLD.room_id);
@@ -1312,5 +1329,7 @@ extension GRDBV2LocalSyncStore {
         INSERT INTO v2_message_search_state
             (singleton, index_version, state, generation)
         VALUES (1, 1, 'building', 1);
+        \(roomLatestVisibleTriggersSQL)
+        \(roomLatestVisibleListTriggersSQL)
         """
 }

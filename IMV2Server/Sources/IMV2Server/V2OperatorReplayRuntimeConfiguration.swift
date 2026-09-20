@@ -34,6 +34,7 @@ public struct V2OperatorReplayListenerConfiguration: Equatable, Sendable {
 public struct V2OperatorReplayRuntimeConfiguration: Sendable {
     /// 控制库连接地址。
     public let databaseURL: String
+    public let directAuthorizationResolutionDatabaseURLs: [String]
     /// PostgreSQL 会话与连接策略。
     public let databasePolicy: V2PostgresRuntimePolicy
     /// 重放服务的回环监听配置。
@@ -96,8 +97,8 @@ public struct V2OperatorReplayRuntimeConfiguration: Sendable {
         userShardStorage = try V2UserShardStorageConfiguration.parseRegistryJSON(
             Self.required("IM_V2_USER_SHARD_STORES_JSON", environment: environment)
         )
-        // Existing operators may omit this registry; forward replay then has
-        // no configured owner and never falls back to the control database.
+        // Without a room registry, personal-event and forward replay have no
+        // configured source owner and never fall back to the control database.
         if let raw = environment.value(for: "IM_V2_ROOM_SHARD_STORES_JSON") {
             roomShardStorage = try V2RoomShardStorageConfiguration.parseRegistryJSON(raw)
         } else { roomShardStorage = [] }
@@ -105,7 +106,12 @@ public struct V2OperatorReplayRuntimeConfiguration: Sendable {
             primaryDatabaseURL: databaseURL,
             userShardStorage: userShardStorage
         )
-        try databasePolicy.validate(databaseURLs: [databaseURL] + userShardStorage.map(\.databaseURL) + roomShardStorage.map(\.databaseURL))
+        directAuthorizationResolutionDatabaseURLs = Set([databaseURL] + roomShardStorage.map(\.databaseURL)).sorted()
+        let (resolutionConnections, overflow) = directAuthorizationResolutionDatabaseURLs.count.multipliedReportingOverflow(by: databasePolicy.eventLoopThreads)
+        guard !overflow else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS") }
+        try databasePolicy.validate(databaseURLs: [databaseURL] + userShardStorage.map(\.databaseURL) + roomShardStorage.map(\.databaseURL),
+            connectionsPerEventLoopPerPhysicalStore: databasePolicy.maximumConnectionsPerEventLoop,
+            additionalConnections: resolutionConnections)
     }
 
     /// 读取必需的环境变量并去除首尾空白。

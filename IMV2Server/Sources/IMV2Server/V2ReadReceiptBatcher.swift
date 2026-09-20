@@ -203,7 +203,7 @@ public actor V2ReadReceiptBatcher: V2ReadReceiptAdmission {
         let generation = flushGeneration
         let delay = configuration.maximumDelay
         flushTask = Task { [weak self] in
-            do { try await Task.sleep(for: delay) } catch { return }
+            do { try await v2Sleep(for: delay) } catch { return }
             await self?.flushAfterDelay(generation: generation)
         }
     }

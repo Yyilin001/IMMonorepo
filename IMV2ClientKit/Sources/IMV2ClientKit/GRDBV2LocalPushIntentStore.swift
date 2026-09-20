@@ -273,20 +273,33 @@ extension GRDBV2LocalSyncStore: V2LocalPushIntentStoring {
         return state
     }
 
+    private static func optionalPushIntentInteger(_ row: Row, column: String) throws -> Int64? {
+        let value: DatabaseValue = row[column]
+        if value.isNull { return nil }
+        guard case .int64(let integer) = value.storage else { throw V2LocalPushIntentError.invalidState }
+        return integer
+    }
+
+    private static func pushIntentInteger(_ row: Row, column: String) throws -> Int64 {
+        guard let value = try optionalPushIntentInteger(row, column: column) else { throw V2LocalPushIntentError.invalidState }
+        return value
+    }
+
     private static func readPushIntent(scope: V2PushIntentScope, db: Database) throws -> V2LocalPushIntent? {
         guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_push_intent WHERE singleton = 1") else { return nil }
         let storedScope = try V2PushIntentScope(userID: scope.userID, deviceID: DeviceID(row["device_id"]), installation: scope.installation)
         guard let owner = UUID(uuidString: row["owner_id"]) else { throw V2LocalPushIntentError.invalidState }
-        let revision: Int64 = row["intent_revision"], ack: Int64 = row["acknowledged_revision"]
+        let revision = try pushIntentInteger(row, column: "intent_revision"), ack = try pushIntentInteger(row, column: "acknowledged_revision")
         guard revision > 0, ack >= 0, ack <= revision else { throw V2LocalPushIntentError.invalidState }
-        let attemptCount: Int = row["attempt_count"]
-        guard (0...Int(Int32.max)).contains(attemptCount) else { throw V2LocalPushIntentError.invalidState }
+        let storedAttempts = try pushIntentInteger(row, column: "attempt_count")
+        guard (0...Int64(Int32.max)).contains(storedAttempts) else { throw V2LocalPushIntentError.invalidState }
+        let attemptCount = Int(storedAttempts)
         let nextAttemptAt: Double = row["next_attempt_at"]
         guard nextAttemptAt >= 0, nextAttemptAt < 1e300 else { throw V2LocalPushIntentError.invalidState }
         let tokenText: String? = row["token_reference"], claimText: String? = row["claim_id"]
         let token = tokenText.flatMap(UUID.init(uuidString:)), claimID = claimText.flatMap(UUID.init(uuidString:))
         guard (tokenText == nil) == (token == nil), (claimText == nil) == (claimID == nil) else { throw V2LocalPushIntentError.invalidState }
-        let expected: Int64? = row["expected_epoch"], epoch: Int64? = row["session_epoch"]
+        let expected = try optionalPushIntentInteger(row, column: "expected_epoch"), epoch = try optionalPushIntentInteger(row, column: "session_epoch")
         let claim: V2PushIntentSessionClaim?
         if let claimID, let expected, expected >= 0 { claim = try .init(requestID: claimID, expectedEpoch: UInt64(expected)) }
         else { guard claimID == nil && expected == nil else { throw V2LocalPushIntentError.invalidState }; claim = nil }

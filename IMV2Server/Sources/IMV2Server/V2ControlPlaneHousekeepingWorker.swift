@@ -125,6 +125,9 @@ public enum V2ControlPlaneHousekeepingError: Error, Equatable, Sendable {
 public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepingStore {
     private let database: any Database
 
+    // Shared by startup readiness and transactional execution.
+    static var housekeepingRotationPeriod: Int64 { Int64(10 * idempotencyTables.count) }
+
     /// 组合数据库。
     ///
     /// - Parameter database: 存放终态簿记与控制面状态的数据库。
@@ -159,14 +162,30 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2ControlPlaneHousekeepingError.corruptPersistenceState
             }
+            // A durable transaction slot avoids clock/cadence aliasing and
+            // serializes concurrent maintainers. Failed cleanup rolls it back.
+            guard let slot = try await sql.raw("""
+                SELECT rotation AS value FROM im_v2.control_housekeeping_cursor
+                WHERE singleton = TRUE FOR UPDATE
+                """).first(decoding: ControlHousekeepingRotationRow.self),
+                slot.value >= 0, slot.value < Self.housekeepingRotationPeriod else {
+                throw V2ControlPlaneHousekeepingError.corruptPersistenceState
+            }
+            let rotation = UInt(slot.value)
+            let next = slot.value == Self.housekeepingRotationPeriod - 1 ? 0 : slot.value + 1
+            try await sql.raw("""
+                UPDATE im_v2.control_housekeeping_cursor SET rotation = \(bind: next)
+                WHERE singleton = TRUE
+                """).run()
             // `limit` is a transaction-wide row budget, not a per-table
             // multiplier. Divide it fairly across every cleanup class so a
             // single pass has predictable lock/WAL cost and, when the budget
             // covers all categories, cold tables do not starve behind a
-            // continuously busy fan-out table.
+            // continuously busy work table.
             var budget = ControlHousekeepingDeletionBudget(
                 total: limit,
-                categoryCount: 16
+                categoryCount: 10,
+                rotation: rotation
             )
             var count = 0
             count += try await deleteSimple(
@@ -182,7 +201,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             count += try await deleteSimple(
                 sql: sql, table: "content_review_jobs", identity: "message_id",
                 where: "state IN ('completed', 'superseded') AND completed_at <= ", order: "completed_at, message_id",
-                cutoff: cutoff, limit: budget.take()
+                cutoff: cutoff, limit: budget.take(), roomOwned: true
             )
             count += try await deleteSimple(
                 sql: sql, table: "public_profile_update_outbox", identity: "source_event_id",
@@ -211,112 +230,6 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 cutoff: cutoff, limit: budget.take()
             )
 
-            // A terminal plan may have a very large audience. Every statement
-            // below limits rows, not plans, so even one 100k-member room is
-            // dismantled across predictable maintenance passes.
-            let deliveryLimit = budget.take()
-            count += try await sql.raw("""
-                WITH candidates AS (
-                    SELECT delivery.ctid
-                    FROM im_v2.fanout_deliveries AS delivery
-                    JOIN im_v2.fanout_plans AS plan
-                      ON plan.source_event_id = delivery.source_event_id
-                    WHERE delivery.state = 'terminal' AND plan.state = 'terminal'
-                      AND plan.terminal_at <= \(bind: cutoff)
-                    ORDER BY plan.terminal_at, delivery.source_event_id,
-                             delivery.target_user_id, delivery.projection_kind
-                    LIMIT \(bind: deliveryLimit)
-                    FOR UPDATE OF delivery SKIP LOCKED
-                )
-                DELETE FROM im_v2.fanout_deliveries AS delivery
-                USING candidates WHERE delivery.ctid = candidates.ctid
-                RETURNING 1 AS value
-                """).all(decoding: ControlHousekeepingDeletedRow.self).count
-
-            let inboxLimit = budget.take()
-            count += try await sql.raw("""
-                WITH candidates AS (
-                    SELECT inbox.ctid
-                    FROM im_v2.consumer_inbox AS inbox
-                    JOIN im_v2.fanout_plans AS plan
-                      ON plan.source_event_id = inbox.source_event_id
-                    WHERE inbox.consumer_name = 'v2-fanout-delivery'
-                      AND plan.state = 'terminal' AND plan.terminal_at <= \(bind: cutoff)
-                    ORDER BY plan.terminal_at, inbox.source_event_id,
-                             inbox.target_user_id, inbox.projection_kind
-                    LIMIT \(bind: inboxLimit)
-                    FOR UPDATE OF inbox SKIP LOCKED
-                )
-                DELETE FROM im_v2.consumer_inbox AS inbox
-                USING candidates WHERE inbox.ctid = candidates.ctid
-                RETURNING 1 AS value
-                """).all(decoding: ControlHousekeepingDeletedRow.self).count
-
-            let completionUnitLimit = budget.take()
-            count += try await sql.raw("""
-                WITH candidates AS (
-                    SELECT unit.ctid
-                    FROM im_v2.fanout_completion_units AS unit
-                    JOIN im_v2.fanout_plans AS plan
-                      ON plan.source_event_id = unit.source_event_id
-                    WHERE unit.state = 'released' AND plan.state = 'terminal'
-                      AND plan.terminal_at <= \(bind: cutoff)
-                      AND NOT EXISTS (
-                          SELECT 1 FROM im_v2.fanout_deliveries AS delivery
-                          WHERE delivery.source_event_id = unit.source_event_id
-                            AND delivery.completion_unit_id = unit.completion_unit_id
-                      )
-                    ORDER BY plan.terminal_at, unit.source_event_id, unit.completion_unit_id
-                    LIMIT \(bind: completionUnitLimit)
-                    FOR UPDATE OF unit SKIP LOCKED
-                )
-                DELETE FROM im_v2.fanout_completion_units AS unit
-                USING candidates WHERE unit.ctid = candidates.ctid
-                RETURNING 1 AS value
-                """).all(decoding: ControlHousekeepingDeletedRow.self).count
-
-            let planTargetLimit = budget.take()
-            count += try await sql.raw("""
-                WITH candidates AS (
-                    SELECT target.ctid
-                    FROM im_v2.fanout_plan_targets AS target
-                    JOIN im_v2.fanout_plans AS plan
-                      ON plan.source_event_id = target.source_event_id
-                    WHERE plan.state = 'terminal' AND plan.terminal_at <= \(bind: cutoff)
-                    ORDER BY plan.terminal_at, target.source_event_id, target.target_user_id
-                    LIMIT \(bind: planTargetLimit)
-                    FOR UPDATE OF target SKIP LOCKED
-                )
-                DELETE FROM im_v2.fanout_plan_targets AS target
-                USING candidates WHERE target.ctid = candidates.ctid
-                RETURNING 1 AS value
-                """).all(decoding: ControlHousekeepingDeletedRow.self).count
-
-            count += try await deleteSimple(
-                sql: sql, table: "room_outbox", identity: "source_event_id",
-                where: "state = 'terminal' AND terminal_at <= ", order: "terminal_at, source_event_id",
-                cutoff: cutoff, limit: budget.take()
-            )
-
-            let planLimit = budget.take()
-            count += try await sql.raw("""
-                WITH candidates AS (
-                    SELECT plan.ctid
-                    FROM im_v2.fanout_plans AS plan
-                    WHERE plan.state = 'terminal' AND plan.terminal_at <= \(bind: cutoff)
-                      AND NOT EXISTS (SELECT 1 FROM im_v2.room_outbox AS outbox WHERE outbox.plan_id = plan.plan_id)
-                      AND NOT EXISTS (SELECT 1 FROM im_v2.fanout_completion_units AS unit WHERE unit.source_event_id = plan.source_event_id)
-                      AND NOT EXISTS (SELECT 1 FROM im_v2.fanout_deliveries AS delivery WHERE delivery.source_event_id = plan.source_event_id)
-                      AND NOT EXISTS (SELECT 1 FROM im_v2.fanout_plan_targets AS target WHERE target.source_event_id = plan.source_event_id)
-                    ORDER BY plan.terminal_at, plan.source_event_id
-                    LIMIT \(bind: planLimit)
-                    FOR UPDATE OF plan SKIP LOCKED
-                )
-                DELETE FROM im_v2.fanout_plans AS plan
-                USING candidates WHERE plan.ctid = candidates.ctid
-                RETURNING 1 AS value
-                """).all(decoding: ControlHousekeepingDeletedRow.self).count
-
             // Authentication replay rows contain encrypted bearer material;
             // their own replay expiry is the deletion boundary, independent
             // of the longer command-idempotency window.
@@ -338,7 +251,9 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             let idempotencyRows = try await purgeIdempotencyResults(
                 sql: sql,
                 cutoff: idempotencyCutoff,
-                rotationSeed: now,
+                // With a sub-category budget, advance the inner table
+                // rotation once per outer cycle to avoid modulo aliasing.
+                rotation: limit < 10 ? rotation / 10 : rotation,
                 limit: budget.take()
             )
             count += credentialReplays + refreshHistory + connectionLeases + idempotencyRows
@@ -359,16 +274,13 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
     private func purgeIdempotencyResults(
         sql: any SQLDatabase,
         cutoff: Date,
-        rotationSeed: Date,
+        rotation: UInt,
         limit: Int
     ) async throws -> Int {
         let tables = Self.idempotencyTables
         let selectedCount = min(limit, tables.count)
         guard selectedCount > 0 else { return 0 }
-        guard let minute = Int(exactly: (rotationSeed.timeIntervalSince1970 / 60).rounded(.towardZero)) else {
-            throw V2ControlPlaneHousekeepingError.corruptPersistenceState
-        }
-        let start = Int(minute.magnitude % UInt(tables.count))
+        let start = Int(rotation % UInt(tables.count))
         let perTableLimit = max(1, limit / selectedCount)
         var deleted = 0
         for offset in 0 ..< selectedCount {
@@ -379,6 +291,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                     FROM im_v2.\(unsafeRaw: descriptor.table) AS target
                     WHERE target.\(unsafeRaw: descriptor.timestamp) <= \(bind: cutoff)
                       \(unsafeRaw: descriptor.additionalPredicate)
+                      \(unsafeRaw: Self.roomCleanupPredicate(enabled: descriptor.roomOwned))
                     ORDER BY target.\(unsafeRaw: descriptor.timestamp), target.ctid
                     LIMIT \(bind: perTableLimit)
                     FOR UPDATE OF target SKIP LOCKED
@@ -399,16 +312,18 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
         where predicate: String,
         order: String,
         cutoff: Date,
-        limit: Int
+        limit: Int,
+        roomOwned: Bool = false
     ) async throws -> Int {
         try await sql.raw("""
             WITH candidates AS (
                 SELECT \(unsafeRaw: identity)
-                FROM im_v2.\(unsafeRaw: table)
+                FROM im_v2.\(unsafeRaw: table) AS target
                 WHERE \(unsafeRaw: predicate)\(bind: cutoff)
+                  \(unsafeRaw: Self.roomCleanupPredicate(enabled: roomOwned))
                 ORDER BY \(unsafeRaw: order)
                 LIMIT \(bind: limit)
-                FOR UPDATE SKIP LOCKED
+                FOR UPDATE OF target SKIP LOCKED
             )
             DELETE FROM im_v2.\(unsafeRaw: table) AS target
             USING candidates
@@ -417,14 +332,40 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             """).all(decoding: ControlHousekeepingDeletedRow.self).count
     }
 
+    /// Room-owned cleanup must serialize with marker installation. Missing
+    /// local rooms are retained until migration retirement is explicitly proven.
+    private static func roomCleanupPredicate(enabled: Bool) -> String {
+        guard enabled else { return "" }
+        return """
+            AND (SELECT true FROM im_v2.rooms AS room
+                 WHERE room.room_id = target.room_id AND room.migration_fence_id IS NULL
+                 FOR SHARE OF room SKIP LOCKED)
+            """
+    }
+
     private struct IdempotencyTable: Sendable {
         let table: String
         let timestamp: String
         let additionalPredicate: String
+        let roomOwned: Bool
+
+        init(table: String, timestamp: String, additionalPredicate: String, roomOwned: Bool = false) {
+            self.table = table
+            self.timestamp = timestamp
+            self.additionalPredicate = additionalPredicate
+            self.roomOwned = roomOwned
+        }
     }
 
+    // Do not add message_send_completions here: sends have no server-enforced
+    // expiry fence, and source visibility also depends on their immutable
+    // accepted membership revision. The generic retention minimum proves
+    // neither replay expiry nor the end of that authorization dependency.
+    // message_forward_operations also owns the stable target client ID. With
+    // no server-enforced forwarding expiry, deleting it makes an old forward
+    // generate a new send identity and bypass the retained send completion.
     private static let idempotencyTables: [IdempotencyTable] = [
-        .init(table: "direct_room_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "direct_room_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
         .init(table: "user_relationship_operations", timestamp: "updated_at", additionalPredicate: ""),
         .init(table: "user_block_operations", timestamp: "updated_at", additionalPredicate: ""),
         .init(table: "stranger_message_preference_operations", timestamp: "updated_at", additionalPredicate: ""),
@@ -433,52 +374,55 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
         // decision results; missing evidence must never be mistaken for a
         // membership operation that did not commit. Match only the operation
         // identity so conflicting legacy bindings remain investigable too.
-        .init(table: "room_membership_operations", timestamp: "created_at", additionalPredicate: "AND NOT EXISTS (SELECT 1 FROM im_v2.group_join_requests AS request WHERE request.decided_by_user_id = target.actor_user_id AND request.decision_operation_id = target.operation_id)"),
+        .init(table: "room_membership_operations", timestamp: "created_at", additionalPredicate: "AND NOT EXISTS (SELECT 1 FROM im_v2.group_join_requests AS request WHERE request.decided_by_user_id = target.actor_user_id AND request.decision_operation_id = target.operation_id)", roomOwned: true),
         .init(table: "media_upload_operations", timestamp: "created_at", additionalPredicate: ""),
-        .init(table: "message_withdrawal_operations", timestamp: "created_at", additionalPredicate: ""),
-        .init(table: "moderation_operations", timestamp: "created_at", additionalPredicate: "AND NOT EXISTS (SELECT 1 FROM im_v2.moderation_audit_entries AS audit WHERE audit.actor_user_id = target.actor_user_id AND audit.operation_id = target.operation_id)"),
-        .init(table: "message_edit_operations", timestamp: "created_at", additionalPredicate: ""),
-        .init(table: "read_receipt_operations", timestamp: "recorded_at", additionalPredicate: ""),
-        .init(table: "message_reaction_operations", timestamp: "created_at", additionalPredicate: ""),
-        .init(table: "group_room_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "message_withdrawal_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
+        .init(table: "moderation_operations", timestamp: "created_at", additionalPredicate: "AND NOT EXISTS (SELECT 1 FROM im_v2.moderation_audit_entries AS audit WHERE audit.actor_user_id = target.actor_user_id AND audit.operation_id = target.operation_id)", roomOwned: true),
+        .init(table: "message_edit_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
+        .init(table: "read_receipt_operations", timestamp: "recorded_at", additionalPredicate: "", roomOwned: true),
+        .init(table: "message_reaction_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
+        .init(table: "group_room_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
         .init(table: "public_profile_update_operations", timestamp: "created_at", additionalPredicate: ""),
         .init(table: "user_add_preference_operations", timestamp: "updated_at", additionalPredicate: ""),
         .init(table: "read_receipt_preference_operations", timestamp: "updated_at", additionalPredicate: "AND NOT EXISTS (SELECT 1 FROM im_v2.read_receipt_preference_propagation_outbox AS outbox WHERE outbox.actor_user_id = target.actor_user_id AND outbox.operation_id = target.operation_id)"),
         .init(table: "user_live_activity_preference_operations", timestamp: "updated_at", additionalPredicate: ""),
         .init(table: "user_room_preference_operations", timestamp: "updated_at", additionalPredicate: ""),
         .init(table: "user_message_favorite_operations", timestamp: "updated_at", additionalPredicate: ""),
-        .init(table: "room_pinned_message_operations", timestamp: "created_at", additionalPredicate: ""),
-        .init(table: "group_announcement_operations", timestamp: "created_at", additionalPredicate: ""),
-        .init(table: "group_permission_operations", timestamp: "created_at", additionalPredicate: ""),
-        .init(table: "group_role_operations", timestamp: "created_at", additionalPredicate: ""),
-        .init(table: "message_forward_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "room_pinned_message_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
+        .init(table: "group_announcement_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
+        .init(table: "group_permission_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
+        .init(table: "group_role_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
         .init(table: "device_session_operations", timestamp: "created_at", additionalPredicate: ""),
-        .init(table: "special_account_message_operations", timestamp: "created_at", additionalPredicate: ""),
+        .init(table: "special_account_message_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
         .init(table: "user_contact_alias_operations", timestamp: "created_at", additionalPredicate: ""),
-        .init(table: "room_member_nickname_operations", timestamp: "created_at", additionalPredicate: "")
+        .init(table: "room_member_nickname_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true)
     ]
 }
 
+private struct ControlHousekeepingRotationRow: Decodable { let value: Int64 }
 private struct ControlHousekeepingDeletedRow: Decodable { let value: Int }
 
-private struct ControlHousekeepingDeletionBudget {
-    private var remaining: Int
-    private var remainingCategoryCount: Int
+/// Divides the row budget without multiplication or addition near Int.max.
+/// Small budgets rotate across categories instead of always serving the prefix.
+struct ControlHousekeepingDeletionBudget {
+    private let base: Int
+    private let extra: Int
+    private let categoryCount: Int
+    private let start: Int
+    private var index = 0
 
-    init(total: Int, categoryCount: Int) {
+    init(total: Int, categoryCount: Int, rotation: UInt) {
         precondition(total > 0 && categoryCount > 0)
-        remaining = total
-        remainingCategoryCount = categoryCount
+        self.categoryCount = categoryCount
+        base = total / categoryCount
+        extra = total % categoryCount
+        start = Int(rotation % UInt(categoryCount))
     }
 
     mutating func take() -> Int {
-        guard remaining > 0 else {
-            remainingCategoryCount = max(0, remainingCategoryCount - 1)
-            return 0
-        }
-        let allocation = max(1, remaining / max(1, remainingCategoryCount))
-        remaining -= allocation
-        remainingCategoryCount = max(0, remainingCategoryCount - 1)
-        return allocation
+        guard index < categoryCount else { return 0 }
+        let distance = index >= start ? index - start : categoryCount - (start - index)
+        index += 1
+        return base + (distance < extra ? 1 : 0)
     }
 }

@@ -78,7 +78,7 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
             }
         }
 
-        let acceptedDelivery = v2MessageAcceptedDeliveryQuery(
+        let acceptance = v2MessageAcceptanceFactQuery(
             messageID: "CASE WHEN event.event_type IN ('message.edited', 'message.withdrawn', 'message.reaction_changed') THEN (event.payload->>'message_id')::uuid ELSE NULL END",
             roomID: "event.room_id"
         )
@@ -133,7 +133,7 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
                         OR accepted.message_id IS NOT NULL) AS authority_complete
                 FROM room
                 JOIN visible_event_candidates AS event ON TRUE
-                LEFT JOIN LATERAL (\(acceptedDelivery)) AS accepted ON TRUE
+                LEFT JOIN LATERAL (\(acceptance)) AS accepted ON TRUE
                 WHERE room.room_kind IN ('group', 'direct')
                   AND room.actor_is_active_member
                   AND event.room_sequence > \(bind: cursor.signedValue)

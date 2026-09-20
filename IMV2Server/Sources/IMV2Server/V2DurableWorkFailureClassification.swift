@@ -14,10 +14,6 @@ import Foundation
 /// - Returns: 该失败的类别。
 func v2DurableWorkFailureKind(for error: any Error) -> V2DurableWorkFailureKind {
     switch error {
-    case V2FanoutDeliveryError.inboxAlreadyCommitted:
-        // 收件箱唯一键代表不可变的投递身份。同一身份已被提交而同步日志行缺失，
-        // 重复执行只会反复命中同一冲突。
-        return .deterministic
     // 消息与房间写入路径的 `corruptPersistenceState` 表示持久内容身份不再自洽
     // （载荷身份、投影状态、队列序号或既有回执），重复执行不会改变结论，
     // 继续重试只会让毒丸行持续占用预算，因此判为确定性并交给运维修复。

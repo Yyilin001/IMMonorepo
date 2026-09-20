@@ -5,85 +5,6 @@ import Testing
 
 @Suite("Finite room-log catch-up", .timeLimit(.minutes(1)))
 struct V2RoomLogCatchUpTests {
-    @Test("an empty directory larger than the quantum terminates", arguments: [13, 1_000])
-    func emptyDirectoryTerminates(roomCount: Int) async throws {
-        let rooms = try makeRooms(roomCount)
-        let store = CatchUpStore(rooms: rooms)
-        let transport = CatchUpTransport(tails: [:])
-        let engine = V2GroupEventSyncEngine(transport: transport, store: store)
-        var rounds = 0
-        var remaining = true
-        while remaining, rounds < roomCount {
-            let progress = try await engine.synchronizeBackgroundKnownRooms(maximumPages: 12)
-            #expect(progress.processedPageCount <= 12)
-            #expect(progress.appliedEventCount == 0)
-            remaining = progress.mayHaveRemainingWork
-            rounds += 1
-        }
-        #expect(!remaining)
-        #expect(rounds == (roomCount + 11) / 12)
-        #expect(await transport.roomsRequested() == rooms)
-    }
-
-    @Test("the owned worker drains hot and cold rooms without another hint")
-    func workerContinuesAndRemainsFair() async throws {
-        let rooms = try makeRooms(13)
-        let store = CatchUpStore(rooms: rooms)
-        let transport = CatchUpTransport(tails: [rooms[0]: 10_000, rooms[12]: 1])
-        let engine = V2GroupEventSyncEngine(transport: transport, store: store)
-        let finished = CatchUpSignal()
-        let worker = V2RoomLogCatchUpWorker(engine: engine) { progress in
-            if !progress.mayHaveRemainingWork { await finished.signal() }
-        }
-        let running = Task { try await worker.run() }
-        await finished.wait()
-        running.cancel()
-        await #expect(throws: CancellationError.self) { try await running.value }
-        #expect(await store.groupEventCursor(roomID: rooms[0]) == 10_000)
-        #expect(await store.groupEventCursor(roomID: rooms[12]) == 1)
-        let requested = await transport.roomsRequested()
-        #expect(Array(requested.prefix(13)) == rooms)
-        #expect(requested.count == 62) // 50 hot pages + 12 other rooms.
-    }
-
-    @Test("a captured directory endpoint defers newly appended room IDs")
-    func directoryHasFiniteEndMarker() async throws {
-        let rooms = try makeRooms(14)
-        let store = CatchUpStore(rooms: Array(rooms.prefix(13)))
-        let transport = CatchUpTransport(tails: [:])
-        let engine = V2GroupEventSyncEngine(transport: transport, store: store)
-        #expect(try await engine.synchronizeBackgroundKnownRooms(maximumPages: 12).mayHaveRemainingWork)
-        await store.add(rooms[13])
-        #expect(try await !engine.synchronizeBackgroundKnownRooms(maximumPages: 12).mayHaveRemainingWork)
-        #expect(await transport.roomsRequested() == Array(rooms.prefix(13)))
-        let restarted = V2GroupEventSyncEngine(transport: transport, store: store)
-        _ = try await restarted.synchronizeBackgroundKnownRooms(maximumPages: 1)
-        #expect(await transport.roomsRequested().last == rooms[13])
-    }
-
-    @Test("snapshot activation pauses the worker until durable sync wakes it again")
-    func snapshotFenceKeepsWorkerAlive() async throws {
-        let room = try makeRooms(1)[0]
-        let store = CatchUpStore(rooms: [room])
-        await store.setFenced(true)
-        let transport = CatchUpTransport(tails: [room: 1])
-        let engine = V2GroupEventSyncEngine(transport: transport, store: store)
-        let finished = CatchUpSignal()
-        let worker = V2RoomLogCatchUpWorker(engine: engine) { progress in
-            if !progress.mayHaveRemainingWork { await finished.signal() }
-        }
-        let running = Task { try await worker.run() }
-        await store.fenceHit.wait()
-        #expect(await store.groupEventCursor(roomID: room) == 0)
-        await store.setFenced(false)
-        await worker.requestCatchUp()
-        await finished.wait()
-        running.cancel()
-        await #expect(throws: CancellationError.self) { try await running.value }
-        #expect(await transport.roomsRequested() == [room, room])
-        #expect(await store.groupEventCursor(roomID: room) == 1)
-    }
-
     @Test("a server claiming more without cursor progress is rejected")
     func rejectsNoProgressLoop() async throws {
         let room = try makeRooms(1)[0]
@@ -91,7 +12,7 @@ struct V2RoomLogCatchUpTests {
             transport: NoProgressCatchUpTransport(), store: CatchUpStore(rooms: [room])
         )
         await #expect(throws: V2RealtimeTransportError.unexpectedResponse) {
-            _ = try await engine.synchronizeBackgroundKnownRooms(maximumPages: 12)
+            _ = try await engine.synchronizeOnePage(roomID: room)
         }
     }
 
@@ -103,7 +24,7 @@ struct V2RoomLogCatchUpTests {
         let engine = V2GroupEventSyncEngine(transport: transport, store: store)
         let foreground = Task { try await engine.synchronizeOnePage(roomID: room) }
         await transport.started.wait()
-        let maintenance = Task { try await engine.synchronizeBackgroundKnownRooms(maximumPages: 1) }
+        let maintenance = Task { try await engine.synchronizeOnePage(roomID: room) }
         await transport.release.signal()
         _ = try await foreground.value
         _ = try await maintenance.value
@@ -117,13 +38,13 @@ struct V2RoomLogCatchUpTests {
         let store = CatchUpStore(rooms: [room])
         let transport = GatedCatchUpTransport(room: room)
         let engine = V2GroupEventSyncEngine(transport: transport, store: store)
-        let work = Task { try await engine.synchronizeBackgroundKnownRooms(maximumPages: 1) }
+        let work = Task { try await engine.synchronizeOnePage(roomID: room) }
         await transport.started.wait()
         work.cancel()
         await transport.release.signal()
         await #expect(throws: CancellationError.self) { _ = try await work.value }
         #expect(await store.groupEventCursor(roomID: room) == 0)
-        _ = try await engine.synchronizeBackgroundKnownRooms(maximumPages: 1)
+        _ = try await engine.synchronizeOnePage(roomID: room)
         #expect(await transport.cursors() == [0, 0])
         #expect(await store.groupEventCursor(roomID: room) == 1)
     }
@@ -135,7 +56,6 @@ struct V2RoomLogCatchUpTests {
 
 private actor CatchUpStore: V2LocalGroupEventStore {
     private var rooms: [RoomID]
-    private var cursor: RoomID?
     private var sequences: [RoomID: UInt64] = [:]
     private var fenced = false
     let fenceHit = CatchUpSignal()
@@ -146,9 +66,6 @@ private actor CatchUpStore: V2LocalGroupEventStore {
         Array(rooms.sorted { $0.rawValue < $1.rawValue }
             .filter { candidate in roomID.map { candidate.rawValue > $0.rawValue } ?? true }.prefix(limit))
     }
-    func lastKnownRoomLogRoomID() -> RoomID? { rooms.max { $0.rawValue < $1.rawValue } }
-    func hybridGroupBackgroundCursor() -> RoomID? { cursor }
-    func setHybridGroupBackgroundCursor(_ roomID: RoomID?) { cursor = roomID }
     func isKnownRoomLogRoom(roomID: RoomID) -> Bool { rooms.contains(roomID) }
     func markRoomEventUnauthorized(roomID: RoomID) { rooms.removeAll { $0 == roomID } }
     func groupEventCursor(roomID: RoomID) -> UInt64 { sequences[roomID, default: 0] }

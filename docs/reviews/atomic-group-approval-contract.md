@@ -16,7 +16,7 @@
 
 ## 数据库迁移
 
-`IMV2/sql/migrations/20260906_atomic_group_approval.sql` 要求排空全部旧邀请写进程，然后从 current-19 迁移至 current-20。迁移在事务内检查旧决策键重复；重复时明确失败，不自动选择记录或删除数据。新增非延迟 `UNIQUE (decided_by_user_id, decision_operation_id)`，未决策的 NULL 保持原语义。Swift readiness 与 SQL readiness 均检查有效唯一索引和真实约束，删除约束但保留 marker 会被拒绝。
+当前规范 schema 直接定义非延迟 `UNIQUE (decided_by_user_id, decision_operation_id)`，未决策 NULL 保持原语义。Swift 和 SQL readiness 检查约束存在与结构；不执行旧决策数据回填或历史升级。
 
 ## 验证
 

@@ -63,8 +63,11 @@ public protocol V2RoomLogRetentionStore: Sendable {
 ///
 /// 删除是本项目里**唯一**允许移除房间事件的路径，由触发器双重约束：语句必须显式声明
 /// 这是保留裁剪，且被删事件序号必须已经低于房间的裁剪下界。
-public struct PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
+public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
     private let database: any Database
+    // 稳定主键轮转；事务成功后才推进。重启从头开始，不影响裁剪安全性。
+    private var lastScannedRoomID: UUID?
+    private var isTrimming = false
 
     /// 组合数据库。
     ///
@@ -94,29 +97,73 @@ public struct PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
         guard let activeSince = v2PostgresPastTimestamp(now: now, interval: window) else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
-        return try await database.transaction { transaction in
+        // actor 在等待数据库时可重入；同一实例只允许一轮更新游标。
+        guard !isTrimming else { return .init(scannedRooms: 0, trimmedRooms: 0, deletedEvents: 0) }
+        isTrimming = true
+        defer { isTrimming = false }
+        let afterRoomID = lastScannedRoomID
+        let result = try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            let cursorPredicate: SQLQueryString = if let afterRoomID {
+                "room_id > \(bind: afterRoomID)"
+            } else { "TRUE" }
+            // 与迁移标记安装争用同一房间锁；冻结或忙碌房间跳过，下轮继续。
+            // 先锁定有界房间集，再在新语句快照中计算已读下界，避免并发入群被漏算。
+            var locked = try await sql.raw("""
+                SELECT room_id FROM im_v2.rooms
+                WHERE \(cursorPredicate)
+                  AND room_sequence > log_trimmed_through_room_sequence
+                  AND migration_fence_id IS NULL
+                ORDER BY room_id
+                LIMIT \(bind: limit)
+                FOR UPDATE SKIP LOCKED
+                """).all(decoding: RoomLogLockedRow.self)
+            if locked.isEmpty, afterRoomID != nil {
+                locked = try await sql.raw("""
+                    SELECT room_id FROM im_v2.rooms
+                    WHERE room_sequence > log_trimmed_through_room_sequence
+                      AND migration_fence_id IS NULL
+                    ORDER BY room_id LIMIT \(bind: limit) FOR UPDATE SKIP LOCKED
+                    """).all(decoding: RoomLogLockedRow.self)
+            }
+            let roomIDs = locked.map(\.roomID)
+            guard !roomIDs.isEmpty else {
+                return (V2RoomLogTrimReport(scannedRooms: 0, trimmedRooms: 0, deletedEvents: 0), UUID?.none)
             }
             let candidates = try await sql.raw("""
                 SELECT room.room_id, room.log_trimmed_through_room_sequence AS trimmed_through,
                        GREATEST(
                            COALESCE(
                                (
-                                   SELECT MIN(receipt.read_through_room_sequence)
-                                   FROM im_v2.room_read_receipts AS receipt
-                                   WHERE receipt.room_id = room.room_id
-                                     AND (\(bind: mode.rawValue) = 'permanent'
-                                          OR receipt.updated_at >= \(bind: activeSince))
+                                   SELECT MIN(reader.read_sequence)
+                                   FROM (
+                                       SELECT receipt.read_through_room_sequence AS read_sequence
+                                       FROM im_v2.room_read_receipts AS receipt
+                                       WHERE receipt.room_id = room.room_id
+                                         AND (\(bind: mode.rawValue) = 'permanent'
+                                              OR receipt.updated_at >= \(bind: activeSince))
+                                       UNION ALL
+                                       -- 缺少回执不能证明已读或已过宽限；新单聊和旧成员均需保护。
+                                       SELECT 0::bigint
+                                       FROM im_v2.room_memberships AS member
+                                       WHERE member.room_id = room.room_id
+                                         AND member.left_revision IS NULL
+                                         AND NOT EXISTS (
+                                             SELECT 1 FROM im_v2.room_read_receipts AS receipt
+                                             WHERE receipt.room_id = member.room_id
+                                               AND receipt.user_id = member.user_id
+                                         )
+                                   ) AS reader
                                ),
                                room.room_sequence
                            ),
                            0
                        )::bigint AS floor_sequence
                 FROM im_v2.rooms AS room
-                WHERE room.room_sequence > room.log_trimmed_through_room_sequence
-                ORDER BY room.last_event_at, room.room_id
-                LIMIT \(bind: limit)
+                WHERE room.room_id = ANY(\(bind: roomIDs)::uuid[])
+                ORDER BY room.room_id
                 """).all(decoding: RoomLogRetentionCandidateRow.self)
             var trimmedRooms = 0
             var deletedEvents = 0
@@ -151,9 +198,16 @@ public struct PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
                 trimmedRooms += 1
                 deletedEvents += Int(removed?.count ?? 0)
             }
-            return .init(scannedRooms: candidates.count, trimmedRooms: trimmedRooms, deletedEvents: deletedEvents)
+            return (V2RoomLogTrimReport(scannedRooms: candidates.count, trimmedRooms: trimmedRooms, deletedEvents: deletedEvents), roomIDs.last)
         }
+        lastScannedRoomID = result.1
+        return result.0
     }
+}
+
+private struct RoomLogLockedRow: Decodable {
+    let roomID: UUID
+    enum CodingKeys: String, CodingKey { case roomID = "room_id" }
 }
 
 private struct RoomLogRetentionCandidateRow: Decodable {
@@ -173,8 +227,8 @@ private struct RoomLogTrimmedRow: Decodable {
 
 /// 周期运行房间日志保留裁剪的工作器。
 ///
-/// 永久模式下它每次只做一次有界检查，不会删除任何历史；窗口模式下它按活跃读者的已读线
-/// 下界推进裁剪。两种模式共用同一条路径，避免"配置切换后跑的是另一段代码"。
+/// 永久模式下全部已知读者钉住下界；窗口模式下仅窗口内的回执钉住下界。
+/// 当前成员缺少回执时，两种模式都保守地保留历史。两种模式共用同一条路径，避免"配置切换后跑的是另一段代码"。
 public struct V2RoomLogRetentionWorker: Sendable {
     private let store: any V2RoomLogRetentionStore
     private let mode: V2RoomLogRetentionMode

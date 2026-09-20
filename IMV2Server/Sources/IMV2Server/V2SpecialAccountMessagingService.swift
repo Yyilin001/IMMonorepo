@@ -305,19 +305,27 @@ public struct PostgresV2SpecialAccountMessagingStore: V2SpecialAccountMessagingS
         guard let accountUUID = UUID(uuidString: account.userID.rawValue),
               let operationUUID = UUID(uuidString: request.operationID.rawValue),
               let roomUUID = UUID(uuidString: roomID.rawValue),
-              let messageUUID = UUID(uuidString: message.messageID.rawValue)
+              let messageUUID = UUID(uuidString: message.messageID.rawValue),
+              message.roomID.uuidValue == roomUUID,
+              message.senderUserID.uuidValue == accountUUID,
+              message.clientMessageID.uuidValue == operationUUID
         else { throw V2SpecialAccountMessagingError.corruptPersistenceState }
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2SpecialAccountMessagingError.corruptPersistenceState }
             // Serialize retries even when the operation row does not exist yet.
             let lockKey = "special-account-message:\(accountUUID):\(operationUUID)"
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
-            if let existing = try await sql.raw("SELECT request_fingerprint, message_id FROM im_v2.special_account_message_operations WHERE account_user_id = \(bind: accountUUID) AND operation_id = \(bind: operationUUID) FOR UPDATE").first(decoding: SpecialAccountOperationRow.self) {
-                guard existing.requestFingerprint == request.requestFingerprint, existing.messageID == messageUUID else {
+            if let existing = try await sql.raw("SELECT request_fingerprint, message_id, room_id FROM im_v2.special_account_message_operations WHERE account_user_id = \(bind: accountUUID) AND operation_id = \(bind: operationUUID) FOR UPDATE").first(decoding: SpecialAccountOperationRow.self) {
+                guard existing.requestFingerprint == request.requestFingerprint, existing.messageID == messageUUID, existing.roomID == roomUUID else {
                     throw V2SpecialAccountMessagingError.idempotencyConflict
                 }
                 return
             }
+            guard let room = try await sql.raw("""
+                SELECT migration_fence_id FROM im_v2.rooms
+                WHERE room_id = \(bind: roomUUID) FOR SHARE
+                """).first(decoding: SpecialAccountRoomFenceRow.self),
+                room.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
             guard v2PostgresTimestampCanEncode(now) else { throw V2SpecialAccountMessagingError.corruptPersistenceState }
             try await sql.raw("INSERT INTO im_v2.special_account_message_operations (account_user_id, operation_id, request_fingerprint, room_id, message_id, created_at) VALUES (\(bind: accountUUID), \(bind: operationUUID), \(bind: request.requestFingerprint), \(bind: roomUUID), \(bind: messageUUID), \(bind: now))").run()
             let supportRoomID: UUID? = account.kind == .customerSupport ? roomUUID : nil
@@ -336,5 +344,11 @@ private struct SpecialAccountBooleanRow: Decodable { let value: Bool }
 private struct SpecialAccountOperationRow: Decodable {
     let requestFingerprint: String
     let messageID: UUID
-    enum CodingKeys: String, CodingKey { case requestFingerprint = "request_fingerprint"; case messageID = "message_id" }
+    let roomID: UUID
+    enum CodingKeys: String, CodingKey { case requestFingerprint = "request_fingerprint"; case messageID = "message_id"; case roomID = "room_id" }
+}
+
+private struct SpecialAccountRoomFenceRow: Decodable {
+    let migrationFenceID: UUID?
+    enum CodingKeys: String, CodingKey { case migrationFenceID = "migration_fence_id" }
 }

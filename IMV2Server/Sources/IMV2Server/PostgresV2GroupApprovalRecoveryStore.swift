@@ -87,7 +87,7 @@ public struct PostgresV2GroupApprovalRecoveryStore: V2GroupApprovalRecoveryStore
             // housekeeping pass. New housekeeping retains referenced receipts.
             let member = try await sql.raw("""
                 SELECT room_id, target_user_id, action, expected_membership_revision,
-                       resulting_membership_revision, room_sequence, event_id, plan_id, created_at
+                       resulting_membership_revision, room_sequence, event_id, created_at
                 FROM im_v2.room_membership_operations
                 WHERE actor_user_id = \(bind: command.reviewerUserID) AND operation_id = \(bind: command.decisionOperationID) FOR UPDATE
                 """).first(decoding: ApprovalRecoveryMemberRow.self)
@@ -151,8 +151,8 @@ public struct PostgresV2GroupApprovalRecoveryStore: V2GroupApprovalRecoveryStore
     /// - Throws: 房间不存在或归属与作用域不符时抛出
     ///   ``V2GroupApprovalRecoveryError/ownerChanged``。
     private func assertOwner(_ scope: V2GroupApprovalRecoveryScope, sql: any SQLDatabase) async throws -> Int64 {
-        guard let room = try await sql.raw("SELECT room_shard_id, owner_epoch, membership_revision FROM im_v2.rooms WHERE room_id = \(bind: scope.roomID) FOR UPDATE").first(decoding: ApprovalRecoveryRoomRow.self),
-              room.shardID == scope.shardID, room.epoch == scope.ownerEpoch else { throw V2GroupApprovalRecoveryError.ownerChanged }
+        guard let room = try await sql.raw("SELECT room_shard_id, owner_epoch, membership_revision, migration_fence_id FROM im_v2.rooms WHERE room_id = \(bind: scope.roomID) FOR UPDATE").first(decoding: ApprovalRecoveryRoomRow.self),
+              room.shardID == scope.shardID, room.epoch == scope.ownerEpoch, room.migrationFenceID == nil else { throw V2GroupApprovalRecoveryError.ownerChanged }
         return room.revision
     }
     /// 取得指定键的事务级咨询锁。
@@ -187,7 +187,7 @@ public struct PostgresV2GroupApprovalRecoveryStore: V2GroupApprovalRecoveryStore
                 (operation_id, operator_principal, shard_id, owner_epoch, room_id, request_id,
                  reviewer_user_id, decision_operation_id, reason_code, outcome, detail, requested_at,
                  applicant_user_id, prepared_revision, member_room_id, member_target_user_id, member_action,
-                 expected_revision, resulting_revision, room_sequence, event_id, plan_id)
+                 expected_revision, resulting_revision, room_sequence, event_id)
             VALUES (\(bind: command.operationID), \(bind: principal), \(bind: command.scope.shardID),
                     \(bind: command.scope.ownerEpoch), \(bind: command.scope.roomID), \(bind: command.requestID),
                     \(bind: command.reviewerUserID), \(bind: command.decisionOperationID), \(bind: command.reason.rawValue),
@@ -195,7 +195,7 @@ public struct PostgresV2GroupApprovalRecoveryStore: V2GroupApprovalRecoveryStore
                     \(bind: request.applicantUserID), \(bind: request.preparedRevision),
                     \(bind: member?.roomID), \(bind: member?.targetUserID), \(bind: member?.action),
                     \(bind: member?.expectedRevision), \(bind: member?.resultingRevision), \(bind: member?.roomSequence),
-                    \(bind: member?.eventID), \(bind: member?.planID))
+                    \(bind: member?.eventID))
             """).run()
         return .init(operationID: command.operationID, outcome: outcome, detail: detail, wasIdempotent: false)
     }
@@ -212,8 +212,8 @@ private func recoverySQL(_ database: any Database) throws -> any SQLDatabase {
 }
 private struct ApprovalRecoveryBool: Decodable { let value: Bool }
 private struct ApprovalRecoveryRoomRow: Decodable {
-    let shardID: String; let epoch: Int64; let revision: Int64
-    enum CodingKeys: String, CodingKey { case shardID = "room_shard_id", epoch = "owner_epoch", revision = "membership_revision" }
+    let shardID: String; let epoch: Int64; let revision: Int64; let migrationFenceID: UUID?
+    enum CodingKeys: String, CodingKey { case shardID = "room_shard_id", epoch = "owner_epoch", revision = "membership_revision", migrationFenceID = "migration_fence_id" }
 }
 private struct ApprovalRecoveryRequestRow: Decodable {
     let inviteID: UUID; let applicantUserID: UUID; let state: String
@@ -227,8 +227,8 @@ private struct ApprovalRecoveryCandidateRow: Decodable {
 }
 private struct ApprovalRecoveryMemberRow: Decodable {
     let roomID: UUID; let targetUserID: UUID; let action: String; let expectedRevision: Int64; let resultingRevision: Int64
-    let roomSequence: Int64; let eventID: UUID; let planID: UUID; let createdAt: Date
-    enum CodingKeys: String, CodingKey { case roomID = "room_id", targetUserID = "target_user_id", action, expectedRevision = "expected_membership_revision", resultingRevision = "resulting_membership_revision", roomSequence = "room_sequence", eventID = "event_id", planID = "plan_id", createdAt = "created_at" }
+    let roomSequence: Int64; let eventID: UUID; let createdAt: Date
+    enum CodingKeys: String, CodingKey { case roomID = "room_id", targetUserID = "target_user_id", action, expectedRevision = "expected_membership_revision", resultingRevision = "resulting_membership_revision", roomSequence = "room_sequence", eventID = "event_id", createdAt = "created_at" }
 }
 private struct ApprovalRecoveryInviteRow: Decodable {
     let used: Int; let maximum: Int

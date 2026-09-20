@@ -12,7 +12,7 @@ actor V2HybridGroupShardCreditSnapshotCache {
         let roomShardID: String
         let capacityProfileID: String
         let kind: String
-        let deliveryMode: V2GroupDeliveryMode
+        let capacityClass: V2GroupCapacityClass
         let frozenAt: Date?
         let roomShardLeaseID: UUID
         let roomShardLeaseGeneration: Int64

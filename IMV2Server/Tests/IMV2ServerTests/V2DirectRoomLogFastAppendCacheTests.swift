@@ -103,32 +103,34 @@ struct V2DirectRoomLogFastAppendCacheTests {
         #expect(await cache.snapshot().entries == 0)
     }
 
-    @Test("reciprocal reply promotion preserves the cached room and shard snapshot")
-    func reciprocalReplyPromotionIsRevisionFenced() async throws {
+    @Test("reciprocal reply promotion preserves the cached room and shard snapshot", arguments: [Int64(7), Int64.max - 1])
+    func reciprocalReplyPromotionIsRevisionFenced(revision: Int64) async throws {
         let cache = V2DirectRoomLogFastAppendCache(capacity: 2)
         let key = V2DirectRoomLogFastAppendCache.Key(roomID: UUID(), senderID: UUID())
         let entry = try makeEntry(
             sequence: 21,
-            directPairRevision: 7,
+            directPairRevision: revision,
             recipientHasReplied: false
         )
         await cache.insert(entry, for: key)
 
         await cache.markRecipientsHaveReplied([.init(
             key: key,
-            expectedDirectPairRevision: 7
+            expectedDirectPairRevision: revision
         )])
         let promoted = try #require(await cache.value(for: key))
         #expect(promoted.policy.recipientHasReplied)
-        #expect(promoted.policy.directPairRevision == 8)
+        #expect(promoted.policy.directPairRevision == revision + 1)
         #expect(promoted.roomShardID == entry.roomShardID)
         #expect(promoted.membershipRevision == entry.membershipRevision)
 
         await cache.markRecipientsHaveReplied([.init(
             key: key,
-            expectedDirectPairRevision: 7
+            expectedDirectPairRevision: revision
         )])
-        #expect(await cache.value(for: key)?.policy.directPairRevision == 8)
+        #expect(await cache.value(for: key)?.policy.directPairRevision == revision + 1)
+        await cache.markRecipientsHaveReplied([.init(key: key, expectedDirectPairRevision: revision + 1)])
+        #expect(await cache.value(for: key) == promoted)
     }
 
     private func makeEntry(
@@ -167,14 +169,7 @@ struct V2DirectRoomLogFastAppendCacheTests {
                     id: try .init(UUID().uuidString),
                     generation: 1,
                     validUntil: Date().addingTimeInterval(60),
-                    commandWindow: try .init(limit: 500_000),
-                    fanoutWindow: try .init(limit: 100_000),
-                    maxOutstandingFanoutUnits: 100_000,
-                    maxOutstandingPlans: 100_000
-                ),
-                outstandingFanoutUnits: 0,
-                outstandingPlans: 0
-            )
+                    commandWindow: try .init(limit: 500_000)))
         )
     }
 }

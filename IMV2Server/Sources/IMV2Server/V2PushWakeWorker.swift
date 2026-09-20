@@ -218,7 +218,7 @@ public struct V2PushWakeWorker: Sendable {
             let outcome = try await withThrowingTaskGroup(of: V2PushWakeProviderOutcome.self) { group in
                 group.addTask { try await provider.send(lease.wake) }
                 group.addTask {
-                    try await Task.sleep(for: .seconds(sendTimeout))
+                    try await v2Sleep(for: .seconds(sendTimeout))
                     throw V2PushWakeWorkerError.sendTimedOut
                 }
                 guard let result = try await group.next() else { throw V2PushWakeWorkerError.sendTimedOut }

@@ -1,7 +1,7 @@
 # Durable-work operator replay runbook
 
-状态：已实现受认证的单目标 replay 控制面；paused/metrics-unavailable/fan-out-failure
-告警规则已入库，实际 Alertmanager receiver、审计保留策略和容量阈值仍需由运维负责人批准。
+状态：单目标和按事件重放已改为可靠个人事件词表；旧房间发件箱和公共消息扇出不再接受重放。
+个人事件队列已接入独立来源库指标与暂停/停滞告警规则；实际告警接收配置和演练仍需验证。
 
 `IMV2OperatorServerApp` 是独立的 loopback-only 进程。它只监听
 `127.0.0.1` 或 `::1`，不复用公网 TLS gateway、账户服务或任意终端用户 token。
@@ -27,13 +27,14 @@
 
 ## 按来源事件批量重放
 
-同一个事件可能对应多条暂停行（典型是扇出投递：一条事件、多个目标）。逐行重放会让
+同一个事件可能对应多条暂停行（例如一次成员变化通知多个用户）。逐行重放会让
 "修好根因"之后的收尾变成大量人工调用，因此提供按事件的有界批量：
 
 ```json
 {
   "operationID": "new-uuid-per-drain-step",
-  "targetKind": "fanout_delivery",
+  "targetKind": "user_state_event",
+  "sourceShardID": "room-a",
   "sourceEventID": "source-event-uuid",
   "reason": "dependency_recovered",
   "limit": 64
@@ -42,7 +43,7 @@
 
 响应是 `{ operationID, requeued, notPaused, hasMore }`。
 
-- **选择面精确**：只有这一个事件；顺序稳定（扇出按目标用户、投影类型排序），没有扫描、
+- **选择面精确**：只有这一个事件；顺序稳定（个人事件按目标用户、投影类型排序），没有扫描、
   筛选、正则或自由文本。`limit` 落在 `1...500`。
 - **排空语义**：`hasMore=true` 表示该事件还有超出本批上限的暂停行，用**同一个**
   `operationID` 继续调用即可推进；已经重放过的行由派生的行级审计挡住，不会重复重放。
@@ -50,7 +51,7 @@
 - **逐行审计**：每一行都有自己的审计记录（操作标识由批量标识与目标身份稳定派生），
   形状与单目标重放完全一致，因此 `source_event_id` + `requested_at` + `operator_principal`
   即可把一次事故对应的重放全部找回来。
-- **类型限制**：只接受按事件定位工作的类型（`room_outbox`、`fanout_delivery`、
+- **类型限制**：只接受按事件定位工作的类型（`user_state_event`、
   `content_review`、`media_scan`、`media_purge`）。`read_receipt_preference_propagation`
   与 `user_projection` 是按用户定位的，批量语义不明确，必须继续走单目标接口。
 - **同样的边界**：批量不会跳过损坏数据、不会把工作标为终态，也不绕过 admission。
@@ -58,28 +59,14 @@
 
 ## 触发条件与处置
 
-1. `IMV2PausedRoomOutbox`、`IMV2PausedFanoutDelivery`、
-   `IMV2PausedContentReview`、`IMV2PausedMediaScan`、`IMV2PausedMediaPurge` 或
-   `IMV2PausedReadReceiptPreferencePropagation`、`IMV2PausedUserProjection`（对应
-   `im_v2_room_outbox_backlog{state="paused"}`、
-   `im_v2_fanout_delivery_backlog{state="paused"}` 或
-   `im_v2_content_review_backlog{state="paused"}`、
-   `im_v2_media_scan_backlog{state="paused"}` 或
-   `im_v2_media_purge_backlog{state="paused"}` 或
-   `im_v2_read_receipt_preference_propagation_backlog{state="paused"}` 或
-   `im_v2_user_projection_backlog{state="paused"}` 大于零）持续两分钟时创建 incident。
-   规则和 role owner 见
-   [`observability.md`](observability.md)；不能静默、snooze 后忘记或以容量理由提高该零阈值。
-
-   `IMV2StalledRoomOutbox` 与 `IMV2StalledFanoutDelivery` 覆盖另一种停滞：瞬时失败
-   现在无限重试而不再进入暂停，因此一条持续失败的行不会出现在暂停计数里。这两个
-   告警基于 `im_v2_room_outbox_oldest_unfinished_age_seconds` 与
-   `im_v2_fanout_delivery_oldest_unfinished_age_seconds`，超过 30 分钟仍未达到终态
-   即创建 incident。处置方式相同：先修复根因，再用本 runbook 重放确实无法自愈的行。
+1. 确认来源库 `user_state_event_outbox` 的暂停事件及持续未完成事件。
+   瞬时故障继续退避重试；确定性数据错误进入暂停。队列计数、最老未完成年龄的
+   对应告警分别为 `IMV2PausedUserStateEvent` 和 `IMV2StalledUserStateEvent`，参见 [`observability.md`](observability.md)。
+   内容审核、媒体扫描/清理、回执偏好传播和用户投影继续使用各自的暂停告警。
 2. 先修复根因（PostgreSQL、broker、路由或依赖服务），并确认没有正持续失败；
    replay 不是跳过损坏数据或绕开 admission 的工具。
 3. 从受控数据库调查或既有 incident evidence 获取**精确**的 source event，及
-   delivery 所需的 target user / projection kind。不要把数据库查询结果、用户 ID
+   个人事件所需的来源分片、target user / projection kind。不要把数据库查询结果、用户 ID
    或 bearer token 粘贴进工单公开字段。
 4. 经 bastion/mTLS proxy 调用 loopback service。示例 body（token 仅从 secret
    manager 注入 shell，禁止回显、记录或放进历史）：
@@ -87,15 +74,22 @@
 ```json
 {
   "operationID": "new-uuid-per-attempt",
-  "targetKind": "fanout_delivery",
+  "targetKind": "user_state_event",
+  "sourceShardID": "room-a",
   "sourceEventID": "source-event-uuid",
   "targetUserID": "target-user-uuid",
-  "projectionKind": "message_created",
+  "projectionKind": "membership",
   "reason": "dependency_recovered"
 }
 ```
 
-`targetKind` 为 `room_outbox`、`content_review`、`media_scan` 或 `media_purge`
+`user_state_event` 必须携带 `sourceShardID`，其值必须是
+`IM_V2_ROOM_SHARD_STORES_JSON` 中已配置的来源房间分片。单目标还必须携带用户和
+个人事件类型（例如 `membership`、`timeline_activity`）；公共 `message` 等类型无效。
+省略或指定未知分片返回 400，不会回退控制库。其他工作类型不允许传 `sourceShardID`。
+来源库内的暂停恢复与审计属于同一个事务，重放后仍由正常 worker 完成目标路由和投影。
+
+`targetKind` 为 `content_review`、`media_scan` 或 `media_purge`
 时只能传 `sourceEventID`（媒体类型中该字段承载 opaque media UUID）；不得附带
 target user 或 projection kind。`targetKind` 为
 `read_receipt_preference_propagation` 时，`sourceEventID` 必须是偏好操作 UUID，
@@ -107,11 +101,12 @@ target user 或 projection kind。`targetKind` 为
 必须是 paused checkpoint 的用户，且不得附带 projection kind。该 replay 只清零失败预算并
 恢复 ready，不会跳过 poison sequence。
 
-5. 记录 `operationID` 于 incident。网络重试必须复用同一 UUID：服务返回同一
+5. 记录 `operationID` 和来源分片于 incident。个人事件的审计与幂等范围是来源库；
+   网络重试必须保持 `sourceShardID` 和 UUID 不变：服务返回同一
    outcome 并标记 `wasIdempotent: true`。同一 UUID 搭配不同目标/原因返回冲突，
    必须停止并调查，不能改写审计历史。
 6. `requeued` 后观察 paused gauge 下降、scheduled/ready 工作重新流动，以及最终
-   fan-out plan/outbox 的正常完成。`not_paused` 表示操作当时无 paused 行；先刷新
+   个人事件投影与来源确认的正常完成。`not_paused` 表示操作当时无 paused 行；先刷新
    调查证据，切勿循环提交新 UUID。
 
 ## 审计与发布控制

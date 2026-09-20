@@ -8,14 +8,14 @@ private let watermarkTestInstallationBinding = V2LocalInstallationBinding(
 )
 
 struct V2RoomReadWatermarkTests {
-    @Test("an own-read-watermark projection advances the local read line")
-    func ownReadWatermarkAdvancesLocalState() async throws {
+    @Test("an own-read-watermark projection advances the local read line", arguments: [Int64(-1), Int64(1750000000000)])
+    func ownReadWatermarkAdvancesLocalState(milliseconds: Int64) async throws {
         let (store, directory) = try makeStore()
         defer { try? FileManager.default.removeItem(at: directory) }
         let room = RoomID(uuid: UUID())
 
         _ = try await store.apply(batch([
-            try watermarkRecord(sequence: 1, room: room, watermark: 42, recordedAtMilliseconds: 1_750_000_000_000)
+            try watermarkRecord(sequence: 1, room: room, watermark: 42, recordedAtMilliseconds: milliseconds)
         ]))
 
         #expect(try await store.roomReadWatermark(roomID: room) == 42)

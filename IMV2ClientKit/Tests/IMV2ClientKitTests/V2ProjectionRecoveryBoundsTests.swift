@@ -7,6 +7,15 @@ struct V2ProjectionRecoveryBoundsTests {
     @Test(arguments: ["room_sequence", "timeline_sequence", "message_revision", "control_sequence"],
           [Int64.min, -1, 1, Int64.max])
     func storedIntegers(field: String, value: Int64) throws {
+        try checkProjection(field: field, value: value.databaseValue, expected: value < 0 ? nil : UInt64(value))
+    }
+
+    @Test(arguments: ["room_sequence", "timeline_sequence", "message_revision", "control_sequence"], [1.5, Double(Int64.max)])
+    func nonintegerStoredValues(field: String, value: Double) throws {
+        try checkProjection(field: field, value: value.databaseValue, expected: nil)
+    }
+
+    private func checkProjection(field: String, value: DatabaseValue, expected: UInt64?) throws {
         var columns: [String: (any DatabaseValueConvertible)?] = [
             "source_event_id": UUID().uuidString, "message_id": UUID().uuidString,
             "room_id": UUID().uuidString, "sender_user_id": UUID().uuidString, "actor_user_id": UUID().uuidString,
@@ -26,10 +35,10 @@ struct V2ProjectionRecoveryBoundsTests {
             default: return item.messageRevision
             }
         }
-        if value < 0 {
+        if expected == nil {
             #expect(throws: V2ClientProjectionError.invalidMessagePayload) { _ = try decodedValue() }
         } else {
-            #expect(try decodedValue() == UInt64(value))
+            #expect(try decodedValue() == expected)
         }
     }
 }

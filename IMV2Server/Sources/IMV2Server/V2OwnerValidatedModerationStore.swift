@@ -17,7 +17,7 @@ public protocol V2OwnerValidatedModerationStore: Sendable {
     ///   - now: 服务端统一授时时刻，用于审计与留存计算。
     /// - Returns: 审核结果。
     /// - Throws: 归属已变更、权限不足或持久化失败时抛出。
-    func applyOwnerValidated(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2ModerationOutcome
+    func applyOwnerValidated(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome
 
     /// 按房间归属执行可信安全审核命令。
     ///
@@ -30,5 +30,5 @@ public protocol V2OwnerValidatedModerationStore: Sendable {
     ///   - now: 服务端统一授时时刻，用于审计与留存计算。
     /// - Returns: 审核结果。
     /// - Throws: 归属已变更、命令动作不受可信安全入口支持或持久化失败时抛出。
-    func applyTrustedSafetyOwnerValidated(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2ModerationOutcome
+    func applyTrustedSafetyOwnerValidated(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome
 }

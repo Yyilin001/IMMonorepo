@@ -8,7 +8,7 @@ struct RoomMembershipTests {
         func result() throws -> V2RoomMembershipChange {
             try .init(roomID: .init("room"), targetUserID: .init("user"), action: .add,
                 membershipRevision: revision, roomSequence: sequence, eventID: .init("event"),
-                fanoutPlanID: .init("plan"), createdAt: .distantPast)
+                createdAt: .distantPast)
         }
         if revision == 0 || sequence == 0 || revision > UInt64(Int64.max) || sequence > UInt64(Int64.max) {
             #expect(throws: V2RevisionValidationError.outOfRange) { _ = try result() }
@@ -34,8 +34,8 @@ struct RoomMembershipTests {
         }
     }
 
-    @Test("a membership result keeps event, fan-out, sequence, and revision distinct")
-    func preservesIndependentOrderingAndFanoutIdentities() throws {
+    @Test("a membership result keeps event, sequence, and revision distinct")
+    func preservesIndependentOrderingAndEventIdentity() throws {
         let result = try V2RoomMembershipChange(
             roomID: try .init("room-a"),
             targetUserID: try .init("user-b"),
@@ -43,12 +43,10 @@ struct RoomMembershipTests {
             membershipRevision: 5,
             roomSequence: 12,
             eventID: try .init("event-a"),
-            fanoutPlanID: try .init("plan-a"),
             createdAt: .distantPast
         )
         #expect(result.membershipRevision == 5)
         #expect(result.roomSequence == 12)
         #expect(result.eventID.rawValue == "event-a")
-        #expect(result.fanoutPlanID.rawValue == "plan-a")
     }
 }

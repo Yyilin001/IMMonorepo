@@ -77,8 +77,10 @@ public struct V2VaporLegacyDeviceRegistrationCancellationRoutes: Sendable {
                   let targetDevice = UUID(uuidString: input.targetDeviceID),
                   assertionDevice != targetDevice else { return Self.response(.badRequest) }
             let user: UserID
+            let revision: Int64?
             do {
                 user = try await assertionVerifier.verifiedUserID(for: input.accountAssertion, deviceID: .init(uuid: assertionDevice))
+                revision = try await assertionVerifier.credentialRevision(for: input.accountAssertion, deviceID: .init(uuid: assertionDevice))
             } catch V2AccountAssertionError.invalidAssertion {
                 return Self.response(.unauthorized)
             } catch {
@@ -86,7 +88,7 @@ public struct V2VaporLegacyDeviceRegistrationCancellationRoutes: Sendable {
             }
             do {
                 let trusted = try V2TrustedLegacyDeviceRegistrationCancellation(userID: user,
-                    assertionDeviceID: .init(uuid: assertionDevice), targetDeviceID: .init(uuid: targetDevice), operationID: input.operationID)
+                    assertionDeviceID: .init(uuid: assertionDevice), targetDeviceID: .init(uuid: targetDevice), operationID: input.operationID, credentialRevision: revision)
                 switch try await service.cancel(trusted) {
                 case .applied, .idempotent: return Self.response(.noContent)
                 case .accountUnavailable: return Self.response(.forbidden)

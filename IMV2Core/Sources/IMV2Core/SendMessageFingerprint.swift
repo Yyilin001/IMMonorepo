@@ -6,10 +6,8 @@ import Foundation
 /// 在已验证命令构造时计算 SHA-256，使存储适配器在持锁期间只需绑定固定长度摘要。
 /// 摘要表达输入一致性，不证明发送者权限，也不替代房间／actor／命令 ID 的去重范围。
 public struct V2SendMessageFingerprint: Equatable, Encodable, Sendable {
-    /// 转发发送采用的当前指纹版本 2，包含所选源消息版本。
-    public static let currentVersion: UInt16 = 2
-    /// 普通发送继续使用版本 1，保留既有字节编码和持久化重放键。
-    public static let ordinarySendVersion: UInt16 = 1
+    /// 房间日志发送的统一编码版本，普通发送与转发使用同一合同。
+    public static let currentVersion: UInt16 = 3
     /// 决定摘要编码合同的版本，必须与 digest 一起持久化和比较。
     public let version: UInt16
     /// 32 字节 SHA-256 摘要；不可由后续编辑或撤回后的正文重新构造。
@@ -18,13 +16,13 @@ public struct V2SendMessageFingerprint: Equatable, Encodable, Sendable {
     /// 验证从持久化读取的指纹外形。
     ///
     /// - Parameters:
-    ///   - version: 当前支持的普通发送版本 1 或转发版本 2。
+    ///   - version: 当前支持的房间日志发送版本 3。
     ///   - digest: 恰好 32 字节的摘要。
     /// - Throws: 不支持的版本或错误摘要长度抛出 invalidStoredFingerprint。
     ///
     /// 此入口不重新计算内容，存储层仍须保证摘要来自原接受操作。
     public init(version: UInt16, digest: Data) throws {
-        guard (version == Self.ordinarySendVersion || version == Self.currentVersion), digest.count == 32 else {
+        guard version == Self.currentVersion, digest.count == 32 else {
             throw V2SendMessageFingerprintError.invalidStoredFingerprint
         }
         self.version = version
@@ -33,8 +31,8 @@ public struct V2SendMessageFingerprint: Equatable, Encodable, Sendable {
 
     /// 从已经验证的命令字段计算原始输入指纹。
     ///
-    /// 普通发送保持版本 1；存在 forwardedFrom 时使用版本 2 并纳入源版本。
-    /// 实体偏移、长度、精确受众数量等值必须由命令构造边界验证后传入，
+    /// 普通发送与转发统一编码；转发包含所选源版本。
+    /// 实体偏移、长度等值必须由命令构造边界验证后传入，
     /// 此内部入口中的无符号转换不再次承担外部输入验证。
     init(
         roomID: RoomID,
@@ -45,10 +43,9 @@ public struct V2SendMessageFingerprint: Equatable, Encodable, Sendable {
         mentions: [V2MentionTarget],
         entities: [V2MessageEntity],
         replyTo: V2MessageReplyReference?,
-        targetRule: FanoutTargetRule,
         forwardedFrom: V2ForwardMessageSource?
     ) {
-        let version = forwardedFrom == nil ? Self.ordinarySendVersion : Self.currentVersion
+        let version = Self.currentVersion
         var encoder = SendMessageFingerprintEncoder()
         encoder.string("im.v2.send-message")
         encoder.integer(UInt64(version))
@@ -78,13 +75,6 @@ public struct V2SendMessageFingerprint: Equatable, Encodable, Sendable {
             encoder.optionalString(entity.linkURL?.absoluteString)
         }
         encoder.optionalString(replyTo?.messageID.rawValue)
-        switch targetRule {
-        case .eligibleMemberCount:
-            encoder.tag(1)
-        case .exactTargetCount(let count):
-            encoder.tag(2)
-            encoder.integer(UInt64(count))
-        }
         if let forwardedFrom {
             encoder.tag(1)
             encoder.string(forwardedFrom.messageID.rawValue)

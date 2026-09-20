@@ -63,7 +63,6 @@ public protocol V2ControlValidatedRoomMembershipStore:
     ///   - identitySnapshot: 控制面提供的身份快照。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 变更结果。
     /// - Throws: 归属不符、身份失效、无权限或持久化失败时抛出。
@@ -73,7 +72,6 @@ public protocol V2ControlValidatedRoomMembershipStore:
         identitySnapshot: V2MembershipIdentitySnapshot,
         capacityProfile: V2CapacityProfile,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2RoomMembershipChangeOutcome
 }
@@ -166,7 +164,6 @@ public struct V2RoutedRoomMembershipStore: V2RoomMembershipStore {
     ///   - command: 成员变更命令。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 变更结果。
     /// - Throws: 归属未配置、身份校验失败或归属存储失败时抛出。
@@ -174,7 +171,6 @@ public struct V2RoutedRoomMembershipStore: V2RoomMembershipStore {
         command: V2ChangeRoomMembershipCommand,
         capacityProfile: V2CapacityProfile,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2RoomMembershipChangeOutcome {
         async let selectedOwner = selector.owner(for: command.roomID)
@@ -189,7 +185,6 @@ public struct V2RoutedRoomMembershipStore: V2RoomMembershipStore {
             identitySnapshot: identitySnapshot,
             capacityProfile: capacityProfile,
             eventID: eventID,
-            planID: planID,
             now: now
         )
     }
@@ -226,7 +221,6 @@ public struct V2RoutedMessageWithdrawalStore: V2MessageWithdrawalStore {
     ///   - command: 撤回命令。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 撤回结果。
     /// - Throws: 归属未配置或归属存储失败时抛出。
@@ -234,7 +228,6 @@ public struct V2RoutedMessageWithdrawalStore: V2MessageWithdrawalStore {
         command: V2WithdrawMessageCommand,
         capacityProfile: V2CapacityProfile,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2MessageWithdrawalOutcome {
         let selected = try await selector.owner(for: command.roomID)
@@ -243,7 +236,6 @@ public struct V2RoutedMessageWithdrawalStore: V2MessageWithdrawalStore {
             ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
-            planID: planID,
             now: now
         )
     }
@@ -280,7 +272,6 @@ public struct V2RoutedMessageReactionStore: V2MessageReactionStore {
     ///   - command: 表情变更命令。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 表情变更结果。
     /// - Throws: 归属未配置或归属存储失败时抛出。
@@ -288,7 +279,6 @@ public struct V2RoutedMessageReactionStore: V2MessageReactionStore {
         command: V2ChangeMessageReactionCommand,
         capacityProfile: V2CapacityProfile,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2MessageReactionOutcome {
         let selected = try await selector.owner(for: command.roomID)
@@ -297,7 +287,6 @@ public struct V2RoutedMessageReactionStore: V2MessageReactionStore {
             ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
-            planID: planID,
             now: now
         )
     }
@@ -333,7 +322,6 @@ public struct V2RoutedMessageEditStore: V2MessageEditStore {
     ///   - command: 编辑命令。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 编辑结果。
     /// - Throws: 归属未配置或归属存储失败时抛出。
@@ -341,7 +329,6 @@ public struct V2RoutedMessageEditStore: V2MessageEditStore {
         command: V2EditMessageCommand,
         capacityProfile: V2CapacityProfile,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2MessageEditOutcome {
         let selected = try await selector.owner(for: command.roomID)
@@ -350,7 +337,6 @@ public struct V2RoutedMessageEditStore: V2MessageEditStore {
             ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
-            planID: planID,
             now: now
         )
     }
@@ -388,7 +374,6 @@ public struct V2RoutedGroupCapabilitiesStore: V2GroupCapabilitiesStore {
     ///   - command: 置顶消息命令。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 置顶结果。
     /// - Throws: 归属未配置或归属存储失败时抛出。
@@ -397,7 +382,6 @@ public struct V2RoutedGroupCapabilitiesStore: V2GroupCapabilitiesStore {
         command: V2PinnedMessageCommand,
         capacityProfile: V2CapacityProfile,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage> {
         let selected = try await selector.owner(for: command.roomID)
@@ -407,7 +391,6 @@ public struct V2RoutedGroupCapabilitiesStore: V2GroupCapabilitiesStore {
             ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
-            planID: planID,
             now: now
         )
     }
@@ -419,7 +402,6 @@ public struct V2RoutedGroupCapabilitiesStore: V2GroupCapabilitiesStore {
     ///   - command: 群公告命令。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 公告结果。
     /// - Throws: 归属未配置或归属存储失败时抛出。
@@ -428,7 +410,6 @@ public struct V2RoutedGroupCapabilitiesStore: V2GroupCapabilitiesStore {
         command: V2GroupAnnouncementCommand,
         capacityProfile: V2CapacityProfile,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement> {
         let selected = try await selector.owner(for: command.roomID)
@@ -438,7 +419,6 @@ public struct V2RoutedGroupCapabilitiesStore: V2GroupCapabilitiesStore {
             ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
-            planID: planID,
             now: now
         )
     }
@@ -450,7 +430,6 @@ public struct V2RoutedGroupCapabilitiesStore: V2GroupCapabilitiesStore {
     ///   - command: 角色权限命令。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 权限变更结果。
     /// - Throws: 归属未配置或归属存储失败时抛出。
@@ -459,7 +438,6 @@ public struct V2RoutedGroupCapabilitiesStore: V2GroupCapabilitiesStore {
         command: V2GroupRolePermissionsCommand,
         capacityProfile: V2CapacityProfile,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2GroupCapabilitiesOutcome<
         V2GroupRolePermissionsChange
@@ -471,7 +449,6 @@ public struct V2RoutedGroupCapabilitiesStore: V2GroupCapabilitiesStore {
             ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
-            planID: planID,
             now: now
         )
     }
@@ -483,7 +460,6 @@ public struct V2RoutedGroupCapabilitiesStore: V2GroupCapabilitiesStore {
     ///   - command: 成员角色命令。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 角色变更结果。
     /// - Throws: 归属未配置或归属存储失败时抛出。
@@ -492,7 +468,6 @@ public struct V2RoutedGroupCapabilitiesStore: V2GroupCapabilitiesStore {
         command: V2GroupMemberRoleCommand,
         capacityProfile: V2CapacityProfile,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> {
         let selected = try await selector.owner(for: command.roomID)
@@ -502,7 +477,6 @@ public struct V2RoutedGroupCapabilitiesStore: V2GroupCapabilitiesStore {
             ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
-            planID: planID,
             now: now
         )
     }
@@ -543,7 +517,6 @@ public struct V2RoutedModerationStore:
     ///   - command: 审核命令。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 审核结果。
     /// - Throws: 归属未配置或归属存储失败时抛出。
@@ -551,7 +524,6 @@ public struct V2RoutedModerationStore:
         command: V2ModerationCommand,
         capacityProfile: V2CapacityProfile,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2ModerationOutcome {
         let selected = try await selector.owner(for: command.roomID)
@@ -560,7 +532,6 @@ public struct V2RoutedModerationStore:
             ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
-            planID: planID,
             now: now
         )
     }
@@ -571,7 +542,6 @@ public struct V2RoutedModerationStore:
     ///   - command: 审核命令，发起者由服务配置的受信主体提供。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 审核结果。
     /// - Throws: 归属未配置或归属存储失败时抛出。
@@ -579,7 +549,6 @@ public struct V2RoutedModerationStore:
         command: V2ModerationCommand,
         capacityProfile: V2CapacityProfile,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2ModerationOutcome {
         let selected = try await selector.owner(for: command.roomID)
@@ -588,7 +557,6 @@ public struct V2RoutedModerationStore:
             ownerRoute: selected.route,
             capacityProfile: capacityProfile,
             eventID: eventID,
-            planID: planID,
             now: now
         )
     }

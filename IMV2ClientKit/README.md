@@ -30,6 +30,12 @@ currently implemented durable boundaries are:
   discarded, and rebuilt through authenticated sync; temporary Keychain
   unavailability pauses startup without touching the database.
 
+The unreleased local projection database installs the complete current schema
+in one initialization step; historical schema upgrades and projection backfills
+are removed. Reopening a current database retains its queued commands, completed
+receipts, membership fences, and snapshot import progress. The separate search
+database also has one current-schema initialization step.
+
 `V2AuthSession.establish(_:)` is the sole credential-establishment boundary for
 the separately trusted account/device-registration service. It writes the first
 device credential record atomically and fences any older refresh. The session

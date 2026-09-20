@@ -4,6 +4,23 @@ import IMV2Core
 import Testing
 
 struct V2GatewayRuntimeConfigurationTests {
+    @Test("Gateway frame configuration respects the wire length range")
+    func framePayloadWireRange() throws {
+        for limit in [-1, Int(UInt32.max) + 1, Int.max] {
+            var environment = runtimeValues
+            environment["IM_V2_MAX_FRAME_BYTES"] = String(limit)
+            #expect(throws: V2FrameCodecError.invalidLimits) {
+                _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(environment))
+            }
+        }
+        for limit in [0, 65_536, Int(UInt32.max)] {
+            var environment = runtimeValues
+            environment["IM_V2_MAX_FRAME_BYTES"] = String(limit)
+            let configuration = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(environment))
+            #expect(configuration.frameLimits.maximumPayloadBytes == limit)
+        }
+    }
+
     @Test("Idle timeout must be exactly representable by the NIO nanosecond timer")
     func idleTimeoutNanosecondsBoundary() throws {
         let maximum = Int(Int64.max / 1_000_000)
@@ -186,20 +203,12 @@ struct V2GatewayRuntimeConfigurationTests {
         }
     }
 
-    @Test("message projection rollout modes are validated as one compatibility fence")
-    func validatesMessageProjectionRolloutModes() throws {
+    @Test("room-log runtime limits and retention are validated")
+    func validatesRoomLogRuntimeLimits() throws {
         let defaults = try V2GatewayRuntimeConfiguration(
             environment: V2DictionaryRuntimeEnvironment(runtimeValues)
         )
-        #expect(defaults.messageProjectionWriteMode == .dual)
-        #expect(defaults.messageProjectionReadMode == .preferShared)
         #expect(defaults.messageProjectionStateRetentionSeconds == 604_800)
-        // 目标架构把单聊的权威副本放在房间事件日志上，因此未配置时的默认是 room_log；
-        // 兼容基线仍可显式选择，见下面的 planner/preplanned 用例。
-        #expect(defaults.directFanoutMode == .roomLog)
-        // 标准群同样默认走读模型：只有这样才能让"尾部是非消息事件时未读停在 1"这个
-        // 扇出群边界彻底消失（见房间读模型合同 §5.4 与 §9 第 3 步）。
-        #expect(defaults.groupDeliveryAuthority == .roomLog)
         #expect(defaults.directRoomLogAdmissionMode == .room)
         // 保留窗口默认是"永久"=不裁剪历史，与既有行为一致；窗口模式必须显式选择。
         #expect(defaults.roomLogRetentionMode == .permanent)
@@ -223,36 +232,16 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(defaults.livePresenceRenewalMaximumDelayMilliseconds == 2)
         #expect(defaults.groupEventWakePollIntervalMilliseconds == 500)
         #expect(defaults.shutdownGraceMilliseconds == 20_000)
-        #expect(defaults.fanoutPayloadWriteMode == .body)
 
         var shared = runtimeValues
-        shared["IM_V2_MESSAGE_PROJECTION_WRITE_MODE"] = "shared"
-        shared["IM_V2_MESSAGE_PROJECTION_READ_MODE"] = "shared"
         shared["IM_V2_MESSAGE_PROJECTION_STATE_RETENTION_SECONDS"] = "86400"
         let sharedConfiguration = try V2GatewayRuntimeConfiguration(
             environment: V2DictionaryRuntimeEnvironment(shared)
         )
-        #expect(sharedConfiguration.messageProjectionWriteMode == .shared)
-        #expect(sharedConfiguration.messageProjectionReadMode == .shared)
         #expect(sharedConfiguration.messageProjectionStateRetentionSeconds == 86_400)
 
-        var preplanned = runtimeValues
-        preplanned["IM_V2_DIRECT_FANOUT_MODE"] = "preplanned"
-        #expect(try V2GatewayRuntimeConfiguration(
-            environment: V2DictionaryRuntimeEnvironment(preplanned)
-        ).directFanoutMode == .preplanned)
+        let roomLog = runtimeValues
 
-        var roomLog = runtimeValues
-        roomLog["IM_V2_DIRECT_FANOUT_MODE"] = "room_log"
-        #expect(try V2GatewayRuntimeConfiguration(
-            environment: V2DictionaryRuntimeEnvironment(roomLog)
-        ).directFanoutMode == .roomLog)
-
-        var fanoutGroups = runtimeValues
-        fanoutGroups["IM_V2_GROUP_DELIVERY_AUTHORITY_MODE"] = "fanout"
-        #expect(try V2GatewayRuntimeConfiguration(
-            environment: V2DictionaryRuntimeEnvironment(fanoutGroups)
-        ).groupDeliveryAuthority == .fanout)
 
         var shardOnlyAdmission = roomLog
         shardOnlyAdmission["IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE"] = "shard_only"
@@ -260,18 +249,7 @@ struct V2GatewayRuntimeConfigurationTests {
             environment: V2DictionaryRuntimeEnvironment(shardOnlyAdmission)
         ).directRoomLogAdmissionMode == .shardOnly)
 
-        var shardOnlyAdmissionOutsideRoomLog = runtimeValues
-        // shard_only 只允许出现在 room_log 模式；默认现在就是 room_log，
-        // 所以要显式选择兼容基线才能触发这条校验。
-        shardOnlyAdmissionOutsideRoomLog["IM_V2_DIRECT_FANOUT_MODE"] = "planner"
-        shardOnlyAdmissionOutsideRoomLog["IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE"] = "shard_only"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
-            "IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE"
-        )) {
-            _ = try V2GatewayRuntimeConfiguration(
-                environment: V2DictionaryRuntimeEnvironment(shardOnlyAdmissionOutsideRoomLog)
-            )
-        }
+
 
         var credits = roomLog
         credits["IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"] = "64"
@@ -522,18 +500,7 @@ struct V2GatewayRuntimeConfigurationTests {
             )
         }
 
-        var eventCacheOutsideRoomLog = runtimeValues
-        // 默认部署模式现在是 room_log；这里要验证的是"该选项只在 room_log 之外非法"，
-        // 因此必须显式选择兼容基线，而不是依赖默认值。
-        eventCacheOutsideRoomLog["IM_V2_DIRECT_FANOUT_MODE"] = "planner"
-        eventCacheOutsideRoomLog["IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES"] = "4096"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
-            "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES"
-        )) {
-            _ = try V2GatewayRuntimeConfiguration(
-                environment: V2DictionaryRuntimeEnvironment(eventCacheOutsideRoomLog)
-            )
-        }
+
 
         var highActivityAppendBatch = appendBatch
         highActivityAppendBatch["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS"] = "20"
@@ -660,17 +627,7 @@ struct V2GatewayRuntimeConfigurationTests {
             )
         }
 
-        var creditsOutsideRoomLog = runtimeValues
-        // 同上：显式选择兼容基线，避免"默认就是 room_log"掩盖这条校验。
-        creditsOutsideRoomLog["IM_V2_DIRECT_FANOUT_MODE"] = "planner"
-        creditsOutsideRoomLog["IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"] = "64"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
-            "IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"
-        )) {
-            _ = try V2GatewayRuntimeConfiguration(
-                environment: V2DictionaryRuntimeEnvironment(creditsOutsideRoomLog)
-            )
-        }
+
 
         var oversizedCredits = roomLog
         oversizedCredits["IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"] = "129"
@@ -682,13 +639,6 @@ struct V2GatewayRuntimeConfigurationTests {
             )
         }
 
-        var referencePayload = runtimeValues
-        referencePayload["IM_V2_FANOUT_PAYLOAD_WRITE_MODE"] = "reference"
-        #expect(try V2GatewayRuntimeConfiguration(
-            environment: V2DictionaryRuntimeEnvironment(referencePayload)
-        ).fanoutPayloadWriteMode == .reference)
-
-        var invalidDirectFanout = runtimeValues
         var windowedRetention = runtimeValues
         windowedRetention["IM_V2_ROOM_LOG_RETENTION_MODE"] = "window"
         windowedRetention["IM_V2_ROOM_LOG_RETENTION_WINDOW_SECONDS"] = "86400"
@@ -709,39 +659,9 @@ struct V2GatewayRuntimeConfigurationTests {
             _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(invalidRetentionWindow))
         }
 
-        invalidDirectFanout["IM_V2_DIRECT_FANOUT_MODE"] = "client_selected"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_DIRECT_FANOUT_MODE")) {
-            _ = try V2GatewayRuntimeConfiguration(
-                environment: V2DictionaryRuntimeEnvironment(invalidDirectFanout)
-            )
-        }
 
-        var invalidGroupAuthority = runtimeValues
-        invalidGroupAuthority["IM_V2_GROUP_DELIVERY_AUTHORITY_MODE"] = "client_selected"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_DELIVERY_AUTHORITY_MODE")) {
-            _ = try V2GatewayRuntimeConfiguration(
-                environment: V2DictionaryRuntimeEnvironment(invalidGroupAuthority)
-            )
-        }
 
-        var invalidFanoutPayload = runtimeValues
-        invalidFanoutPayload["IM_V2_FANOUT_PAYLOAD_WRITE_MODE"] = "client_selected"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_FANOUT_PAYLOAD_WRITE_MODE")) {
-            _ = try V2GatewayRuntimeConfiguration(
-                environment: V2DictionaryRuntimeEnvironment(invalidFanoutPayload)
-            )
-        }
 
-        var unsafe = runtimeValues
-        unsafe["IM_V2_MESSAGE_PROJECTION_WRITE_MODE"] = "shared"
-        unsafe["IM_V2_MESSAGE_PROJECTION_READ_MODE"] = "inline"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
-            "IM_V2_MESSAGE_PROJECTION_WRITE_MODE/IM_V2_MESSAGE_PROJECTION_READ_MODE"
-        )) {
-            _ = try V2GatewayRuntimeConfiguration(
-                environment: V2DictionaryRuntimeEnvironment(unsafe)
-            )
-        }
 
         var shortRetention = runtimeValues
         shortRetention["IM_V2_MESSAGE_PROJECTION_STATE_RETENTION_SECONDS"] = "86399"
@@ -763,15 +683,6 @@ struct V2GatewayRuntimeConfigurationTests {
         }
     }
 
-    @Test("runtime requires an explicit fan-out fresh-burst fairness policy")
-    func rejectsMissingFanoutFreshBurstPolicy() {
-        var values = runtimeValues
-        values.removeValue(forKey: "IM_V2_FANOUT_FRESH_BURST_PASSES")
-        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_FANOUT_FRESH_BURST_PASSES")) {
-            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
-        }
-    }
-
     @Test("server idempotency retention cannot undercut the client retry contract")
     func rejectsShortIdempotencyRetention() throws {
         var values = runtimeValues
@@ -784,62 +695,6 @@ struct V2GatewayRuntimeConfigurationTests {
             _ = try V2GatewayRuntimeConfiguration(
                 environment: V2DictionaryRuntimeEnvironment(values)
             )
-        }
-    }
-
-    @Test("runtime requires a bounded fan-out delivery commit batch size")
-    func validatesFanoutDeliveryCommitBatchSize() {
-        var missing = runtimeValues
-        missing.removeValue(forKey: "IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE")
-        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE")) {
-            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(missing))
-        }
-        var oversized = runtimeValues
-        oversized["IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE"] = "129"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE")) {
-            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(oversized))
-        }
-    }
-
-    @Test("runtime requires a bounded cross-store fan-out delivery commit batch size")
-    func validatesCrossStoreFanoutDeliveryCommitBatchSize() {
-        var missing = runtimeValues
-        missing.removeValue(forKey: "IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE")
-        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE")) {
-            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(missing))
-        }
-        var oversized = runtimeValues
-        oversized["IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE"] = "257"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE")) {
-            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(oversized))
-        }
-    }
-
-    @Test("runtime requires a bounded cross-store fan-out commit concurrency")
-    func validatesCrossStoreFanoutDeliveryCommitConcurrency() {
-        var missing = runtimeValues
-        missing.removeValue(forKey: "IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY")
-        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY")) {
-            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(missing))
-        }
-        var oversized = runtimeValues
-        oversized["IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY"] = "3"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY")) {
-            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(oversized))
-        }
-    }
-
-    @Test("runtime requires a bounded fan-out delivery claim batch size")
-    func validatesFanoutDeliveryClaimBatchSize() {
-        var missing = runtimeValues
-        missing.removeValue(forKey: "IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE")
-        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE")) {
-            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(missing))
-        }
-        var oversized = runtimeValues
-        oversized["IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE"] = "2001"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE")) {
-            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(oversized))
         }
     }
 
@@ -873,6 +728,36 @@ struct V2GatewayRuntimeConfigurationTests {
                 environment: V2DictionaryRuntimeEnvironment(oversized)
             )
         }
+    }
+
+    @Test("route and direct authority pools stay inside the process connection ceiling", arguments: [false, true], [false, true])
+    func userStateRoutePoolBudget(isolated: Bool, separateOwner: Bool) throws {
+        var values = runtimeValues
+        values["IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED"] = isolated ? "true" : "false"
+        let controlURL = try #require(values["IM_V2_DATABASE_URL"])
+        let ownerURL = separateOwner ? "postgres://v2:password@owner/im_v2" : controlURL
+        values["IM_V2_ROOM_SHARD_STORES_JSON"] = """
+        [{"shard_id":"room-a","database_url":"\(ownerURL)"},
+         {"shard_id":"room-b","database_url":"\(ownerURL)"}]
+        """
+        // Logical aliases share physical data and resolution pools.
+        let physicalStores = separateOwner ? 2 : 1
+        values["IM_V2_DIRECT_ROOM_SHARD_ID"] = "room-a"
+        values["IM_V2_GROUP_ROOM_SHARD_ID"] = "room-b"
+        values["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = "32"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        }
+        let controlConnections = isolated ? 4 : 8
+        let total = 4 * (8 * physicalStores + 1 + controlConnections + physicalStores)
+        values["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = String(total - 1)
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        }
+        values["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = String(total)
+        let configuration = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        #expect(configuration.directSendControlConnectionsPerEventLoop == controlConnections)
+        #expect(configuration.directAuthorizationResolutionDatabaseURLs == Set([controlURL, ownerURL]).sorted())
     }
 
     @Test("PostgreSQL policy bounds every wait and the aggregate physical pool budget")
@@ -991,15 +876,9 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.syncWakeMaximumPendingUsers == 50_000)
         #expect(configuration.syncWakeDeliveryConcurrency == 64)
         #expect(configuration.syncWakeCoalescingEnabled)
-        #expect(configuration.acceptedMessageProjectionBatchEnabled)
         #expect(configuration.commandSuccessLogSamplePermille == 10)
         #expect(configuration.commandSlowLogThresholdMilliseconds == 250)
         #expect(configuration.commandDiagnosticLogMaximumPerSecond == 20)
-        #expect(configuration.fanoutDeliveryCommitBatchSize == 128)
-        #expect(configuration.crossStoreFanoutDeliveryCommitBatchSize == 256)
-        #expect(configuration.crossStoreFanoutDeliveryCommitConcurrency == 2)
-        #expect(configuration.fanoutDeliveryClaimBatchSize == 2_000)
-        #expect(configuration.fanoutFreshBurstPasses == 7)
         #expect(configuration.durableRetryPolicy.initialDelay == 1)
         #expect(configuration.durableRetryPolicy.maximumDelay == 60)
         #expect(configuration.durableRetryPolicy.maximumAttempts == 10)
@@ -1027,10 +906,7 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.strangerMessagePolicy.maximumMessagesPerWindow == 3)
         #expect(configuration.strangerMessagePolicy.window == 86_400)
         #expect(configuration.contentReviewSafetyActorUserID == nil)
-        guard case .durablePollingOnly = configuration.fanoutHint else {
-            Issue.record("Expected durable polling without NATS configuration")
-            return
-        }
+
     }
 
     @Test("runtime rejects a malformed direct room owner route before readiness")
@@ -1091,35 +967,6 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.contentReviewSafetyActorUserID?.rawValue == "00000000-0000-0000-0000-000000000901")
         #expect(configuration.contentReviewViolationTerms == ["blocked", "malware"])
         #expect(configuration.contentReviewEscalationTerms == ["manual-review"])
-    }
-
-    @Test("NATS hint requires both endpoint and subject")
-    func parsesAndValidatesNATSHintConfiguration() throws {
-        var values = runtimeValues
-        values["IM_V2_NATS_URL"] = "tls://nats.internal:4222"
-        values["IM_V2_NATS_SUBJECT"] = "imv2.fanout.wake"
-        values["IM_V2_NATS_TOKEN"] = "test-broker-token"
-        let configuration = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
-        guard case .nats(let nats) = configuration.fanoutHint else {
-            Issue.record("Expected NATS hint")
-            return
-        }
-        #expect(nats.subject == "imv2.fanout.wake")
-
-        values["IM_V2_NATS_URL"] = "nats://nats.internal:4222"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_NATS_URL/IM_V2_NATS_SUBJECT")) {
-            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
-        }
-        values["IM_V2_NATS_URL"] = "tls://nats.internal:4222"
-        values.removeValue(forKey: "IM_V2_NATS_TOKEN")
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_NATS_URL/IM_V2_NATS_SUBJECT")) {
-            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
-        }
-        values["IM_V2_NATS_TOKEN"] = "test-broker-token"
-        values.removeValue(forKey: "IM_V2_NATS_SUBJECT")
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_NATS_URL/IM_V2_NATS_SUBJECT")) {
-            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
-        }
     }
 
     @Test("Hybrid wake routing requires an opaque-subject key with its NATS configuration")
@@ -1445,15 +1292,9 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_SYNC_WAKE_MAX_PENDING_USERS": "50000",
             "IM_V2_SYNC_WAKE_DELIVERY_CONCURRENCY": "64",
             "IM_V2_SYNC_WAKE_COALESCING_ENABLED": "true",
-            "IM_V2_ACCEPTED_MESSAGE_PROJECTION_BATCH_ENABLED": "true",
             "IM_V2_COMMAND_SUCCESS_LOG_SAMPLE_PERMILLE": "10",
             "IM_V2_COMMAND_SLOW_LOG_THRESHOLD_MS": "250",
             "IM_V2_COMMAND_DIAGNOSTIC_LOG_MAX_PER_SECOND": "20",
-            "IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE": "128",
-            "IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE": "256",
-            "IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY": "2",
-            "IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE": "2000",
-            "IM_V2_FANOUT_FRESH_BURST_PASSES": "7",
             "IM_V2_DURABLE_RETRY_INITIAL_DELAY_MS": "1000",
             "IM_V2_DURABLE_RETRY_MAX_DELAY_MS": "60000",
             "IM_V2_DURABLE_RETRY_MAX_ATTEMPTS": "10",
@@ -1480,12 +1321,6 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_CAPACITY_PROFILE_ID": "standard",
             "IM_V2_MAX_ELIGIBLE_MEMBERS": "100000",
             "IM_V2_MAX_COMMANDS_PER_WINDOW": "1000",
-            "IM_V2_MAX_FANOUT_UNITS_PER_WINDOW": "100000",
-            "IM_V2_MAX_OUTSTANDING_FANOUT_UNITS": "1000000",
-            "IM_V2_MAX_OUTSTANDING_PLANS": "10000",
-            "IM_V2_MAX_ENUMERATION_PAGE_SIZE": "1000",
-            "IM_V2_MAX_PLANNER_CONCURRENCY": "8",
-            "IM_V2_MAX_DELIVERY_CONCURRENCY": "16",
             "IM_V2_RATE_LIMIT_RETRY_AFTER_SECONDS": "3",
         ]
     }

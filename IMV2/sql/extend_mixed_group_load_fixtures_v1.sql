@@ -6,7 +6,7 @@
 \endif
 
 -- Extends an already-provisioned mixed-group v1 fixture with nine additional
--- 10k hybrid rooms.  The rooms reuse the exact active membership of hy-10k-00
+-- 10k large-capacity rooms.  The rooms reuse the exact active membership of hy-10k-00
 -- so a distributed hot-room test does not require or persist new credentials.
 -- This migration is intentionally guarded and one-shot: partial or repeated
 -- execution fails instead of silently producing a non-comparable fixture.
@@ -54,14 +54,14 @@ BEGIN
         SELECT 1
         FROM im_v2.rooms
         WHERE room_id = source_room_id
-          AND delivery_mode = 'large_group_hybrid'
+          AND capacity_class = 'large'
           AND capacity_profile_id = (
               SELECT capacity_profile_id
               FROM imv2_mixed_group_extension_config
           )
     ) THEN
         RAISE EXCEPTION
-            'hy-10k-00 must be a complete 10k hybrid fixture for profile %',
+            'hy-10k-00 must be a complete 10k large-capacity fixture for profile %',
             (SELECT capacity_profile_id
              FROM imv2_mixed_group_extension_config);
     END IF;
@@ -92,9 +92,9 @@ $guard$;
 
 INSERT INTO im_v2.rooms
     (room_id, room_kind, room_shard_id, room_sequence,
-     membership_revision, capacity_profile_id, delivery_mode, created_at)
+     membership_revision, capacity_profile_id, capacity_class, created_at)
 SELECT fixture.room_id, 'group', fixture.room_shard_id, 0,
-       1, :'capacity_profile_id', 'large_group_hybrid', now()
+       1, :'capacity_profile_id', 'large', now()
 FROM imv2_mixed_group_extension_specs AS fixture;
 
 INSERT INTO im_v2.group_rooms (room_id, owner_user_id, title, created_at)
@@ -122,18 +122,8 @@ WHERE source.room_id = '00000000-0000-4000-8000-000000002710'
   AND source.left_revision IS NULL;
 
 INSERT INTO im_v2.room_admission
-    (room_id, eligible_member_count,
-     command_window_limit, command_window_used,
-     fanout_window_limit, fanout_window_used,
-     max_outstanding_fanout_units, outstanding_fanout_units,
-     max_outstanding_plans, outstanding_plans,
-     shard_lease_id, shard_lease_generation)
-SELECT fixture.room_id, 10000,
-       pool.command_window_limit, 0,
-       pool.fanout_window_limit, 0,
-       pool.max_outstanding_fanout_units, 0,
-       pool.max_outstanding_plans, 0,
-       pool.lease_id, pool.generation
+    (room_id, eligible_member_count, command_window_limit, command_window_used, shard_lease_id, shard_lease_generation)
+SELECT fixture.room_id, 10000, pool.command_window_limit, 0, pool.lease_id, pool.generation
 FROM imv2_mixed_group_extension_specs AS fixture
 JOIN im_v2.shard_admission_pools AS pool
   ON pool.room_shard_id = fixture.room_shard_id
@@ -157,11 +147,11 @@ $verify$;
 
 COMMIT;
 
-SELECT room.room_id, room.room_shard_id, room.delivery_mode,
+SELECT room.room_id, room.room_shard_id, room.capacity_class,
        count(membership.user_id) AS active_members
 FROM im_v2.rooms AS room
 JOIN im_v2.room_memberships AS membership USING (room_id)
 WHERE room.room_id::text ~ '^00000000-0000-400[1-9]-8000-000000002710$'
   AND membership.left_revision IS NULL
-GROUP BY room.room_id, room.room_shard_id, room.delivery_mode
+GROUP BY room.room_id, room.room_shard_id, room.capacity_class
 ORDER BY room.room_id;

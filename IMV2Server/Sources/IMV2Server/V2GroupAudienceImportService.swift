@@ -144,21 +144,21 @@ public protocol V2GroupAudienceImportStore: Sendable {
 public struct V2GroupAudienceImportService: Sendable {
     private let store: any V2GroupAudienceImportStore
     private let groupMessaging: V2GroupMessagingService
-    private let deliveryPolicy: V2GroupDeliveryPolicy
+    private let deliveryPolicy: V2GroupCapacityPolicy
     private let policy: V2GroupAudienceImportPolicy
     private let now: @Sendable () -> Date
 
     public init(
         store: any V2GroupAudienceImportStore,
         groupMessaging: V2GroupMessagingService,
-        deliveryPolicy: V2GroupDeliveryPolicy = .init(),
+        deliveryPolicy: V2GroupCapacityPolicy = .init(),
         policy: V2GroupAudienceImportPolicy? = nil,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.store = store
         self.groupMessaging = groupMessaging
         self.deliveryPolicy = deliveryPolicy
-        self.policy = policy ?? .init(maximumStagedMembersPerActor: deliveryPolicy.maximumMembers(for: .largeGroupHybrid) - 1)
+        self.policy = policy ?? .init(maximumStagedMembersPerActor: deliveryPolicy.maximumMembers(for: .large) - 1)
         self.now = now
     }
 
@@ -176,7 +176,7 @@ public struct V2GroupAudienceImportService: Sendable {
             actorUserID: actorUserID,
             operationID: operationID,
             memberUserIDs: memberUserIDs,
-            maximumMembers: deliveryPolicy.maximumMembers(for: .largeGroupHybrid) - 1,
+            maximumMembers: deliveryPolicy.maximumMembers(for: .large) - 1,
             policy: policy,
             now: now()
         )

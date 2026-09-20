@@ -4,6 +4,59 @@ import Testing
 
 @Suite("V2 zlib frame compression")
 struct V2ZlibFrameCompressionTests {
+    @Test("invalid budgets are rejected before allocating an output buffer", arguments: [Int.min, -1, 0])
+    func invalidBudgets(value: Int) throws {
+        let input = Data([0x41])
+        #expect(throws: V2FrameCompressionError.invalidConfiguration) {
+            try V2ZlibFrameCompression.compress(input, maximumInputBytes: value)
+        }
+        #expect(throws: V2FrameCompressionError.invalidConfiguration) {
+            try V2ZlibFrameCompression.decompress(input, maximumOutputBytes: value)
+        }
+        #expect(throws: V2FrameCompressionError.invalidConfiguration) {
+            try V2ZlibFrameCompression.decompress(
+                input, maximumOutputBytes: 1, maximumExpansionRatio: value
+            )
+        }
+    }
+
+    @Test("expansion bound is checked at its largest representable product")
+    func expansionProductBounds() throws {
+        let input = Data(repeating: 0x41, count: 128)
+        let compressed = try V2ZlibFrameCompression.compress(input, maximumInputBytes: input.count)
+        #expect(compressed.count > 1)
+        let largestRatio = Int.max / compressed.count
+        #expect(try V2ZlibFrameCompression.decompress(
+            compressed, maximumOutputBytes: input.count,
+            maximumExpansionRatio: largestRatio
+        ) == input)
+        for ratio in [largestRatio + 1, Int.max] {
+            #expect(throws: V2FrameCompressionError.expansionRatioExceeded) {
+                try V2ZlibFrameCompression.decompress(
+                    compressed, maximumOutputBytes: input.count,
+                    maximumExpansionRatio: ratio
+                )
+            }
+        }
+    }
+
+    @Test("exact byte budgets allow a frame and reject one byte less")
+    func exactByteBudgets() throws {
+        let input = Data([0x41, 0x42, 0x43])
+        let compressed = try V2ZlibFrameCompression.compress(input, maximumInputBytes: input.count)
+        #expect(throws: V2FrameCompressionError.inputTooLarge) {
+            try V2ZlibFrameCompression.compress(input, maximumInputBytes: input.count - 1)
+        }
+        #expect(try V2ZlibFrameCompression.decompress(
+            compressed, maximumOutputBytes: input.count, maximumExpansionRatio: 1
+        ) == input)
+        #expect(throws: V2FrameCompressionError.outputLimitExceeded) {
+            try V2ZlibFrameCompression.decompress(
+                compressed, maximumOutputBytes: input.count - 1, maximumExpansionRatio: 1
+            )
+        }
+    }
+
     @Test("v20 zlib member matches the cross-platform golden vector")
     func goldenVector() throws {
         let input = Data("IMV2 frame compression golden vector v20".utf8)

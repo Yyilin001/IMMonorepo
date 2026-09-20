@@ -1,6 +1,11 @@
 import Crypto
 import Foundation
 import IMV2Core
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 
 /// 一次本地开发上传的不透明授权。
 ///
@@ -35,6 +40,7 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
     private let signingKey: Data
     private let now: @Sendable () -> Date
     private var didPrepare = false
+    private var preparation: Task<Void, any Error>?
 
     /// 校验并保存根目录、目标地址与签名密钥。
     ///
@@ -65,29 +71,39 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
 
     /// 在进程启动时建立私有目录并清理上次崩溃遗留的上传碎片。
     ///
-    /// 对同一提供方重复调用是空操作，因此不会误删正在进行的流式上传。
+    /// 同一提供方的并发调用等待同一次初始化；成功后重复调用是空操作，失败后可以重试。
+    /// 初始化不会因单个调用方取消而中断，避免留下只完成一半的暂存目录。
     ///
     /// - Throws: 目录创建或清理失败时抛出。
     public func prepare() async throws {
         guard !didPrepare else { return }
-        let rootDirectory = self.rootDirectory
-        let stagingDirectory = self.stagingDirectory
-        try await Self.performBlocking {
-            try FileManager.default.createDirectory(
-                at: rootDirectory,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            if FileManager.default.fileExists(atPath: stagingDirectory.path) {
-                try FileManager.default.removeItem(at: stagingDirectory)
+        if let preparation { return try await preparation.value }
+        // Publish before suspending: actor reentrancy must not start a second
+        // destructive cleanup. A caller's cancellation does not cancel shared
+        // initialization; every caller drains the same bounded filesystem task.
+        let task = Task {
+            defer { preparation = nil }
+            let rootDirectory = self.rootDirectory
+            let stagingDirectory = self.stagingDirectory
+            try await Self.performBlocking {
+                try FileManager.default.createDirectory(
+                    at: rootDirectory,
+                    withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700]
+                )
+                if FileManager.default.fileExists(atPath: stagingDirectory.path) {
+                    try FileManager.default.removeItem(at: stagingDirectory)
+                }
+                try FileManager.default.createDirectory(
+                    at: stagingDirectory,
+                    withIntermediateDirectories: false,
+                    attributes: [.posixPermissions: 0o700]
+                )
             }
-            try FileManager.default.createDirectory(
-                at: stagingDirectory,
-                withIntermediateDirectories: false,
-                attributes: [.posixPermissions: 0o700]
-            )
+            didPrepare = true
         }
-        didPrepare = true
+        preparation = task
+        try await task.value
     }
 
     /// 为一个上传会话签发短时上传目标。
@@ -137,6 +153,7 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         _ = try validatedExpiryMilliseconds(expiresAt)
         let objectURL = try objectURL(for: mediaID)
         let byteCount = try await Self.performBlocking { () throws -> Int64 in
+            try Self.requireNotPurged(objectURL)
             guard FileManager.default.fileExists(atPath: objectURL.path) else {
                 throw V2LocalFilesystemMediaProviderError.objectUnavailable
             }
@@ -216,26 +233,30 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         let rootDirectory = self.rootDirectory
         let objectURL = try objectURL(for: upload.mediaID)
         try await Self.performBlocking {
-            let attributes = try FileManager.default.attributesOfItem(atPath: upload.fileURL.path)
-            guard let size = attributes[.size] as? NSNumber,
-                  size.int64Value == actualByteCount
-            else { throw V2LocalFilesystemMediaProviderError.byteCountMismatch }
-            try FileManager.default.createDirectory(
-                at: rootDirectory,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: upload.fileURL.path
-            )
-            try FileManager.default.moveItem(at: upload.fileURL, to: objectURL)
+            try Self.withObjectMutationLock(objectURL) { marker in
+                guard !FileManager.default.fileExists(atPath: marker.path) else { throw V2LocalFilesystemMediaProviderError.objectUnavailable }
+                let attributes = try FileManager.default.attributesOfItem(atPath: upload.fileURL.path)
+                guard let size = attributes[.size] as? NSNumber,
+                      size.int64Value == actualByteCount
+                else { throw V2LocalFilesystemMediaProviderError.byteCountMismatch }
+                try FileManager.default.createDirectory(
+                    at: rootDirectory,
+                    withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700]
+                )
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: upload.fileURL.path
+                )
+                try FileManager.default.moveItem(at: upload.fileURL, to: objectURL)
+            }
         }
     }
 
     package func verifyForwardImportedObject(mediaID: MediaID, byteCount: Int64, digest: Data) async throws -> Bool {
         let object = try objectURL(for: mediaID)
         return try await Self.performBlocking {
+            try Self.requireNotPurged(object)
             guard FileManager.default.fileExists(atPath: object.path) else { return false }
             guard try ForwardMediaFileIO.digest(object, byteCount: byteCount) == digest else { throw V2ForwardMediaCopyError.contentConflict }
             return true
@@ -258,17 +279,20 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         let object = try objectURL(for: upload.mediaID)
         let root = rootDirectory
         try await Self.performBlocking {
-            guard try ForwardMediaFileIO.digest(upload.fileURL, byteCount: receipt.byteCount) == receipt.digest else { throw V2ForwardMediaCopyError.contentConflict }
-            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            do {
-                // link(2) fails if another worker won; unlike replacement,
-                // it cannot overwrite a previously installed different blob.
-                try FileManager.default.linkItem(at: upload.fileURL, to: object)
-            } catch {
-                guard FileManager.default.fileExists(atPath: object.path) else { throw error }
+            try Self.withObjectMutationLock(object) { marker in
+                guard !FileManager.default.fileExists(atPath: marker.path) else { throw V2LocalFilesystemMediaProviderError.objectUnavailable }
+                guard try ForwardMediaFileIO.digest(upload.fileURL, byteCount: receipt.byteCount) == receipt.digest else { throw V2ForwardMediaCopyError.contentConflict }
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                do {
+                    // link(2) fails if another worker won; unlike replacement,
+                    // it cannot overwrite a previously installed different blob.
+                    try FileManager.default.linkItem(at: upload.fileURL, to: object)
+                } catch {
+                    guard FileManager.default.fileExists(atPath: object.path) else { throw error }
+                }
+                guard try ForwardMediaFileIO.digest(object, byteCount: receipt.byteCount) == receipt.digest else { throw V2ForwardMediaCopyError.contentConflict }
+                try ForwardMediaFileIO.syncDirectory(root)
             }
-            guard try ForwardMediaFileIO.digest(object, byteCount: receipt.byteCount) == receipt.digest else { throw V2ForwardMediaCopyError.contentConflict }
-            try ForwardMediaFileIO.syncDirectory(root)
         }
     }
 
@@ -331,6 +355,7 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         let claims = try verify(targetURL: targetURL, kind: .download, mediaID: mediaID)
         let objectURL = try objectURL(for: mediaID)
         let byteCount = try await Self.performBlocking { () throws -> Int64 in
+            try Self.requireNotPurged(objectURL)
             guard FileManager.default.fileExists(atPath: objectURL.path) else {
                 throw V2LocalFilesystemMediaProviderError.objectUnavailable
             }
@@ -360,7 +385,7 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         }
     }
 
-    /// 删除指定媒体在本地的对象与暂存文件。
+    /// 持久标记媒体已删除并移除对象；迟到提交不能恢复它，调用方仍负责释放暂存文件。
     ///
     /// - Parameter mediaID: 目标媒体标识。
     /// - Throws: 媒体标识非法时抛出
@@ -368,8 +393,19 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
     public func purge(mediaID: MediaID) async throws {
         let objectURL = try objectURL(for: mediaID)
         try await Self.performBlocking {
-            guard FileManager.default.fileExists(atPath: objectURL.path) else { return }
-            try FileManager.default.removeItem(at: objectURL)
+            try Self.withObjectMutationLock(objectURL) { marker in
+                if !FileManager.default.fileExists(atPath: marker.path) {
+                    try Data([1]).write(to: marker, options: .withoutOverwriting)
+                }
+                let handle = try FileHandle(forWritingTo: marker)
+                defer { try? handle.close() }
+                try handle.synchronize()
+                try ForwardMediaFileIO.syncDirectory(marker.deletingLastPathComponent())
+                if FileManager.default.fileExists(atPath: objectURL.path) {
+                    try FileManager.default.removeItem(at: objectURL)
+                }
+                try ForwardMediaFileIO.syncDirectory(objectURL.deletingLastPathComponent())
+            }
         }
     }
 
@@ -384,10 +420,39 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
     public func localBytesForScanning(mediaID: MediaID) async throws -> Data {
         let objectURL = try objectURL(for: mediaID)
         return try await Self.performBlocking {
+            try Self.requireNotPurged(objectURL)
             guard FileManager.default.fileExists(atPath: objectURL.path) else {
                 throw V2LocalFilesystemMediaProviderError.objectUnavailable
             }
             return try Data(contentsOf: objectURL, options: [.mappedIfSafe])
+        }
+    }
+
+    // Never unlink lock files: old/new descriptors must protect the same inode.
+    private nonisolated static func withObjectMutationLock<Value>(
+        _ object: URL, action: (URL) throws -> Value
+    ) throws -> Value {
+        let directory = object.deletingLastPathComponent().appendingPathComponent(".object-state", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                               attributes: [.posixPermissions: 0o700])
+        try ForwardMediaFileIO.syncDirectory(object.deletingLastPathComponent())
+        let lock = directory.appendingPathComponent(object.lastPathComponent + ".lock")
+        let descriptor = open(lock.path, O_CREAT | O_RDWR, 0o600)
+        guard descriptor >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        defer { _ = close(descriptor) }
+        while flock(descriptor, LOCK_EX) != 0 {
+            if errno == EINTR { continue }
+            throw POSIXError(.init(rawValue: errno) ?? .EIO)
+        }
+        defer { _ = flock(descriptor, LOCK_UN) }
+        return try action(directory.appendingPathComponent(object.lastPathComponent + ".purged"))
+    }
+
+    private nonisolated static func requireNotPurged(_ object: URL) throws {
+        let marker = object.deletingLastPathComponent().appendingPathComponent(".object-state", isDirectory: true)
+            .appendingPathComponent(object.lastPathComponent + ".purged")
+        guard !FileManager.default.fileExists(atPath: marker.path) else {
+            throw V2LocalFilesystemMediaProviderError.objectUnavailable
         }
     }
 

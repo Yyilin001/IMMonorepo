@@ -13,6 +13,38 @@ struct V2RoutedContentReviewWorkerTests {
         #expect(await owner.limits().isEmpty)
     }
 
+    @Test("aggregate budget rejects overflow before starting owners", arguments: [2, 3])
+    func aggregateBudgetBounds(ownerCount: Int) async throws {
+        let owner = RoutedReviewProgressor(result: .success(.init(
+            claimedCount: 0, resolvedCount: 0, redactedCount: 0, releasedCount: 0
+        )))
+        let worker = try V2RoutedContentReviewWorker(
+            progressors: Array(repeating: owner, count: ownerCount)
+        )
+        for limit in [Int.max / ownerCount + 1, Int.max] {
+            await #expect(throws: V2ContentReviewWorkerError.invalidLimit) {
+                try await worker.runOnce(limitPerOwner: limit)
+            }
+        }
+        #expect(await owner.limits().isEmpty)
+    }
+
+    @Test("largest representable aggregate budget remains usable", arguments: [1, 2, 3])
+    func maximumAggregateBudget(ownerCount: Int) async throws {
+        let limit = Int.max / ownerCount
+        let owner = RoutedReviewProgressor(result: .success(.init(
+            claimedCount: limit, resolvedCount: limit, redactedCount: limit, releasedCount: 0
+        )))
+        let worker = try V2RoutedContentReviewWorker(
+            progressors: Array(repeating: owner, count: ownerCount)
+        )
+        #expect(try await worker.runOnce(limitPerOwner: limit) == .init(
+            claimedCount: limit * ownerCount, resolvedCount: limit * ownerCount,
+            redactedCount: limit * ownerCount, releasedCount: 0
+        ))
+        #expect(await owner.limits() == Array(repeating: limit, count: ownerCount))
+    }
+
     @Test("healthy room owners continue while one review store is unavailable")
     func isolatesOwnerFailureAndAggregatesReports() async throws {
         let first = RoutedReviewProgressor(result: .success(.init(

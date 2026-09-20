@@ -5,7 +5,7 @@ import SQLKit
 
 /// PostgreSQL 群引导事务。
 ///
-/// 它在同一事务内创建房间、初始成员关系、准入状态、扇出计划与操作台账。
+/// 它在同一事务内创建房间、初始成员关系、准入状态、个人会话发现待办与操作台账。
 /// 分阶段受众在整个事务中始终保持关系形态，因此十万成员群不会变成 Swift 数组
 /// 或一个巨大的 PostgreSQL 参数数组。
 public struct PostgresV2GroupMessagingStore:
@@ -16,8 +16,6 @@ public struct PostgresV2GroupMessagingStore:
 {
     private let database: any Database
 
-    private let groupDeliveryAuthority: V2RoomDeliveryAuthority
-
     /// 组合数据库与新建群聊的权威副本形态策略。
     ///
     /// 混合大群固定以房间日志为权威副本；标准群取这里的部署策略，默认与部署默认一致
@@ -25,10 +23,8 @@ public struct PostgresV2GroupMessagingStore:
     ///
     /// - Parameters:
     ///   - database: 存放房间、事件与投递的数据库。
-    ///   - groupDeliveryAuthority: 新建标准群的权威副本形态。
-    public init(database: any Database, groupDeliveryAuthority: V2RoomDeliveryAuthority = .roomLog) {
+    public init(database: any Database) {
         self.database = database
-        self.groupDeliveryAuthority = groupDeliveryAuthority
     }
 
     public func create(
@@ -37,7 +33,6 @@ public struct PostgresV2GroupMessagingStore:
         roomShardID: String,
         roomID: RoomID,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2CreateGroupRoomOutcome {
         let actorID = try groupUUID(command.actorUserID)
@@ -51,7 +46,7 @@ public struct PostgresV2GroupMessagingStore:
             actorID: actorID,
             operationID: try groupUUID(command.operationID),
             title: command.title,
-            deliveryMode: command.deliveryMode,
+            capacityClass: command.capacityClass,
             memberCount: memberCount,
             audience: .inline(
                 requestedMembers: requestedMembers,
@@ -65,7 +60,6 @@ public struct PostgresV2GroupMessagingStore:
             roomShardID: roomShardID,
             roomID: roomID,
             eventID: eventID,
-            planID: planID,
             now: now
         )
     }
@@ -77,7 +71,6 @@ public struct PostgresV2GroupMessagingStore:
         roomShardID: String,
         roomID: RoomID,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2CreateGroupRoomOutcome {
         let actorID = try groupUUID(command.actorUserID)
@@ -92,7 +85,7 @@ public struct PostgresV2GroupMessagingStore:
                 actorID: actorID,
                 operationID: try groupUUID(command.operationID),
                 title: command.title,
-                deliveryMode: command.deliveryMode,
+                capacityClass: command.capacityClass,
                 memberCount: canonicalAudience.count,
                 audience: .inline(
                     requestedMembers: requestedMembers,
@@ -104,7 +97,6 @@ public struct PostgresV2GroupMessagingStore:
             roomShardID: roomShardID,
             roomID: roomID,
             eventID: eventID,
-            planID: planID,
             now: now
         )
     }
@@ -137,13 +129,13 @@ public struct PostgresV2GroupMessagingStore:
                 """).run()
             try await sql.raw("""
                 INSERT INTO im_v2.group_room_creation_intents
-                    (actor_user_id, operation_id, room_id, event_id, plan_id,
+                    (actor_user_id, operation_id, room_id, event_id,
                      room_shard_id, route_epoch, request_fingerprint,
                      audience_member_count, state, created_at, updated_at)
                 VALUES (
                     \(bind: values.actorUserID), \(bind: values.operationID),
                     \(bind: values.roomID), \(bind: values.eventID),
-                    \(bind: values.planID), \(bind: intent.roomShardID),
+                    \(bind: intent.roomShardID),
                     \(bind: intent.routeEpoch),
                     \(bind: intent.requestFingerprint),
                     \(bind: intent.audienceMemberCount), 'prepared',
@@ -152,7 +144,7 @@ public struct PostgresV2GroupMessagingStore:
                 ON CONFLICT DO NOTHING
                 """).run()
             guard let persisted = try await sql.raw("""
-                SELECT room_id, event_id, plan_id, room_shard_id, route_epoch,
+                SELECT room_id, event_id, room_shard_id, route_epoch,
                        request_fingerprint, audience_member_count
                 FROM im_v2.group_room_creation_intents
                 WHERE actor_user_id = \(bind: values.actorUserID)
@@ -215,7 +207,7 @@ public struct PostgresV2GroupMessagingStore:
                 actorID: try groupUUID(command.actorUserID),
                 operationID: try groupUUID(command.operationID),
                 title: command.title,
-                deliveryMode: command.deliveryMode,
+                capacityClass: command.capacityClass,
                 memberCount: command.allMemberCount,
                 audience: .stagedControlManifest
             ),
@@ -224,7 +216,6 @@ public struct PostgresV2GroupMessagingStore:
             roomShardID: intent.roomShardID,
             roomID: intent.roomID,
             eventID: intent.eventID,
-            planID: intent.planID,
             now: now
         )
     }
@@ -235,7 +226,6 @@ public struct PostgresV2GroupMessagingStore:
         roomShardID: String,
         roomID: RoomID,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2CreateGroupRoomOutcome {
         guard command.allMemberCount <= capacityProfile.limits.maxEligibleMembers else {
@@ -246,7 +236,7 @@ public struct PostgresV2GroupMessagingStore:
             actorID: try groupUUID(command.actorUserID),
             operationID: try groupUUID(command.operationID),
             title: command.title,
-            deliveryMode: command.deliveryMode,
+            capacityClass: command.capacityClass,
             memberCount: command.allMemberCount,
             audience: .staged
         )
@@ -257,7 +247,6 @@ public struct PostgresV2GroupMessagingStore:
             roomShardID: roomShardID,
             roomID: roomID,
             eventID: eventID,
-            planID: planID,
             now: now
         )
     }
@@ -269,7 +258,6 @@ public struct PostgresV2GroupMessagingStore:
         roomShardID: String,
         roomID: RoomID,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2CreateGroupRoomOutcome {
         return try await database.transaction { transaction in
@@ -280,7 +268,7 @@ public struct PostgresV2GroupMessagingStore:
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: operationLockKey), 0))").run()
 
             if let previous = try await sql.raw("""
-                SELECT room_id, title, delivery_mode, audience_kind,
+                SELECT room_id, title, capacity_class, audience_kind,
                        initial_member_count, initial_member_user_ids, created_at
                 FROM im_v2.group_room_operations
                 WHERE actor_user_id = \(bind: input.actorID)
@@ -393,15 +381,13 @@ public struct PostgresV2GroupMessagingStore:
 
             let createdRoomID = try groupUUID(roomID)
             let createdEventID = try groupUUID(eventID)
-            let createdPlanID = try groupUUID(planID)
             // Responses and projections use the persisted precision. Other writes keep the original Date.
             guard let timestamp = try await sql.raw("""
                 INSERT INTO im_v2.rooms
                     (room_id, room_kind, room_shard_id, room_sequence, membership_revision,
-                     capacity_profile_id, delivery_mode, delivery_authority, created_at)
+                     capacity_profile_id, capacity_class, created_at)
                 VALUES (\(bind: createdRoomID), 'group', \(bind: roomShardID), 1, 1,
-                        \(bind: capacityProfile.id), \(bind: input.deliveryMode.rawValue),
-                        \(bind: v2RoomDeliveryAuthority(input.deliveryMode, configured: groupDeliveryAuthority).rawValue),
+                        \(bind: capacityProfile.id), \(bind: input.capacityClass.rawValue),
                         \(bind: now))
                 RETURNING created_at
                 """).first(decoding: GroupCommittedTimestampRow.self) else {
@@ -463,54 +449,20 @@ public struct PostgresV2GroupMessagingStore:
                 VALUES (\(bind: createdEventID), \(bind: createdRoomID), 1, 'room.created', \(bind: input.actorID),
                         jsonb_build_object('event_type', 'room.created', 'room_id', \(bind: createdRoomID.uuidString),
                                            'owner_user_id', \(bind: input.actorID.uuidString), 'title', \(bind: input.title),
-                                           'delivery_mode', \(bind: input.deliveryMode.rawValue),
-                                           'delivery_authority', \(bind: v2RoomDeliveryAuthority(input.deliveryMode, configured: groupDeliveryAuthority).rawValue),
+                                           'capacity_class', \(bind: input.capacityClass.rawValue),
                                            'membership_revision', 1,
                                            'created_at_ms', \(bind: createdAtMilliseconds)),
                         1, \(bind: now))
                 """).run()
+            // 会话发现属于每个初始成员的个人状态，不再借用公共消息扇出计划。
+            // 直接从本事务的成员关系集合写入，十万成员不进入 Swift 数组。
             try await sql.raw("""
-                INSERT INTO im_v2.fanout_plans
-                    (plan_id, source_event_id, room_id, source_room_sequence,
-                     committed_membership_revision, target_rule, enumeration_checkpoint,
-                     target_count, reserved_fanout_cost, state, created_at)
-                VALUES (\(bind: createdPlanID), \(bind: createdEventID), \(bind: createdRoomID), 1, 1,
-                        '{"kind":"frozen_targets"}'::jsonb,
-                        jsonb_build_object('after_user_id', NULL),
-                        \(bind: input.memberCount), \(bind: input.memberCount), 'planning', \(bind: now))
-                """).run()
-
-            switch input.audience {
-            case .inline(let requestedMembers, _):
-                let encoded = try groupUUIDJSON([input.actorID] + requestedMembers)
-                try await sql.raw("""
-                    INSERT INTO im_v2.fanout_plan_targets (source_event_id, target_user_id)
-                    SELECT \(bind: createdEventID), value::uuid
-                    FROM jsonb_array_elements_text(\(bind: encoded)::jsonb) AS value
-                    """).run()
-            case .staged:
-                try await sql.raw("""
-                    INSERT INTO im_v2.fanout_plan_targets (source_event_id, target_user_id)
-                    SELECT \(bind: createdEventID), \(bind: input.actorID)
-                    UNION ALL
-                    SELECT \(bind: createdEventID), member.user_id
-                    FROM im_v2.group_room_creation_draft_members AS member
-                    WHERE member.actor_user_id = \(bind: input.actorID)
-                      AND member.operation_id = \(bind: input.operationID)
-                    """).run()
-            case .stagedControlManifest:
-                try await sql.raw("""
-                    INSERT INTO im_v2.fanout_plan_targets
-                        (source_event_id, target_user_id)
-                    SELECT \(bind: createdEventID), member.user_id
-                    FROM im_v2.group_room_creation_intent_members AS member
-                    WHERE member.actor_user_id = \(bind: input.actorID)
-                      AND member.operation_id = \(bind: input.operationID)
-                    """).run()
-            }
-            try await sql.raw("""
-                INSERT INTO im_v2.room_outbox (source_event_id, plan_id, state, created_at)
-                VALUES (\(bind: createdEventID), \(bind: createdPlanID), 'pending', \(bind: now))
+                INSERT INTO im_v2.user_state_event_outbox
+                    (source_event_id, user_id, projection_kind, payload, created_at, next_attempt_at, source_room_id)
+                SELECT event.event_id, member.user_id, 'room', event.payload, event.created_at, event.created_at, event.room_id
+                FROM im_v2.room_events AS event
+                JOIN im_v2.room_memberships AS member ON member.room_id = event.room_id
+                WHERE event.event_id = \(bind: createdEventID) AND member.left_revision IS NULL
                 """).run()
 
             // Reserve after the private bulk rows are prepared. Rejection
@@ -518,9 +470,7 @@ public struct PostgresV2GroupMessagingStore:
             // not locked throughout the potentially large set-based inserts.
             guard let lease = try await sql.raw("""
                 SELECT lease_id, generation, valid_until, command_window_limit,
-                       command_window_used, fanout_window_limit, fanout_window_used,
-                       max_outstanding_fanout_units, outstanding_fanout_units,
-                       max_outstanding_plans, outstanding_plans
+                       command_window_used
                 FROM im_v2.shard_admission_pools
                 WHERE room_shard_id = \(bind: roomShardID)
                   AND capacity_profile_id = \(bind: capacityProfile.id)
@@ -530,13 +480,8 @@ public struct PostgresV2GroupMessagingStore:
             }
             let initialAdmission = try RoomAdmissionState(
                 eligibleMemberCount: input.memberCount,
-                commandWindow: .init(limit: capacityProfile.limits.maxCommandsPerWindow),
-                fanoutWindow: .init(limit: capacityProfile.limits.maxFanoutUnitsPerWindow),
-                outstandingFanoutUnits: 0,
-                outstandingPlans: 0
-            )
-            let reservation = try FanoutAdmissionEvaluator.reserve(
-                request: .init(targetRule: .exactTargetCount(input.memberCount)),
+                commandWindow: .init(limit: capacityProfile.limits.maxCommandsPerWindow))
+            let reservation = try V2CommandAdmissionEvaluator.reserve(
                 profile: capacityProfile.limits,
                 roomState: initialAdmission,
                 shardState: try lease.state(),
@@ -558,31 +503,17 @@ public struct PostgresV2GroupMessagingStore:
             }
             try await sql.raw("""
                 INSERT INTO im_v2.room_admission
-                    (room_id, eligible_member_count, command_window_limit, fanout_window_limit,
-                     max_outstanding_fanout_units, max_outstanding_plans,
-                     shard_lease_id, shard_lease_generation)
-                VALUES (\(bind: createdRoomID), \(bind: input.memberCount),
-                        \(bind: capacityProfile.limits.maxCommandsPerWindow),
-                        \(bind: capacityProfile.limits.maxFanoutUnitsPerWindow),
-                        \(bind: capacityProfile.limits.maxOutstandingFanoutUnits),
-                        \(bind: capacityProfile.limits.maxOutstandingPlans),
-                        \(bind: try groupUUID(reservedLease.id)),
-                        \(bind: try groupSigned(reservedLease.generation)))
+                    (room_id, eligible_member_count, command_window_limit, shard_lease_id, shard_lease_generation)
+                VALUES (\(bind: createdRoomID), \(bind: input.memberCount), \(bind: capacityProfile.limits.maxCommandsPerWindow), \(bind: try groupUUID(reservedLease.id)), \(bind: try groupSigned(reservedLease.generation)))
                 """).run()
             try await sql.raw("""
                 UPDATE im_v2.room_admission
-                SET command_window_used = \(bind: reservedRoom.commandWindow.used),
-                    fanout_window_used = \(bind: reservedRoom.fanoutWindow.used),
-                    outstanding_fanout_units = \(bind: reservedRoom.outstandingFanoutUnits),
-                    outstanding_plans = \(bind: reservedRoom.outstandingPlans)
+                SET command_window_used = \(bind: reservedRoom.commandWindow.used)
                 WHERE room_id = \(bind: createdRoomID)
                 """).run()
             try await sql.raw("""
                 UPDATE im_v2.shard_admission_pools
-                SET command_window_used = \(bind: reservedLease.commandWindow.used),
-                    fanout_window_used = \(bind: reservedLease.fanoutWindow.used),
-                    outstanding_fanout_units = \(bind: reservedShard.outstandingFanoutUnits),
-                    outstanding_plans = \(bind: reservedShard.outstandingPlans)
+                SET command_window_used = \(bind: reservedLease.commandWindow.used)
                 WHERE room_shard_id = \(bind: roomShardID)
                   AND capacity_profile_id = \(bind: capacityProfile.id)
                   AND lease_id = \(bind: try groupUUID(reservedLease.id))
@@ -594,10 +525,10 @@ public struct PostgresV2GroupMessagingStore:
                 let encoded = try groupUUIDJSON(requestedMembers)
                 try await sql.raw("""
                     INSERT INTO im_v2.group_room_operations
-                        (actor_user_id, operation_id, room_id, title, delivery_mode,
+                        (actor_user_id, operation_id, room_id, title, capacity_class,
                          audience_kind, initial_member_count, initial_member_user_ids, created_at)
                     VALUES (\(bind: input.actorID), \(bind: input.operationID), \(bind: createdRoomID),
-                            \(bind: input.title), \(bind: input.deliveryMode.rawValue), 'inline',
+                            \(bind: input.title), \(bind: input.capacityClass.rawValue), 'inline',
                             \(bind: input.memberCount),
                             ARRAY(SELECT value::uuid
                                   FROM jsonb_array_elements_text(\(bind: encoded)::jsonb) AS value
@@ -607,10 +538,10 @@ public struct PostgresV2GroupMessagingStore:
             case .staged, .stagedControlManifest:
                 try await sql.raw("""
                     INSERT INTO im_v2.group_room_operations
-                        (actor_user_id, operation_id, room_id, title, delivery_mode,
+                        (actor_user_id, operation_id, room_id, title, capacity_class,
                          audience_kind, initial_member_count, initial_member_user_ids, created_at)
                     VALUES (\(bind: input.actorID), \(bind: input.operationID), \(bind: createdRoomID),
-                            \(bind: input.title), \(bind: input.deliveryMode.rawValue), 'staged',
+                            \(bind: input.title), \(bind: input.capacityClass.rawValue), 'staged',
                             \(bind: input.memberCount), ARRAY[]::uuid[], \(bind: now))
                     """).run()
             }
@@ -659,7 +590,7 @@ private struct GroupCreationInput: Sendable {
     let actorID: UUID
     let operationID: UUID
     let title: String
-    let deliveryMode: V2GroupDeliveryMode
+    let capacityClass: V2GroupCapacityClass
     let memberCount: Int
     let audience: GroupCreationAudience
 
@@ -674,7 +605,7 @@ private struct GroupCreationInput: Sendable {
             roomID: roomID,
             ownerUserID: actorUserID,
             title: title,
-            deliveryMode: deliveryMode,
+            capacityClass: capacityClass,
             memberUserIDs: materializedMembers,
             memberCount: memberCount,
             createdAt: createdAt
@@ -688,12 +619,6 @@ private struct GroupShardLeaseRow: Decodable {
     let validUntil: Date
     let commandWindowLimit: Int
     let commandWindowUsed: Int
-    let fanoutWindowLimit: Int
-    let fanoutWindowUsed: Int
-    let maxOutstandingFanoutUnits: Int
-    let outstandingFanoutUnits: Int
-    let maxOutstandingPlans: Int
-    let outstandingPlans: Int
 
     enum CodingKeys: String, CodingKey {
         case leaseID = "lease_id"
@@ -701,12 +626,7 @@ private struct GroupShardLeaseRow: Decodable {
         case validUntil = "valid_until"
         case commandWindowLimit = "command_window_limit"
         case commandWindowUsed = "command_window_used"
-        case fanoutWindowLimit = "fanout_window_limit"
-        case fanoutWindowUsed = "fanout_window_used"
-        case maxOutstandingFanoutUnits = "max_outstanding_fanout_units"
-        case outstandingFanoutUnits = "outstanding_fanout_units"
-        case maxOutstandingPlans = "max_outstanding_plans"
-        case outstandingPlans = "outstanding_plans"
+
     }
 
     func state() throws -> ShardAdmissionState {
@@ -715,14 +635,7 @@ private struct GroupShardLeaseRow: Decodable {
                 id: .init(leaseID.uuidString),
                 generation: try groupUnsigned(generation),
                 validUntil: validUntil,
-                commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed),
-                fanoutWindow: .init(limit: fanoutWindowLimit, used: fanoutWindowUsed),
-                maxOutstandingFanoutUnits: maxOutstandingFanoutUnits,
-                maxOutstandingPlans: maxOutstandingPlans
-            ),
-            outstandingFanoutUnits: outstandingFanoutUnits,
-            outstandingPlans: outstandingPlans
-        )
+                commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed)))
     }
 }
 
@@ -733,27 +646,23 @@ private struct GroupOwnerIntentValues {
     let operationID: UUID
     let roomID: UUID
     let eventID: UUID
-    let planID: UUID
 
     init(_ intent: V2GroupRoomCreationIntent) throws {
         guard let actorUserID = intent.actorUserID.uuidValue,
               let operationID = intent.operationID.uuidValue,
               let roomID = intent.roomID.uuidValue,
-              let eventID = intent.eventID.uuidValue,
-              let planID = intent.planID.uuidValue
+              let eventID = intent.eventID.uuidValue
         else { throw V2GroupMessagingStoreError.corruptPersistenceState }
         self.actorUserID = actorUserID
         self.operationID = operationID
         self.roomID = roomID
         self.eventID = eventID
-        self.planID = planID
     }
 }
 
 private struct GroupOwnerIntentRow: Decodable {
     let roomID: UUID
     let eventID: UUID
-    let planID: UUID
     let roomShardID: String
     let routeEpoch: Int64
     let requestFingerprint: Data
@@ -762,7 +671,6 @@ private struct GroupOwnerIntentRow: Decodable {
     enum CodingKeys: String, CodingKey {
         case roomID = "room_id"
         case eventID = "event_id"
-        case planID = "plan_id"
         case roomShardID = "room_shard_id"
         case routeEpoch = "route_epoch"
         case requestFingerprint = "request_fingerprint"
@@ -772,7 +680,6 @@ private struct GroupOwnerIntentRow: Decodable {
     func matches(_ intent: V2GroupRoomCreationIntent) -> Bool {
         roomID == intent.roomID.uuidValue
             && eventID == intent.eventID.uuidValue
-            && planID == intent.planID.uuidValue
             && roomShardID == intent.roomShardID
             && routeEpoch == intent.routeEpoch
             && requestFingerprint == intent.requestFingerprint
@@ -823,7 +730,7 @@ private struct GroupStagedDraftRow: Decodable {
 private struct GroupOperationRow: Decodable {
     let roomID: UUID
     let title: String
-    let deliveryMode: V2GroupDeliveryMode
+    let capacityClass: V2GroupCapacityClass
     let audienceKind: String
     let initialMemberCount: Int
     let initialMemberUserIDs: [UUID]
@@ -832,7 +739,7 @@ private struct GroupOperationRow: Decodable {
     enum CodingKeys: String, CodingKey {
         case roomID = "room_id"
         case title
-        case deliveryMode = "delivery_mode"
+        case capacityClass = "capacity_class"
         case audienceKind = "audience_kind"
         case initialMemberCount = "initial_member_count"
         case initialMemberUserIDs = "initial_member_user_ids"
@@ -841,7 +748,7 @@ private struct GroupOperationRow: Decodable {
 
     func matches(_ input: GroupCreationInput) -> Bool {
         guard title == input.title,
-              deliveryMode == input.deliveryMode,
+              capacityClass == input.capacityClass,
               audienceKind == input.audience.kind,
               initialMemberCount == input.memberCount
         else { return false }
@@ -873,7 +780,7 @@ private struct GroupOperationRow: Decodable {
             roomID: try .init(roomID.uuidString),
             ownerUserID: ownerUserID,
             title: title,
-            deliveryMode: deliveryMode,
+            capacityClass: capacityClass,
             memberUserIDs: materializedMembers,
             memberCount: initialMemberCount,
             createdAt: createdAt

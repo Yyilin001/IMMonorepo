@@ -93,6 +93,8 @@ public struct V2ClientDirectSendingCapability: Equatable, Sendable {
     public let roomID: RoomID
     /// 当前是否允许发送。
     public let canSend: Bool
+    /// 产生本状态的房间时间线序号，用于异步乱序收敛。
+    public let stateVersion: UInt64
     /// 最近更新时刻。
     public let updatedAt: Date
 
@@ -101,10 +103,12 @@ public struct V2ClientDirectSendingCapability: Equatable, Sendable {
     /// - Parameters:
     ///   - roomID: 目标房间。
     ///   - canSend: 是否允许发送。
+    ///   - stateVersion: 产生此状态的正整数房间时间线序号。
     ///   - updatedAt: 最近更新时刻。
-    public init(roomID: RoomID, canSend: Bool, updatedAt: Date) {
+    public init(roomID: RoomID, canSend: Bool, stateVersion: UInt64, updatedAt: Date) {
         self.roomID = roomID
         self.canSend = canSend
+        self.stateVersion = stateVersion
         self.updatedAt = updatedAt
     }
 
@@ -117,19 +121,22 @@ public struct V2ClientDirectSendingCapability: Equatable, Sendable {
         struct Wire: Decodable {
             let roomID: String
             let canSend: Bool
+            let stateVersion: UInt64
             let updatedAtMilliseconds: Int64
             enum CodingKeys: String, CodingKey {
                 case roomID = "room_id"
                 case canSend = "can_send"
+                case stateVersion = "state_version"
                 case updatedAtMilliseconds = "updated_at_ms"
             }
         }
         guard record.projectionKind == "direct_sending_capability",
               let wire = try? JSONDecoder().decode(Wire.self, from: record.payload),
+              wire.stateVersion > 0, wire.stateVersion <= UInt64(Int64.max),
               wire.updatedAtMilliseconds >= 0
         else { throw V2ClientProjectionError.invalidMessagePayload }
         do {
-            self.init(roomID: try .init(wire.roomID), canSend: wire.canSend, updatedAt: Date(timeIntervalSince1970: TimeInterval(wire.updatedAtMilliseconds) / 1_000))
+            self.init(roomID: try .init(wire.roomID), canSend: wire.canSend, stateVersion: wire.stateVersion, updatedAt: Date(timeIntervalSince1970: TimeInterval(wire.updatedAtMilliseconds) / 1_000))
         } catch {
             throw V2ClientProjectionError.invalidMessagePayload
         }

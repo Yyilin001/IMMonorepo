@@ -284,6 +284,7 @@ public enum V2GroupJoinSubmissionPersistenceOutcome: Equatable, Sendable {
     case alreadyPending(V2GroupJoinRequestRecord)
     case alreadyMember(V2GroupInvitePreviewRecord)
     case rejected(V2GroupJoinRequestRecord)
+    case cancelled(V2GroupJoinRequestRecord)
     case unavailable
     case rateLimited
 }
@@ -331,7 +332,9 @@ public protocol V2GroupInvitationStore: Sendable {
     func preview(tokenDigest: Data, applicantUserID: UserID, now: Date) async throws -> V2GroupInvitePreviewPersistenceOutcome
     func submit(_ request: V2GroupJoinSubmissionPersistenceRequest) async throws -> V2GroupJoinSubmissionPersistenceOutcome
     func pendingRequests(roomID: RoomID, reviewerUserID: UserID, cursor: String?, pageSize: Int, now: Date) async throws -> V2GroupJoinRequestRecordPage
-    func approve(roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID, operationID: GroupJoinDecisionOperationID, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupJoinApprovalPersistenceOutcome
+    func approve(roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID, operationID: GroupJoinDecisionOperationID, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupJoinApprovalPersistenceOutcome
+    /// 仅申请人可取消；按申请身份幂等，已完成的审批返回原终态。
+    func cancel(roomID: RoomID, requestID: GroupJoinRequestID, applicantUserID: UserID, now: Date) async throws -> V2GroupJoinRequestRecord
     func reject(roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID, operationID: GroupJoinDecisionOperationID, now: Date) async throws -> V2GroupJoinDecisionPreparationOutcome
 }
 
@@ -423,6 +426,10 @@ public struct V2GroupInvitationService: Sendable {
         return .init(requests: try page.requests.map { try request($0, visibleTo: reviewerUserID) }, nextCursor: page.nextCursor)
     }
 
+    public func cancel(roomID: RoomID, requestID: GroupJoinRequestID, applicantUserID: UserID) async throws -> V2GroupJoinRequest {
+        try request(await store.cancel(roomID: roomID, requestID: requestID, applicantUserID: applicantUserID, now: now()), visibleTo: applicantUserID)
+    }
+
     public func decide(_ input: V2DecideGroupJoinRequest) async throws -> V2GroupJoinDecisionOutcome {
         switch input.decision {
         case .reject:
@@ -439,8 +446,7 @@ public struct V2GroupInvitationService: Sendable {
         let outcome = try await store.approve(
             roomID: input.roomID, requestID: input.requestID,
             reviewerUserID: input.reviewerUserID, operationID: input.operationID,
-            capacityProfile: capacityProfile, eventID: .init(uuid: makeUUID()),
-            planID: .init(uuid: makeUUID()), now: now()
+            capacityProfile: capacityProfile, eventID: .init(uuid: makeUUID()), now: now()
         )
         switch outcome {
         case .approved(let value): return .approved(try request(value, visibleTo: input.reviewerUserID))

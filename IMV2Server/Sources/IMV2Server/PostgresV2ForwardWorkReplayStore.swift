@@ -77,14 +77,17 @@ public struct PostgresV2ForwardWorkReplayStore: V2ForwardWorkReplayStore {
             case .media:
                 // Match import locking: inbox -> room -> import job.
                 guard let inbox = try await sql.raw("""
-                    SELECT export_id, payload, payload_digest, state, result_message_id, result_room_sequence, error_code
+                    SELECT target_room_id, target_shard_id, target_epoch, state
                     FROM im_v2.message_forward_inbox WHERE export_id = \(bind: command.exportID) FOR UPDATE
-                    """).first(decoding: ForwardInboxRow.self) else { throw V2ForwardWorkReplayError.targetUnavailable }
-                let export = try inbox.export
-                guard let ordinal = command.ordinal, export.intent.media.indices.contains(ordinal)
+                    """).first(decoding: ReplayForwardInbox.self) else { throw V2ForwardWorkReplayError.targetUnavailable }
+                guard let ordinal = command.ordinal,
+                      try await sql.raw("""
+                        SELECT true AS value FROM im_v2.message_forward_inbox_media
+                        WHERE export_id = \(bind: command.exportID) AND ordinal = \(bind: ordinal)
+                        """).first(decoding: ReplayForwardBool.self) != nil
                 else { throw V2ForwardWorkReplayError.targetUnavailable }
-                try await assertOwner(.init(roomID: export.intent.targetRoomID, shardID: export.intent.targetShardID,
-                    epoch: export.intent.targetEpoch), command: command, sql: sql)
+                try await assertOwner(.init(roomID: inbox.roomID, shardID: inbox.shardID,
+                    epoch: inbox.epoch), command: command, sql: sql)
                 if inbox.state == "pending" {
                     changed = try await sql.raw("""
                         UPDATE im_v2.message_forward_media_imports
@@ -117,10 +120,10 @@ public struct PostgresV2ForwardWorkReplayStore: V2ForwardWorkReplayStore {
     private func assertOwner(_ owner: ReplayForwardOwner, command: V2ForwardWorkReplayCommand, sql: any SQLDatabase) async throws {
         guard owner.shardID == command.shardID else { throw V2ForwardWorkReplayError.ownerChanged }
         guard let current = try await sql.raw("""
-            SELECT room_id, room_shard_id AS shard_id, owner_epoch AS epoch
+            SELECT room_id, room_shard_id AS shard_id, owner_epoch AS epoch, migration_fence_id
             FROM im_v2.rooms WHERE room_id = \(bind: owner.roomID) FOR UPDATE
-            """).first(decoding: ReplayForwardOwner.self),
-              current.shardID == owner.shardID, current.epoch == owner.epoch
+            """).first(decoding: ReplayForwardCurrentOwner.self),
+              current.shardID == owner.shardID, current.epoch == owner.epoch, current.migrationFenceID == nil
         else { throw V2ForwardWorkReplayError.ownerChanged }
     }
 }
@@ -135,4 +138,18 @@ private struct ReplayForwardAudit: Decodable {
     enum CodingKeys: String, CodingKey {
         case shardID = "shard_id", kind = "target_kind", exportID = "export_id", ordinal, reason = "reason_code", outcome
     }
+}
+
+private struct ReplayForwardInbox: Decodable {
+    let roomID: UUID; let shardID: String; let epoch: Int64; let state: String
+    enum CodingKeys: String, CodingKey {
+        case roomID = "target_room_id", shardID = "target_shard_id", epoch = "target_epoch", state
+    }
+}
+
+private struct ReplayForwardCurrentOwner: Decodable {
+    let shardID: String
+    let epoch: Int64
+    let migrationFenceID: UUID?
+    enum CodingKeys: String, CodingKey { case shardID = "shard_id", epoch, migrationFenceID = "migration_fence_id" }
 }

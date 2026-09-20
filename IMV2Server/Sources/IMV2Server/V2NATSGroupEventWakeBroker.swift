@@ -228,7 +228,7 @@ final class V2NATSGroupNotificationDispatcher: V2NATSPayloadSubmitting, Sendable
         func signal(after delay: Duration) {
             let continuation = continuation
             Task(priority: .high) {
-                if delay > .zero { try? await Task.sleep(for: delay) }
+                if delay > .zero { try? await v2Sleep(for: delay) }
                 guard !Task.isCancelled else { return }
                 continuation.yield()
             }
@@ -365,7 +365,7 @@ final class V2NATSGroupNotificationDispatcher: V2NATSPayloadSubmitting, Sendable
                 for await _ in mailbox.signals {
                     guard !Task.isCancelled else { break }
                     if reorderingDelay > .zero {
-                        try? await Task.sleep(for: reorderingDelay)
+                        try? await v2Sleep(for: reorderingDelay)
                     }
                     for notification in Self.coalesced(mailbox.drain()) {
                         guard !Task.isCancelled else { return }
@@ -777,6 +777,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
     private var nextSubscriptionID = 1
     private var isShutDown = false
     private var reconnectTask: Task<Void, Never>?
+    private let coverageLost: @Sendable () async -> Void
 
     public init(
         configuration: V2NATSGroupEventWakeConfiguration,
@@ -784,6 +785,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
             V2ForegroundGroupEventNotification
         ) -> Void = { _ in },
         metrics: (any V2GatewayTransportMetricsRecorder)? = nil,
+        coverageLost: @escaping @Sendable () async -> Void = {},
         receiveWake: @escaping @Sendable (V2ForegroundGroupEventNotification) async -> Void
     ) {
         self.configuration = configuration
@@ -791,6 +793,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         self.recordRecoveryNotification = recordRecoveryNotification
         self.metrics = metrics
         self.receiveWake = receiveWake
+        self.coverageLost = coverageLost
     }
 
     deinit {
@@ -1079,6 +1082,10 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
     }
 
     private func connectedChannel() async throws -> Connection {
+        guard !isShutDown else { throw V2NATSGroupEventWakeBrokerError.unavailable }
+        if let connection, !connection.channel.isActive {
+            await connectionClosed(connection.id)
+        }
         guard !isShutDown else { throw V2NATSGroupEventWakeBrokerError.unavailable }
         if let connection, connection.channel.isActive { return connection }
         let pending: Task<Connection, any Error>
@@ -1399,9 +1406,10 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         return try JSONEncoder().encode(wire)
     }
 
-    private func connectionClosed(_ closedID: UUID) {
+    private func connectionClosed(_ closedID: UUID) async {
         guard connection?.id == closedID else { return }
         connection = nil
+        await coverageLost()
         scheduleReconnectIfNeeded()
     }
 
@@ -1432,7 +1440,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
                 return
             } catch {
                 guard !Task.isCancelled else { return }
-                try? await Task.sleep(for: .milliseconds(delayMilliseconds))
+                try? await v2Sleep(for: .milliseconds(delayMilliseconds))
                 delayMilliseconds = min(delayMilliseconds * 2, 5_000)
             }
         }
@@ -1508,7 +1516,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
 
     private func discard(_ discarded: Connection) async {
         if connection?.channel === discarded.channel {
-            connection = nil
+            await connectionClosed(discarded.id)
         }
         try? await discarded.channel.close().get()
     }

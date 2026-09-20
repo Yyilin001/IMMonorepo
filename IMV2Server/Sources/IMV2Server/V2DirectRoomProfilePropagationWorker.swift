@@ -152,7 +152,7 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
     private func directTargets(for lease: ProfileUpdateLease, limit: Int) async throws -> [DirectProfileTarget] {
         guard let sql = database as? any SQLDatabase else { throw V2DirectRoomProfilePropagationError.corruptPersistenceState }
         return try await sql.raw("""
-            SELECT pair.room_id,
+            SELECT pair.room_id, floor(extract(epoch FROM pair.created_at) * 1000)::bigint AS room_created_at_ms,
                    CASE WHEN pair.lower_user_id = \(bind: lease.sourceUserID)
                         THEN pair.higher_user_id ELSE pair.lower_user_id END AS target_user_id
             FROM im_v2.direct_room_pairs AS pair
@@ -217,7 +217,8 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
                        payload->>'display_name' AS display_name,
                        payload->>'account_kind' AS account_kind,
                        (payload->>'revision')::bigint AS revision,
-                       (payload->>'updated_at_ms')::bigint AS updated_at_ms
+                       (payload->>'updated_at_ms')::bigint AS updated_at_ms,
+                       (payload->>'room_created_at_ms')::bigint AS room_created_at_ms
                 FROM im_v2.user_projection_effects
                 WHERE user_id = \(bind: target.userID) AND source_event_id = \(bind: lease.sourceEventID)
                   AND projection_kind = 'direct_room_profile'
@@ -250,6 +251,7 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
                                            'display_name', \(bind: lease.displayName),
                                            'account_kind', \(bind: lease.accountKind),
                                            'revision', \(bind: lease.revision),
+                                           'room_created_at_ms', \(bind: target.roomCreatedAtMilliseconds),
                                            'updated_at_ms', \(bind: lease.updatedAtMilliseconds)),
                         \(bind: lease.profileUpdatedAt))
                 """).run()
@@ -390,11 +392,13 @@ private extension ProfileUpdateLease {
 }
 
 private struct DirectProfileTarget: Decodable {
+    let roomCreatedAtMilliseconds: Int64
     let roomID: UUID
     let userID: UUID
 
     enum CodingKeys: String, CodingKey {
         case roomID = "room_id"
+        case roomCreatedAtMilliseconds = "room_created_at_ms"
         case userID = "target_user_id"
     }
 }
@@ -405,6 +409,7 @@ private struct DirectProfileSequenceRow: Decodable {
 }
 
 private struct ExistingDirectProfileProjectionRow: Decodable {
+    let roomCreatedAtMilliseconds: Int64
     let sequence: Int64
     let roomID: String
     let targetUserID: String
@@ -417,6 +422,7 @@ private struct ExistingDirectProfileProjectionRow: Decodable {
     enum CodingKeys: String, CodingKey {
         case sequence = "user_sync_sequence"
         case roomID = "room_id"
+        case roomCreatedAtMilliseconds = "room_created_at_ms"
         case targetUserID = "target_user_id"
         case publicHandle = "public_handle"
         case displayName = "display_name"
@@ -435,7 +441,8 @@ private struct ExistingDirectProfileProjectionRow: Decodable {
         }
         return publicHandle == lease.publicHandle && displayName == lease.displayName &&
             accountKind == lease.accountKind &&
-            revision == lease.revision && updatedAtMilliseconds == lease.updatedAtMilliseconds
+            revision == lease.revision && updatedAtMilliseconds == lease.updatedAtMilliseconds &&
+            roomCreatedAtMilliseconds == target.roomCreatedAtMilliseconds
     }
 }
 

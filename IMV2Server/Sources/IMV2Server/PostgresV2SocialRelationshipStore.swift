@@ -9,6 +9,7 @@ import SQLKit
 /// 因此拉黑、关系跃迁与私聊准入观察到的是同一份有序状态，而不是一组尽力而为的读取结果。
 public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
     private let database: any Database
+    private let authorizationCoordinator: V2DirectAuthorizationCoordinator?
     private let shadowForwarder: any V2UserShardProjectionShadowing
 
     /// 组合数据库与投影影子转发器。
@@ -16,8 +17,10 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
     /// - Parameters:
     ///   - database: 存放关系、拉黑与偏好设置的数据库。
     ///   - shadowForwarder: 用于把投影变更转发到影子用户分片的实现。
-    public init(database: any Database, shadowForwarder: any V2UserShardProjectionShadowing) {
+    public init(database: any Database, shadowForwarder: any V2UserShardProjectionShadowing,
+        authorizationCoordinator: V2DirectAuthorizationCoordinator? = nil) {
         self.database = database
+        self.authorizationCoordinator = authorizationCoordinator
         self.shadowForwarder = shadowForwarder
     }
 
@@ -68,18 +71,22 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
             switch command.action {
             case .request:
                 guard existing == nil else { return .invalidState }
+                try await v2DrainDirectAuthorizations(.pair(actorID, targetID), coordinator: authorizationCoordinator, transaction: transaction, now: now)
                 try await sql.raw("INSERT INTO im_v2.user_relationships (lower_user_id, higher_user_id, state, requested_by_user_id, updated_at) VALUES (\(bind: pair.lower), \(bind: pair.higher), 'pending', \(bind: actorID), \(bind: now))").run()
                 result = (.pending, actorID)
             case .accept:
                 guard let existing, existing.state == "pending", existing.requestedByUserID == targetID else { return .invalidState }
+                try await v2DrainDirectAuthorizations(.pair(actorID, targetID), coordinator: authorizationCoordinator, transaction: transaction, now: now)
                 try await sql.raw("UPDATE im_v2.user_relationships SET state = 'accepted', updated_at = \(bind: now) WHERE lower_user_id = \(bind: pair.lower) AND higher_user_id = \(bind: pair.higher)").run()
                 result = (.accepted, nil)
             case .reject:
                 guard let existing, existing.state == "pending", existing.requestedByUserID == targetID else { return .invalidState }
+                try await v2DrainDirectAuthorizations(.pair(actorID, targetID), coordinator: authorizationCoordinator, transaction: transaction, now: now)
                 try await sql.raw("DELETE FROM im_v2.user_relationships WHERE lower_user_id = \(bind: pair.lower) AND higher_user_id = \(bind: pair.higher)").run()
                 result = (.none, nil)
             case .remove:
                 guard existing != nil else { return .invalidState }
+                try await v2DrainDirectAuthorizations(.pair(actorID, targetID), coordinator: authorizationCoordinator, transaction: transaction, now: now)
                 try await sql.raw("DELETE FROM im_v2.user_relationships WHERE lower_user_id = \(bind: pair.lower) AND higher_user_id = \(bind: pair.higher)").run()
                 result = (.none, nil)
             }
@@ -135,6 +142,7 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
             guard try await socialUserIsActive(actorID, sql: sql) else {
                 throw V2SocialRelationshipStoreError.actorInactive
             }
+            try await v2DrainDirectAuthorizations(.pair(actorID, targetID), coordinator: authorizationCoordinator, transaction: transaction, now: now)
             var relationshipWasRemoved = false
             if command.action == .block {
                 relationshipWasRemoved = try await sql.raw("DELETE FROM im_v2.user_relationships WHERE lower_user_id = \(bind: pair.lower) AND higher_user_id = \(bind: pair.higher) RETURNING lower_user_id").first(decoding: DeletedRelationshipRow.self) != nil
@@ -194,14 +202,21 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
         pair: (lower: UUID, higher: UUID, lockKey: String),
         sql: any SQLDatabase
     ) async throws {
-        // Send acceptance locks the same pair row. This serializes a social
-        // mutation with cached-policy admission and makes the revision a real
-        // fence instead of a best-effort invalidation hint.
+        // Active colocated rooms keep their revision fence. Frozen source
+        // copies are immutable: configured destination sends read the control
+        // policy directly, so revocation must not depend on changing that copy.
+        // Take the room lock before the pair lock, matching owner writes.
         guard try await sql.raw("""
-            WITH candidate AS MATERIALIZED (
-                SELECT room_id FROM im_v2.direct_room_pairs
-                WHERE lower_user_id = \(bind: pair.lower) AND higher_user_id = \(bind: pair.higher)
-                FOR UPDATE
+            WITH writable_room AS MATERIALIZED (
+                SELECT room.room_id FROM im_v2.rooms room
+                JOIN im_v2.direct_room_pairs pair ON pair.room_id = room.room_id
+                WHERE pair.lower_user_id = \(bind: pair.lower) AND pair.higher_user_id = \(bind: pair.higher)
+                  AND room.migration_fence_id IS NULL
+                FOR SHARE OF room
+            ), candidate AS MATERIALIZED (
+                SELECT pair.room_id FROM im_v2.direct_room_pairs pair
+                JOIN writable_room ON writable_room.room_id = pair.room_id
+                FOR UPDATE OF pair
             ), advanced AS (
                 UPDATE im_v2.direct_room_pairs AS pair
                 SET direct_policy_revision = pair.direct_policy_revision + 1

@@ -36,9 +36,9 @@ struct V2RoomWriteBatchRouteCacheTests {
         let room = UUID(uuidString: "00000000-0000-0000-0000-000000000201")!
 
         await cache.insert([(roomID: room, route: .individual)])
-        await cache.insert([(roomID: room, route: .largeGroupHybrid)])
+        await cache.insert([(roomID: room, route: .large)])
 
-        #expect(await cache.values(for: [room]) == [.largeGroupHybrid])
+        #expect(await cache.values(for: [room]) == [.large])
         let snapshot = await cache.snapshot()
         #expect(snapshot.entries == 1)
         #expect(snapshot.insertions == 1)

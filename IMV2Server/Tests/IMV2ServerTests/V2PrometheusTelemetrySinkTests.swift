@@ -79,36 +79,10 @@ struct V2PrometheusTelemetrySinkTests {
             rejection: .rateLimited,
             elapsedMilliseconds: 12
         ))
-        await sink.record(.fanoutProgress(
-            traceID: trace,
-            claimedOutboxRows: 2,
-            publishedOutboxRows: 1,
-            releasedOutboxRows: -1,
-            pausedOutboxRows: 2,
-            claimedDeliveries: 4,
-            committedDeliveries: 3,
-            staleDeliveries: 1,
-            staleRouteDeliveries: 1,
-            releasedDeliveries: 2,
-            pausedDeliveries: 3,
-            relayElapsedMilliseconds: 3,
-            deliveryElapsedMilliseconds: 5,
-            elapsedMilliseconds: 8
-        ))
-        await sink.record(.fanoutFailure(traceID: trace, stage: .delivery, elapsedMilliseconds: 1))
-
         let metrics = await sink.renderPrometheus()
 
         #expect(metrics.contains("im_v2_gateway_commands_total{command=\"send_message\",outcome=\"rejected\",rejection=\"RATE_LIMITED\"} 1"))
         #expect(metrics.contains("im_v2_gateway_command_duration_milliseconds_sum{command=\"send_message\",outcome=\"rejected\",rejection=\"RATE_LIMITED\"} 12"))
-        #expect(metrics.contains("im_v2_fanout_outbox_rows_total{state=\"claimed\"} 2"))
-        #expect(metrics.contains("im_v2_fanout_outbox_rows_total{state=\"released\"} 0"))
-        #expect(metrics.contains("im_v2_fanout_outbox_rows_total{state=\"paused\"} 2"))
-        #expect(metrics.contains("im_v2_fanout_deliveries_total{state=\"stale_route\"} 1"))
-        #expect(metrics.contains("im_v2_fanout_deliveries_total{state=\"paused\"} 3"))
-        #expect(metrics.contains("im_v2_fanout_relay_duration_milliseconds_sum 3"))
-        #expect(metrics.contains("im_v2_fanout_delivery_duration_milliseconds_sum 5"))
-        #expect(metrics.contains("im_v2_fanout_failures_total{stage=\"delivery\"} 1"))
         #expect(!metrics.contains(trace.uuidString))
         #expect(!metrics.contains("room_id"))
         #expect(!metrics.contains("user_id"))
@@ -274,25 +248,17 @@ struct V2PrometheusTelemetrySinkTests {
             isAvailable: false,
             servedFromLastKnownGood: true,
             lastSuccessfulRefreshAgeSeconds: 77,
-            readyRoomOutboxRows: -1,
-            leasedRoomOutboxRows: 2,
-            scheduledRoomOutboxRows: 3,
-            pausedRoomOutboxRows: 4,
-            oldestUnfinishedRoomOutboxAgeSeconds: 120,
+            readyUserStateEventRows: -1,
+            leasedUserStateEventRows: 2,
+            scheduledUserStateEventRows: 3,
+            pausedUserStateEventRows: 4,
+            oldestUnfinishedUserStateEventAgeSeconds: 120,
             readyDirectProfileUpdates: 15,
             leasedDirectProfileUpdates: 16,
             readyReadReceiptPreferencePropagations: 29,
             leasedReadReceiptPreferencePropagations: 30,
             scheduledReadReceiptPreferencePropagations: 31,
             pausedReadReceiptPreferencePropagations: 32,
-            openFanoutPlans: 5,
-            readyFanoutDeliveries: 6,
-            leasedFanoutDeliveries: 7,
-            scheduledFanoutDeliveries: 8,
-            pausedFanoutDeliveries: 9,
-            oldestUnfinishedFanoutDeliveryAgeSeconds: 240,
-            terminalFanoutCompletionUnits: 10,
-            oldestTerminalFanoutCompletionAgeSeconds: 11,
             readyContentReviews: 17,
             leasedContentReviews: 18,
             scheduledContentReviews: 19,
@@ -317,9 +283,6 @@ struct V2PrometheusTelemetrySinkTests {
             projectionVersionGCBacklogEstimatedRows: 43,
             messageProjectionStatesEstimatedRows: 45,
             messageProjectionStatesRelationBytes: 46,
-            messageProjectionReferenceEstimatedRows: 47,
-            messageProjectionBackfillEstimatedRows: 48,
-            messageProjectionInlinePayloadEstimatedRows: 49,
             uncompactedProjectedRecords: 44,
             pendingSyncRecordsAcrossDevices: 10,
             resetPendingDevices: 11,
@@ -333,25 +296,17 @@ struct V2PrometheusTelemetrySinkTests {
         #expect(rendered.contains("im_v2_durable_work_metrics_available 0"))
         #expect(rendered.contains("im_v2_durable_work_metrics_last_known_good 1"))
         #expect(rendered.contains("im_v2_durable_work_metrics_last_success_age_seconds 77"))
-        #expect(rendered.contains("im_v2_room_outbox_backlog{state=\"ready\"} 0"))
-        #expect(rendered.contains("im_v2_room_outbox_backlog{state=\"leased\"} 2"))
-        #expect(rendered.contains("im_v2_room_outbox_backlog{state=\"scheduled\"} 3"))
-        #expect(rendered.contains("im_v2_room_outbox_backlog{state=\"paused\"} 4"))
-        #expect(rendered.contains("im_v2_room_outbox_oldest_unfinished_age_seconds 120"))
+        #expect(rendered.contains("im_v2_user_state_event_backlog{state=\"ready\"} 0"))
+        #expect(rendered.contains("im_v2_user_state_event_backlog{state=\"leased\"} 2"))
+        #expect(rendered.contains("im_v2_user_state_event_backlog{state=\"scheduled\"} 3"))
+        #expect(rendered.contains("im_v2_user_state_event_backlog{state=\"paused\"} 4"))
+        #expect(rendered.contains("im_v2_user_state_event_oldest_unfinished_age_seconds 120"))
         #expect(rendered.contains("im_v2_direct_profile_update_backlog{state=\"ready\"} 15"))
         #expect(rendered.contains("im_v2_direct_profile_update_backlog{state=\"leased\"} 16"))
         #expect(rendered.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"ready\"} 29"))
         #expect(rendered.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"leased\"} 30"))
         #expect(rendered.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"scheduled\"} 31"))
         #expect(rendered.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"paused\"} 32"))
-        #expect(rendered.contains("im_v2_fanout_plans_open 5"))
-        #expect(rendered.contains("im_v2_fanout_delivery_backlog{state=\"ready\"} 6"))
-        #expect(rendered.contains("im_v2_fanout_delivery_backlog{state=\"leased\"} 7"))
-        #expect(rendered.contains("im_v2_fanout_delivery_backlog{state=\"scheduled\"} 8"))
-        #expect(rendered.contains("im_v2_fanout_delivery_backlog{state=\"paused\"} 9"))
-        #expect(rendered.contains("im_v2_fanout_delivery_oldest_unfinished_age_seconds 240"))
-        #expect(rendered.contains("im_v2_fanout_completion_release_backlog 10"))
-        #expect(rendered.contains("im_v2_fanout_completion_release_oldest_age_seconds 11"))
         #expect(rendered.contains("im_v2_content_review_backlog{state=\"ready\"} 17"))
         #expect(rendered.contains("im_v2_content_review_backlog{state=\"leased\"} 18"))
         #expect(rendered.contains("im_v2_content_review_backlog{state=\"scheduled\"} 19"))
@@ -371,9 +326,6 @@ struct V2PrometheusTelemetrySinkTests {
         #expect(rendered.contains("im_v2_projection_version_gc_backlog_estimated_rows 43"))
         #expect(rendered.contains("im_v2_message_projection_states_estimated_rows 45"))
         #expect(rendered.contains("im_v2_message_projection_states_relation_bytes 46"))
-        #expect(rendered.contains("im_v2_message_projection_references_estimated_rows 47"))
-        #expect(rendered.contains("im_v2_message_projection_backfill_estimated_rows 48"))
-        #expect(rendered.contains("im_v2_message_projection_inline_payload_estimated_rows 49"))
         #expect(rendered.contains("im_v2_sync_uncompacted_projected_records 44"))
         #expect(rendered.contains("im_v2_sync_pending_records_across_devices 10"))
         #expect(rendered.contains("im_v2_sync_reset_pending_devices 11"))

@@ -72,6 +72,7 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
             switch try await mapErrors({ try await invitations.submit(.init(applicantUserID: actor.userID, operationID: operation, secret: secret, note: body.note)) }) {
             case .submitted(let value): return try response(SubmissionResponse(kind: "submitted", request: RequestResponse(value, resumable: nil), preview: nil))
             case .alreadyPending(let value): return try response(SubmissionResponse(kind: "already_pending", request: RequestResponse(value, resumable: nil), preview: nil))
+            case .cancelled(let value): return try response(SubmissionResponse(kind: "cancelled", request: RequestResponse(value, resumable: nil), preview: nil))
             case .rejected(let value): return try response(SubmissionResponse(kind: "rejected", request: RequestResponse(value, resumable: nil), preview: nil))
             case .alreadyMember(let value): return try response(SubmissionResponse(kind: "already_member", request: nil, preview: PreviewResponse(value)))
             case .unavailable: throw Abort(.notFound)
@@ -96,6 +97,17 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
             }
             let items = try page.requests.map { try RequestResponse($0) }
             return try response(RequestPageResponse(items: items, nextCursor: page.nextCursor))
+        }
+
+        routes.post("v2", "group-join-requests", ":requestID", "cancel") { request async throws -> Response in
+            let actor = try await authenticate(request)
+            let body = try request.content.decode(CancelBody.self)
+            guard let rawID = request.parameters.get("requestID"), let requestID = try? GroupJoinRequestID(rawID),
+                  let room = try? RoomID(body.roomID) else { throw Abort(.badRequest) }
+            let value = try await mapErrors {
+                try await invitations.cancel(roomID: room, requestID: requestID, applicantUserID: actor.userID)
+            }
+            return try response(RequestResponse(value))
         }
 
         routes.post("v2", "group-join-requests", ":requestID", "decision") { request async throws -> Response in
@@ -133,6 +145,8 @@ private struct TokenBody: Content { let token: String }
 /// 提交入群申请时的入参。
 private struct SubmitBody: Content { let token: String; let operationID: String; let note: String?; enum CodingKeys: String, CodingKey { case token, operationID = "operation_id", note } }
 
+/// 申请人取消时仅需房间身份，申请人来自认证。
+private struct CancelBody: Content { let roomID: String; enum CodingKeys: String, CodingKey { case roomID = "room_id" } }
 /// 审批入群申请时的入参。
 private struct DecisionBody: Content { let roomID: String; let operationID: String; let decision: String; enum CodingKeys: String, CodingKey { case roomID = "room_id", operationID = "operation_id", decision } }
 

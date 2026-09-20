@@ -15,7 +15,7 @@ struct V2OutboxGroupCreatorTests {
         let runtime = V2ClientRuntime(connection: OfflineConnection(), activity: UnusedActivity())
         do {
             let outbox = V2GroupRoomCommandOutboxEngine(store: store, transport: CreationTransport(rejectOld: false))
-            let pending = try await outbox.enqueueCreation(title: "new", deliveryMode: .standardFanout, initialMemberUserIDs: [.init(uuid: UUID())])
+            let pending = try await outbox.enqueueCreation(title: "new", capacityClass: .standard, initialMemberUserIDs: [.init(uuid: UUID())])
             let before = try await store.groupRoomCreations()
             #expect(before.count == 1 && before.first?.operationID == pending.operationID && before.first?.state == .pending)
             let creator = V2OutboxGroupConversationCreator(outbox: outbox, runtime: runtime)
@@ -46,11 +46,11 @@ struct V2OutboxGroupCreatorTests {
             let transport = CreationTransport(rejectOld: false)
             let member = UserID(uuid: UUID())
             let olderOutbox = V2GroupRoomCommandOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: 999) })
-            let older = try await olderOutbox.enqueueCreation(title: "old", deliveryMode: .standardFanout, initialMemberUserIDs: [member])
+            let older = try await olderOutbox.enqueueCreation(title: "old", capacityClass: .standard, initialMemberUserIDs: [member])
             try await olderOutbox.requestCancellation(operationID: older.operationID)
             if refuseOld { await transport.refuseCancellation(older.operationID) }
             let outbox = V2GroupRoomCommandOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: 1_000) })
-            let current = try await outbox.enqueueCreation(title: "new", deliveryMode: .standardFanout, initialMemberUserIDs: [member])
+            let current = try await outbox.enqueueCreation(title: "new", capacityClass: .standard, initialMemberUserIDs: [member])
             let creator = V2OutboxGroupConversationCreator(outbox: outbox, runtime: runtime)
             #expect(try await creator.cancelConversationCreation(operationID: current.operationID.rawValue) == .queuedForRetry)
             let commands = try await store.groupRoomCreations()
@@ -58,7 +58,7 @@ struct V2OutboxGroupCreatorTests {
             #expect(commands.first { $0.operationID == older.operationID }?.state == (refuseOld ? .finalizing : .cancelled))
             #expect(try await outbox.flushOnce() == .cancelled(current.operationID))
             #expect(try await store.groupRoomCreations().first { $0.operationID == current.operationID }?.state == .cancelled)
-            let next = try await outbox.enqueueCreation(title: "next", deliveryMode: .standardFanout, initialMemberUserIDs: [member])
+            let next = try await outbox.enqueueCreation(title: "next", capacityClass: .standard, initialMemberUserIDs: [member])
             #expect(try await creator.cancelConversationCreation(operationID: next.operationID.rawValue) == .cancelled)
             await runtime.stop()
             try await store.close()
@@ -80,7 +80,7 @@ struct V2OutboxGroupCreatorTests {
             let transport = CreationTransport(rejectOld: rejectOld)
             let member = UserID(uuid: UUID())
             let olderOutbox = V2GroupRoomCommandOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: 999) })
-            let older = try await olderOutbox.enqueueCreation(title: "old", deliveryMode: .standardFanout, initialMemberUserIDs: [member])
+            let older = try await olderOutbox.enqueueCreation(title: "old", capacityClass: .standard, initialMemberUserIDs: [member])
             let outbox = V2GroupRoomCommandOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: 1_000) })
             let creator = V2OutboxGroupConversationCreator(outbox: outbox, runtime: runtime)
             let result = try await creator.createConversation(title: "new", initialMemberUserIDs: [member.rawValue])
@@ -118,7 +118,7 @@ private actor CreationTransport: V2ClientGroupMessagingTransport {
     func finalizeGroupRoomCreation(operationID: GroupRoomOperationID) async throws -> V2ClientGroupRoom {
         let title = try #require(titles[operationID])
         if rejectOld && title == "old" { throw V2RealtimeTransportError.server(code: "FORBIDDEN", retryable: false, retryAfterSeconds: 0, currentRevision: nil) }
-        return .init(roomID: title == "new" ? newRoom : .init(uuid: UUID()), title: title, deliveryMode: .standardFanout, memberUserIDs: [], memberCount: 2, createdAt: Date(timeIntervalSince1970: 1_000))
+        return .init(roomID: title == "new" ? newRoom : .init(uuid: UUID()), title: title, capacityClass: .standard, memberUserIDs: [], memberCount: 2, createdAt: Date(timeIntervalSince1970: 1_000))
     }
     func cancelGroupRoomCreation(operationID: GroupRoomOperationID) async throws {
         if operationID == refusedCancellation {

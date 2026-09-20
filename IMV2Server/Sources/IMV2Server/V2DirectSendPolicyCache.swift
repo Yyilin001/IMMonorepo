@@ -395,3 +395,22 @@ public actor V2DirectSendPolicyCache {
         }
     }
 }
+
+
+// Control facts must be refreshed inside the control transaction on every use;
+// owner revision numbers only fence reply/projection and owner-local structure.
+extension V2DirectSendPolicyCache.Entry {
+    func applyingControlPolicy(_ control: V2DirectSendControlPolicy) -> Self {
+        .init(recipientID: recipientID, directPairRevision: directPairRevision,
+            senderPolicyRevision: senderPolicyRevision, recipientPolicyRevision: recipientPolicyRevision,
+            senderProfileVisibleToRecipient: senderProfileVisibleToRecipient, senderCanSend: senderCanSend,
+            senderIsActive: control.sender.isActive, recipientIsActive: control.recipient.isActive,
+            blocked: control.blocked, isFriend: control.isFriend,
+            senderHasReplied: senderHasReplied, recipientHasReplied: recipientHasReplied,
+            allowsStrangers: control.allowsStrangers,
+            senderAccountKind: control.sender.specialKind, senderAccountStatus: control.sender.specialStatus,
+            senderAllowsServiceMessages: control.sender.allowsServiceMessages,
+            recipientAccountKind: control.recipient.specialKind, recipientAccountStatus: control.recipient.specialStatus,
+            recipientAllowsCustomerMessages: control.recipient.allowsCustomerMessages)
+    }
+}

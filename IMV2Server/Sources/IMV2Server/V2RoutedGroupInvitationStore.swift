@@ -11,6 +11,7 @@ public struct V2RoutedGroupInvitationStore: V2GroupInvitationStore, V2GroupInvit
     private let owners: any V2RoomShardStorageResolving
     private let directory: any V2GroupInviteDirectory
     private let identities: any V2GroupInvitationIdentityReading
+    private let quota: PostgresV2GroupJoinQuotaStore
 
     /// 组合控制库、归属路由与归属存储解析器。
     ///
@@ -23,6 +24,7 @@ public struct V2RoutedGroupInvitationStore: V2GroupInvitationStore, V2GroupInvit
         self.owners = owners
         self.directory = PostgresV2GroupInviteDirectory(database: controlDatabase)
         self.identities = PostgresV2GroupInvitationIdentityReader(database: controlDatabase)
+        self.quota = .init(database: controlDatabase)
     }
 
     /// 创建邀请：先在所属归属预检，再经目录落意图并最终由归属提交。
@@ -126,7 +128,14 @@ public struct V2RoutedGroupInvitationStore: V2GroupInvitationStore, V2GroupInvit
     /// - Throws: 归属解析或持久化失败时抛出。
     public func submit(_ request: V2GroupJoinSubmissionPersistenceRequest) async throws -> V2GroupJoinSubmissionPersistenceOutcome {
         guard let location = try await directory.resolve(tokenDigest: request.tokenDigest) else { return .unavailable }
-        return try await owner(roomID: location.roomID, inviteID: location.inviteID).submit(request)
+        guard try await identities.read(userIDs: [request.applicantUserID])[request.applicantUserID]?.isActive == true else {
+            throw V2GroupInvitationServiceError.permissionDenied
+        }
+        guard case .reserved(let intent) = try await quota.reserve(request, roomID: location.roomID, inviteID: location.inviteID, now: request.createdAt) else { return .rateLimited }
+        let store = try await owner(roomID: .init(uuid: intent.roomID), inviteID: .init(uuid: intent.inviteID))
+        let receipt = try await store.applyReservedSubmission(intent, now: request.createdAt)
+        try await quota.resolve(intent, outcome: receipt.outcome, targetRequestID: receipt.targetRequestID, now: request.createdAt)
+        return try await store.reservedSubmissionResponse(intent, observed: receipt)
     }
 
     /// 分页读取待审核的入群申请。
@@ -152,12 +161,16 @@ public struct V2RoutedGroupInvitationStore: V2GroupInvitationStore, V2GroupInvit
     ///   - operationID: 幂等操作标识。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 批准结果。
     /// - Throws: 无审核权限、归属变化或持久化失败时抛出。
-    public func approve(roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID, operationID: GroupJoinDecisionOperationID, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupJoinApprovalPersistenceOutcome {
-        try await owner(roomID: roomID).approve(roomID: roomID, requestID: requestID, reviewerUserID: reviewerUserID, operationID: operationID, capacityProfile: capacityProfile, eventID: eventID, planID: planID, now: now)
+    public func approve(roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID, operationID: GroupJoinDecisionOperationID, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupJoinApprovalPersistenceOutcome {
+        let result = try await owner(roomID: roomID).approve(roomID: roomID, requestID: requestID, reviewerUserID: reviewerUserID, operationID: operationID, capacityProfile: capacityProfile, eventID: eventID, now: now)
+        switch result {
+        case .approved(let request), .alreadyDecided(let request): try await quota.releaseTerminal(request, now: now)
+        default: break
+        }
+        return result
     }
 
     /// 拒绝一条入群申请。
@@ -171,7 +184,25 @@ public struct V2RoutedGroupInvitationStore: V2GroupInvitationStore, V2GroupInvit
     /// - Returns: 拒绝准备结果。
     /// - Throws: 无审核权限、归属变化或持久化失败时抛出。
     public func reject(roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID, operationID: GroupJoinDecisionOperationID, now: Date) async throws -> V2GroupJoinDecisionPreparationOutcome {
-        try await owner(roomID: roomID).reject(roomID: roomID, requestID: requestID, reviewerUserID: reviewerUserID, operationID: operationID, now: now)
+        let result = try await owner(roomID: roomID).reject(roomID: roomID, requestID: requestID, reviewerUserID: reviewerUserID, operationID: operationID, now: now)
+        switch result {
+        case .rejected(let request), .alreadyApproved(let request), .alreadyRejected(let request): try await quota.releaseTerminal(request, now: now)
+        default: break
+        }
+        return result
+    }
+
+    public func cancel(roomID: RoomID, requestID: GroupJoinRequestID, applicantUserID: UserID, now: Date) async throws -> V2GroupJoinRequestRecord {
+        let result = try await owner(roomID: roomID).cancel(roomID: roomID, requestID: requestID, applicantUserID: applicantUserID, now: now)
+        try await quota.releaseTerminal(result, now: now)
+        return result
+    }
+
+    /// Recovery replays the exact persisted generation, without reserving again
+    /// or hydrating a user-facing profile. Lost terminal notifications converge here.
+    func resumeSubmission(_ intent: V2GroupJoinQuotaIntent, now: Date) async throws {
+        let receipt = try await owner(roomID: .init(uuid: intent.roomID), inviteID: .init(uuid: intent.inviteID)).applyReservedSubmission(intent, now: now)
+        try await quota.resolve(intent, outcome: receipt.outcome, targetRequestID: receipt.targetRequestID, now: now)
     }
 
     /// 解析房间归属并构造对应的邀请存储。

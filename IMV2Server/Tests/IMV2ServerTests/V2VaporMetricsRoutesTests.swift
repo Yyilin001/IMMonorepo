@@ -294,21 +294,16 @@ struct V2VaporMetricsRoutesTests {
         let telemetry = V2PrometheusTelemetrySink()
         let durableWorkMetrics = DurableWorkMetricsProbe(snapshot: .init(
             isAvailable: true,
-            readyRoomOutboxRows: 2,
-            leasedRoomOutboxRows: 1,
-            scheduledRoomOutboxRows: 6,
-            pausedRoomOutboxRows: 7,
+            readyUserStateEventRows: 2,
+            leasedUserStateEventRows: 1,
+            scheduledUserStateEventRows: 6,
+            pausedUserStateEventRows: 7,
             readyDirectProfileUpdates: 15,
             leasedDirectProfileUpdates: 16,
             readyReadReceiptPreferencePropagations: 30,
             leasedReadReceiptPreferencePropagations: 31,
             scheduledReadReceiptPreferencePropagations: 32,
             pausedReadReceiptPreferencePropagations: 33,
-            openFanoutPlans: 3,
-            readyFanoutDeliveries: 4,
-            leasedFanoutDeliveries: 5,
-            scheduledFanoutDeliveries: 8,
-            pausedFanoutDeliveries: 9,
             readyContentReviews: 18,
             leasedContentReviews: 19,
             scheduledContentReviews: 20,
@@ -333,9 +328,6 @@ struct V2VaporMetricsRoutesTests {
             projectionVersionGCBacklogEstimatedRows: 43,
             messageProjectionStatesEstimatedRows: 45,
             messageProjectionStatesRelationBytes: 46,
-            messageProjectionReferenceEstimatedRows: 47,
-            messageProjectionBackfillEstimatedRows: 48,
-            messageProjectionInlinePayloadEstimatedRows: 49,
             uncompactedProjectedRecords: 44,
             pendingSyncRecordsAcrossDevices: 10,
             resetPendingDevices: 11,
@@ -350,9 +342,9 @@ struct V2VaporMetricsRoutesTests {
         try await app.testing().test(.GET, "metrics") { response async throws in
             let body = response.body.string
             #expect(body.contains("im_v2_durable_work_metrics_available 1"))
-            #expect(body.contains("im_v2_room_outbox_backlog{state=\"ready\"} 2"))
-            #expect(body.contains("im_v2_room_outbox_backlog{state=\"scheduled\"} 6"))
-            #expect(body.contains("im_v2_room_outbox_backlog{state=\"paused\"} 7"))
+            #expect(body.contains("im_v2_user_state_event_backlog{state=\"ready\"} 2"))
+            #expect(body.contains("im_v2_user_state_event_backlog{state=\"scheduled\"} 6"))
+            #expect(body.contains("im_v2_user_state_event_backlog{state=\"paused\"} 7"))
             #expect(body.contains("im_v2_direct_profile_update_backlog{state=\"ready\"} 15"))
             #expect(body.contains("im_v2_direct_profile_update_backlog{state=\"leased\"} 16"))
             #expect(body.contains("im_v2_read_receipt_preference_propagation_backlog{state=\"ready\"} 30"))
@@ -367,13 +359,7 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_projection_version_gc_backlog_estimated_rows 43"))
             #expect(body.contains("im_v2_message_projection_states_estimated_rows 45"))
             #expect(body.contains("im_v2_message_projection_states_relation_bytes 46"))
-            #expect(body.contains("im_v2_message_projection_references_estimated_rows 47"))
-            #expect(body.contains("im_v2_message_projection_backfill_estimated_rows 48"))
-            #expect(body.contains("im_v2_message_projection_inline_payload_estimated_rows 49"))
             #expect(body.contains("im_v2_sync_uncompacted_projected_records 44"))
-            #expect(body.contains("im_v2_fanout_delivery_backlog{state=\"leased\"} 5"))
-            #expect(body.contains("im_v2_fanout_delivery_backlog{state=\"scheduled\"} 8"))
-            #expect(body.contains("im_v2_fanout_delivery_backlog{state=\"paused\"} 9"))
             #expect(body.contains("im_v2_content_review_backlog{state=\"ready\"} 18"))
             #expect(body.contains("im_v2_content_review_backlog{state=\"leased\"} 19"))
             #expect(body.contains("im_v2_content_review_backlog{state=\"scheduled\"} 20"))

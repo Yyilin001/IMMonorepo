@@ -74,16 +74,18 @@ forwarding 请求可安全重试；`409` 表示另一个 attempt 正在进行或
 ```
 
 控制面锁定 migration、验证 source/target/epoch，写入新的 write owner 与 epoch，
-并进入默认 24 小时 retention。fan-out worker 对每条 delivery 重新读 route；过期
-route 只 fenced handoff 到新 bucket，绝不在旧 owner 写入。新 route 的 target
-projection 先由 `consumer_inbox` 去重提交，再完成控制库 delivery 计数。
+并进入默认 24 小时 retention。个人事件投影在路由栅栏内选择目标库，并遵守迁移写入隔离；
+目标提交成功后才确认来源库事件。`user_state_event_receipts` 保存已投递事件的序号和
+不可变载荷，用于日志压缩后的重试去重；它随迁移复制、参与指纹并在保留期后清理。
+直接写入的个人操作继续通过 `user_projection_effects` 保存幂等结果。旧 `consumer_inbox`
+和公共扇出 delivery 已删除，不再参与迁移。
 
 记录 operation ID 和返回 epoch。`409` 必须停止：表示 epoch 已变、迁移证据不匹配
 或相同 operation ID 被用于不同语义；不得换 UUID 绕过该栅栏。
 
 ## Retention、观测与 rollback
 
-在 retention 内观察目标同步、fan-out backlog、paused durable work、数据库错误率及
+在 retention 内观察目标同步、个人事件积压、paused durable work、数据库错误率及
 用户可见序列单调性。source cleanup 只会在截止后由 leased worker 执行；不要手工
 删除 source 数据。
 

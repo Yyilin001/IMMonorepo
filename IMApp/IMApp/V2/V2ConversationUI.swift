@@ -51,9 +51,9 @@ struct V2ConversationListItem: Hashable, Identifiable, Sendable {
     /// 展示用未读数；服务端未读经本地已读水位收窄后的结果。
     ///
     /// 轮转还没覆盖到的房间为 0：界面不显示角标，也不用本地推算冒充服务端值。
-    let unreadCount: UInt64
+    let unreadCount: UInt64?
 
-    init(id: String, title: String, preview: String, lastActivity: Date, isOutgoing: Bool, kind: V2ConversationKind, isPinned: Bool = false, isArchived: Bool = false, muteUntil: Date? = nil, unreadCount: UInt64 = 0) {
+    init(id: String, title: String, preview: String, lastActivity: Date, isOutgoing: Bool, kind: V2ConversationKind, isPinned: Bool = false, isArchived: Bool = false, muteUntil: Date? = nil, unreadCount: UInt64? = nil) {
         self.id = id
         self.title = title
         self.preview = preview
@@ -281,7 +281,6 @@ protocol V2ConversationDataSource: Sendable {
     /// 读取进入房间推进已读线所需的本地事实。
     func roomReadCheckpoint(roomID: String) async throws -> V2ConversationRoomReadCheckpoint
     /// 推进一次有界的未读轮转；未读不是列表渲染的前提，因此不抛错。
-    func refreshConversationUnread(pageBudget: Int) async
     func conversationSummaryPage(
         for userID: String,
         isArchived: Bool,
@@ -298,7 +297,6 @@ protocol V2ConversationDataSource: Sendable {
 
 extension V2ConversationDataSource {
     /// 不支持未读目录的数据源保持列表可用。
-    func refreshConversationUnread(pageBudget _: Int) async {}
     /// 不支持本地投影的数据源按"历史完整"处理。
     func roomLogHistoryIsIncomplete(roomID _: String) async throws -> Bool { false }
     /// 不支持本地投影的数据源无法回答"已经应用到哪"，因此不推进已读线。
@@ -627,8 +625,6 @@ final class V2ConversationListStore {
         if resetWindow { items = []; conversationNextCursor = nil; hasEarlierConversations = false; viewport.reset() }
         if items.isEmpty { state = .loading }
         let archived = isShowingArchived
-        // 每次刷新先走一页未读轮转：最活跃的房间最先拿到服务端未读，之后才读本地列表。
-        await dataSource.refreshConversationUnread(pageBudget: 1)
         do {
             while true {
                 let capturedAnchorID = viewport.anchorID
@@ -1045,15 +1041,15 @@ struct V2ConversationListView: View {
                                     if item.muteUntil.map({ $0 > Date() }) == true { Image(systemName: "bell.slash.fill").foregroundStyle(.secondary).accessibilityHidden(true) }
                                     Spacer()
                                     // 未读来自服务端摘要；静音只影响提醒，不影响这里的计数。
-                                    if item.unreadCount > 0 {
-                                        Text(item.unreadCount > 99 ? "99+" : "\(item.unreadCount)")
+                                    if let unreadCount = item.unreadCount, unreadCount > 0 {
+                                        Text(unreadCount > 99 ? "99+" : "\(unreadCount)")
                                             .font(.caption2.weight(.semibold))
                                             .monospacedDigit()
                                             .foregroundStyle(.white)
                                             .padding(.horizontal, 6)
                                             .padding(.vertical, 2)
                                             .background(Capsule().fill(.red))
-                                            .accessibilityLabel("\(item.unreadCount) 条未读")
+                                            .accessibilityLabel("\(unreadCount) 条未读")
                                             .accessibilityIdentifier("v2.conversation.unread.\(item.id)")
                                     }
                                     Text(item.lastActivity, format: .dateTime.hour().minute())
@@ -1379,6 +1375,7 @@ struct V2ConversationAccountMenu: View {
     let openPublicIdentity: @MainActor () -> Void
     let openDeviceSessions: @MainActor () -> Void
     let openPrivacySettings: @MainActor () -> Void
+    let openAccountSecurity: @MainActor () -> Void
     let signOut: @MainActor () -> Void
 
     var body: some View {
@@ -1393,6 +1390,8 @@ struct V2ConversationAccountMenu: View {
             }
             Button("消息接收设置", action: openPrivacySettings)
                 .accessibilityIdentifier("v2.privacy.open")
+            Button("账号安全", action: openAccountSecurity)
+                .accessibilityIdentifier("v2.security.open")
             Button("退出登录", role: .destructive, action: signOut)
                 .accessibilityIdentifier("v2.sign-out")
         } label: {

@@ -63,10 +63,11 @@ public struct PostgresV2ForwardDeliveryStore: Sendable {
                     JOIN im_v2.rooms AS room ON room.room_id = export.source_room_id
                     WHERE export.source_shard_id = \(bind: sourceShardID)
                       AND room.room_shard_id = export.source_shard_id AND room.owner_epoch = export.source_epoch
+                      AND room.migration_fence_id IS NULL
                       AND ((job.state = 'pending' AND job.next_attempt_at <= \(bind: now))
                            OR (job.state = 'claimed' AND job.lease_expires_at <= \(bind: now)))
                     ORDER BY job.next_attempt_at NULLS FIRST, job.created_at, job.export_id
-                    LIMIT \(bind: limit) FOR UPDATE OF job SKIP LOCKED
+                    LIMIT \(bind: limit) FOR UPDATE OF job SKIP LOCKED FOR SHARE OF room SKIP LOCKED
                 ), claimed AS (
                     UPDATE im_v2.message_forward_delivery_jobs AS job
                     SET state = 'claimed', claim_token = \(bind: token), lease_expires_at = \(bind: expiresAt),
@@ -96,9 +97,12 @@ public struct PostgresV2ForwardDeliveryStore: Sendable {
         guard v2PostgresTimestampCanEncode(now) else { throw V2ForwardExportError.corruptPersistenceState }
         guard let sql = database as? any SQLDatabase else { throw V2ForwardExportError.corruptPersistenceState }
         return try await sql.raw("""
-            SELECT EXISTS(SELECT 1 FROM im_v2.message_forward_delivery_jobs
-                WHERE export_id = \(bind: lease.export.intent.exportID) AND state = 'claimed'
-                  AND claim_token = \(bind: lease.claimToken) AND lease_expires_at > \(bind: now)) AS value
+            SELECT EXISTS(SELECT 1 FROM im_v2.message_forward_delivery_jobs AS job
+                JOIN im_v2.message_forward_exports AS export ON export.export_id = job.export_id
+                JOIN im_v2.rooms AS room ON room.room_id = export.source_room_id
+                WHERE room.room_shard_id = export.source_shard_id AND room.owner_epoch = export.source_epoch
+                  AND room.migration_fence_id IS NULL AND job.export_id = \(bind: lease.export.intent.exportID) AND job.state = 'claimed'
+                  AND job.claim_token = \(bind: lease.claimToken) AND job.lease_expires_at > \(bind: now)) AS value
             """).first(decoding: DeliveryBoolRow.self)?.value == true
     }
 
@@ -114,16 +118,19 @@ public struct PostgresV2ForwardDeliveryStore: Sendable {
     ///   ``V2ForwardExportError/corruptPersistenceState``。
     public func complete(_ lease: V2ForwardDeliveryLease, now: Date) async throws -> Bool {
         guard v2PostgresTimestampCanEncode(now) else { throw V2ForwardExportError.corruptPersistenceState }
-        guard let sql = database as? any SQLDatabase else { throw V2ForwardExportError.corruptPersistenceState }
-        return try await sql.raw("""
-            UPDATE im_v2.message_forward_delivery_jobs AS job
-            SET state = 'completed', claim_token = NULL, lease_expires_at = NULL,
-                next_attempt_at = NULL, completed_at = \(bind: now)
-            WHERE job.export_id = \(bind: lease.export.intent.exportID) AND job.state = 'claimed'
-              AND job.claim_token = \(bind: lease.claimToken) AND job.lease_expires_at > \(bind: now)
-              AND EXISTS(SELECT 1 FROM im_v2.message_forward_export_receipts AS receipt WHERE receipt.export_id = job.export_id)
-            RETURNING true AS value
-            """).first(decoding: DeliveryBoolRow.self)?.value == true
+        return try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else { throw V2ForwardExportError.corruptPersistenceState }
+            guard try await lockActiveSource(exportID: lease.export.intent.exportID, sql: sql) else { return false }
+            return try await sql.raw("""
+                UPDATE im_v2.message_forward_delivery_jobs AS job
+                SET state = 'completed', claim_token = NULL, lease_expires_at = NULL,
+                    next_attempt_at = NULL, completed_at = \(bind: now)
+                WHERE job.export_id = \(bind: lease.export.intent.exportID) AND job.state = 'claimed'
+                  AND job.claim_token = \(bind: lease.claimToken) AND job.lease_expires_at > \(bind: now)
+                  AND EXISTS(SELECT 1 FROM im_v2.message_forward_export_receipts AS receipt WHERE receipt.export_id = job.export_id)
+                RETURNING true AS value
+                """).first(decoding: DeliveryBoolRow.self)?.value == true
+        }
     }
 
     /// 按处置结果重排租约。
@@ -142,7 +149,6 @@ public struct PostgresV2ForwardDeliveryStore: Sendable {
     public func reschedule(_ lease: V2ForwardDeliveryLease, disposition: V2DurableRetryDisposition,
                            resetAttempts: Bool = false, now: Date) async throws -> Bool {
         guard v2PostgresTimestampCanEncode(now) else { throw V2ForwardExportError.corruptPersistenceState }
-        guard let sql = database as? any SQLDatabase else { throw V2ForwardExportError.corruptPersistenceState }
         let state: String, retryAt: Date?
         switch disposition {
         case .retry(let at):
@@ -150,15 +156,32 @@ public struct PostgresV2ForwardDeliveryStore: Sendable {
             state = "pending"; retryAt = at
         case .pause: state = "paused"; retryAt = nil
         }
-        return try await sql.raw("""
-            UPDATE im_v2.message_forward_delivery_jobs
-            SET state = \(bind: state), next_attempt_at = \(bind: retryAt), claim_token = NULL, lease_expires_at = NULL,
-                retry_count = CASE WHEN \(bind: resetAttempts) THEN 0 ELSE retry_count END
-            WHERE export_id = \(bind: lease.export.intent.exportID) AND state = 'claimed'
-              AND claim_token = \(bind: lease.claimToken) AND lease_expires_at > \(bind: now)
-            RETURNING true AS value
+        return try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else { throw V2ForwardExportError.corruptPersistenceState }
+            guard try await lockActiveSource(exportID: lease.export.intent.exportID, sql: sql) else { return false }
+            return try await sql.raw("""
+                UPDATE im_v2.message_forward_delivery_jobs
+                SET state = \(bind: state), next_attempt_at = \(bind: retryAt), claim_token = NULL, lease_expires_at = NULL,
+                    retry_count = CASE WHEN \(bind: resetAttempts) THEN 0 ELSE retry_count END
+                WHERE export_id = \(bind: lease.export.intent.exportID) AND state = 'claimed'
+                  AND claim_token = \(bind: lease.claimToken) AND lease_expires_at > \(bind: now)
+                RETURNING true AS value
+                """).first(decoding: DeliveryBoolRow.self)?.value == true
+        }
+    }
+
+    /// Keep the current source stable through the job update. The export binding is immutable.
+    private func lockActiveSource(exportID: UUID, sql: any SQLDatabase) async throws -> Bool {
+        try await sql.raw("""
+            SELECT true AS value FROM im_v2.rooms AS room
+            JOIN im_v2.message_forward_exports AS export ON export.source_room_id = room.room_id
+            WHERE export.export_id = \(bind: exportID)
+              AND room.room_shard_id = export.source_shard_id AND room.owner_epoch = export.source_epoch
+              AND room.migration_fence_id IS NULL
+            FOR SHARE OF room
             """).first(decoding: DeliveryBoolRow.self)?.value == true
     }
+
 }
 
 private struct DeliveryClaimRow: Decodable {

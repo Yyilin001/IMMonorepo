@@ -4,8 +4,8 @@ import SQLKit
 
 /// 清理消息投影状态的回收工作器。
 ///
-/// 只删除超过安全宽限期、没有任何用户投影或扇出引用，且不是控制存储当前生效修订的
-/// 不可变状态；外键的 `RESTRICT` 约束是抵御并发竞态的最后一道栅栏。
+/// 只删除超过安全宽限期、不是控制存储当前生效修订的
+/// 不可变状态；候选行使用行锁，多个回收实例不会重复认领。
 public struct PostgresV2MessageProjectionStateGCWorker: Sendable {
     private let database: any Database
     private let schema: String
@@ -38,7 +38,7 @@ public struct PostgresV2MessageProjectionStateGCWorker: Sendable {
 
     /// 执行一轮有界状态回收。
     ///
-    /// 存在用户投影版本引用、扇出共享载荷引用，或该状态仍是未撤回消息的当前内容修订时，
+    /// 该状态仍是未撤回消息的当前内容修订时，
     /// 对应状态会被跳过；候选行使用 `FOR UPDATE SKIP LOCKED` 选取，多实例可并行。
     ///
     /// - Parameters:
@@ -63,16 +63,6 @@ public struct PostgresV2MessageProjectionStateGCWorker: Sendable {
                 SELECT state.state_id
                 FROM \(unsafeRaw: table("message_projection_states")) AS state
                 WHERE state.created_at < \(bind: cutoff)
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM \(unsafeRaw: table("user_projection_versions")) AS version
-                      WHERE version.message_state_id = state.state_id
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM \(unsafeRaw: table("fanout_sync_payloads")) AS shared
-                      WHERE shared.message_state_id = state.state_id
-                  )
                   AND NOT EXISTS (
                       SELECT 1
                       FROM \(unsafeRaw: table("messages")) AS message

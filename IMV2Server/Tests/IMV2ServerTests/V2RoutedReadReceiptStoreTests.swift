@@ -47,8 +47,8 @@ struct V2RoutedReadReceiptStoreTests {
         #expect(await owner.selectedRoutes() == [firstRoute, otherRoute])
     }
 
-    @Test("direct room classification falls back to privacy-preserving control path")
-    func directReceiptFallsBackToControl() async throws {
+    @Test("direct receipts use the room owner for scalar and batch requests", arguments: [false, true])
+    func directReceiptStaysOnOwner(batch: Bool) async throws {
         let fixture = try ReceiptFixture()
         let owner = GroupReceiptStoreSpy(attempt: .notGroup)
         let control = RoutedReceiptControlSpy(receipt: fixture.receipt)
@@ -60,12 +60,14 @@ struct V2RoutedReadReceiptStoreTests {
             controlStore: control
         )
 
-        #expect(try await store.record(
-            command: fixture.command,
-            now: fixture.now
-        ) == .recorded(fixture.receipt))
-        #expect(await owner.commands() == [fixture.command])
-        #expect(await control.recordCommands() == [fixture.command])
+        if batch {
+            let result = try await store.recordBatch([.init(command: fixture.command, now: fixture.now)])
+            #expect(result == [.success(.recorded(fixture.receipt))])
+        } else {
+            #expect(try await store.record(command: fixture.command, now: fixture.now) == .recorded(fixture.receipt))
+        }
+        #expect(await owner.commands().count == (batch ? 2 : 1))
+        #expect(await control.recordCommands().isEmpty)
     }
 
     @Test("user preferences and reader disclosure remain on control authority")
@@ -214,6 +216,16 @@ private actor GroupReceiptStoreSpy: V2OwnerValidatedReadReceiptStore {
     ) {
         self.attempt = attempt
         self.candidatePages = candidatePages
+    }
+
+    func recordOwnerValidated(command: V2RecordReadReceiptCommand, ownerRoute: V2RoomShardRoute,
+                              now: Date) throws -> V2ReadReceiptOutcome {
+        switch recordGroupOwnerValidated(command: command, ownerRoute: ownerRoute, now: now) {
+        case .handled(let outcome): return outcome
+        case .notGroup:
+            return .recorded(try V2ReadReceipt(roomID: command.roomID, userID: command.actorUserID,
+                readThroughRoomSequence: command.readThroughRoomSequence, recordedAt: now))
+        }
     }
 
     func recordGroupOwnerValidated(

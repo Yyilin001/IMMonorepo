@@ -556,8 +556,2151 @@ bash scripts/verify_v2.sh
 - 主题：server-clock-boundaries
 - 引用文档：4 份（`docs/reviews/archive/2026-09-05-remediation-timeline.md`, `docs/reviews/archive/2026-09-05-system-remediation-plan.md`, `docs/reviews/archive/2026-09-05-system-remediation-progress.md` 等）
 
+### 20260913-room-log-fixed-load
+
+- 日期：2026-09-13
+- 主题：当前 Release 私聊、标准群和 10 万人大群固定负载
+- 证据：[实测报告与限制](archive/room-log-fixed-load-2026-09-13.md)
+- 结果：每轮 800 条计划消息全部确认，最终排空，无逐用户正文；不代表容量上限或完整故障恢复验收。
+
 ### 20260907-session-absolute-expiry
 
 - 日期：2026-09-07
 - 主题：session-absolute-expiry
 - 引用文档：2 份（`docs/reviews/archive/2026-09-05-remediation-timeline.md`, `docs/reviews/device-session-absolute-expiry-contract.md`）
+
+### 20260919-governance-recovery
+
+范围：D08 当前工具链下的恢复验收；未执行全仓完整测试。
+
+- 首轮真实链路驱动 `/tmp/imv2-governance-reconnect-20260919-01-driver.log` 退出 1，失败发生在 ClientKit 测试编译，尚未执行 App 自动重连。Swift 6.4 拒绝 `V2RoomRecoveryCrashTests` 从异步数据库读取返回非 Sendable 的 GRDB Row；临时服务和数据库已清理。
+- 修正为在数据库读取闭包内提取 Int/Bool/Double/String 值，保留原持久化断言。构建日志 `/tmp/imv2-governance-crash-build-20260919.log`；未启用环境的首次运行仅证明编译，两个 skipped 不计通过。
+- 显式启用强杀后的 `/tmp/imv2-governance-crash-20260919.log` 退出 0，31 类事务、提交前后共 62 参数通过（7.447 秒）；父进程的 crashChild 跳过不计通过，子进程分别验证 SIGKILL 及重启状态。
+- 自动重连驱动补计独立 scoped App 登录产生的一台设备；额外按恢复测试账号要求恰有两台未撤销设备，防止三次重连产生额外注册。保留总设备、撤销、凭据及撤销事件的严格数量检查。
+- 本机只有 iOS 27 运行时，驱动增加 `--simulator-runtime` 并在构建前检查可用性，默认 iOS 26.2 保留。实际运行时写入证据目录，iOS 27 结果不代表 iOS 26 验证。
+
+强杀复现（先完成 ClientKit 测试构建，再执行）：
+
+```sh
+cd IMV2ClientKit
+IMV2_CLIENT_CRASH_BINARY="$PWD/.build/arm64-apple-macosx/debug/IMV2ClientKitPackageTests.xctest/Contents/MacOS/IMV2ClientKitPackageTests" swift test --skip-build --filter V2RoomRecoveryCrashTests
+```
+
+最终真实链路：`/tmp/imv2-governance-reconnect-20260919-02-driver.log` 退出 0，证据目录 `/tmp/imv2-governance-reconnect-20260919-02`。App 3 passed / 0 failed / 1 未启用后台待发专项 skipped；129 房间首轮 12.995 秒、重连 0.339 秒，跨 Gateway 在线及前台三次自动重连标记通过。HTTP 与数据库终验通过：总设备/撤销/已撤销设备有效 access/有效 refresh/撤销事件为 `13|3|0|0|3`，恢复账号设备/撤销为 `2|0`；代理恰好三次 disconnect。独立核实专用模拟器 E3563836-23FF-41FB-A64F-2D754901DF89 已删除，cleanup.log 记录临时数据库、证书和服务清理完成。源码绑定见 source-manifest.json。
+
+本次使用与既有专项相同的 [NATS v2.11.0 官方发行包](https://github.com/nats-io/nats-server/releases/tag/v2.11.0)，下载后与官方 SHA256SUMS 比对。未修改生产业务行为，未跑全仓业务全量或外部发布验收。三次断线证明前台聊天页自动恢复正文，不证明自动跟随滚动、真机后台、所有房间游标或资源硬上限。
+
+```sh
+python3 scripts/verify_v2_live_account_authorization.py \
+  --output /tmp/imv2-governance-reconnect-20260919-02 \
+  --app-ui --gateway --room-recovery-scale 129 --room-recovery-app-reconnect \
+  --multi-gateway-nats-binary /tmp/imv2-governance-nats-20260919/nats-server-v2.11.0-darwin-arm64/nats-server \
+  --simulator-runtime com.apple.CoreSimulator.SimRuntime.iOS-27-0
+```
+
+复现时选择新的输出目录；已有目录会被拒绝。NATS 路径和模拟器运行时须指向本机已准备的资源。
+
+### 20260919-member-role-profile
+
+B06 当前房间恢复：个人流先应用本人修订10，房间页再应用另一成员角色修订2及移除修订3，原 reducer 按房间资料版本提前返回，留下已移除角色。修复前 `/tmp/imv2-member-role-before-20260919.log` 退出1，角色残留与重开后残留两处断言失败。
+
+修复将目标角色删除移到房间资料旧版本判断之前，SQL 同时限制目标角色修订不超过移除修订；本人资格检查仍先执行，未改变数据库结构或事务边界。首次定向回归5项通过，扩展为4种目标/本人版本组合并增加真实快照激活与重开后，最终 `/tmp/imv2-member-role-snapshot-20260919.log` 退出0：26项/3套件（0.504秒）。包括 V2MemberRoleRecoveryTests、原本人资格/快照与持久恢复测试；参数不额外累计到测试函数数量。
+
+```sh
+swift test --package-path IMV2ClientKit --disable-automatic-resolution --jobs 4 \
+  --filter 'V2MemberRoleRecoveryTests|V2SyncEngineTests.membership|V2SyncEngineTests.snapshotViewerMembershipRevision|V2RoomRecoveryPersistenceTests'
+```
+
+源码摘要：`/tmp/imv2-member-role-sources-20260919.json`。未重跑 App/TLS、服务端或全仓套件；B06 的逐成员负状态、基线、裁剪及全部代次组合仍开放。
+
+### 20260919-member-role-identity
+
+B06 角色身份边界：原代码验证 RoomID/UserID 后仍以原始字符串落库，等价大小写的角色无法匹配移除，且快照按规范 room ID 保留时会丢失角色；角色分支也未核对外层房间、显式来源序号和同修订冲突，并接受不能由合法角色变更生成的 owner。
+
+修复前 `/tmp/imv2-member-role-identity-before-20260919.log` 退出1，2个测试函数（8参数场景）共18处断言失败。修复统一存储规范UUID、校验房间/序号与角色/整数域，并对同修订不同角色或不同已知来源序号拒绝整页；不新增schema或改变事务边界。最终 `/tmp/imv2-member-role-identity-after-20260919.log` 退出0：29项/3套件（0.633秒），包含新负例的角色/游标回滚断言以及移除、快照、重开、本人资格和持久恢复回归。
+
+```sh
+swift test --package-path IMV2ClientKit --disable-automatic-resolution --jobs 4 \
+  --filter 'V2MemberRoleRecoveryTests|V2SyncEngineTests.groupSnapshot|V2SyncEngineTests.membership|V2SyncEngineTests.snapshotViewerMembershipRevision|V2RoomRecoveryPersistenceTests'
+```
+
+源码摘要：`/tmp/imv2-member-role-identity-sources-20260919.json`。未跑App/TLS、服务端或全仓测试。source_event_id/摘要持久化、逐成员撤销负事实与完整重入/裁剪仍待后续，B06不关闭。
+
+### 20260919-member-ledger
+
+B06 新增当前本地 `v2_member_effects`：持久保存逐成员 add/remove/role 的来源、修订、规范摘要与可选房间序号。移除和重加均不再丢掉阻止旧角色恢复的版本事实；同修订异来源、同来源变更语义或已知房间序号不一致会拒绝事务。快照保留仍授权房间的来源历史，核对冲突后重建角色；本人撤销清理来源表，独立本人撤销状态继续保留。仅更改当前全新 SQLite schema，PostgreSQL schema36和协议30不变。
+
+复现阶段 `/tmp/imv2-member-tombstone-before-20260919.log` 退出1：移除、快照切换及重开后注入旧角色，两种本人版本均重新产生角色（2处断言失败）。修复后同修订异来源会被拒绝，更旧且未记录的修订可记入历史但不改变角色。补充重加、本人退出清理、快照旧角色合并、来源/摘要/序号冲突及数据库字段约束。
+
+最终 `/tmp/imv2-member-ledger-final-20260919.log` 退出0：148项/4套件，2.651秒，含完整 V2SyncEngineTests 与成员恢复、持久恢复和schema专项。初轮新快照测试误把 resetPending 的代次断言为旧代次，按 beginReset 合同改为核对 prepare 失败前后完整游标不变，同时断言正式来源表、角色与房间游标保持原状态；未放宽生产校验。
+
+```sh
+swift test --package-path IMV2ClientKit --disable-automatic-resolution --jobs 4 \
+  --filter 'V2MemberRoleRecoveryTests|V2SyncEngineTests|V2RoomRecoveryPersistenceTests|V2LocalSchemaContractTests'
+```
+
+进程中断测试新增成员移除提交前/后场景，检查来源记录、角色和房间游标整体提交，并在重开后重试同一页。首次运行发现旧固定路径指向9月14日的旧测试二进制，父子代码不一致，产生缺表错误（`/tmp/imv2-member-ledger-crash-20260919.log`，退出1）；该结果不作为当前代码证据。测试现在通过自身 Bundle 定位正在加载的可执行文件，并强制配置路径与之相同，避免旧测试程序被当成当前证据。历史文档中的固定路径不可不经校验直接复用。
+
+切换到当前二进制后，新增重试夹具因两个进程的 JSON 键顺序不同被原有逐字节重放校验拒绝（`/tmp/imv2-member-ledger-crash-current-20260919.log`，退出1）；将夹具编码固定为 sortedKeys，保留原生产重放校验。
+
+```sh
+IMV2_CLIENT_CRASH_BINARY="$PWD/IMV2ClientKit/.build/out/Products/Debug/IMV2ClientKitTests.xctest/Contents/MacOS/IMV2ClientKitTests" \
+  swift test --package-path IMV2ClientKit --disable-automatic-resolution --jobs 4 --filter V2RoomRecoveryCrashTests
+```
+
+最终 `/tmp/imv2-member-ledger-crash-final-20260919.log` 退出0：64个提交前/后参数场景全部通过，9.292秒；父进程跳过仅供子进程启动的 crashChild，不把该跳过计作额外通过项。
+
+此路径对应本机当前 SwiftPM 构建布局；其他构建系统必须指向实际加载的测试 Bundle。源码和测试二进制摘要见 `/tmp/imv2-member-ledger-sources-20260919.json`。以上受控旧载荷/公共角色快照测试仅覆盖本地边界，不恢复旧个人公共投影生产路径。尚未验收首次安装/裁剪后的成员权威基线、本人重入全部代次、来源保留与容量，也未重跑 App/TLS、PostgreSQL、真机或全仓业务测试；B06继续开放。
+
+### 20260919-member-directory
+
+B06 核对当前成员展示链路：App 通过分页名录获取名单和 actorRole，而不是读取 SQLite 的 `v2_group_member_roles`。服务端名录查询当前成员关系，游标绑定房间/修订；日志裁剪不直接删除该关系，但跨 owner 名录路由和真实裁剪/重新加入组合尚未验收。
+
+发现 App 已确认名录过时后仍保留旧管理角色：分页修订冲突后首屏重读失败、跨页版本变化后重读失败、FORBIDDEN、NOT_FOUND 和主动刷新失败均留下旧名单、actorRole、revision及分页游标。新增6参数测试还包含普通网络失败的对照场景；修复前实际运行 `/tmp/imv2-member-directory-repro-20260919.log` 退出65，1测试函数/6参数共25处断言失败。
+
+修复统一失效清理；刷新期间的新刷新意图由原任务串行重读，不接受迟到旧页。拒绝重复成员、停滞游标和带后续游标的空页。普通分页网络失败可保留已加载状态；不修改服务端授权规则。
+
+验证过程保留两次无效运行：初次 `/tmp/imv2-member-directory-before-20260919.log` 因新模拟器未完成启动，测试宿主启动失败；待模拟器 bootstatus 完成后，第二次旧筛选名称运行0项（`/tmp/imv2-member-directory-before-retry-20260919.log`），不计通过。通过测试枚举取得 Swift Testing 的完整标识（含参数签名）后，使用原已编译二进制执行上述失败复现，再重新构建修复版。
+
+最终 `/tmp/imv2-member-directory-after-20260919.log` 退出0，10项测试函数全部通过（0.011秒），包含6种失效/网络情况和3种异常分页。其他场景覆盖正常分页、修订冲突后重读、单一请求所有者、刷新丢弃迟到旧角色、成员操作修订与取消。结果包 `/tmp/imv2-member-directory-after-20260919.xcresult`；准确筛选列表 `/tmp/imv2-member-directory-selected-tests.json`；源码摘要 `/tmp/imv2-member-directory-sources-20260919.json`。
+
+```sh
+xcodebuild test -project IMApp/IMApp.xcodeproj -scheme IMApp -configuration Debug \
+  -destination 'platform=iOS Simulator,id=<专用模拟器ID>' \
+  -disableAutomaticPackageResolution -parallel-testing-enabled NO -collect-test-diagnostics never \
+  '-only-testing:IMAppTests/V2ConversationStoreTests/groupMemberInvalidationClearsOldManagementState(scenario:)' \
+  '-only-testing:IMAppTests/V2ConversationStoreTests/groupMemberRefreshDiscardsLateRoleAndKeepsOneRequestOwner()' \
+  '-only-testing:IMAppTests/V2ConversationStoreTests/groupMemberInvalidPageDoesNotLeavePartialRoster(scenario:)'
+```
+
+上面展示3个新增测试的复现入口；本次实际选择10项，完整清单见所列JSON。使用本机iOS27专用模拟器6977B62B-2D97-468B-A247-FA940FDF90A6；没有复用用户正在运行的模拟器。测试使用注入读取器，没有把模拟结果称为真实网络或PostgreSQL验收。未跑App全套、全仓、真机或发布检查，B06保持开放。
+
+### 20260919-member-directory-routing
+
+B06 当前名录跨库缺口：ServerApp 原来直接用默认数据库构造 `PostgresV2RoomMembershipDirectoryStore`，查询同时依赖该库的 rooms、room_memberships、public_user_profiles。房间恢复已有 owner 路由不代表名录读取也已路由。
+
+新增 `V2RoutedRoomMembershipDirectoryStore` 并接入 ServerApp：不缓存的控制面路由选择 owner；owner 内共享锁核对 shard/epoch 与当前资格并分页取候选；控制库一次批量读取候选的有效公开身份并排除停用账号；返回前复核成员资格/修订/角色与控制面归属。游标版本2绑定房间、修订、owner shard/epoch和扫描边界；归属变化映射 REVISION_CONFLICT，不能回退旧 owner。单次扫描不超过100条候选，另取1条探测后续，不为填满可见页无界扫描。
+
+边界校正：上一轮 App 将带后续游标的空页判为无效；跨控制库过滤隐藏资料后，这种页可以合法出现。现允许游标推进的空页并保留“加载更多”，继续拒绝重复成员和停滞游标，增加从隐藏空页加载到可见成员的验证。没有修改协议字段、协议版本或PostgreSQL schema。
+
+最终 `/tmp/imv2-routed-members-postgres-final-20260919.log` 退出0：9项/4套件，1.162秒。包括路由/边界参数测试、Gateway身份与错误映射、服务输入合同，以及实际启用的 `PostgresV2MemberDirectoryRoutingTests.ownerSwitchHiddenProfilesAndRejoin`。真实专项创建三个独立临时数据库，分别作为控制面和两个 owner；核心断言：
+
+- owner 中放入过期资料，只有控制库的当前公开资料可返回；隐藏与停用账号被过滤，空页游标能推进。
+- owner 房间事件表为空、head/裁剪下界均为100，仍可读取当前角色和名录，不依赖旧角色事件。
+- 切换 owner 后旧游标被拒绝，从第一页取得新代次游标；旧 owner 仍保留有效成员副本，当前 owner 撤销时不会回退读取旧副本。
+- 重新加入后角色为普通成员、修订更新，旧成员修订游标被拒绝；物理 owner epoch 不符被拒绝。
+- 在候选页读取后、公开身份返回前，通过真实 owner 事务撤销调用者资格，最终复核拒绝整页。
+
+```sh
+PGHOST=127.0.0.1 PGPORT=<专用PostgreSQL端口> PGUSER=<测试角色> \
+  bash scripts/test_v2_server_native_postgres.sh --disable-automatic-resolution \
+  --filter 'V2RoutedRoomMembershipDirectoryTests|PostgresV2MemberDirectoryRoutingTests|V2RoomMembershipDirectoryServiceTests|V2GatewayDomainCommandHandlerTests.membershipDirectory'
+```
+
+App `/tmp/imv2-routed-members-app-20260919.log` 退出0：11项/1套件，0.010秒；使用新建且确认启动完成的iOS27模拟器40F5B9EE-878C-4A47-A561-A70509F47382。结果包 `/tmp/imv2-routed-members-app-20260919.xcresult`，完整筛选列表 `/tmp/imv2-routed-members-selected-tests.json`，源码摘要 `/tmp/imv2-routed-members-sources-20260919.json`。测试以注入名录服务验证 App 状态，没有声称运行实际 App/TLS 名录请求。
+
+上述三库切换是受控路由/状态夹具，不证明完整迁移搬运、首次安装App整链、全部恢复代次或容量。未跑全仓、真机或生产发布检查，B06保持实施中。
+
+本轮专用PostgreSQL进程已停止、脚本创建的临时数据库剩余0个，专用模拟器已删除；清理证据 `/tmp/imv2-routed-members-cleanup-20260919.log`。
+
+<a id="20260919-group-join-cancellation"></a>
+
+## 2026-09-19：D06 申请人取消与审批竞态
+
+本轮新增 cancelled 终态、owner 事务取消、HTTPS 入口、客户端响应校验和 App 操作。
+规则见[申请取消合同](group-join-cancellation-contract.md)。采用当前新库 schema 37，不提供旧库升级。
+
+| 范围 | 实际结果 | 证据 |
+| --- | --- | --- |
+| 真实 PostgreSQL、服务与 HTTP | 11 项测试 / 4 套件通过，7.318 秒；开启 disposable 标记并创建独立数据库，数据库项实际执行 | `/tmp/imv2-d06-postgres-final.log` |
+| 取消数据库组合 | pending、expired、revoked、approve-first、reject-first、race、approving 共 7 场景；检查其他人/错房间拒绝、原终态重放、无重复成员/事件/次数、取消后重新申请；另含跨库 owner 路由及 epoch 拒绝 | 同上 |
+| 相关审批与配额回归 | 3 个审批事务回滚点、2 个并发配额场景；HTTP 时钟边界 20 场景，包括取消和 cancelled 提交重放 | 同上 |
+| ClientKit HTTP | 4 项测试通过，0.005 秒；取消正常终态及异常房间、申请、状态、时间共 8 个参数场景 | `/tmp/imv2-d06-client-final.log` |
+| App store | 8 项测试通过，0.011 秒；新增取消结果/失败重试 4 场景、替换/关闭/退出后的迟到结果 3 场景，既有提交隔离回归同轮通过 | `/tmp/imv2-d06-app-final.log`、`/tmp/imv2-d06-app-final.xcresult` |
+| Core 邀请模型 | 3 项测试通过，0.001 秒 | `/tmp/imv2-d06-core.log` |
+| 历史账号升级脚本 | 35→36 的凭据保存和拒绝重复升级专项通过；不再把该旧版本宣称为当前就绪合同 | `/tmp/imv2-d06-historical-upgrade.log` |
+
+开发中保留两次失败：客户端测试嵌套 `#require` 编译失败和响应 fixture 的 handle 字段写错，均已修复；
+App 新增 completed 分支最初过宽，使旧提交完成后又可提交，原有隔离测试捕获 6 个失败参数，
+已收紧为仅 cancelled 可再次提交并重跑全邀请 store 专项。失败日志为 `/tmp/imv2-d06-app.log`；
+不把失败轮或修改前的通过记录当作最终证明。
+
+完整房间迁移、跨 owner 全局配额、生产真机/APNs 仍按原条目开放；受控 owner epoch 切换不是搬迁执行器验收。
+本轮没有执行全仓业务测试、提交或部署。最终 schema/文档门禁与源码摘要在本节继续记录。
+
+最终 schema 检查：4 个约束偏离参数全部通过，1.649 秒，见 `/tmp/imv2-d06-schema-corrected.log`。
+覆盖 state/decision CHECK 放宽、部分唯一索引误改为全量唯一、历史查询索引缺失。
+初轮历史索引检查误接到了注册凭据检查，错误归因被专项捕获，已移到独立的 joinCancellationContract；
+失败记录保留在 `/tmp/imv2-d06-schema-final.log`。独立 SQL 就绪门禁确认新库为 true、删除历史索引为 false，
+见 `/tmp/imv2-d06-schema-gate-final.log`。该最后变更只重跑受影响的 schema 专项；未重复无关业务套件。
+
+源码/测试/日志摘要保存于 `/tmp/imv2-d06-sources-20260919.json`；ClientKit 验证之后只整理了接口注释，
+没有改变其运行逻辑。文档链接、结构、协议与差异门禁均已通过。D06 关闭，B23/B27 和全部 E 类保持开放。
+
+<a id="20260919-group-join-quota-ledger"></a>
+
+## 2026-09-19：B23 控制库预留账本（尚未接入生产）
+
+下述为最初账本阶段；当前接线与关闭结论见[后续验收](#20260919-group-join-global-quota)。
+
+新增 `PostgresV2GroupJoinQuotaStore` 和 schema 38 的 `group_join_quota_intents`。
+这是全局配额的持久化组件，**生产 submit 仍直接调用 owner，B23 不关闭**；完整接线与验收条件见
+[全局配额合同](group-join-global-quota-contract.md)。
+
+- `/tmp/imv2-b23-ledger-final.log`：真实 PostgreSQL，7 项测试 / 2 套件通过，6.500 秒。
+  配额账本 6 项函数含 14 个展开场景；另重跑取消功能的 4 个约束偏离场景。
+- 同一申请人、不同 room/invite 的 40 次并发预留恰好得到 20 个 reserved 和 20 个 limited；
+  另一个申请人有独立容量。重新创建 store 并推进一年时钟不会释放不确定的 held。
+- 验证同操作的 room/invite/note/token 摘要冲突、同活跃邀请共享预留、服务重试不覆盖首次 request ID；
+  approved/rejected/cancelled/already_member 释放名额，迟到 pending 不能重新打开终态。
+- unavailable/rate_limited/permission_denied 的确定拒绝记录允许同操作新 generation 重试；
+  旧 generation 不能释放新预留，tracking 不能被伪装为失败而释放，Int64.max 代次拒绝递增且不崩溃。
+- 启动门禁验证账本列、11 项约束及 4 个索引；弱化 outcome/generation CHECK、删除活跃唯一索引或恢复索引均被拒绝。
+
+仅账本调用方的前置条件规定 resolve 必须有 owner 持久回执；本阶段未实现该回执和恢复协调器，
+所以不能把本轮结果描述成完整跨 owner 提交/释放或故障恢复已经通过。未运行全仓业务测试。
+
+独立 SQL 就绪门禁确认 schema 38 为 true、删除活跃邀请唯一索引后为 false，见
+`/tmp/imv2-b23-sql-gate.log`（该临时日志后续被覆盖，原摘要见本段及本阶段源码/日志摘要）。旧 35→36 账号升级专项仍通过，见 `/tmp/imv2-b23-historical-upgrade.log`；
+该记录不宣称旧版本符合当前 schema 38。文档链接、结构、协议与差异门禁通过。
+源码与日志摘要：`/tmp/imv2-b23-ledger-sources-20260919.json`。本轮临时数据库已清理，专用 PostgreSQL 已停止；未提交或部署。
+
+
+<a id="20260919-group-join-global-quota"></a>
+
+## 2026-09-19：B23 全局配额、重复绑定与崩溃恢复
+
+B23 已关闭。生产代码接入 control 预留→owner 原子申请/回执→control 确认；Account runtime
+每轮有界处理恢复任务。schema 39 增加 owner 不可变回执、重复操作别名与持久认领字段。
+本文验证本机原生 PostgreSQL 的真实跨库提交与独立进程中断，不代表生产部署、容量或完整房间迁移验收。
+
+| 专项 | 实际结果与边界 | 日志 |
+| --- | --- | --- |
+| 配额及邀请 | 16 项测试 / 2 套件通过，21.849 秒；10 项账本函数与 6 项 owner/路由函数，参数展开共 39 场景 | `/tmp/imv2-b23-alias-integrated.log` |
+| 全局 20 上限 | 同一申请人向两个 owner 提交 40 次，20 个接受、20 个限流；两库都有申请且总数为 20。control 与其中一个 owner 共用数据库，另一个 owner 使用独立数据库 | 同上 |
+| 重复操作 | 满额时不同 operation 返回同一申请；记录各自输入绑定；取消后旧别名返回 cancelled，新操作才可重新申请。确定拒绝可重试新代次，绑定到另一已确认申请后旧证明不能释放其名额 | 同上 |
+| owner 原子回执 | 回执插入失败时申请一并回滚；并发提交只有一个申请/回执；到期、邀请限流、账号停用的拒绝结果不会因条件变化被旧代次重新执行 | 同上 |
+| 进程中断 | 6 个真实 SIGKILL 检查点：预留后、owner 提交后、control 确认后，以及取消/批准/拒绝后未通知 control。使用本次已加载测试二进制，新 worker 只依赖持久状态恢复 | 同上 |
+| operator 与失败退避 | 1 项测试、committed/released/quarantined 三场景通过。归属不匹配时退避并保留名额；运维确认批准后释放，退回 pending 或证据不足仍占名额 | `/tmp/imv2-b23-operator.log` |
+| 新库合同 | 当前建库、导出/恢复和结构偏离检查通过；149 张表、349 个索引。新增三表的七个索引加取消历史索引，取代旧 146/341 断言 | `/tmp/imv2-b23-current-bootstrap.log` |
+| 独立 SQL 就绪 | schema 39 为 true；删除操作绑定外键、owner 结果约束或恢复索引均为 false。Swift 门禁也覆盖缺失回执约束和账本约束 | `/tmp/imv2-b23-current-39-sql-gate.log` |
+
+最初跨库用例在审批处失败：测试容量配置的命令额度为 100，种子数据为 10，实际得到限流。
+分阶段诊断见 `/tmp/imv2-b23-diagnose.log`；修正为 10 后保留严格的审批成功、名额和两库 pending 数断言。
+同时修复了真实遗漏：不同 operation 共用申请却未持久绑定，取消后的迟到重试可能重新申请。
+不能把此前未通过的跨库记录描述成成功，也不能把该问题仅归为测试配置。
+
+16 项主专项之后仅增加 operator 专项和清理源文件行末空白；operator 使用后续编译版本。
+测试构建已编译 Account 可执行程序。文档链接、结构、协议及差异检查另行通过。
+未运行全仓业务套件、真机/APNs 或负载长稳；完整房间迁移由 B27 跟踪。
+源码及日志摘要见 `/tmp/imv2-b23-global-quota-sources-20260919.json`。本轮测试数据库已清理，未提交或部署。
+
+
+<a id="20260919-message-projection-bounds"></a>
+
+## 2026-09-19：B01 消息投影整数入口
+
+消息投影构造、JSON 解码及恢复修订统一拒绝超出 PostgreSQL bigint 的值；编辑/撤回在最后合法修订停止递增。
+存储投影读取先检查修订为正，负修订返回错误，避免 UInt64 转换崩溃。
+
+修复前 `/tmp/imv2-b01-projection-before.log` 中两项测试共八个失败，均为超界值没有被拒绝。
+修复后 `/tmp/imv2-b01-projection-after.log` 中消息投影、快照响应及群响应边界共 16 项 / 3 套件通过。
+新增存储负修订与合法最大值推进用例；没有把合法上界也一并拒绝，没有修改 wire/schema 版本。
+
+具体入口和剩余范围见[消息投影边界](message-projection-integer-boundaries.md)。本批未运行真实 PostgreSQL、App、ClientKit 或全仓套件；
+快照构建累计计数的加法边界仍待修复，B01 继续开放。源码/日志摘要：`/tmp/imv2-b01-projection-sources-20260919.json`。
+
+
+<a id="20260919-snapshot-sequence-bounds"></a>
+
+## 2026-09-19：B01 快照计数约束与 Core 发送序号
+
+更正上一批对快照 worker 的初步判断：schema 39 的累计页数/条数/字节数 CHECK 已将值限制在协议范围，
+有界单页追加不会溢出 Int64。未修改构建算法、未删除约束制造故障；新增真实 PostgreSQL 专项证明边界行为。
+
+- `/tmp/imv2-b01-snapshot-counts.log`：3 项 / 2 套件通过，3.099 秒。
+  新增 6 个计数边界场景，另跑原分页续传/发布/GC，以及空账号/失败恢复。
+  恰好达到上限仍提交页面；再追加会标记失败且不写新页，释放租约并清理 pending token、重置记录，恢复设备游标。
+- `/tmp/imv2-b01-send-sequence.log`：Core 接受与指纹 14 项 / 2 套件通过。
+  新增首序号零、Int64 上界加一、UInt64.max 的拒绝，以及最后合法序号成功、耗尽后重放/冲突/新提交组合。
+  `V2SendMessageReducer` 在首次接受前验证持久化范围，返回 `invalidRoomSequence`；不使用截断或饱和递增。
+
+快照测试使用合成累计计数，不代表容量测试；Core 修复不等于所有生产写库此前都存在同样问题。
+详见[入口核对](message-projection-integer-boundaries.md)。本轮不修改协议/schema，未运行全仓测试，B01 继续开放。
+源码/日志摘要：`/tmp/imv2-b01-snapshot-sequence-sources-20260919.json`。未提交或部署。
+
+
+<a id="20260919-cache-worker-integer-bounds"></a>
+
+## 2026-09-19：B01 私聊缓存与后台重试边界
+
+扩展两个私聊缓存套件，覆盖 Int64.max - 1 到最后合法修订、迟到和重复回调不再次递增；
+扩展持久任务退避套件，覆盖 Int32.max、Int.max - 1、Int.max。
+调用链核对确认单条/批量数据库回复标记更新已有 Int64 上界条件，缓存派生依赖该成功更新。
+没有为绕过生产前置条件的合成调用增加新的业务分支。
+
+原生 PostgreSQL 脚本过滤两个缓存套件、持久任务错误分类套件及三个数据库测试：
+`pushWakeRetryCounterBoundary`、`migrationRetentionRetryCounterBoundary`、`mediaSessionRetryCounterBoundary`。
+`/tmp/imv2-b01-cache-worker-boundaries.log` 记录 16 项 / 4 套件通过，17.941 秒；
+数据库参数场景分别为 6、6、12，覆盖饱和重试/旧完成隔离，以及媒体最后合法认领与耗尽后不写入。
+这不是生产长稳或所有 worker 的验证。
+
+另核对事务重试辅助函数的生产调用点，均使用默认最多两次重试；当前乘法输入有界。
+没有将该只读结论写成任意 maximumRetryCount 的测试证明。
+详见[入口清单](message-projection-integer-boundaries.md)。本批无生产代码变更，未跑全仓测试，B01 保持开放。
+源码与日志摘要：`/tmp/imv2-b01-cache-worker-sources-20260919.json`。未提交或部署。
+
+
+<a id="20260919-client-recovery-integer-bounds"></a>
+
+## 2026-09-19：B01 客户端恢复整数与事务边界
+
+新增 `V2RoomRecoveryIntegerBoundsTests` 两项真实 SQLite 测试：最后合法调度序号成功，耗尽后
+retryRoomRecoveryWork 抛 invalidWork 且重试时间、待办与调度序号保持原值；完整房间状态的
+最大合法值读写一致，六个负状态字段被 schema 拒绝，超界通知不改写现有任务。
+
+定向运行 `V2RoomRecoveryIntegerBoundsTests`、`V2RoomRecoveryPersistenceTests`、
+`V2ProjectionRecoveryBoundsTests`、`V2SyncCursorRecoveryBoundsTests`、
+`V2PendingCommandRecoveryBoundsTests`：26 项 / 5 套件通过，0.430 秒。
+日志 `/tmp/imv2-b01-client-recovery-integers.log`。既有命令恢复 14 字段 × 5 数值是 Row 解码测试，
+不描述成数据库重开；游标恢复套件实际执行 SQLite 写入、关闭和重开。
+
+本批仅新增测试并完善[入口映射](message-projection-integer-boundaries.md)。没有新增生产算法，
+没有关闭约束来制造失败，未跑全仓或设备验收。B01 仍开放，其他 worker/outbox/分页入口映射待完成。
+源码和日志摘要：`/tmp/imv2-b01-client-recovery-sources-20260919.json`。
+
+
+<a id="20260919-recovery-storage-types"></a>
+
+## 2026-09-19：B01 SQLite 恢复表精确整数读取
+
+修复 `GRDBV2RoomRecoveryWork`：目标序号、调度序号及六个房间状态字段先校验
+`DatabaseValue.storage` 为非负 int64，再转换或递增。SQLite INTEGER affinity 与非负 CHECK
+仍允许 REAL 存储；上一批负值约束测试未覆盖此情况。此次没有调整约束或 schema。
+
+`V2RoomRecoveryIntegerBoundsTests.nonintegerStorageFailsWithoutMutation` 含 5 字段 × 2 数值：
+1.5 和 Double(Int64.max)。真实数据库在完整约束下接受测试写入；业务读取返回 invalidWork，
+存储值、real 类型和重试时间保持不变；显式修复测试数据后重新读取成功。
+没有声称正常生产写入会生成这些 REAL 值；此修复针对持久化恢复入口的异常数据处理。
+
+运行恢复整数、恢复持久化、恢复引擎三个套件及 outbox 的 retryCounterBounds、
+nonintegerRetryCounter 两项：48 项 / 4 套件通过，1.779 秒。
+日志 `/tmp/imv2-b01-recovery-storage-types.log`。其中 outbox 的既有负计数测试会关闭 CHECK
+模拟损坏，恢复表新增 10 场景没有关闭约束，二者证据范围不同。
+未运行全仓/App/真机验收。B01 继续开放；其他 SQLite 读取不能直接继承此结论。
+源码摘要 `/tmp/imv2-b01-recovery-storage-types-sources-20260919.json`。
+
+
+<a id="20260919-recovery-authority-integers"></a>
+
+## 2026-09-19：B01 恢复成员资格与摘要的整数读取
+
+将恢复表的精确存储类型检查扩展至成员资格栅栏/授权比较，以及最新消息摘要的版本、计数、
+内容游标和本地消息修订。MAX(room_sequence) 仍用原聚合查询，空值按原契约为零。
+异常存储返回 invalidWork，不进行近似转换，不据此授予资格、提交摘要或删除恢复待办。
+
+新增 2 个真实 SQLite 成员修订场景和 12 个摘要 Row 解码场景；真实成员写入保持数据库约束开启。
+运行 `V2RoomRecoveryIntegerBoundsTests|V2RoomRecoveryPersistenceTests|V2RoomRecoveryEngineTests`，
+48 项 / 3 套件通过，1.783 秒，日志 `/tmp/imv2-b01-recovery-authority-integers-after.log`。
+初次编译因可空聚合闭包把零推断成 Int 而失败，已显式指定返回 Int64 后重跑；
+失败日志保留 `/tmp/imv2-b01-recovery-authority-integers.log`，不计为测试通过。
+
+未改变 schema/协议，未跑全仓/App/真机。其他本地表与 B01 剩余映射仍开放。
+源码/日志摘要：`/tmp/imv2-b01-recovery-authority-sources-20260919.json`。
+
+
+<a id="20260919-remaining-worker-integers"></a>
+
+## 2026-09-19：B01 其余后台任务计数核验
+
+读取当前饱和递增实现后，执行原生 PostgreSQL 定向过滤：
+`propagationRetryCounterBoundary|contentReviewRetryCounterBoundary|groupWakeRetryCounterBoundary|mediaWorkerRetryCounterBoundary`。
+四项测试 / 一套件通过，50.695 秒；参数场景分别 24、12、12、24，共 72。
+日志 `/tmp/imv2-b01-remaining-worker-integers.log`。覆盖传播效果去重、审核决策/暂停、群唤醒新修订保留，
+媒体瞬时失败继续重试且不阻挡健康任务。均包含计数上限或最后合法推进及部分过期租约组合。
+不是迁移、容量或全体后台任务完整验收；群唤醒测试旧展示名含 Hybrid，不代表运行旧投递架构。
+
+另完成客户端 16 个命令重试存储入口到共享精确计数 helper 的映射，以及五个分页/窗口 API 的
+limit 加一上界核对，详见[整数入口清单](message-projection-integer-boundaries.md)。这些调用点本轮为源码核对，
+不声称 16 条业务端到端全部重跑。本轮未新增测试或生产代码变更，B01 继续开放。
+源码/日志摘要：`/tmp/imv2-b01-remaining-worker-sources-20260919.json`。未提交、部署或运行全仓套件。
+
+
+<a id="20260919-send-completion-retention"></a>
+
+## 2026-09-19：B11 接受记录保留与真实维护回归
+
+当前源码核对确认：SendMessage 没有服务端可验证的旧操作期限/代次，35 天常量只是最短保留期；
+`v2ForwardSourceVisibility` 同时依赖接受记录中的 accepted_membership_revision 作为历史授权事实。
+因此安全 GC 需要同时解决旧操作拒绝和仍存活内容的授权依赖，不能直接加一条按年龄 DELETE。
+现行合同已从历史 v1/v2 实施记录分离，见[接受记录保留与清理](send-completion-retention.md)。
+
+扩展 `sendCompletionIsIndependentOfMutableContent`：完成编辑、撤回、正文删除后，将维护时刻设为
+最短服务端保留期加一天，调用真实控制面维护工作器；检查接受事实不变、重发仍返回原回执、六类
+改参仍冲突、正文行数为零、接受记录一条。三个参数场景通过，1 项 / 1 套件，1.105 秒。
+日志 `/tmp/imv2-b11-completion-retention.log`。参数历史名字仍为 standard/hybrid/hybrid-mention，
+当前实际为标准群、大群和带提及的大群房间日志，不代表旧投递模式仍运行。
+
+本批业务算法未改变，仅补回归、维护列表的禁止误删说明和现行合同。维护器注释是在测试编译期间
+补充，不改变测试二进制语义；不把这次保留验证描述成 GC、迁移或容量完成。未跑全仓，B11 仍开放。
+源码/日志摘要：`/tmp/imv2-b11-retention-sources-20260919.json`。测试库已清理，未提交或部署。
+
+
+<a id="20260919-role-policy-storage"></a>
+
+## 2026-09-19：B01 角色权限恢复的整数类型
+
+修复角色恢复任务建立、成员版本匹配、基线完成及权限读取中的直接整数转换。
+新增 `rolePolicyInteger` 统一检查真实 integer 类型及字段下界；读取完整先前基线后再决定版本合并。
+没有用截断、默认零或覆盖异常数据的方式消除错误。既有 Int32 饱和重试计数逻辑保持不变。
+
+新增 8 个真实 SQLite 场景，包含房间成员修订与三项权限基线字段，各写入 1.5 或 Double(Int64.max)，
+约束保持开启。验证异常返回 invalidMessagePayload，重置任务的删除回滚、原请求及原值保留；
+修复测试数据后同一待办可成功完成。
+
+- `/tmp/imv2-b01-role-policy-storage.log`：9 项 / 1 套件通过，0.366 秒。
+- `/tmp/imv2-b01-role-policy-regression.log`：10 项 / 1 套件通过，0.278 秒。
+
+两组过滤不同，共 19 项；补充组覆盖正常重开、权限来源/快照及后台运行器，未跑整个同步套件或全仓。
+B01 仍开放。源码与日志摘要 `/tmp/imv2-b01-role-policy-sources-20260919.json`。未提交或部署。
+
+
+<a id="20260919-command-storage-types"></a>
+
+## 2026-09-19：B01 待执行命令修订/序号的精确类型
+
+`GRDBV2LocalSyncStore` 的 17 个可选、4 个必填 commandStorageUnsigned 调用点改为先读取
+DatabaseValue 并检查 integer，之后执行非负 UInt64 转换；可选 NULL 仍为 nil。
+覆盖消息接受、编辑/撤回、成员/审核、禁言、表情和已读结果恢复，异常抛 commandConflict。
+
+边界测试保留编辑/撤回/成员/回执 14 个字段的 70 个整数 Row 解码场景，增加 28 个 REAL 场景。
+这些是解码测试，不声称写入/关闭/重开。受影响 outbox 现有业务测试另覆盖正常写入、重试及终态行为。
+41 项 / 10 套件通过，0.462 秒，日志 `/tmp/imv2-b01-command-storage-types.log`。
+
+未改 schema/协议，未跑全仓或设备测试。B01 仍开放；源码/日志摘要
+`/tmp/imv2-b01-command-storage-sources-20260919.json`。未提交或部署。
+
+
+<a id="20260919-projection-storage-types"></a>
+
+## 2026-09-19：B01 投影与同步的精确 Row 整数转换
+
+`GRDBV2LocalSyncStore` 的 projectionStorageUnsigned 五处和 storageUnsigned 十一处 Row 调用
+先检查实际 integer 类型，之后复用原非负转换。保留原投影/同步错误分类、合法零与最大值行为。
+涉及消息投影、同步记录、资料版本、快照累计值和其他引用这些 helper 的恢复读取。
+新增 8 个 REAL 投影解码场景；原负值与最大值断言保留。
+
+`V2ProjectionRecoveryBoundsTests|V2SyncEngineTests|V2ProfileRepositoryTests|V2GroupCapability`
+过滤运行共 130 项 / 4 套件通过，2.301 秒；日志 `/tmp/imv2-b01-projection-storage-types.log`。
+共享转换影响完整同步流程，因此运行该模块的同步套件；未跑全仓、App 或真机。
+新增 Row 场景不描述成真实数据库重开。B01 仍开放。
+源码/日志摘要：`/tmp/imv2-b01-projection-storage-sources-20260919.json`。未提交或部署。
+
+
+<a id="20260919-forward-terminal-query"></a>
+
+## 2026-09-19：B04 跨 owner 转发终态元数据查询
+
+新增 `PostgresV2ForwardReceiptStore.terminalStatus`，由 `V2CrossOwnerForwardService` 在 prepare 前调用。
+按 actor/operation/source message/target room 唯一身份联结 export 与 receipt，验证 source room/revision
+以及两侧摘要，再返回原成功/拒绝结果。查询不选择 payload，未命中继续原准备/投递路径，prepare 后仍重查回执。
+无终态路径多一次有界查询，尚未做容量测量；不将此改动描述为已经启用载荷 GC。
+
+新真实 PostgreSQL 测试在不存在源房间/正文/目标库/投递任务的条件下，验证成功、拒绝、摘要不匹配三类记录，
+包含改源房间/修订冲突和不同 actor/operation/target 不命中。fixture 直接插入合法编码导出和回执，
+摘要不匹配记录为显式异常注入；没有删除约束或关闭触发器。
+初轮 `/tmp/imv2-b04-terminal-replay.log` 1 项通过（0.368 秒），补充摘要异常后
+`/tmp/imv2-b04-terminal-replay-after.log` 1 项通过（0.370 秒），两次不是不同测试项。
+
+实际双 owner 业务回归过滤 `forwardRoutedRuntimeLifecycle|forwardTerminalReceiptRecovery`：
+2 项 / 1 套件、6 参数场景通过，4.840 秒，日志 `/tmp/imv2-b04-terminal-runtime-regression.log`。
+覆盖终态回执、源 epoch、事务回滚、标准/大群运行器重启及原转发重放。
+
+[载荷清理边界](forward-terminal-payload-retention.md)明确尚缺 schema 压缩状态、其他读者适配、
+预查未命中后并发压缩栅栏、清理 worker 和完整 room owner 迁移。B04 继续开放。
+文档链接/结构/差异检查通过；未跑全仓、容量或真机，未部署。
+源码/日志摘要 `/tmp/imv2-b04-terminal-query-sources-20260919.json`。
+
+
+<a id="20260919-forward-bodyless-receipt"></a>
+
+## 2026-09-19：B04 终态回执不再携带正文
+
+`V2ForwardTerminalReceipt` 改为 exportID、32 字节 payloadDigest、终态结果，移除完整 export 属性；
+导出构造入口仍为模块内部，另有内部元数据构造入口供目标持久读取使用。服务器调用点同步调整，
+这不是网络协议变更，也不授权客户端凭摘要构造回执。
+
+目标 terminalReceipt 仅查询 completed/rejected 行并用 NULL 代替 payload，不读取正文；pending/accepted
+仍返回 nil。源 record 按导出主键与摘要核对，在首次落盘时从数据库元数据校验源房间 shard/epoch，
+精确旧回执重放沿用原先无需再次授权的规则。工作器/目标 endpoint 均核对 ID 与摘要匹配原导出。
+
+- `/tmp/imv2-b04-bodyless-receipt-regression.log`：4 项 / 1 套件通过，21.050 秒。
+  inbox 接受恢复 2、源回执 4、投递恢复 18、路由运行器 2，共 26 个真实双库参数场景。
+  包含原结果冲突、改正文后的摘要冲突、源 epoch、ACK 丢失、租约、取消和重启断言。
+- `/tmp/imv2-b04-bodyless-receipt-boundaries.log`：2 项 / 1 套件通过，0.362 秒。
+  新增 4 个非法摘要长度拒绝场景；原终态查询成功/拒绝/摘要不匹配数据库专项同轮通过。
+
+schema 仍为 39，没有修改 payload 非空约束或启用清理任务。目标 receive、投递租约等其他读者与
+压缩并发栅栏仍按[清理合同](forward-terminal-payload-retention.md)实施，B04 保持开放。
+未跑全仓、容量或设备测试，未提交或部署；测试库已清理。
+源码/日志摘要 `/tmp/imv2-b04-bodyless-receipt-sources-20260919.json`。
+
+<a id="20260919-forward-inbox-terminal"></a>
+
+## 2026-09-19：B04 目标收件箱终态读取与导入重放
+
+receive 的重复请求查询只读取 payload_digest；输入 V2ForwardExport 已校验完整载荷 SHA-256，
+相同 exportID 而摘要不同仍拒绝。status 与 v2LockForwardInbox 对 completed/rejected 返回空正文，
+pending/accepted 保留完整正文；importForwardExport 先检查摘要，终态返回原结果，未完成任务仍检查正文相等。
+
+真实 PostgreSQL 终态 fixture 在没有房间和业务消息的条件下插入合法终态记录，验证成功/拒绝的 receive、
+status、terminalReceipt、加锁读取及 importForwardExport，断言加锁读取不返回正文、改正文请求冲突。
+未删除 schema 约束或触发器，存储中正文仍在；此测试不宣称物理清理已经可用。
+
+- `/tmp/imv2-b04-inbox-terminal-bodyless.log`：2 项 / 1 套件通过，0.384 秒。
+  包含非法摘要长度 4 场景及源回执/目标终态 fixture。
+- `/tmp/imv2-b04-inbox-terminal-regression.log`：5 项 / 1 套件通过，26.345 秒。
+  接受恢复 2、目标准入/权限/媒体边界 8、私聊收尾及归属变化 4、投递恢复 18、路由运行器 2，
+  合计 34 参数场景。覆盖 pending/accepted 正文路径、终态重放及重启恢复。
+
+schema 39 / 协议 30 未变。源 prepare 并发压缩栅栏、operator 媒体回放、实际载荷压缩及完整房间迁移
+仍按[清理边界](forward-terminal-payload-retention.md)跟踪，B04 保持开放。
+未跑全仓、容量或真机，未提交或部署。
+源码与日志摘要：`/tmp/imv2-b04-inbox-terminal-sources-20260919.json`。
+
+<a id="20260919-forward-prepare-terminal-snapshot"></a>
+
+## 2026-09-19：B04 准备导出在同一快照选择终态或载荷
+
+源端服务改用 prepareForDelivery；原 pair advisory lock 内，一条 SQL 联结 export/receipt，
+可见终态时不选择 payload，校验 source room/revision、导出与回执摘要后返回结果。
+尚无回执则读取并复核完整导出，原首次授权、配额和导出/任务原子提交不变。
+取得完整导出后服务仍重查回执，处理之后发生的提交。公共 prepare 保留返回完整导出的合同；
+实际压缩启用前仍须定义它的无正文行为，不能把此次改动描述为所有 API 已支持压缩。
+
+真实 PostgreSQL fixture 先断言终态预查为空、准备返回原导出，再提交回执并调用生产准备入口，
+验证在源房间/正文不存在时返回原成功或拒绝；更改源绑定及异常回执摘要拒绝。
+这是受控排列“预查未命中 → 回执提交 → 准备查询”，并未执行实际清理或并发压缩工作器。
+SQL 同一快照的读取仍需与后续压缩事务联测。
+
+过滤 PostgresV2ForwardTerminalReplayTests、forwardExportCommitAndReplay、forwardTerminalReceiptRecovery、
+forwardRoutedRuntimeLifecycle，共 5 项 / 2 套件通过，5.795 秒。
+包括终态专项、4 个摘要长度参数，以及导出 2 / 回执 4 / 双 owner 运行器 2 个参数场景。
+日志 `/tmp/imv2-b04-prepare-terminal-snapshot.log`；源码摘要 `/tmp/imv2-b04-prepare-terminal-snapshot-sources-20260919.json`。
+未跑全仓、容量、设备或实际 GC；schema 39 / 协议 30 未变，B04 保持开放。
+
+<a id="20260919-forward-inbox-owner-metadata"></a>
+
+## 2026-09-19：B04 收件箱保存独立归属，operator 重放不读正文
+
+schema 40 为 message_forward_inbox 新增非空 target_shard_id / target_epoch，并约束非空分片、
+非负代次；原身份不可变触发器覆盖新字段。接收导出时与 inbox/media 同事务保存。
+operator 媒体重放改读归属和 state，通过不可删除的 inbox_media 行校验 ordinal；保留
+inbox → room → import 锁顺序、当前归属检查、仅 pending inbox 重排 paused 工作及原审计幂等规则。
+不再为终态或非终态 operator 请求选择/解码 payload，错误序号及旧归属仍拒绝。
+
+新建库标识、Swift/SQL 启动门禁、实现状态文档及生命周期测试的旧版注入脚本同步到 schema 40；
+协议仍为 30，无旧库迁移脚本。本次没有放宽正文非空、不可变或删除约束，没有启用清理任务。
+
+- `/tmp/imv2-b04-inbox-owner-metadata.log`：5 项 / 2 套件通过，28.961 秒。
+  含摘要长度 4、收件箱接受恢复 2、operator 投递/媒体 2、schema 漂移 42 个参数场景，及终态 fixture。
+  schema 新增缺归属分片非空、缺代次、缺归属约束 3 场景，Swift 和 SQL 门禁均拒绝。
+  operator 补验证归属元数据不可改、拒绝终态的新请求返回 notPaused、旧审计重放不变、
+  不存在媒体序号/错误分片/当前 epoch 已变化时新请求拒绝。没有物理清理后的重放验证。
+- `/tmp/imv2-b04-schema40-bootstrap.log`：原生 PostgreSQL 新建库、恢复及结构漂移脚本通过。
+  使用独立创建的临时数据库；测试后已清理。
+
+文档链接、结构、schema 表覆盖、协议文档及差异检查通过；未跑全仓、容量或真机，未提交或部署。
+B04 仍须完成实际压缩状态、清理工作器、剩余读者/媒体保留边界与完整房间迁移。
+源码/日志摘要：`/tmp/imv2-b04-inbox-owner-metadata-sources-20260919.json`。
+
+<a id="20260919-forward-inbox-compaction"></a>
+
+## 2026-09-19：B04 目标终态正文实际清理与维护接线
+
+schema 41 为目标 inbox 引入 payload_compacted_at 和单向清理约束。仅已完成/拒绝的正文可以置空，
+身份、摘要、结果、时间及其他元数据必须不变；清理后的正文不能恢复，记录不可删除。
+新增按 completed_at/export_id 的部分索引，canonical 基线为 149 表、350 索引。
+源 export 载荷仍非空且不可修改；不将目标清理描述为双端全部完成。
+
+PostgresV2ForwardInboxCompactor 按 7 天终态排查保留期、1...1024 有界批量执行，
+单条 SQL + FOR UPDATE SKIP LOCKED 原子转换；Gateway 现有维护任务调用各 owner 后台库，
+沿用取消/关闭生命周期。7 天不是幂等身份期限；身份、摘要、结果及媒体映射没有删除。
+没有部署、修改生产库或清理媒体对象/备份。
+
+真实 PostgreSQL fixture 对成功、拒绝验证：pending/accepted 不清理、未满期限不清理、
+非法提前置空拒绝、事务取消回滚后仍可清理、4 个并发清理器合计只清理一次、再次运行零行。
+直接查询断言数据库 payload 已为空，随后运行 receive、status、terminalReceipt、加锁读取和
+importForwardExport，原结果仍可重放，改参冲突仍拒绝，恢复正文/删除身份仍失败。
+operator 媒体测试先实际清理拒绝终态正文，再验证迟到请求、序号、归属和原审计重放。
+这些测试不等同 SIGKILL 或真实媒体存储并发清理验收。
+
+- `/tmp/imv2-b04-inbox-compaction-final.log`：6 项 / 2 套件通过，43.604 秒。
+  含终态 fixture、摘要长度 4、收件箱接受恢复 2、operator 2、投递恢复 18、schema 漂移 45 参数场景。
+  漂移覆盖缺清理列、约束和扫描索引；Swift 与 SQL 启动门禁均拒绝。
+- `/tmp/imv2-b04-schema41-bootstrap-final.log`：新建库、schema 恢复与结构漂移通过。
+- 初次 bootstrap 的约束自动命名冲突、索引数量基线失败日志保留在
+  `/tmp/imv2-b04-schema41-bootstrap.log`、`/tmp/imv2-b04-schema41-bootstrap-after.log`。
+  修正期间的旧编译产物在 `/tmp/imv2-b04-inbox-compaction.log` 有 1 项结构断言失败；
+  最终源码重新编译并运行上述 final 日志，历史失败不作为通过证据。
+
+文档、schema 表覆盖、协议文档及差异检查通过；未跑全仓、容量或真机，未提交或部署。
+尚须完成源端清理、进程强杀/媒体组合及完整 owner 迁移，B04 保持开放。
+源码/日志摘要：`/tmp/imv2-b04-inbox-compaction-sources-20260919.json`。
+
+<a id="20260919-forward-source-compaction"></a>
+
+## 2026-09-19：B04 源 export 终态正文清理
+
+schema 42 为源 export 增加 delivery_completed_at / payload_compacted_at。投递 job 完成触发器
+与 job 同事务写入完成标记，导出不可变触发器必须看到 completed job、相同完成时间和匹配摘要的回执。
+源清理器按部分索引扫描，要求投递与回执均满 7 天、两侧摘要一致；单批 1...1024，SKIP LOCKED，
+只把正文置空。身份、路由、媒体 ID、摘要与回执不清理，禁止恢复正文或制造新的接受。
+Gateway 原有维护任务已接入源清理，与目标清理分别处理失败和取消。
+
+业务 prepareForDelivery 在清理后返回原终态；直接 prepare 在验证原绑定及回执后抛出
+payloadCompacted，不误报源不存在或重新导出。旧租约不能 complete/reschedule 已完成任务。
+保留期不是幂等身份期限；源媒体引用释放沿用终态回执规则，未声称清理媒体对象或备份。
+
+真实 PostgreSQL 新增：仅有回执不可清理、paused/pending/claimed 不清理、伪造完成资格拒绝、
+完成标记与投递完成共同回滚、未满期限跳过、清理回滚、4 个并发清理器只更新一次、重复运行零行。
+确认实际 payload=NULL；原接受/拒绝结果、迟到源回执、目标导入、改参冲突和直接 prepare 错误仍正确。
+摘要错误的回执不能使 job 完成并建立清理资格。未删除约束或关闭业务触发器。
+
+- `/tmp/imv2-b04-source-compaction.log`：业务回归 5 项通过，包含导出 2、回执 4、投递恢复 18、
+  双 owner 运行器 2、schema 漂移 50，共 76 参数场景；该轮整体 7 项中新增 fixture 有 1 项失败，
+  原因是测试直接尝试 paused → claimed，被原状态机拒绝，不能把本轮称为全绿。
+- 修正测试为 paused → pending → claimed，未修改生产代码或已通过的业务测试，定向重跑
+  `/tmp/imv2-b04-source-compaction-after.log`：2 项 / 1 套件通过，0.408 秒。
+- `/tmp/imv2-b04-schema42-bootstrap-final.log`：新建库、恢复、结构漂移通过。
+  基线 149 表、351 索引、26 应用触发器、24 函数；早期计数基线失败日志
+  `/tmp/imv2-b04-schema42-bootstrap.log`、`/tmp/imv2-b04-schema42-bootstrap-after.log` 保留。
+
+文档、schema 表覆盖、协议文档和差异检查通过。未跑全仓、容量、真机或 SIGKILL，未部署或提交。
+B04 仍缺强杀/媒体端到端组合、成本和完整房间迁移证据。
+源码/日志摘要：`/tmp/imv2-b04-source-compaction-sources-20260919.json`。
+
+<a id="20260919-forward-media-terminal-compaction"></a>
+
+## 2026-09-19：B04 真实媒体复制后双端清理与迟到回调
+
+扩展 forwardMediaImportBytesAndRecovery 两个参数：compact-success / compact-rejected。
+使用真实 source/target PostgreSQL 与两个独立本地文件 provider，复制真实字节并记录摘要。
+成功路径扫描并接受消息；拒绝路径在原媒体租约有效时冻结目标房间，使收件箱拒绝。
+
+两条路径均验证 pending 不清理；目标先实际清理正文时，源仍没有回执/完成状态，源不能清理。
+目标 endpoint 未配置媒体工作器也可重放终态；源记录回执仍不立即清理，投递完成后才清理。
+SQL 直接断言两端 payload=NULL。迟到 recordCopied/complete/reject/retry 和 claim 使用仍在原租约
+有效期内的逻辑回调时间，全部不能写入；拒绝不能仅归因于租约过期。operator 返回 notPaused。
+真实删除源文件后，目标 endpoint 与源服务仍返回原接受/拒绝结果，目标文件字节不变，
+媒体对象、导入任务、映射和消息的整体快照不变；对象数保持 1，成功 1 条消息、拒绝 0 条消息。
+
+`/tmp/imv2-b04-media-terminal-compaction.log`：1 项 / 1 套件、16 参数场景全部通过，12.531 秒。
+包含原大文件、扫描重试、ACK 丢失、租约、并发复制、取消、双附件、EICAR 等 14 场景和新增 2 场景。
+本轮仅修改测试与文档，schema 42 / 协议 30 不变，未修改生产代码或重跑全仓。
+
+边界：测试单独推进正文清理的时钟，没有执行七天后的媒体对象过期流程；复制在清理前已完成，
+不代表在途复制跨清理、生产对象存储、孤立对象擦除、SIGKILL、容量或完整房间迁移均已通过。
+B04 继续开放。文档链接/结构及差异检查通过；未提交或部署，临时数据库和文件已清理。
+源码/日志摘要：`/tmp/imv2-b04-media-terminal-compaction-sources-20260919.json`。
+
+<a id="20260919-forward-local-purge-fence"></a>
+
+## 2026-09-19：B04 本地媒体删除后禁止迟到提交重建对象
+
+发现 V2LocalFilesystemMediaProvider.purge 仅 unlink 最终文件，正在暂存的普通上传或转发复制
+随后仍可 move/link 回同一对象。修复为持久 `.object-state` 删除标记与每对象 flock：
+两类提交与删除共用锁；删除同步标记和目录后 unlink，重复删除也同步既有标记，再同步对象目录。
+各读取入口检查标记，处理标记已写入但旧文件尚未移除的状态。锁文件不删除，避免 inode 更换破坏互斥。
+标记跨 provider 重建/prepare 保留；标记和锁文件无自动 GC，媒体 ID 不得复用。
+文件锁与 I/O 在既有 detached utility 工作中执行，不阻塞 NIO event loop。
+
+新增测试覆盖普通和转发两条提交：已暂存后被另一个 provider 删除，再提交拒绝；
+每条路径 8 次提交/删除并发，最终不能下载；重新构造 provider 并 prepare 后同一 ID 上传仍拒绝。
+另重建“标记已持久但旧文件仍在”的磁盘状态，旧下载目标、扫描及转发对象复核均拒绝，重复 purge 移除文件。
+这不是实际 SIGKILL 或多进程/Linux 文件系统验收。
+
+旧 concurrent 复制测试原用 purge 模拟未确认文件丢失，却要求同 ID 重建。现改为直接移除测试文件，
+明确模拟偶发丢失；永久删除由新增用例验证。没有放宽已删除对象的防护来满足旧测试。
+
+- `/tmp/imv2-b04-local-purge-fence.log`：12 项 / 3 套件通过，0.043 秒。
+  新删除防护、原本地 provider 和 Vapor 字节路由专项。
+- `/tmp/imv2-b04-local-purge-media-regression.log`：1 项 / 1 套件，16 参数场景通过，12.603 秒。
+  真实双 PostgreSQL、本地文件复制/扫描/回收及双端正文清理后的媒体终态重放回归。
+
+schema 42 / 协议 30 未变。该 provider 只用于本地开发，生产存储防迟到写入仍由 E03 验收。
+未跑全仓、真机、容量或强杀；未提交或部署。文档链接/结构和差异检查通过，临时测试库已清理。
+源码/日志摘要：`/tmp/imv2-b04-local-purge-fence-sources-20260919.json`。
+
+<a id="20260919-forward-local-purge-sigkill"></a>
+
+## 2026-09-19：B04 本地媒体真实 SIGKILL 与独立进程恢复
+
+新增 macOS 专项 V2LocalMediaPurgeCrashTests，复用仓库已有 Swift Testing 子进程宿主机制。
+对 staged / installed / purged 三个检查点，各启动一个真实进程执行当前 provider，写入检查点后
+直接 SIGKILL 自身；父进程要求退出原因为 uncaughtSignal、信号为 SIGKILL，且检查点内容匹配。
+每次再启动另一个真实进程，仅从文件系统恢复并要求正常退出，共六个子进程。
+
+验证范围：暂存后中断不产生最终对象，prepare 清理暂存并允许重试；安装后中断保留原字节，
+清理遗留暂存后同 ID/摘要安装仍幂等；删除完成后中断，新的 provider 仍拒绝同 ID 的转发安装。
+每个子进程有 30 秒超时，并通过检查点防止超时杀进程被当成检查点通过；取消只终止本测试子进程。
+
+`/tmp/imv2-b04-local-purge-sigkill-after.log`：1 项 / 1 套件、3 参数场景通过，0.430 秒。
+初轮日志 `/tmp/imv2-b04-local-purge-sigkill.log` 为测试诊断字符串类型的编译失败，修正后重跑；
+未修改生产代码，也未重跑数据库/全仓套件。schema 42 / 协议 30 不变。
+
+本证据是应用进程在 API 边界被 SIGKILL；不是文件系统掉电、fsync 内强杀、多进程同时竞争、
+数据库清理事务强杀、生产对象存储或 Linux 验收。B04 仍有对应组合、容量与完整房间迁移缺口。
+文档链接/结构及差异检查通过，未提交或部署，子进程和临时文件已收尾。
+源码/日志摘要：`/tmp/imv2-b04-local-purge-sigkill-sources-20260919.json`。
+
+<a id="20260919-forward-compaction-sigkill"></a>
+
+## 2026-09-19：B04 清理事务提交前后真实 SIGKILL
+
+新增 PostgresV2ForwardCompactionCrashTests，源/目标 × 提交前/提交后 × 接受/拒绝共 8 个参数场景。
+每个场景由真实子进程调用当前 PostgresV2ForwardExportCompactor 或 PostgresV2ForwardInboxCompactor，
+提交前场景在外层 Fluent 事务内执行清理 SQL，确认更新 1 行后 SIGKILL；提交后场景在清理器返回后 SIGKILL。
+父进程检查实际退出信号和检查点，再启动独立恢复进程，共 16 个子进程。
+未提交场景记录真实 PostgreSQL backend PID，恢复进程先确认该连接已消失再检查与重跑。
+
+恢复验证：提交前正文和摘要保留、清理时间为空，重跑更新 1 行；提交后正文已空、摘要保留、
+清理时间非空，重跑更新 0 行；再次运行均为 0。未选中的另一侧表正文保持不变。
+源终态查询/回执重放/prepareForDelivery 和目标 receive/terminalReceipt/importForwardExport
+仍返回相同成功或拒绝结果。没有源房间与业务正文可用于重新授权或重新接受。
+
+`/tmp/imv2-b04-compaction-sigkill-after.log`：1 项 / 1 套件，8 参数全部通过，4.431 秒。
+初轮 `/tmp/imv2-b04-compaction-sigkill.log` 为测试局部函数缺 @Sendable 的编译失败，修正后定向重跑。
+本轮仅新增测试及文档，schema 42 / 协议 30 不变，无生产代码修改。
+
+范围：在脚本拥有的临时 PostgreSQL 数据库中，用合法导出/回执/收件箱 fixture 分别执行两侧真实清理器；
+两侧表位于同一临时物理库，用于验证各自本地事务，不代表跨 owner 网络故障或完整运行器联动。
+SIGKILL 杀的是清理客户端，不是 PostgreSQL 服务，也不是 WAL/PITR、主机掉电或 Linux 验收。
+B04 仍缺运行器/外部媒体副作用组合、容量成本与完整 owner 迁移。
+文档链接/结构及差异检查通过；未跑全仓、未提交或部署，子进程和测试数据库已收尾。
+源码/日志摘要：`/tmp/imv2-b04-compaction-sigkill-sources-20260919.json`。
+
+<a id="20260919-forward-compaction-cost"></a>
+
+## 2026-09-19：B04 清理 SQL 成本与源端历史回执扫描修复
+
+新增 `scripts/measure_v2_forward_compaction.py`，只在其创建的唯一临时数据库加载当前 schema，
+直接提取 Swift 清理器中的 SQL 并替换已知绑定；未知绑定拒绝执行。保存完整
+EXPLAIN (ANALYZE, BUFFERS, WAL, FORMAT JSON)、PostgreSQL 版本及源码/schema/脚本摘要。
+每组装载后 VACUUM ANALYZE；每次测量实际 UPDATE、触发器与 WAL，随后 ROLLBACK。
+不修改服务端设置，不通过关闭顺序扫描强迫计划。
+
+数据集：1,000/10,000 条记录配 1 KiB 文本，另有 1,000 条配 64 KiB 文本；文本用逐行不同的散列片段构造。
+75% 为已清理历史终态，5% 为可清理旧终态，5% 为近期终态，其余为未完成任务；
+最终 fixture 的可清理集合包含成功和拒绝。两侧分别测量 limit 1/128/1024，共 18 组。
+每组更新条数必须等于 min(limit, rows/20)，万行源端小批不得全扫历史 receipt/job。
+
+发现与修复：原源端 JOIN 在 10,000 条记录、limit=1 时先扫描 8,000 条旧回执
+（另过滤 500 条近期回执），核验 500 个完成任务，再选 1 条。现在使用主键标量子查询，
+保持 job 状态/时间、receipt 摘要/记录时间全部条件不变，缺行不满足条件；部分索引按时间选候选。
+最终万行 limit=1/128 分别只查询 1/128 条任务及回执；目标小批同样走候选索引。
+目标 limit=1024、更新 500 行时仍有 UPDATE 连接输入的全表扫描，不宣称扫描量在所有分布下都受 limit 限制。
+
+| 最终数据集与批量 | 源端实际更新 / 执行时间 / WAL 字节 | 目标实际更新 / 执行时间 / WAL 字节 |
+| --- | --- | --- |
+| 10,000 条 / 1 KiB / limit 1 | 1 / 0.973 ms / 877 | 1 / 0.796 ms / 513 |
+| 10,000 条 / 1 KiB / limit 128 | 128 / 5.089 ms / 106,368 | 128 / 2.970 ms / 63,864 |
+| 1,000 条 / 64 KiB / limit 128 | 50 / 5.829 ms / 136,050 | 50 / 4.593 ms / 119,550 |
+
+原测量 `/tmp/imv2-b04-compaction-cost.{json,log}` 保留旧 SQL 与计划。
+中间 `/tmp/imv2-b04-compaction-cost-after.log` 因修改 fixture 成功/拒绝分布时误改 bucket 表达式，
+更新数断言失败；修正脚本后重新运行。最终 `/tmp/imv2-b04-compaction-cost-final.{json,log}` 全部通过。
+前后 fixture 的成功/拒绝比例不同，因此不将时延差作为严格性能提升比率；扫描计划本身证明原问题及修复。
+
+修改后 `/tmp/imv2-b04-compaction-cost-regression.log`：两套件通过，清理/并发重放与摘要边界通过，
+8 个成功/拒绝、源/目标、提交前后 SIGKILL 场景通过，总计 4.251 秒。
+测试框架汇总 4 项，其中子进程专用入口在父进程中按设计跳过，由 8 个场景实际启动执行。
+未改 schema 42 / 协议 30，未跑全仓业务套件。
+
+这些是单机缓存命中的 SQL 探针，每轮回滚后可能留有已回滚版本；不提供冷缓存、百分位延迟、
+混合业务、运行器开销、复制中断、长期身份增长或生产容量结论。B04 继续开放，完整归属迁移仍依赖 B27。
+源码及日志摘要：`/tmp/imv2-b04-compaction-cost-sources-20260919.json`。未提交或部署。
+
+<a id="20260919-forward-copy-purge-interleaving"></a>
+
+## 2026-09-19：B04 导入工作器复制回调与媒体清除交错
+
+在真实双库、本地文件的 forwardMediaImportBytesAndRecovery 专项中新增
+purge-before-copy / purge-after-copy 两个参数。测试包装器仅在真实 copier 调用前或返回后插入检查点，
+实际字节 I/O、claim、回调、重试判定均由现有导入工作器和提供方执行。
+这是确定性排列交错，不是操作系统随机竞争，也不是在文件字节流中段暂停。
+
+检查点中，在临时媒体到期后先运行真实 retention worker，确认 pending inbox 仍阻止过期；
+随后冻结目标房间，通过真实 claim 授权检查把 inbox 置为 ROOM_FROZEN，
+再次运行 retention worker，实际标记过期并创建 purge outbox，再由真实 purge worker 清除对象。
+同一检查点内重复 purge 无新工作，下载目标签发拒绝。
+
+释放复制调用后，before-copy 场景实际尝试复制/安装但被删除标记阻止，after-copy 场景返回清除前的成功回执；
+导入工作器都应返回 superseded，再次运行 idle。原租约仍未到期，结果不能归因于时间超时。
+检查媒体保持 expired、copied_digest 仍为空、purge outbox 已完成、没有接受消息且对象仍不可访问。
+随后推进到 7 天保留期后实际清理 inbox 正文，并经 endpoint 重放原 ROOM_FROZEN 回执。
+
+本轮只新增测试，生产路径沿用此前的本地删除标记与持久状态栅栏。
+`/tmp/imv2-b04-copy-purge-interleaving.log`：1 项 / 1 套件、18 个参数场景全部通过，14.104 秒。
+新增两种交错与原有 16 场景同轮通过；未跑全仓业务套件，schema 42 / 协议 30 不变。
+源码/日志摘要：`/tmp/imv2-b04-copy-purge-interleaving-sources-20260919.json`。未提交或部署。
+范围不包括进程强杀、生产对象存储、文件流中段停顿、完整源投递运行器或房间归属迁移。
+
+<a id="20260919-forward-media-prepare-flight"></a>
+
+## 2026-09-19：B04 本地媒体初始化重入修复
+
+检查取消/重启路径时发现 V2LocalFilesystemMediaProvider.prepare 在 didPrepare=false 后等待文件 I/O，
+同一 actor 的其他调用可在等待期间再次进入删除/重建 .upload-staging 的操作。
+32 个并发调用的真实文件系统专项复现目录重复创建错误；这也使较早调用返回后开始的暂存上传暴露于后续删除。
+
+现由提供方持有一个初始化 Task，在首次 await 之前保存；其他调用等待该任务。
+成功后置 didPrepare，成功或失败均由任务自身清除运行中引用，失败后可重试。
+调用方取消不取消共享初始化，各调用等待已拥有的文件操作收尾；实际阻塞文件操作仍在 utility detached task 中执行。
+这只协调同一提供方实例，不是多个实例/进程共用媒体根目录的启动锁。
+
+新增 V2LocalMediaPrepareConcurrencyTests：32 次初始化后立即各写一个独立暂存文件，
+全部返回后核验 32 份字节均保留并提交、下载一致；另验证根路径被普通文件占用导致失败后，移除阻碍可重试成功。
+初轮 `/tmp/imv2-b04-media-prepare-before.log` 为测试误读 fileprivate 字段的编译失败，
+修正测试为自行保存媒体 ID 后，`/tmp/imv2-b04-media-prepare-repro.log` 在未改生产代码时复现目录创建竞态。
+修改后 `/tmp/imv2-b04-media-prepare-after.log`：4 套件、框架汇总 12 项，0.170 秒；
+32 并发初始化、失败重试、原提供方行为、删除栅栏和 3 个 SIGKILL 恢复参数通过。
+子进程入口在父进程中按设计跳过，由 SIGKILL 参数实际启动执行。
+真实双库媒体复制回归 `/tmp/imv2-b04-media-prepare-copy-regression.log`：18 参数全部通过，14.156 秒。
+没有扩大到全仓业务测试；schema 42 / 协议 30 不变，未提交或部署。
+源码/日志摘要：`/tmp/imv2-b04-media-prepare-sources-20260919.json`。
+
+<a id="20260919-forward-runtime-compacted-retry"></a>
+
+## 2026-09-19：B04 媒体运行器回执丢失、正文清理与不可达重试
+
+在真实双库、本地文件专项新增 runtime-ack-loss-compacted 参数，驱动完整
+V2ForwardDeliveryRuntime → DeliveryWorker → ImportEndpoint → MediaImportWorker → 真实本地 copier/scanner。
+第一次目标正常提交媒体和消息，测试投递边界丢弃终态回执并抛 targetUnavailable；
+等待源任务持久化 pending/retry_count=1 后取消并等待运行器退出。
+
+推进逻辑时钟超过 7 天，实际清理目标 inbox 正文，源端没有收到回执所以不能清理。
+第二个运行器使用缺少目标分片的配置注册表，模拟目标不可达，必须持久化 pending/retry_count=2，
+不能形成拒绝回执或放行源正文清理。再次取消并等待退出。
+
+移除源提供方文件以模拟源字节不可用；第三个运行器连接不配置媒体 worker 的真实 endpoint，
+必须从已清理正文的目标终态取回原结果，完成源任务（retry_count=3）。
+验证源回执与原接受结果一致、目标仅一条消息和一个媒体对象、目标字节不变；
+再推进源回执与完成时间的保留期，实际清理源正文，目标重放仍保持原结果。
+每次运行器均有有界状态等待并在成功/异常路径取消及等待，不能留下后台任务。
+
+本场景故障由受信投递接口和配置路由注入，不是真实网络断连；三次运行器均为同一测试进程内重建，
+不是跨进程 SIGKILL。源字节删除为故障注入，不宣称业务媒体保留策略会提前删除来源。
+没有新增生产代码；完整进程强杀、生产外部存储和归属迁移仍开放。
+`/tmp/imv2-b04-runtime-compacted-retry.log`：1 项 / 1 套件、19 参数场景全部通过，15.307 秒。
+新增运行器组合与原 18 个媒体场景同轮通过；未跑全仓业务套件，schema 42 / 协议 30 不变。
+源码/日志摘要：`/tmp/imv2-b04-runtime-compacted-retry-sources-20260919.json`。未提交或部署。
+
+<a id="20260919-snapshot-storage-types"></a>
+
+## 2026-09-19：B01 快照导入存储类型保护
+
+快照清单匹配、恢复页索引、应用页、准备切换与确认切换原有部分直接 Int64/Int 解码，
+现对八个持久化整数字段先检查 SQLite 的实际 integer 类型，再执行原领域范围/一致性校验。
+新增 16 参数 × 3 阶段共 48 组合，确认 REAL 输入返回 storageRangeExceeded，
+原字段值/类型和游标保持；显式修复测试数据后同一快照继续成功。
+页索引注入临时绕过 next_page_index<=page_count，其他字段保留正常约束。
+
+`/tmp/imv2-b01-snapshot-storage-types-after.log`：V2SyncEngineTests 124 项全部通过，3.600 秒。
+初轮 `/tmp/imv2-b01-snapshot-storage-types.log` 为新增测试宏内缺 try 的编译失败，修正后重跑。
+未跑全仓、App、真机或跨进程恢复；本地 schema 未变，B01 仍有其他读取入口与用例映射待审计。
+源码与日志摘要：`/tmp/imv2-b01-snapshot-storage-types-sources-20260919.json`。未提交或部署。
+
+<a id="20260919-push-storage-types"></a>
+
+## 2026-09-19：B01 Push 意图整数恢复检查
+
+本地 Push 的五个整数读取入口现先检查实际 integer 类型，再沿用既有范围及状态关系检查。
+新增 10 个真实数据库关闭/重开场景，覆盖分数与 Int64 上界外的 REAL 值；
+异常读取、重试和 owner 替换均明确拒绝且不覆盖原状态，修复测试字段后原意图可继续重试。
+仅 attempt_count=1.5 不绕过约束，其他注入通过临时关闭 CHECK 模拟损坏记录。
+
+`/tmp/imv2-b01-push-storage-types.log`：V2LocalPushIntentTests、V2PushIntentReconcilerTests
+共 14 项 / 2 套件通过，1.275 秒；包含原计数饱和、取消、迟到响应与所有者替换回归。
+未修改 schema，未跑全仓或真实 APNs；B01 仍有其他恢复/比较入口待审计，相关生命周期项不因此关闭。
+源码/日志摘要：`/tmp/imv2-b01-push-storage-types-sources-20260919.json`。未提交或部署。
+
+<a id="20260919-command-duplicate-storage"></a>
+
+## 2026-09-19：B01 命令重复比较与已读水位
+
+四个命令重复比较入口补实际 SQLite integer 类型检查；已读合并水位在 MAX 前检查每个参与序号，
+拒绝被更大合法值掩盖的小数等非法数据。正常空集合、pending/acknowledged 选择和幂等行为不变。
+新增 12 个真实 SQLite 场景，不关闭 CHECK；异常返回 commandConflict、原记录保留且无新增命令，
+显式修复测试数据后重复提交/水位推进可继续。
+
+`/tmp/imv2-b01-command-duplicate-storage.log`：新增专项、恢复边界、成员/撤回/编辑/已读 outbox
+共 17 项 / 6 套件通过，0.171 秒。未跑全仓、App 或真机；schema 未变，B01 仍开放。
+源码/日志摘要：`/tmp/imv2-b01-command-duplicate-storage-sources-20260919.json`。未提交或部署。
+
+<a id="20260919-social-storage-types"></a>
+
+## 2026-09-19：B01 私聊能力和已读版本恢复
+
+私聊发送能力版本及已读可见性/偏好版本改用 SQLite integer 存储检查；旧已读序号在新旧版本分支前校验，
+不允许较新的事件覆盖损坏历史。新增五字段 × 两种 REAL 值，验证明确拒绝、原值与同步游标保留，
+修复测试数据后同一批次可以继续应用。全部使用正常 SQLite CHECK，无约束绕过。
+
+`/tmp/imv2-b01-social-storage-types.log`：新专项、V2DirectReceiptVisibilityTests 与 V2SyncEngineTests
+共 127 项 / 3 套件通过，3.679 秒。包含已有隐藏可见性、旧事件、快照与恢复回归；
+新增场景本身不是数据库重开测试。未改 schema、未跑全仓、未提交或部署，B01 仍开放。
+源码/日志摘要：`/tmp/imv2-b01-social-storage-types-sources-20260919.json`。
+
+<a id="20260919-search-storage-types"></a>
+
+## 2026-09-19：B01 搜索索引整数读取
+
+搜索状态/观察、索引代次与版本、任务期望修订、主库与派生文档版本/序号的读取增加实际正 integer 检查，
+主库不存在的 LEFT JOIN NULL 继续按缺失处理，其他类型明确返回 invalidMessagePayload。
+新增七类位置 × 两种 REAL，共 14 个真实 SQLite 场景，不关闭 CHECK。
+确认异常观察/查询拒绝、任务保留、派生索引重建恢复，以及显式修复主库字段后同一任务继续完成。
+
+`/tmp/imv2-b01-search-storage-types.log`：V2MessageSearchTests 与 V2SyncEngineTests
+共 135 项 / 2 套件通过，3.868 秒。新增场景没有关闭/重开数据库，不能当作新的跨进程恢复证据。
+未改 schema、未跑全仓、未提交或部署。B01 仍需完成其余投影/回滚入口核对。
+源码/日志摘要：`/tmp/imv2-b01-search-storage-types-sources-20260919.json`。
+
+<a id="20260919-reset-fence-storage"></a>
+
+## 2026-09-19：B01 重置回滚与快照搜索状态整数检查
+
+回滚游标三字段及快照复制的搜索 generation/index_version 改为先检查实际 integer 类型。
+新增 10 个真实 SQLite 异常场景，确认取消/准备切换被拒绝时游标、快照页进度与回滚记录保留，
+修复注入字段后原流程仍可完成。仅回滚 ACK 序号注入绕过字段间关系 CHECK，其余未关闭约束。
+
+`/tmp/imv2-b01-reset-fence-storage.log`：V2SyncEngineTests 与 V2MessageSearchTests
+共 136 项 / 2 套件通过，3.957 秒。未改 schema、未跑全仓/App/真机、未提交或部署。
+B01 仍有成员/角色收据和其他投影的内部版本比较待核对。
+源码/日志摘要：`/tmp/imv2-b01-reset-fence-storage-sources-20260919.json`。
+
+<a id="20260919-effect-storage-types"></a>
+
+## 2026-09-19：B01 公告与角色权限收据整数检查
+
+公告/角色权限的效果收据和当前投影版本、可选来源序号，以及权限基线版本，增加精确正 integer 读取。
+新增 18 个真实 SQLite 异常场景，保留正常 CHECK，验证 invalidMessagePayload、原值/游标保留，
+以及失败事务不会残留新效果收据；恢复测试字段后原事件可继续应用。
+收据重复场景移除旧 personal 事件 fixture 后保留独立效果账本，不作为真实裁剪/跨进程恢复验收。
+
+`/tmp/imv2-b01-effect-storage-types.log`：V2SyncEngineTests 与 V2MemberRoleRecoveryTests
+共 130 项 / 2 套件通过，3.977 秒。没有修改成员历史聚合实现；该入口仍待下一步审计。
+未改 schema、未跑全仓、未提交或部署，B01 继续开放。
+源码/日志摘要：`/tmp/imv2-b01-effect-storage-types-sources-20260919.json`。
+
+<a id="20260919-member-storage-types"></a>
+
+## 2026-09-19 成员效果历史整数读取
+
+- 修复：成员收据三个整数字段、历史最大修订与角色来源序号使用实际存储类型检查；聚合拒绝被较大合法版本掩盖的异常历史。
+- 验证：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2SyncEngineTests|V2MemberRoleRecoveryTests'`，131 项、2 套件通过，3.942 秒；新增参数场景 8 个。
+- 日志：`/tmp/imv2-b01-member-storage-types.log`；源码证据：`/tmp/imv2-b01-member-storage-types-sources-20260919.json`。
+- 边界：真实 SQLite 正常 CHECK 下验证回滚和修复后重试；未跑全仓或真机，B01 继续开放。
+
+<a id="20260919-room-projection-storage"></a>
+
+## 2026-09-19 房间投影整数比较
+
+- 修复：时间线、禁言、房间冻结与群资料四处比较使用实际 integer 类型读取，拒绝 REAL 后再参与幂等或新旧版本判断。
+- 验证：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2RoomProjectionStorageTests|V2SyncEngineTests|V2MemberRoleRecoveryTests'`，132 项、3 套件通过，3.997 秒；新增 12 个参数场景。
+- 日志：`/tmp/imv2-b01-room-projection-storage.log`；源码证据：`/tmp/imv2-b01-room-projection-storage-sources-20260919.json`。
+- 边界：正常 SQLite CHECK 下验证重复/较新投递的事务回滚与修复后重试；未跑全仓、App 或真机，B01 继续开放。
+
+<a id="20260919-message-effect-storage"></a>
+
+## 2026-09-19 消息效果与墓碑整数读取
+
+- 修复：消息收据、墓碑、当前撤回目标及旧式编辑七处修订比较先检查实际 integer 类型。
+- 验证：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2SyncEngineTests|V2MessageSearchTests'`，138 项、2 套件通过，4.025 秒；新增 14 个参数场景。
+- 日志：`/tmp/imv2-b01-message-effect-storage.log`；源码证据：`/tmp/imv2-b01-message-effect-storage-sources-20260919.json`。
+- 边界：真实 SQLite 正常 CHECK 下验证事务回滚、修复后重试及撤回正文不恢复；未跑全仓、App 或真机。B01 继续开放。
+
+<a id="20260919-reaction-storage"></a>
+
+## 2026-09-19 消息反应整数读取
+
+- 修复：重复反应收据校验实际正 integer 来源序号与输入一致；当前反应版本排序拒绝非整数存储。
+- 验证：`swift test --package-path IMV2ClientKit --jobs 4 --filter V2SyncEngineTests`，128 项、1 套件通过，3.833 秒；新增 6 个参数场景覆盖重复/较新/迟到事件的回滚与修复后重试。
+- 日志：`/tmp/imv2-b01-reaction-storage.log`；源码证据：`/tmp/imv2-b01-reaction-storage-sources-20260919.json`。
+- 边界：保留正常 SQLite CHECK，未跑全仓、App 或真机；B01 继续开放。
+
+<a id="20260919-profile-storage"></a>
+
+## 2026-09-19 资料及失效记录整数读取
+
+- 修复：六处资料版本读取及失效记录合并/清理前的最低版本检查，拒绝 REAL 存储参与比较。
+- 验证：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2ProfileStorageTypesTests|V2ProfileRepositoryTests|V2SyncEngineTests'`，132 项、3 套件通过，3.959 秒；新增 16 个参数场景。
+- 日志：`/tmp/imv2-b01-profile-storage.log`；源码证据：`/tmp/imv2-b01-profile-storage-sources-20260919.json`。
+- 边界：正常 SQLite CHECK 下验证资料/私聊身份/待刷新记录事务回滚与修复后重试；未跑全仓、App 或真机。B01 继续开放。
+
+<a id="20260919-membership-entry-storage"></a>
+
+## 2026-09-19 成员入口整数检查与剩余范围核对
+
+- 修复：成员入口的本人资格版本及他人成员事件比较已有群资料版本先检查实际正 integer。
+- 验证：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2MemberRoleRecoveryTests|V2SyncEngineTests'`，134 项、2 套件通过，4.079 秒；新增 4 个异常场景。
+- 日志：`/tmp/imv2-b01-membership-entry-storage.log`；源码证据：`/tmp/imv2-b01-membership-entry-storage-sources-20260919.json`。
+- 范围核对：整数专题文首新增当前调用链表，明确置顶/权限快照、水位聚合与审核解码等剩余项；转发推进和群创建计数确认已有上游实际类型检查，未重复修改。
+- 边界：本次未跑全仓、App、真机或转发专项；B01 继续开放。
+
+<a id="20260919-effective-watermark-storage"></a>
+
+## 2026-09-19 有效已读水位整数检查
+
+- 修复：有效水位聚合检查全部正 integer 候选，不让较大合法值掩盖 REAL；本人水位同步更新前也检查原持久值。
+- 验证：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2CommandDuplicateStorageTests|V2SyncEngineTests|V2ReadReceiptOutboxTests'`，135 项、3 套件通过，3.881 秒；新增 8 个参数场景。
+- 日志：`/tmp/imv2-b01-effective-watermark-storage.log`；源码证据：`/tmp/imv2-b01-effective-watermark-storage-sources-20260919.json`。
+- 边界：正常 SQLite CHECK 下覆盖持久水位、pending/acknowledged 回执、更新回滚和修复后重试；未跑全仓、App 或真机，B01 继续开放。
+
+<a id="20260919-pin-storage"></a>
+
+## 2026-09-19 置顶事件与快照整数检查
+
+- 修复：可选置顶来源序号精确读取，快照合并前检查 shadow 状态/收据与相关 live 收据，保留 NULL 未知来源语义。
+- 验证：`swift test --package-path IMV2ClientKit --jobs 4 --filter V2SyncEngineTests`，129 项、1 套件通过，4.125 秒；新增 12 个参数场景。
+- 日志：`/tmp/imv2-b01-pin-storage.log`；源码证据：`/tmp/imv2-b01-pin-storage-sources-20260919.json`。
+- 边界：正常 SQLite CHECK 下覆盖增量与快照两侧数据，验证失败回滚和修复后同操作重试；未跑全仓、App 或真机，B01 继续开放。
+
+<a id="20260919-policy-snapshot-storage"></a>
+
+## 2026-09-19 角色权限快照整数检查
+
+- 修复：快照两侧角色修订/来源序号及全局权限版本在排序和 SQL 合并前验证实际类型；保留 NULL 来源语义。
+- 验证：`swift test --package-path IMV2ClientKit --jobs 4 --filter V2SyncEngineTests`，130 项、1 套件通过，5.132 秒；新增 36 个参数场景覆盖快照更旧/相等/更新。
+- 日志：`/tmp/imv2-b01-policy-snapshot-storage.log`；源码证据：`/tmp/imv2-b01-policy-snapshot-storage-sources-20260919.json`。
+- 边界：正常 SQLite CHECK 下验证快照准备事务回滚及修复后同快照切换；未跑全仓、App 或真机。B01 继续开放。
+
+<a id="20260919-policy-global-moderation-storage"></a>
+
+## 2026-09-19 增量权限全局版本与审核解码
+
+- 修复：增量权限入口验证全局版本，审核公开读取先验证真实正 integer 再转换 UInt64。
+- 验证：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2SyncEngineTests|V2RoomProjectionStorageTests'`，131 项、2 套件通过，5.175 秒；新增 6 个权限参数场景，扩展两个既有审核异常场景的公开读取断言。
+- 日志：`/tmp/imv2-b01-policy-global-moderation-storage.log`；源码证据：`/tmp/imv2-b01-policy-global-moderation-storage-sources-20260919.json`。
+- 边界：正常 SQLite CHECK 下验证回滚及修复后重试；未跑全仓、App 或真机。房间聚合及基线全局版本仍待处理，B01 继续开放。
+
+<a id="20260919-room-applied-storage"></a>
+
+## 2026-09-19 房间已应用序号聚合检查
+
+- 修复：八来源原始候选在聚合前验证实际类型与正值/零/NULL 域，结果经精确整数读取。
+- 验证：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2SyncEngineTests|V2RoomRecoveryRunnerTests'` 实际匹配 131 项、1 个同步套件，通过，5.288 秒；新增 16 个参数场景。第二过滤名未匹配套件，不计作 runner 验收。
+- 日志：`/tmp/imv2-b01-room-applied-storage.log`；源码证据：`/tmp/imv2-b01-room-applied-storage-sources-20260919.json`。
+- 边界：正常 CHECK 下覆盖同表/跨来源较大合法值掩盖小数，以及最大值、零和未知来源语义。新候选扫描的大历史读取成本待测；未跑全仓、App 或真机，B01 继续开放。
+
+<a id="20260919-room-applied-index-cost"></a>
+
+## 2026-09-19 房间已应用序号成本修复
+
+- 测量脚本：`scripts/measure_v2_room_applied.py`，真实相关表/索引子集、两个房间、1 千/1 万/10 万三档合成数据，保留 CHECK。本机热缓存扫描发现 10 万档约 24 ms；新 8 个稀疏异常索引与 3 个序号索引使同档约 0.0054 ms。
+- 成本证据：`/tmp/imv2-b01-room-applied-cost.json`、`/tmp/imv2-b01-room-applied-cost-final.json`、`/tmp/imv2-b01-room-applied-cost-no-index.json`；写入/空间样本和测量边界见整数专题，不外推生产容量。
+- 验证：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2SyncEngineTests|V2LocalSchemaContractTests'` 中同步 131 项通过，schema 2 项旧对象数/指纹失败；核对差异恰为 11 索引后更新合同，`--filter V2LocalSchemaContractTests` 两项通过。未重跑已通过的同步套件。
+- 日志：`/tmp/imv2-b01-room-applied-indexed-final.log`、`/tmp/imv2-b01-room-applied-schema-after.log`；证据清单 `/tmp/imv2-b01-room-applied-index-cost-sources-20260919.json`。
+- 边界：新库及快照索引复制；旧库未追加索引时不继承成本结果。无全仓、App 或真机验收，B01 继续开放。
+
+<a id="20260919-policy-completion-storage"></a>
+
+## 2026-09-19 权限基线完成路径整数检查
+
+- 修复：全局权限修订及角色观察修订/可选序号在基线完成写入和版本比较前校验实际类型。
+- 验证：`swift test --package-path IMV2ClientKit --jobs 4 --filter V2SyncEngineTests`，132 项、1 套件通过，5.519 秒；新增 12 个相同/较新基线异常组合。
+- 日志：`/tmp/imv2-b01-policy-completion-storage.log`；源码证据：`/tmp/imv2-b01-policy-completion-storage-sources-20260919.json`。
+- 边界：正常 SQLite CHECK 下验证旧基线/待办保留及修复后相同请求完成；未跑全仓、App 或真机。未读快照独立聚合新列为待核对，B01 继续开放。
+
+<a id="20260919-unread-snapshot-storage"></a>
+
+## 2026-09-19 未读快照整数检查
+
+- 修复：六个状态字段精确读取、成员修订先验证后过滤、独立水位 MAX 拒绝异常且保留无记录 NULL。
+- 验证：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2RoomRecoveryPersistenceTests|V2ConversationUnreadModelTests|V2CommandDuplicateStorageTests'`，26 项、3 套件通过，0.531 秒；新增 20 个参数场景。
+- 日志：`/tmp/imv2-b01-unread-snapshot-storage.log`；源码证据：`/tmp/imv2-b01-unread-snapshot-storage-sources-20260919.json`。
+- 边界：head/子序号关系约束不允许的四种 fixture 临时绕过 CHECK，其余保留正常约束；验证原值保留及修复后读取，撤权/绑定隔离原回归通过。未跑全仓、App、真机或容量，B01 继续开放。
+
+<a id="20260919-member-snapshot-storage"></a>
+
+## 2026-09-19 成员快照历史整数检查
+
+- 修复：授权群/同源 live 历史与 shadow 成员效果在冲突 join、复制和最新角色归并前检查三个整数字段。
+- 验证：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2MemberRoleRecoveryTests|V2SyncEngineTests'`，139 项、2 套件通过，5.989 秒；新增 12 个参数场景。
+- 日志：`/tmp/imv2-b01-member-snapshot-storage.log`；源码证据：`/tmp/imv2-b01-member-snapshot-storage-sources-20260919.json`。
+- 边界：正常 CHECK 下验证准备失败保持 live 移除状态及修复后旧角色不复活；未跑全仓、App 或真机。其他 SQL 复制继续审计，B01 开放。
+
+<a id="20260919-snapshot-receipt-storage"></a>
+
+## 2026-09-19 公告与权限快照收据整数检查
+
+- 修复：相关 live 与 shadow 历史收据在保留版本筛选前校验修订/可选来源序号，避免异常被过滤或复制。
+- 验证：`swift test --package-path IMV2ClientKit --jobs 4 --filter V2SyncEngineTests`，133 项、1 套件通过，5.961 秒；新增 16 个参数场景。
+- 日志：`/tmp/imv2-b01-snapshot-receipt-storage.log`；源码证据：`/tmp/imv2-b01-snapshot-receipt-storage-sources-20260919.json`。
+- 边界：正常 CHECK 下验证准备失败保持 live 版本及修复后同快照切换、历史收据保留；未跑全仓、App 或真机。其他 SQL 复制仍待核对，B01 开放。
+
+<a id="20260919-reaction-snapshot-storage"></a>
+
+## 2026-09-19 反应快照整数检查
+
+- 修复：shadow 反应状态/收据及相关 live 收据在序号保留过滤前检查实际正 integer。
+- 验证：`swift test --package-path IMV2ClientKit --jobs 4 --filter V2SyncEngineTests`，134 项、1 套件通过，6.135 秒；新增 8 个参数场景。
+- 日志：`/tmp/imv2-b01-reaction-snapshot-storage.log`；源码证据：`/tmp/imv2-b01-reaction-snapshot-storage-sources-20260919.json`。
+- 边界：正常 CHECK 下验证准备事务回滚及修复后同快照切换；新旧添加/移除时可见表与版本表一致性尚需专项核对。本轮未跑全仓、App 或真机，B01/B06 继续开放。
+
+
+<a id="20260919-reaction-snapshot-order"></a>
+
+## 2026-09-19 反应快照合并与来源冲突
+
+- 复现：live/shadow 分别复制可见反应和版本记录，导致旧添加复活或较新版本丢失。修复前 4 个参数场景产生 8 个断言问题，日志 `/tmp/imv2-b06-reaction-snapshot-order-before.log`。
+- 修复：保留原授权房间范围；合并前校验实际正整数序号、同键房间/同版本/同源冲突，按较新房间序号选择 add/remove；收据保留前拒绝历史同源摘要冲突；依据最终版本重建可见反应，排除撤回/tombstone。
+- 验证：先有 4 项反应专项通过，日志 `/tmp/imv2-b06-reaction-snapshot-order-targeted.log`。扩展测试的首次编译因 Swift Testing 不接受三组参数集合失败，记录于 `/tmp/imv2-b06-reaction-snapshot-order-final.log`；改为 8 个明确位组合后，`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2SyncEngineTests|V2MemberRoleRecoveryTests'` 实际 143 项、2 套件通过，6.900 秒，日志 `/tmp/imv2-b06-reaction-snapshot-order-final-v2.log`。
+- 新增覆盖：8 个新旧方向/add-remove/撤回组合，快照激活后关闭重开并重放旧来源；3 个同版本/同来源/历史来源冲突，检查准备失败、游标/live 状态保留及未准备标记。既有 8 个整数异常与独立反应快照专项同轮通过。
+- 源码证据：`/tmp/imv2-b06-reaction-snapshot-order-sources-20260919.json`。
+- 边界：未改 schema，未跑全仓/App/真机、容量或完整 owner 迁移；B01/B06 保持开放。此前整数专项的历史验证范围不扩大为本轮验证。
+
+
+<a id="20260919-policy-eligibility-storage"></a>
+
+## 2026-09-19 权限基线快照资格整数检查
+
+- 复现：资格比较前未验证存储类型；异常修订可使基线静默被过滤，或将非法权限/序号复制后才在读取时失败。10 场景修复前产生 30 个断言问题，日志 `/tmp/imv2-b01-policy-eligibility-before.log`。
+- 修复：对两侧授权且房间匹配的候选，在修订/来源比较前校验基线三个整数及 live/incoming 成员修订；不改变合法资格筛选条件和撤权范围。
+- 验证：新增五位置 × 两种 REAL 共 10 场景，正常 CHECK 下确认准备失败保留原值/类型、游标和未准备标记，修复后同快照可激活并恢复两个权限角色。`swift test --package-path IMV2ClientKit --jobs 4 --filter V2SyncEngineTests`，137 项、1 套件通过，6.559 秒；既有房间保留/移除与权限快照回归同轮通过。
+- 日志：`/tmp/imv2-b01-policy-eligibility-after.log`；源码证据：`/tmp/imv2-b01-policy-eligibility-sources-20260919.json`。
+- 边界：未改 schema、未跑全仓/App/真机/容量；普通房间行 SQL 复制和完整跨模块映射仍待完成，B01 保持开放。
+
+
+<a id="20260919-snapshot-room-log-storage"></a>
+
+## 2026-09-19 房间日志与游标快照整数检查
+
+- 复现：复制前未验证事件序号、应用游标和裁剪下界。准备意外成功，REAL 游标进入激活库；读取 2^63 时 GRDB Row 强制转换触发 fatal error，修复前进程失败，未完整跑完参数矩阵。日志 `/tmp/imv2-b01-snapshot-room-log-before.log`。
+- 修复：按原授权房间范围先验证三字段，再复制日志/游标；公开 groupEventCursor/roomLogTrimmedThroughSequence 使用实际整数读取并抛 storageRangeExceeded，缺失行保持零。
+- 验证：12 个参数场景覆盖三字段 × 两种 REAL × 保留/移除。保留范围检查回滚、原值/类型和游标保留、修复后激活及关闭重开；移除范围允许丢弃异常旧记录，且无事件/公告残留。两个公开 getter 安全拒绝异常值，重开读取正常游标/零裁剪下界。
+- 命令：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2SyncEngineTests|V2RoomRecoveryPersistenceTests'`，159 项、2 套件通过，7.633 秒。日志 `/tmp/imv2-b01-snapshot-room-log-after.log`；源码证据 `/tmp/imv2-b01-snapshot-room-log-sources-20260919.json`。
+- 边界：未改 schema、未跑全仓/App/真机/容量。普通消息和管理等投影的复制仍须核对，B01 保持开放。
+
+
+<a id="20260919-snapshot-message-storage"></a>
+
+## 2026-09-19 消息快照与历史修订整数检查
+
+- 修复：两侧相关消息的三个整数在冲突复制前检查；相关撤回记录修订在复制前检查；效果收据修订在保留版本筛选前检查，防止 REAL 被静默过滤或复制。
+- 初始复现：18 参数场景、36 个断言问题，日志 `/tmp/imv2-b01-snapshot-message-before.log`。其中两个 live 收据场景存在夹具 ID 不一致，不能作为正确匹配候选的修复前证据。
+- 中间轮：`/tmp/imv2-b01-snapshot-message-after.log` 实际只运行 139 项同步测试，搜索过滤名未命中。四个断言来自收据夹具 ID 不一致，另两个时限断言超出 5 秒；未改时限断言。修正夹具并使用真实搜索套件名，串行重跑相关套件。
+- 最终验证：`swift test --package-path IMV2ClientKit --jobs 4 --no-parallel --filter 'V2SyncEngineTests|V2MessageSearchTests'`，150 项、2 套件通过，55.973 秒；日志 `/tmp/imv2-b01-snapshot-message-final.log`。18 场景验证异常时准备失败、原值/类型/游标和未准备标记保持，以及修复后同快照激活恢复撤回消息 revision 3。此前两个时限用例在原断言下通过；这不证明并发时限根因已经完成独立诊断。
+- 源码证据：`/tmp/imv2-b01-snapshot-message-sources-20260919.json`。
+- 边界：未改 schema、未跑全仓/App/真机/容量；管理/控制/时间线等普通表复制及完整映射仍开放，B01 未关闭。
+
+
+<a id="20260919-snapshot-room-projection-storage"></a>
+
+## 2026-09-19 管理/控制/时间线快照序号检查
+
+- 复现：三类普通房间行复制前无实际整数检查；新增 18 参数场景修复前产生 30 个断言问题，日志 `/tmp/imv2-b01-snapshot-room-projection-before.log`。
+- 修复：copyRoomRows 仅对三个明确调用点检查全部 shadow 与授权 live 序号为实际正 integer，再复制。撤权/移除范围仍丢弃旧数据。
+- 验证：18 场景覆盖三类 × 两种 REAL × live/shadow/移除；保留范围确认原值/类型/游标/未准备标记不变，修复后激活并关闭重开；移除范围确认无记录残留。shadow 损坏由导入房间后复制合法行构造，未声称完成服务端快照产物验证。
+- 命令：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'snapshotRoomProjectionStorage|V2RoomProjectionStorageTests|privateTimelineActivityAndCapabilityAreApplied|conversationTimelineUsesUnifiedKeysetPages|moderationProjectionIsApplied|snapshotPreservesHybridRoomLogOwnership|snapshotV3AtomicallyReplacesProjection|snapshotStagingResumesAfterInterruption|snapshotAckCrashWindowResumesSafely|repeatedSnapshotActivation|preparedSnapshotFencesProjectionWrites'`，实际 11 项、2 套件通过，0.944 秒。
+- 日志：`/tmp/imv2-b01-snapshot-room-projection-after.log`；源码证据：`/tmp/imv2-b01-snapshot-room-projection-sources-20260919.json`。
+- 边界：未改 schema、未跑全仓/App/真机/容量。其他普通表和快照初始化复制仍待审计；B01 状态保持开放，总表缩短累积描述，原批次证据保留在专项清单。
+
+
+<a id="20260919-snapshot-member-fence-storage"></a>
+
+## 2026-09-19 快照本人成员状态整数检查
+
+- 复现：初始化无条件复制本人成员状态，准备阶段也未检查修订；8 场景修复前产生 28 个断言问题，日志 `/tmp/imv2-b01-snapshot-member-fence-before.log`。
+- 修复：创建影子表前检查 live 全量成员修订；准备时检查 shadow 全量成员修订，再执行投影复制/撤权过滤。撤权历史也必须保持有效版本。
+- 验证：8 场景覆盖 begin/prepare × 成员/已移除 × 两种 REAL，失败时游标/原值/类型保持，begin 不残留影子表及导入记录，prepare 保持未准备标记；修复后同快照激活、重开保留原成员状态，后续 revision 3 授予成功。
+- 命令：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'snapshotMembershipFenceStorage|V2MemberRoleRecoveryTests|snapshotRoomLogStorage|snapshotRoomProjectionStorage|snapshotMessageStorage|snapshotV3AtomicallyReplacesProjection|snapshotStagingResumesAfterInterruption|snapshotAckCrashWindowResumesSafely|repeatedSnapshotActivation|preparedSnapshotFencesProjectionWrites'`，16 项、2 套件通过，2.690 秒。日志 `/tmp/imv2-b01-snapshot-member-fence-after.log`。
+- 源码证据：`/tmp/imv2-b01-snapshot-member-fence-sources-20260919.json`。
+- 边界：未改 schema、未跑全仓/App/真机/容量；无完整 owner 迁移或重入整链声明。其他普通表/派生查询与跨模块映射仍开放，B01/B06 未关闭。
+
+
+<a id="20260919-room-page-cursor-storage"></a>
+
+## 2026-09-19 房间恢复页游标整数检查
+
+- 复现：恢复页提交直接 Row 转 Int64，2^63 REAL 游标触发 GRDB fatal error；修复前进程失败，参数矩阵未完整执行。日志 `/tmp/imv2-b01-room-page-cursor-before.log`。
+- 修复：事件应用前检查应用游标和裁剪下界为实际非负 integer，缺口判断复用本事务验证后的旧游标，避免二次未经检查的转换；旧裁剪值在 SQL MAX 前检查。
+- 验证：8 参数场景覆盖两字段 × 两种 REAL × 空/有事件页；失败原值/类型和缺口标记保持、无事件/冻结投影写入；修复后同页可提交、正常置位历史缺口，重复不增加事件。
+- 命令：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2RoomRecoveryIntegerBoundsTests|V2RoomRecoveryPersistenceTests|V2RoomRecoveryEngineTests|snapshotRoomLogStorage'`，51 项、4 套件通过，1.971 秒；日志 `/tmp/imv2-b01-room-page-cursor-after.log`。
+- 源码证据：`/tmp/imv2-b01-room-page-cursor-sources-20260919.json`。最终只再修正了缺口判定注释，无行为变化。
+- 边界：未改 schema、未跑全仓/App/真机/容量；其他普通表/派生查询与跨模块审计仍开放，B01 未关闭。
+
+
+<a id="20260919-latest-visible-max-storage"></a>
+
+## 2026-09-19 最新可见摘要 MAX 候选整数检查
+
+- 复现：合法较大序号掩盖 1.5，摘要读取/提交被接受并清除待办。4 场景修复前产生 3 个断言问题，日志 `/tmp/imv2-b01-latest-visible-max-before.log`。
+- 修复：同一查询先检测目标房间非法序号，再取 MAX；异常返回 -1 并由 recoveryInteger 拒绝。无关房间不影响目标摘要，空消息范围仍为零。
+- 验证：4 场景覆盖两种 REAL × 目标/无关房间，验证错误时待办仍需摘要、原值保持，修复后原请求可提交/读取。`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2RoomRecoveryIntegerBoundsTests|V2RoomRecoveryPersistenceTests|V2RoomRecoveryEngineTests|V2ConversationUnreadModelTests'`，首版 53 项通过，1.976 秒，日志 `/tmp/imv2-b01-latest-visible-max-after.log`；优化查询表达式后同范围 53 项、4 套件通过，1.909 秒，日志 `/tmp/imv2-b01-latest-visible-max-final.log`。
+- 查询计划：首个最小模型计划断言失败，显示 SELECT 1 偏好普通覆盖索引；改为存在性子查询 SELECT message_id 后，Python SQLite 的最小主键/唯一/稀疏索引模型使用既有异常索引和 MAX 覆盖索引，记录 `/tmp/imv2-b01-latest-visible-max-plan.txt`。不是实际 GRDB 设备容量测试，无 INDEXED BY 或 schema 改动。
+- 源码证据：`/tmp/imv2-b01-latest-visible-max-sources-20260919.json`。测试后只补充解释查询计划的注释。
+- 边界：未跑全仓/App/真机/容量；其他查询/转换/计数完整映射继续进行，B01 未关闭。
+
+
+<a id="20260919-recovery-work-merge-storage"></a>
+
+## 2026-09-19 恢复待办整数合并与完成检查
+
+- 复现：初始五条路径 45 场景产生 90 个断言问题，日志 `/tmp/imv2-b01-recovery-work-merge-before.log`；修复后 59 项回归通过，2.734 秒，日志 `/tmp/imv2-b01-recovery-work-merge-after.log`。扩展重试及完成比较后，两个测试产生 19 个断言问题，日志 `/tmp/imv2-b01-recovery-work-completion-before.log`。
+- 修复：统一验证五个待办整数，接入已返回工作行、入队/ensure、状态/摘要提交与服务记账；完成删除前验证待办和本地应用游标。允许合法 NULL 目录版本，不调整 schema。
+- 新增验证：六操作（读取、入队、ensure、状态提交、摘要提交、重试）× 九字段/异常值组合，共 54 场景；另两字段 × 两种 REAL 的 4 个完成比较场景。使用正常 CHECK；priority 只测合法范围内的 1.5，其余字段测 1.5/2^63。错误时原值、请求修订和待办标记保持，不写状态/摘要；修复后继续原动作，完成路径原待办可正常删除。
+- 最终命令：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2RoomRecoveryIntegerBoundsTests|V2RoomRecoveryPersistenceTests|V2RoomRecoveryEngineTests|V2MemberRoleRecoveryTests'`，60 项、4 套件通过，2.792 秒；日志 `/tmp/imv2-b01-recovery-work-merge-final.log`。
+- 源码证据：`/tmp/imv2-b01-recovery-work-merge-sources-20260919.json`。
+- 边界：不包括所有延迟待办筛选前的完整验证，不扩大到所有目录/触发器/清理调用链。未跑全仓/App/真机/容量，B01 未关闭。
+
+
+<a id="20260920-directory-summary-storage"></a>
+
+## 2026-09-20 目录恢复缓存摘要整数比较
+
+- 复现：缓存三个版本字段未经实际整数校验即参与目录资格比较；6 场景产生 24 个断言问题，日志 `/tmp/imv2-b01-directory-summary-before.log`。
+- 修复：目标房间缓存 personal_generation、owner_epoch、membership_revision 在 SQL EXISTS 比较前校验，沿用原非负/正值范围。
+- 验证：三字段 × 两种 REAL，共 6 场景。两房间页中第二个缓存异常，确认游标/拓扑/完成状态不变、无待办残留、异常值保持；修复后同页可推进并正确区分缓存复用与新摘要请求。
+- 命令：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2RoomRecoveryIntegerBoundsTests|V2RoomRecoveryPersistenceTests|V2RoomRecoveryEngineTests'`，54 项、3 套件通过，2.218 秒；日志 `/tmp/imv2-b01-directory-summary-after.log`。
+- 源码证据：`/tmp/imv2-b01-directory-summary-sources-20260920.json`。
+- 边界：未改 schema、未跑全仓/App/真机/容量；其他目录输入、触发器与清理调用链继续映射，B01 未关闭。
+
+
+<a id="20260920-recovery-scan-binding"></a>
+
+## 2026-09-20 恢复调度计数账号隔离
+
+- 复现：账号/安装绑定变化后，旧待办已清空，但旧 service_sequence 仍被新扫描继承；最大计数导致新身份无法进行服务记账。6 场景产生 8 个断言问题，日志 `/tmp/imv2-b01-recovery-scan-binding-before.log`。
+- 修复：身份变化的原清理事务内同时删除旧 scan，新建行以默认零开始；同身份重连保持历史，不重置耗尽保护。
+- 验证：用户/安装绑定/同身份 × 7/Int64.max，共 6 场景；检查旧 scope 失效、待办隔离、新身份记账到 1，以及同身份正常递增/耗尽安全拒绝。
+- 命令：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2RoomRecoveryIntegerBoundsTests|V2RoomRecoveryPersistenceTests|V2RoomRecoveryEngineTests|V2AccountLocalStoreOwnerTests'`，61 项、4 套件通过，2.390 秒；日志 `/tmp/imv2-b01-recovery-scan-binding-after.log`。
+- 源码证据：`/tmp/imv2-b01-recovery-scan-binding-sources-20260920.json`。
+- 边界：身份变化测试沿用仓库已有安装表更新夹具；不等同 App 换号/Keychain/真机闭环。未改 schema、未跑全仓或容量，B01/B08 的剩余范围继续开放。
+
+
+<a id="20260920-core-boundary-audit"></a>
+
+## 2026-09-20 核心帧长度配置与整数调用链
+
+- 缺口：帧配置允许超出 UInt32 线格式的长度，编码器随后直接转换包体计数。修复为构造器限定 UInt32 可表达长度并保证加帧头不溢出 Int，失败抛 invalidLimits。
+- 复现：首次测试编译因使用了错误的 decodeSingle 名称失败，日志 `/tmp/imv2-b01-frame-length-before.log`；修正为实际 decodeExactlyOne 后，7 项帧测试中两个超上界配置断言失败，日志 `/tmp/imv2-b01-frame-length-before-v2.log`。未分配超大包体或声称复现了 4 GiB 编码崩溃。
+- 验证：新增 6 个参数场景，覆盖负值/超上界配置、零/普通/UInt32.max 合法配置、空帧 round trip 和仅最大声明长度的帧头。预算、发送序号、指纹、富文本、媒体时间戳及版本包装既有专项同轮通过。
+- 命令：`swift test --package-path IMV2Core --jobs 4 --filter 'V2FrameCodecTests|CommandAdmissionTests|PushAdmissionTests|SendMessageAcceptanceTests|SendMessageFingerprintTests|RichMessageContentTests|MediaTimestampBoundsTests|ProfileRevisionBoundsTests|MessageMutationResultBoundsTests|GroupCapabilityResultBoundsTests'`，40 项、10 套件通过，0.004 秒；日志 `/tmp/imv2-b01-core-boundary-audit.log`。
+- 源码证据：`/tmp/imv2-b01-core-boundary-audit-sources-20260920.json`。
+- 边界：仅当前 64 位平台验证；未跑 Server/App/全仓/网络或超大包体。源码核对与实际测试范围在整数专项表分别记录，B01 未关闭。
+
+
+<a id="20260920-server-boundary-audit"></a>
+
+## 2026-09-20 Gateway 配置接入与服务端时间边界
+
+- 变更：新增 Gateway 环境配置入口的帧上限测试，拒绝三个非法值并接受零/常规/最大线格式值，验证此前 Core 修复实际作用于运行配置。未改服务端业务源码或重试策略。
+- 核对：限流重试整秒转换与二分、PostgreSQL 截止点检查、用户投影 failure_count 的 schema 下界与递增上界保护；详细范围见整数专项表。源码核对不作为数据库工作器运行证据。
+- 命令：`swift test --package-path IMV2Server --jobs 4 --filter 'V2GatewayRuntimeConfigurationTests|V2PostgresTimestampBoundsTests|V2AccountRateLimitBoundsTests'`，40 项、3 套件通过，0.004 秒，无数据库前置条件；日志 `/tmp/imv2-b01-server-boundary-audit.log`。
+- 源码证据：`/tmp/imv2-b01-server-boundary-audit-sources-20260920.json`。
+- 边界：当前 64 位本机验证；未跑 PostgreSQL/TLS/工作器整链、App、全仓或超大包体。B01 的跨模块完整映射仍开放。
+
+
+<a id="20260920-review-budget"></a>
+
+## 2026-09-20 内容审核跨归属汇总预算
+
+- 缺口与修复：单归属预算只检查正数，跨归属累加缺总上界；现在在启动任何工作前以 Int.max / 归属数验证，避免执行后计数溢出。推进协议明确每项报告计数须在 0...limit。
+- 复现：`/tmp/imv2-b01-review-budget-before.log`，5 项测试中越界预算参数场景出现 6 个断言失败；实际验证了非法配置仍启动工作，未以巨量实际任务复现溢出崩溃。
+- 验证：2/3 归属拒绝超限且零调用，1/2/3 归属允许最大合法预算并精确汇总；既有归属失败隔离、全部失败及审核重试专项同轮通过。
+- 命令：`swift test --package-path IMV2Server --jobs 4 --filter 'V2RoutedContentReviewWorkerTests|V2ContentReviewWorkerTests'`，19 项、2 套件通过，0.002 秒；日志 `/tmp/imv2-b01-review-budget-after.log`。
+- 源码证据：`/tmp/imv2-b01-review-budget-sources-20260920.json`。
+- 边界：替身驱动的预算与工作器测试；生产 PostgreSQL LIMIT 及每租约计数仅作源码核对，未跑真实数据库、App、全仓或容量。B01 继续开放。
+
+
+<a id="20260920-sharded-threshold"></a>
+
+## 2026-09-20 分片发送准入自适应阈值溢出
+
+- 缺口：合法 Int.max 阈值在向上取整的中间加法溢出；现使用商和余数计算，不收紧合法配置，保留每通道最小样本数。
+- 复现：实际构造器边界测试在旧源码下异常退出，signal code 5；日志 `/tmp/imv2-b01-sharded-threshold-before.log`。无需分配巨量任务，未声称已有生产流量触发记录。
+- 验证：2/3/128 通道 × Int.max-1/Int.max 共 6 场景构造和空快照通过；既有稳定分片、并发、共享容量、取消及自适应延迟测试同轮通过。
+- 命令：`swift test --package-path IMV2Server --jobs 4 --filter V2SendMessageServiceTests`，27 项、1 套件通过，0.142 秒；日志 `/tmp/imv2-b01-sharded-threshold-after.log`。
+- 源码证据：`/tmp/imv2-b01-sharded-threshold-sources-20260920.json`。
+- 边界：当前 64 位平台与替身存储；未跑 PostgreSQL、App、全仓或容量。已核对的分页上界另列整数专项，不据此推断所有分页及计数安全，B01 继续开放。
+
+
+<a id="20260920-compression-boundaries"></a>
+
+## 2026-09-20 发送准入计数与压缩预算边界核对
+
+- 变更：新增 3 项压缩测试，其中非法预算为 3 个参数场景。生产逻辑已有保护，本轮未修改，也没有宣称复现新缺陷。
+- 验证：Int.min/-1/0 压缩预算、解压预算与膨胀比均返回 invalidConfiguration；Int.max / 压缩字节数的膨胀比可用，再加一及 Int.max 按既有合同返回 expansionRatioExceeded；精确字节预算可用，少一字节分别返回输入/输出超限。
+- 命令：`swift test --package-path IMV2Compression --jobs 4`，8 项、1 套件通过，0.001 秒；这是独立小模块的完整测试，非全仓运行。日志 `/tmp/imv2-b01-compression-boundaries.log`。
+- 源码核对：共享待处理容量加一、发送与数据库准入毫秒饱和计算、分片 UInt64 指标求和及 Server/ClientKit 编码膨胀比上界；详细限制见整数专项。本轮没有执行服务端/客户端套件。
+- 源码证据：`/tmp/imv2-b01-compression-boundaries-sources-20260920.json`。
+- 边界：未跑 App、数据库、真实超大缓冲、跨平台或容量测试；剩余转换与计数入口继续核对，B01 开放。
+
+
+<a id="20260920-recovery-dates"></a>
+
+## 2026-09-20 恢复待办持久化时间校验
+
+- 缺口：待办行时间可为 SQLite 文本或无穷；原整数校验不覆盖这些值，合并/重试可以继续并改变请求或覆盖异常。
+- 修复：整行校验增加整数/有限实数时间要求，匹配请求的重试在覆盖 next_attempt_at 前校验；保持事务回滚及过期请求不改写新请求的条件。
+- 复现：修改前无穷时间的合并/重试测试 4 组参数各测正负无穷，19 个断言失败，日志 `/tmp/imv2-b01-recovery-dates-before.log`。文本读取测试只在修复后执行，未声称有修改前崩溃运行证据。
+- 验证：无穷值拒绝及行/请求/调度计数不变、修复后重试恢复；文本入队时间两种排序均拒绝，负小数时间读取保持合法。
+- 命令：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2RoomRecoveryIntegerBoundsTests|V2RoomRecoveryPersistenceTests|V2RoomRecoveryEngineTests'`，57 项、3 套件通过，2.421 秒；日志 `/tmp/imv2-b01-recovery-dates-after.log`。
+- 源码证据：`/tmp/imv2-b01-recovery-dates-sources-20260920.json`。
+- 边界：未增加 schema 或全队列扫描，被到期筛选排除的异常待办仍需独立处理；未跑 App/Server/全仓或容量，B01 未关闭。
+
+
+<a id="20260920-recovery-progress-dates"></a>
+
+## 2026-09-20 恢复进度识别被筛选掩盖的异常重试时间
+
+- 缺口：原进度只读 MIN(next_attempt_at)，既可能将无穷作为日期返回，也会漏掉正常最小值之后的非法文本/二进制/正无穷。
+- 修复：保留空队列语义；非空队列在同一快照用两个标量子查询读取 MIN/MAX，共享时间解码器拒绝非数值与非有限值，返回 invalidWork。无 schema 变更。
+- 复现：修改前正负无穷 × 是否另有正常行，4 个场景均未抛错；日志 `/tmp/imv2-b01-recovery-progress-dates-before.log`，4 个断言失败。文本/二进制场景仅在修改后运行。
+- 验证：8 个参数场景拒绝异常、保留原值、修复后正确返回计数和最早日期；空队列保持 nil。
+- 命令：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2RoomRecoveryIntegerBoundsTests|V2RoomRecoveryPersistenceTests|V2RoomRecoveryEngineTests'`，59 项、3 套件通过，2.432 秒；日志 `/tmp/imv2-b01-recovery-progress-dates-after.log`。
+- 查询计划：从当前源码提取表/索引/查询，在 Python SQLite 内存库 EXPLAIN；MIN/MAX 均 SEARCH USING COVERING INDEX v2_room_recovery_work_due_idx，日志 `/tmp/imv2-b01-recovery-progress-dates-plan.txt`。不作为 GRDB 真机性能或容量结果。
+- 源码证据：`/tmp/imv2-b01-recovery-progress-dates-sources-20260920.json`。
+- 边界：补齐恢复进度读取对异常重试时间的发现，不是自动修复坏库；未选中行的其他字段/排序仍需审计。未跑 App/Server/全仓或容量，B01 开放。
+
+
+<a id="20260920-recovery-invalid-date-runner"></a>
+
+## 2026-09-20 非法重试时间的前台/后台停止与恢复
+
+- 变更：新增前台/后台 × 文本/正无穷 4 个运行器场景，使用真实 SQLite、替身恢复传输及通知流；生产逻辑不变。
+- 失败保持：invalidWork 上抛，engine idle，目录与正文均未请求，两个待办保留、异常房间请求修订不变，正文游标仍零；不宣称完成个人流证明。
+- 修复后：显式修复一行并以新通知流复用引擎，在有限预算内推进两个游标到 5、清空待办、再次停止。
+- 首轮：`/tmp/imv2-recovery-invalid-date-runner.log`，24 项中 4 个新场景的最终空队列断言失败。预存队列可能先于后续目录页被处理，目录页随后重新安排摘要核对，原 4 单位预算不足；保留清空断言，将测试预算改为 6，未改变生产预算或运行器。
+- 命令：`swift test --package-path IMV2ClientKit --jobs 4 --filter V2RoomRecoveryEngineTests`，24 项、1 套件通过，1.412 秒；日志 `/tmp/imv2-recovery-invalid-date-runner-v2.log`。
+- 源码证据：`/tmp/imv2-recovery-invalid-date-runner-sources-20260920.json`。
+- 边界：不是自动坏库修复、真实 TLS 重连、APNs 或真机系统后台；未跑全仓。此证据补齐局部运行器生命周期，不关闭 B01/D08。
+
+
+<a id="20260920-membership-inflight-runner"></a>
+
+## 2026-09-20 本人撤销与恢复响应在途交错
+
+- 变更：只新增测试与一次性响应拦截替身。前台/后台 × 状态/正文响应两个边界，共 4 个参数场景。
+- 过程：目录发现房间后，在恢复响应返回前通过真实个人流 apply 提交本人 remove（修订 2），再让旧状态或正文页继续进入现有恢复运行器。
+- 结果：staleMembership 上抛，engine idle；正文游标仍为零；目标房间同步状态、最新摘要与待办没有复活；成员资格保留修订 2、is_member=false；无个人流完成证明。
+- 命令：`swift test --package-path IMV2ClientKit --jobs 4 --filter V2RoomRecoveryEngineTests`，25 项、1 套件通过，1.405 秒；日志 `/tmp/imv2-recovery-membership-flight.log`。
+- 源码证据：`/tmp/imv2-recovery-membership-flight-sources-20260920.json`。
+- 边界：真实 SQLite + 可控传输替身；未跑真实 TLS、App、迁移、成员重入或全仓。生产逻辑已有栅栏，本轮未改，B03/B06/D08 继续开放。
+
+
+<a id="20260920-rejoin-inflight-runner"></a>
+
+## 2026-09-20 在途旧资格响应与本人撤销后重入
+
+- 变更：测试替身可按房间更新成员修订；状态响应在拦截之前构造，确保返回的确为旧修订。新增状态/正文两个边界，未改生产实现。
+- 交错：实际个人流 reducer 在 generation 1 中提交 remove 修订 2、add 修订 3；新待办 request_revision 与旧请求不同；旧恢复响应随后进入运行器。
+- 结果：旧响应 staleMembership，engine idle、正文游标零；修订 3 的成员记录与新 request_revision 保留。使用新通知流和返回修订 3 的传输替身重启，同一引擎在 6 单位预算内推进两个房间游标到 5、保存状态修订 3、清空队列。
+- 命令：`swift test --package-path IMV2ClientKit --jobs 4 --filter V2RoomRecoveryEngineTests`，26 项、1 套件通过，1.402 秒；日志 `/tmp/imv2-recovery-rejoin-flight.log`。
+- 源码证据：`/tmp/imv2-recovery-rejoin-flight-sources-20260920.json`。
+- 边界：真实 SQLite、真实个人流 reducer，传输为替身且正文页为空；不证明缺席消息可见性、个人流重置代次、真实网络/App 或 owner 迁移。未跑全仓，B03/B06/D08 仍开放。
+
+
+<a id="20260920-rejoin-content-flight"></a>
+
+## 2026-09-20 重入在途响应的非空正文验证
+
+- 变更：重入测试增加空/非空正文参数，状态/正文两个响应阶段合计 4 场景。替身正文响应先构造再执行交错，保证晚到的仍是旧消息；生产逻辑未改。
+- 验证：旧资格序号 1 消息响应被拒绝后，事件表及消息投影为空、游标零；新资格序号 5 消息经新通知流恢复后，仅新消息及一条事件落库，旧消息不存在，状态修订 3、游标 5、待办清空。
+- 命令：`swift test --package-path IMV2ClientKit --jobs 4 --filter V2RoomRecoveryEngineTests`，26 项、1 套件通过，1.388 秒；日志 `/tmp/imv2-recovery-rejoin-content-flight.log`。
+- 源码证据：`/tmp/imv2-recovery-rejoin-content-flight-sources-20260920.json`。
+- 边界：真实 SQLite/reducer，服务端过滤由传输替身预设；不证明服务端历史成员区间、重置代次、TLS/App 或迁移，未跑全仓。B03/B06/D08 未关闭。
+
+
+<a id="20260920-recovery-body-authorization-fence"></a>
+
+## 2026-09-20 旧正文借用重入后新状态授权的修复
+
+- 缺口：正文落库只检查当前持久状态允许访问；请求等待期间发生撤销/重入并写入新状态后，旧正文可重新落库。
+- 复现：真实 SQLite/个人流 remove 修订 2、add 修订 3，再提交新状态；旧任务的非空页不应写入。修改前 4 个断言失败，旧消息与游标实际写入，日志 `/tmp/imv2-recovery-body-fence-before.log`。
+- 修复：正文提交必须带已捕获状态；当前 ownerEpoch、viewerMembershipRevision 及个人成员栅栏必须匹配请求捕获值，之后仍做当前资格检查。head/read 变化和新通知的 request_revision 不作全等限制。
+- 调用约定：提交状态后重新读取任务再发正文请求；生产引擎已这样执行。四处持久化测试沿用旧的预状态任务，首次回归因此失败，日志 `/tmp/imv2-recovery-body-fence-after.log`；修正测试后一次编译因 async let 捕获可变量失败，日志 `/tmp/imv2-recovery-body-fence-final.log`，改为不可变捕获。
+- 验证：重入后先提交新状态仍拒绝旧消息、新待办保留且可继续；未捕获状态、owner/成员修订变化拒绝，仅 head 推进允许；原并发实时/恢复、新通知公平性与条件 unavailable 场景保持通过。
+- 命令：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2RoomRecoveryPersistenceTests|V2RoomRecoveryEngineTests|V2RoomRecoveryIntegerBoundsTests'`，64 项、3 套件通过，2.577 秒；日志 `/tmp/imv2-recovery-body-fence-final-v2.log`。
+- 源码证据：`/tmp/imv2-recovery-body-fence-sources-20260920.json`。
+- 边界：未跑真实 TLS/App、SIGKILL、完整迁移或全仓；旧强杀 fixture 已在状态提交后重新获取正文任务，仅源码核对，不声称重跑其历史验收。B03/B06/D08 开放。
+
+
+<a id="20260920-rejoin-summary-fence"></a>
+
+## 2026-09-20 重入后的旧摘要拒绝
+
+- 变更：扩展实际撤销/重入并提交新状态的持久化测试，分别覆盖摘要携带旧恢复任务与不带恢复任务；生产逻辑未改。
+- 验证：修订 1 的非空旧摘要在当前修订 3 下返回 false，未写缓存且未清除新待办的 requires_summary；新资格空摘要提交后，旧摘要再次返回 false，缓存仍是新资格结果。旧正文拒绝、新资格正文可继续的断言保留。
+- 命令：`swift test --package-path IMV2ClientKit --jobs 4 --filter V2RoomRecoveryPersistenceTests`，23 项、1 套件通过，0.503 秒；日志 `/tmp/imv2-recovery-rejoin-summary-fence.log`。
+- 源码证据：`/tmp/imv2-recovery-rejoin-summary-fence-sources-20260920.json`。
+- 边界：真实 SQLite 的提交顺序测试；不等同真实网络/App、代次重置或迁移。未跑全仓，B03/B06/D08 保持开放。
+
+
+<a id="20260920-recovery-body-generation"></a>
+
+## 2026-09-20 重置前正文响应跨代次写入修复
+
+- 复现：同一成员资格、同一恢复 scope，在 generation 1 捕获正文任务，真实完成 generation 2 的快照导入/准备/激活后交付旧非空公告页。旧实现仍写公告、推进游标并完成待办，4 个断言失败；日志 `/tmp/imv2-recovery-body-generation-before.log`。
+- 修复：V2RoomRecoveryWork 读取时在同一快照捕获可选 personalGeneration；正文提交事务复核当前 generation，变化则抛 staleScope。原成员资格/owner 栅栏继续生效；未修改 schema。
+- 验证：旧正文拒绝且公告/游标未写、待办 request_revision 保留；新代次重新读取的任务可提交公告到游标 20。既有恢复持久化/运行器/整数与快照房间日志类型专项同轮通过。
+- 命令：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2RoomRecoveryPersistenceTests|V2RoomRecoveryEngineTests|V2RoomRecoveryIntegerBoundsTests|V2SyncEngineTests/recoveryBodySnapshotGenerationFence|V2SyncEngineTests/snapshotRoomLogStorage'`，66 项、4 套件通过，2.775 秒；日志 `/tmp/imv2-recovery-body-generation-after.log`。
+- 源码证据：`/tmp/imv2-recovery-body-generation-sources-20260920.json`。
+- 边界：真实 SQLite 快照激活与正文提交，不是实际服务器 ACK/TLS/App；其他异步结果入口仍须独立核对，未跑全仓或 SIGKILL，B03/B06/D08 开放。
+
+
+<a id="20260920-recovery-results-generation"></a>
+
+## 2026-09-20 恢复结果共用个人流代次检查
+
+- 复现：将真实快照激活场景扩展到状态、不可用、重试及完成入口。原正文检查通过，其余入口未拒绝旧任务，出现更新状态/删除待办/延后待办；5 个参数场景共 6 个断言失败，日志 `/tmp/imv2-recovery-results-generation-before.log`。
+- 修复：抽取 requireRoomRecoveryWorkScope，在事务内校验 scan/账户及捕获 generation；状态、不可用、重试、完成、服务计数、正文、带 work 的摘要共用。没有 work 的摘要仍按原请求 generation 校验。
+- 回归：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2RoomRecoveryPersistenceTests|V2RoomRecoveryEngineTests|V2RoomRecoveryIntegerBoundsTests|V2SyncEngineTests/recoveryBodySnapshotGenerationFence'`，65 项、4 套件通过，2.520 秒；日志 `/tmp/imv2-recovery-results-generation-after.log`。
+- 补测：加入新摘要请求搭配旧 work 的场景后，仅重跑 `V2SyncEngineTests/recoveryBodySnapshotGenerationFence`；1 项测试、6 个参数场景通过，0.356 秒，日志 `/tmp/imv2-recovery-results-generation-summary.log`。每个场景都验证旧结果拒绝、正文游标/公告未写、待办保留，以及新代次任务可继续提交。
+- 源码证据：`/tmp/imv2-recovery-results-generation-sources-20260920.json`。
+- 边界：真实 SQLite 快照流程，不是服务端 ACK/TLS/App；未跑全仓或 SIGKILL，不扩大到未核对的其他协议入口，B03/B06/D08 开放。
+
+
+<a id="20260920-recovery-work-fence-crash"></a>
+
+## 2026-09-20 恢复资格与代次栅栏后的六入口强杀复验
+
+- 变更：测试增加显式事务选择 IMV2_CLIENT_CRASH_TRANSACTIONS；默认完整矩阵不变，拒绝不支持、重复或空的选择。生产源码未再修改。
+- 实际范围：recovery、state、unavailable、retryWork、finishWork、summary，各 before/after，共 12 个真实 SIGKILL 参数。父进程确认子进程使用当前加载的测试 bundle；随后重开 SQLite 验证正文/游标、状态、待办、延期/调度计数或摘要对应的原子性与恢复。
+- 命令：设置 IMV2_CLIENT_CRASH_BINARY 为当前 `IMV2ClientKit/.build/out/Products/Debug/IMV2ClientKitTests.xctest/Contents/MacOS/IMV2ClientKitTests` 的绝对路径，IMV2_CLIENT_CRASH_TRANSACTIONS=`recovery,state,unavailable,retryWork,finishWork,summary`，运行 `swift test --package-path IMV2ClientKit --jobs 4 --filter V2RoomRecoveryCrashTests/killedCommitRecoversAtomically`。
+- 结果：1 项测试、12 个参数通过，1.103 秒；日志 `/tmp/imv2-recovery-work-fence-crash.log`。
+- 源码证据：`/tmp/imv2-recovery-work-fence-crash-sources-20260920.json`。
+- 边界：这是资格/代次保护修改后六入口的真实进程验证；未重跑其余强杀参数、App/TLS、系统后台或全仓，不据此关闭 B03/B06/D08。
+
+
+<a id="20260920-directory-flight-fence"></a>
+
+## 2026-09-20 目录旧扫描轮次与旧代次响应修复
+
+- 复现：同一 scope 重扫回到首页、或个人游标代次由 1 改为 2，旧目录响应仍被接受并标记完成。2 个场景共 8 个断言失败，日志 `/tmp/imv2-directory-flight-before.log`；代次变更首轮使用定向数据库夹具。
+- 修复：V2RoomRecoveryScan 捕获 directory_round 与个人流 generation；目录提交以 request 替代单独 scope 参数，事务核对轮次、代次、请求/当前游标；引擎在请求前捕获。全部调用点已更新，未改 schema。
+- 回归：`swift test --package-path IMV2ClientKit --jobs 4 --filter 'V2RoomRecoveryPersistenceTests|V2RoomRecoveryEngineTests|V2RoomRecoveryIntegerBoundsTests'`，65 项、3 套件通过，2.599 秒；日志 `/tmp/imv2-directory-flight-after.log`。
+- 强杀：设置当前 IMV2_CLIENT_CRASH_BINARY，IMV2_CLIENT_CRASH_TRANSACTIONS=`directory,emptyDirectory,finalDirectory,restartDirectory`，`swift test --package-path IMV2ClientKit --skip-build --filter V2RoomRecoveryCrashTests/killedCommitRecoversAtomically`；1 项测试、8 参数通过，0.679 秒，日志 `/tmp/imv2-directory-flight-crash.log`。
+- 真实快照补测：随后仅新增目录参数到已有快照六入口测试，实际 beginReset/import/prepare/activate 后，旧目录页 stalePage、新目录页可提交。`V2SyncEngineTests/recoveryBodySnapshotGenerationFence` 1 项、7 参数通过，0.382 秒，日志 `/tmp/imv2-directory-flight-snapshot.log`。强杀运行早于此测试扩展，生产源码未再改变。
+- 源码证据：`/tmp/imv2-directory-flight-sources-20260920.json`。
+- 边界：真实 SQLite/进程强杀；无实际网络/App/跨 owner 迁移，未跑全仓，B03/B06/D08 开放。
+
+
+<a id="20260920-housekeeping-small-budget"></a>
+
+## 2026-09-20 服务端小额度清理类别饥饿修复
+
+- 复现：控制面按固定类别顺序分配额度，limit=1 时只有第一类获得额度。真实 PostgreSQL 连续模拟 300 个分钟槽位，过期连接租约和普通命令幂等记录均未被删除，4 个断言失败；日志 `/tmp/imv2-housekeeping-small-before.log`。
+- 修复：类别额度改用商/余数分配，余数按分钟槽位轮转；小于 10 的总额度下，内层幂等表按外层完整周期推进，避免两层取模仅命中部分表。分钟转换在事务前验证，单轮总预算不变；无 schema、保留条件、历史兼容或客户端变更。
+- 专项：`swift test --package-path IMV2Server --jobs 4 --filter 'V2ControlHousekeepingBudgetTests|PostgresV2RoomWriteStoreIntegrationTests/housekeepingSmallBudgetDoesNotStarve|PostgresV2RoomWriteStoreIntegrationTests/housekeepingTimestampBoundaries|PostgresV2RoomWriteStoreIntegrationTests/housekeepingRetentionPrecision|PostgresV2RoomWriteStoreIntegrationTests/boundedHousekeepingRecoversExpiredSyncReset|PostgresV2RoomWriteStoreIntegrationTests/invitationApprovalReceiptsSurviveHousekeeping'`。设置独立端口 55479 的临时数据库及 disposable 标记，报告 7 项、2 套件通过，3.298 秒；其中保留期精度用例因当时未设置第二数据库而提前返回，不计该轮有效证据。日志 `/tmp/imv2-housekeeping-small-after.log`。
+- 补验：随后配置同一临时实例的第二个独立数据库，`--skip-build --filter PostgresV2RoomWriteStoreIntegrationTests/housekeepingRetentionPrecision`，真实执行 6 个参数场景，1 项通过，4.049 秒；日志 `/tmp/imv2-housekeeping-small-retention.log`。
+- 覆盖：小额度真实清理、单轮删除不超额、负时间/非法时间拒绝、保留期边界、新记录保留、审批回执保护；纯预算用例覆盖 1–9 的代表额度、10/11/1024、Int.max 附近及 UInt.max 轮转值。
+- 证据：`/tmp/imv2-housekeeping-small-sources-20260920.json`。没有运行全仓测试。轮转证据按连续分钟槽位；任意配置周期若长期只采样固定槽位仍可能遗漏类别，调度周期与轮转覆盖组合需继续核对，不将本轮视为所有调度配置的公平性证明。B01/D08 继续开放。
+
+
+<a id="20260920-housekeeping-durable-rotation"></a>
+
+## 2026-09-20 服务端清理按持久事务轮次推进
+
+- 继续核对发现：上一轮分钟取模仍与固定调度周期耦合，例如每 10 分钟运行、limit=1 时仅一个类别持续获得额度。当前实现替换该方式，不再依赖墙钟轮转。
+- 当前 schema 43 新增 control_housekeeping_cursor 单行表及种子。清理事务锁定轮次行，用它分配类别/幂等表预算并推进有界循环计数；删除失败连同轮次回滚。不同存储实例、并发维护器共享数据库进度。缺表、缺种子、列或约束漂移由启动/建库合同拒绝；只更新新库基线，不增加旧库升级路径。
+- 测试：小额度真实 PostgreSQL 用例扩展为时钟不变、每分钟、每 10 分钟、每小时四参数，并每轮重建 store。时钟不变场景同时验证缺种子启动拒绝、删除触发器注入失败后的轮次/数据回滚、两个独立 store 并发提交后轮次推进两次。
+- 回归命令：设置端口 55479 的主/次临时独立数据库与 disposable 标记，`swift test --package-path IMV2Server --jobs 4 --filter 'V2CurrentSchemaSourceTests|V2ControlHousekeepingBudgetTests|PostgresV2RoomWriteStoreIntegrationTests/housekeepingSmallBudgetDoesNotStarve|PostgresV2RoomWriteStoreIntegrationTests/housekeepingTimestampBoundaries|PostgresV2RoomWriteStoreIntegrationTests/housekeepingRetentionPrecision|PostgresV2RoomWriteStoreIntegrationTests/boundedHousekeepingRecoversExpiredSyncReset|PostgresV2RoomWriteStoreIntegrationTests/invitationApprovalReceiptsSurviveHousekeeping'`，8 项、3 套件通过，9.431 秒；本轮主/次库齐全，保留期 6 参数实际执行。日志 `/tmp/imv2-housekeeping-durable.log`。
+- Schema 专项：`IMV2_SCHEMA_BOOTSTRAP_NATIVE=1` 配合独立实例运行 `scripts/test_v2_postgres_schema_bootstrap.sh`。首轮提示表数 149 应为 150；同步表数 150、索引数 352，并将轮次种子纳入导出恢复，新增移除轮次约束时拒绝的断言后通过。日志 `/tmp/imv2-housekeeping-durable-schema.log`、`/tmp/imv2-housekeeping-durable-schema-v2.log`。
+- 源码证据：`/tmp/imv2-housekeeping-durable-sources-20260920.json`。本轮仅服务端及对应 schema/文档；未跑全仓、实际进程强杀、生产容量或完整 owner 迁移。store 重建与事务失败证据不冒充真实进程重启；B01/D08 其余范围仍开放。
+
+
+<a id="20260920-housekeeping-readiness-bound"></a>
+
+## 2026-09-20 清理轮次启动范围与执行范围统一
+
+- 复现：轮次设为 Int64.max，原启动检查只验证非负而放行；工作器却要求小于完整轮转周期。真实 PostgreSQL 新增用例出现 1 个预期抛错未发生的失败，日志 `/tmp/imv2-housekeeping-readiness-before.log`。
+- 修复：PostgresV2ControlPlaneHousekeepingStore.housekeepingRotationPeriod 由当前幂等表数量计算，事务读取、循环回绕和启动检查共用；不改 schema 43 或历史兼容策略。
+- 验证：拒绝恰好等于周期及 Int64.max；随后分别恢复到 0 和最大合法轮次，启动检查成功。并重跑预算边界及四种调度间隔下的真实清理（含此前的并发、回滚分支）。
+- 命令：主/次临时 PostgreSQL 与 disposable 标记齐备，`swift test --package-path IMV2Server --jobs 4 --filter 'PostgresV2RoomRecoverySchemaTests/housekeepingReadinessRejectsOutOfRangeRotation|V2ControlHousekeepingBudgetTests|PostgresV2RoomWriteStoreIntegrationTests/housekeepingSmallBudgetDoesNotStarve'`；4 项、3 套件通过，2.770 秒，日志 `/tmp/imv2-housekeeping-readiness-after.log`。
+- 源码证据：`/tmp/imv2-housekeeping-readiness-sources-20260920.json`。仅此服务端边界与相关回归，不代表 B01 所有入口审计完成；未跑全仓。
+
+
+<a id="20260920-publication-replay-policy"></a>
+
+## 2026-09-20 普通发送/编辑在权限变化后的重放与额度一致性
+
+- 审计范围：普通发送 PostgresV2RoomWriteStore 的完成记录分支、编辑 PostgresV2MessageEditStore 的操作回执分支，以及共用 v2AuthorizeContentWrite。二者都在新写入授权前处理既有操作的原参重放或改参冲突；本轮未发现需要修改的生产逻辑。
+- 补强既有 editsRespectCurrentContentWriteAuthorization：房间冻结、禁言、成员移出、发送权限撤销、账号停用五个场景，在发送并编辑成功后改变权限；新发送/编辑被拒绝，原发送与原编辑返回各自原回执，同 ID 改参均返回幂等冲突。前后房间/分片 command_window_used 及房间序号不变，消息/房间事件/投影数量不变，发送完成记录和编辑操作记录各保留一条。
+- 实际验证：独立临时 PostgreSQL（55479），设置主数据库及 disposable 标记，`swift test --package-path IMV2Server --jobs 4 --filter PostgresV2RoomWriteStoreIntegrationTests/editsRespectCurrentContentWriteAuthorization`，1 项、5 参数通过，1.882 秒；日志 `/tmp/imv2-publication-replay-policy.log`。
+- 源码证据：`/tmp/imv2-publication-replay-policy-sources-20260920.json`。
+- 边界：此处通过服务/存储调用验证数据库策略，账号停用场景不表示已停用账号仍可通过 Gateway 认证。批量发送只做了源码定位，未新增/运行其与权限变化的组合；转发、管理、完整 owner 迁移及跨组件并发仍由 D07/D08 跟踪。未改生产代码、客户端或 schema，未跑全仓测试。
+
+
+<a id="20260920-publication-batched-policy"></a>
+
+## 2026-09-20 两类群的准入队列重放与拒绝隔离
+
+- 将上一轮普通发送/编辑的权限变化用例扩展到 standard/large 两类群，共 10 个参数组合；保留原有标量发送、编辑、新请求拒绝、原回执和改参冲突断言。
+- 每个组合再通过实际 V2SendMessageAdmissionBatcher 并发提交原发送、同 clientMessageID 改参及新的无权发送。分别得到原回执、幂等冲突及当前权限错误；房间/分片额度、房间序号、消息/事件/投影数量均与运行前一致，发送完成记录和编辑记录仍各一条。
+- 验证：独立临时 PostgreSQL（55479），主数据库与 disposable 标记齐备；`swift test --package-path IMV2Server --jobs 4 --filter PostgresV2RoomWriteStoreIntegrationTests/editsRespectCurrentContentWriteAuthorization`；1 项、10 参数通过，4.090 秒。日志 `/tmp/imv2-publication-batched-policy.log`，源码证据 `/tmp/imv2-publication-batched-policy-sources-20260920.json`。
+- 边界：实际准入队列和逐条回退路径的结果隔离验证，没有断言三条请求必须形成同一个原子批次，也不据此宣称已覆盖所有批量优化分支、有效相邻请求、私聊、转发或管理路径。未发现需改动的生产行为；仅补测试与证据，无客户端/schema 变更，未跑全仓，D07/D08 继续开放。
+
+
+<a id="20260920-forward-target-policy-replay"></a>
+
+## 2026-09-20 跨库转发目标权限变化与终态重放
+
+- 扩展 forwardInboxTargetBoundaries 到 standard/large 两类群。移出成员、禁言、冻结、发送权限撤销、账号停用五种情形中，先额外完成一次转发，再修改目标权限；已完成转发重试及 inbox 状态读取均返回原成功结果，尚未接受的另一操作按当前权限拒绝。
+- 同轮保留 owner epoch 不匹配、准入额度耗尽及媒体未就绪路径，合计 8×2=16 个参数。失败/等待与终态重放前后，目标 rooms、room_admission、shard_admission_pools 的完整行快照不变；消息/发送完成记录只包含预先完成的那一条，待办可保存终态拒绝。额度恢复后的等待任务仍可成功接受。
+- 验证：主/次独立临时 PostgreSQL 数据库（55479），disposable 标记已设置；`swift test --package-path IMV2Server --jobs 4 --filter PostgresV2RoomWriteStoreIntegrationTests/forwardInboxTargetBoundaries`，1 项、16 参数通过，11.266 秒。日志 `/tmp/imv2-forward-policy-replay.log`，源码证据 `/tmp/imv2-forward-policy-replay-sources-20260920.json`。
+- 边界：跨数据库真实目标导入/状态读取，权限变化由受控 SQL 夹具建立；不是 Gateway 认证、实际网络/进程强杀、完整 owner 搬迁或全部管理命令验收。本轮未发现需改动的生产逻辑，仅补测试与清单证据，未改客户端或 schema，未跑全仓。B04/D07/D08 仍有其他开放范围。
+
+
+<a id="20260920-room-migration-preparation"></a>
+
+## 2026-09-20 房间 owner 迁移准备记录
+
+- 实现：V2RoomOwnerMigrationPreparation 规范化目标分片并保护 epoch 加一；准备存储验证分片注册，锁定明确源目录，按迁移 ID 幂等、按房间排他，新建 prepared 记录。精确重试返回原记录；改参、未知分片、源路由过期和房间已有任务分别拒绝。准备不切换路由、不复制数据。
+- schema 44：新增 9 列 room_owner_migrations、主键和进行中房间唯一索引，以及保护任务身份的函数/触发器；启动检查核对列、唯一索引和启用的保护触发器。新库基线同步，未提供旧库升级。
+- 首次 Swift 构建因新启动查询的多行字符串缩进失败，修正后 2 项通过；再补数据库身份防篡改与不同 ID 并发争用房间验证后，`swift test --package-path IMV2Server --jobs 4 --filter V2RoomOwnerMigrationPreparationTests` 最终 2 项、1 套件通过，0.445 秒。主数据库和 disposable 标记齐备；日志 `/tmp/imv2-room-migration-preparation.log`、`/tmp/imv2-room-migration-preparation-v2.log`、`/tmp/imv2-room-migration-preparation-final.log`。
+- 真实数据库用例覆盖同 ID 并发只产生一条任务、store 重建后原记录重放、同 ID 改参、未知分片、源 epoch 不符、不同 ID 并发只允许一个成功、数据库禁止修改目标身份、源路由保持不变、移除排他索引后启动拒绝；纯请求用例覆盖同分片拒绝及 epoch 最大边界。
+- Native PostgreSQL 建库/导出恢复/漂移专项最终通过：151 张表、354 个索引、27 个应用触发器、25 个函数；保护触发器禁用时 SQL gate 拒绝，恢复启用后通过。日志 `/tmp/imv2-room-migration-preparation-schema-final.log`。
+- 源码证据：`/tmp/imv2-room-migration-preparation-sources-20260920.json`。仅准备组件，不是完整迁移执行器；冻结、复制/校验、发布、任务接管、operator/runtime 组装及进程强杀仍未完成。B27 保持开放。无客户端修改，未跑全仓。
+
+
+<a id="20260920-room-migration-abort"></a>
+
+## 2026-09-20 迁移准备记录读取与安全取消
+
+- 实现：record(migrationID:) 读取原记录；abortPreparation 使用与准备相同的 ID 建议锁及记录行锁，核对请求，prepared → aborted，精确重复返回原结果。拒绝不存在、改参、非法/倒退时间和已离开准备阶段的取消。取消不依赖当前分片注册集合，也不更新源目录。
+- 验证：重建 store 且清空注册表后读取与取消、两个并发取消返回同一记录、取消后原 ID 不复活、新 ID 成功准备、旧取消不能影响新任务、路由不变。7 个后续阶段由受控 SQL 夹具建立，仅验证取消拒绝；不冒充实际冻结/复制/发布。
+- 命令：临时 PostgreSQL 主库（55479）及 disposable 标记齐备，`swift test --package-path IMV2Server --jobs 4 --filter V2RoomOwnerMigrationPreparationTests`，3 项、1 套件通过，0.742 秒；日志 `/tmp/imv2-room-migration-abort.log`，源码证据 `/tmp/imv2-room-migration-abort-sources-20260920.json`。
+- 边界：schema 44 未变；无真实进程强杀、operator/runtime 组装或 owner 数据搬迁。B27 继续开放；本轮未改客户端，未跑全仓。
+
+
+<a id="20260920-room-migration-freezing-intent"></a>
+
+## 2026-09-20 迁移冻结意图与准备取消互斥
+
+- 实现：schema 45 / V2RoomOwnerMigrationPhase 增加 freezing。beginFreezing 验证注册分片、任务完整身份和阶段，在同一事务锁定当前源路由并比较 shard/epoch；prepared → freezing，重复 freezing 返回原记录。任务进入此阶段后准备取消拒绝，不能与源端后续效果交错释放任务。
+- 真实 PostgreSQL 专项：源 epoch 变化时保持 prepared；非法/倒退时钟不推进；两个并发 beginFreezing 返回同一记录；重建 store 后重试不刷新时间；取消与启动的实际并发只有一个成功，最终阶段对应赢家，两条源路由均未切换。原有准备、取消、身份冲突、排他和整数边界同时回归。
+- 命令：临时主库（55479）与 disposable 标记齐备，`swift test --package-path IMV2Server --jobs 4 --filter V2RoomOwnerMigrationPreparationTests`，4 项、1 套件通过，1.072 秒；日志 `/tmp/imv2-room-migration-freezing-intent.log`。
+- schema 新库建库、导出恢复和漂移检查通过，日志 `/tmp/imv2-room-migration-freezing-schema.log`。没有历史升级链、客户端或协议改动，未跑全仓。
+- 边界：freezing 仅为持久控制意图；没有源 owner 写屏障/排空证明、数据复制或发布。冻结和取消互斥不等于完整迁移已完成，B27 继续开放。源码证据 `/tmp/imv2-room-migration-freezing-intent-sources-20260920.json`。
+
+
+<a id="20260920-room-migration-owner-marker"></a>
+
+## 2026-09-20 源房间迁移标记与共用归属检查
+
+- schema 46：rooms 新增可空 UUID migration_fence_id，新库 SQL 合同与启动检查同步。源端安装器要求 freezing 记录，在房间行锁下复核源 shard/epoch；同迁移 ID 并发安装和重建 store 后重试幂等，不同 ID 拒绝。共用 v2RequireRoomOwner 以同一加锁查询读取标记，标记存在时拒绝操作。
+- 新增真实 PostgreSQL 用例覆盖 prepared 拒绝、源 epoch 不符、并发安装、重建重试、标记前后共用检查、冲突 ID、源 epoch/房间序号与控制阶段不变，以及移除字段后启动拒绝。迁移准备套件首次 5 项通过，日志 `/tmp/imv2-room-migration-owner-marker.log`。
+- 首轮既有归属回归失败：测试按旧 SQL 文本定位等待房间锁的请求，新增查询列后匹配不到；保留失败日志 `/tmp/imv2-room-migration-owner-marker-regression.log`。同步 3 个测试定位条件，仍要求观察到锁等待后才改变归属，没有移除并发断言。
+- 新库建库、导出恢复和漂移专项通过，日志 `/tmp/imv2-room-migration-owner-marker-schema.log`；151 张表、354 个索引、27 个应用触发器、25 个函数。
+- 边界：仅共用归属检查的调用路径受到此标记约束；独立检查、非路由写入、后台工作与清理尚未全覆盖。本次没有新增“实际在途写入与安装器竞争”的排空专项，也没有执行完整搬迁、进程强杀或运行入口组装。任务仍为 freezing，B27 保持开放。无客户端、协议或历史升级改动，未跑全仓。
+- 修正测试定位后，临时 PostgreSQL 主/次库（55479）及 disposable 标记齐备：迁移准备套件 5 项，加发送 3、moderation 12、群能力 8、消息变更 6 个参数场景，合计 9 项测试、2 个套件通过，21.124 秒。日志 `/tmp/imv2-room-migration-owner-marker-final.log`；仅运行上述过滤范围。测试定位修正后的锁等待和重放效果断言全部保留。
+- 文档链接、结构与 diff 空白检查通过。源码/日志 SHA-256 清单为 `/tmp/imv2-room-migration-owner-marker-sources-20260920.json`，属于本机证据，不代替 CI 或生产验收。
+
+
+<a id="20260920-room-migration-send-fence"></a>
+
+## 2026-09-20 路由发送独立归属检查的迁移屏障
+
+- 发现并修复：PostgresV2RoomWriteStore.requireSelectedOwners 原先只校验 shard/epoch，即使源房间设置 migration_fence_id 仍可能通过。现有按房间排序的 FOR NO KEY UPDATE 查询同时读取标记；任一房间已有标记则拒绝整个事务。该检查由路由发送的标量、标准与加速批量等提交分支调用。没有引入旧版本兼容，schema 46 和协议 30 不变。
+- 扩展既有归属专项，覆盖普通群、大群单条/同房间批量，以及私聊纯文本、富文本、跨房间批量。真实 control 准备和 beginFreezing 后调用源端安装器，不用直接 SQL 伪造冻结结果；迁移房间的新发送、原请求重放均拒绝。逐表比较 rooms、messages、room_events、message_send_completions、message_content_versions、message_projection_states、message_projection_state_values，防止异常返回掩盖部分提交。保留旧 epoch、未知分片、错误数据库、锁等待期间代次变化和新 owner 重放断言。
+- 首轮 5 个发送参数通过，私聊批量夹具因同房间重复而触发 duplicateRoom，未进入归属检查；保留 `/tmp/imv2-room-migration-send-fence.log`。修正为两个不同私聊房间，另一个未迁移房间的独立重放仍应成功，混合原子批次应整体拒绝。
+- 边界：并非所有非路由发送、转发/已读独立检查或后台任务均已受屏障约束。准入信用额度可在消息事务前预取，本轮未证明额度池冻结/失效；也未证明每个加速分支都被参数用例实际命中。完整排空、复制、发布及运行入口未完成，B27 继续开放。无客户端改动，未跑全仓。
+- 修正后使用临时 PostgreSQL 主/次库（55479）及 disposable 标记，`swift test --package-path IMV2Server --jobs 4 --filter 'PostgresV2RoomWriteStoreIntegrationTests/routedSendOwnerEpochFence|V2RoomOwnerMigrationPreparationTests'`：迁移套件 5 项与发送 6 个参数全部通过，合计 6 项测试、2 个套件，5.126 秒。日志 `/tmp/imv2-room-migration-send-fence-final.log`。文档链接、结构与 diff 空白检查通过。
+- 源码和日志 SHA-256 清单 `/tmp/imv2-room-migration-send-fence-sources-20260920.json` 是本机证据，不代替生产容量、全入口冻结或完整迁移验收。
+
+
+<a id="20260920-room-migration-receipt-forward-fence"></a>
+
+## 2026-09-20 已读回执与同库转发迁移屏障
+
+- 修复：PostgresV2ReadReceiptStore 的标量 FOR UPDATE、读者查询 FOR SHARE 和群回执批量 prepared statement 均读取 migration_fence_id，在归属判断中要求为空；批量行解码同步为包含可空 UUID 的四列。v2RequireForwardOwners 的读写加锁查询同时检查源/目标房间迁移标记，任一端正在迁移则拒绝。
+- 普通群/大群的单条回执、批量回执和读者页用例，以及同库转发源端/目标端用例，使用真实控制记录与源端安装器设置屏障。拒绝新操作及既有操作重放后逐表比较持久房间、回执/个人日志或消息/转发接受事实，防止部分提交。保留原有 owner 代次变化、加锁等待及幂等回归，并选择混合回执批次、转发接受/结果发布间归属变化专项一起回归。
+- 边界：新增标记场景覆盖群回执和同库转发，不代表私聊标量回执的两个事务间交错、跨库 export/inbox、后台 worker、非路由路径及准入额度均完成冻结。没有复制、路由发布或完整迁移进程恢复证据，B27 仍开放。schema 46、协议 30 不变，没有客户端或历史兼容改动，未跑全仓。
+- 临时 PostgreSQL 主/次库（55479）与 disposable 标记齐备。过滤运行 routedReadReceiptOwnerEpochFence、readReceiptOwnerMixedBatch、foregroundForwardOwnerFence、foregroundForwardOwnerStageChange：4 项测试、14 个参数、1 套件通过，11.301 秒，日志 `/tmp/imv2-room-migration-receipt-forward-fence.log`。
+- 复用同一构建产物（--skip-build），directReceiptOwnerOutbox 和 directReceiptResponseTimestampPrecision：2 项测试、6 个参数通过，5.658 秒，日志 `/tmp/imv2-room-migration-receipt-direct-regression.log`。这是私聊正常路径投递、隐私和时间精度回归，不冒充私聊迁移交错验证。
+- 文档链接、结构与 diff 空白检查通过。源码/日志 SHA-256 清单 `/tmp/imv2-room-migration-receipt-forward-fence-sources-20260920.json` 是本机验证证据，不替代生产或完整迁移验收。
+
+
+<a id="20260920-room-migration-cross-forward-fence"></a>
+
+## 2026-09-20 跨库转发创建、接受与完成的迁移屏障
+
+- 修复：源端新导出、目标新 inbox 与 v2AssertForwardInboxOwner 均在原加锁查询中读取 migration_fence_id，并要求为空。已存在导出的读取、重复 receive 的摘要核对与不可变 completed/rejected 回执保持只读重放。
+- 额外缺口：正文长度校验可能在进入接受事务内部的 owner 检查之前抛出，再由 catch 把 pending 写为 rejected。现于构造/校验命令前，按 inbox → message operation → room 的现有顺序取得操作锁并检查 owner，防止迁移期间仍写业务拒绝。原接受与完成阶段检查继续保留。
+- 新增普通群/大群双库场景：创建 completed、pending、accepted 未完成、尚未接收四类导出；通过完成事务触发器注入失败建立真实 accepted 检查点，确认状态后撤掉故障。使用 control 准备/冻结意图与实际源端安装器分别标记源房间和目标房间。
+- 校验新导出与新接收拒绝；pending 和 accepted 在正常正文限制、过小限制下均因 ownerChanged 停止；原导出、已存在接收与 completed 回执读取仍保留。比较源/目标各 11 张表的完整行快照，覆盖房间、消息、接受回执、房间事件、准入额度、导出/投递待办、源回执及目标 inbox/媒体关联，防止错误返回后仍产生持久效果。
+- 边界：媒体复制/映射、投递任务 claim/推进、源回执写入、清理与非路由入口尚未全部纳入迁移屏障。本次故障由数据库触发器控制，不是进程强杀；尚无完整复制、发布或运行入口，B27 保持开放。schema 46、协议 30 不变，无历史兼容和客户端改动，未跑全仓。
+- 临时 PostgreSQL 主/次库（55479）及 disposable 标记齐备，过滤运行 forwardMigrationWriteBoundaries、forwardInboxTargetBoundaries、forwardInboxAcceptanceAndRecovery、forwardInboxReceiveOwnerFenceWait、forwardExportCommitAndReplay。5 项测试通过：22 个参数场景加 1 个接收锁等待用例，17.104 秒。日志 `/tmp/imv2-room-migration-cross-forward-fence.log`。文档链接、结构与 diff 空白检查通过。
+- 本机源码/日志 SHA-256 清单 `/tmp/imv2-room-migration-cross-forward-fence-sources-20260920.json`，不代替生产或完整迁移验收。
+
+
+<a id="20260920-room-migration-delivery-fence"></a>
+
+## 2026-09-20 源转发投递任务与终态回执迁移屏障
+
+- 修复：认领候选除过滤 shard/epoch 外，还要求 migration_fence_id 为空；同时 FOR UPDATE OF job SKIP LOCKED 与 FOR SHARE OF room SKIP LOCKED，房间锁持有到认领提交。仅过滤不加房间锁不足以防止检查与迁移安装交错。按表分别加锁及跳过行为核对 [PostgreSQL 16 官方 SELECT 文档](https://www.postgresql.org/docs/16/sql-select.html#SQL-FOR-UPDATE-SHARE)。
+- isCurrent 增加当前房间归属/标记检查；complete/reschedule 改为事务内读取不可变导出绑定、取得源房间共享锁并复核后更新任务。源归属变化或迁移标记存在时返回 false，不推进状态或清空旧租约。首次保存源端终态回执在原房间锁内额外要求无迁移标记；完全相同的既有回执仍只读返回。
+- 新增 migration/epoch 两个参数：4 个导出中认领 3 个，实际目标接受两个并产生终态回执，其中一个先写回源。持有源房间排他锁期间第四个 pending 任务不能被认领；然后通过实际安装器设置标记，或受控 SQL 改 owner epoch。旧租约失效、完成/重试/暂停均不写，新回执拒绝、旧回执可重放，未过期和已过期任务均不再认领。比较房间、导出、投递任务与回执四表完整快照。
+- 边界：没有证明所有房间写入、媒体映射、operator 恢复或清理已冻结，也没有取消已发出的远程请求。网络请求前后 isCurrent 是快照检查；在途目标接受与源回执缺失的承接仍须由完整迁移执行器处理。B27 保持开放；schema 46、协议 30 不变，无客户端/历史兼容改动，未跑全仓。
+- 首轮测试夹具的 SQL 参数插值符号在生成时丢失，持锁任务语法错误回滚后，观察方一直等待。确认 PostgreSQL 无活动锁等待、错误日志命中该 SQL 后终止本次测试 helper；未把观察超时当成进程停止。修正插值，并在持锁任务失败时释放观察方、继续传播原错误。失败构建/运行日志 `/tmp/imv2-room-migration-delivery-fence.log`，数据库错误摘录 `/tmp/imv2-room-migration-delivery-fence-fixture-failure.txt`；终止后仅清理 55479 的两个一次性测试库中的 im_v2 夹具，再重跑同一过滤范围。
+- 修正后在临时 PostgreSQL 主/次库（55479）与 disposable 标记下，过滤运行 forwardDeliveryMigrationFence、forwardDeliveryWorkerRecovery、forwardTerminalReceiptRecovery：3 项测试、24 个参数、1 套件全部通过，21.978 秒。日志 `/tmp/imv2-room-migration-delivery-fence-final.log`；覆盖新屏障 2 参数、既有源回执 4 参数、投递工作器 18 参数。没有扩大到全仓。
+- 文档链接、结构与 diff 空白检查通过。本机源码/日志 SHA-256 清单 `/tmp/imv2-room-migration-delivery-fence-sources-20260920.json`，不代替完整迁移或生产验收。
+
+
+<a id="20260920-room-migration-media-operator-fence"></a>
+
+## 2026-09-20 媒体数据库回写与运维重放迁移屏障
+
+- 核对：PostgresV2ForwardMediaImportStore.claim 和统一 mutate 已调用 v2AssertForwardInboxOwner，前批迁移标记检查因此已覆盖复制摘要、对象扫描/可用/失败状态、inbox 媒体映射、任务完成/拒绝/重试/暂停。本轮为这些路径补充证据，没有重复改写媒体存储。
+- 实际修复：PostgresV2ForwardWorkReplayStore.assertOwner 原先只核对 shard/epoch；现在同一加锁查询同时读取 migration_fence_id，新 operator 重放必须无标记。新审计预占在同一事务回滚，原有审计结果的精确重放仍只读返回。
+- 媒体新增两个检查点：本地提供方实际复制文件后，分别在记录复制摘要之前、之后通过真实 control 准备/冻结及源端安装器设置目标屏障。claim、recordCopied、complete、reject、retry/pause 以及重新启动的 worker 均应拒绝；比较 rooms、media_objects、inbox、inbox_media、media_imports 五表快照，且实际目标文件仍保留原字节。不是网络 I/O 强杀或扫描中途并发验收。
+- operator 新增 delivery/media 两参数：先正常重放并再次暂停，安装对应房间迁移标记后，新操作拒绝且审计/任务/媒体快照不变；旧审计操作仍返回原 requeued 结果，当前任务保持 paused。原有非迁移幂等、并发、审计回滚、时钟及改参验证保留。
+- 边界：对象提供方 I/O 不在数据库事务中，正在进行的复制不能仅凭数据库屏障宣称已取消。清理、其他写入口与完整搬迁/恢复继续开放，B27 未关闭。schema 46、协议 30 不变，无历史兼容或客户端改动，未跑全仓。
+
+- 临时 PostgreSQL 主/次库（55479）及 disposable 标记齐备，过滤运行 forwardMediaImportBytesAndRecovery、forwardOperatorReplay：2 项测试、25 个参数、1 套件全部通过，19.452 秒。媒体 21 参数含两个新增迁移检查点；operator 4 参数含 delivery/media 的正常与迁移状态。日志 /tmp/imv2-room-migration-media-operator-fence.log。
+- 文档链接、结构与 diff 空白检查通过。本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-media-operator-fence-sources-20260920.json，不代替完整迁移或生产验收。
+
+
+<a id="20260920-room-migration-compaction-fence"></a>
+
+## 2026-09-20 转发正文压缩迁移屏障
+
+- 修复：PostgresV2ForwardExportCompactor 与 PostgresV2ForwardInboxCompactor 在候选筛选中按 source_room_id/target_room_id 查询房间主键，要求迁移标记为空，使用 FOR SHARE SKIP LOCKED 持有房间锁；候选正文继续 FOR UPDATE SKIP LOCKED，单语句原子清理且更新数量受 limit 限制。缺少本地房间时不清理；旧 owner 回收仍待完整迁移协议。
+- 专项补齐源/目标房间夹具：房间被另一连接排他锁定时清理返回零；实际准备、冻结意图与安装器在外层可回滚测试事务中设置标记，同事务清理返回零，随后回滚整个夹具再验证正常清理、并发最多一次和事务回滚。这里回滚的是隔离测试夹具，不是已提交迁移的恢复方案。清理结束后删除夹具房间，继续证明终态回执读取不依赖活房间。
+- 首次测试编译因本地 compact 函数缺少 @Sendable 失败，修正后功能专项 2 项通过，0.465 秒。日志 /tmp/imv2-room-migration-compaction-fence.log 与 /tmp/imv2-room-migration-compaction-fence-final.log。
+- 第一版直接 JOIN 房间表。实际 SQL 成本探针 18 组通过原有回执/任务扫描门槛，但大批次出现房间全表扫描，证据 /tmp/imv2-room-migration-compaction-cost.json、/tmp/imv2-room-migration-compaction-cost.log。改为带锁的主键标量子查询，并为探针增加禁止房间 Seq Scan 的断言；保留旧结果，不把其作为最终查询证据。
+- 最终功能专项 2 项通过，0.449 秒，日志 /tmp/imv2-room-migration-compaction-fence-bounded.log。最终 18 组 SQL 成本探针通过，/tmp/imv2-room-migration-compaction-cost-bounded.json 与 /tmp/imv2-room-migration-compaction-cost-bounded.log；1 万条导出/收件箱、2 万房间下，limit 1/128/1024 都按房间主键查询，实际更新 1/128/500 行。探针使用独立临时数据库、当前 Swift SQL 和回滚 EXPLAIN，只有本机暖缓存成本含义，不是生产容量或所有数据分布的扫描上界证明。
+- schema 46、协议 30 不变；无客户端或历史兼容改动，未跑全仓。其他清理、完整写入覆盖、迁移复制/发布及在途 I/O 承接仍开放，B27 未关闭。
+
+- 复用最终构建运行 PostgresV2ForwardCompactionCrashTests：source/target × 提交前/后 × 接受/拒绝共 8 个真实 SIGKILL 与新进程恢复场景全部通过，3.770 秒；父进程中的子进程入口按设计跳过，实际由每个场景启动执行。日志 /tmp/imv2-room-migration-compaction-crash.log。
+- 文档链接、结构与 diff 空白检查通过。B27 清单改为当前实现与剩余范围摘要，逐批细节仍保留在迁移合同和验证记录。本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-compaction-fence-sources-20260920.json。
+
+
+<a id="20260920-room-migration-log-retention-fence"></a>
+
+## 2026-09-20 房间日志裁剪迁移屏障
+
+- 修复：PostgresV2RoomLogRetentionStore 的首次和回绕候选查询均要求 migration_fence_id 为空，并以 FOR UPDATE SKIP LOCKED 锁定有界房间集。锁保持到同事务下界更新及事件删除结束，与迁移标记安装互斥；遇到其他事务占锁不再阻塞整轮。
+- 新专项分别使用 permanent/window，建立三个具备可裁剪日志的房间；通过真实 prepare、beginFreezing、install 提交首尾两个房间的迁移标记。独立连接锁住中间房间，清理返回零；释放锁后只清理中间房间两条事件。继续验证游标回绕与存储实例重建，迁移房间的 rooms、room_events、room_read_receipts、room_memberships 完整行快照保持不变。测试竞争连接设置两秒锁等待上限，防止缺少跳锁造成挂起。
+- schema 46、协议 30 不变；未修改客户端或增加历史兼容。只覆盖房间日志保留入口，不证明其他维护已冻结、完整迁移已排空或生产扫描成本达标，B27 继续开放。
+
+- 临时 PostgreSQL（127.0.0.1:55479、disposable 标记）过滤执行 roomRetentionMigrationFence、roomRetentionMissingReceiptsAndRotation、roomLogRetentionFollowsActiveReaders：3 项测试、5 个场景、1 套件通过，测试 1.901 秒；构建 205.47 秒，没有运行全套测试。日志 /tmp/imv2-room-migration-log-retention-fence.log。
+- 文档链接、结构与 diff 空白检查通过。本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-log-retention-fence-sources-20260920.json；未提交或部署。
+
+<a id="20260920-room-migration-housekeeping-fence"></a>
+
+## 2026-09-20 房间操作回执与审核终态清理迁移屏障
+
+- 修复：控制维护器显式标注 14 类 room_id 直接归属的操作回执和 content_review_jobs；候选通过房间主键标量子查询要求 migration_fence_id 为空，并以 FOR SHARE SKIP LOCKED 持锁到事务结束，待删行仍使用 FOR UPDATE OF target SKIP LOCKED。保留原审批/审计依赖判断、轮转和总删除预算。缺少本地房间不会被当作安全清理依据。
+- 新 PostgreSQL 专项为迁移房间与普通房间各构造 15 条终态记录，实际调用准备/冻结意图/安装器提交迁移标记。另一连接锁定普通房间时，清理只删除账号侧偏好回执；两房间的 15 表完整行快照均保持不变。释放锁后普通房间删除 14 条回执和 1 条审核任务，迁移房间不变；重建维护器重跑仍不删除。竞争事务设两秒锁等待上限。
+- 临时 PostgreSQL（55479、disposable 标记）新专项 1 项通过，0.422 秒，日志 /tmp/imv2-room-migration-housekeeping-fence.log。
+- 用户分片偏好回执不纳入房间 owner 冻结；message_forward_operations 的跨房间归属、共享媒体及其他审计/后台清理仍开放。schema 46、协议 30 不变，未改客户端或历史兼容，B27 未关闭。本机专项不证明全量冻结或生产扫描成本达标。
+
+- 复用构建过滤执行 housekeepingSmallBudgetDoesNotStarve、housekeepingTimestampBoundaries、boundedHousekeepingRecoversExpiredSyncReset、invitationApprovalReceiptsSurviveHousekeeping：4 项测试、10 个场景通过，5.252 秒，日志 /tmp/imv2-room-migration-housekeeping-regression.log。小预算轮转、事务回滚/并发维护、时间非法拒绝及批准中/已批准/身份错配的审批证据保留仍通过。未跑全套测试。
+- 文档链接、结构与 diff 空白检查通过。本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-housekeeping-fence-sources-20260920.json；未提交或部署。
+
+
+<a id="20260920-forward-operation-retention"></a>
+
+## 2026-09-20 转发操作绑定过期后重复发送修复
+
+- 问题：同库转发的 message_forward_operations 保存固定 target_client_message_id，但通用维护器按 35 天期限删除它；旧转发命令没有服务端过期拒绝边界，再试会生成新的发送身份，绕过仍保留的 message_send_completions。
+- 首轮扩展 forwardSourceRevisionFencesABAAndRetry：真实清理删除回执，重试不再返回原结果；因夹具额度租约只有效 100 秒，返回 UNAVAILABLE。失败日志 /tmp/imv2-forward-operation-retention-before.log。随后把夹具租约延至迟到重试之后，保持其余生产代码不变，第二轮直接复现重复接受：原消息序号 4，迟到同一操作返回不同消息标识和序号 5。失败日志 /tmp/imv2-forward-operation-retention-before-renewed.log。
+- 修复：将 message_forward_operations 移出通用清理，保留未完成绑定与已完成结果。可清理回执表从 27 减为 26，维护游标周期由动态表数计算为 260；当前新库仍从零开始，不增加旧配置或旧 schema 兼容。
+- 扩展专项要求真实维护后两条转发绑定仍在、迟到精确重放返回原结果且消息数不变，并继续运行来源 ABA、修订冲突、接受指纹与完成后来源变更的既有检查。长期增长、旧操作拒绝边界和完整迁移承接仍未实现，B11/B27 不关闭。
+
+- 修复后在临时 PostgreSQL（55479、disposable 标记）过滤执行 forwardSourceRevisionFencesABAAndRetry、housekeepingSmallBudgetDoesNotStarve、boundedHousekeepingRecoversExpiredSyncReset、V2ControlHousekeepingBudgetTests：5 项测试、2 套件通过，3.812 秒；包含 4 个维护周期参数和 13 个预算边界参数，未运行全套测试。日志 /tmp/imv2-forward-operation-retention-fixed.log。
+- 文档链接、结构与 diff 空白检查通过。本机源码/日志 SHA-256 清单 /tmp/imv2-forward-operation-retention-sources-20260920.json；schema 46、协议 30 不变，未改客户端，未提交或部署。
+
+<a id="20260920-room-migration-moderation-audit-fence"></a>
+
+## 2026-09-20 审核审计清理迁移屏障
+
+- 修复：PostgresV2ModerationAuditRetentionStore 的候选选择按房间主键取得 FOR SHARE SKIP LOCKED，要求 migration_fence_id 为空，审计行使用 FOR UPDATE OF audit SKIP LOCKED；房间锁保留到清理事务完成，与标记安装互斥。保留原 retain_until、排序及数量上限，缺少本地房间不删除。
+- 扩展 PostgresV2HousekeepingMigrationTests：真实迁移标记提交后对两房间分别保存 16 表完整行快照；普通房间被独立连接占锁时，审计删除返回零，两房间数据不变。释放后普通房间先清理其他 14 行，审计和对应 moderation 回执仍在；删除 1 条到期审计后才能清理对应 1 条回执。迁移房间全程不变，重建两类清理器重复执行返回零。竞争事务设两秒锁等待上限。
+- 临时 PostgreSQL（55479、disposable 标记）运行新专项及 V2ModerationAuditRetentionWorkerTests：4 项测试、2 套件通过，0.432 秒，日志 /tmp/imv2-room-migration-moderation-audit-fence.log。
+- schema 46、协议 30 不变；未改客户端或历史兼容。其他审核写入、外部 I/O、共享媒体及完整迁移仍开放，B27 未关闭。
+
+- 复用构建过滤执行 moderationRetentionClockBounds、moderatorRedactionIsDurableAndExplicit：2 项测试通过，1.235 秒，日志 /tmp/imv2-room-migration-moderation-audit-regression.log。原非法时刻拒绝、到期边界及真实审核撤回/审计/事件/重放行为保持通过，未运行全套测试。
+- 文档链接、结构与 diff 空白检查通过。本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-moderation-audit-sources-20260920.json；未提交或部署。
+
+<a id="20260920-room-migration-content-review-fence"></a>
+
+## 2026-09-20 内容审核任务数据库迁移屏障
+
+- 修复：PostgresV2ContentReviewStore 认领候选时使用房间主键标量查询、FOR SHARE SKIP LOCKED 和 migration_fence_id 为空条件，候选任务仍 FOR UPDATE OF job SKIP LOCKED。validateAndRenew、resolve、stageViolation、scheduleRetry 均在同一数据库事务内持有房间共享锁并检查标记，任务修改同时匹配房间身份。源端标记安装与这些数据库写入互斥。
+- 新 PostgreSQL 专项通过真实 prepare/beginFreezing/install 提交迁移标记；验证旧租约的续租、违规暂存、三类结果保存、重试及暂停均拒绝，六表完整行快照不变。另一连接锁住唯一正常房间时认领为空；释放后正常房间可认领并保存人工复核结果。重建存储并推进到旧租约到期后，迁移房间的 pending/claimed 均不重新认领。竞争连接设置两秒锁等待上限。
+- 只覆盖审核存储的认领和数据库回写；外部审核 I/O、运维重放及所有 trusted-safety 内容处置入口仍待完整核对。schema 46、协议 30 不变，未改客户端或历史兼容，B27 保持开放。
+
+- 临时 PostgreSQL（55479、disposable 标记）新专项 1 项通过，0.384 秒，日志 /tmp/imv2-room-migration-content-review-fence.log。复用构建过滤运行 contentReviewRetryCounterBoundary、contentReviewClockBounds、editReplacesTheClaimedContentReviewJob、contentReviewJobsAreTransactionalLeaseFencedAndDurablyResolved、contentReviewEscalationDoesNotRedactTheMessage、contentReviewViolationUsesAuthoritativeRedaction：6 项测试通过，13.882 秒，日志 /tmp/imv2-room-migration-content-review-regression.log。未运行全套测试。
+- 文档链接、结构与 diff 空白检查通过。本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-content-review-sources-20260920.json；未提交或部署。
+
+<a id="20260920-room-migration-moderation-write-fence"></a>
+
+## 2026-09-20 审核内容处置迁移屏障
+
+- 修复：PostgresV2ModerationStore 的 redact、mute、removeMember、controlRoom 四条事务路径从既有房间 FOR UPDATE 查询读取 migration_fence_id，新操作发现标记即抛 ownerChanged；房间锁保持至事务结束，源端标记安装与内容/成员/审核回执/事件/额度修改互斥。覆盖非路由后台调用及普通审核调用。已完成非路由精确重放仍为只读回执，路由入口继续先验证 owner 与标记。
+- 扩展 routedModerationOwnerEpochFence：普通群/大群各覆盖 redact、mute、remove、safety_redact、freeze、unfreeze，通过真实 prepare/beginFreezing/install 提交标记。非路由新操作拒绝，路由新操作与旧操作拒绝，非路由旧操作返回原回执；rooms、messages、room_events、room_memberships、room_member_mutes、moderation_operations、moderation_audit_entries、room_admission、shard_admission_pools、content_review_jobs 十表完整行快照不变。保留原 epoch、并发提交、错库和等待后重新检查回归。
+- schema 46、协议 30 不变；未改客户端或历史兼容。此批验证内容处置事务，不等同于外部审核 I/O 排空或完整迁移，B27 仍开放。
+
+- 临时 PostgreSQL 主/次库（55479、disposable 标记）过滤执行 routedModerationOwnerEpochFence、trustedSafetyRoomControlIsDurableAndEnforced、contentReviewViolationUsesAuthoritativeRedaction：3 项测试、14 个场景、1 套件通过，10.115 秒，日志 /tmp/imv2-room-migration-moderation-write-fence.log。未运行全套测试。
+- 文档链接、结构与 diff 空白检查通过。本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-moderation-write-sources-20260920.json；未提交或部署。
+
+<a id="20260920-room-migration-review-replay-fence"></a>
+
+## 2026-09-20 审核运维恢复迁移屏障
+
+- 修复：PostgresV2DurableWorkReplayStore 的 contentReview 分支在任务变更前，关联实际任务的房间并 FOR SHARE 取得锁，拒绝 migration_fence_id 非空。外层事务一并回滚 processing 审计预占；没有任务时仍保留原 notPaused 语义。单目标和按事件恢复共用此分支，原精确操作审计命中先返回，不能重新激活任务。
+- 扩展 PostgreSQL 审核迁移专项：先正常暂停、运维恢复并重新认领，再提交迁移标记；额外保留一个暂停任务。新的单目标和事件恢复均拒绝，原运维操作返回 wasIdempotent/requeued；七表完整行快照含 durable_work_replay_audit 保持不变。原认领、续租、结果和重试/暂停屏障验证继续执行。
+- 首轮编译因测试 seed 夹具缺少 message 参数失败，日志 /tmp/imv2-room-migration-review-replay-fence.log；修正夹具后重跑同一专项。生产修复没有因夹具失败放宽。
+- schema 46、协议 30 不变；未改客户端或历史兼容。其他运维类型、外部 I/O 与完整迁移仍开放，B27 不关闭。
+
+- 修正后临时 PostgreSQL（55479、disposable 标记）新专项 1 项通过，0.394 秒，日志 /tmp/imv2-room-migration-review-replay-fence-final.log。复用构建过滤运行 contentReviewClockBounds、durableReplayAuditClockBounds、V2VaporDurableWorkOperatorReplayRoutesTests：6 项测试、2 套件通过，5.885 秒，日志 /tmp/imv2-room-migration-review-replay-regression.log。未运行全套测试。
+- 文档链接、结构与 diff 空白检查通过。本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-review-replay-sources-20260920.json；未提交或部署。
+
+<a id="20260920-room-migration-membership-write-fence"></a>
+
+## 2026-09-20 成员变更迁移屏障
+
+- 修复：PostgresV2RoomMembershipStore 的两处房间 FOR UPDATE 查询均读取 migration_fence_id；提供 ownerRoute 时与分片/epoch 一起校验，无路由时在成员效果产生前检查。覆盖直接 change 和邀请审批调用的同事务原语。保留操作建议锁先于房间锁的顺序；本地已提交回执仍只读，路由回执先验证归属/标记。
+- 扩展 routedMembershipOwnerEpochFence 的普通群/大群参数：真实 prepare/beginFreezing/install 提交标记后，直接与路由入口的新增/移除均拒绝；路由旧命令拒绝，本地旧命令返回原回执。rooms、room_memberships、room_membership_operations、room_events、room_admission、shard_admission_pools、user_state_event_outbox 七表完整行快照保持不变。原并发幂等、身份、epoch 与锁等待回归继续运行。
+- 邀请存储自己的创建/申请/管理归属检查仍待补齐；本批不证明邀请全链路已冻结。schema 46、协议 30 不变，未改客户端或历史兼容，B27 仍开放。
+
+- 临时 PostgreSQL 主/次库（55479、disposable 标记）过滤执行 routedMembershipOwnerEpochFence、invitationApprovalIsOneTransaction、invitationApprovalSharesMembershipLockOrder：3 项测试、6 个场景、1 套件通过，3.728 秒，日志 /tmp/imv2-room-migration-membership-write-fence.log。包含审批后段三种失败的完整回滚、十次并发重放，以及最后邀请名额的并发竞争；未运行全套测试。
+- 文档链接、结构与 diff 空白检查通过。本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-membership-write-sources-20260920.json；未提交或部署。
+
+<a id="20260920-room-migration-invitation-fence"></a>
+
+## 2026-09-20 邀请存储迁移屏障
+
+- 修复：PostgresV2GroupInvitationStore 共用 fence 对 scoped/直接调用都锁定房间并要求 migration_fence_id 为空；scoped 继续验证分片/epoch。无 scope 的新提交在锁邀请前通过摘要查询房间绑定并锁房间，保持 room → invite 顺序。直接精确提交重放仍只读。已使用 fence 的只读管理查询也在迁移后拒绝。
+- 新 invitationMigrationFence 普通群/大群参数通过真实 prepare/beginFreezing/install 提交标记，对 scoped 与直接存储验证创建预查、创建精确重试、列表、撤销、新提交、申请列表、批准、拒绝、取消均抛 ownerChanged，scoped 预览拒绝；直接旧提交只读返回。rooms、group_invite_links、group_join_requests、group_join_submission_receipts、room_memberships、room_membership_operations、room_events、room_admission、shard_admission_pools、user_state_event_outbox 十表快照不变。
+- 只覆盖 owner 邀请存储的事务边界，不代表 control 目录与配额恢复的跨库交错、审批运维恢复或完整迁移已完成。schema 46、协议 30 不变，未改客户端或历史兼容，B27 保持开放。
+
+- 首轮迁移专项及审批/配额回归通过，但取消申请的 7 个参数均发现不存在房间从 requestNotFound 被误报为 ownerChanged，日志 /tmp/imv2-room-migration-invitation-fence.log。修正共用 fence：直接调用找不到房间时交回原领域检查，scoped 找不到选定房间仍拒绝归属；存在房间的迁移标记检查不变。
+- 修正后临时 PostgreSQL 主/次库（55479、disposable 标记）过滤执行 invitationMigrationFence、invitationApplicantCancellation、invitationApprovalSharesMembershipLockOrder、invitationApplicantQuotaIsAtomic：4 项测试、12 个场景、1 套件通过，5.609 秒，日志 /tmp/imv2-room-migration-invitation-fence-final.log。未运行全套测试。
+- 文档链接、结构与 diff 空白检查通过。本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-invitation-sources-20260920.json；未提交或部署。
+
+<a id="20260920-room-migration-approval-recovery-fence"></a>
+
+## 2026-09-20 审批异常恢复迁移屏障
+
+- 修复：PostgresV2GroupApprovalRecoveryStore 的 assertOwner 在既有房间 FOR UPDATE 查询中读取 migration_fence_id，并与 shard/epoch 一起校验。标记存在时，新恢复和候选分页抛 ownerChanged；精确已提交操作仍只读返回原审计结果。
+- 扩展 groupApprovalRecoveryPagesConfiguredOwner：在既有双库分页、并发恢复与 epoch 验证后，通过真实 prepare/beginFreezing/install 提交冻结标记；对仍 approving 与已释放申请发起新恢复均拒绝，首页/续页查询拒绝，重建服务后的原操作重放保持 released/wasIdempotent。八张房间、申请、邀请、审计、阻断记录、成员操作、成员及事件表的完整行快照不变。
+- 同轮选择四种审批证据场景回归；完整迁移、在途外部 I/O 与 control 配额恢复仍未关闭。schema 46、协议 30 不变，未改客户端或历史兼容。
+
+- 临时 PostgreSQL 主/次库（55479、disposable 标记）过滤运行 groupApprovalRecoveryPagesConfiguredOwner、groupApprovalRecoveryIsAuditedAndFenced：2 项测试、5 个场景、1 套件通过，4.439 秒；日志 /tmp/imv2-room-migration-approval-recovery-fence.log。未运行全套测试，临时数据库已停止。
+- 文档链接、结构与 diff 空白检查通过。本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-approval-recovery-sources-20260920.json；未提交或部署。
+
+<a id="20260920-room-migration-invitation-recovery-fence"></a>
+
+## 2026-09-20 邀请创建与全局配额恢复冻结交错
+
+- 本批补充跨库验证，不新增兼容路径或生产写入分支。现有邀请共用 fence 已覆盖 resumeCreation 的 owner 预检以及 resumeSubmission 的 owner 提交/回执观察。
+- invitationRecoveryMigrationFence 分别构造仅预留配额、owner 已提交但 control 尚未确认、owner 已取消但 control 仍 tracking 三个检查点，并保留另一条尚未发布目录的邀请创建意图（owner 未创建/已创建）。真实 prepare/beginFreezing/install 后，在两个到期时刻重建工作器并执行。
+- 验证目标：创建与配额恢复均延期，不在同轮重复认领、不误报完成或暂停；保留 held/tracking 配额，未发布邀请仍不可解析；源库八张表及 control 路由、邀请目录、配额别名三表完整行快照不变。控制恢复租约/重试时间允许按既有协议推进，它们不属于 owner 复制集。
+- 同轮定向选择 groupJoinQuotaOperatorRecovery 和 inviteCreationRecoveryClaimsAndFences，验证正常恢复、终态释放和认领竞争。未覆盖冻结安装与 control 最终确认同时提交、目标发布后的重新路由、三库完整迁移或进程强杀；这些仍按 B27 跟踪。
+
+- 临时 PostgreSQL 主/次库（55479、disposable 标记）过滤执行上述三项测试：7 个场景、1 套件通过，5.541 秒；日志 /tmp/imv2-room-migration-invitation-recovery-fence.log。未运行全套测试，临时数据库已停止。
+- 文档链接、结构与 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-invitation-recovery-sources-20260920.json。未提交或部署，B27 保持开放。
+
+<a id="20260920-room-migration-message-mutation-fence"></a>
+
+## 2026-09-20 消息编辑、撤回与反应迁移屏障
+
+- 修复：PostgresV2MessageEditStore、PostgresV2MessageWithdrawalStore、PostgresV2MessageReactionStore 在既有房间 FOR UPDATE 查询读取 migration_fence_id；新操作在消息、反应、事件、额度或审核任务变更前拒绝迁移标记。不依赖调用方是否传入 ownerRoute，保留原锁顺序。已提交直接操作仍可只读返回精确回执；路由操作继续在回执读取前检查选定 owner。
+- 扩展 routedMessageMutationOwnerEpochFence 的普通群/大群 × 编辑/撤回/反应六种组合：真实 prepare/beginFreezing/install 后，直接新命令与路由新/旧命令均拒绝，本地原命令返回原回执；比较房间、消息、正文版本、投影表/视图、反应、三类操作回执、事件、房间/分片额度、审核任务及唤醒队列十四个关系的完整行快照。原十次并发幂等、错误分片/物理库、epoch 与房间锁等待验证保留。
+- schema 46、协议 30 不变，未改客户端或历史兼容。其他直接写入入口和完整排空/复制/发布仍待完成，B27 不关闭。
+
+- 临时 PostgreSQL 主/次库（55479、disposable 标记）过滤运行 routedMessageMutationOwnerEpochFence：1 项测试、6 个场景通过，4.777 秒；日志 /tmp/imv2-room-migration-message-mutation-fence.log。
+- 复用构建运行 withdrawalWritesTombstoneTransaction、reactionWritesSetChangeAndDeliversIt、editWritesRevisionFencedTransaction、concurrentEditAndWithdrawalDoNotCreateConflictingHistory：4 项直接写入/并发回归通过，1.591 秒；日志 /tmp/imv2-room-migration-message-mutation-regression.log。未运行全套测试，临时数据库已停止。
+- 文档链接、结构与 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-message-mutation-sources-20260920.json。未提交或部署。
+
+<a id="20260920-room-migration-group-capability-fence"></a>
+
+## 2026-09-20 群管理写入迁移屏障
+
+- 修复：PostgresV2GroupCapabilitiesStore 的共用 prepare 在既有房间 FOR UPDATE 查询读取 migration_fence_id，并在成员权限、准入及领域修改前拒绝标记。置顶、公告、角色权限和成员角色的新写入不再依赖调用方提供 ownerRoute 才受保护；本地精确回执仍只读。直接修改本人角色的既有无效果提前返回未改动，不能据此产生房间变更。
+- 扩展 routedGroupCapabilityOwnerEpochFence：普通群/大群 × 四类操作，在真实 prepare/beginFreezing/install 后验证直接新操作及路由新/旧操作拒绝、本地原操作只读重放；房间、成员、置顶、公告、权限、四类回执、事件、两级额度及个人/群唤醒队列共十四张表完整行快照不变。原十次并发、错误物理库、归属切换和锁等待回归保留。
+- 同轮选择 groupCapabilitySourceVersions 验证普通群/大群正常版本与房间日志行为。schema 46、协议 30 不变；其他直接写入入口、完整排空与迁移执行器仍待完成，B27 保持开放。
+
+- 临时 PostgreSQL 主/次库（55479、disposable 标记）过滤执行 routedGroupCapabilityOwnerEpochFence 和 groupCapabilitySourceVersions：2 项测试、10 个场景、1 套件通过，7.082 秒；日志 /tmp/imv2-room-migration-group-capability-fence.log。未运行全套测试，临时数据库已停止。
+- 文档链接、结构与 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-group-capability-sources-20260920.json。未提交或部署。
+
+<a id="20260920-room-migration-nickname-fence"></a>
+
+## 2026-09-20 群昵称写入迁移屏障
+
+- 修复：PostgresV2ProfilePresentationStore 的新群昵称操作在读取成员资格和昵称前，按 room_id 取得房间 FOR SHARE 锁并检查 migration_fence_id；锁持有到昵称与回执事务结束，和迁移安装的 FOR UPDATE 互斥。不存在房间仍返回 forbidden，已提交精确操作仍只读返回原回执；联系人备注不受房间标记影响。
+- 新 nicknameMigrationFence 覆盖普通群/大群。先正常提交昵称，再通过真实准备与冻结安装器在外层事务保存未提交标记；并发新昵称请求须出现在真实房间锁等待中，标记提交后须抛 ownerChanged。重建存储后更名/清除同样拒绝，旧操作保持原结果；昵称、昵称回执、成员和事件四表完整行快照不变。
+- 定向回归选择资料写入时间边界及展示 HTTP 路由。现有 HTTP 通用错误映射会将 ownerChanged 返回 503；本批未新增 API。Account 展示存储仍直接使用配置数据库，房间昵称的完整 owner 路由与迁移后承接尚未实现，不以源端拒绝替代。
+- schema 46、协议 30 不变；未改客户端或历史兼容，B27 保持开放。
+
+- 临时 PostgreSQL 主/次库（55479、disposable 标记）过滤执行 nicknameMigrationFence、profileWriteTimestampBoundaries 和 V2VaporProfilePresentationRoutesTests：6 项测试、17 个场景、2 套件通过，8.929 秒；含 2 个真实冻结锁等待参数、6 个数据库时间边界参数及 9 个 HTTP 场景。日志 /tmp/imv2-room-migration-nickname-fence.log。未运行全套测试，临时数据库已停止。
+- 文档链接、结构与 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-nickname-sources-20260920.json。未提交或部署。
+
+<a id="20260920-room-migration-nickname-routing"></a>
+
+## 2026-09-20 群昵称归属路由与 Account 接线
+
+- 新 V2RoutedProfilePresentationStore 将群昵称分页/更新解析到 room owner；联系人备注委派原配置存储，不因群昵称路由搬动。拒绝未知分片、非标准 schema；不回退控制库。Account 的展示 HTTP 接口现使用此路由存储与现有房间存储注册表。
+- PostgresV2ProfilePresentationStore 增加内部房间作用域。作用域写入在操作锁后、旧回执前通过共用 owner 检查验证 room/shard/epoch/迁移标记；作用域分页在同一事务内锁房间、复核归属并读取成员资格和昵称。此处读取使用共用 FOR UPDATE 检查，正确性优先，后续如需共享读锁应独立测量。非路由旧接口保留其原只读行为与上一批新写入保护。
+- 新 routedNicknameOwnerFence 覆盖普通群/大群真实双库：昵称落 owner、control 无昵称及操作记录；联系人备注仍落 control。昵称首页/续页正确；缓存旧 epoch 的读取、新更新、旧操作重放均拒绝，新路由精确重放保持原结果。错误物理库及未知分片拒绝；真实迁移标记安装后重建路由存储，读取/新操作/旧重放均拒绝，owner 保留原昵称和唯一回执。
+- 同轮回归真实昵称锁等待与展示 HTTP 路由。schema 46、协议 30 不变；本批未实现数据复制和路由发布，不以配置 epoch 的定向检查替代完整迁移承接，B27 保持开放。
+
+- 首轮真实昵称分页暴露既有 SQL 别名 authorization 与 PostgreSQL 保留字冲突（syntax error at or near authorization）。失败日志 /tmp/imv2-room-migration-nickname-routing.log；数据库错误摘要 /tmp/imv2-room-migration-nickname-routing-postgres-errors.log。将该 CTE 改名为 nickname_authorization，未放宽断言或绕过真实数据库查询。
+- 修正后临时 PostgreSQL 主/次库（55479、disposable 标记）重跑同一过滤：6 项测试、13 个场景、2 套件通过，2.969 秒；包含 2 个双库路由、2 个真实冻结锁等待及 9 个 HTTP 场景。日志 /tmp/imv2-room-migration-nickname-routing-final.log。Account 可执行目标同次构建通过；未启动完整 Account 服务、未运行全套测试，临时数据库已停止。
+- 文档链接、结构与 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-nickname-routing-sources-20260920.json。未提交或部署。
+
+<a id="20260920-room-migration-direct-send-fence"></a>
+
+## 2026-09-20 直接发送与大群快速批量迁移屏障
+
+- 修复：PostgresV2RoomWriteStore 的 requireSelectedOwners 不再因 ownerRoutes 为空直接退出。所有传入房间按稳定顺序取得 FOR NO KEY UPDATE 锁，现存房间有迁移标记即拒绝；有路由时额外检查完整房间集合与 shard/epoch。未选路由且房间缺失仍交回原接受流程产生领域错误。直接发送的旧请求也先检查迁移标记，不能通过重放绕过。
+- 大群 plain conditional append 保留正常路径的单条原子 SQL：在已锁定房间中读取标记，将标记为空加入 eligible，batch_gate 要求全部输入符合条件后才修改消息/序号/额度。标记造成零写入时，诊断路径先调用共用检查并抛 ownerChanged。标记检查未改变原递归操作锁和稳定房间锁顺序。
+- 扩展 routedSendOwnerEpochFence 的 standard、hybrid、hybridBatch、direct、directBatch、directRich 六种参数，冻结后额外直接调用 writer 的新单条/原子批量及旧请求重放；比较房间、消息、事件、接受回执、正文版本与投影表/视图七个关系的完整行快照。原路由、epoch、错误物理库和锁等待回归保留。
+- 修改脚本第一次因测试中同一断言出现两次而停止，生产文件已写入、测试扩展尚未落盘；当次既有四项测试通过（5.576 秒），日志 /tmp/imv2-room-migration-direct-send-fence.log。确认进程退出后将扩展定位到冻结段，再运行最终专项；初次通过不作为新增直接路径的证明。
+- 预取信用额度的冻结/退还/接管仍是独立未完成项。本批不声称所有额度状态不变，也不证明全部发送优化/在途路径已排空。schema 46、协议 30 不变，B27 保持开放。
+
+- 最终临时 PostgreSQL 主/次库（55479、disposable 标记）过滤运行 routedSendOwnerEpochFence、atomicallyPersistsPlainHybridGroupMessagesAcrossRooms、atomicallyPersistsRepeatedPlainHybridGroupRoomMessages、overlappingMultiShardBatchesUseDeterministicLockOrder：4 项测试、9 个场景、1 套件通过，5.894 秒；日志 /tmp/imv2-room-migration-direct-send-fence-final.log。正常跨房间/同一热点房间原子批量和交叠分片锁顺序继续通过；未运行全套测试，临时数据库已停止。
+- 文档链接、结构与 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-direct-send-sources-20260920.json。未提交或部署。
+
+<a id="20260920-room-migration-direct-receipt-fence"></a>
+
+## 2026-09-20 直接已读回执迁移屏障
+
+- 修复：PostgresV2ReadReceiptStore 的 recordGroups 在没有 ownerRoutes 时也按稳定顺序取得房间共享锁并读取迁移标记，将标记非空的输入设为 ownerIsValid=false。既有批量 SQL 在任何回执效果前按单项返回 owner_changed；没有房间的直接请求仍使用原领域结果。路由数量检查仍在输入阶段执行，路由调用继续验证 shard/epoch。
+- 私聊从群批处理探测返回 notGroup 到真正写入之间还有事务间隔，故其既有房间 FOR UPDATE 查询也读取并检查标记；新回执不会因探测后开始冻结而落入未保护的私聊路径。精确私聊回执若已在该事务命中只读结果，不产生后处理。
+- 扩展群 owner 专项：普通群/大群的冻结后直接 record/recordBatch 对新操作和旧操作均拒绝；原路由/读者分页/锁等待及四表快照检查保留。扩展 directReceiptOwnerOutbox：完成原控制隐私与 owner outbox 投递验证后安装真实迁移标记，私聊直接标量/批量新旧请求拒绝，房间、已读位置、操作回执、个人事件队列及同步日志五表完整行快照不变。
+- 同轮运行 readReceiptOwnerMixedBatch，确保某项归属失败不破坏其他合法项。未修改客户端、schema 46 或协议 30；未证明个人事件队列整体排空或完整迁移，B27 仍开放。
+
+- 临时 PostgreSQL 主/次库（55479、disposable 标记）过滤执行 routedReadReceiptOwnerEpochFence、directReceiptOwnerOutbox、readReceiptOwnerMixedBatch：3 项测试、10 个场景、1 套件通过，8.832 秒；日志 /tmp/imv2-room-migration-direct-receipt-fence.log。未运行全套测试，临时数据库已停止。
+- 文档链接、结构与 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-room-migration-direct-receipt-sources-20260920.json。未提交或部署。
+
+<a id="20260920-user-event-source-room"></a>
+
+## 2026-09-20 个人事件队列的显式来源房间
+
+- 归属核对发现：room/membership、私聊资料、已读水位、已读候选、发送能力及时间线提示由 owner 事务产生；control 的已读偏好传播也产生带 room_id 的 direct_read_receipt。不能按 projection_kind 或载荷房间 ID 推断源队列属于房间。
+- 新库 schema 47 为 user_state_event_outbox 增加可空 source_room_id、源房间有界扫描索引及载荷房间绑定约束。非空表示随房间迁移的源事件；空表示其他来源，不自动因载荷含 room_id 归类。共用 enqueue 接受显式来源并将其纳入幂等比较，避免同一事件身份在 control/room 间重绑定。
+- 群创建、成员变更、审核移除、私聊创建/资料、发送能力、时间线拒绝提示及标量/批量已读水位/候选写入均标明源房间；control 偏好传播继续使用空来源。Account/Gateway 新库契约和启动检查同步为 47，协议仍为 30；没有旧库升级或兼容分支。
+- sourceRoomOwnership 专项区分同类型/同房间载荷的 owner/control 事件，验证精确重试、来源改参冲突、数据库绑定约束及删除来源列后启动拒绝。运行相关业务回归检查实际生产 SQL 与新约束配合。
+- 本批提供队列归属和后续复制选择依据，尚未将 claim/acknowledge/retry/operator/清理接入房间屏障，也未排空已认领事件或完成迁移。B27 保持开放。
+
+- 首轮 canonical 建库检查发现新增索引导致总数从 354 变为 355，日志 /tmp/imv2-user-event-source-room-schema.log；核对新增单个来源索引后更新精确计数，重跑建库/恢复、漂移及 readiness 关系覆盖检查通过，日志 /tmp/imv2-user-event-source-room-schema-final.log。当前仍为 151 张表、27 个应用触发器、25 个函数。
+
+- 临时 PostgreSQL（55479、disposable 标记）sourceRoomOwnership 1 项通过，0.525 秒，日志 /tmp/imv2-user-event-source-room.log。复用构建顺序执行生产入口过滤回归：routedSendOwnerEpochFence、routedMembershipOwnerEpochFence、routedModerationOwnerEpochFence、directReceiptOwnerOutbox、readReceiptOwnerMixedBatch、groupCreationTimestampBoundaries、readReceiptPolicyDirectoryPropagation，共 7 项测试、29 个场景通过，22.666 秒，日志 /tmp/imv2-user-event-source-room-regression.log。未运行全套测试，临时数据库已停止。
+- 文档链接、结构与 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-user-event-source-room-sources-20260920.json。未提交或部署。
+
+
+<a id="20260920-user-event-migration-fence"></a>
+
+## 2026-09-20 个人事件队列迁移屏障
+
+- PostgresV2UserStateEventOutbox 的 claim、acknowledge、retry 按 source_room_id 主键查询来源房间，在队列修改所在 SQL 内取得共享锁并要求 migration_fence_id 为空。认领使用 SKIP LOCKED，确认及重试等待并复核；空来源事件不受载荷中房间 ID 影响，缺失来源房间时保持队列不变。
+- 新增 sourceRoomMigrationFence：真实安装冻结标记前认领一个事件，保留另一待认领事件；冻结后确认返回 false，重试及暂停不修改原行。重建存储并越过租约期限，冻结与缺失房间事件不被认领，正常房间及载荷包含被冻结房间的 control 事件仍认领/确认成功。冻结两行完整快照保持不变。
+- 临时 PostgreSQL 主/次库（55479、disposable 标记）执行 PostgresV2UserStateEventTests，24 项测试、1 套件通过，15.254 秒；新增场景 0.323 秒。日志 /tmp/imv2-user-event-migration-fence.log。未运行全仓测试。
+- 本批仅保护队列三类修改；运维重放和已确认队列清理仍需接入屏障，已经认领的事件仍可能向用户库提交投影，其排空/去重承接需单独闭环。未变更客户端、schema 47 或协议 30；B27 保持开放。
+
+- 文档链接、结构与差异空白检查通过，临时数据库已停止。本机源码/日志 SHA-256 清单 /tmp/imv2-user-event-migration-fence-sources-20260920.json；未提交或部署。
+
+
+<a id="20260920-user-event-maintenance-fence"></a>
+
+## 2026-09-20 个人事件运维重放与过期清理迁移屏障
+
+- PostgresV2DurableWorkReplayStore 的 userStateEvent 分支读取不可变 source_room_id；有来源时先共享锁定房间并检查迁移标记，再修改暂停事件。更新条件复核相同来源；房间缺失或冻结抛出 ownerChanged，外层事务回滚审计预占。没有目标仍按既有 notPaused 结果处理，原操作精确重放只读已有审计。
+- PostgresV2UserStateEventGCWorker 的到期候选按来源房间主键取得共享锁并跳过占锁，冻结/缺失房间事件保留；control 空来源不受载荷房间影响，原 delivered_at 保留期限和数量限制不变。
+- 新增运维专项覆盖正常重放后冻结、精确结果重放、单目标及按事件批量拒绝、缺失房间拒绝、事件与审计完整快照不变，以及同房间载荷 control 事件继续处理。新增清理专项覆盖安装标记的在途事务和普通房间占锁、正常/control 清理、缺失房间保留、锁释放后清理恢复或继续因标记保留。
+- 验证结果在本节后续记录；本批不证明在途投影/外部 I/O 已排空，不关闭 B27。未变更客户端、schema 47 或协议 30。
+
+- 首轮 5 项测试中，运维新专项、原运维重放及审计时间边界均通过（3 项、5 个场景，4.174 秒），原清理回归也通过；新增清理两个并发场景遇到 connectionRequestTimeout。核对测试依赖默认每事件循环只有 1 条连接，持锁事务耗尽连接后无法启动独立清理，尚未进入待验证 SQL。将该测试辅助数据库配置为每事件循环 4 条连接，仅重跑受影响清理专项。首轮日志保留为 /tmp/imv2-user-event-maintenance-fence.log。
+
+- 修正测试连接池后，sourceRoomGCFence 两场景及 completedEventGC 通过（2 项、3 个场景，1.112 秒）；日志 /tmp/imv2-user-event-maintenance-fence-final.log。两轮合计覆盖 5 项、8 个不同场景，未重跑已通过的运维专项或全仓测试。临时 PostgreSQL 已停止。
+- 文档链接、结构与 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-user-event-maintenance-fence-sources-20260920.json。未提交或部署。
+
+
+<a id="20260920-room-wake-migration-fence"></a>
+
+## 2026-09-20 房间唤醒队列迁移屏障
+
+- PostgresV2GroupEventWakeStore 在候选认领、发布确认删除和安排重试三处按实际 room_id 取得房间共享锁，并检查 migration_fence_id 为空；认领使用 SKIP LOCKED 避免一个忙碌房间阻塞其他候选，回调等待并复核。原租约令牌与修订条件保留。
+- 认领保留两条 READ COMMITTED 语句：先持久化租约，再取得当前房间水位；房间锁持有到事务提交。此项不取消已经发出的外部通知，也不证明完整排空。
+- 新增 groupWakeMigrationFence 的直接/路由两种入口：先认领旧租约，再创建待认领及正常房间；实际持房间锁时只有正常房间被认领。安装真实迁移标记后，旧租约确认/重试均保持队列原行，重建存储并越过租约期限仍跳过冻结房间，正常房间可认领并确认删除。另保留高水位 7 覆盖队列目标 3 的断言。
+- 同轮选择重试整数边界、时间边界和同房间批量发送/唤醒水位回归。验证结果见后续记录；未修改客户端、schema 47 或协议 30，B27 继续开放。
+
+- 首轮日志 /tmp/imv2-room-wake-migration-fence.log：原重试边界 12 场景、时间边界 2 场景和同房间批量发送 1 场景通过；新增直接调用场景通过，路由场景失败。原因是测试先经路由确认再以同一租约经路由重试，前者已按既有契约移除进程内映射，后者因此报 corruptPersistenceState，未进入数据库重试检查。
+- 修正新增测试为直接/路由 × 确认优先/重试优先四场景：第一个回调走所选入口，迟到的另一个回调直接进入持久存储，覆盖两种冻结后回调顺序及原路由映射消费规则；仅重跑新增专项，保留首轮失败日志。
+
+- 修正测试调用方式后，groupWakeMigrationFence 四场景通过，3.064 秒，日志 /tmp/imv2-room-wake-migration-fence-final.log。连同首轮通过的三项回归，本批覆盖 4 项测试、19 个不同场景。只运行所选专项，临时 PostgreSQL 主/次库（55479、disposable 标记）已停止。
+- 文档链接、结构和 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-room-wake-migration-fence-sources-20260920.json。未提交或部署。
+
+
+<a id="20260920-direct-open-migration-fence"></a>
+
+## 2026-09-20 复用私聊房间迁移屏障
+
+- 核对发现 open 的 existingPair 分支已持房间共享锁，但未检查 migration_fence_id，冻结后仍可插入新的 direct_room_operations。现从同一锁定查询读取标记并在新增回执前抛出 ownerChanged；创建新房间流程和已有精确操作只读重放保持原行为。
+- directRoomOpenMigrationFence 覆盖直接及路由两种入口：先经真实 control 路由创建 owner 私聊，再持有真实标记安装事务，发起新操作，并从 pg_stat_activity 确认请求等待房间锁；释放冻结提交后新操作拒绝，操作回执仅原有一条。重建存储后的新请求仍拒绝，旧请求仍返回原房间；owner 七表与 control 三表完整行快照保持不变。
+- 同轮选择 directRoomOpenConcurrentReplay 六种操作/用户对并发组合、directRouteClockBounds 两种目录恢复状态回归。验证结果见后续记录。没有历史兼容或客户端变更；schema 47、协议 30 不变，完整私聊迁移仍按 B27 跟踪。
+
+- 临时 PostgreSQL 主/次库（55479、disposable 标记）过滤执行上述三项，3 项测试、10 个场景、1 套件通过，7.809 秒；新增冻结交错两场景 1.553 秒。日志 /tmp/imv2-direct-open-migration-fence.log。没有运行全仓测试，临时数据库已停止。
+- 文档链接、结构及 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-direct-open-migration-fence-sources-20260920.json。未提交或部署。
+
+
+<a id="20260920-special-account-migration-fence"></a>
+
+## 2026-09-20 特殊账号消息后处理迁移屏障
+
+- PostgresV2SpecialAccountMessagingStore.record 原先仅按操作加锁，新操作仍可在房间冻结后插入操作记录和审计。现新操作在房间共享锁下检查 migration_fence_id，冻结或缺失房间拒绝；已存在的精确操作保持只读。
+- 校验接受回执的 roomID、senderUserID、clientMessageID 分别与输入房间、账号及操作一致，防止锁定其他房间而绕过实际消息的冻结边界；既有操作幂等比较增加 room_id。
+- 扩展 specialAccountMessageClockBounds 的系统/客服两个场景：保持原时间边界、并发重放和审计插入失败回滚验收后，实际接受另一条消息但不记录特殊账号审计；安装迁移标记，重建存储的新后处理拒绝，旧后处理重放不变。错房间和错操作回执拒绝，整个服务重试也拒绝；操作、审计、消息、事件、私聊操作、支持会话与准入完整快照保持不变。
+- 同轮选择特殊账号服务单元回归。结果见后续记录；没有客户端或历史兼容变更，schema 47、协议 30 不变。尚未实现消息接受后缺失审计的迁移承接/自动恢复，B27 保持开放。
+
+- 临时 PostgreSQL 主/次库（55479、disposable 标记）执行 specialAccountMessageClockBounds 与 V2SpecialAccountMessagingServiceTests：2 项测试、3 个场景、2 套件通过，1.784 秒。日志 /tmp/imv2-special-account-migration-fence.log。未运行全仓测试，临时数据库已停止。
+- 文档链接、结构与 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-special-account-migration-fence-sources-20260920.json。未提交或部署。
+
+
+<a id="20260920-room-credit-migration-fence"></a>
+
+## 2026-09-20 房间命令额度持久预扣迁移屏障
+
+- 核对消息投影补建：loadCurrentOrMaterialize 的当前生产调用只有编辑、撤回和审核处置，均在已有房间写入检查内；本次未给只读路径增加无依据的额外锁。
+- V2RoomAdmissionCommandCreditPool.reserveBatch 原先独立修改 room_admission，发送事务虽然拒绝冻结，预扣仍可能先改动源数据。现使用 materialized 房间候选取得 FOR KEY SHARE 锁并要求 migration_fence_id 为空，然后按原分片租约/代次/窗口上限锁定准入行和预扣。rejection 读取迁移标记并抛 ownerChanged，不把冻结误报为额度耗尽。
+- 新增 roomCreditMigrationFence 的标量/批量场景：持真实冻结安装事务，启动额度预扣，从 pg_stat_activity 确认等待房间锁，提交冻结后拒绝；重建额度池后仍拒绝，源准入完整行不变。批量中的正常房间先预扣，后项冻结失败时归还进程令牌，没有悬挂 inFlight；正常房间仍可取得额度且仅预扣原批量的 2 个额度。
+- 同轮选择房间额度容量与时间边界回归。结果见后续记录；本批不验证已预取额度的迁移失效、分片额度清退或目标重建，不关闭 B27。未修改客户端、schema 47 或协议 30。
+
+- 首轮冻结/容量/时间专项 3 项、11 个场景通过，7.868 秒，日志 /tmp/imv2-room-credit-migration-fence.log；该轮尚未覆盖真实发送事务持锁后请求独立预扣的路径。继续查调用链发现 acceptSingleDirectRoomLogWithCredits 的预检持有房间锁后才调用额度池，不能使用与之冲突的共享锁。
+- 对照 [PostgreSQL 16 行锁文档](https://www.postgresql.org/docs/16/explicit-locking.html#LOCKING-ROWS)，额度预扣采用 KEY SHARE，发送预检改为 NO KEY UPDATE（仍串行正常写入），冻结安装保持显式 FOR UPDATE（与两者冲突）。中间构建在发现预检仍有 FOR UPDATE 时主动终止，进程已确认为退出 143，尚未执行测试；日志 /tmp/imv2-room-credit-migration-fence-final.log 保留，不记作通过。
+- 新专项追加正常发送持有 NO KEY UPDATE 时通过独立连接预扣成功的检查；扩大到真实私聊发送/额度快速路径及 routedSendOwnerEpochFence，复验最终锁组合，结果见后续记录。
+
+- 最终版本在临时 PostgreSQL 主/次库（55479、disposable 标记）过滤执行 roomCreditMigrationFence、directRoomLogRoomCommandCreditsPreserveRoomCapacity、admissionCreditClockBounds、persistsDirectRoomLogWithoutPerUserFanoutArtifacts、routedSendOwnerEpochFence：5 项测试、19 个场景、1 套件通过，13.448 秒。日志 /tmp/imv2-room-credit-migration-fence-verified.log；先前结果不替代最终锁组合的复验。未跑全仓测试，临时数据库已停止。
+- 文档链接、结构与 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-room-credit-migration-fence-sources-20260920.json。未提交或部署。
+
+
+<a id="20260920-direct-control-policy-fence"></a>
+
+## 2026-09-20 私聊控制权限事务基础
+
+- 调用链核对确认：Gateway 的 PostgresV2SocialRelationshipStore 写控制库，V2RoutedRoomWriteStore 选择 owner 后直接调用其接受实现；当前 owner 的关系/拉黑/偏好和缓存版本不能替代控制权威。未把加入迁移标记过滤当作跨库授权修复。
+- 新增内部 V2DirectSendControlPolicyFence.withPolicy，复用实际关系/拉黑、陌生人偏好和停用账号写者的咨询锁键，以共享模式持有到异步回调完成；现有资料及特殊账号行另取共享行锁。读取双方活跃状态、特殊账号设置、拉黑、好友及接收者陌生人偏好，缺失资料返回 inactive，非法/同一用户对拒绝。
+- directControlPolicyFence 使用独立控制库和 owner 库；控制回调等待期间发起四种真实写者（拉黑、删除好友、陌生人权限拒绝、账号停用），从 pg_stat_activity 确认它们等待咨询锁。释放回调、在 owner 测试表提交后，写者才能完成；下一次范围读取观察最新控制事实，owner 本地副本保持未修改。另测回调抛错后锁释放、缺失账号和非法用户对。
+- 测试中的 owner 提交是专用测试表，**不是实际发送验收**。新增入口尚未接入 PostgresV2RoomWriteStore 或应用组装，也未改写社交版本递增；缓存、批量统一锁顺序、控制连接失效与真实消息提交的端到端边界仍待完成，B27/D07 不关闭。
+
+- 临时 PostgreSQL 主/次库（55479、disposable 标记）过滤执行 directControlPolicyFence：1 项测试、4 个场景通过，2.994 秒；日志 /tmp/imv2-direct-control-policy-fence.log。此证据限于连接正常时的回调生命周期，控制连接中断与 owner 迟到提交尚须故障注入验证；不能将本方法当作已完成的分布式提交保证。未运行全仓测试，临时数据库已停止。
+- 文档链接、结构及 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-direct-control-policy-fence-sources-20260920.json。未提交或部署。
+
+
+<a id="20260920-direct-send-control-authority"></a>
+
+## 2026-09-20 单条私聊发送控制权限接入
+
+- PostgresV2RoomWriteStore 增加内部 acceptDirectUsingControlPolicy：先只读定位接收者，在控制事务取得权限范围后才进入 owner 接受事务；固定 room/sender/recipient 并在领域预检时复核，不把快照暴露给调用者复用。
+- 普通接受、单条额度预检及快速追加以控制事实覆盖账号状态、拉黑、好友、陌生人偏好和特殊账号设置；成员、禁言、回复、可见性投影、房间/分片额度继续取自 owner。已有操作回执仍先按原结果重放。
+- 新增 directSendControlAuthority，在独立控制/owner 数据库上使用真实私聊房间与真实发送，覆盖冷路径/预热路径 × 拉黑、并发拉黑、删除好友、陌生人权限拒绝、发送者停用、接收者停用；owner 权限副本保持过时，另检查权限恢复后的新发送以及旧拒绝回执不变。结果见后续记录。
+- 本批只提供内部单条接受入口。应用组装、原子批量全局锁顺序、转发目标接入、社交版本归属，以及控制连接失效/owner 迟到提交仍待完成；B27/D07 保持开放。未修改客户端、schema 47 或协议 30。
+
+
+- 首轮 /tmp/imv2-direct-send-control-authority.log：新增 10 场景均在“首次接受结果与重放结果直接比较”的测试断言失败；既有控制范围 4 场景和房间日志 2 场景通过。实际契约区分 accepted 与 idempotent，已修正为检查重放类型及原接受回执相等；该轮整体不记为通过。
+- 快速追加仅在事务内使用控制事实派生快照，提交后继续缓存原 owner 快照，避免控制范围结束后经共享缓存泄漏到其他入口。新增缓存断言：控制库拒绝陌生人、owner 仍允许时，好友快速追加成功，但缓存仍保存 owner 的允许值。
+- 增加两种并发场景：先持 owner 房间锁，启动实际发送并观察其等待房间锁，再发起控制拉黑并观察其等待咨询锁；释放房间锁后发送完成、拉黑随后提交，后续新发送被拒绝。控制连接中断不在此证据范围内。
+
+
+- 最终版本在临时 PostgreSQL 主/次库（55479、disposable 标记）过滤执行 directSendControlAuthority、directControlPolicyFence、persistsDirectRoomLogWithoutPerUserFanoutArtifacts：3 项测试、18 个场景、1 套件通过，12.295 秒；新增实际发送 12 场景 8.403 秒。日志 /tmp/imv2-direct-send-control-authority-final.log，首轮失败日志保留。未运行全仓测试，临时数据库已停止。
+- 文档链接、结构及 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-direct-send-control-authority-sources-20260920.json。未提交或部署；问题关闭数量不变。
+
+
+<a id="20260920-direct-batch-control-authority"></a>
+
+## 2026-09-20 私聊原子批量控制权限接入
+
+- V2DirectSendControlPolicyFence 增加 withPolicies：最多 128 个发送方向，完整用户集合、规范用户对集合分别去重排序；先统一取得账号、用户对、偏好锁，再集合读取账号和方向策略。单条入口委托同一实现，不按请求顺序嵌套单对事务。
+- PostgresV2RoomWriteStore 增加内部 acceptDirectAtomicallyUsingControlPolicy；单条与批量共用一次 owner 集合发现、固定 room/sender/recipient 映射及控制事务。范围覆盖实际 acceptAtomicallyOwnerValidated 的普通批量和缓存快速追加，owner 当前回复、成员与额度规则仍保留。
+- 新增 directBatchControlAuthority：冷/预热 × 拉黑第一/第二条四场景，使用独立控制/owner 库、两个真实私聊。检查正常接受、预热后的实际快速批量、相反房间顺序的并发接受、owner 权限未更新时整批拒绝且无前缀落库、解除后以同批操作重试成功，以及空集合和超出 128 条的拒绝。另选既有单条权限、控制锁及房间日志专项回归。
+- 首轮 /tmp/imv2-direct-batch-control-authority.log 在新增测试构造 ownerRoute 时缺少 try，编译失败，未执行测试。已修正测试构造；最终结果见后续记录。
+- 应用组装尚未使用这两个内部入口，转发目标接入、社交版本归属及控制连接失效边界仍未贯通，B27/D07 继续开放。未修改客户端、schema 47 或协议 30。
+
+
+- 最终版本在临时 PostgreSQL 主/次库（55479、disposable 标记）过滤执行 directBatchControlAuthority、directSendControlAuthority、directControlPolicyFence、persistsDirectRoomLogWithoutPerUserFanoutArtifacts：4 项测试、22 个场景、1 套件通过，16.637 秒；新增批量四场景 3.216 秒。日志 /tmp/imv2-direct-batch-control-authority-final.log，首轮编译失败日志保留。未运行全仓测试，临时数据库已停止。
+- 文档链接、结构及 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-direct-batch-control-authority-sources-20260920.json。未提交或部署；问题关闭数量不变。应用接线另须隔离控制权限连接池并计入预算，避免同物理库下控制与 owner 嵌套取连接的依赖。
+
+
+<a id="20260920-control-policy-runtime"></a>
+
+## 2026-09-20 控制权限运行入口及独立连接池
+
+- 将先前仅用于内部专项的单条/批量方法并入正式 accept、acceptAtomically、importForwardExport；usingControlDatabase 绑定控制池，usingWorkloadDatabase 保留绑定。房间集合发现记录 kind，owner 锁下复核；群聊保留 owner 授权且不占私聊控制事务。单条和批量旧专项改为调用正式 owner-validated 方法。
+- Gateway 同库和多库两处写存储构造均绑定独立 direct-send-control 池；前台转发及后台目标写存储复用绑定。每 EventLoop 配额跟随当前 foreground 配额，独立于 owner 和个人事件路由池；计入总连接上限、溢出检查、会话就绪验证、Application 关闭及固定指标 direct_send_control。
+- 新增 routedDirectControlPools 的同物理库/不同库两个场景：控制与 owner 各只有一个连接，经实际 V2RoutedRoomWriteStore 执行群聊、并发私聊及拉黑后拒绝。新增 directForwardControlAuthority：真实源消息导出至另一库私聊，拉黑后新导入拒绝、旧终态不变、解除后新导入恢复；工作连接池副本保留控制配置。
+- 配置测试覆盖隔离/共享模式：预算少一条即拒绝，足额时接受，并检查权限池配额。选择单条、批量和控制围栏回归；结果见后续记录。未修改客户端、schema 47 或协议 30。
+- 这不是完整分布式提交保证：控制连接失效、社交版本与冻结房间解耦、所有转发组合及生产容量仍需证据，B27/D07 保持开放。
+
+
+- 临时 PostgreSQL 主/次库（55479、disposable 标记）过滤执行上述数据库专项与 V2GatewayRuntimeConfigurationTests：37 项测试、2 套件通过，18.048 秒，其中数据库专项 23 个场景。实际路由小池 2 场景 1.655 秒，私聊转发 1 场景 0.808 秒。日志 /tmp/imv2-control-policy-runtime.log。
+- 因共用 requireSelectedOwners 查询增加 room_kind，另以同一构建补跑原有 persistsDirectRoomLogWithoutPerUserFanoutArtifacts 的直接/路由两场景：1 项测试、2 场景通过，1.072 秒，日志 /tmp/imv2-control-policy-runtime-room-log.log。合计 38 项不同测试、数据库部分 25 个场景；未运行全仓测试，临时数据库已停止。
+- 文档链接、结构及 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-control-policy-runtime-sources-20260920.json。源码中的旧“未组装”说明已同步修正，仅注释不改变已验证行为。未提交或部署，问题关闭数量不变。
+
+
+<a id="20260920-social-frozen-source-policy"></a>
+
+## 2026-09-20 社交变更与冻结源副本解耦
+
+- PostgresV2SocialRelationshipStore.bumpDirectPairPolicyRevision 改为 rooms 共享锁 → direct_room_pairs 更新锁，仅锁定并递增未冻结房间。真实冻结安装的 FOR UPDATE 与此共享锁互斥，等待后复核 migration_fence_id。控制库关系/拉黑不依赖已冻结副本的版本空间，正常本地房间保留原修订与 Int64 上限检查。
+- 陌生人设置修改的是控制库用户偏好与用户策略版本，没有直接写 direct_room_pairs，本批未改该实现。目标房间继续通过已接入的控制权限范围判定拉黑、好友及偏好，房间副本的旧好友状态不参与控制权威。
+- 新增 socialFrozenSourcePolicy 的拉黑/删除好友两场景：在两个独立数据库预置相同 roomID 的私聊、预热目标缓存，将源策略版本设至 Int64.max；持真实冻结安装事务，启动社交写入并观察它等待房间锁，释放冻结后控制变更成功且源用户对完整行不变。目标副本仍保存旧好友且没有拉黑，实际发送仍拒绝；解除/重新建交后新发送恢复，源完整用户对行仍不变。
+- 同 roomID 的双库房间是测试预置，不是执行了迁移复制或路由发布。选择社交并发重放/最终整数边界、正式路由小池发送和单条控制权限专项回归。结果见后续记录；B27/D07 继续开放，未修改客户端、schema 47 或协议 30。
+
+
+- 临时 PostgreSQL 主/次库（55479、disposable 标记）过滤执行 socialFrozenSourcePolicy、socialOperationConcurrentReplay、routedDirectControlPools、directSendControlAuthority：4 项测试、28 个场景、1 套件通过，21.941 秒；新增冻结副本 2 场景 1.669 秒。日志 /tmp/imv2-social-frozen-source-policy.log。未运行全仓测试，临时数据库已停止。
+- 文档链接、结构及 diff 空白检查通过；本机源码/日志 SHA-256 清单 /tmp/imv2-social-frozen-source-policy-sources-20260920.json。未提交或部署，问题关闭数量不变。
+
+
+<a id="20260920-direct-control-connection-loss"></a>
+
+## 2026-09-20 控制连接中断故障复现
+
+- 新增 directControlConnectionLoss 的冷/预热两场景：实际私聊发送取得控制权限后等待 owner 房间锁；仅在 disposable 主/次库中，精确定位该控制事务的后端并终止它；随后通过真实社交服务提交拉黑，再释放 owner 锁，检查旧发送是否仍创建消息以及调用者是否收到错误。
+- 安全断言要求旧操作消息数为零。测试以 withKnownIssue 显式标记尚未解决的 D07 故障边界；这是可执行的未关闭回归，不是放宽通过标准。正常请求随后必须观察到拉黑并拒绝。实际运行结果见后续记录。
+- 本地 Fluent 驱动事务实现等待异步业务闭包返回后才执行 COMMIT，独立 owner 回调不因控制连接关闭自动获得持久拒绝。已在迁移合同补充待实现的持久授权意图、owner 回执/拒绝标记及撤权恢复要求；尚未新增生产协议、schema 或回收规则。
+
+
+- 首轮 /tmp/imv2-direct-control-connection-loss.log 两场景在故障注入 SQL 处失败，尚未断开控制连接。临时 PostgreSQL 日志明确为 pg_terminate_backend(bigint) 不存在；已将绑定的测试后端 PID 显式转为 int4，仅重跑该专项。该轮不作为业务安全证据。
+
+
+- 第二轮 /tmp/imv2-direct-control-connection-loss-final.log 已成功终止控制后端；冷场景观察到控制库 user_blocks 为 1、owner messages 为 1，但测试等待旧请求收尾未结束。约 149 秒后核对仍运行的测试子进程 PID/父进程关系，终止该确切子进程，原运行以退出 1 结束。随后独立读取上述两库计数仍各为 1，确认记录已提交；清理本轮测试创建的 im_v2 schema。此轮不是通过结果，也没有因观察超时重启同一进程。
+- 故障探针改在独立子进程运行：父进程创建并拥有临时 schema，子进程完成注入和观测后写出报告并退出，父进程核对报告及安全断言后清理。设 30 秒子进程 watchdog，不等待被断连接口的收尾。此隔离只修正测试生命周期，不是生产问题修复。
+
+
+- 隔离版日志 /tmp/imv2-direct-control-connection-loss-isolated.log：父测试冷/预热 2 场景均完成观测，1.754 秒；两份报告均为 controlBlocks=1、ownerCommitted=1，观测时 callbackSettled=0。新请求已按拉黑拒绝，但先前持有快照的操作仍在拉黑提交后写入消息。安全断言实际失败两次，由 withKnownIssue 明确记录；测试工具退出 0 不代表缺陷修复。子探针在父运行中跳过，仅由父测试显式启动。
+- 父进程已清理两个场景的临时 schema，PostgreSQL 主/次库（55479）已停止。没有跑无关回归或全仓测试，没有修改生产授权行为、schema 47 或协议 30；生产源码仅补充了连接失效边界的注释。
+- D07 优先级升为 P1，仍为实施中；关闭数量不变。文档链接、结构及 diff 空白检查通过；本机源码/日志及两份探针报告的 SHA-256 清单 /tmp/imv2-direct-control-connection-loss-sources-20260920.json。未提交或部署。
+
+
+### 20260920-direct-authorization-owner-receipts
+
+- 范围：D07 持久授权的房间侧原语，关联 B11/B27。schema 48 新增 direct_authorization_receipts；152 张表、356 个索引、28 个应用触发器、26 个函数。项目未上线，只修改当前新库合同，不新增旧库升级链。
+- 原语：prepare 与现有单条发送共用操作锁，绑定操作/代次、接收者、owner shard/epoch 与 v3 摘要；finish 必须读取同事务的接受/业务拒绝事实才能生成证明，已有 aborted 会抛错；abort 等待同一操作锁，保存原结果或持久中止。跨代次不能更改命令摘要；数据库拒绝更新/删除，启动检查精确验证约束、索引及触发器函数。
+- 新增真实 PostgreSQL 4 项测试、7 个场景通过，覆盖先中止后迟到准备/完成、原代次与新代次重放/改参、更新/删除拒绝、真实操作锁等待后的提交/回滚、无完成事实、旧 owner epoch，以及触发器禁用/约束缺失/函数改写的启动拒绝。测试以独立随机 schema 执行，原语测试的完成记录为受控数据库夹具，不能代替正式消息入口接线。
+- 同轮原有 directSendControlAuthority 的 12 个实际发送场景通过。合计 5 项测试、19 个场景、2 个 suite，执行 9.859 秒；首次新增测试编译因仅含宏的事务闭包未显式声明 throws 失败，修正后完整结束并通过；没有将编译失败算作通过。
+- 独立新库建库、schema-only 恢复与漂移检查通过；初次建库在 readiness 表清单更新前报告缺少新表，补齐后最终通过。文档链接、结构和差异检查通过。
+- 日志：`/tmp/imv2-direct-authorization-owner-receipts.log`（首次编译失败）、`/tmp/imv2-direct-authorization-owner-receipts-final.log`（最终通过）、`/tmp/imv2-direct-authorization-schema-bootstrap-initial.log`（初次清单缺项）、`/tmp/imv2-direct-authorization-schema-bootstrap.log`（最终建库通过）。源码指纹：`/tmp/imv2-direct-authorization-owner-receipts-sources-20260920.json`。这些是本机临时证据，不是远端 CI 或干净 checkout 验收。
+- 限制：正式消息接受、批量与转发尚未接入这些原语；控制授权意图、撤权协调及恢复工作器仍待完成。D07 控制断连后迟到发送的 P1 复现没有关闭，本轮未重复运行其已知失败测试。新记录当前不自动过期，完整保留/迁移仍由 B11/B27 跟踪。没有运行全仓测试、修改客户端、提交或部署。
+
+
+### 20260920-direct-authorization-control-intents
+
+- 范围：D07 持久授权的控制侧登记、撤权协调与恢复原语，关联 B11/B27。schema 49 新增 direct_authorization_intents，153 张表、360 个索引、29 个应用触发器、27 个函数；只修改当前新库合同。
+- 实现：控制权限与整批授权登记同事务提交，登记行同时承担恢复任务。相同操作重试沿用原 owner、epoch、代次与权限事实，只有持久 aborted 被控制库确认后，新前台请求才能开启新代次并刷新事实；原命令摘要/接收者/初始时间不变。数据库保护 held 代次与终态，拒绝删除、非法结果/租约组合。
+- 撤权原语在既有排他权限锁内读取 held，最多处理 128 项，通过 owner 操作锁取得已提交结果或持久中止记录；确认使用独立控制连接。外层撤权因批次上限或不可达回滚，不抹去已完成的确认进度；剩余 held 不为空不能报告成功。恢复最多认领 100 项，过期仅重新认领，owner 不可达时退避；旧租约不能清除新租约，旧代次不能释放新代次。
+- 新增 5 项测试、8 个真实 PostgreSQL 场景通过：授权登记提交后终止实际控制 backend、重新连接重放并持久中止迟到代次；两项登记以每批一项排空，首轮外层事务失败后保留确认进度，第二轮成功才写入拉黑；owner 不可达、恢复租约过期/旧租约回调与新代次；8 个反序批量并发重试、改参导致整批回滚，以及数据库拒绝 held 代次/策略改写、无结果事件 ID 与删除；索引/约束/触发器/函数内容漂移的启动拒绝。
+- 同轮房间侧回执 7 场景与原控制锁 4 场景回归通过。合计 10 项测试、19 个场景、3 个 suite，执行 7.253 秒，编译 233.39 秒。测试使用两个独立 PostgreSQL 数据库和随机 schema；撤权政策写入由受控 SQL 夹具执行，尚不能证明正式社交/偏好/账号停用入口已经接通。断连发生于控制授权登记提交之后，不替代原正式发送的控制事务中断 P1 复验。
+- 独立当前新库建库、schema-only 恢复与漂移检查通过。日志：`/tmp/imv2-direct-authorization-intents.log`、`/tmp/imv2-direct-authorization-intent-schema.log`。源码指纹：`/tmp/imv2-direct-authorization-control-intents-sources-20260920.json`；最后仅校正权限快照的源码说明，未改动已测执行逻辑。这些为本机临时证据，不是远端 CI 或干净 checkout 验收。
+- 限制：普通/批量/转发的 owner 同事务接线、权限写者与独立池配置、后台生命周期和实际 P1 断连回归仍未完成，D07 保持开放。完整记录保留和房间迁移承接仍由 B11/B27 跟踪。没有运行全仓测试、修改客户端、提交或部署。
+
+
+### 20260920-direct-authorization-owner-entry
+
+- 范围：D07 房间侧正式接受事务的持久授权接线，关联 B11/B27。schema 49 与协议 30 不变，没有新增历史兼容路径。
+- 实现：PostgresV2RoomWriteStore 通过 usingAuthorizationGrants 绑定已提交的控制授权，校验命令摘要并保留 owner/epoch/接收者/代次。普通发送、标准/快速原子批量与转发导入的消息事务统一在返回前记录授权证明；失败回滚同事务的消息与序号。准入未形成接受或业务拒绝时不生成终态，继续 held 供重试/恢复。usingWorkloadDatabase 保留绑定。
+- 锁顺序：checkAttempt 只取得与发送共用的操作锁并检查中止记录；既有源/目标房间按序加锁后才执行完整 prepare，避免同库转发提前锁目标房间。批量先取得完整操作锁集合，再校验房间归属与授权；中止代次始终抛错。
+- 新增 3 项测试、14 个真实双数据库场景通过：单条接受/业务拒绝/预先中止/回执约束注入失败各两种缓存状态，证明回执失败使消息与房间序号回滚，修复约束后同操作可接受；中止后新代次接受，旧代次仍被拒绝；批量的前/后命令中止与冷/预热四种组合无部分提交，更新代次后两条消息与证明提交，预热批量确认实际快速追加计数；转发导入预先中止不能落消息，成功导入及精确重放保持一个接受证明。
+- 同轮原有单条控制授权 12 场景、原子批量 4 场景、转发控制授权 1 场景，房间证明 7 场景、控制意图 8 场景回归通过。合计 15 项测试、46 个场景、3 个 suite，执行 25.013 秒，编译 220.05 秒。日志：`/tmp/imv2-direct-authorization-owner-entry.log`；源码指纹：`/tmp/imv2-direct-authorization-owner-entry-sources-20260920.json`。
+- 限制：测试显式调用控制登记并把授权绑定到正式写存储；Gateway 仍需自动登记/绑定/确认，社交/偏好/账号停用等权限写者仍需接入 drain，后台生命周期仍需注册恢复。旧瞬时控制范围尚未被替换，原 D07 P1 断连复现未关闭，本轮未重复其已知失败测试；媒体转发、同库跨房间竞态与完整运行入口的故障矩阵仍需继续验证。没有把本轮结果表述为整体断连修复。
+- 本轮只跑受影响的服务端专项；未运行全仓测试、改动客户端、提交或部署。本机证据不是远端 CI 或干净 checkout 结果。
+
+
+### 20260920-direct-authorization-policy-writers
+
+- 范围：D07 实际权限写者的持久授权排空及协议错误分类，关联 B11/B27。schema 49、协议 30 不变。
+- 接线：关系变更/拉黑、陌生人权限、账号停用，在既有排他用户对/偏好/账号状态锁范围内先处理 held 意图，再改变控制事实与登记操作。精确操作重放先返回，不取消后来授权。协调器缺失时也读取 held 并拒绝有未完成授权的变更；owner 不可达不能假报成功。
+- 新增 directDurablePolicyWriters 的 12 个真实双库场景通过（四类操作 × 已配置/缺失/不可达）：成功撤权阻止持久授权的迟到真实发送；配置缺失或不可达时，权限、好友状态及 held 不被错误改写；原发送可在失败撤权后真实接受，随后重试撤权确认原接受回执，旧发送仍幂等返回原结果；新授权读取新控制事实；旧权限操作重放不取消后来 held。
+- 第一轮同时验证原社交并发重放 12 场景、原单条控制授权 12 场景、原控制权限锁 4 场景。合计 4 项测试、40 个数据库场景，执行 32.201 秒，通过。日志：`/tmp/imv2-direct-authorization-policy-writers.log`。
+- 随后补齐网关映射：撤权未完成/owner 不可达/中止代次及内部持久化异常返回可重试 UNAVAILABLE；控制命令身份冲突返回不可重试 IDEMPOTENCY_CONFLICT，异常不逃出命令处理器。账号停用将排空失败映射为既有 unavailable，取消信号继续传播。
+- 最终重跑受影响的 12 个撤权场景，新增网关 5 个错误映射场景（同处理器重复调用），并运行账号停用 HTTP 原有 5 个参数/非参数场景。合计 5 项测试、22 个场景、3 个 suite，执行 8.685 秒，通过。未重复第一轮未受后续错误分类影响的其余数据库专项。日志：`/tmp/imv2-direct-authorization-policy-writers-final.log`；源码指纹：`/tmp/imv2-direct-authorization-policy-writers-sources-20260920.json`。最后仅补充协调器连接池隔离说明，没有改变已测逻辑。
+- 边界：测试显式传入协调器、登记并绑定授权；连接夹具允许多连接，尚不能证明最小连接池的运行组装。Gateway/Operator 自动授权登记/绑定/确认、独立于预留和权限写者的确认池、独立 owner 中止连接、后台恢复生命周期仍需接通并验证。原瞬时控制范围尚未替换，D07 P1 断连复现继续开放，本轮没有重复其已知失败测试。特殊账号和其他权限写者的完整入口清点、全转发/迁移故障矩阵仍需继续。
+- 未运行全仓测试、修改客户端、提交或部署。本机结果不替代远端 CI、干净 checkout 和生产容量验收。
+
+
+### 20260920-direct-authorization-runtime-pools
+
+- 范围：D07 的 Gateway/Operator 协调器与处理连接池、Gateway 恢复任务接线；schema 49、协议 30 不变，不引入历史兼容。
+- 运行组装：按控制库和 room owner 的不同 URL 注册专用池，每 event loop 1 条连接；逻辑别名复用池，用户独有分片不增加处理池。控制确认与 owner 中止可在同库共用处理池，两笔事务顺序完成。所有句柄验证会话策略，连接数计入进程总预算；Gateway 增加固定 direct_authorization_resolution 指标。社交/陌生人权限/账号停用写者注入协调器；Gateway 每轮恢复最多 8 条，退出时取消并加入既有有界任务排空。
+- 首轮编译发现 Operator 的预算调用遗漏 connectionsPerEventLoopPerPhysicalStore，修正后重跑。第二轮两个应用编译通过，但新增 Gateway 配置夹具没有登记相应 direct/group shard ID，4 个参数场景报错；补全测试拓扑后重跑。两轮失败均不算通过。
+- 最终配置测试覆盖隔离/共享模式、同库/独立 owner、多逻辑分片共用 URL、预算恰好足够/少一条；Operator 另覆盖用户独有数据库不多计授权处理池。新增 2 个真实 PostgreSQL 场景在同库/双库分别占满预留、权限写者、owner 前台三个单连接池，并持有实际排他权限锁，独立协调器仍完成 owner 中止和控制确认；新代次读到拉黑，随后有界恢复确认终态。
+- 最终 42 项测试、3 个 suite 通过，执行 6.350 秒，增量编译 18.55 秒；包含原授权意图的断后端、撤权回滚、不可达/租约、并发/改参和 schema 漂移专项。只执行配置与授权意图相关测试，没有跑全仓套件。
+- 日志：`/tmp/imv2-authorization-runtime-config-20260920.log`（编译失败）、`/tmp/imv2-authorization-runtime-config-final-20260920.log`（夹具配置失败，编译通过）、`/tmp/imv2-authorization-runtime-pools-20260920.log`（最终通过）。源码/日志指纹：`/tmp/imv2-direct-authorization-runtime-pools-sources-20260920.json`。
+- 边界：数据库测试显式组装角色池，预留连接是被测试事务占用，未模拟真实预留等待权限锁；应用入口通过编译，不等于完整 Gateway 启停或强杀验收。正式普通/批量/转发仍需自动登记/绑定/确认并替换原 withControlPolicies 路径，原 P1 已知失败标记保留，D07 不关闭。未修改客户端、提交或部署；本机证据不替代远端 CI 与生产容量。
+
+
+### 20260920-direct-automatic-authorization
+
+- 范围：D07 普通/原子批量发送的自动持久授权；Gateway 使用既有独立确认池。schema 49、协议 30 不变，客户端未改动。
+- 实现：只读发现 owner/epoch/接收者，按原命令身份和 v3 摘要登记并提交后绑定授权；接受/拒绝证明仍与消息同事务。完整发送返回（含缓存与命令额度记账）后读取不可变证明并确认控制记录；没有证明不结算，错误保留 held 并映射可重试 UNAVAILABLE，取消继续传播。普通改参返回原幂等冲突，批量重复/冲突保留既有标量回退。
+- 故障探针：两个场景分别冷/预热，在 owner 房间锁阻塞时要求 held 授权已提交，终止确切的单连接预留池后端；真实拉黑通过协调器等待 owner 操作锁，阻塞期间 block=0。释放锁后原消息先提交，再由撤权读取证明并确认后提交拉黑；新请求拒绝。子探针的关键观测改为 require，不能因子进程直接退出而忽略断言失败。父测试去掉普通发送的 withKnownIssue；历史复现未覆盖或删除。
+- 第一轮编译 240.62 秒、执行 30.148 秒；10 项测试（子探针默认跳过，由父显式启动）、37 个业务参数场景。普通断连 2、路由单连接 2、转发旧路径回归 1、显式 owner 事务 14、批量 4、发送控制权限 12 场景通过；新增 ACK 失败 2 场景因测试假设错误失败：冷路径直接使用数据库额度，本地 committedCredits 不递增；幂等重试可预取并归还未用令牌，整个本地 snapshot 不应要求相等。失败保留，不计通过。
+- 修正专项为数据库已预扣减去本地空闲/在途后的实际消费守恒、已提交令牌不重复消费、消息唯一及改参冲突；预热分支另核对快速追加计数增加。注入控制终态 CHECK 拒绝，原消息仍提交、授权 held；解除故障后同参数重试幂等补确认。随后补齐确认故障的 retryable 映射和子探针强断言，仅重跑受影响的 20 个场景。
+- 最终日志 5 项测试、1 个 suite（含默认跳过、由父显式启动的子探针），20 个业务参数场景全部通过；执行 16.291 秒，编译 215.97 秒。两份冷/预热报告均为 blocksWhileOwnerHeld=0、ownerAtRevocation=1、ownerCommitted=1、controlBlocks=1、callbackSettled=1。这表示消息在撤权完成前结算，不是允许撤权完成后的迟到写入。
+- 日志：`/tmp/imv2-direct-automatic-authorization-20260920.log`（首次 ACK 测试假设失败）、`/tmp/imv2-direct-automatic-authorization-final-20260920.log`（最终通过）。源码/日志/探针指纹：`/tmp/imv2-direct-automatic-authorization-sources-20260920.json`。没有跑全仓测试；先前不受后续错误映射影响的 17 个场景未重复运行。
+- 限制：转发仍调用 withControlPolicies，必须处理媒体就绪后的命令指纹、自动登记/确认与终态预查；完整进程启停/强杀、登记提交前故障、特殊账号写者清点及迁移承接继续开放。D07 保持 P1/实施中，关闭数不变；普通发送专项修复不代替整个问题关闭。未提交或部署，本机证据不是远端 CI。
+
+
+### 20260920-forward-automatic-authorization
+
+- 范围：D07 的正式转发自动授权，关联 B04/B11/B27。schema 49、协议 30 不变，未改客户端或增加历史兼容。
+- 实现：幂等接收 inbox 后，短 owner 预检事务锁定收件箱和媒体映射。媒体未就绪直接 pending，不登记授权；就绪命令以稳定目标媒体 ID 形成指纹，预检提交后才执行控制登记。实际接受事务重新校验完整命令和 owner，保留消息/证明原子提交及既有接受/拒绝逻辑。预检不以当前文本上限阻止已有 accepted 的恢复，真正接受仍按当前上限拒绝新长文本。
+- 终态：接线共用普通发送的提交后确认；完成标记成功、控制 ACK 失败时，重放按原操作读取控制授权，以不可变 owner 证明补确认，不重建命令或新代次，不读取已清理正文。没有消息证明的拒绝保持 held，后台通过 owner 中止证明再结算。控制身份冲突映射为转发幂等冲突。RoomWriteStore 中 withControlPolicies 和旧发现 DTO 已移除。
+- 新增 directForwardAutomaticAuthorization：7 个场景 × 无附件/真实附件，共 14 个真实双库场景。包含媒体 pending 时零授权/零证明、实际文件复制与扫描、等待期间拉黑后拒绝、INVALID_ARGUMENT 及后台中止后终态重放、准入 pending 后同代次接受、消息已提交但 completion 标记失败后缩小文本上限仍恢复、接受/拒绝 ACK 失败及 inbox 正文压缩后补确认。核对消息/媒体引用唯一、授权/证明各一条、代次不增加、无遗留 held。
+- 同轮相关 25 个回归通过：直接转发控制权限 1、显式 owner 授权转发 2、普通发送 ACK/额度 2、收件箱提交回滚及并发/收尾恢复 2、迁移写入边界 2、两类群目标资格/权限/epoch/准入/媒体 16。后面三个旧套件已绑定生产控制授权入口，群路径仍不登记单聊授权。
+- 首轮 7 项测试、39 个场景，编译 237.61 秒、执行 31.397 秒；4 个新增附件成功场景在最后引用计数处查询了不存在的 im_v2.message_media，PostgreSQL 明确报 relation does not exist，整轮失败。修正为实际 message_media_references；服务端源码未再修改，仅重跑新增 14 个场景，最终全部通过，执行 14.126 秒、编译 211.79 秒。没有把初轮失败算成整轮通过，也未重复已通过且不受测试查询修正影响的 25 个回归。
+- 日志：`/tmp/imv2-forward-automatic-authorization-20260920.log`（首次测试表名错误）、`/tmp/imv2-forward-automatic-authorization-final-20260920.log`（最终通过）；源码/日志指纹：`/tmp/imv2-forward-automatic-authorization-sources-20260920.json`。文档链接、结构与 diff 检查另行执行。
+- 限制：没有进行实际转发进程强杀/断连及并发撤权故障矩阵，也未完成特殊账号权限写者清点、媒体状态变化并发窗口或完整迁移承接。D07 仍为 P1/实施中，问题关闭数量不变。仅运行受影响服务端专项，未运行全仓测试、提交或部署。本机证据不代替远端 CI 和生产容量。
+
+
+### 20260920-forward-control-connection-loss
+
+- 范围：D07 当前应用控制权限写者清点，以及真实转发授权登记后的控制连接中断/并发撤权。生产代码、schema 49 和协议 30 均未修改。
+- 写者清点：按 V2DirectSendControlPolicyFence 读取的 public_user_profiles、account_disables、user_relationships、user_blocks、user_stranger_message_preferences、special_accounts，核对 Sources 内写入语句、方法及 Gateway/Operator 组装。关系/拉黑、陌生人权限、账号停用都在相应排他锁内先排空；分片偏好路由明确使用 controlStore。资料编辑只改展示字段；账号注册使用新 UUID；special_accounts 未发现应用写入接口，SpecialAccountMessagingService 写的是消息操作/审计。详细入口见[合同清点表](room-owner-migration-contract.md#当前控制权限写者清点2026-09-20)。这不是数据库不可变声明，不覆盖特权 SQL 或外部配置系统在线变更。
+- 探针：把 directControlConnectionLoss 扩为普通/转发 × 冷/预热。转发先接收 inbox，再持有 owner 房间锁；实际导入必须先提交 held 授权再等待 owner。终止测试专用单连接预留池 backend，真实拉黑必须等待 owner 操作锁，且阻塞期间 user_blocks=0。释放锁后接受完成、撤权确认后提交拉黑；新发送拒绝。转发另验证终态重放不依赖当前更小文本限制，消息仍一条、控制 generation=1 且 accepted。
+- 本轮只运行 directControlConnectionLoss；2 项测试、1 个 suite（子探针默认跳过，由父测试显式启动）、4 个业务场景全部通过。执行 3.835 秒，编译 211.50 秒。四份报告均为 blocksWhileOwnerHeld=0、ownerAtRevocation=1、ownerCommitted=1、controlBlocks=1、callbackSettled=1；关键子探针断言使用 require，未保留 known issue。
+- 日志：`/tmp/imv2-forward-control-connection-loss-20260920.log`；源码、四份报告和子日志指纹：`/tmp/imv2-forward-control-connection-loss-sources-20260920.json`。未重跑已通过的媒体/ACK/配置专项或全仓套件。
+- 边界：本次终止的是 PostgreSQL 后端连接，测试子进程正常写报告后退出，不是服务进程 SIGKILL。尚未覆盖登记提交前、owner 提交后确认前的完整进程中断、转发撤权先完成的相反顺序、媒体状态变化及迁移承接。D07 继续实施中，关闭数量不变；未改客户端、提交或部署，本机证据不替代远端 CI/生产环境。
+
+
+### 20260920-direct-authorization-process-crash
+
+- 范围：D07 持久授权的真实进程中断；只增加服务端测试和更新治理证据，生产代码、schema 49、协议 30 不变。
+- 检查点：普通发送、双房间批量、无附件转发 × 登记事务提交前、登记提交后尚未接受、owner 提交后确认前、确认完成后，共 12 个参数场景。前三种在数据库锁等待可观测后由父进程 SIGKILL；最后一种要求子进程完成发送并写 ready 标记后 SIGKILL。父测试要求确实因 SIGKILL 退出，不能把正常退出当成崩溃。
+- 恢复：每次重新启动独立进程，按过期恢复时钟调用实际协调器，然后使用同一 room/client 身份重放；转发使用原导出载荷与摘要。登记前无遗留；登记后恢复中止旧代次并用第二代接受；owner 提交后恢复原证明并保留第一代；确认后不领取恢复任务。核对消息唯一、所有控制授权 accepted、证明数量与代次、claimed/resolved 数量及 deferred=0。批量按正式接受入口及既有标量回退语义执行，owner 提交后断言两条消息已提交。
+- 结果：2 项测试、1 个 suite（子探针默认跳过，由父显式启动）；12 个业务参数全部通过。编译 217.41 秒，执行 11.578 秒。仅运行 directAuthorizationProcessCrash 专项，未运行全仓套件。
+- 日志：`/tmp/imv2-direct-authorization-process-crash-20260920.log`；源码/文档/输入身份/子进程日志/恢复报告指纹：`/tmp/imv2-direct-authorization-process-crash-sources-20260920.json`。各独立证据目录见日志中的 Authorization SIGKILL evidence，保留 ready 与 report 文件供核对。
+- 限制：本机真实双库、Application 与存储组件的子进程强杀，不是完整 Gateway 网络服务部署或 Linux 崩溃验收；未覆盖附件状态并发变化、相反撤权顺序及完整迁移承接。D07 仍为 P1/实施中，20/47 已关闭计数不变。未改客户端、引入历史兼容、提交或部署。
+
+
+### 20260920-forward-revocation-first
+
+- 范围：D07 撤权先完成的转发顺序，仅扩展服务端测试及文档，生产代码、schema 49、协议 30 不变。
+- 新增无附件/真实附件两个场景：正式导入因准入已满返回 pending，留下 held 授权且无 owner 证明。真实拉黑写者通过协调器保存 aborted 证明并确认后提交拉黑。释放准入后，旧授权迟到导入抛出 attemptAborted，消息与媒体引用为零；正式入口按原操作重试，第二代读取拉黑事实并持久拒绝，终态重放保持相同结果。最终控制操作一条、第二代 denied、owner 证明两条。
+- 仅运行 directForwardAutomaticAuthorization：1 项测试、1 个 suite、16 个参数全部通过，包含新增 2 场景和原有 14 个回归。编译 211.78 秒，执行 12.832 秒。未跑全仓测试。
+- 日志：`/tmp/imv2-forward-revocation-first-20260920.log`；源码与日志指纹：`/tmp/imv2-forward-revocation-first-sources-20260920.json`。
+- 边界：确定排序的准入等待、拉黑完成、旧任务迟到和新代次重试，不代表任意在途竞争、媒体状态变化、完整 Gateway 生命周期或迁移验收。D07 保持实施中，关闭数不变；未改客户端、历史兼容或部署。
+
+
+### 20260920-forward-media-window
+
+- 范围：D07 转发预检提交后、实际接受前的媒体状态窗口；仅修改服务端测试和治理文档，生产代码、schema 49、协议 30 不变。
+- 新增 2 场景都使用实际上传、复制并扫描就绪的附件。父任务持有 control 的 account-state 排他锁，启动正式导入，观察 pg_stat_activity 中共享权限锁等待，并确认尚无控制授权。这意味着 owner 预检已提交、控制登记尚未完成。
+- 分别在 owner 库注入 state=expired，或保持 available 但 expires_at 等于请求时间。释放控制锁后，实际接受重新校验媒体并抛出 mediaUnavailable。断言消息、媒体引用和 owner 接受证明为零，控制授权仍 held；到期恢复 claimed=1/resolved=1/deferred=0，控制与 owner 均保存 aborted 终态。
+- 仅运行 directForwardAutomaticAuthorization：1 项测试、1 个 suite、18 个参数全部通过（新增 2，原有回归 16）；编译 213.25 秒，执行 14.425 秒。未跑全仓测试。
+- 日志：`/tmp/imv2-forward-media-window-20260920.log`；源码/文档/日志指纹：`/tmp/imv2-forward-media-window-sources-20260920.json`。
+- 边界：媒体变化由数据库故障注入精确放入窗口，没有声称覆盖实际过期工作器、物理文件删除或映射身份修改的全部并发时序。完整 Gateway 生命周期、其他在途竞争及 owner 迁移仍开放；D07 关闭计数不变。
+
+
+### 20260920-authorization-gateway-lifecycle
+
+- 范围：D07 实际 IMV2ServerApp 的后台授权恢复与进程生命周期。新增 [可重复探针](../../scripts/test_v2_authorization_gateway_lifecycle.py)，只允许显式确认的本机临时 PostgreSQL 集群，创建独立随机数据库并在结束时清理。生产 Swift、schema 49、协议 30 不变。
+- 探针使用当前 canonical schema、临时 TLS 证书和实际 Gateway 可执行文件，控制与 owner 共用物理数据库，运行时按正式配置创建独立角色池。预置三个合法 held 操作，分别验证启动后自动恢复、owner 房间锁等待期间 SIGKILL 后重启按租约恢复、等待期间 SIGTERM 正常停机后再启动恢复。
+- SIGKILL 要求退出码对应信号 9。所有 SIGTERM 要求退出码 0 和服务任务 drained=true；在途等待场景在约 2 秒数据库锁超时后延后授权并完成退出，下次启动在 next_check_at 到期后恢复。最终三个 owner aborted 证明、消息零；未手动调用协调器替代实际后台任务。
+- 真实入口增量构建通过（2.93 秒）；最终仓库脚本全部通过，证据目录 `/tmp/imv2-auth-gateway-abb8e085-ab13-4711-9839-18f49312d37e`，含四次进程日志、schema 日志与 report.json。总日志 `/tmp/imv2-auth-gateway-lifecycle-repository-20260920.log`，源码/日志指纹 `/tmp/imv2-auth-gateway-lifecycle-sources-20260920.json`。没有运行全仓测试。
+- 首次临时夹具错误地把数据库线程数改为 1 却保留 4 线程的并发预算，启动检查拒绝；恢复正确配置后，强杀夹具仅终止 psql，数据库 sleep 事务仍持锁，重启恢复按预期延后但探针超时。修正为仅终止本次独立数据库内的持锁后端后通过；两次失败日志保留，不计通过。最终仓库脚本又加入在途 SIGTERM 场景并整体通过。
+- 限制：这是 macOS、本机单物理库、预置 held 授权的真实 Gateway 后台生命周期；没有通过 TLS 发消息，不能替代前台普通/批量/转发的全进程故障矩阵、跨物理库部署、Linux、安全认证、生产容量或迁移接管验收。D07 保持实施中，关闭数不变。

@@ -34,8 +34,6 @@ public struct V2SendMessageCommand: Equatable, Sendable {
     public let mentions: [V2MentionTarget]
     public let entities: [V2MessageEntity]
     public let replyTo: V2MessageReplyReference?
-    /// 由可信业务层选择的受众计数规则，不允许普通客户端自行扩大投递范围。
-    public let targetRule: FanoutTargetRule
     /// 服务端构造的新转发来源快照；普通发送协议不直接接受此字段。
     public let forwardedFrom: V2ForwardMessageSource?
     public let fingerprint: V2SendMessageFingerprint
@@ -51,10 +49,9 @@ public struct V2SendMessageCommand: Equatable, Sendable {
     ///   - mentions: 不重复的提及目标，数量受共享上限约束。
     ///   - entities: 按 UTF-16 偏移描述的已定义富文本实体。
     ///   - replyTo: 可选回复消息引用，历史可见性由存储层另查。
-    ///   - targetRule: 可信业务层选择的分发计数规则；精确数量不得为负。
     ///   - forwardedFrom: 新转发的可信源快照，普通发送为 nil。
     ///   - limits: 正文 UTF-8 容量预算。
-    /// - Throws: 内容／集合限制、富文本验证或负的精确目标数量错误。
+    /// - Throws: 内容／集合限制或富文本验证错误。
     ///
     /// 构造不会检查房间当前权限、媒体可用状态或数据库 owner；这些检查不能省略。
     public init(
@@ -66,7 +63,6 @@ public struct V2SendMessageCommand: Equatable, Sendable {
         mentions: [V2MentionTarget] = [],
         entities: [V2MessageEntity] = [],
         replyTo: V2MessageReplyReference? = nil,
-        targetRule: FanoutTargetRule = .eligibleMemberCount,
         forwardedFrom: V2ForwardMessageSource? = nil,
         limits: V2MessageCommandLimits
     ) throws {
@@ -81,9 +77,6 @@ public struct V2SendMessageCommand: Equatable, Sendable {
             throw V2SendMessageValidationError.invalidTextLength
         }
         try V2RichMessageContent.validate(text: text, entities: entities)
-        if case .exactTargetCount(let count) = targetRule, count < 0 {
-            throw V2CoreError.invalidNonNegativeValue
-        }
         self.roomID = roomID
         self.senderUserID = senderUserID
         self.clientMessageID = clientMessageID
@@ -92,13 +85,12 @@ public struct V2SendMessageCommand: Equatable, Sendable {
         self.mentions = mentions
         self.entities = entities
         self.replyTo = replyTo
-        self.targetRule = targetRule
         self.forwardedFrom = forwardedFrom
         self.fingerprint = V2SendMessageFingerprint(
             roomID: roomID, senderUserID: senderUserID,
             clientMessageID: clientMessageID, text: text, media: media,
             mentions: mentions, entities: entities, replyTo: replyTo,
-            targetRule: targetRule, forwardedFrom: forwardedFrom
+            forwardedFrom: forwardedFrom
         )
     }
 }
@@ -175,12 +167,8 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
     /// 仅群组房间存在。
     ///
     /// 它是用于非权威前台可用性提示的准入元数据；
-    /// 不会改变持久扇出或应答契约。
-    public let groupDeliveryMode: V2GroupDeliveryMode?
-    /// 当该已接受消息是从房间事件日志而非每用户扇出流中持久恢复时为 `true`。
-    ///
-    /// 提示本身是尽力而为的；房间游标仍是权威。
-    public let usesRoomEventLog: Bool
+    /// 公共消息始终通过房间日志可靠恢复。
+    public let groupCapacityClass: V2GroupCapacityClass?
     public let createdAt: Date
 
     public init(
@@ -195,8 +183,8 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
         mentions: [V2MentionTarget] = [],
         entities: [V2MessageEntity] = [],
         replyTo: V2MessageReplyReference? = nil,
-        groupDeliveryMode: V2GroupDeliveryMode? = nil,
-        usesRoomEventLog: Bool = false,
+        groupCapacityClass: V2GroupCapacityClass? = nil,
+
         createdAt: Date
     ) {
         self.messageID = messageID
@@ -211,20 +199,18 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
         precondition((try? V2RichMessageContent.validate(text: text, entities: entities)) != nil)
         self.entities = entities
         self.replyTo = replyTo
-        self.groupDeliveryMode = groupDeliveryMode
-        self.usesRoomEventLog = usesRoomEventLog
+        self.groupCapacityClass = groupCapacityClass
         self.createdAt = createdAt
     }
 
     /// 使用权威存储元数据补齐可序列化的接受结果。
     ///
     /// 媒体展示 ID 必须与原引用按顺序精确一致，否则目标构造器的前置条件失败。
-    /// 可选参数使用本方法传入值；默认值不会自动继承草稿的 groupDeliveryMode 或 usesRoomEventLog。
+    /// 可选参数使用本方法传入值；默认值不会自动继承草稿的 groupCapacityClass。
     ///
     /// - Parameters:
     ///   - mediaPresentations: 与 media 数量、顺序和身份完全匹配的展示信息。
-    ///   - groupDeliveryMode: 群投递模式元数据，默认 nil。
-    ///   - usesRoomEventLog: 是否通过房间事件日志可靠恢复，默认 false。
+    ///   - groupCapacityClass: 群容量等级元数据，默认 nil。
     ///   - sourceEventID: 存储侧原始事件身份。
     ///   - acceptedMembershipRevision: 提交时成员资格版本栅栏。
     ///   - directRecipientUserID: 同一接受事务锁定的私聊对端。
@@ -233,8 +219,8 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
     /// - Important: 仅供已验证的存储边界调用；方法不执行网络授权或数据库提交。
     public func materialized(
         mediaPresentations: [V2MediaPresentation],
-        groupDeliveryMode: V2GroupDeliveryMode? = nil,
-        usesRoomEventLog: Bool = false,
+        groupCapacityClass: V2GroupCapacityClass? = nil,
+
         sourceEventID: EventID? = nil,
         acceptedMembershipRevision: UInt64? = nil,
         directRecipientUserID: UserID? = nil,
@@ -253,8 +239,8 @@ public struct V2AcceptedMessageDraft: Equatable, Sendable {
             mentions: mentions,
             entities: entities,
             replyTo: replyTo,
-            groupDeliveryMode: groupDeliveryMode,
-            usesRoomEventLog: usesRoomEventLog,
+            groupCapacityClass: groupCapacityClass,
+
             sourceEventID: sourceEventID,
             acceptedMembershipRevision: acceptedMembershipRevision,
             directRecipientUserID: directRecipientUserID,
@@ -286,10 +272,8 @@ public struct V2AcceptedMessage: Equatable, Sendable {
     /// 仅群组房间存在。
     ///
     /// 它是用于非权威前台可用性提示的准入元数据；
-    /// 不会改变持久扇出或应答契约。
-    public let groupDeliveryMode: V2GroupDeliveryMode?
-    /// 参见 ``V2AcceptedMessageDraft/usesRoomEventLog``。
-    public let usesRoomEventLog: Bool
+    /// 公共消息始终通过房间日志可靠恢复。
+    public let groupCapacityClass: V2GroupCapacityClass?
     /// canonical room-log 事件的内部持久身份。
     ///
     /// 用于服务器缓存保留原事件重放身份，不属于发送 ACK 的公开字段。
@@ -319,8 +303,8 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         mentions: [V2MentionTarget] = [],
         entities: [V2MessageEntity] = [],
         replyTo: V2MessageReplyReference? = nil,
-        groupDeliveryMode: V2GroupDeliveryMode? = nil,
-        usesRoomEventLog: Bool = false,
+        groupCapacityClass: V2GroupCapacityClass? = nil,
+
         sourceEventID: EventID? = nil,
         acceptedMembershipRevision: UInt64? = nil,
         directRecipientUserID: UserID? = nil,
@@ -341,8 +325,7 @@ public struct V2AcceptedMessage: Equatable, Sendable {
         precondition((try? V2RichMessageContent.validate(text: text, entities: entities)) != nil)
         self.entities = entities
         self.replyTo = replyTo
-        self.groupDeliveryMode = groupDeliveryMode
-        self.usesRoomEventLog = usesRoomEventLog
+        self.groupCapacityClass = groupCapacityClass
         self.sourceEventID = sourceEventID
         self.acceptedMembershipRevision = acceptedMembershipRevision
         self.directRecipientUserID = directRecipientUserID
@@ -351,47 +334,12 @@ public struct V2AcceptedMessage: Equatable, Sendable {
     }
 }
 
-/// 准入完成后的分发计划草稿，关联源事件、房间位置与已预留的容量。
-public struct V2FanoutPlanDraft: Equatable, Sendable {
-    public let id: FanoutPlanID
-    public let sourceEventID: EventID
-    public let roomID: RoomID
-    public let roomSequence: UInt64
-    public let reservation: FanoutAdmissionReservation
-
-    /// 保存首次接受事务准备的分发计划及容量预留。
-    ///
-    /// - Parameters:
-    ///   - id: 同一接受重试期间固定的计划 ID。
-    ///   - sourceEventID: 对应原始房间事件。
-    ///   - roomID: 事件所属房间。
-    ///   - roomSequence: 原消息的房间序号。
-    ///   - reservation: 准入评估器返回的容量预留。
-    ///
-    /// 该值本身不写入队列或扣减数据库容量。
-    public init(
-        id: FanoutPlanID,
-        sourceEventID: EventID,
-        roomID: RoomID,
-        roomSequence: UInt64,
-        reservation: FanoutAdmissionReservation
-    ) {
-        self.id = id
-        self.sourceEventID = sourceEventID
-        self.roomID = roomID
-        self.roomSequence = roomSequence
-        self.reservation = reservation
-    }
-}
-
 /// 纯 reducer 返回的完整房间分片接受事务值。
 ///
-/// 存储层须在同一房间事务中按适用合同写入 canonical 消息、去重结果、事件、outbox、
-/// 计划及房间／分片准入状态，不能只保存 acceptedMessage 后返回成功。
+/// 存储层须在同一房间事务中写入消息、去重结果、房间事件及房间／分片命令准入状态。
 public struct V2MessageAcceptanceTransaction: Equatable, Sendable {
     public let acceptedMessage: V2AcceptedMessageDraft
     public let eventID: EventID
-    public let fanoutPlan: V2FanoutPlanDraft
     /// 提交接受后应持久化的房间序号、准入和去重状态。
     public let nextRoomState: V2RoomCommandState
     /// 接受后扣减容量的分片准入状态，必须与消息一起提交。
@@ -402,19 +350,16 @@ public struct V2MessageAcceptanceTransaction: Equatable, Sendable {
     /// - Parameters:
     ///   - acceptedMessage: 尚待媒体元数据补齐的消息草稿。
     ///   - eventID: canonical 事件身份。
-    ///   - fanoutPlan: 关联分发草稿和容量预留。
     ///   - nextRoomState: 提交后的房间状态。
     ///   - nextShardState: 提交后的分片容量状态。
     public init(
         acceptedMessage: V2AcceptedMessageDraft,
         eventID: EventID,
-        fanoutPlan: V2FanoutPlanDraft,
         nextRoomState: V2RoomCommandState,
         nextShardState: ShardAdmissionState
     ) {
         self.acceptedMessage = acceptedMessage
         self.eventID = eventID
-        self.fanoutPlan = fanoutPlan
         self.nextRoomState = nextRoomState
         self.nextShardState = nextShardState
     }
@@ -423,7 +368,7 @@ public struct V2MessageAcceptanceTransaction: Equatable, Sendable {
 /// 纯消息 reducer 使用的房间状态快照；不是独立持久化存储。
 public struct V2RoomCommandState: Equatable, Sendable {
     public let roomID: RoomID
-    /// 下一条首次接受消息使用的房间序号；调用方需保证递增可表示。
+    /// Next fresh sequence; the reducer rejects values outside 1...Int64.max.
     public let nextRoomSequence: UInt64
     public let admission: RoomAdmissionState
     /// 按完整去重键保存的原指纹和接受草稿，用于先于再次准入识别重放。
@@ -433,7 +378,7 @@ public struct V2RoomCommandState: Equatable, Sendable {
     ///
     /// - Parameters:
     ///   - roomID: 状态所属房间，必须与传入 reducer 的命令一致。
-    ///   - nextRoomSequence: 下一次首次接受将使用的序号，必须可安全递增。
+    ///   - nextRoomSequence: Next sequence, or an exhausted successor retained for replay.
     ///   - admission: 当前房间准入状态。
     ///   - acceptedCommands: 已提交原操作的稳定指纹与接受结果，默认为空。
     ///
@@ -465,19 +410,17 @@ public struct V2AcceptedSendCommand: Equatable, Sendable {
     }
 }
 
-/// 一次接受尝试预先生成的消息、事件与分发计划身份。
+/// 一次接受尝试预先生成的消息与事件身份。
 ///
 /// 数据库事务重试应复用该组值，避免同一操作生成第二组服务端身份。
 public struct V2AcceptanceIdentifiers: Equatable, Sendable {
     public let messageID: MessageID
     public let eventID: EventID
-    public let planID: FanoutPlanID
 
     /// 保存本次接受要使用的稳定标识，不分配数据库序号或预留容量。
-    public init(messageID: MessageID, eventID: EventID, planID: FanoutPlanID) {
+    public init(messageID: MessageID, eventID: EventID) {
         self.messageID = messageID
         self.eventID = eventID
-        self.planID = planID
     }
 }
 
@@ -491,8 +434,8 @@ public enum V2SendMessageAcceptanceResult: Equatable, Sendable {
     case idempotencyConflict
     /// 房间准入限流，关联值给出建议等待秒数。
     case rateLimited(retryAfterSeconds: Int)
-    /// 分发准入当前不可用，携带具体容量原因。
-    case unavailable(FanoutAdmissionUnavailableReason)
+    /// 命令准入当前不可用，携带具体容量原因。
+    case unavailable(V2CommandAdmissionUnavailableReason)
 }
 
 /// 无 I/O 的发送接受计算，先按原指纹判重，再计算准入与后继状态。
@@ -507,9 +450,9 @@ public enum V2SendMessageReducer {
     ///   - identifiers: 同一事务重试期间保持不变的服务端身份。
     ///   - now: 准入计算与首次接受时间。
     /// - Returns: 重放、冲突、限流、不可用或包含完整后继状态的接受事务。
-    /// - Throws: 房间身份不匹配，或准入计算错误。
+    /// - Throws: Room mismatch, invalid/exhausted sequence, or admission errors.
     /// - Important: 不获取数据库锁或检查当前成员权限；调用方负责提供已授权且一致的状态。
-    ///   首次接受会对 nextRoomSequence 加一，传入状态必须满足可安全递增的边界。
+    ///   Fresh accepts validate sequence bounds before admission; completed operations replay first.
     public static func reduce(
         command: V2SendMessageCommand,
         roomState: V2RoomCommandState,
@@ -532,8 +475,14 @@ public enum V2SendMessageReducer {
                 ? .idempotent(prior.acceptedMessage) : .idempotencyConflict
         }
 
-        let admission = try FanoutAdmissionEvaluator.reserve(
-            request: FanoutAdmissionRequest(targetRule: command.targetRule),
+        // An exhausted state still replays completed operations above. Only
+        // fresh accepts require a positive, persistable room sequence.
+        guard roomState.nextRoomSequence > 0,
+              roomState.nextRoomSequence <= UInt64(Int64.max) else {
+            throw V2SendMessageReducerError.invalidRoomSequence
+        }
+
+        let admission = try V2CommandAdmissionEvaluator.reserve(
             profile: profile,
             roomState: roomState.admission,
             shardState: shardState,
@@ -544,7 +493,7 @@ public enum V2SendMessageReducer {
             return .rateLimited(retryAfterSeconds: retryAfterSeconds)
         case .unavailable(let reason):
             return .unavailable(reason)
-        case .accepted(let reservation, let reservedRoomAdmission, let reservedShardState):
+        case .accepted(_, let reservedRoomAdmission, let reservedShardState):
             let accepted = V2AcceptedMessageDraft(
                 messageID: identifiers.messageID,
                 roomID: command.roomID,
@@ -568,18 +517,10 @@ public enum V2SendMessageReducer {
                 admission: reservedRoomAdmission,
                 acceptedCommands: acceptedCommands
             )
-            let plan = V2FanoutPlanDraft(
-                id: identifiers.planID,
-                sourceEventID: identifiers.eventID,
-                roomID: command.roomID,
-                roomSequence: accepted.roomSequence,
-                reservation: reservation
-            )
             return .accepted(
                 V2MessageAcceptanceTransaction(
                     acceptedMessage: accepted,
                     eventID: identifiers.eventID,
-                    fanoutPlan: plan,
                     nextRoomState: nextRoomState,
                     nextShardState: reservedShardState
                 )
@@ -590,4 +531,6 @@ public enum V2SendMessageReducer {
 
 public enum V2SendMessageReducerError: Error, Equatable, Sendable {
     case roomMismatch
+    /// A fresh acceptance has a zero or exhausted persisted sequence.
+    case invalidRoomSequence
 }

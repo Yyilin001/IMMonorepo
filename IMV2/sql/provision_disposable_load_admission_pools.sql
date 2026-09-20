@@ -57,18 +57,8 @@ END
 $guard$;
 
 INSERT INTO im_v2.shard_admission_pools
-    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
-     command_window_limit, fanout_window_limit,
-     max_outstanding_fanout_units, max_outstanding_plans)
-SELECT 'rooms-load-' || lpad(shard_number::text, 2, '0'),
-       config.capacity_profile_id,
-       gen_random_uuid(),
-       1,
-       CURRENT_TIMESTAMP + make_interval(hours => config.lease_hours),
-       config.command_window_limit,
-       100000,
-       1000000,
-       10000
+    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until, command_window_limit)
+SELECT 'rooms-load-' || lpad(shard_number::text, 2, '0'), config.capacity_profile_id, gen_random_uuid(), 1, CURRENT_TIMESTAMP + make_interval(hours => config.lease_hours), config.command_window_limit
 FROM disposable_pool_provision_config AS config
 CROSS JOIN LATERAL generate_series(0, config.expected_shards - 1)
   AS shard_number;

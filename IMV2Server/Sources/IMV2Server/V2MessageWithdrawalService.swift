@@ -46,7 +46,7 @@ public enum V2MessageWithdrawalOutcome: Equatable, Sendable {
     /// 被限流，并给出建议重试秒数。
     case rateLimited(retryAfterSeconds: Int)
     /// 准入当前不可用，附带不可用原因。
-    case unavailable(FanoutAdmissionUnavailableReason)
+    case unavailable(V2CommandAdmissionUnavailableReason)
 }
 
 /// 消息撤回的持久化能力。
@@ -60,14 +60,13 @@ public protocol V2MessageWithdrawalStore: Sendable {
     ///   - command: 撤回命令。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 撤回结果。
     /// - Throws: 房间或消息不存在、发起者非作者、持久化失败时抛出。
-    func withdraw(command: V2WithdrawMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2MessageWithdrawalOutcome
+    func withdraw(command: V2WithdrawMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageWithdrawalOutcome
 }
 
-/// 撤回命令的事件与扇出标识生成器。
+/// 撤回命令的事件标识生成器。
 public struct V2MessageWithdrawalIDFactory: Sendable {
     private let makeUUID: @Sendable () -> UUID
 
@@ -76,12 +75,12 @@ public struct V2MessageWithdrawalIDFactory: Sendable {
     /// - Parameter makeUUID: 产生原始 UUID 的闭包，测试可注入确定性实现。
     public init(makeUUID: @escaping @Sendable () -> UUID = UUID.init) { self.makeUUID = makeUUID }
 
-    /// 生成一对互不相同的事件标识与扇出计划标识。
+    /// 生成一个事件标识。
     ///
-    /// - Returns: 本次命令使用的事件标识与扇出计划标识。
+    /// - Returns: 本次命令使用的事件标识。
     /// - Throws: 标识类型拒绝生成值时抛出。
-    public func make() throws -> (eventID: EventID, planID: FanoutPlanID) {
-        try (.init(makeUUID().uuidString), .init(makeUUID().uuidString))
+    public func make() throws -> EventID {
+        try .init(makeUUID().uuidString)
     }
 }
 
@@ -97,7 +96,7 @@ public struct V2MessageWithdrawalService: Sendable {
     /// - Parameters:
     ///   - store: 实际执行撤回的存储实现。
     ///   - capacityProfile: 固定的容量档位。
-    ///   - identifiers: 事件与扇出标识生成器。
+    ///   - identifiers: 事件标识生成器。
     ///   - now: 可注入的当前时刻读取函数。
     public init(store: any V2MessageWithdrawalStore, capacityProfile: V2CapacityProfile, identifiers: V2MessageWithdrawalIDFactory = .init(), now: @escaping @Sendable () -> Date = Date.init) {
         self.store = store
@@ -112,12 +111,11 @@ public struct V2MessageWithdrawalService: Sendable {
     /// - Returns: 撤回结果；标识与授时由本方法补齐。
     /// - Throws: 标识生成失败，或存储判定无权限、修订冲突、持久化失败时抛出。
     public func withdraw(_ request: V2AuthenticatedMessageWithdrawal) async throws -> V2MessageWithdrawalOutcome {
-        let ids = try identifiers.make()
+        let eventID = try identifiers.make()
         return try await store.withdraw(
             command: .init(roomID: request.roomID, actorUserID: request.actorUserID, operationID: request.operationID, messageID: request.messageID, expectedMessageRevision: request.expectedMessageRevision),
             capacityProfile: capacityProfile,
-            eventID: ids.eventID,
-            planID: ids.planID,
+            eventID: eventID,
             now: now()
         )
     }

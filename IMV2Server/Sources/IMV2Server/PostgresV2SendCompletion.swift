@@ -44,7 +44,7 @@ let v2ConditionalHybridGroupSendCompletionCTE = roomLogSendCompletionCTE(
 private func roomLogSendCompletionCTE(
     isGroup: Bool, acceptedSource: String = "input", membershipColumn: String = "membership_revision"
 ) -> String {
-    let groupMode = isGroup ? "'large_group_hybrid'::text" : "NULL::text"
+    let groupMode = isGroup ? "'large'::text" : "NULL::text"
     let recipient = isGroup ? "NULL::uuid" : """
         CASE WHEN pair.lower_user_id = message.sender_user_id THEN pair.higher_user_id
              WHEN pair.higher_user_id = message.sender_user_id THEN pair.lower_user_id END
@@ -89,11 +89,11 @@ private func roomLogSendCompletionCTE(
             (room_id, sender_user_id, client_message_id,
              fingerprint_version, request_fingerprint, message_id, event_id,
              room_sequence, timeline_sequence, accepted_membership_revision,
-             delivery_authority, group_delivery_mode, direct_recipient_user_id, created_at)
+             group_capacity_class, direct_recipient_user_id, created_at)
         SELECT message.room_id, message.sender_user_id, message.client_message_id,
                input.fingerprint_version, input.request_fingerprint,
                message.message_id, input.event_id, message.room_sequence,
-               message.timeline_sequence, \(membershipSource).\(membershipColumn), 'room_log',
+               message.timeline_sequence, \(membershipSource).\(membershipColumn),
                \(groupMode), \(recipient),
                message.created_at
         FROM message_insert AS message
@@ -112,8 +112,7 @@ func v2SendCompletionCTE(
     fingerprint: V2SendMessageFingerprint,
     eventID: UUID,
     acceptedMembershipRevision: Int64,
-    groupDeliveryMode: V2GroupDeliveryMode?,
-    usesRoomEventLog: Bool
+    groupCapacityClass: V2GroupCapacityClass?
 ) -> SQLQueryString {
     """
     , completion_insert AS (
@@ -121,13 +120,12 @@ func v2SendCompletionCTE(
             (room_id, sender_user_id, client_message_id,
              fingerprint_version, request_fingerprint, message_id, event_id,
              room_sequence, timeline_sequence, accepted_membership_revision,
-             delivery_authority, group_delivery_mode, direct_recipient_user_id, created_at)
+             group_capacity_class, direct_recipient_user_id, created_at)
         SELECT message.room_id, message.sender_user_id, message.client_message_id,
                \(bind: Int16(fingerprint.version)), \(bind: fingerprint.digest),
                message.message_id, \(bind: eventID), message.room_sequence,
                message.timeline_sequence, \(bind: acceptedMembershipRevision),
-               \(bind: usesRoomEventLog ? "room_log" : "personal"),
-               \(bind: groupDeliveryMode?.rawValue),
+               \(bind: groupCapacityClass?.rawValue),
                CASE WHEN pair.lower_user_id = message.sender_user_id THEN pair.higher_user_id
                     WHEN pair.higher_user_id = message.sender_user_id THEN pair.lower_user_id END,
                message.created_at

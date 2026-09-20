@@ -110,6 +110,8 @@ public enum V2ForwardExportError: Error, Equatable, Sendable {
     case idempotencyConflict
     /// 来源房间准入容量不足。
     case capacityExceeded
+    /// 已完成导出的正文已清理；终态仍可通过转发服务重放。
+    case payloadCompacted
     /// 持久化记录缺失或字段无法解码。
     case corruptPersistenceState
 }

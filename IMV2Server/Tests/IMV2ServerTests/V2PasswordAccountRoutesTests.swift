@@ -9,6 +9,27 @@ import VaporTesting
 
 @Suite("V2 password fallback routes", .serialized)
 struct V2PasswordAccountRoutesTests {
+    @Test("registration conflicts have distinct no-store business codes", arguments: [false, true])
+    func registrationConflict(_ publicConflict: Bool) async throws {
+        let app = try await Application.make(.testing)
+        let store = PasswordAccountStoreFake(userID: .init(uuid: UUID()))
+        await store.failRegistration(publicConflict ? .publicHandleAlreadyExists : .accountAlreadyExists)
+        V2PasswordAccountRoutes(store: store, assertionIssuer: try .init(rawKey: Data(repeating: 8, count: 32)),
+            passwords: testPasswordWorker(on: app), loginAttemptLimiter: AllowedPasswordAttemptLimiter()).register(on: app)
+        do {
+            try await app.testing().test(.POST, "v2/account-auth/password/register", beforeRequest: { request in
+                try request.content.encode(V2PasswordAccountHTTPRequest(accountHandle: "new-account", password: "valid-password",
+                    deviceID: UUID().uuidString, publicHandle: "public_user", displayName: "User"))
+            }) { response async throws in
+                #expect(response.status == .conflict)
+                #expect(response.headers.first(name: .cacheControl) == "no-store")
+                let body = try response.content.decode([String: String].self)
+                #expect(body["code"] == (publicConflict ? "public_handle_taken" : "account_handle_taken"))
+            }
+            try await app.asyncShutdown()
+        } catch { try? await app.asyncShutdown(); throw error }
+    }
+
     @Test("password fallback preserves all accepted UTF-8 bytes", arguments: [71, 72, 73, 1024])
     func passwordFullInput(_ bytes: Int) async throws {
         let app = try await Application.make(.testing)
@@ -241,6 +262,8 @@ struct V2PasswordAccountRoutesTests {
 }
 
 private struct BlockedPasswordAttemptLimiter: V2PasswordLoginAttemptLimiting {
+    func consumeAttempt(accountHandle _: String) async throws -> Int? { retryAfterSeconds }
+    func auditRejectedAttempt(accountHandle _: String, userID _: UserID?, deviceID _: DeviceID) async throws {}
     let retryAfterSeconds: Int
 
     func blockedRetryAfterSeconds(accountHandle _: String) async throws -> Int? { retryAfterSeconds }
@@ -249,6 +272,8 @@ private struct BlockedPasswordAttemptLimiter: V2PasswordLoginAttemptLimiting {
 }
 
 private struct AllowedPasswordAttemptLimiter: V2PasswordLoginAttemptLimiting {
+    func consumeAttempt(accountHandle _: String) async throws -> Int? { nil }
+    func auditRejectedAttempt(accountHandle _: String, userID _: UserID?, deviceID _: DeviceID) async throws {}
     func blockedRetryAfterSeconds(accountHandle _: String) async throws -> Int? { nil }
     func recordRejectedAttempt(accountHandle _: String, userID _: UserID?, deviceID _: DeviceID) async throws {}
     func recordSuccessfulAttempt(accountHandle _: String, userID _: UserID, deviceID _: DeviceID) async throws {}
@@ -273,6 +298,7 @@ private struct TestPasswordWorkerLifecycle: LifecycleHandler {
 private actor PasswordAccountStoreFake: V2PasswordAccountStoring {
     private let userID: UserID
     private var passwordHash: String?
+    private var registrationFailure: V2PasswordAccountStoreError?
 
     init(userID: UserID) {
         self.userID = userID
@@ -285,6 +311,7 @@ private actor PasswordAccountStoreFake: V2PasswordAccountStoring {
         displayName _: String,
         deviceID _: DeviceID
     ) async throws -> UserID {
+        if let registrationFailure { throw registrationFailure }
         self.passwordHash = passwordHash
         return userID
     }
@@ -294,6 +321,7 @@ private actor PasswordAccountStoreFake: V2PasswordAccountStoring {
     func completeAuthentication(accountHandle: String, expected: V2PasswordCredential, deviceID: DeviceID) async throws -> Bool {
         expected.userID == userID && expected.passwordHash == passwordHash
     }
+    func failRegistration(_ error: V2PasswordAccountStoreError) { registrationFailure = error }
     func seedPasswordHash(_ digest: String) { passwordHash = digest }
 
     func persistedPasswordHash() -> String? { passwordHash }

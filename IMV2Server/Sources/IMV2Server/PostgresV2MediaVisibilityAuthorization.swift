@@ -4,10 +4,8 @@ import SQLKit
 
 /// 媒体可见性授权判定的 PostgreSQL 实现。
 ///
-/// 媒体边缘只能为已持久化投递给请求者的消息投影签发传输目标，或为当前对该请求者可见的
-/// 头像签发。共享的消息状态本身不构成授权：请求者还必须同时持有有效的用户投影引用，
-/// 以及当前与历史内容授权；仅有陈旧投影不足以放行。
-/// 判定同时支持共享载荷与内联载荷两种存放形态。
+/// 消息附件由规范消息引用与房间访问权限授权，头像由可见资料授权。
+/// 共享状态、旧个人副本或媒体标识本身不构成授权；每次签发和兑换都重新检查。
 enum V2PostgresMediaVisibilityAuthorization {
     /// 判断请求者是否有权访问指定媒体。
     ///
@@ -40,7 +38,7 @@ enum V2PostgresMediaVisibilityAuthorization {
     ///
     /// 谓词要求：媒对象处于可用状态、设备有效且账号未停用；随后满足其一——
     /// 消息引用路径要求消息未撤回、引用未撤销、请求者在消息接受修订与当前修订下都具备成员资格，
-    /// 且存在一条未关闭的用户投影把该媒体列为消息附件；
+    /// 并且请求者对当前正文修订具有历史访问权限；
     /// 或头像路径要求资料有效、双方无拉黑，并且请求者与资料所有者存在好友、同房间等关联。
     ///
     /// - Parameters:
@@ -85,32 +83,6 @@ enum V2PostgresMediaVisibilityAuthorization {
                             AND message.withdrawn_at IS NULL
                             AND reference.revoked_at IS NULL
                             AND (\(v2ForwardSourceVisibility(actorID: requesterUserID)))
-                            -- Current projection state is the durable delivery
-                            -- authority after incremental log compaction. A
-                            -- withdrawn/redacted message closes this version,
-                            -- so old media cannot be re-authorized.
-                            AND EXISTS (
-                                SELECT 1
-                                FROM im_v2.user_projection_versions AS delivery
-                                LEFT JOIN im_v2.message_projection_state_values AS state
-                                  ON state.state_id = delivery.message_state_id
-                                WHERE delivery.user_id = \(bind: requesterUserID)
-                                  AND delivery.projection_kind = 'message'
-                                  AND delivery.entity_key IN (message.message_id::text, upper(message.message_id::text))
-                                  AND delivery.valid_to_sequence IS NULL
-                                  AND delivery.scope_room_id = message.room_id
-                                  AND lower(COALESCE(state.payload, delivery.payload)->>'message_id') = message.message_id::text
-                                  AND lower(COALESCE(state.payload, delivery.payload)->>'room_id') = message.room_id::text
-                                  AND COALESCE(state.payload, delivery.payload)->>'event_type' = 'message.accepted'
-                                  AND COALESCE(
-                                      (COALESCE(state.payload, delivery.payload)->>'is_withdrawn')::boolean,
-                                      FALSE
-                                  ) = FALSE
-                                  AND (COALESCE(state.payload, delivery.payload)->'media_ids'
-                                      @> jsonb_build_array(media.media_id::text)
-                                    OR COALESCE(state.payload, delivery.payload)->'media_ids'
-                                      @> jsonb_build_array(upper(media.media_id::text)))
-                            )
                       )
                       OR EXISTS (
                           SELECT 1

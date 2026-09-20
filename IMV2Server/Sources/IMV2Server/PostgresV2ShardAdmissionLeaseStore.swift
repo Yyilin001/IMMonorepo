@@ -52,13 +52,9 @@ public struct PostgresV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
 
             guard try await sql.raw("""
                 INSERT INTO im_v2.shard_admission_pools
-                    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
-                     command_window_limit, fanout_window_limit,
-                     max_outstanding_fanout_units, max_outstanding_plans)
+                    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until, command_window_limit)
                 VALUES
-                    (\(bind: key.roomShardID), \(bind: key.capacityProfileID), \(bind: try uuid(leaseID)), 1, \(bind: validUntil),
-                     \(bind: capacityProfile.limits.maxCommandsPerWindow), \(bind: capacityProfile.limits.maxFanoutUnitsPerWindow),
-                     \(bind: capacityProfile.limits.maxOutstandingFanoutUnits), \(bind: capacityProfile.limits.maxOutstandingPlans))
+                    (\(bind: key.roomShardID), \(bind: key.capacityProfileID), \(bind: try uuid(leaseID)), 1, \(bind: validUntil), \(bind: capacityProfile.limits.maxCommandsPerWindow))
                 ON CONFLICT (room_shard_id, capacity_profile_id) DO NOTHING
                 RETURNING 1
                 """).first() != nil else {
@@ -70,11 +66,7 @@ public struct PostgresV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
                 id: leaseID,
                 generation: 1,
                 validUntil: validUntil,
-                commandWindow: .init(limit: capacityProfile.limits.maxCommandsPerWindow),
-                fanoutWindow: .init(limit: capacityProfile.limits.maxFanoutUnitsPerWindow),
-                maxOutstandingFanoutUnits: capacityProfile.limits.maxOutstandingFanoutUnits,
-                maxOutstandingPlans: capacityProfile.limits.maxOutstandingPlans
-            )
+                commandWindow: .init(limit: capacityProfile.limits.maxCommandsPerWindow))
         }
     }
 
@@ -187,8 +179,7 @@ public struct PostgresV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
                 SET lease_id = \(bind: replacementID),
                     generation = \(bind: replacementGeneration),
                     valid_until = \(bind: validUntil),
-                    command_window_used = 0,
-                    fanout_window_used = 0
+                    command_window_used = 0
                 WHERE room_shard_id = \(bind: key.roomShardID)
                   AND capacity_profile_id = \(bind: key.capacityProfileID)
                   AND lease_id = \(bind: current.leaseID)
@@ -211,9 +202,7 @@ public struct PostgresV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
 
     private func selectPool(key: V2ShardAdmissionPoolKey, sql: any SQLDatabase) async throws -> V2ShardAdmissionPoolRow? {
         try await sql.raw("""
-            SELECT lease_id, generation, valid_until, command_window_limit, command_window_used,
-                   fanout_window_limit, fanout_window_used, max_outstanding_fanout_units,
-                   outstanding_fanout_units, max_outstanding_plans, outstanding_plans
+            SELECT lease_id, generation, valid_until, command_window_limit, command_window_used
             FROM im_v2.shard_admission_pools
             WHERE room_shard_id = \(bind: key.roomShardID)
               AND capacity_profile_id = \(bind: key.capacityProfileID)
@@ -228,26 +217,15 @@ private struct V2ShardAdmissionPoolRow: Decodable {
     let validUntil: Date
     let commandWindowLimit: Int
     let commandWindowUsed: Int
-    let fanoutWindowLimit: Int
-    let fanoutWindowUsed: Int
-    let maxOutstandingFanoutUnits: Int
-    let outstandingFanoutUnits: Int
-    let maxOutstandingPlans: Int
-    let outstandingPlans: Int
 
     enum CodingKeys: String, CodingKey {
         case leaseID = "lease_id", generation, validUntil = "valid_until"
         case commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used"
-        case fanoutWindowLimit = "fanout_window_limit", fanoutWindowUsed = "fanout_window_used"
-        case maxOutstandingFanoutUnits = "max_outstanding_fanout_units", outstandingFanoutUnits = "outstanding_fanout_units"
-        case maxOutstandingPlans = "max_outstanding_plans", outstandingPlans = "outstanding_plans"
+
     }
 
     func matches(_ profile: RoomCapacityProfile) -> Bool {
         commandWindowLimit == profile.maxCommandsPerWindow
-            && fanoutWindowLimit == profile.maxFanoutUnitsPerWindow
-            && maxOutstandingFanoutUnits == profile.maxOutstandingFanoutUnits
-            && maxOutstandingPlans == profile.maxOutstandingPlans
     }
 
     func lease(
@@ -260,11 +238,7 @@ private struct V2ShardAdmissionPoolRow: Decodable {
             id: id ?? .init(leaseID.uuidString),
             generation: try unsigned(generation ?? self.generation),
             validUntil: validUntil ?? self.validUntil,
-            commandWindow: .init(limit: commandWindowLimit, used: resetWindows ? 0 : commandWindowUsed),
-            fanoutWindow: .init(limit: fanoutWindowLimit, used: resetWindows ? 0 : fanoutWindowUsed),
-            maxOutstandingFanoutUnits: maxOutstandingFanoutUnits,
-            maxOutstandingPlans: maxOutstandingPlans
-        )
+            commandWindow: .init(limit: commandWindowLimit, used: resetWindows ? 0 : commandWindowUsed))
     }
 }
 

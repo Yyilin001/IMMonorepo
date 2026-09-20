@@ -201,11 +201,13 @@ public struct V2VaporDeviceCredentialRoutes: Sendable {
             else { throw Abort(.badRequest) }
 
             let userID: UserID
+            let revision: Int64?
             do {
                 userID = try await assertionVerifier.verifiedUserID(
                     for: input.accountAssertion,
                     deviceID: deviceID
                 )
+                revision = try await assertionVerifier.credentialRevision(for: input.accountAssertion, deviceID: deviceID)
             } catch V2AccountAssertionError.invalidClock {
                 return .init(status: .serviceUnavailable, headers: ["Cache-Control": "no-store", "Pragma": "no-cache"])
             } catch {
@@ -218,7 +220,7 @@ public struct V2VaporDeviceCredentialRoutes: Sendable {
                     userID: userID,
                     deviceID: deviceID,
                     operationID: input.operationID,
-                    metadata: metadata
+                    metadata: metadata, credentialRevision: revision
                 ), cancellation: input.cancellation))
             } catch V2DeviceSessionServiceError.invalidRequest {
                 throw Abort(.badRequest)

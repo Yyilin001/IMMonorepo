@@ -6,6 +6,11 @@ import Foundation
 public enum V2DatabasePoolMetricClass: String, CaseIterable, Sendable {
     /// 多类工作共用的连接池。
     case shared
+    /// 个人事件跨库提交期间持有路由围栏的专用连接池。
+    case userStateRoute = "user_state_route"
+    /// 私聊权限范围持锁至 owner 提交的专用连接池。
+    case directSendControl = "direct_send_control"
+    case directAuthorizationResolution = "direct_authorization_resolution"
     /// 前台消息写入、控制写入和交互读取使用的连接池。
     case foreground
     /// 同步工作使用的连接池。

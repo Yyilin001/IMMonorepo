@@ -198,3 +198,84 @@ private func directoryUUID<Tag>(_ identifier: V2Identifier<Tag>) throws -> UUID 
     guard let value = UUID(uuidString: identifier.rawValue) else { throw V2RoomMembershipDirectoryError.corruptPersistenceState }
     return value
 }
+
+extension PostgresV2RoomMembershipDirectoryStore: V2RoomMemberCandidateReading {
+    func candidates(_ request: V2RoomMembershipDirectoryRequest, route: V2RoomShardRoute) async throws -> V2RoomMemberCandidatePage {
+        let room = try directoryUUID(request.roomID)
+        let actor = try directoryUUID(request.actorUserID)
+        let cursor = try request.cursor.map { value -> OwnerDirectoryCursor in
+            guard let data = Data(base64Encoded: value), let cursor = try? JSONDecoder().decode(OwnerDirectoryCursor.self, from: data),
+                  cursor.v == 2, cursor.r == room, cursor.m >= 0, cursor.e >= 0 else {
+                throw V2RoomMembershipDirectoryError.invalidCursor
+            }
+            guard cursor.s == route.shardID, cursor.e == route.epoch else { throw V2RoomMembershipDirectoryError.ownerChanged }
+            return cursor
+        }
+        return try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else { throw V2RoomMembershipDirectoryError.corruptPersistenceState }
+            let state = try await ownerDirectoryAuthorization(room: room, actor: actor, route: route, sql: sql)
+            if let cursor, cursor.m != state.revision { throw V2RoomMembershipDirectoryError.revisionConflict(currentRevision: UInt64(state.revision)) }
+            let predicate: SQLQueryString = if let cursor { "user_id > \(bind: cursor.a)" } else { "TRUE" }
+            let rows = try await sql.raw("""
+                SELECT user_id, role FROM im_v2.room_memberships
+                WHERE room_id = \(bind: room) AND joined_revision <= \(bind: state.revision)
+                  AND (left_revision IS NULL OR left_revision > \(bind: state.revision))
+                  AND \(predicate)
+                ORDER BY user_id LIMIT \(bind: request.pageSize + 1)
+                """).all(decoding: OwnerDirectoryMemberRow.self)
+            guard Set(rows.map(\.userID)).count == rows.count else { throw V2RoomMembershipDirectoryError.corruptPersistenceState }
+            let selected = Array(rows.prefix(request.pageSize))
+            let entries = try selected.map { row -> V2RoomMemberCandidate in
+                guard let role = V2RoomMembershipRole(rawValue: row.role) else { throw V2RoomMembershipDirectoryError.corruptPersistenceState }
+                return .init(userID: .init(uuid: row.userID), role: role)
+            }
+            var next: String?
+            if rows.count > request.pageSize, let last = selected.last {
+                let encoded = try JSONEncoder().encode(OwnerDirectoryCursor(v: 2, r: room, m: state.revision, a: last.userID,
+                    s: route.shardID, e: route.epoch)).base64EncodedString()
+                guard encoded.utf8.count <= V2RoomMembershipDirectoryRequest.maximumCursorBytes else { throw V2RoomMembershipDirectoryError.corruptPersistenceState }
+                next = encoded
+            }
+            return .init(membershipRevision: UInt64(state.revision), actorRole: state.role, entries: entries, nextCursor: next)
+        }
+    }
+
+    func validate(_ request: V2RoomMembershipDirectoryRequest, route: V2RoomShardRoute, page: V2RoomMemberCandidatePage) async throws {
+        let room = try directoryUUID(request.roomID), actor = try directoryUUID(request.actorUserID)
+        try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else { throw V2RoomMembershipDirectoryError.corruptPersistenceState }
+            let state = try await ownerDirectoryAuthorization(room: room, actor: actor, route: route, sql: sql)
+            guard UInt64(state.revision) == page.membershipRevision else { throw V2RoomMembershipDirectoryError.revisionConflict(currentRevision: UInt64(state.revision)) }
+            guard state.role == page.actorRole else { throw V2RoomMembershipDirectoryError.corruptPersistenceState }
+        }
+    }
+}
+
+private struct OwnerDirectoryCursor: Codable {
+    let v: Int; let r: UUID; let m: Int64; let a: UUID; let s: String; let e: Int64
+}
+private struct OwnerDirectoryMemberRow: Decodable {
+    let userID: UUID; let role: String
+    enum CodingKeys: String, CodingKey { case userID = "user_id", role }
+}
+private struct OwnerDirectoryRoomRow: Decodable {
+    let revision: Int64; let shard: String; let epoch: Int64
+    enum CodingKeys: String, CodingKey { case revision = "membership_revision", shard = "room_shard_id", epoch = "owner_epoch" }
+}
+
+private func ownerDirectoryAuthorization(room: UUID, actor: UUID, route: V2RoomShardRoute, sql: any SQLDatabase) async throws -> (revision: Int64, role: V2RoomMembershipRole) {
+    guard let state = try await sql.raw("""
+        SELECT membership_revision, room_shard_id, owner_epoch FROM im_v2.rooms
+        WHERE room_id = \(bind: room) AND room_kind = 'group' FOR SHARE
+        """).first(decoding: OwnerDirectoryRoomRow.self) else { throw V2RoomMembershipDirectoryError.roomNotFound }
+    guard state.shard == route.shardID, state.epoch == route.epoch else { throw V2RoomMembershipDirectoryError.ownerChanged }
+    guard state.revision >= 0 else { throw V2RoomMembershipDirectoryError.corruptPersistenceState }
+    let actors = try await sql.raw("""
+        SELECT role FROM im_v2.room_memberships WHERE room_id = \(bind: room) AND user_id = \(bind: actor)
+          AND joined_revision <= \(bind: state.revision) AND (left_revision IS NULL OR left_revision > \(bind: state.revision))
+        LIMIT 2
+        """).all(decoding: DirectoryActorRow.self)
+    guard !actors.isEmpty else { throw V2RoomMembershipDirectoryError.actorNotMember }
+    guard actors.count == 1, let role = V2RoomMembershipRole(rawValue: actors[0].role) else { throw V2RoomMembershipDirectoryError.corruptPersistenceState }
+    return (state.revision, role)
+}

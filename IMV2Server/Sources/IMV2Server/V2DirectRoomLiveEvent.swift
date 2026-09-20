@@ -141,8 +141,7 @@ struct V2GroupRoomLiveEventDraft: Equatable, Sendable {
         _ message: V2AcceptedMessage,
         excludingConnectionID: UUID? = nil
     ) {
-        guard message.usesRoomEventLog,
-              message.groupDeliveryMode == .largeGroupHybrid,
+        guard message.groupCapacityClass == .large,
               message.media.isEmpty,
               message.mentions.isEmpty,
               message.replyTo == nil,
@@ -207,8 +206,7 @@ struct V2DirectRoomLiveEventDraft: Equatable, Sendable {
         _ message: V2AcceptedMessage,
         excludingConnectionID: UUID? = nil
     ) {
-        guard message.usesRoomEventLog,
-              message.groupDeliveryMode == nil,
+        guard message.groupCapacityClass == nil,
               message.media.isEmpty,
               message.mentions.isEmpty,
               message.replyTo == nil,

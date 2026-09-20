@@ -165,6 +165,74 @@ struct V2GroupInvitationStoreTests {
         #expect(await client.submissions.isEmpty)
     }
 
+    @Test("取消后可重新申请，重试使用同一申请身份", arguments: ["cancelled", "approved", "rejected", "retry"])
+    func cancellationResult(_ scenario: String) async throws {
+        let client = InvitationBarrierClient()
+        // Each store owns exactly the client whose delayed responses it consumes.
+        let subject = V2GroupInvitationStore(client: client)
+        let secret = try secret("A"), base = try preview("A"), id = GroupJoinRequestID(uuid: UUID())
+        let pending = try V2GroupInvitePreview(inviteID: base.inviteID, roomID: base.roomID, roomTitle: base.roomTitle, expiresAt: base.expiresAt, requestState: .pending, requestID: id, isAlreadyMember: false)
+        let open = Task { await subject.open(secret.rawValue) }
+        await client.waitForPreview(secret)
+        await client.finishPreview(secret, result: .success(pending))
+        await open.value
+        #expect(subject.canCancelRequest && !subject.canSubmit)
+        let cancel = Task { await subject.cancelRequest() }
+        await client.waitForCancellation(1)
+        #expect(subject.isJoining && !subject.canCancelRequest)
+        await subject.cancelRequest()
+        #expect(await client.cancellations.count == 1)
+        let state: V2GroupJoinRequestState = scenario == "retry" ? .cancelled : try #require(.init(rawValue: scenario))
+        let result = try cancellationRecord(pending, state: state)
+        await client.finishCancellation(result: scenario == "retry" ? .failure(V2ClientGroupInvitationError.networkFailure) : .success(result))
+        await cancel.value
+        if scenario == "retry" {
+            #expect(subject.canCancelRequest && subject.preview == pending)
+            let retry = Task { await subject.cancelRequest() }
+            await client.waitForCancellation(2)
+            #expect(await client.cancellations == [id, id])
+            await client.finishCancellation(result: .success(result))
+            await retry.value
+        }
+        #expect(subject.preview?.requestState == state)
+        #expect(subject.canSubmit == (state == .cancelled))
+        #expect(!subject.canCancelRequest && !subject.isJoining)
+    }
+
+    @Test("迟到取消结果不能覆盖新邀请、关闭页面或退出后的状态", arguments: ["replace", "dismiss", "invalidate"])
+    func lateCancellation(_ scenario: String) async throws {
+        let client = InvitationBarrierClient()
+        let subject = V2GroupInvitationStore(client: client)
+        let secret = try secret("A"), base = try preview("A")
+        let pending = try V2GroupInvitePreview(inviteID: base.inviteID, roomID: base.roomID, roomTitle: base.roomTitle, expiresAt: base.expiresAt, requestState: .pending, requestID: .init(uuid: UUID()), isAlreadyMember: false)
+        let open = Task { await subject.open(secret.rawValue) }
+        await client.waitForPreview(secret)
+        await client.finishPreview(secret, result: .success(pending))
+        await open.value
+        let cancel = Task { await subject.cancelRequest() }
+        await client.waitForCancellation(1)
+        let replacement = try preview("B")
+        if scenario == "replace" {
+            let b = try self.secret("B")
+            let next = Task { await subject.open(b.rawValue) }
+            await client.waitForPreview(b)
+            await client.finishPreview(b, result: .success(replacement))
+            await next.value
+        } else if scenario == "dismiss" { subject.dismissJoin() }
+        else { subject.invalidate() }
+        await client.finishCancellation(result: .success(try cancellationRecord(pending, state: .cancelled)))
+        await cancel.value
+        #expect(subject.preview == (scenario == "replace" ? replacement : nil))
+        #expect(subject.joinFeedback == nil && !subject.isJoining)
+        #expect(subject.canSubmit == (scenario == "replace"))
+    }
+
+    private func cancellationRecord(_ preview: V2GroupInvitePreview, state: V2GroupJoinRequestState) throws -> V2GroupJoinRequest {
+        try .init(requestID: #require(preview.requestID), inviteID: preview.inviteID, roomID: preview.roomID,
+                  applicant: .init(userID: .init(uuid: UUID()), handle: .init("cancel_applicant"), displayName: "Applicant", accountKind: .regular),
+                  note: nil, state: state, resumableDecisionOperationID: nil, createdAt: Date(), decidedAt: Date())
+    }
+
     private func secret(_ character: String) throws -> V2GroupInviteSecret {
         try .init(String(repeating: character, count: 43))
     }
@@ -219,5 +287,24 @@ private actor InvitationBarrierClient: V2ClientGroupInvitationManaging {
     func activeInvites(roomID: RoomID) async throws -> [V2GroupInviteLink] { [] }
     func revoke(inviteID: GroupInviteID, roomID: RoomID, operationID: GroupInviteOperationID) async throws {}
     func pendingRequests(roomID: RoomID, cursor: String?, pageSize: Int) async throws -> V2GroupJoinRequestPage { .init(requests: [], nextCursor: nil) }
+    private(set) var cancellations: [GroupJoinRequestID] = []
+    private var pendingCancellation: CheckedContinuation<V2GroupJoinRequest, any Error>?
+    private var cancellationWaiter: CheckedContinuation<Void, Never>?
+    func cancel(roomID: RoomID, requestID: GroupJoinRequestID) async throws -> V2GroupJoinRequest {
+        cancellations.append(requestID)
+        return try await withCheckedThrowingContinuation {
+            pendingCancellation = $0
+            cancellationWaiter?.resume()
+            cancellationWaiter = nil
+        }
+    }
+    func waitForCancellation(_ count: Int) async {
+        guard cancellations.count < count else { return }
+        await withCheckedContinuation { cancellationWaiter = $0 }
+    }
+    func finishCancellation(result: Result<V2GroupJoinRequest, any Error>) {
+        pendingCancellation?.resume(with: result)
+        pendingCancellation = nil
+    }
     func decide(roomID: RoomID, requestID: GroupJoinRequestID, operationID: GroupJoinDecisionOperationID, decision: V2GroupJoinDecision) async throws -> V2ClientGroupJoinDecisionOutcome { throw V2ClientGroupInvitationError.unavailable }
 }

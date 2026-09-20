@@ -16,10 +16,15 @@ struct V2LocalSchemaContractTests {
         let primary = try DatabasePool(path: url.path)
         let search = try DatabasePool(path: url.deletingPathExtension().appendingPathExtension("search.sqlite").path)
 
-        #expect(try migrationIdentifiers(in: primary) == ["addForwardChunkCompletionDigest", "bindForwardSourceReferences", "createCurrentV2Schema", "orderAnnouncementEffects", "orderPinnedMessageEffects", "orderReactionEffects", "orderRolePolicyEffects", "recordConversationUnreadDirectory", "recordPushIntent", "recordRolePolicyRecovery", "recordRoomDeliveryAuthority", "recordRoomLogTrimWatermark", "recordSharedMessageEffects", "recordSnapshotRebuildIntent", "scheduleRolePolicyRecovery", "useUUIDForwardChunkIdentities"])
+        #expect(try migrationIdentifiers(in: primary) == ["createCurrentV2Schema"])
         #expect(try migrationIdentifiers(in: search) == ["createCurrentV2MessageSearchSchema"])
-        #expect(try schemaObjectCount(in: primary) == 176)
-        #expect(try schemaFingerprint(in: primary) == 0x5cfe5b9b17df5ba9)
+        let primaryObjectCount = try schemaObjectCount(in: primary)
+        #expect(primaryObjectCount == 211)
+        #expect(try schemaObjectExists(named: "v2_room_unread_directory", in: primary) == false)
+        #expect(try schemaObjectExists(named: "v2_room_unread_rotation", in: primary) == false)
+        #expect(try schemaObjectExists(named: "v2_hybrid_group_background_state", in: primary) == false)
+        let primaryFingerprint = try schemaFingerprint(in: primary)
+        #expect(primaryFingerprint == 0x42eabdd87f0a886d)
         #expect(try schemaObjectCount(in: search) == 5)
         #expect(try schemaFingerprint(in: search) == 0x39f4_35c6_3f7a_01b5)
 
@@ -37,15 +42,23 @@ struct V2LocalSchemaContractTests {
         )
         let database = try DatabasePool(path: url.path)
 
+        #expect(rejects(database, sql: "INSERT INTO v2_member_effects VALUES ('source', 'room', 'user', 0, 'remove', NULL, 1, 1, zeroblob(32))"))
+        #expect(rejects(database, sql: "INSERT INTO v2_member_effects VALUES ('source', 'room', 'user', 1, 'role', NULL, 1, 1, zeroblob(32))"))
+        #expect(rejects(database, sql: "INSERT INTO v2_member_effects VALUES ('source', 'room', 'user', 1, 'remove', 'admin', 1, 1, zeroblob(32))"))
+        #expect(rejects(database, sql: "INSERT INTO v2_member_effects VALUES ('source', 'room', 'user', 1, 'role', 'owner', 1, 1, zeroblob(32))"))
+        #expect(rejects(database, sql: "INSERT INTO v2_member_effects VALUES ('source', 'room', 'user', 1, 'add', NULL, 0, 1, zeroblob(32))"))
+        #expect(rejects(database, sql: "INSERT INTO v2_member_effects VALUES ('source', 'room', 'user', 1, 'add', NULL, 1, 1, zeroblob(31))"))
+        #expect(rejects(database, sql: "INSERT INTO v2_room_membership_states VALUES ('room', 0, 'event', 1)"))
+        #expect(rejects(database, sql: "INSERT INTO v2_room_membership_states VALUES ('room', 1, 'event', 2)"))
         #expect(rejects(database, sql: """
             INSERT INTO v2_direct_room_identities
-                (room_id, target_user_id, public_handle, display_name, account_kind, updated_at)
-            VALUES ('room-identity', 'user-identity', 'identity_user', 'Identity', 'invalid', 1)
+                (room_id, target_user_id, public_handle, display_name, account_kind, updated_at, room_created_at)
+            VALUES ('room-identity', 'user-identity', 'identity_user', 'Identity', 'invalid', 1, 1)
             """))
         #expect(rejects(database, sql: """
             INSERT INTO v2_direct_room_profile_projections
-                (room_id, source_event_id, target_user_id, public_handle, display_name, account_kind, revision, updated_at)
-            VALUES ('room-profile', 'event-profile', 'user-profile', 'profile_user', 'Profile', 'invalid', 1, 1)
+                (room_id, source_event_id, target_user_id, public_handle, display_name, account_kind, revision, updated_at, room_created_at)
+            VALUES ('room-profile', 'event-profile', 'user-profile', 'profile_user', 'Profile', 'invalid', 1, 1, 1)
             """))
         #expect(rejects(database, sql: """
             INSERT INTO v2_profile_views
@@ -54,7 +67,7 @@ struct V2LocalSchemaContractTests {
             """))
         #expect(rejects(database, sql: """
             INSERT INTO v2_room_profile_projections
-                (room_id, source_event_id, title, owner_user_id, membership_revision, delivery_mode, created_at)
+                (room_id, source_event_id, title, owner_user_id, membership_revision, capacity_class, created_at)
             VALUES ('room-profile', 'event-room', 'Room', 'owner', 1, NULL, 1)
             """))
     }

@@ -111,7 +111,7 @@ struct V2ProjectionChangeNotifierTests {
             "sender_user_id": "00000000-0000-0000-0000-000000000222", "text": "private-before-withdrawal",
             "mention_user_ids": [], "mentions_everyone": false, "server_created_at_ms": 1_750_000_000_000
         ])
-        let source = CancellableTimelineSource(source: .init(localStore: local))
+        let source = CancellableTimelineSource(source: .init(localStore: local, requestLatestVisible: { _ in }))
         let notifier = V2ProjectionChangeNotifier(localStore: local)
         let store = V2ConversationDetailStore(environment: .init(userID: "user", projections: .init(dataSource: source),
             runtime: .init(projectionChangeNotifier: notifier)), context: .init(roomID: room, kind: .direct(accountKind: .regular)))

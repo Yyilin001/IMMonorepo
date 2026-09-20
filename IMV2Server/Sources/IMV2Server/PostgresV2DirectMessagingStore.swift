@@ -9,6 +9,7 @@ import SQLKit
 /// 两个调用方并发发起同一会话时，不会凭空产生一个无人引用的孤立房间。
 public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
     private let database: any Database
+    private let authorizationCoordinator: V2DirectAuthorizationCoordinator?
     private let shadowForwarder: any V2UserShardProjectionShadowing
 
     /// 组合数据库与投影影子转发器。
@@ -16,8 +17,10 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
     /// - Parameters:
     ///   - database: 存放私聊房间、操作记录与偏好设置的数据库。
     ///   - shadowForwarder: 用于把投影变更转发到影子用户分片的实现。
-    public init(database: any Database, shadowForwarder: any V2UserShardProjectionShadowing) {
+    public init(database: any Database, shadowForwarder: any V2UserShardProjectionShadowing,
+        authorizationCoordinator: V2DirectAuthorizationCoordinator? = nil) {
         self.database = database
+        self.authorizationCoordinator = authorizationCoordinator
         self.shadowForwarder = shadowForwarder
     }
 
@@ -56,12 +59,13 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: pair.lockKey), 0))").run()
             let activeAccountCount = try await sql.raw("SELECT COUNT(*)::int AS value FROM im_v2.public_user_profiles AS profile WHERE (profile.user_id = \(bind: actorID) OR profile.user_id = \(bind: targetID)) AND profile.state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables AS disabled WHERE disabled.user_id = profile.user_id)").first(decoding: DirectCountRow.self)?.value ?? 0
             guard activeAccountCount == 2 else { return .unavailable }
-            if let existingPair = try await sql.raw("SELECT pair.room_id, pair.created_at, room.capacity_profile_id FROM im_v2.direct_room_pairs AS pair INNER JOIN im_v2.rooms AS room ON room.room_id = pair.room_id WHERE pair.lower_user_id = \(bind: pair.lower) AND pair.higher_user_id = \(bind: pair.higher) FOR SHARE OF room").first(decoding: DirectPairRow.self) {
+            if let existingPair = try await sql.raw("SELECT pair.room_id, pair.created_at, room.capacity_profile_id, room.migration_fence_id FROM im_v2.direct_room_pairs AS pair INNER JOIN im_v2.rooms AS room ON room.room_id = pair.room_id WHERE pair.lower_user_id = \(bind: pair.lower) AND pair.higher_user_id = \(bind: pair.higher) FOR SHARE OF room").first(decoding: DirectPairRow.self) {
                 // A direct pair is globally unique and its room keeps the
                 // immutable capacity profile selected at creation. Do not
                 // return a room that this deployment cannot subsequently
                 // write; callers can retry after the intended profile is
                 // restored or an explicit room migration completes.
+                guard existingPair.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
                 guard existingPair.capacityProfileID == capacityProfile.id else {
                     return .unavailable
                 }
@@ -109,17 +113,10 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
             try await v2InitializeNewRoomReadWatermarks(
                 roomID: createdRoomID, now: now, sql: sql
             )
-            try await sql.raw("INSERT INTO im_v2.room_admission (room_id, eligible_member_count, command_window_limit, fanout_window_limit, max_outstanding_fanout_units, max_outstanding_plans, shard_lease_id, shard_lease_generation) VALUES (\(bind: createdRoomID), 2, \(bind: capacityProfile.limits.maxCommandsPerWindow), \(bind: capacityProfile.limits.maxFanoutUnitsPerWindow), \(bind: capacityProfile.limits.maxOutstandingFanoutUnits), \(bind: capacityProfile.limits.maxOutstandingPlans), \(bind: lease.leaseID), \(bind: lease.generation))").run()
+            try await sql.raw("INSERT INTO im_v2.room_admission (room_id, eligible_member_count, command_window_limit, shard_lease_id, shard_lease_generation) VALUES (\(bind: createdRoomID), 2, \(bind: capacityProfile.limits.maxCommandsPerWindow), \(bind: lease.leaseID), \(bind: lease.generation))").run()
             let persisted = try await insertOperation(actorID: actorID, operationID: operationID, targetID: targetID, roomID: createdRoomID, sql: sql)
             try await appendDirectRoomProfileProjection(recipientID: actorID, roomID: createdRoomID, profile: targetProfile, sourceEventID: operationID, createdAt: now, sql: sql)
             return .opened(try persisted.directRoom(actor: command.actorUserID, target: command.targetUserID))
-        }
-        switch outcome {
-        case .opened, .idempotent:
-            let sourceEventID = try EventID(command.operationID.rawValue)
-            _ = try await shadowForwarder.shadowIfForwarding(userID: command.actorUserID, sourceEventID: sourceEventID, projectionKinds: ["direct_room_profile"])
-        case .idempotencyConflict, .unavailable:
-            break
         }
         return outcome
     }
@@ -147,6 +144,7 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
                 return .idempotent(permission: existing.permission, updatedAt: existing.updatedAt)
             }
             guard v2PostgresTimestampCanEncode(now) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
+            try await v2DrainDirectAuthorizations(.user(actorID), coordinator: authorizationCoordinator, transaction: transaction, now: now)
             try await sql.raw("INSERT INTO im_v2.user_stranger_message_preferences (user_id, allows_stranger_messages, updated_at) VALUES (\(bind: actorID), \(bind: requested), \(bind: now)) ON CONFLICT (user_id) DO UPDATE SET allows_stranger_messages = EXCLUDED.allows_stranger_messages, updated_at = EXCLUDED.updated_at").run()
             try await bumpDirectSendPolicyVersion(userID: actorID, now: now, sql: sql)
             guard let persisted = try await sql.raw("INSERT INTO im_v2.stranger_message_preference_operations (actor_user_id, operation_id, allows_stranger_messages, updated_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: requested), \(bind: now)) RETURNING allows_stranger_messages, updated_at").first(decoding: DirectPreferenceOperationRow.self) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
@@ -233,15 +231,12 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
 
     private func appendDirectRoomProfileProjection(recipientID: UUID, roomID: UUID, profile: DirectPublicProfileRow, sourceEventID: UUID, createdAt: Date, sql: any SQLDatabase) async throws {
         guard profile.revision > 0, v2PostgresTimestampCanEncode(profile.updatedAt) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
-        guard let sequence = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: recipientID), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 WHERE im_v2.user_sync_sequences.next_sequence < \(bind: Int64.max) RETURNING next_sequence").first(decoding: DirectSyncSequenceRow.self) else {
-            throw V2DirectMessagingStoreError.corruptPersistenceState
-        }
         // All room-event payloads use Foundation's canonical UUID spelling.
         // Do not let PostgreSQL's UUID-to-text conversion make direct-profile
         // records lexically differ from messages for the same room.
         let wireRoomID = roomID.uuidString
         let wireTargetUserID = profile.userID.uuidString
-        try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: recipientID), \(bind: sequence.nextSequence), \(bind: sourceEventID), 'direct_room_profile', jsonb_build_object('room_id', \(bind: wireRoomID), 'target_user_id', \(bind: wireTargetUserID), 'public_handle', \(bind: profile.publicHandle), 'display_name', \(bind: profile.displayName), 'account_kind', \(bind: profile.accountKind), 'revision', \(bind: profile.revision), 'updated_at_ms', \(bind: Int64(profile.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: createdAt))").run()
+        try await sql.raw("INSERT INTO im_v2.user_state_event_outbox (user_id, source_event_id, projection_kind, payload, created_at, next_attempt_at, source_room_id) VALUES (\(bind: recipientID), \(bind: sourceEventID), 'direct_room_profile', jsonb_build_object('room_id', \(bind: wireRoomID), 'target_user_id', \(bind: wireTargetUserID), 'public_handle', \(bind: profile.publicHandle), 'display_name', \(bind: profile.displayName), 'account_kind', \(bind: profile.accountKind), 'revision', \(bind: profile.revision), 'room_created_at_ms', (SELECT floor(extract(epoch FROM created_at) * 1000)::bigint FROM im_v2.rooms WHERE room_id = \(bind: roomID)), 'updated_at_ms', \(bind: Int64(profile.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: createdAt), \(bind: createdAt), \(bind: roomID))").run()
     }
 }
 
@@ -257,8 +252,8 @@ private struct DirectOperationRow: Decodable {
     func directRoom(actor: UserID, target: UserID) throws -> V2DirectRoom { .init(roomID: try .init(roomID.uuidString), actorUserID: actor, targetUserID: target, createdAt: createdAt) }
 }
 private struct DirectPairRow: Decodable {
-    let roomID: UUID; let createdAt: Date; let capacityProfileID: String
-    enum CodingKeys: String, CodingKey { case roomID = "room_id", createdAt = "created_at", capacityProfileID = "capacity_profile_id" }
+    let roomID: UUID; let createdAt: Date; let capacityProfileID: String; let migrationFenceID: UUID?
+    enum CodingKeys: String, CodingKey { case roomID = "room_id", createdAt = "created_at", capacityProfileID = "capacity_profile_id", migrationFenceID = "migration_fence_id" }
     func directRoom(actor: UserID, target: UserID) throws -> V2DirectRoom { .init(roomID: try .init(roomID.uuidString), actorUserID: actor, targetUserID: target, createdAt: createdAt) }
 }
 private struct DirectCountRow: Decodable { let value: Int }

@@ -150,12 +150,7 @@ public struct V2AccountRuntimeConfiguration: Sendable {
             limits: .init(
                 maxEligibleMembers: Self.integer("IM_V2_MAX_ELIGIBLE_MEMBERS", environment: environment),
                 maxCommandsPerWindow: Self.integer("IM_V2_MAX_COMMANDS_PER_WINDOW", environment: environment),
-                maxFanoutUnitsPerWindow: Self.integer("IM_V2_MAX_FANOUT_UNITS_PER_WINDOW", environment: environment),
-                maxOutstandingFanoutUnits: Self.integer("IM_V2_MAX_OUTSTANDING_FANOUT_UNITS", environment: environment),
-                maxOutstandingPlans: Self.integer("IM_V2_MAX_OUTSTANDING_PLANS", environment: environment),
-                maxEnumerationPageSize: Self.integer("IM_V2_MAX_ENUMERATION_PAGE_SIZE", environment: environment),
-                maxPlannerConcurrency: Self.integer("IM_V2_MAX_PLANNER_CONCURRENCY", environment: environment),
-                maxDeliveryConcurrency: Self.integer("IM_V2_MAX_DELIVERY_CONCURRENCY", environment: environment),
+
                 retryAfterSeconds: Self.integer("IM_V2_RATE_LIMIT_RETRY_AFTER_SECONDS", environment: environment)
             )
         )

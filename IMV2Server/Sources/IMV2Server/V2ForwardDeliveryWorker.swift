@@ -127,7 +127,7 @@ public struct V2ForwardDeliveryWorker: Sendable {
         try await withThrowingTaskGroup(of: V2ForwardTerminalReceipt?.self) { group in
             group.addTask { try await target.deliver(export) }
             group.addTask {
-                try await Task.sleep(for: .seconds(deliveryTimeout))
+                try await v2Sleep(for: .seconds(deliveryTimeout))
                 throw V2ForwardDeliveryError.timedOut
             }
             defer { group.cancelAll() }
@@ -165,7 +165,7 @@ public struct V2ForwardDeliveryWorker: Sendable {
                 }
                 return try await store.reschedule(lease, disposition: .retry(at: retryAt), resetAttempts: true, now: time) ? .deferred : .superseded
             }
-            guard receipt.export == lease.export else { throw V2ForwardDeliveryError.receiptMismatch }
+            guard receipt.matches(lease.export) else { throw V2ForwardDeliveryError.receiptMismatch }
             try Task.checkCancellation()
             guard try await store.isCurrent(lease, now: now()) else { return .superseded }
             try await receipts.record(receipt, now: now())

@@ -90,10 +90,24 @@ public struct V2CrossOwnerForwardService: V2CrossOwnerForwarding {
         func failure(_ code: String) throws -> V2CrossOwnerForwardOutcome {
             .completed(try .init(sourceMessageID: source.messageID, targetRoomID: target, messageID: nil, roomSequence: nil, errorCode: code))
         }
+        func terminal(_ result: V2ForwardImportOutcome) throws -> V2CrossOwnerForwardOutcome {
+            switch result {
+            case .accepted(let id, let sequence):
+                return .completed(try .init(sourceMessageID: source.messageID, targetRoomID: target, messageID: id, roomSequence: sequence, errorCode: nil))
+            case .rejected(let code): return try failure(code)
+            case .pending: throw V2ForwardExportError.corruptPersistenceState
+            }
+        }
         let export: V2ForwardExport
         do {
-            export = try await endpoint.exports.prepare(actorUserID: actor, operationID: operation, source: source,
-                sourceRoute: sourceRoute, targetRoomID: target, targetRoute: targetRoute, now: now())
+            if let result = try await endpoint.receipts.terminalStatus(actor: actor, operation: operation, source: source, target: target) {
+                return try terminal(result)
+            }
+            switch try await endpoint.exports.prepareForDelivery(actorUserID: actor, operationID: operation, source: source,
+                sourceRoute: sourceRoute, targetRoomID: target, targetRoute: targetRoute, now: now()) {
+            case .export(let prepared): export = prepared
+            case .terminal(let result): return try terminal(result)
+            }
         } catch V2ForwardExportError.sourceUnavailable { return try failure("NOT_FOUND")
         } catch V2ForwardExportError.sourceChanged { return try failure("SOURCE_CHANGED")
         } catch V2ForwardExportError.mediaUnavailable { return try failure("MEDIA_UNAVAILABLE")
@@ -101,12 +115,7 @@ public struct V2CrossOwnerForwardService: V2CrossOwnerForwarding {
         } catch V2ForwardExportError.invalidRequest { return try failure("INVALID_ARGUMENT")
         } catch V2ForwardExportError.capacityExceeded { return .pending(paused: false) }
         if let result = try await endpoint.receipts.status(exportID: export.intent.exportID) {
-            switch result {
-            case .accepted(let id, let sequence):
-                return .completed(try .init(sourceMessageID: source.messageID, targetRoomID: target, messageID: id, roomSequence: sequence, errorCode: nil))
-            case .rejected(let code): return try failure(code)
-            case .pending: throw V2ForwardExportError.corruptPersistenceState
-            }
+            return try terminal(result)
         }
         return .pending(paused: try await endpoint.jobs.isPaused(exportID: export.intent.exportID))
     }

@@ -57,14 +57,10 @@ public struct V2ClientGroupRolePolicy: Equatable, Sendable {
 
 /// 群控制类事件载荷的解析器。
 ///
-/// 与界面模型分开可以保证标准扇出、混合房间日志拉取与前台预览三条路径
-/// 使用完全相同的校验逻辑。
+/// 与界面模型分开，供房间日志消费和快照导入复用。
 enum V2ClientGroupCapabilityProjection {
     /// 仅解读事件类型的事件头。
     struct Header: Decodable { let eventType: String; enum CodingKeys: String, CodingKey { case eventType = "event_type" } }
-    /// 成员角色变更事件的关键字段。
-    struct MemberRole: Decodable { let roomID: String; let targetUserID: String; let role: String; let membershipRevision: UInt64; enum CodingKeys: String, CodingKey { case roomID = "room_id", targetUserID = "target_user_id", role, membershipRevision = "membership_revision" } }
-
     /// 解析事件头。
     ///
     /// - Parameter data: 事件载荷。

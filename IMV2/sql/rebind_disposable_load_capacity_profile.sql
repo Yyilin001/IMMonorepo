@@ -81,9 +81,6 @@ BEGIN
              SELECT command_window_limit FROM disposable_profile_rebind_config
            )
            OR command_window_used <> 0
-           OR fanout_window_used <> 0
-           OR outstanding_fanout_units <> 0
-           OR outstanding_plans <> 0
            OR valid_until <= CURRENT_TIMESTAMP)
   ) THEN
     RAISE EXCEPTION 'new-profile pools are not fresh and compatible';
@@ -105,10 +102,7 @@ BEGIN
     WHERE room.capacity_profile_id = (
       SELECT old_profile_id FROM disposable_profile_rebind_config
     )
-      AND (admission.command_window_used <> 0
-           OR admission.fanout_window_used <> 0
-           OR admission.outstanding_fanout_units <> 0
-           OR admission.outstanding_plans <> 0)
+      AND (admission.command_window_used <> 0)
   ) THEN
     RAISE EXCEPTION 'old-profile room admission is not drained';
   END IF;
@@ -118,12 +112,6 @@ $guard$;
 UPDATE im_v2.room_admission AS admission
 SET command_window_limit = pool.command_window_limit,
     command_window_used = 0,
-    fanout_window_limit = pool.fanout_window_limit,
-    fanout_window_used = 0,
-    max_outstanding_fanout_units = pool.max_outstanding_fanout_units,
-    outstanding_fanout_units = 0,
-    max_outstanding_plans = pool.max_outstanding_plans,
-    outstanding_plans = 0,
     shard_lease_id = pool.lease_id,
     shard_lease_generation = pool.generation
 FROM im_v2.rooms AS room

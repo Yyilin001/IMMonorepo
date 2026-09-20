@@ -291,6 +291,8 @@ public actor V2GatewayByteStream {
     // scheduling a best-effort close.
     private var deviceRevocationHandler: (@Sendable () async -> Void)?
     private var outboundWriter: (@Sendable (Data) async -> Void)?
+    private var requiredNotificationWriter: (@Sendable (Data) async -> Bool)?
+    private var requiredNotificationClose: (@Sendable () async -> Void)?
     /// 一旦所属传输关闭，迟到的回调安装就不得重新形成
     /// 流 -> 回调 -> channel handler -> 流的循环强引用。
     ///
@@ -379,6 +381,9 @@ public actor V2GatewayByteStream {
                 )
                 try V2FrameCodec.validateForEncoding(exchange.response, limits: frameLimits)
                 try await respond(exchange.response)
+                if case .accountRoomChangesReady(let ready)? = exchange.responseEnvelope.body {
+                    try await registry.accountRoomChangesReadyWritten(connectionID: connectionID, epoch: ready.connectionEpoch)
+                }
                 if let rejection = exchange.terminalAuthenticationError {
                     // The awaited transport write must finish before the
                     // existing failure path closes the channel. Stop here so
@@ -458,11 +463,15 @@ public actor V2GatewayByteStream {
     public func attachTransport(
         deviceRevocationHandler: @escaping @Sendable () async -> Void,
         outboundWriter: @escaping @Sendable (Data) async -> Void,
+        requiredNotificationWriter: (@Sendable (Data) async -> Bool)? = nil,
+        requiredNotificationClose: (@Sendable () async -> Void)? = nil,
         foregroundWriter: (@Sendable (Data) -> Void)? = nil
     ) -> Bool {
         guard !transportClosed else { return false }
         self.deviceRevocationHandler = deviceRevocationHandler
         self.outboundWriter = outboundWriter
+        self.requiredNotificationWriter = requiredNotificationWriter
+        self.requiredNotificationClose = requiredNotificationClose ?? deviceRevocationHandler
         let adaptedForegroundWriter: (@Sendable (ByteBuffer) -> Void)?
         if let foregroundWriter {
             adaptedForegroundWriter = { buffer in
@@ -488,11 +497,15 @@ public actor V2GatewayByteStream {
     func attachNIOTransport(
         deviceRevocationHandler: @escaping @Sendable () async -> Void,
         outboundWriter: @escaping @Sendable (Data) async -> Void,
+        requiredNotificationWriter: (@Sendable (Data) async -> Bool)? = nil,
+        requiredNotificationClose: (@Sendable () async -> Void)? = nil,
         foregroundWriter: V2NIOGatewayForegroundWriter?
     ) -> Bool {
         guard !transportClosed else { return false }
         self.deviceRevocationHandler = deviceRevocationHandler
         self.outboundWriter = outboundWriter
+        self.requiredNotificationWriter = requiredNotificationWriter
+        self.requiredNotificationClose = requiredNotificationClose ?? deviceRevocationHandler
         foregroundTransport.attach(nioWriter: foregroundWriter)
         return true
     }
@@ -618,10 +631,39 @@ public actor V2GatewayByteStream {
         await outboundWriter(bytes)
     }
 
+    /// Success acknowledges the transport write, not client persistence.
+    /// A false result requires the notification owner to stop draining.
+    func sendAccountRoomNotification(_ notification: V2AccountRoomNotification) async -> Bool {
+        guard let identity = registeredIdentity, let writer = requiredNotificationWriter,
+              !transportClosed, let contract = await session.authenticatedFrameContract(),
+              registeredIdentity == identity, !transportClosed else { return false }
+        var envelope = notification.envelope()
+        envelope.requestID = 0
+        envelope.protocolVersion = UInt32(contract.protocolVersion)
+        guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope,
+                frameVersion: contract.protocolVersion, compression: contract.compression),
+              let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits) else { return false }
+        let written = await writer(bytes)
+        return written && !transportClosed && registeredIdentity == identity
+    }
+
+    func supportsRequiredNotifications() -> Bool {
+        !transportClosed && requiredNotificationWriter != nil
+    }
+
+    func closeForAccountRecovery() async {
+        if let requiredNotificationClose { await requiredNotificationClose() }
+        await unregisterAuthenticatedDevice()
+        await session.close()
+        detachTransport()
+    }
+
     private func detachTransport() {
         transportClosed = true
         deviceRevocationHandler = nil
         outboundWriter = nil
+        requiredNotificationWriter = nil
+        requiredNotificationClose = nil
         foregroundTransport.detach()
     }
 
@@ -656,6 +698,15 @@ public actor V2GatewayByteStream {
 
     private func updateHybridGroupSubscription(inbound: IMV2Envelope, response: IMV2Envelope) async throws {
         switch inbound.body {
+        case .snapshotPagePull:
+            guard case .snapshotPage(let page)? = response.body else { return }
+            try await registry.refreshAccountRoomSnapshotMemberships(connectionID: connectionID, page: page)
+        case .syncPull:
+            guard case .syncBatch(let batch)? = response.body else { return }
+            try await registry.refreshAccountRoomMemberships(connectionID: connectionID, batch: batch)
+        case .userRoomDirectoryList:
+            guard case .userRoomDirectoryPage(let page)? = response.body else { return }
+            try await registry.installAccountRoomDirectory(connectionID: connectionID, page: page)
         case .setLiveActivityPreferences:
             guard case .liveActivityPreferencesSet(let updated)? = response.body
             else { return }

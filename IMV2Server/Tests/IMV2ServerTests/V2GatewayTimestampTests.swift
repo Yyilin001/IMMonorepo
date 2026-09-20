@@ -29,20 +29,6 @@ struct V2GatewayTimestampTests {
         let start = ContinuousClock.now
         #expect(v2ElapsedMilliseconds(since: start, now: start.advanced(by: .milliseconds(25))) == 25)
     }
-    @Test("Cross-store timing uses bounded monotonic durations and nearest milliseconds")
-    func crossStoreElapsedMilliseconds() {
-        for duration: Duration in [.zero, .seconds(-1), .seconds(Int64.max), .seconds(Int64.min)] {
-            #expect(v2CrossStoreElapsedMilliseconds(duration) == 0)
-        }
-        #expect(v2CrossStoreElapsedMilliseconds(.microseconds(499)) == 0)
-        #expect(v2CrossStoreElapsedMilliseconds(.microseconds(500)) == 1)
-        #expect(v2CrossStoreElapsedMilliseconds(.microseconds(1_499)) == 1)
-        #expect(v2CrossStoreElapsedMilliseconds(.microseconds(1_500)) == 2)
-        #expect(v2CrossStoreElapsedMilliseconds(.microseconds(1_999_500)) == 2_000)
-        #expect(v2CrossStoreElapsedMilliseconds(.seconds(1) + .milliseconds(250)) == 1_250)
-        let maximum = Duration.seconds(Int64.max / 1_000) + .milliseconds(Int64.max % 1_000)
-        #expect(v2CrossStoreElapsedMilliseconds(maximum) == Int.max)
-        #expect(v2CrossStoreElapsedMilliseconds(maximum + .microseconds(500)) == 0)
-    }
+
 
 }

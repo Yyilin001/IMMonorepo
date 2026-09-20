@@ -54,6 +54,8 @@ public enum V2GatewayConnectionClosure: String, CaseIterable, Equatable, Sendabl
     case inboundQueueLimit = "inbound_queue_limit"
     case frameLimitViolation = "frame_limit_violation"
     case requestFailure = "request_failure"
+    case requiredNotificationBackpressure = "required_notification_backpressure"
+    case requiredNotificationWriteTimeout = "required_notification_write_timeout"
     case deviceRevoked = "device_revoked"
 }
 
@@ -514,6 +516,10 @@ public enum V2GatewayTelemetryCommand: String, CaseIterable, Hashable, Sendable 
     case snapshotPagePull = "snapshot_page_pull"
     case snapshotAck = "snapshot_ack"
     case listRoomMembers = "list_room_members"
+    case userRoomDirectoryList = "user_room_directory_list"
+    case accountRoomChangesStart = "account_room_changes_start"
+    case roomSyncStateBatch = "room_sync_state_batch"
+    case roomLatestVisibleBatch = "room_latest_visible_batch"
     case getGroupRolePolicyBaseline = "get_group_role_policy_baseline"
     case groupEventPull = "group_event_pull"
     case groupEventSubscribe = "group_event_subscribe"
@@ -559,30 +565,6 @@ public enum V2TelemetryEvent: Equatable, Sendable {
         rejection: V2GatewayTelemetryRejection?,
         elapsedMilliseconds: UInt64
     )
-    /// 聚合的持久工作进展。计数刻意不按房间、来源事件、目标用户或分片建键，以避免高基数。
-    case fanoutProgress(
-        traceID: UUID,
-        claimedOutboxRows: Int,
-        publishedOutboxRows: Int,
-        releasedOutboxRows: Int,
-        pausedOutboxRows: Int,
-        claimedDeliveries: Int,
-        committedDeliveries: Int,
-        staleDeliveries: Int,
-        staleRouteDeliveries: Int,
-        releasedDeliveries: Int,
-        pausedDeliveries: Int,
-        relayElapsedMilliseconds: UInt64,
-        deliveryElapsedMilliseconds: UInt64,
-        elapsedMilliseconds: UInt64
-    )
-    case fanoutFailure(traceID: UUID, stage: V2FanoutTelemetryStage, elapsedMilliseconds: UInt64)
-}
-
-public enum V2FanoutTelemetryStage: String, CaseIterable, Equatable, Sendable {
-    case relay
-    case delivery
-    case pipeline
 }
 
 /// 在不削弱精确指标的前提下，限制重复的命令诊断日志。
@@ -696,20 +678,7 @@ public final class V2PrometheusTelemetrySink: V2TelemetrySink, Sendable {
 
     private struct Storage: Sendable {
         var gateway: [GatewayKey: CounterAndDuration] = [:]
-        var fanoutRuns = CounterAndDuration()
-        var fanoutRelayRuns = CounterAndDuration()
-        var fanoutDeliveryRuns = CounterAndDuration()
-        var fanoutFailures: [V2FanoutTelemetryStage: UInt64] = [:]
-        var fanoutOutboxClaimed: UInt64 = 0
-        var fanoutOutboxPublished: UInt64 = 0
-        var fanoutOutboxReleased: UInt64 = 0
-        var fanoutOutboxPaused: UInt64 = 0
-        var fanoutDeliveriesClaimed: UInt64 = 0
-        var fanoutDeliveriesCommitted: UInt64 = 0
-        var fanoutDeliveriesStale: UInt64 = 0
-        var fanoutDeliveriesStaleRoute: UInt64 = 0
-        var fanoutDeliveriesReleased: UInt64 = 0
-        var fanoutDeliveriesPaused: UInt64 = 0
+
     }
 
     private let storage = Mutex(Storage())
@@ -725,26 +694,7 @@ public final class V2PrometheusTelemetrySink: V2TelemetrySink, Sendable {
                 aggregate.add(elapsedMilliseconds: elapsedMilliseconds)
                 storage.gateway[key] = aggregate
 
-            case let .fanoutProgress(_, claimedOutboxRows, publishedOutboxRows, releasedOutboxRows, pausedOutboxRows, claimedDeliveries, committedDeliveries, staleDeliveries, staleRouteDeliveries, releasedDeliveries, pausedDeliveries, relayElapsedMilliseconds, deliveryElapsedMilliseconds, elapsedMilliseconds):
-                storage.fanoutRuns.add(elapsedMilliseconds: elapsedMilliseconds)
-                storage.fanoutRelayRuns.add(elapsedMilliseconds: relayElapsedMilliseconds)
-                storage.fanoutDeliveryRuns.add(elapsedMilliseconds: deliveryElapsedMilliseconds)
-                storage.fanoutOutboxClaimed = v2SaturatingAdd(storage.fanoutOutboxClaimed, v2NonNegative(claimedOutboxRows))
-                storage.fanoutOutboxPublished = v2SaturatingAdd(storage.fanoutOutboxPublished, v2NonNegative(publishedOutboxRows))
-                storage.fanoutOutboxReleased = v2SaturatingAdd(storage.fanoutOutboxReleased, v2NonNegative(releasedOutboxRows))
-                storage.fanoutOutboxPaused = v2SaturatingAdd(storage.fanoutOutboxPaused, v2NonNegative(pausedOutboxRows))
-                storage.fanoutDeliveriesClaimed = v2SaturatingAdd(storage.fanoutDeliveriesClaimed, v2NonNegative(claimedDeliveries))
-                storage.fanoutDeliveriesCommitted = v2SaturatingAdd(storage.fanoutDeliveriesCommitted, v2NonNegative(committedDeliveries))
-                storage.fanoutDeliveriesStale = v2SaturatingAdd(storage.fanoutDeliveriesStale, v2NonNegative(staleDeliveries))
-                storage.fanoutDeliveriesStaleRoute = v2SaturatingAdd(storage.fanoutDeliveriesStaleRoute, v2NonNegative(staleRouteDeliveries))
-                storage.fanoutDeliveriesReleased = v2SaturatingAdd(storage.fanoutDeliveriesReleased, v2NonNegative(releasedDeliveries))
-                storage.fanoutDeliveriesPaused = v2SaturatingAdd(storage.fanoutDeliveriesPaused, v2NonNegative(pausedDeliveries))
 
-            case let .fanoutFailure(_, stage, _):
-                storage.fanoutFailures[stage] = v2SaturatingAdd(
-                    storage.fanoutFailures[stage, default: 0],
-                    1
-                )
             }
         }
     }
@@ -769,40 +719,6 @@ public final class V2PrometheusTelemetrySink: V2TelemetrySink, Sendable {
             lines.append("im_v2_gateway_command_duration_milliseconds_count{\(labels)} \(aggregate.count)")
         }
 
-        lines += [
-            "# HELP im_v2_fanout_runs_total Durable fan-out pipeline runs.",
-            "# TYPE im_v2_fanout_runs_total counter",
-            "im_v2_fanout_runs_total \(storage.fanoutRuns.count)",
-            "im_v2_fanout_run_duration_milliseconds_sum \(storage.fanoutRuns.elapsedMilliseconds)",
-            "im_v2_fanout_run_duration_milliseconds_count \(storage.fanoutRuns.count)",
-            "# HELP im_v2_fanout_relay_duration_milliseconds Aggregate outbox relay phase duration.",
-            "# TYPE im_v2_fanout_relay_duration_milliseconds summary",
-            "im_v2_fanout_relay_duration_milliseconds_sum \(storage.fanoutRelayRuns.elapsedMilliseconds)",
-            "im_v2_fanout_relay_duration_milliseconds_count \(storage.fanoutRelayRuns.count)",
-            "# HELP im_v2_fanout_delivery_duration_milliseconds Aggregate delivery phase duration.",
-            "# TYPE im_v2_fanout_delivery_duration_milliseconds summary",
-            "im_v2_fanout_delivery_duration_milliseconds_sum \(storage.fanoutDeliveryRuns.elapsedMilliseconds)",
-            "im_v2_fanout_delivery_duration_milliseconds_count \(storage.fanoutDeliveryRuns.count)",
-            "# HELP im_v2_fanout_outbox_rows_total Aggregate durable outbox progression.",
-            "# TYPE im_v2_fanout_outbox_rows_total counter",
-            "im_v2_fanout_outbox_rows_total{state=\"claimed\"} \(storage.fanoutOutboxClaimed)",
-            "im_v2_fanout_outbox_rows_total{state=\"published\"} \(storage.fanoutOutboxPublished)",
-            "im_v2_fanout_outbox_rows_total{state=\"released\"} \(storage.fanoutOutboxReleased)",
-            "im_v2_fanout_outbox_rows_total{state=\"paused\"} \(storage.fanoutOutboxPaused)",
-            "# HELP im_v2_fanout_deliveries_total Aggregate delivery progression.",
-            "# TYPE im_v2_fanout_deliveries_total counter",
-            "im_v2_fanout_deliveries_total{state=\"claimed\"} \(storage.fanoutDeliveriesClaimed)",
-            "im_v2_fanout_deliveries_total{state=\"committed\"} \(storage.fanoutDeliveriesCommitted)",
-            "im_v2_fanout_deliveries_total{state=\"stale\"} \(storage.fanoutDeliveriesStale)",
-            "im_v2_fanout_deliveries_total{state=\"stale_route\"} \(storage.fanoutDeliveriesStaleRoute)",
-            "im_v2_fanout_deliveries_total{state=\"released\"} \(storage.fanoutDeliveriesReleased)",
-            "im_v2_fanout_deliveries_total{state=\"paused\"} \(storage.fanoutDeliveriesPaused)",
-            "# HELP im_v2_fanout_failures_total Fan-out failures by closed stage vocabulary.",
-            "# TYPE im_v2_fanout_failures_total counter",
-        ]
-        for stage in V2FanoutTelemetryStage.allCases {
-            lines.append("im_v2_fanout_failures_total{stage=\"\(stage.rawValue)\"} \(storage.fanoutFailures[stage, default: 0])")
-        }
         return lines.joined(separator: "\n") + "\n"
     }
 
@@ -841,6 +757,10 @@ func v2TelemetryCommand(for envelope: IMV2Envelope) -> V2GatewayTelemetryCommand
     case .snapshotPagePull: .snapshotPagePull
     case .snapshotAck: .snapshotAck
     case .listRoomMembers: .listRoomMembers
+    case .userRoomDirectoryList: .userRoomDirectoryList
+    case .accountRoomChangesStart: .accountRoomChangesStart
+    case .roomSyncStateBatch: .roomSyncStateBatch
+    case .roomLatestVisibleBatch: .roomLatestVisibleBatch
     case .getGroupRolePolicyBaseline: .getGroupRolePolicyBaseline
     case .groupEventPull: .groupEventPull
     case .groupEventSubscribe: .groupEventSubscribe

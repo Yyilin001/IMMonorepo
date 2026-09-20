@@ -26,8 +26,7 @@ BEGIN
     SELECT user_id, source_event_id, projection_kind,
            user_sync_sequence, payload, created_at
     FROM inserted_user_sync_rows
-    WHERE payload_storage = 'inline'
-      AND projection_kind NOT IN ('message', 'membership', 'moderation', 'room')
+    WHERE projection_kind NOT IN ('message', 'membership', 'moderation', 'room')
     ON CONFLICT (user_id, source_event_id, projection_kind) DO NOTHING;
 
     IF EXISTS (
@@ -35,8 +34,7 @@ BEGIN
         FROM inserted_user_sync_rows AS inserted
         JOIN im_v2.user_projection_effects AS effect
           USING (user_id, source_event_id, projection_kind)
-        WHERE inserted.payload_storage = 'inline'
-          AND inserted.projection_kind NOT IN
+        WHERE inserted.projection_kind NOT IN
               ('message', 'membership', 'moderation', 'room')
           AND ROW(effect.user_sync_sequence, effect.payload, effect.created_at)
               IS DISTINCT FROM
@@ -64,7 +62,7 @@ BEGIN
     FROM inserted_room_events AS inserted
     JOIN im_v2.rooms AS room ON room.room_id = inserted.room_id
     WHERE room.room_kind = 'group'
-      AND room.delivery_mode = 'large_group_hybrid'
+      AND room.capacity_class = 'large'
     GROUP BY inserted.room_id
     ON CONFLICT (room_id) DO UPDATE
     SET target_room_sequence = GREATEST(
@@ -116,7 +114,7 @@ BEGIN
     JOIN im_v2.rooms AS room ON room.room_id = inserted.room_id
     WHERE inserted.accepted_event_storage = 'message_row'
       AND room.room_kind = 'group'
-      AND room.delivery_mode = 'large_group_hybrid'
+      AND room.capacity_class = 'large'
     GROUP BY inserted.room_id
     ON CONFLICT (room_id) DO UPDATE
     SET target_room_sequence = GREATEST(
@@ -200,43 +198,11 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION im_v2.reject_fanout_plan_identity_mutation() RETURNS trigger
+CREATE FUNCTION im_v2.reject_room_capacity_class_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF NEW.source_event_id IS DISTINCT FROM OLD.source_event_id
-       OR NEW.target_rule IS DISTINCT FROM OLD.target_rule THEN
-        RAISE EXCEPTION 'fanout plan identity and target rule are immutable';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION im_v2.reject_fresh_direct_delivery_identity_mutation() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    IF NEW.fresh_direct_eligible IS DISTINCT FROM OLD.fresh_direct_eligible THEN
-        RAISE EXCEPTION 'fresh direct eligibility is immutable';
-    END IF;
-    IF OLD.fresh_direct_eligible
-       AND (
-           NEW.source_event_id IS DISTINCT FROM OLD.source_event_id
-           OR NEW.target_user_id IS DISTINCT FROM OLD.target_user_id
-           OR NEW.projection_kind IS DISTINCT FROM OLD.projection_kind
-           OR NEW.completion_unit_id IS DISTINCT FROM OLD.completion_unit_id
-       ) THEN
-        RAISE EXCEPTION 'fresh direct delivery identity is immutable';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION im_v2.reject_room_delivery_mode_mutation() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    IF NEW.delivery_mode IS DISTINCT FROM OLD.delivery_mode THEN
+    IF NEW.capacity_class IS DISTINCT FROM OLD.capacity_class THEN
         RAISE EXCEPTION 'room delivery mode is immutable';
     END IF;
     RETURN NEW;
@@ -275,53 +241,8 @@ BEGIN
     IF NEW.shard_lease_id IS DISTINCT FROM OLD.shard_lease_id
        OR NEW.shard_lease_generation IS DISTINCT FROM OLD.shard_lease_generation THEN
         NEW.command_window_used := 0;
-        NEW.fanout_window_used := 0;
     END IF;
     RETURN NEW;
-END;
-$$;
-
-CREATE FUNCTION im_v2.validate_fresh_direct_delivery_batch() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM inserted_fanout_deliveries
-        WHERE fresh_direct_eligible
-    ) THEN
-        RETURN NULL;
-    END IF;
-
-    IF EXISTS (
-        SELECT source_event_id
-        FROM inserted_fanout_deliveries
-        WHERE fresh_direct_eligible
-        GROUP BY source_event_id
-        HAVING count(*) <> 2
-            OR count(DISTINCT completion_unit_id) <> 1
-    ) OR EXISTS (
-        SELECT 1
-        FROM inserted_fanout_deliveries AS delivery
-        LEFT JOIN im_v2.fanout_plans AS plan
-          ON plan.source_event_id = delivery.source_event_id
-        LEFT JOIN im_v2.fanout_completion_units AS unit
-          ON unit.source_event_id = delivery.source_event_id
-         AND unit.completion_unit_id = delivery.completion_unit_id
-        WHERE delivery.fresh_direct_eligible
-          AND (
-              plan.source_event_id IS NULL
-              OR plan.target_rule->>'planning_strategy' <> 'direct_preplanned'
-              OR plan.state <> 'planned'
-              OR plan.target_count <> 2
-              OR plan.enumerated_target_count <> 2
-              OR unit.completion_unit_id IS NULL
-              OR unit.target_count <> 2
-              OR unit.target_boundary->>'audience_kind' <> 'direct_preplanned'
-          )
-    ) THEN
-        RAISE EXCEPTION 'invalid fresh direct delivery batch';
-    END IF;
-    RETURN NULL;
 END;
 $$;
 
@@ -354,13 +275,15 @@ CREATE TABLE im_v2.account_password_authentication_audit (
     user_id uuid,
     device_id uuid NOT NULL,
     occurred_at timestamp with time zone NOT NULL,
-    CONSTRAINT account_password_authentication_audit_outcome_check CHECK ((outcome = ANY (ARRAY['registration_succeeded'::text, 'assertion_succeeded'::text, 'assertion_rejected'::text])))
+    CONSTRAINT account_password_authentication_audit_outcome_check CHECK ((outcome = ANY (ARRAY['registration_succeeded'::text, 'assertion_succeeded'::text, 'assertion_rejected'::text, 'recovery_code_changed'::text, 'password_changed'::text, 'password_recovered'::text])))
 );
 
 CREATE TABLE im_v2.account_password_credentials (
     account_handle text NOT NULL,
     user_id uuid NOT NULL,
     password_hash text NOT NULL,
+    credential_revision bigint NOT NULL DEFAULT 1 CHECK (credential_revision > 0),
+    recovery_code_hmac text CHECK (recovery_code_hmac IS NULL OR length(recovery_code_hmac) = 64),
     created_at timestamp with time zone NOT NULL,
     CONSTRAINT account_password_credentials_account_handle_check CHECK (((octet_length(account_handle) >= 3) AND (octet_length(account_handle) <= 64))),
     CONSTRAINT account_password_credentials_password_hash_check CHECK (((length(password_hash) >= 60) AND (length(password_hash) <= 255)))
@@ -388,16 +311,6 @@ CREATE TABLE im_v2.auth_devices (
     last_active_at timestamp with time zone NOT NULL,
     CONSTRAINT auth_devices_display_name_length CHECK (((octet_length(display_name) >= 1) AND (octet_length(display_name) <= 128))),
     CONSTRAINT auth_devices_platform_length CHECK (((octet_length(platform) >= 1) AND (octet_length(platform) <= 64)))
-);
-
-CREATE TABLE im_v2.consumer_inbox (
-    consumer_name text NOT NULL,
-    source_event_id uuid NOT NULL,
-    target_user_id uuid NOT NULL,
-    projection_kind text NOT NULL,
-    committed_at timestamp with time zone NOT NULL,
-    user_sync_sequence bigint,
-    CONSTRAINT consumer_inbox_user_sync_sequence_check CHECK (((user_sync_sequence IS NULL) OR (user_sync_sequence > 0)))
 );
 
 CREATE TABLE im_v2.content_review_cases (
@@ -590,7 +503,7 @@ CREATE TABLE im_v2.direct_message_denials (
     source_event_id uuid NOT NULL,
     timeline_sequence bigint NOT NULL,
     created_at timestamp with time zone NOT NULL,
-    fingerprint_version smallint NOT NULL CHECK (fingerprint_version IN (1, 2)),
+    fingerprint_version smallint NOT NULL CHECK (fingerprint_version = 3),
     request_fingerprint bytea NOT NULL CHECK (octet_length(request_fingerprint) = 32),
     reason text DEFAULT 'generic'::text NOT NULL,
     CONSTRAINT direct_message_denials_reason_check CHECK ((reason = ANY (ARRAY['generic'::text, 'system_account_read_only'::text]))),
@@ -678,97 +591,8 @@ CREATE TABLE im_v2.durable_work_replay_audit (
     CONSTRAINT durable_work_replay_audit_outcome_check CHECK ((outcome = ANY (ARRAY['processing'::text, 'requeued'::text, 'not_paused'::text]))),
     CONSTRAINT durable_work_replay_audit_projection_kind_check CHECK (((projection_kind IS NULL) OR ((char_length(projection_kind) >= 1) AND (char_length(projection_kind) <= 64)))),
     CONSTRAINT durable_work_replay_audit_reason_code_check CHECK ((reason_code = ANY (ARRAY['dependency_recovered'::text, 'data_repaired'::text, 'false_positive'::text]))),
-    CONSTRAINT durable_work_replay_audit_target_kind_check CHECK ((target_kind = ANY (ARRAY['room_outbox'::text, 'fanout_delivery'::text, 'content_review'::text, 'media_scan'::text, 'media_purge'::text, 'read_receipt_preference_propagation'::text, 'user_projection'::text]))),
-    CONSTRAINT durable_work_replay_audit_target_shape_check CHECK ((((target_kind = ANY (ARRAY['room_outbox'::text, 'content_review'::text, 'media_scan'::text, 'media_purge'::text])) AND (target_user_id IS NULL) AND (projection_kind IS NULL)) OR ((target_kind = 'fanout_delivery'::text) AND (target_user_id IS NOT NULL) AND (projection_kind IS NOT NULL)) OR ((target_kind = ANY (ARRAY['read_receipt_preference_propagation'::text, 'user_projection'::text])) AND (target_user_id IS NOT NULL) AND (projection_kind IS NULL))))
-);
-
--- Fan-out bookkeeping is update-heavy: pending rows become terminal within
--- seconds, while the normal retention worker removes them days later. Use a
--- row-count-independent vacuum threshold so dead tuples and partial-index
--- entries cannot grow for hours at sustained message rates.
-CREATE TABLE im_v2.fanout_completion_units (
-    source_event_id uuid NOT NULL,
-    completion_unit_id uuid NOT NULL,
-    target_boundary jsonb NOT NULL,
-    target_count bigint NOT NULL,
-    committed_target_count bigint DEFAULT 0 NOT NULL,
-    policy_skipped_target_count bigint DEFAULT 0 NOT NULL,
-    state text NOT NULL,
-    lease_expires_at timestamp with time zone,
-    retry_count bigint DEFAULT 0 NOT NULL,
-    released_at timestamp with time zone,
-    CONSTRAINT fanout_completion_units_check CHECK (((committed_target_count + policy_skipped_target_count) <= target_count)),
-    CONSTRAINT fanout_completion_units_check1 CHECK (((state = 'pending'::text) OR ((committed_target_count + policy_skipped_target_count) = target_count))),
-    CONSTRAINT fanout_completion_units_check2 CHECK (((state <> 'released'::text) OR (released_at IS NOT NULL))),
-    CONSTRAINT fanout_completion_units_committed_target_count_check CHECK ((committed_target_count >= 0)),
-    CONSTRAINT fanout_completion_units_policy_skipped_target_count_check CHECK ((policy_skipped_target_count >= 0)),
-    CONSTRAINT fanout_completion_units_retry_count_check CHECK ((retry_count >= 0)),
-    CONSTRAINT fanout_completion_units_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'terminal'::text, 'released'::text]))),
-    CONSTRAINT fanout_completion_units_target_count_check CHECK ((target_count >= 0))
-)
-WITH (autovacuum_vacuum_scale_factor='0.02', autovacuum_vacuum_threshold='1000', autovacuum_analyze_scale_factor='0.02', autovacuum_analyze_threshold='1000');
-
-CREATE TABLE im_v2.fanout_deliveries (
-    source_event_id uuid NOT NULL,
-    target_user_id uuid NOT NULL,
-    projection_kind text NOT NULL,
-    completion_unit_id uuid NOT NULL,
-    target_shard_bucket text NOT NULL,
-    observed_router_epoch bigint NOT NULL,
-    state text DEFAULT 'pending'::text NOT NULL,
-    claim_token uuid,
-    lease_expires_at timestamp with time zone,
-    retry_count bigint DEFAULT 0 NOT NULL,
-    diagnostic_terminal_reason text,
-    next_attempt_at timestamp with time zone,
-    paused_at timestamp with time zone,
-    last_failure_code text,
-    fresh_direct_eligible boolean DEFAULT false NOT NULL,
-    CONSTRAINT fanout_deliveries_fresh_direct_kind_check CHECK (((NOT fresh_direct_eligible) OR (projection_kind = 'message'::text))),
-    CONSTRAINT fanout_deliveries_observed_router_epoch_check CHECK ((observed_router_epoch >= 0)),
-    CONSTRAINT fanout_deliveries_pause_state_check CHECK (((state = 'paused'::text) = (paused_at IS NOT NULL))),
-    CONSTRAINT fanout_deliveries_retry_count_check CHECK ((retry_count >= 0)),
-    CONSTRAINT fanout_deliveries_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'terminal'::text, 'paused'::text])))
-)
-WITH (autovacuum_vacuum_scale_factor='0.02', autovacuum_vacuum_threshold='1000', autovacuum_analyze_scale_factor='0.02', autovacuum_analyze_threshold='1000');
-
-CREATE TABLE im_v2.fanout_plan_targets (
-    source_event_id uuid NOT NULL,
-    target_user_id uuid NOT NULL
-);
-
-CREATE TABLE im_v2.fanout_plans (
-    plan_id uuid NOT NULL,
-    source_event_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    source_room_sequence bigint NOT NULL,
-    committed_membership_revision bigint NOT NULL,
-    target_rule jsonb NOT NULL,
-    enumeration_checkpoint jsonb NOT NULL,
-    target_count bigint,
-    reserved_fanout_cost bigint NOT NULL,
-    state text NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    terminal_at timestamp with time zone,
-    enumerated_target_count bigint DEFAULT 0 NOT NULL,
-    CONSTRAINT fanout_plans_check CHECK (((enumerated_target_count >= 0) AND ((target_count IS NULL) OR (enumerated_target_count <= target_count)))),
-    CONSTRAINT fanout_plans_committed_membership_revision_check CHECK ((committed_membership_revision >= 0)),
-    CONSTRAINT fanout_plans_direct_preplanned_shape_check CHECK ((((target_rule ->> 'planning_strategy'::text) IS DISTINCT FROM 'direct_preplanned'::text) OR ((state = ANY (ARRAY['planned'::text, 'terminal'::text])) AND (target_count = 2) AND (enumerated_target_count = 2) AND (reserved_fanout_cost = 2)))),
-    CONSTRAINT fanout_plans_reserved_fanout_cost_check CHECK ((reserved_fanout_cost >= 0)),
-    CONSTRAINT fanout_plans_source_room_sequence_check CHECK ((source_room_sequence > 0)),
-    CONSTRAINT fanout_plans_state_check CHECK ((state = ANY (ARRAY['planning'::text, 'planned'::text, 'terminal'::text]))),
-    CONSTRAINT fanout_plans_target_count_check CHECK (((target_count IS NULL) OR (target_count >= 0)))
-)
-WITH (autovacuum_vacuum_scale_factor='0.02', autovacuum_vacuum_threshold='1000', autovacuum_analyze_scale_factor='0.02', autovacuum_analyze_threshold='1000');
-
-CREATE TABLE im_v2.fanout_sync_payloads (
-    source_event_id uuid NOT NULL,
-    projection_kind text NOT NULL,
-    payload jsonb,
-    created_at timestamp with time zone NOT NULL,
-    message_state_id uuid,
-    CONSTRAINT fanout_sync_payloads_message_state_kind_check CHECK (((message_state_id IS NULL) OR (projection_kind = 'message'::text))),
-    CONSTRAINT fanout_sync_payloads_payload_reference_check CHECK (((payload IS NOT NULL) OR (message_state_id IS NOT NULL)))
+    CONSTRAINT durable_work_replay_audit_target_kind_check CHECK ((target_kind = ANY (ARRAY['user_state_event'::text, 'content_review'::text, 'media_scan'::text, 'media_purge'::text, 'read_receipt_preference_propagation'::text, 'user_projection'::text]))),
+    CONSTRAINT durable_work_replay_audit_target_shape_check CHECK ((((target_kind = ANY (ARRAY['content_review'::text, 'media_scan'::text, 'media_purge'::text])) AND (target_user_id IS NULL) AND (projection_kind IS NULL)) OR ((target_kind = 'user_state_event'::text) AND (target_user_id IS NOT NULL) AND (projection_kind IS NOT NULL)) OR ((target_kind = ANY (ARRAY['read_receipt_preference_propagation'::text, 'user_projection'::text])) AND (target_user_id IS NOT NULL) AND (projection_kind IS NULL))))
 );
 
 CREATE TABLE im_v2.gateway_worker_cursors (
@@ -788,7 +612,6 @@ CREATE TABLE im_v2.group_announcement_operations (
     resulting_revision bigint NOT NULL,
     room_sequence bigint NOT NULL,
     event_id uuid NOT NULL,
-    plan_id uuid NOT NULL,
     created_at timestamp with time zone NOT NULL,
     CONSTRAINT group_announcement_operations_body_check CHECK (((length(body) > 0) AND (octet_length(body) <= 4096))),
     CONSTRAINT group_announcement_operations_expected_revision_check CHECK ((expected_revision >= 0)),
@@ -840,7 +663,6 @@ CREATE TABLE im_v2.group_permission_operations (
     permissions jsonb NOT NULL,
     room_sequence bigint NOT NULL,
     event_id uuid NOT NULL,
-    plan_id uuid NOT NULL,
     created_at timestamp with time zone NOT NULL,
     CONSTRAINT group_permission_operations_check CHECK ((resulting_revision > expected_revision)),
     CONSTRAINT group_permission_operations_expected_revision_check CHECK ((expected_revision > 0)),
@@ -858,7 +680,6 @@ CREATE TABLE im_v2.group_role_operations (
     resulting_membership_revision bigint NOT NULL,
     room_sequence bigint NOT NULL,
     event_id uuid NOT NULL,
-    plan_id uuid NOT NULL,
     created_at timestamp with time zone NOT NULL,
     CONSTRAINT group_role_operations_check CHECK ((resulting_membership_revision > expected_membership_revision)),
     CONSTRAINT group_role_operations_check1 CHECK ((actor_user_id <> target_user_id)),
@@ -903,13 +724,13 @@ CREATE TABLE im_v2.group_room_operations (
     title text NOT NULL,
     initial_member_user_ids uuid[] NOT NULL,
     created_at timestamp with time zone NOT NULL,
-    delivery_mode text DEFAULT 'standard_fanout'::text NOT NULL,
+    capacity_class text DEFAULT 'standard'::text NOT NULL,
     audience_kind text DEFAULT 'inline'::text NOT NULL,
     initial_member_count integer NOT NULL,
     CONSTRAINT group_room_operations_audience_fingerprint_check CHECK ((((audience_kind = 'inline'::text) AND (initial_member_count = (cardinality(initial_member_user_ids) + 1))) OR ((audience_kind = 'staged'::text) AND (cardinality(initial_member_user_ids) = 0)))),
     CONSTRAINT group_room_operations_audience_kind_check CHECK ((audience_kind = ANY (ARRAY['inline'::text, 'staged'::text]))),
     CONSTRAINT group_room_operations_check CHECK ((array_position(initial_member_user_ids, actor_user_id) IS NULL)),
-    CONSTRAINT group_room_operations_delivery_mode_check CHECK ((delivery_mode = ANY (ARRAY['standard_fanout'::text, 'large_group_hybrid'::text]))),
+    CONSTRAINT group_room_operations_capacity_class_check CHECK ((capacity_class = ANY (ARRAY['standard'::text, 'large'::text]))),
     CONSTRAINT group_room_operations_initial_member_count_check CHECK (((initial_member_count >= 1) AND (initial_member_count <= 100000))),
     CONSTRAINT group_room_operations_initial_member_user_ids_check CHECK ((cardinality(initial_member_user_ids) >= 0)),
     CONSTRAINT group_room_operations_title_check CHECK (((octet_length(title) >= 1) AND (octet_length(title) <= 120)))
@@ -961,8 +782,84 @@ CREATE TABLE im_v2.group_join_requests (
     created_at timestamp with time zone NOT NULL,
     updated_at timestamp with time zone NOT NULL,
     CONSTRAINT group_join_requests_note_check CHECK (((note IS NULL) OR ((octet_length(note) >= 1) AND (octet_length(note) <= 500)))),
-    CONSTRAINT group_join_requests_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'approving'::text, 'approved'::text, 'rejected'::text]))),
-    CONSTRAINT group_join_requests_decision_check CHECK ((((state = 'pending'::text) AND (decision_operation_id IS NULL) AND (decided_by_user_id IS NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NULL)) OR ((state = 'approving'::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NOT NULL) AND (decided_at IS NULL)) OR ((state = 'approved'::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NOT NULL) AND (decided_at IS NOT NULL)) OR ((state = 'rejected'::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NOT NULL))))
+    CONSTRAINT group_join_requests_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'approving'::text, 'approved'::text, 'rejected'::text, 'cancelled'::text]))),
+    CONSTRAINT group_join_requests_decision_check CHECK ((((state = 'cancelled'::text) AND (decision_operation_id IS NULL) AND (decided_by_user_id = applicant_user_id) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NOT NULL)) OR ((state = 'pending'::text) AND (decision_operation_id IS NULL) AND (decided_by_user_id IS NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NULL)) OR ((state = 'approving'::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NOT NULL) AND (decided_at IS NULL)) OR ((state = 'approved'::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NOT NULL) AND (decided_at IS NOT NULL)) OR ((state = 'rejected'::text) AND (decision_operation_id IS NOT NULL) AND (decided_by_user_id IS NOT NULL) AND (approval_membership_revision IS NULL) AND (decided_at IS NOT NULL))))
+);
+
+-- Control-plane reservations and durable recovery scheduling.
+CREATE TABLE im_v2.group_join_quota_intents (
+    applicant_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    request_id uuid NOT NULL UNIQUE,
+    room_id uuid NOT NULL,
+    invite_id uuid NOT NULL,
+    token_digest bytea NOT NULL CHECK (octet_length(token_digest) = 32),
+    note text CHECK (note IS NULL OR octet_length(note) BETWEEN 1 AND 500),
+    maximum_pending_per_invite bigint NOT NULL CHECK (maximum_pending_per_invite > 0),
+    generation bigint NOT NULL CHECK (generation > 0),
+    phase text NOT NULL CHECK (phase IN ('held', 'tracking', 'denied', 'terminal')),
+    outcome text,
+    target_request_id uuid,
+    created_at timestamptz NOT NULL CHECK (isfinite(created_at)),
+    attempt_created_at timestamptz NOT NULL CHECK (isfinite(attempt_created_at)),
+    updated_at timestamptz NOT NULL CHECK (isfinite(updated_at)),
+    next_check_at timestamptz NOT NULL CHECK (isfinite(next_check_at)),
+    lease_token uuid,
+    lease_until timestamptz,
+    attempt_count bigint NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    CONSTRAINT group_join_quota_lease_check CHECK (
+        (lease_token IS NULL AND lease_until IS NULL)
+        OR (lease_token IS NOT NULL AND lease_until IS NOT NULL AND isfinite(lease_until) AND phase IN ('held', 'tracking'))),
+    PRIMARY KEY (applicant_user_id, operation_id),
+    CONSTRAINT group_join_quota_outcome_check CHECK (
+        (phase = 'held' AND outcome IS NULL AND target_request_id IS NULL)
+        OR (phase = 'tracking' AND outcome IS NOT NULL AND outcome IN ('pending', 'approving') AND target_request_id IS NOT NULL)
+        OR (phase = 'denied' AND outcome IS NOT NULL AND outcome IN ('unavailable', 'rate_limited', 'permission_denied') AND target_request_id IS NULL)
+        OR (phase = 'terminal' AND outcome IS NOT NULL AND (
+            (outcome IN ('approved', 'rejected', 'cancelled') AND target_request_id IS NOT NULL)
+            OR (outcome = 'already_member' AND target_request_id IS NULL))))
+);
+CREATE UNIQUE INDEX group_join_quota_active_invite_idx ON im_v2.group_join_quota_intents (applicant_user_id, invite_id) WHERE phase IN ('held', 'tracking');
+CREATE INDEX group_join_quota_recovery_idx ON im_v2.group_join_quota_intents (next_check_at, applicant_user_id, operation_id) WHERE phase IN ('held', 'tracking');
+
+CREATE INDEX group_join_quota_terminal_invite_idx ON im_v2.group_join_quota_intents (applicant_user_id, invite_id, created_at DESC) WHERE phase = 'terminal' AND outcome IN ('approved', 'rejected');
+
+-- Persist every duplicate submission operation before returning its canonical request.
+CREATE TABLE im_v2.group_join_quota_aliases (
+    applicant_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    canonical_operation_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    invite_id uuid NOT NULL,
+    token_digest bytea NOT NULL CHECK (octet_length(token_digest) = 32),
+    note text CHECK (note IS NULL OR octet_length(note) BETWEEN 1 AND 500),
+    created_at timestamptz NOT NULL CHECK (isfinite(created_at)),
+    PRIMARY KEY (applicant_user_id, operation_id),
+    FOREIGN KEY (applicant_user_id, canonical_operation_id)
+        REFERENCES im_v2.group_join_quota_intents (applicant_user_id, operation_id),
+    CHECK (operation_id <> canonical_operation_id)
+);
+
+-- Immutable admission result per control reservation generation, stored on the room owner.
+CREATE TABLE im_v2.group_join_submission_receipts (
+    applicant_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    generation bigint NOT NULL CHECK (generation > 0),
+    request_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    invite_id uuid NOT NULL,
+    token_digest bytea NOT NULL CHECK (octet_length(token_digest) = 32),
+    note text CHECK (note IS NULL OR octet_length(note) BETWEEN 1 AND 500),
+    maximum_pending_per_invite bigint NOT NULL CHECK (maximum_pending_per_invite > 0),
+    intent_created_at timestamptz NOT NULL CHECK (isfinite(intent_created_at)),
+    attempt_created_at timestamptz NOT NULL CHECK (isfinite(attempt_created_at)),
+    disposition text NOT NULL,
+    target_request_id uuid,
+    recorded_at timestamptz NOT NULL CHECK (isfinite(recorded_at)),
+    PRIMARY KEY (applicant_user_id, operation_id, generation),
+    CONSTRAINT group_join_submission_receipt_result_check CHECK (
+        (disposition = 'request' AND target_request_id IS NOT NULL)
+        OR (disposition IN ('already_member', 'unavailable', 'rate_limited', 'permission_denied') AND target_request_id IS NULL))
 );
 
 CREATE TABLE im_v2.group_join_approval_recovery_audit (
@@ -987,10 +884,9 @@ CREATE TABLE im_v2.group_join_approval_recovery_audit (
     resulting_revision bigint,
     room_sequence bigint,
     event_id uuid,
-    plan_id uuid,
     CONSTRAINT group_join_approval_recovery_audit_result_check CHECK (
-        (member_room_id IS NULL AND member_target_user_id IS NULL AND member_action IS NULL AND expected_revision IS NULL AND resulting_revision IS NULL AND room_sequence IS NULL AND event_id IS NULL AND plan_id IS NULL)
-        OR (member_room_id IS NOT NULL AND member_target_user_id IS NOT NULL AND member_action IS NOT NULL AND expected_revision IS NOT NULL AND resulting_revision IS NOT NULL AND room_sequence IS NOT NULL AND event_id IS NOT NULL AND plan_id IS NOT NULL)
+        (member_room_id IS NULL AND member_target_user_id IS NULL AND member_action IS NULL AND expected_revision IS NULL AND resulting_revision IS NULL AND room_sequence IS NULL AND event_id IS NULL)
+        OR (member_room_id IS NOT NULL AND member_target_user_id IS NOT NULL AND member_action IS NOT NULL AND expected_revision IS NOT NULL AND resulting_revision IS NOT NULL AND room_sequence IS NOT NULL AND event_id IS NOT NULL)
     ),
     CONSTRAINT group_join_approval_recovery_audit_completed_check CHECK (outcome <> 'completed' OR expected_revision IS NOT NULL)
 );
@@ -1139,7 +1035,6 @@ CREATE TABLE im_v2.message_edit_operations (
     resulting_message_revision bigint NOT NULL,
     room_sequence bigint NOT NULL,
     event_id uuid NOT NULL,
-    plan_id uuid NOT NULL,
     created_at timestamp with time zone NOT NULL,
     CONSTRAINT message_edit_operations_expected_message_revision_check CHECK ((expected_message_revision > 0)),
     CONSTRAINT message_edit_operations_resulting_message_revision_check CHECK ((resulting_message_revision > 0)),
@@ -1163,20 +1058,54 @@ CREATE TABLE im_v2.message_forward_exports (
     target_client_message_id uuid NOT NULL,
     target_shard_id text NOT NULL CHECK (length(btrim(target_shard_id)) > 0),
     target_epoch bigint NOT NULL CHECK (target_epoch >= 0),
-    payload bytea NOT NULL CHECK (octet_length(payload) BETWEEN 1 AND 1048576),
+    payload bytea CHECK (octet_length(payload) BETWEEN 1 AND 1048576),
     payload_digest bytea NOT NULL CHECK (octet_length(payload_digest) = 32),
     media_ids uuid[] NOT NULL CHECK (cardinality(media_ids) <= 10 AND array_position(media_ids, NULL) IS NULL),
     created_at timestamp with time zone NOT NULL,
+    delivery_completed_at timestamptz,
+    payload_compacted_at timestamptz,
+    CONSTRAINT message_forward_exports_compaction_check CHECK (
+        (payload IS NOT NULL AND payload_compacted_at IS NULL)
+        OR (payload IS NULL AND payload_compacted_at IS NOT NULL AND delivery_completed_at IS NOT NULL
+            AND payload_compacted_at >= delivery_completed_at)
+    ),
     CONSTRAINT message_forward_exports_pair_key UNIQUE (actor_user_id, operation_id, source_message_id, target_room_id),
     CONSTRAINT message_forward_exports_client_key UNIQUE (actor_user_id, target_client_message_id)
 );
 CREATE INDEX message_forward_exports_room_idx ON im_v2.message_forward_exports (source_room_id, created_at, export_id);
 CREATE INDEX message_forward_exports_delivery_idx ON im_v2.message_forward_exports (source_shard_id, created_at, export_id);
 CREATE INDEX message_forward_exports_media_idx ON im_v2.message_forward_exports USING gin (media_ids);
+CREATE INDEX message_forward_exports_compaction_idx ON im_v2.message_forward_exports (delivery_completed_at, export_id)
+    WHERE delivery_completed_at IS NOT NULL AND payload IS NOT NULL;
 CREATE FUNCTION im_v2.reject_forward_export_mutation() RETURNS trigger
     LANGUAGE plpgsql AS $$
 BEGIN
-    RAISE EXCEPTION 'committed forward export is immutable' USING ERRCODE = '23514';
+    IF TG_OP = 'UPDATE' THEN
+        IF OLD.delivery_completed_at IS NULL AND NEW.delivery_completed_at IS NOT NULL
+           AND (to_jsonb(NEW) - 'delivery_completed_at') = (to_jsonb(OLD) - 'delivery_completed_at')
+           AND EXISTS (
+               SELECT 1 FROM im_v2.message_forward_delivery_jobs AS job
+               JOIN im_v2.message_forward_export_receipts AS receipt USING (export_id)
+               WHERE job.export_id = OLD.export_id AND job.state = 'completed'
+                 AND job.completed_at = NEW.delivery_completed_at AND receipt.payload_digest = OLD.payload_digest
+           ) THEN
+            RETURN NEW;
+        END IF;
+        IF OLD.payload IS NOT NULL AND OLD.payload_compacted_at IS NULL
+           AND OLD.delivery_completed_at IS NOT NULL AND NEW.payload IS NULL
+           AND NEW.payload_compacted_at IS NOT NULL AND NEW.payload_compacted_at >= OLD.delivery_completed_at
+           AND (to_jsonb(NEW) - 'payload' - 'payload_compacted_at') = (to_jsonb(OLD) - 'payload' - 'payload_compacted_at')
+           AND EXISTS (
+               SELECT 1 FROM im_v2.message_forward_delivery_jobs AS job
+               JOIN im_v2.message_forward_export_receipts AS receipt USING (export_id)
+               WHERE job.export_id = OLD.export_id AND job.state = 'completed'
+                 AND job.completed_at = OLD.delivery_completed_at AND receipt.payload_digest = OLD.payload_digest
+                 AND receipt.recorded_at <= NEW.payload_compacted_at
+           ) THEN
+            RETURN NEW;
+        END IF;
+    END IF;
+    RAISE EXCEPTION 'committed forward export is immutable'  USING ERRCODE = '23514';
 END;
 $$;
 CREATE TRIGGER message_forward_exports_immutable
@@ -1246,6 +1175,17 @@ $$;
 CREATE TRIGGER message_forward_delivery_jobs_immutable BEFORE UPDATE OR DELETE ON im_v2.message_forward_delivery_jobs
     FOR EACH ROW EXECUTE FUNCTION im_v2.reject_forward_delivery_job_mutation();
 
+-- The terminal delivery and its source compaction eligibility commit together.
+CREATE FUNCTION im_v2.stamp_forward_export_completion() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE im_v2.message_forward_exports SET delivery_completed_at = NEW.completed_at
+    WHERE export_id = NEW.export_id AND delivery_completed_at IS NULL;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER message_forward_delivery_compaction_ready AFTER INSERT OR UPDATE ON im_v2.message_forward_delivery_jobs
+    FOR EACH ROW WHEN (NEW.state = 'completed') EXECUTE FUNCTION im_v2.stamp_forward_export_completion();
+
 -- An inbox receipt is independent of mutable message projections. No source
 -- message/room FK crosses the physical owner boundary.
 CREATE TABLE im_v2.message_forward_inbox (
@@ -1255,7 +1195,9 @@ CREATE TABLE im_v2.message_forward_inbox (
     source_message_id uuid NOT NULL,
     target_room_id uuid NOT NULL,
     target_client_message_id uuid NOT NULL,
-    payload bytea NOT NULL CHECK (octet_length(payload) BETWEEN 1 AND 1048576),
+    target_shard_id text NOT NULL,
+    target_epoch bigint NOT NULL,
+    payload bytea CHECK (octet_length(payload) BETWEEN 1 AND 1048576),
     payload_digest bytea NOT NULL CHECK (octet_length(payload_digest) = 32),
     state text NOT NULL CHECK (state IN ('pending', 'accepted', 'completed', 'rejected')),
     result_message_id uuid,
@@ -1264,6 +1206,13 @@ CREATE TABLE im_v2.message_forward_inbox (
     created_at timestamptz NOT NULL,
     accepted_at timestamptz,
     completed_at timestamptz,
+    payload_compacted_at timestamptz,
+    CONSTRAINT message_forward_inbox_compaction_check CHECK (
+        (payload IS NOT NULL AND payload_compacted_at IS NULL)
+        OR (payload IS NULL AND payload_compacted_at IS NOT NULL AND state IN ('completed', 'rejected')
+            AND completed_at IS NOT NULL AND payload_compacted_at >= completed_at)
+    ),
+    CONSTRAINT message_forward_inbox_owner_check CHECK (length(target_shard_id) > 0 AND target_epoch >= 0),
     CONSTRAINT message_forward_inbox_pair_key UNIQUE (actor_user_id, operation_id, source_message_id, target_room_id),
     CONSTRAINT message_forward_inbox_client_key UNIQUE (actor_user_id, target_client_message_id),
     CONSTRAINT message_forward_inbox_outcome_check CHECK (
@@ -1273,13 +1222,24 @@ CREATE TABLE im_v2.message_forward_inbox (
     )
 );
 CREATE INDEX message_forward_inbox_pending_idx ON im_v2.message_forward_inbox (target_room_id, created_at, export_id) WHERE state IN ('pending', 'accepted');
+CREATE INDEX message_forward_inbox_compaction_idx ON im_v2.message_forward_inbox (completed_at, export_id)
+    WHERE state IN ('completed', 'rejected') AND payload IS NOT NULL;
 CREATE FUNCTION im_v2.reject_forward_inbox_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION 'forward inbox receipt cannot be deleted' USING ERRCODE = '23514';
     END IF;
-    IF ROW(NEW.export_id, NEW.actor_user_id, NEW.operation_id, NEW.source_message_id, NEW.target_room_id, NEW.target_client_message_id, NEW.payload, NEW.payload_digest, NEW.created_at)
-       IS DISTINCT FROM ROW(OLD.export_id, OLD.actor_user_id, OLD.operation_id, OLD.source_message_id, OLD.target_room_id, OLD.target_client_message_id, OLD.payload, OLD.payload_digest, OLD.created_at)
+    -- Only the terminal body can be removed, once; identity and outcome survive.
+    IF OLD.state IN ('completed', 'rejected') AND OLD.payload IS NOT NULL
+       AND OLD.payload_compacted_at IS NULL AND NEW.payload IS NULL
+       AND NEW.payload_compacted_at IS NOT NULL AND NEW.payload_compacted_at >= OLD.completed_at
+       AND (to_jsonb(NEW) - 'payload' - 'payload_compacted_at')
+           = (to_jsonb(OLD) - 'payload' - 'payload_compacted_at') THEN
+        RETURN NEW;
+    END IF;
+    IF ROW(NEW.export_id, NEW.actor_user_id, NEW.operation_id, NEW.source_message_id, NEW.target_room_id, NEW.target_client_message_id, NEW.target_shard_id, NEW.target_epoch, NEW.payload, NEW.payload_digest, NEW.created_at)
+       IS DISTINCT FROM ROW(OLD.export_id, OLD.actor_user_id, OLD.operation_id, OLD.source_message_id, OLD.target_room_id, OLD.target_client_message_id, OLD.target_shard_id, OLD.target_epoch, OLD.payload, OLD.payload_digest, OLD.created_at)
+       OR NEW.payload_compacted_at IS DISTINCT FROM OLD.payload_compacted_at
        OR (OLD.state IN ('completed', 'rejected') AND NEW IS DISTINCT FROM OLD)
        OR (OLD.state = 'pending' AND NEW.state NOT IN ('pending', 'accepted', 'rejected'))
        OR (OLD.state = 'accepted' AND (
@@ -1464,7 +1424,6 @@ CREATE UNIQUE INDEX room_events_message_edit_revision_idx
     (room_id, lower(payload->>'message_id'), (payload->>'message_revision'))
     WHERE event_type = 'message.edited';
 
-
 CREATE VIEW im_v2.message_projection_state_values AS
  SELECT state.state_id,
     state.message_id,
@@ -1491,7 +1450,6 @@ CREATE TABLE im_v2.message_reaction_operations (
     action text NOT NULL,
     room_sequence bigint NOT NULL,
     event_id uuid NOT NULL,
-    plan_id uuid NOT NULL,
     created_at timestamp with time zone NOT NULL,
     CONSTRAINT message_reaction_operations_action_check CHECK ((action = ANY (ARRAY['add'::text, 'remove'::text]))),
     CONSTRAINT message_reaction_operations_room_sequence_check CHECK ((room_sequence > 0))
@@ -1514,7 +1472,6 @@ CREATE TABLE im_v2.message_withdrawal_operations (
     resulting_message_revision bigint NOT NULL,
     room_sequence bigint NOT NULL,
     event_id uuid NOT NULL,
-    plan_id uuid NOT NULL,
     created_at timestamp with time zone NOT NULL,
     CONSTRAINT message_withdrawal_operations_expected_message_revision_check CHECK ((expected_message_revision > 0)),
     CONSTRAINT message_withdrawal_operations_resulting_message_revision_check CHECK ((resulting_message_revision > 0)),
@@ -1557,6 +1514,20 @@ CREATE TABLE im_v2.messages (
 CREATE INDEX messages_room_sender_sequence_idx
     ON im_v2.messages (room_id, sender_user_id, room_sequence DESC);
 
+-- Latest authorized summary candidates skip withdrawn history and avoid per-room sorting.
+CREATE INDEX messages_latest_visible_idx
+    ON im_v2.messages (room_id, room_sequence DESC, message_id DESC)
+    WHERE withdrawn_at IS NULL;
+
+CREATE INDEX messages_visible_membership_idx
+    ON im_v2.messages (room_id, accepted_membership_revision, room_sequence DESC)
+    WHERE accepted_event_storage = 'message_row' AND withdrawn_at IS NULL;
+
+CREATE INDEX room_events_accepted_membership_idx
+    ON im_v2.room_events (room_id, committed_membership_revision, room_sequence DESC)
+    WHERE event_type = 'message.accepted';
+
+
 -- A send's result outlives its editable/deletable content. Deliberately no
 -- message/room foreign key or cascading delete: content retention must not
 -- make an acknowledged operation eligible for acceptance a second time.
@@ -1564,15 +1535,14 @@ CREATE TABLE im_v2.message_send_completions (
     room_id uuid NOT NULL,
     sender_user_id uuid NOT NULL,
     client_message_id uuid NOT NULL,
-    fingerprint_version smallint NOT NULL CHECK (fingerprint_version IN (1, 2)),
+    fingerprint_version smallint NOT NULL CHECK (fingerprint_version = 3),
     request_fingerprint bytea NOT NULL CHECK (octet_length(request_fingerprint) = 32),
     message_id uuid NOT NULL,
     event_id uuid NOT NULL,
     room_sequence bigint NOT NULL CHECK (room_sequence > 0),
     timeline_sequence bigint NOT NULL CHECK (timeline_sequence > 0),
     accepted_membership_revision bigint NOT NULL CHECK (accepted_membership_revision >= 0),
-    delivery_authority text NOT NULL CHECK (delivery_authority IN ('personal', 'room_log')),
-    group_delivery_mode text CHECK (group_delivery_mode IN ('standard_fanout', 'large_group_hybrid')),
+    group_capacity_class text CHECK (group_capacity_class IN ('standard', 'large')),
     direct_recipient_user_id uuid,
     created_at timestamp with time zone NOT NULL,
     PRIMARY KEY (room_id, sender_user_id, client_message_id)
@@ -1593,6 +1563,107 @@ $$;
 CREATE TRIGGER message_send_completions_immutable
     BEFORE UPDATE ON im_v2.message_send_completions
     FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_send_completion_mutation();
+
+-- Control authorization and its recovery obligation are one durable row.
+CREATE TABLE im_v2.direct_authorization_intents (
+    room_id uuid NOT NULL,
+    sender_user_id uuid NOT NULL,
+    client_message_id uuid NOT NULL,
+    recipient_user_id uuid NOT NULL CHECK (recipient_user_id <> sender_user_id),
+    request_fingerprint bytea NOT NULL CHECK (octet_length(request_fingerprint) = 32),
+    generation bigint NOT NULL CHECK (generation > 0),
+    owner_shard_id text NOT NULL CHECK (octet_length(owner_shard_id) > 0),
+    owner_epoch bigint NOT NULL CHECK (owner_epoch >= 0),
+    policy jsonb NOT NULL CHECK (jsonb_typeof(policy) = 'object'),
+    disposition text,
+    event_id uuid,
+    created_at timestamptz NOT NULL CHECK (isfinite(created_at)),
+    attempt_created_at timestamptz NOT NULL CHECK (isfinite(attempt_created_at)),
+    updated_at timestamptz NOT NULL CHECK (isfinite(updated_at)),
+    next_check_at timestamptz NOT NULL CHECK (isfinite(next_check_at)),
+    lease_token uuid,
+    lease_until timestamptz,
+    attempt_count bigint DEFAULT 0 NOT NULL CHECK (attempt_count >= 0),
+    PRIMARY KEY (room_id, sender_user_id, client_message_id),
+    CONSTRAINT direct_authorization_intent_times_check CHECK (created_at <= attempt_created_at AND attempt_created_at <= updated_at),
+    CONSTRAINT direct_authorization_intent_result_check CHECK (
+        ((disposition IS NULL OR disposition = 'aborted') AND event_id IS NULL)
+        OR (disposition IS NOT NULL AND disposition IN ('accepted', 'denied') AND event_id IS NOT NULL)),
+    CONSTRAINT direct_authorization_intent_lease_check CHECK (
+        (lease_token IS NULL AND lease_until IS NULL)
+        OR (lease_token IS NOT NULL AND lease_until IS NOT NULL AND isfinite(lease_until) AND disposition IS NULL))
+);
+CREATE INDEX direct_authorization_held_sender_idx ON im_v2.direct_authorization_intents
+    (sender_user_id, recipient_user_id, room_id, client_message_id) WHERE disposition IS NULL;
+CREATE INDEX direct_authorization_held_recipient_idx ON im_v2.direct_authorization_intents
+    (recipient_user_id, sender_user_id, room_id, client_message_id) WHERE disposition IS NULL;
+CREATE INDEX direct_authorization_recovery_idx ON im_v2.direct_authorization_intents
+    (next_check_at, room_id, sender_user_id, client_message_id) WHERE disposition IS NULL;
+
+CREATE FUNCTION im_v2.guard_direct_authorization_intent() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'authorization obligation cannot be deleted' USING ERRCODE = '23514';
+    END IF;
+    IF ROW(NEW.room_id, NEW.sender_user_id, NEW.client_message_id, NEW.recipient_user_id, NEW.request_fingerprint, NEW.created_at)
+        IS DISTINCT FROM ROW(OLD.room_id, OLD.sender_user_id, OLD.client_message_id, OLD.recipient_user_id, OLD.request_fingerprint, OLD.created_at)
+        OR NEW.updated_at < OLD.updated_at THEN
+        RAISE EXCEPTION 'authorization operation identity cannot change' USING ERRCODE = '23514';
+    END IF;
+    IF OLD.disposition IS NULL THEN
+        IF ROW(NEW.generation, NEW.owner_shard_id, NEW.owner_epoch, NEW.policy, NEW.attempt_created_at)
+            IS DISTINCT FROM ROW(OLD.generation, OLD.owner_shard_id, OLD.owner_epoch, OLD.policy, OLD.attempt_created_at) THEN
+            RAISE EXCEPTION 'held authorization identity cannot change' USING ERRCODE = '23514';
+        END IF;
+    ELSIF OLD.disposition = 'aborted' AND NEW.disposition IS NULL THEN
+        IF NEW.generation - 1 <> OLD.generation OR NEW.attempt_created_at < OLD.updated_at
+            OR NEW.lease_token IS NOT NULL OR NEW.lease_until IS NOT NULL OR NEW.attempt_count <> 0 THEN
+            RAISE EXCEPTION 'authorization renewal requires a fresh generation' USING ERRCODE = '23514';
+        END IF;
+    ELSIF NEW IS DISTINCT FROM OLD THEN
+        RAISE EXCEPTION 'authorization terminal result cannot change' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER direct_authorization_intents_guard
+    BEFORE UPDATE OR DELETE ON im_v2.direct_authorization_intents
+    FOR EACH ROW EXECUTE FUNCTION im_v2.guard_direct_authorization_intent();
+
+-- Owner-local authorization terminal proof, retained until a proven retry/GC
+-- contract exists. An aborted generation must reject every late callback.
+CREATE TABLE im_v2.direct_authorization_receipts (
+    room_id uuid NOT NULL,
+    sender_user_id uuid NOT NULL,
+    client_message_id uuid NOT NULL,
+    generation bigint NOT NULL CHECK (generation > 0),
+    recipient_user_id uuid NOT NULL CHECK (recipient_user_id <> sender_user_id),
+    owner_shard_id text NOT NULL CHECK (octet_length(owner_shard_id) > 0),
+    owner_epoch bigint NOT NULL CHECK (owner_epoch >= 0),
+    request_fingerprint bytea NOT NULL CHECK (octet_length(request_fingerprint) = 32),
+    disposition text NOT NULL,
+    event_id uuid,
+    recorded_at timestamptz NOT NULL CHECK (isfinite(recorded_at)),
+    PRIMARY KEY (room_id, sender_user_id, client_message_id, generation),
+    CONSTRAINT direct_authorization_receipt_result_check CHECK (
+        (disposition = 'aborted' AND event_id IS NULL)
+        OR (disposition IN ('accepted', 'denied') AND event_id IS NOT NULL))
+);
+
+CREATE FUNCTION im_v2.reject_direct_authorization_receipt_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'authorization terminal proof cannot be updated or deleted'
+        USING ERRCODE = '23514';
+END;
+$$;
+
+CREATE TRIGGER direct_authorization_receipts_immutable
+    BEFORE UPDATE OR DELETE ON im_v2.direct_authorization_receipts
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_direct_authorization_receipt_mutation();
 
 -- Accepted room-log events may reference this immutable snapshot after a
 -- message is revised. The trigger below captures the prior revision inside
@@ -1659,7 +1730,6 @@ CREATE TABLE im_v2.moderation_operations (
     reason_code text NOT NULL,
     room_sequence bigint NOT NULL,
     event_id uuid NOT NULL,
-    plan_id uuid NOT NULL,
     created_at timestamp with time zone NOT NULL,
     CONSTRAINT moderation_operations_action_check CHECK ((action = ANY (ARRAY['redact_message'::text, 'remove_member'::text, 'mute_member'::text, 'freeze_room'::text, 'unfreeze_room'::text]))),
     CONSTRAINT moderation_operations_check CHECK ((((action = 'redact_message'::text) AND (target_user_id IS NULL) AND (message_id IS NOT NULL) AND (mute_until IS NULL)) OR ((action = ANY (ARRAY['remove_member'::text, 'mute_member'::text])) AND (target_user_id IS NOT NULL) AND (message_id IS NULL)) OR ((action = ANY (ARRAY['freeze_room'::text, 'unfreeze_room'::text])) AND (target_user_id IS NULL) AND (message_id IS NULL) AND (mute_until IS NULL)))),
@@ -1824,6 +1894,7 @@ CREATE TABLE im_v2.read_receipt_preference_operations (
     operation_id uuid NOT NULL,
     allows_direct_read_receipts boolean NOT NULL,
     allows_group_read_receipts boolean NOT NULL,
+    preference_revision bigint NOT NULL CHECK (preference_revision > 0),
     updated_at timestamp with time zone NOT NULL
 );
 
@@ -1861,27 +1932,12 @@ CREATE TABLE im_v2.room_admission (
     eligible_member_count bigint DEFAULT 0 NOT NULL,
     command_window_limit bigint NOT NULL,
     command_window_used bigint DEFAULT 0 NOT NULL,
-    fanout_window_limit bigint NOT NULL,
-    fanout_window_used bigint DEFAULT 0 NOT NULL,
-    max_outstanding_fanout_units bigint NOT NULL,
-    outstanding_fanout_units bigint DEFAULT 0 NOT NULL,
-    max_outstanding_plans bigint NOT NULL,
-    outstanding_plans bigint DEFAULT 0 NOT NULL,
     shard_lease_id uuid NOT NULL,
     shard_lease_generation bigint NOT NULL,
     CONSTRAINT room_admission_check CHECK ((command_window_used <= command_window_limit)),
-    CONSTRAINT room_admission_check1 CHECK ((fanout_window_used <= fanout_window_limit)),
-    CONSTRAINT room_admission_check2 CHECK ((outstanding_fanout_units <= max_outstanding_fanout_units)),
-    CONSTRAINT room_admission_check3 CHECK ((outstanding_plans <= max_outstanding_plans)),
     CONSTRAINT room_admission_command_window_limit_check CHECK ((command_window_limit >= 0)),
     CONSTRAINT room_admission_command_window_used_check CHECK ((command_window_used >= 0)),
     CONSTRAINT room_admission_eligible_member_count_check CHECK ((eligible_member_count >= 0)),
-    CONSTRAINT room_admission_fanout_window_limit_check CHECK ((fanout_window_limit >= 0)),
-    CONSTRAINT room_admission_fanout_window_used_check CHECK ((fanout_window_used >= 0)),
-    CONSTRAINT room_admission_max_outstanding_fanout_units_check CHECK ((max_outstanding_fanout_units >= 0)),
-    CONSTRAINT room_admission_max_outstanding_plans_check CHECK ((max_outstanding_plans >= 0)),
-    CONSTRAINT room_admission_outstanding_fanout_units_check CHECK ((outstanding_fanout_units >= 0)),
-    CONSTRAINT room_admission_outstanding_plans_check CHECK ((outstanding_plans >= 0)),
     CONSTRAINT room_admission_shard_lease_generation_check CHECK ((shard_lease_generation > 0))
 );
 
@@ -1928,7 +1984,6 @@ CREATE TABLE im_v2.room_membership_operations (
     resulting_membership_revision bigint NOT NULL,
     room_sequence bigint NOT NULL,
     event_id uuid NOT NULL,
-    plan_id uuid NOT NULL,
     created_at timestamp with time zone NOT NULL,
     CONSTRAINT room_membership_operations_action_check CHECK ((action = ANY (ARRAY['add'::text, 'remove'::text]))),
     CONSTRAINT room_membership_operations_expected_membership_revision_check CHECK ((expected_membership_revision >= 0)),
@@ -1947,23 +2002,6 @@ CREATE TABLE im_v2.room_memberships (
     CONSTRAINT room_memberships_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'admin'::text, 'member'::text])))
 );
 
-CREATE TABLE im_v2.room_outbox (
-    source_event_id uuid NOT NULL,
-    plan_id uuid NOT NULL,
-    state text NOT NULL,
-    claim_token uuid,
-    lease_expires_at timestamp with time zone,
-    retry_count bigint DEFAULT 0 NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    terminal_at timestamp with time zone,
-    next_attempt_at timestamp with time zone,
-    paused_at timestamp with time zone,
-    last_failure_code text,
-    CONSTRAINT room_outbox_pause_state_check CHECK (((state = 'paused'::text) = (paused_at IS NOT NULL))),
-    CONSTRAINT room_outbox_retry_count_check CHECK ((retry_count >= 0)),
-    CONSTRAINT room_outbox_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'published'::text, 'terminal'::text, 'paused'::text])))
-);
-
 CREATE TABLE im_v2.room_pinned_message_operations (
     actor_user_id uuid NOT NULL,
     operation_id uuid NOT NULL,
@@ -1972,7 +2010,6 @@ CREATE TABLE im_v2.room_pinned_message_operations (
     is_pinned boolean NOT NULL,
     room_sequence bigint NOT NULL,
     event_id uuid NOT NULL,
-    plan_id uuid NOT NULL,
     created_at timestamp with time zone NOT NULL,
     CONSTRAINT room_pinned_message_operations_room_sequence_check CHECK ((room_sequence > 0))
 );
@@ -2016,6 +2053,7 @@ $$;
 
 CREATE TABLE im_v2.rooms (
     room_id uuid NOT NULL,
+    migration_fence_id uuid,
     owner_epoch bigint DEFAULT 0 NOT NULL CHECK (owner_epoch >= 0),
     room_kind text DEFAULT 'group'::text NOT NULL,
     room_shard_id text NOT NULL,
@@ -2025,23 +2063,19 @@ CREATE TABLE im_v2.rooms (
     frozen_at timestamp with time zone,
     frozen_by_user_id uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    delivery_mode text DEFAULT 'standard_fanout'::text NOT NULL,
-    -- 权威副本形态。与投递模式刻意分开：投递模式描述用哪种扇出规划器且在房间创建后
-    -- 不可变，"哪一份是权威副本"要能按房间推进。单聊由部署开关决定、忽略本列；
-    -- 群聊以本列为准（混合大群固定 room_log，标准群由创建时的部署策略决定）。
-    delivery_authority text DEFAULT 'fanout'::text NOT NULL,
+    capacity_class text DEFAULT 'standard'::text NOT NULL,
+    -- 群权限状态的独立修订；公共内容统一从房间日志恢复。
     group_permission_revision bigint DEFAULT 1 NOT NULL,
     timeline_sequence bigint DEFAULT 0 NOT NULL,
-    -- 房间序列最后一次前进的时刻。由 rooms_touch_last_event_at 维护，
-    -- 因此会话排序不依赖事件最终落在 room_events 还是 message_row。
+    -- 房间序列最后一次前进的事实时间，由 rooms_touch_last_event_at 维护。
+    -- 客户端会话排序使用有效活动投影，不依赖该字段或服务端活动排行。
     last_event_at timestamp with time zone DEFAULT now() NOT NULL,
     -- 已裁剪的历史下界：该序号之前的事件已按保留窗口删除，客户端游标低于它时
     -- 必须被显式告知"历史不完整"，而不是静默少几条。单调只增。
     log_trimmed_through_room_sequence bigint DEFAULT 0 NOT NULL,
     CONSTRAINT rooms_check CHECK ((((frozen_at IS NULL) AND (frozen_by_user_id IS NULL)) OR ((frozen_at IS NOT NULL) AND (frozen_by_user_id IS NOT NULL)))),
-    CONSTRAINT rooms_delivery_mode_check CHECK ((delivery_mode = ANY (ARRAY['standard_fanout'::text, 'large_group_hybrid'::text]))),
-    CONSTRAINT rooms_direct_delivery_mode_check CHECK (((room_kind = 'group'::text) OR (delivery_mode = 'standard_fanout'::text))),
-    CONSTRAINT rooms_delivery_authority_check CHECK ((delivery_authority = ANY (ARRAY['fanout'::text, 'room_log'::text]))),
+    CONSTRAINT rooms_capacity_class_check CHECK ((capacity_class = ANY (ARRAY['standard'::text, 'large'::text]))),
+    CONSTRAINT rooms_direct_capacity_class_check CHECK (((room_kind = 'group'::text) OR (capacity_class = 'standard'::text))),
     CONSTRAINT rooms_group_permission_revision_check CHECK ((group_permission_revision > 0)),
     CONSTRAINT rooms_membership_revision_check CHECK ((membership_revision >= 0)),
     CONSTRAINT rooms_room_kind_check CHECK ((room_kind = ANY (ARRAY['group'::text, 'direct'::text]))),
@@ -2055,12 +2089,38 @@ CREATE TABLE im_v2.rooms (
 CREATE TRIGGER rooms_touch_last_event_at BEFORE UPDATE ON im_v2.rooms
     FOR EACH ROW EXECUTE FUNCTION im_v2.touch_room_last_event_at();
 
-CREATE INDEX rooms_last_event_at_idx
-    ON im_v2.rooms (last_event_at DESC, room_id);
-
 -- Physical room-store routing is control-plane metadata. The canonical room,
 -- membership and message rows live only in the selected owner store; these
 -- records contain no endpoint and are never sent to clients.
+CREATE TABLE im_v2.room_owner_migrations (
+    migration_id uuid PRIMARY KEY,
+    room_id uuid NOT NULL,
+    source_shard_id text NOT NULL CHECK (length(btrim(source_shard_id)) > 0),
+    target_shard_id text NOT NULL CHECK (length(btrim(target_shard_id)) > 0 AND target_shard_id <> source_shard_id),
+    source_epoch bigint NOT NULL CHECK (source_epoch >= 0),
+    target_epoch bigint NOT NULL CHECK (target_epoch > source_epoch AND target_epoch - source_epoch = 1),
+    phase text NOT NULL CHECK (phase IN ('prepared', 'freezing', 'frozen', 'copying', 'copied', 'verified', 'published', 'retaining', 'completed', 'aborted')),
+    created_at timestamptz NOT NULL CHECK (isfinite(created_at)),
+    updated_at timestamptz NOT NULL CHECK (isfinite(updated_at) AND updated_at >= created_at)
+);
+CREATE UNIQUE INDEX room_owner_migrations_active_room_key ON im_v2.room_owner_migrations(room_id)
+    WHERE phase NOT IN ('completed', 'aborted');
+
+CREATE FUNCTION im_v2.preserve_room_migration_identity() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+    IF (NEW.migration_id, NEW.room_id, NEW.source_shard_id, NEW.target_shard_id,
+        NEW.source_epoch, NEW.target_epoch, NEW.created_at) IS DISTINCT FROM
+       (OLD.migration_id, OLD.room_id, OLD.source_shard_id, OLD.target_shard_id,
+        OLD.source_epoch, OLD.target_epoch, OLD.created_at) THEN
+        RAISE EXCEPTION 'room migration identity is immutable';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER room_owner_migrations_identity_guard BEFORE UPDATE ON im_v2.room_owner_migrations
+    FOR EACH ROW EXECUTE FUNCTION im_v2.preserve_room_migration_identity();
+
 CREATE TABLE im_v2.room_owner_routes (
     room_id uuid NOT NULL,
     room_shard_id text NOT NULL,
@@ -2071,6 +2131,45 @@ CREATE TABLE im_v2.room_owner_routes (
     CONSTRAINT room_owner_routes_room_shard_id_check CHECK ((length(btrim(room_shard_id)) > 0)),
     CONSTRAINT room_owner_routes_route_epoch_check CHECK ((route_epoch >= 0))
 );
+
+-- A control-plane fence for multi-page membership scans. Public message
+-- writes never touch this row. The UUID also prevents cursor reuse after reset.
+CREATE TABLE im_v2.room_recovery_topology (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    generation uuid NOT NULL DEFAULT gen_random_uuid()
+);
+INSERT INTO im_v2.room_recovery_topology (singleton) VALUES (true);
+
+CREATE FUNCTION im_v2.invalidate_room_recovery_topology() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        IF NEW.room_id = OLD.room_id
+           AND NEW.room_shard_id = OLD.room_shard_id
+           AND NEW.route_epoch = OLD.route_epoch THEN
+            RETURN NULL;
+        END IF;
+    ELSIF TG_OP = 'INSERT' THEN
+        -- New rooms at epoch zero are discovered through personal membership
+        -- events. Importing an existing owner at a later epoch invalidates scans.
+        IF NEW.route_epoch = 0 THEN RETURN NULL; END IF;
+    END IF;
+    UPDATE im_v2.room_recovery_topology SET generation = gen_random_uuid()
+        WHERE singleton = true;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'room recovery topology fence is missing';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER room_owner_routes_recovery_fence
+    AFTER INSERT OR UPDATE OR DELETE ON im_v2.room_owner_routes
+    FOR EACH ROW EXECUTE FUNCTION im_v2.invalidate_room_recovery_topology();
+CREATE TRIGGER room_owner_routes_recovery_truncate_fence
+    AFTER TRUNCATE ON im_v2.room_owner_routes
+    FOR EACH STATEMENT EXECUTE FUNCTION im_v2.invalidate_room_recovery_topology();
 
 CREATE TABLE im_v2.direct_room_owner_routes (
     lower_user_id uuid NOT NULL,
@@ -2096,7 +2195,6 @@ CREATE TABLE im_v2.group_room_creation_intents (
     operation_id uuid NOT NULL,
     room_id uuid NOT NULL,
     event_id uuid NOT NULL,
-    plan_id uuid NOT NULL,
     room_shard_id text NOT NULL,
     route_epoch bigint DEFAULT 0 NOT NULL,
     request_fingerprint bytea NOT NULL,
@@ -2107,7 +2205,6 @@ CREATE TABLE im_v2.group_room_creation_intents (
     CONSTRAINT group_room_creation_intents_pkey PRIMARY KEY (actor_user_id, operation_id),
     CONSTRAINT group_room_creation_intents_room_id_key UNIQUE (room_id),
     CONSTRAINT group_room_creation_intents_event_id_key UNIQUE (event_id),
-    CONSTRAINT group_room_creation_intents_plan_id_key UNIQUE (plan_id),
     CONSTRAINT group_room_creation_intents_room_shard_id_check CHECK ((length(btrim(room_shard_id)) > 0)),
     CONSTRAINT group_room_creation_intents_route_epoch_check CHECK ((route_epoch >= 0)),
     CONSTRAINT group_room_creation_intents_request_fingerprint_check CHECK ((octet_length(request_fingerprint) = 32)),
@@ -2156,15 +2253,21 @@ CREATE UNIQUE INDEX group_room_creation_intent_pages_final_key
     ON im_v2.group_room_creation_intent_pages (actor_user_id, operation_id)
     WHERE is_final;
 
+CREATE TABLE im_v2.control_housekeeping_cursor (
+    singleton boolean DEFAULT true NOT NULL PRIMARY KEY CHECK (singleton),
+    rotation bigint DEFAULT 0 NOT NULL CHECK (rotation >= 0)
+);
+INSERT INTO im_v2.control_housekeeping_cursor (singleton, rotation) VALUES (true, 0);
+
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-33'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-33'::text))
+    schema_id text DEFAULT 'im-v2-current-49'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-49'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-33');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-49');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
@@ -2174,25 +2277,10 @@ CREATE TABLE im_v2.shard_admission_pools (
     valid_until timestamp with time zone NOT NULL,
     command_window_limit bigint NOT NULL,
     command_window_used bigint DEFAULT 0 NOT NULL,
-    fanout_window_limit bigint NOT NULL,
-    fanout_window_used bigint DEFAULT 0 NOT NULL,
-    max_outstanding_fanout_units bigint NOT NULL,
-    outstanding_fanout_units bigint DEFAULT 0 NOT NULL,
-    max_outstanding_plans bigint NOT NULL,
-    outstanding_plans bigint DEFAULT 0 NOT NULL,
     CONSTRAINT shard_admission_pools_check CHECK ((command_window_used <= command_window_limit)),
-    CONSTRAINT shard_admission_pools_check1 CHECK ((fanout_window_used <= fanout_window_limit)),
-    CONSTRAINT shard_admission_pools_check2 CHECK ((outstanding_fanout_units <= max_outstanding_fanout_units)),
-    CONSTRAINT shard_admission_pools_check3 CHECK ((outstanding_plans <= max_outstanding_plans)),
     CONSTRAINT shard_admission_pools_command_window_limit_check CHECK ((command_window_limit >= 0)),
     CONSTRAINT shard_admission_pools_command_window_used_check CHECK ((command_window_used >= 0)),
-    CONSTRAINT shard_admission_pools_fanout_window_limit_check CHECK ((fanout_window_limit >= 0)),
-    CONSTRAINT shard_admission_pools_fanout_window_used_check CHECK ((fanout_window_used >= 0)),
-    CONSTRAINT shard_admission_pools_generation_check CHECK ((generation > 0)),
-    CONSTRAINT shard_admission_pools_max_outstanding_fanout_units_check CHECK ((max_outstanding_fanout_units >= 0)),
-    CONSTRAINT shard_admission_pools_max_outstanding_plans_check CHECK ((max_outstanding_plans >= 0)),
-    CONSTRAINT shard_admission_pools_outstanding_fanout_units_check CHECK ((outstanding_fanout_units >= 0)),
-    CONSTRAINT shard_admission_pools_outstanding_plans_check CHECK ((outstanding_plans >= 0))
+    CONSTRAINT shard_admission_pools_generation_check CHECK ((generation > 0))
 );
 
 CREATE TABLE im_v2.special_account_message_audit (
@@ -2487,13 +2575,11 @@ CREATE TABLE im_v2.user_projection_versions (
     valid_from_sequence bigint NOT NULL,
     valid_to_sequence bigint,
     source_event_id uuid NOT NULL,
-    payload jsonb,
+    payload jsonb NOT NULL,
     created_at timestamp with time zone NOT NULL,
-    message_state_id uuid,
     CONSTRAINT user_projection_versions_check CHECK (((valid_to_sequence IS NULL) OR (valid_to_sequence > valid_from_sequence))),
-    CONSTRAINT user_projection_versions_check1 CHECK (((scope_room_id IS NULL) OR ((payload IS NOT NULL) AND (lower((payload ->> 'room_id'::text)) = (scope_room_id)::text)) OR ((projection_kind = 'message'::text) AND (message_state_id IS NOT NULL)))),
+    CONSTRAINT user_projection_versions_check1 CHECK (((scope_room_id IS NULL) OR ((payload IS NOT NULL) AND (lower((payload ->> 'room_id'::text)) = (scope_room_id)::text)))),
     CONSTRAINT user_projection_versions_entity_key_check CHECK (((length(entity_key) >= 1) AND (length(entity_key) <= 512))),
-    CONSTRAINT user_projection_versions_payload_storage_check CHECK (((payload IS NOT NULL) OR ((projection_kind = 'message'::text) AND (message_state_id IS NOT NULL)))),
     CONSTRAINT user_projection_versions_projection_kind_check CHECK (((length(projection_kind) >= 1) AND (length(projection_kind) <= 64))),
     CONSTRAINT user_projection_versions_valid_from_sequence_check CHECK ((valid_from_sequence > 0))
 );
@@ -2502,6 +2588,7 @@ CREATE TABLE im_v2.user_read_receipt_preferences (
     user_id uuid NOT NULL,
     allows_direct_read_receipts boolean DEFAULT true NOT NULL,
     allows_group_read_receipts boolean DEFAULT true NOT NULL,
+    preference_revision bigint DEFAULT 1 NOT NULL CHECK (preference_revision > 0),
     updated_at timestamp with time zone NOT NULL
 );
 
@@ -2614,16 +2701,56 @@ CREATE TABLE im_v2.user_stranger_message_preferences (
     updated_at timestamp with time zone NOT NULL
 );
 
+CREATE TABLE im_v2.user_state_event_outbox (
+    source_room_id uuid,
+    CONSTRAINT user_state_event_outbox_room_binding CHECK (source_room_id IS NULL OR COALESCE(lower(payload->>'room_id') = source_room_id::text, false)),
+    source_event_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    projection_kind text NOT NULL CHECK (projection_kind IN ('room', 'membership', 'direct_room_profile', 'own_read_watermark', 'direct_read_receipt', 'read_receipt_preferences', 'conversation_state', 'timeline_activity', 'direct_sending_capability')),
+    payload jsonb NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
+    created_at timestamptz NOT NULL CHECK (isfinite(created_at)),
+    state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'leased', 'delivered', 'paused')),
+    next_attempt_at timestamptz NOT NULL CHECK (isfinite(next_attempt_at)),
+    attempt integer NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+    claim_token uuid,
+    lease_until timestamptz CHECK (lease_until IS NULL OR isfinite(lease_until)),
+    user_sync_sequence bigint CHECK (user_sync_sequence > 0),
+    delivered_at timestamptz CHECK (delivered_at IS NULL OR isfinite(delivered_at)),
+    PRIMARY KEY (source_event_id, user_id, projection_kind),
+    CHECK ((state = 'leased') = (claim_token IS NOT NULL AND lease_until IS NOT NULL)),
+    CHECK (state = 'leased' OR (claim_token IS NULL AND lease_until IS NULL)),
+    CHECK ((state = 'delivered') = (user_sync_sequence IS NOT NULL AND delivered_at IS NOT NULL)),
+    CHECK (state = 'delivered' OR (user_sync_sequence IS NULL AND delivered_at IS NULL))
+);
+CREATE INDEX user_state_event_outbox_source_room_idx
+    ON im_v2.user_state_event_outbox (source_room_id, source_event_id, user_id, projection_kind)
+    WHERE source_room_id IS NOT NULL;
+CREATE INDEX user_state_event_outbox_due_idx
+    ON im_v2.user_state_event_outbox (next_attempt_at, created_at, source_event_id, user_id, projection_kind)
+    WHERE state IN ('pending', 'leased');
+
+CREATE INDEX user_state_event_outbox_delivered_idx
+    ON im_v2.user_state_event_outbox (delivered_at, source_event_id, user_id, projection_kind)
+    WHERE state = 'delivered';
+
+CREATE TABLE im_v2.user_state_event_receipts (
+    user_id uuid NOT NULL,
+    source_event_id uuid NOT NULL,
+    projection_kind text NOT NULL CHECK (projection_kind IN ('room', 'membership', 'direct_room_profile', 'own_read_watermark', 'direct_read_receipt', 'read_receipt_preferences', 'conversation_state', 'timeline_activity', 'direct_sending_capability')),
+    payload jsonb NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
+    projection_payload jsonb NOT NULL CHECK (jsonb_typeof(projection_payload) = 'object'),
+    source_created_at timestamptz NOT NULL CHECK (isfinite(source_created_at)),
+    user_sync_sequence bigint CHECK (user_sync_sequence > 0),
+    PRIMARY KEY (user_id, source_event_id, projection_kind)
+);
+
 CREATE TABLE im_v2.user_sync_log (
     user_id uuid NOT NULL,
     user_sync_sequence bigint NOT NULL,
     source_event_id uuid NOT NULL,
     projection_kind text NOT NULL,
-    payload jsonb,
-    payload_storage text DEFAULT 'inline'::text NOT NULL,
+    payload jsonb NOT NULL,
     created_at timestamp with time zone NOT NULL,
-    CONSTRAINT user_sync_log_check CHECK ((((payload_storage = 'inline'::text) AND (payload IS NOT NULL)) OR ((payload_storage = 'fanout_shared'::text) AND (payload IS NULL)))),
-    CONSTRAINT user_sync_log_payload_storage_check CHECK ((((payload_storage = 'inline'::text) AND (payload IS NOT NULL)) OR ((payload_storage = 'fanout_shared'::text) AND (payload IS NULL)))),
     CONSTRAINT user_sync_log_user_sync_sequence_check CHECK ((user_sync_sequence > 0))
 );
 
@@ -2666,9 +2793,6 @@ ALTER TABLE ONLY im_v2.auth_devices
 
 ALTER TABLE ONLY im_v2.auth_devices
     ADD CONSTRAINT auth_devices_pkey PRIMARY KEY (user_id, device_id);
-
-ALTER TABLE ONLY im_v2.consumer_inbox
-    ADD CONSTRAINT consumer_inbox_pkey PRIMARY KEY (consumer_name, source_event_id, target_user_id, projection_kind);
 
 ALTER TABLE ONLY im_v2.content_review_cases
     ADD CONSTRAINT content_review_cases_pkey PRIMARY KEY (message_id);
@@ -2736,24 +2860,6 @@ ALTER TABLE ONLY im_v2.direct_room_pairs
 ALTER TABLE ONLY im_v2.durable_work_replay_audit
     ADD CONSTRAINT durable_work_replay_audit_pkey PRIMARY KEY (operation_id);
 
-ALTER TABLE ONLY im_v2.fanout_completion_units
-    ADD CONSTRAINT fanout_completion_units_pkey PRIMARY KEY (source_event_id, completion_unit_id);
-
-ALTER TABLE ONLY im_v2.fanout_deliveries
-    ADD CONSTRAINT fanout_deliveries_pkey PRIMARY KEY (source_event_id, target_user_id, projection_kind);
-
-ALTER TABLE ONLY im_v2.fanout_plan_targets
-    ADD CONSTRAINT fanout_plan_targets_pkey PRIMARY KEY (source_event_id, target_user_id);
-
-ALTER TABLE ONLY im_v2.fanout_plans
-    ADD CONSTRAINT fanout_plans_pkey PRIMARY KEY (plan_id);
-
-ALTER TABLE ONLY im_v2.fanout_plans
-    ADD CONSTRAINT fanout_plans_source_event_id_key UNIQUE (source_event_id);
-
-ALTER TABLE ONLY im_v2.fanout_sync_payloads
-    ADD CONSTRAINT fanout_sync_payloads_pkey PRIMARY KEY (source_event_id, projection_kind);
-
 ALTER TABLE ONLY im_v2.gateway_worker_cursors
     ADD CONSTRAINT gateway_worker_cursors_pkey PRIMARY KEY (worker_name, node_id);
 
@@ -2762,9 +2868,6 @@ ALTER TABLE ONLY im_v2.group_announcement_operations
 
 ALTER TABLE ONLY im_v2.group_announcement_operations
     ADD CONSTRAINT group_announcement_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
-
-ALTER TABLE ONLY im_v2.group_announcement_operations
-    ADD CONSTRAINT group_announcement_operations_plan_id_key UNIQUE (plan_id);
 
 ALTER TABLE ONLY im_v2.group_announcements
     ADD CONSTRAINT group_announcements_pkey PRIMARY KEY (room_id);
@@ -2778,17 +2881,11 @@ ALTER TABLE ONLY im_v2.group_permission_operations
 ALTER TABLE ONLY im_v2.group_permission_operations
     ADD CONSTRAINT group_permission_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
-ALTER TABLE ONLY im_v2.group_permission_operations
-    ADD CONSTRAINT group_permission_operations_plan_id_key UNIQUE (plan_id);
-
 ALTER TABLE ONLY im_v2.group_role_operations
     ADD CONSTRAINT group_role_operations_event_id_key UNIQUE (event_id);
 
 ALTER TABLE ONLY im_v2.group_role_operations
     ADD CONSTRAINT group_role_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
-
-ALTER TABLE ONLY im_v2.group_role_operations
-    ADD CONSTRAINT group_role_operations_plan_id_key UNIQUE (plan_id);
 
 ALTER TABLE ONLY im_v2.group_role_permissions
     ADD CONSTRAINT group_role_permissions_pkey PRIMARY KEY (room_id, role, permission);
@@ -2826,11 +2923,15 @@ ALTER TABLE ONLY im_v2.group_invite_links
 ALTER TABLE ONLY im_v2.group_join_requests
     ADD CONSTRAINT group_join_requests_pkey PRIMARY KEY (request_id);
 
+ALTER TABLE ONLY im_v2.group_join_submission_receipts
+    ADD CONSTRAINT group_join_receipt_target_fkey FOREIGN KEY (target_request_id) REFERENCES im_v2.group_join_requests(request_id);
+
 ALTER TABLE ONLY im_v2.group_join_requests
     ADD CONSTRAINT group_join_requests_applicant_user_id_submission_operation_key UNIQUE (applicant_user_id, submission_operation_id);
 
-ALTER TABLE ONLY im_v2.group_join_requests
-    ADD CONSTRAINT group_join_requests_invite_id_applicant_user_id_key UNIQUE (invite_id, applicant_user_id);
+CREATE UNIQUE INDEX group_join_requests_invite_id_applicant_user_id_key ON im_v2.group_join_requests (invite_id, applicant_user_id) WHERE state <> 'cancelled';
+
+CREATE INDEX group_join_requests_applicant_history_idx ON im_v2.group_join_requests (invite_id, applicant_user_id, (state <> 'cancelled') DESC, created_at DESC, request_id DESC);
 
 ALTER TABLE ONLY im_v2.group_join_requests
     ADD CONSTRAINT group_join_requests_reviewer_decision_key UNIQUE (decided_by_user_id, decision_operation_id);
@@ -2868,9 +2969,6 @@ ALTER TABLE ONLY im_v2.message_edit_operations
 ALTER TABLE ONLY im_v2.message_edit_operations
     ADD CONSTRAINT message_edit_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
-ALTER TABLE ONLY im_v2.message_edit_operations
-    ADD CONSTRAINT message_edit_operations_plan_id_key UNIQUE (plan_id);
-
 ALTER TABLE ONLY im_v2.message_forward_operations
     ADD CONSTRAINT message_forward_operations_actor_user_id_target_client_mess_key UNIQUE (actor_user_id, target_client_message_id);
 
@@ -2904,9 +3002,6 @@ ALTER TABLE ONLY im_v2.message_reaction_operations
 ALTER TABLE ONLY im_v2.message_reaction_operations
     ADD CONSTRAINT message_reaction_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
-ALTER TABLE ONLY im_v2.message_reaction_operations
-    ADD CONSTRAINT message_reaction_operations_plan_id_key UNIQUE (plan_id);
-
 ALTER TABLE ONLY im_v2.message_reactions
     ADD CONSTRAINT message_reactions_pkey PRIMARY KEY (message_id, actor_user_id, reaction);
 
@@ -2915,9 +3010,6 @@ ALTER TABLE ONLY im_v2.message_withdrawal_operations
 
 ALTER TABLE ONLY im_v2.message_withdrawal_operations
     ADD CONSTRAINT message_withdrawal_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
-
-ALTER TABLE ONLY im_v2.message_withdrawal_operations
-    ADD CONSTRAINT message_withdrawal_operations_plan_id_key UNIQUE (plan_id);
 
 ALTER TABLE ONLY im_v2.messages
     ADD CONSTRAINT messages_pkey PRIMARY KEY (message_id);
@@ -2939,9 +3031,6 @@ ALTER TABLE ONLY im_v2.moderation_operations
 
 ALTER TABLE ONLY im_v2.moderation_operations
     ADD CONSTRAINT moderation_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
-
-ALTER TABLE ONLY im_v2.moderation_operations
-    ADD CONSTRAINT moderation_operations_plan_id_key UNIQUE (plan_id);
 
 ALTER TABLE ONLY im_v2.public_identity_lookup_rate_limits
     ADD CONSTRAINT public_identity_lookup_rate_limits_pkey PRIMARY KEY (actor_user_id);
@@ -3009,26 +3098,14 @@ ALTER TABLE ONLY im_v2.room_membership_operations
 ALTER TABLE ONLY im_v2.room_membership_operations
     ADD CONSTRAINT room_membership_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
-ALTER TABLE ONLY im_v2.room_membership_operations
-    ADD CONSTRAINT room_membership_operations_plan_id_key UNIQUE (plan_id);
-
 ALTER TABLE ONLY im_v2.room_memberships
     ADD CONSTRAINT room_memberships_pkey PRIMARY KEY (room_id, user_id, joined_revision);
-
-ALTER TABLE ONLY im_v2.room_outbox
-    ADD CONSTRAINT room_outbox_pkey PRIMARY KEY (source_event_id);
-
-ALTER TABLE ONLY im_v2.room_outbox
-    ADD CONSTRAINT room_outbox_plan_id_key UNIQUE (plan_id);
 
 ALTER TABLE ONLY im_v2.room_pinned_message_operations
     ADD CONSTRAINT room_pinned_message_operations_event_id_key UNIQUE (event_id);
 
 ALTER TABLE ONLY im_v2.room_pinned_message_operations
     ADD CONSTRAINT room_pinned_message_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
-
-ALTER TABLE ONLY im_v2.room_pinned_message_operations
-    ADD CONSTRAINT room_pinned_message_operations_plan_id_key UNIQUE (plan_id);
 
 ALTER TABLE ONLY im_v2.room_pinned_messages
     ADD CONSTRAINT room_pinned_messages_pkey PRIMARY KEY (room_id, message_id);
@@ -3195,10 +3272,6 @@ CREATE INDEX auth_devices_active_sessions_idx ON im_v2.auth_devices USING btree 
 
 CREATE INDEX auth_devices_revoked_cleanup_idx ON im_v2.auth_devices USING btree (revoked_at, user_id, device_id) WHERE (revoked_at IS NOT NULL);
 
-CREATE INDEX consumer_inbox_compaction_result_idx ON im_v2.consumer_inbox USING btree (target_user_id, user_sync_sequence, source_event_id, projection_kind) WHERE ((consumer_name = 'v2-fanout-delivery'::text) AND (user_sync_sequence IS NOT NULL));
-
-CREATE INDEX consumer_inbox_source_event_idx ON im_v2.consumer_inbox USING btree (source_event_id, consumer_name, target_user_id, projection_kind);
-
 CREATE INDEX content_review_jobs_claim_idx ON im_v2.content_review_jobs USING btree (state, next_attempt_at, lease_expires_at, created_at, message_id);
 
 CREATE INDEX content_review_jobs_completed_cleanup_idx ON im_v2.content_review_jobs USING btree (completed_at, message_id) WHERE (state = ANY (ARRAY['completed'::text, 'superseded'::text]));
@@ -3226,28 +3299,6 @@ CREATE INDEX direct_room_operations_cleanup_idx ON im_v2.direct_room_operations 
 CREATE INDEX direct_room_pairs_higher_user_idx ON im_v2.direct_room_pairs USING btree (higher_user_id, room_id, lower_user_id);
 
 CREATE INDEX durable_work_replay_audit_requested_at_idx ON im_v2.durable_work_replay_audit USING btree (requested_at DESC);
-
-CREATE INDEX fanout_completion_units_released_cleanup_idx ON im_v2.fanout_completion_units USING btree (released_at, source_event_id, completion_unit_id) WHERE (state = 'released'::text);
-
-CREATE INDEX fanout_completion_units_terminal_release_idx ON im_v2.fanout_completion_units USING btree (source_event_id, completion_unit_id) INCLUDE (target_count) WHERE (state = 'terminal'::text);
-
-CREATE INDEX fanout_deliveries_expired_lease_claim_idx ON im_v2.fanout_deliveries USING btree (target_shard_bucket, lease_expires_at, source_event_id, target_user_id, projection_kind) WHERE ((state = 'pending'::text) AND (lease_expires_at IS NOT NULL));
-
-CREATE INDEX fanout_deliveries_fresh_claim_idx ON im_v2.fanout_deliveries USING btree (target_shard_bucket, source_event_id, target_user_id, projection_kind) WHERE ((state = 'pending'::text) AND (next_attempt_at IS NULL) AND (lease_expires_at IS NULL));
-
-CREATE INDEX fanout_deliveries_fresh_direct_user_microbatch_claim_idx ON im_v2.fanout_deliveries USING btree (target_shard_bucket, mod((hashtextextended((target_user_id)::text, (0)::bigint) & '9223372036854775807'::bigint), (8)::bigint), target_user_id, source_event_id, projection_kind) WHERE (fresh_direct_eligible AND (state = 'pending'::text) AND (claim_token IS NULL) AND (next_attempt_at IS NULL) AND (lease_expires_at IS NULL) AND (paused_at IS NULL) AND (retry_count = 0));
-
-CREATE INDEX fanout_deliveries_fresh_generic_target_lane_claim_idx ON im_v2.fanout_deliveries USING btree (target_shard_bucket, mod((hashtextextended((target_user_id)::text, (0)::bigint) & '9223372036854775807'::bigint), (8)::bigint), source_event_id, target_user_id, projection_kind) WHERE ((NOT fresh_direct_eligible) AND (state = 'pending'::text) AND (next_attempt_at IS NULL) AND (lease_expires_at IS NULL));
-
-CREATE INDEX fanout_deliveries_retry_due_claim_idx ON im_v2.fanout_deliveries USING btree (target_shard_bucket, next_attempt_at, source_event_id, target_user_id, projection_kind) WHERE ((state = 'pending'::text) AND (next_attempt_at IS NOT NULL) AND (lease_expires_at IS NULL));
-
-CREATE INDEX fanout_deliveries_terminal_source_idx ON im_v2.fanout_deliveries USING btree (source_event_id, target_user_id, projection_kind) WHERE (state = 'terminal'::text);
-
-CREATE INDEX fanout_plans_pending_idx ON im_v2.fanout_plans USING btree (state, created_at) WHERE (state <> 'terminal'::text);
-
-CREATE INDEX fanout_plans_terminal_cleanup_idx ON im_v2.fanout_plans USING btree (terminal_at, source_event_id) WHERE (state = 'terminal'::text);
-
-CREATE INDEX fanout_sync_payloads_message_state_idx ON im_v2.fanout_sync_payloads USING btree (message_state_id) WHERE (message_state_id IS NOT NULL);
 
 CREATE INDEX group_announcement_operations_cleanup_idx ON im_v2.group_announcement_operations USING btree (created_at);
 
@@ -3351,12 +3402,6 @@ CREATE INDEX room_memberships_current_user_rooms_idx ON im_v2.room_memberships U
 
 CREATE INDEX room_memberships_eligible_at_revision_idx ON im_v2.room_memberships USING btree (room_id, joined_revision, left_revision, user_id);
 
-CREATE INDEX room_outbox_claim_idx ON im_v2.room_outbox USING btree (state, lease_expires_at, created_at) WHERE (state <> 'terminal'::text);
-
-CREATE INDEX room_outbox_retry_claim_idx ON im_v2.room_outbox USING btree (next_attempt_at, created_at) WHERE (state = 'pending'::text);
-
-CREATE INDEX room_outbox_terminal_cleanup_idx ON im_v2.room_outbox USING btree (terminal_at, source_event_id) WHERE (state = 'terminal'::text);
-
 CREATE INDEX room_pinned_message_operations_cleanup_idx ON im_v2.room_pinned_message_operations USING btree (created_at);
 
 CREATE INDEX room_pinned_messages_order_idx ON im_v2.room_pinned_messages USING btree (room_id, pinned_at DESC, message_id);
@@ -3429,12 +3474,6 @@ CREATE INDEX user_projection_versions_current_room_idx ON im_v2.user_projection_
 
 CREATE INDEX user_projection_versions_gc_idx ON im_v2.user_projection_versions USING btree (valid_to_sequence, user_id) WHERE (valid_to_sequence IS NOT NULL);
 
-CREATE INDEX user_projection_versions_message_backfill_idx ON im_v2.user_projection_versions USING btree (user_id, entity_key, valid_from_sequence) WHERE ((projection_kind = 'message'::text) AND (message_state_id IS NULL) AND (payload IS NOT NULL));
-
-CREATE INDEX user_projection_versions_message_inline_idx ON im_v2.user_projection_versions USING btree (user_id, entity_key, valid_from_sequence) WHERE ((projection_kind = 'message'::text) AND (payload IS NOT NULL));
-
-CREATE INDEX user_projection_versions_message_state_idx ON im_v2.user_projection_versions USING btree (message_state_id) WHERE (message_state_id IS NOT NULL);
-
 CREATE INDEX user_relationship_operations_cleanup_idx ON im_v2.user_relationship_operations USING btree (updated_at);
 
 CREATE INDEX user_room_preference_operations_cleanup_idx ON im_v2.user_room_preference_operations USING btree (updated_at);
@@ -3453,12 +3492,6 @@ CREATE UNIQUE INDEX user_sync_log_nonfanout_identity_idx ON im_v2.user_sync_log 
 
 CREATE INDEX user_sync_retention_claim_idx ON im_v2.user_sync_retention USING btree (updated_at, user_id);
 
-CREATE TRIGGER fanout_deliveries_fresh_direct_batch_validate AFTER INSERT ON im_v2.fanout_deliveries REFERENCING NEW TABLE AS inserted_fanout_deliveries FOR EACH STATEMENT EXECUTE FUNCTION im_v2.validate_fresh_direct_delivery_batch();
-
-CREATE TRIGGER fanout_deliveries_fresh_direct_immutable BEFORE UPDATE OF source_event_id, target_user_id, projection_kind, completion_unit_id, fresh_direct_eligible ON im_v2.fanout_deliveries FOR EACH ROW EXECUTE FUNCTION im_v2.reject_fresh_direct_delivery_identity_mutation();
-
-CREATE TRIGGER fanout_plans_identity_immutable BEFORE UPDATE OF source_event_id, target_rule ON im_v2.fanout_plans FOR EACH ROW EXECUTE FUNCTION im_v2.reject_fanout_plan_identity_mutation();
-
 CREATE TRIGGER room_events_enqueue_hybrid_group_wake AFTER INSERT ON im_v2.room_events REFERENCING NEW TABLE AS inserted_room_events FOR EACH STATEMENT EXECUTE FUNCTION im_v2.enqueue_hybrid_group_event_wake();
 
 CREATE TRIGGER messages_enqueue_hybrid_group_wake AFTER INSERT ON im_v2.messages REFERENCING NEW TABLE AS inserted_messages FOR EACH STATEMENT EXECUTE FUNCTION im_v2.enqueue_hybrid_group_message_wake();
@@ -3467,7 +3500,7 @@ CREATE TRIGGER room_events_immutable BEFORE DELETE OR UPDATE ON im_v2.room_event
 
 CREATE TRIGGER room_admission_windows_follow_shard_lease BEFORE UPDATE OF shard_lease_id, shard_lease_generation ON im_v2.room_admission FOR EACH ROW WHEN ((NEW.shard_lease_id IS DISTINCT FROM OLD.shard_lease_id) OR (NEW.shard_lease_generation IS DISTINCT FROM OLD.shard_lease_generation)) EXECUTE FUNCTION im_v2.reset_room_admission_windows_on_shard_lease_change();
 
-CREATE TRIGGER rooms_delivery_mode_immutable BEFORE UPDATE OF delivery_mode ON im_v2.rooms FOR EACH ROW EXECUTE FUNCTION im_v2.reject_room_delivery_mode_mutation();
+CREATE TRIGGER rooms_capacity_class_immutable BEFORE UPDATE OF capacity_class ON im_v2.rooms FOR EACH ROW EXECUTE FUNCTION im_v2.reject_room_capacity_class_mutation();
 
 CREATE TRIGGER user_sync_log_projection_effect_v4 AFTER INSERT ON im_v2.user_sync_log REFERENCING NEW TABLE AS inserted_user_sync_rows FOR EACH STATEMENT EXECUTE FUNCTION im_v2.capture_user_projection_effect_v4();
 
@@ -3518,24 +3551,6 @@ ALTER TABLE ONLY im_v2.direct_room_operations
 ALTER TABLE ONLY im_v2.direct_room_pairs
     ADD CONSTRAINT direct_room_pairs_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY im_v2.fanout_completion_units
-    ADD CONSTRAINT fanout_completion_units_source_event_id_fkey FOREIGN KEY (source_event_id) REFERENCES im_v2.room_events(event_id);
-
-ALTER TABLE ONLY im_v2.fanout_deliveries
-    ADD CONSTRAINT fanout_deliveries_source_event_id_completion_unit_id_fkey FOREIGN KEY (source_event_id, completion_unit_id) REFERENCES im_v2.fanout_completion_units(source_event_id, completion_unit_id);
-
-ALTER TABLE ONLY im_v2.fanout_plan_targets
-    ADD CONSTRAINT fanout_plan_targets_source_event_id_fkey FOREIGN KEY (source_event_id) REFERENCES im_v2.room_events(event_id);
-
-ALTER TABLE ONLY im_v2.fanout_plans
-    ADD CONSTRAINT fanout_plans_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);
-
-ALTER TABLE ONLY im_v2.fanout_plans
-    ADD CONSTRAINT fanout_plans_source_event_id_fkey FOREIGN KEY (source_event_id) REFERENCES im_v2.room_events(event_id);
-
-ALTER TABLE ONLY im_v2.fanout_sync_payloads
-    ADD CONSTRAINT fanout_sync_payloads_message_state_id_fkey FOREIGN KEY (message_state_id) REFERENCES im_v2.message_projection_states(state_id) ON DELETE RESTRICT;
-
 ALTER TABLE ONLY im_v2.group_announcement_operations
     ADD CONSTRAINT group_announcement_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
@@ -3572,6 +3587,9 @@ ALTER TABLE ONLY im_v2.group_rooms
 ALTER TABLE ONLY im_v2.group_invite_links
     ADD CONSTRAINT group_invite_links_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.group_rooms(room_id) ON DELETE CASCADE;
 
+ALTER TABLE ONLY im_v2.group_join_submission_receipts
+    ADD CONSTRAINT group_join_receipt_room_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);
+
 ALTER TABLE ONLY im_v2.group_join_requests
     ADD CONSTRAINT group_join_requests_invite_room_fkey FOREIGN KEY (invite_id, room_id) REFERENCES im_v2.group_invite_links(invite_id, room_id) ON DELETE CASCADE;
 
@@ -3605,7 +3623,6 @@ END;
 $$;
 CREATE TRIGGER media_download_grants_identity BEFORE UPDATE ON im_v2.media_download_grants
     FOR EACH ROW EXECUTE FUNCTION im_v2.reject_media_download_grant_identity_mutation();
-
 
 ALTER TABLE ONLY im_v2.media_purge_outbox
     ADD CONSTRAINT media_purge_outbox_media_id_fkey FOREIGN KEY (media_id) REFERENCES im_v2.media_objects(media_id);
@@ -3736,12 +3753,6 @@ ALTER TABLE ONLY im_v2.room_membership_operations
 ALTER TABLE ONLY im_v2.room_memberships
     ADD CONSTRAINT room_memberships_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);
 
-ALTER TABLE ONLY im_v2.room_outbox
-    ADD CONSTRAINT room_outbox_plan_id_fkey FOREIGN KEY (plan_id) REFERENCES im_v2.fanout_plans(plan_id);
-
-ALTER TABLE ONLY im_v2.room_outbox
-    ADD CONSTRAINT room_outbox_source_event_id_fkey FOREIGN KEY (source_event_id) REFERENCES im_v2.room_events(event_id);
-
 ALTER TABLE ONLY im_v2.room_pinned_message_operations
     ADD CONSTRAINT room_pinned_message_operations_message_id_fkey FOREIGN KEY (message_id) REFERENCES im_v2.messages(message_id) ON DELETE RESTRICT;
 
@@ -3810,9 +3821,6 @@ ALTER TABLE ONLY im_v2.user_message_favorites
 
 ALTER TABLE ONLY im_v2.user_message_favorites
     ADD CONSTRAINT user_message_favorites_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY im_v2.user_projection_versions
-    ADD CONSTRAINT user_projection_versions_message_state_room_fkey FOREIGN KEY (message_state_id, scope_room_id) REFERENCES im_v2.message_projection_states(state_id, room_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY im_v2.user_room_preference_operations
     ADD CONSTRAINT user_room_preference_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
@@ -3908,7 +3916,7 @@ CREATE TABLE im_v2.group_invite_directory_import_audit (
     next_cursor uuid,
     conflicting_invite_ids uuid[] NOT NULL,
     CONSTRAINT group_invite_import_principal_check CHECK (operator_principal ~ '^[A-Za-z0-9_.:-]{1,128}$'),
-    CONSTRAINT group_invite_import_shard_check CHECK (octet_length(shard_id) BETWEEN 1 AND 128 AND shard_id = btrim(shard_id)),
+    CONSTRAINT group_invite_import_shard_check CHECK (octet_length(shard_id) >= 1 AND octet_length(shard_id) <= 128 AND shard_id = btrim(shard_id)),
     CONSTRAINT group_invite_import_epoch_check CHECK (owner_epoch >= 0),
     CONSTRAINT group_invite_import_page_check CHECK (page_size BETWEEN 1 AND 100),
     CONSTRAINT group_invite_import_reason_check CHECK (reason_code IN ('dependency_recovered','data_repaired','false_positive')),
@@ -3982,3 +3990,6 @@ CREATE TABLE im_v2.legacy_device_registration_cancellations (
     CONSTRAINT legacy_registration_cancellation_operation UNIQUE (user_id, operation_id),
     CONSTRAINT legacy_registration_cancellation_time CHECK (isfinite(cancelled_at))
 );
+
+ALTER TABLE ONLY im_v2.direct_authorization_receipts
+    ADD CONSTRAINT direct_authorization_receipts_room_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);

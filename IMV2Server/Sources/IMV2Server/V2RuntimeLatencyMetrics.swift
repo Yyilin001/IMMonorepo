@@ -141,10 +141,8 @@ public enum V2DirectRoomLogAppendStage: String, CaseIterable, Sendable {
     case shardReservation = "shard_reservation"
     /// 缓存收尾阶段。
     case cacheFinalization = "cache_finalization"
-    /// 投影影子状态收尾阶段。
-    case projectionShadowFinalization = "projection_shadow_finalization"
-    /// 缓存与影子状态合并收尾阶段。
-    case cacheAndShadowFinalization = "cache_and_shadow_finalization"
+    /// 提交后缓存与额度收尾阶段。
+    case commitFinalization = "commit_finalization"
 }
 
 /// 按追加阶段保存的耗时分布，未采样阶段读取为全零直方图。

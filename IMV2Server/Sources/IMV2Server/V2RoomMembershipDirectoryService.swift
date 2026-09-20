@@ -38,7 +38,7 @@ public struct V2RoomMembershipDirectoryPage: Equatable, Sendable {
     ///
     /// 这样管理界面无需枚举整个名册就能得知已认证发起者自身的角色。
     public let actorRole: V2RoomMembershipRole
-    /// 本页成员记录。
+    /// 本页可公开的成员记录；过滤隐藏资料后可能为空，仍可有后续游标。
     public let entries: [V2RoomMembershipDirectoryEntry]
     /// 下一页游标，对调用方不透明。
     ///
@@ -152,6 +152,8 @@ public enum V2RoomMembershipDirectoryError: Error, Equatable, Sendable {
     case invalidCursor
     /// 成员修订已变化，参数为当前修订。
     case revisionConflict(currentRevision: UInt64)
+    /// 读取期间或分页之间房间归属改变，必须从第一页重新读取。
+    case ownerChanged
     /// 持久化记录缺失或字段无法解码。
     case corruptPersistenceState
 }

@@ -1,10 +1,6 @@
 services:
   gateway:
     environment:
-      # 池隔离 A/B 显式固定单聊模式：该画像比较的是隔离策略，不是投递模型。
-      IM_V2_DIRECT_FANOUT_MODE: planner
-      # 同理固定标准群的权威副本形态，隔离策略 A/B 不应被投递模型默认值变化干扰。
-      IM_V2_GROUP_DELIVERY_AUTHORITY_MODE: fanout
       # Preserve fixed capacity for foreground commands, Sync, durable
       # Delivery, projection, and maintenance during mixed-load A/B runs.
       IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED: "true"

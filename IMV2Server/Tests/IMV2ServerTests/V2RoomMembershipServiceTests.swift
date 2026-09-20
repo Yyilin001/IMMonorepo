@@ -26,7 +26,6 @@ struct V2RoomMembershipServiceTests {
         #expect(captured.operationID == request.operationID)
         #expect(captured.expectedMembershipRevision == 4)
         #expect(UUID(uuidString: change.eventID.rawValue) != nil)
-        #expect(UUID(uuidString: change.fanoutPlanID.rawValue) != nil)
     }
 
     @Test("invalid self-targeting is rejected before the persistence boundary")
@@ -47,16 +46,16 @@ struct V2RoomMembershipServiceTests {
     }
 
     private func profile() throws -> V2CapacityProfile {
-        try .init(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100, maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 1))
+        try .init(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 10,    retryAfterSeconds: 1))
     }
 }
 
 private actor MembershipStoreSpy: V2RoomMembershipStore {
     private var captured: V2ChangeRoomMembershipCommand?
 
-    func change(command: V2ChangeRoomMembershipCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2RoomMembershipChangeOutcome {
+    func change(command: V2ChangeRoomMembershipCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2RoomMembershipChangeOutcome {
         captured = command
-        return .changed(try .init(roomID: command.roomID, targetUserID: command.targetUserID, action: command.action, membershipRevision: command.expectedMembershipRevision + 1, roomSequence: 8, eventID: eventID, fanoutPlanID: planID, createdAt: now))
+        return .changed(try .init(roomID: command.roomID, targetUserID: command.targetUserID, action: command.action, membershipRevision: command.expectedMembershipRevision + 1, roomSequence: 8, eventID: eventID, createdAt: now))
     }
 
     func command() -> V2ChangeRoomMembershipCommand? { captured }

@@ -128,8 +128,6 @@ public enum DeviceIDTag: V2IdentifierTag {}
 public enum MessageIDTag: V2IdentifierTag {}
 public enum EventIDTag: V2IdentifierTag {}
 public enum ClientMessageIDTag: V2IdentifierTag {}
-public enum FanoutPlanIDTag: V2IdentifierTag {}
-public enum CompletionUnitIDTag: V2IdentifierTag {}
 public enum ShardAdmissionLeaseIDTag: V2IdentifierTag {}
 public enum SnapshotIDTag: V2IdentifierTag {}
 public enum MembershipOperationIDTag: V2IdentifierTag {}
@@ -172,8 +170,6 @@ public typealias DeviceID = V2Identifier<DeviceIDTag>
 public typealias MessageID = V2Identifier<MessageIDTag>
 public typealias EventID = V2Identifier<EventIDTag>
 public typealias ClientMessageID = V2Identifier<ClientMessageIDTag>
-public typealias FanoutPlanID = V2Identifier<FanoutPlanIDTag>
-public typealias CompletionUnitID = V2Identifier<CompletionUnitIDTag>
 public typealias ShardAdmissionLeaseID = V2Identifier<ShardAdmissionLeaseIDTag>
 public typealias SnapshotID = V2Identifier<SnapshotIDTag>
 public typealias MembershipOperationID = V2Identifier<MembershipOperationIDTag>

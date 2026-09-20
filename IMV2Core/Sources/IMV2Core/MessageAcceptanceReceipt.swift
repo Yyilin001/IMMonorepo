@@ -17,10 +17,8 @@ public struct V2MessageAcceptanceReceipt: Equatable, Sendable {
     public let senderUserID: UserID
     /// 客户端发送幂等身份。
     public let clientMessageID: ClientMessageID
-    /// 接受时的可选群投递模式。
-    public let groupDeliveryMode: V2GroupDeliveryMode?
-    /// 该接受结果是否使用房间事件日志路径。
-    public let usesRoomEventLog: Bool
+    /// 接受时的可选群容量等级。
+    public let groupCapacityClass: V2GroupCapacityClass?
     /// 可选源事件身份。
     public let sourceEventID: EventID?
     /// 接受时绑定的可选成员修订号。
@@ -36,7 +34,7 @@ public struct V2MessageAcceptanceReceipt: Equatable, Sendable {
     public init(
         messageID: MessageID, roomID: RoomID, roomSequence: UInt64,
         timelineSequence: UInt64, senderUserID: UserID, clientMessageID: ClientMessageID,
-        groupDeliveryMode: V2GroupDeliveryMode?, usesRoomEventLog: Bool,
+        groupCapacityClass: V2GroupCapacityClass?,
         sourceEventID: EventID?, acceptedMembershipRevision: UInt64?,
         directRecipientUserID: UserID?, createdAt: Date
     ) {
@@ -46,8 +44,7 @@ public struct V2MessageAcceptanceReceipt: Equatable, Sendable {
         self.timelineSequence = timelineSequence
         self.senderUserID = senderUserID
         self.clientMessageID = clientMessageID
-        self.groupDeliveryMode = groupDeliveryMode
-        self.usesRoomEventLog = usesRoomEventLog
+        self.groupCapacityClass = groupCapacityClass
         self.sourceEventID = sourceEventID
         self.acceptedMembershipRevision = acceptedMembershipRevision
         self.directRecipientUserID = directRecipientUserID
@@ -61,8 +58,8 @@ public extension V2AcceptedMessage {
         .init(
             messageID: messageID, roomID: roomID, roomSequence: roomSequence,
             timelineSequence: timelineSequence, senderUserID: senderUserID,
-            clientMessageID: clientMessageID, groupDeliveryMode: groupDeliveryMode,
-            usesRoomEventLog: usesRoomEventLog, sourceEventID: sourceEventID,
+            clientMessageID: clientMessageID, groupCapacityClass: groupCapacityClass,
+            sourceEventID: sourceEventID,
             acceptedMembershipRevision: acceptedMembershipRevision,
             directRecipientUserID: directRecipientUserID, createdAt: createdAt
         )

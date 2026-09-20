@@ -296,8 +296,15 @@ final class IMAppLocalAccountUITests: XCTestCase {
         )
         let endpoint = try V2RealtimeEndpoint(host: "localhost", port: 7_443)
         let senderConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
-        let receiverConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+        let secondaryPort = ProcessInfo.processInfo.environment["IMV2_ROOM_RECOVERY_SECONDARY_PORT"].flatMap(UInt16.init)
+        let receiverEndpoint = try V2RealtimeEndpoint(host: "localhost", port: secondaryPort ?? 7_443)
+        let receiverConnection = V2TLSFrameConnection(endpoint: receiverEndpoint, frameLimits: frameLimits)
 
+        let restoredSenderConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("im-v2-private-hint-e2e-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
         do {
             let senderSession = try await senderConnection.connectAndAuthenticate(
                 accessToken: sender.accessToken,
@@ -330,11 +337,63 @@ final class IMAppLocalAccountUITests: XCTestCase {
                 action: .block
             )
             XCTAssertTrue(blocked.isBlocked)
-            await assertDirectMessageIsForbidden(
+            await assertDirectMessageIsRestricted(
                 senderTransport: senderTransport,
                 roomID: directRoom.roomID,
                 text: "must-not-deliver-while-blocked"
             )
+
+            let senderBinding = LocalE2EInstallationBindingStore()
+            let senderURL = directory.appendingPathComponent("sender.sqlite")
+            let senderStore = try await V2LocalStoreBootstrapper(bindingStore: senderBinding).open(databaseURL: senderURL)
+            let receiverStore = try await V2LocalStoreBootstrapper(bindingStore: LocalE2EInstallationBindingStore())
+                .open(databaseURL: directory.appendingPathComponent("receiver.sqlite"), userID: receiver.userID)
+            let senderSync = V2SyncEngine(transport: senderTransport, store: senderStore,
+                capabilityProfile: senderSession.capabilityProfile)
+            let receiverSync = V2SyncEngine(transport: receiverTransport, store: receiverStore,
+                capabilityProfile: receiverSession.capabilityProfile)
+            var hints: [V2ClientTimelineActivityProjection] = []
+            for _ in 0..<100 {
+                try await synchronizeInitialState(senderSync)
+                hints = try await senderStore.timelineActivities(in: directRoom.roomID)
+                if !hints.isEmpty { break }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            XCTAssertEqual(hints.count, 1, "受限发送必须产生一条可持久恢复的单侧提示。")
+            let hint = try XCTUnwrap(hints.first)
+            XCTAssertEqual(hint.kind, .directMessageRestricted)
+            try await synchronizeInitialState(receiverSync)
+            let receiverHints = try await receiverStore.timelineActivities(in: directRoom.roomID)
+            XCTAssertTrue(receiverHints.isEmpty, "对方不能收到发送者的单侧提示。")
+
+            await senderConnection.disconnect()
+            let restoredSession = try await restoredSenderConnection.connectAndAuthenticate(
+                accessToken: sender.accessToken, deviceID: sender.deviceID, supportedCapabilityProfiles: ["base"])
+            let restoredStore = try await V2LocalStoreBootstrapper(bindingStore: senderBinding).open(databaseURL: senderURL)
+            let persistedHints = try await restoredStore.timelineActivities(in: directRoom.roomID)
+            XCTAssertEqual(persistedHints, hints, "重新打开 SQLite 后必须保留原提示身份和顺序。")
+            let restoredTransport = V2ProtobufSyncTransport(wire: restoredSenderConnection,
+                protocolVersion: restoredSession.protocolVersion)
+            let restoredSync = V2SyncEngine(transport: restoredTransport, store: restoredStore,
+                capabilityProfile: restoredSession.capabilityProfile)
+            try await synchronizeInitialState(restoredSync)
+            let replayedHints = try await restoredStore.timelineActivities(in: directRoom.roomID)
+            XCTAssertEqual(replayedHints, hints, "重连补拉不得重复插入提示。")
+            try await assertPrivateHintSurvivesAppRelaunch(sender: sender, roomID: directRoom.roomID.rawValue, hintID: hint.id) {
+                let before = Set(try await restoredStore.timelineActivities(in: directRoom.roomID).map(\.id))
+                await assertDirectMessageIsRestricted(senderTransport: restoredTransport, roomID: directRoom.roomID,
+                    text: "background-recovery-\(UUID())")
+                let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+                while ContinuousClock.now < deadline {
+                    try await synchronizeInitialState(restoredSync)
+                    if let new = try await restoredStore.timelineActivities(in: directRoom.roomID).first(where: { !before.contains($0.id) }) {
+                        return new.id
+                    }
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+                throw V2RealtimeTransportError.unexpectedResponse
+            }
+
 
             let unblocked = try await receiverTransport.changeUserBlock(
                 operationID: try UserBlockOperationID(UUID().uuidString.lowercased()),
@@ -342,7 +401,8 @@ final class IMAppLocalAccountUITests: XCTestCase {
                 action: .unblock
             )
             XCTAssertFalse(unblocked.isBlocked)
-            let accepted = try await senderTransport.sendMessage(
+            await receiverConnection.disconnect()
+            let accepted = try await restoredTransport.sendMessage(
                 roomID: directRoom.roomID,
                 clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
                 text: "allowed-after-explicit-unblock",
@@ -350,14 +410,88 @@ final class IMAppLocalAccountUITests: XCTestCase {
                 mentions: []
             )
             XCTAssertEqual(accepted.roomID, directRoom.roomID)
+            let reconnected = try await receiverConnection.connectAndAuthenticate(
+                accessToken: receiver.accessToken, deviceID: receiver.deviceID, supportedCapabilityProfiles: ["base"])
+            let recoveryTransport = V2ProtobufSyncTransport(wire: receiverConnection,
+                protocolVersion: reconnected.protocolVersion)
+            let recoveryPersonal = V2SyncEngine(transport: recoveryTransport, store: receiverStore,
+                capabilityProfile: reconnected.capabilityProfile)
+            try await synchronizeInitialState(recoveryPersonal)
+            let recoveryEngine = V2RoomRecoveryEngine(transport: recoveryTransport, latestVisible: recoveryTransport,
+                store: receiverStore, groupEvents: V2GroupEventSyncEngine(transport: recoveryTransport, store: receiverStore))
+            let recoveryRunner = V2RoomRecoveryRunner(engine: recoveryEngine, source: receiverConnection,
+                personalSync: recoveryPersonal)
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask { try await recoveryRunner.run(userID: receiver.userID) }
+                group.addTask {
+                    let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+                    while await recoveryEngine.phase != .live {
+                        try Task.checkCancellation()
+                        guard ContinuousClock.now < deadline else {
+                            throw V2RealtimeTransportError.unexpectedResponse
+                        }
+                        try await Task.sleep(for: .milliseconds(20))
+                    }
+                    let progress = try await recoveryEngine.progress()
+                    guard progress.directoryComplete, progress.pendingRoomCount == 0 else {
+                        throw V2RealtimeTransportError.unexpectedResponse
+                    }
+                }
+                defer { group.cancelAll() }
+                _ = try await group.next()
+            }
+            // The runner owns cancellation and drains its consumer before returning.
+            let stoppedPhase = await recoveryEngine.phase
+            XCTAssertEqual(stoppedPhase, .idle)
+            print("IMV2_FOREGROUND_RECOVERY_COMPLETION_PASSED")
+            let recovered = try await receiverStore.messages(in: directRoom.roomID)
+            XCTAssertEqual(recovered.map(\.messageID), [accepted.messageID])
+            XCTAssertEqual(recovered.first?.text, "allowed-after-explicit-unblock")
+            let cursor = try await receiverStore.groupEventCursor(roomID: directRoom.roomID)
+            XCTAssertGreaterThanOrEqual(cursor, accepted.roomSequence)
+            let list = try await receiverStore.conversationListPage(isArchived: false, before: nil, limit: 20)
+            let entry = try XCTUnwrap(list.entries.first { $0.roomID == directRoom.roomID })
+            XCTAssertEqual(entry.lastMessage?.messageID, accepted.messageID)
+            let summaries = try await recoveryTransport.latestVisible(roomIDs: [directRoom.roomID])
+            guard case .snapshot(let summary)? = summaries[directRoom.roomID] else {
+                XCTFail("Authorized recovery must return a latest-visible snapshot")
+                throw V2RealtimeTransportError.unexpectedResponse
+            }
+            XCTAssertEqual(summary.latest?.id, accepted.messageID)
+            let privateActivities = try await receiverStore.timelineActivities(in: directRoom.roomID)
+            XCTAssertTrue(privateActivities.isEmpty)
+            if secondaryPort != nil {
+                let online = try await restoredTransport.sendMessage(roomID: directRoom.roomID,
+                    clientMessageID: .init(UUID().uuidString.lowercased()), text: "cross-gateway-online",
+                    media: [], mentions: [])
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    group.addTask {
+                        while true {
+                            let change = try await receiverConnection.nextAccountRoomChange()
+                            if case .changed(_, let room, let head) = change,
+                               room == directRoom.roomID, head >= online.roomSequence { return }
+                            if case .resyncRequired = change { throw V2RealtimeTransportError.unexpectedResponse }
+                        }
+                    }
+                    group.addTask {
+                        try await Task.sleep(for: .seconds(10))
+                        throw V2RealtimeTransportError.unexpectedResponse
+                    }
+                    defer { group.cancelAll() }
+                    _ = try await group.next()
+                }
+                print("IMV2_CROSS_GATEWAY_RECOVERY_AND_ONLINE_WAKE_PASSED")
+            }
         } catch {
             await senderConnection.disconnect()
             await receiverConnection.disconnect()
+            await restoredSenderConnection.disconnect()
             throw error
         }
 
         await senderConnection.disconnect()
         await receiverConnection.disconnect()
+        await restoredSenderConnection.disconnect()
     }
 
     /// A friendship is server-authoritative: both sides complete the private
@@ -671,13 +805,15 @@ final class IMAppLocalAccountUITests: XCTestCase {
     }
 }
 
-private struct LocalE2EAccountCredentials: Sendable {
-    let accessToken: String
-    let deviceID: DeviceID
-    let userID: UserID
+struct LocalE2EAccountCredentials: Sendable {
+    let accountHandle: String
+    let credentials: V2AuthCredentials
+    var accessToken: String { credentials.accessToken }
+    var deviceID: DeviceID { credentials.deviceID }
+    var userID: UserID { credentials.userID }
 }
 
-private actor LocalE2EInstallationBindingStore: V2InstallationBindingStore {
+actor LocalE2EInstallationBindingStore: V2InstallationBindingStore {
     private var binding: V2LocalInstallationBinding?
 
     func load() -> V2LocalInstallationBinding? { binding }
@@ -691,7 +827,7 @@ private actor LocalE2EInstallationBindingStore: V2InstallationBindingStore {
     }
 }
 
-private func registerLocalAccount(displayName: String) async throws -> LocalE2EAccountCredentials {
+func registerLocalAccount(displayName: String) async throws -> LocalE2EAccountCredentials {
     let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     let deviceID = try DeviceID(UUID().uuidString.lowercased())
     let registration = try await localJSONRequest(
@@ -715,15 +851,30 @@ private func registerLocalAccount(displayName: String) async throws -> LocalE2EA
         ], cancellation: pending.cancellation
     )
     return try .init(
-        accessToken: XCTUnwrap(issued["accessToken"] as? String),
-        deviceID: deviceID,
-        userID: .init(XCTUnwrap(issued["userID"] as? String))
+        accountHandle: "dual_\(suffix.prefix(20))",
+        credentials: .init(
+            userID: .init(XCTUnwrap(issued["userID"] as? String)), deviceID: deviceID,
+            accessToken: XCTUnwrap(issued["accessToken"] as? String),
+            accessTokenExpiresAt: Date(timeIntervalSince1970: XCTUnwrap(issued["accessTokenExpiresAtMilliseconds"] as? Double) / 1000),
+            refreshCredential: XCTUnwrap(issued["refreshCredential"] as? String),
+            revocationCredential: .init(rawValue: XCTUnwrap(issued["revocationCredential"] as? String)),
+            revocationCredentialExpiresAt: Date(timeIntervalSince1970: XCTUnwrap(issued["revocationCredentialExpiresAtMilliseconds"] as? Double) / 1000)
+        )
     )
 }
 
-private func synchronizeInitialState(_ syncEngine: V2SyncEngine) async throws {
-    if case .resetPending = try await syncEngine.synchronizeUntilCaughtUp() {
-        try await syncEngine.completePendingReset()
+func synchronizeInitialState(_ syncEngine: V2SyncEngine) async throws {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+    while true {
+        do {
+            if case .resetPending = try await syncEngine.synchronizeUntilCaughtUp() {
+                try await syncEngine.completePendingReset()
+            }
+            return
+        } catch V2RealtimeTransportError.server(code: _, retryable: true, retryAfterSeconds: let seconds, currentRevision: _) {
+            guard ContinuousClock.now < deadline else { throw V2RealtimeTransportError.unexpectedResponse }
+            try await Task.sleep(for: .seconds(max(1, seconds)))
+        }
     }
 }
 
@@ -768,14 +919,14 @@ private func assertStrangerMessageIsForbidden(
     senderTransport: V2ProtobufSyncTransport,
     roomID: RoomID
 ) async {
-    await assertDirectMessageIsForbidden(
+    await assertDirectMessageIsRestricted(
         senderTransport: senderTransport,
         roomID: roomID,
         text: "must-not-deliver"
     )
 }
 
-private func assertDirectMessageIsForbidden(
+private func assertDirectMessageIsRestricted(
     senderTransport: V2ProtobufSyncTransport,
     roomID: RoomID,
     text: String
@@ -794,7 +945,7 @@ private func assertDirectMessageIsForbidden(
             XCTFail("direct 消息拒收必须返回服务端授权结果，实际错误：\(error)。")
             return
         }
-        XCTAssertEqual(code, "FORBIDDEN")
+        XCTAssertEqual(code, "DIRECT_MESSAGE_RESTRICTED")
         XCTAssertFalse(retryable)
     } catch {
         XCTFail("direct 消息拒收应映射为不透明授权错误，实际错误：\(error)。")
@@ -870,4 +1021,60 @@ private func localJSONRequest(endpoint: URL, body: [String: String], cancellatio
         XCTAssertTrue(decoded == cancellation, "Issuer must confirm original cancellation binding.")
     }
     return result
+}
+
+/// Uses the same real source event as the two-client sync assertion, with a
+/// separate scoped App installation and its real Keychain/SQLite restoration.
+@MainActor
+private func assertPrivateHintSurvivesAppRelaunch(
+    sender: LocalE2EAccountCredentials, roomID: String, hintID: String,
+    produceWhileBackgrounded: () async throws -> String
+) async throws {
+    let app = XCUIApplication()
+    let scoped = ["-v2-ui-testing-live-local-account", "-v2-ui-testing-e2e-scope", UUID().uuidString.lowercased()]
+    defer {
+        app.terminate()
+        app.launchArguments = scoped + ["-v2-ui-testing-cleanup-local-account"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["v2.local-e2e.cleanup.completed"].waitForExistence(timeout: 15))
+        app.terminate()
+    }
+    app.launchArguments = scoped + ["-v2-ui-testing-account-handle", sender.accountHandle,
+        "-v2-ui-testing-local-password", "local-clientkit-password"]
+    app.launch()
+    let login = app.buttons["v2.password.submit"]
+    guard login.waitForExistence(timeout: 15) else { XCTFail("真实账号登录入口未出现"); return }
+    login.tap()
+    for restored in [false, true] {
+        if restored {
+            app.terminate()
+            app.launchArguments = scoped + ["-v2-ui-testing-restore-local-account"]
+            app.launch()
+        }
+        let room = app.descendants(matching: .any).matching(identifier: "v2.conversation.direct.\(roomID)").firstMatch
+        guard room.waitForExistence(timeout: 30) else { XCTFail("登录或冷启动恢复后未同步到原私聊"); return }
+        room.tap()
+        let identifier = "v2.timeline.activity.\(hintID)"
+        let hint = app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        guard hint.waitForExistence(timeout: 30) else { XCTFail("聊天页缺少持久单侧提示，恢复状态：\(restored)"); return }
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: identifier).count, 1,
+            "同一源事件在聊天页只能显示一次")
+        XCTAssertEqual(hint.label, "系统提示")
+        if restored {
+            for cycle in 1...3 {
+                XCUIDevice.shared.press(.home)
+                XCTAssertTrue(app.wait(for: .runningBackground, timeout: 10))
+                let newID = try await produceWhileBackgrounded()
+                app.activate()
+                XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))
+                let newIdentifier = "v2.timeline.activity.\(newID)"
+                let newHint = app.descendants(matching: .any).matching(identifier: newIdentifier)
+                XCTAssertTrue(newHint.firstMatch.waitForExistence(timeout: 30),
+                    "Foreground cycle \(cycle) must recover the event produced in background")
+                XCTAssertEqual(newHint.count, 1)
+                XCTAssertEqual(app.descendants(matching: .any).matching(identifier: identifier).count, 1)
+            }
+            print("IMV2_THREE_FOREGROUND_RECOVERY_CYCLES_PASSED")
+        }
+    }
 }

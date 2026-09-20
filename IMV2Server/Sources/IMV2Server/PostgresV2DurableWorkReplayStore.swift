@@ -95,32 +95,53 @@ public struct PostgresV2DurableWorkReplayStore: V2DurableWorkReplayStore {
 
             let didRequeue: Bool
             switch command.target.kind {
-            case .roomOutbox:
-                didRequeue = try await sql.raw("""
-                    UPDATE im_v2.room_outbox
-                    SET state = 'pending', claim_token = NULL, lease_expires_at = NULL,
-                        next_attempt_at = NULL, paused_at = NULL, last_failure_code = NULL,
-                        retry_count = 0
-                    WHERE source_event_id = \(bind: sourceEventID)
-                      AND state = 'paused'
-                    RETURNING source_event_id
-                    """).first(decoding: ReplayTargetRow.self) != nil
-            case .fanoutDelivery:
+            case .userStateEvent:
                 guard let targetUserID, let projectionKind = command.target.projectionKind else {
                     throw V2DurableWorkReplayStoreError.corruptPersistenceState
                 }
-                didRequeue = try await sql.raw("""
-                    UPDATE im_v2.fanout_deliveries
-                    SET state = 'pending', claim_token = NULL, lease_expires_at = NULL,
-                        next_attempt_at = NULL, paused_at = NULL, last_failure_code = NULL,
-                        retry_count = 0
+                // Source ownership is immutable; lock the room before mutating
+                // the event. A failed fence also rolls back the audit reservation.
+                guard let source = try await sql.raw("""
+                    SELECT source_room_id
+                    FROM im_v2.user_state_event_outbox
                     WHERE source_event_id = \(bind: sourceEventID)
-                      AND target_user_id = \(bind: targetUserID)
+                      AND user_id = \(bind: targetUserID) AND projection_kind = \(bind: projectionKind)
+                    """).first(decoding: ReplayUserEventSourceRow.self) else {
+                    didRequeue = false
+                    break
+                }
+                if let roomID = source.sourceRoomID {
+                    guard let room = try await sql.raw("""
+                        SELECT migration_fence_id FROM im_v2.rooms
+                        WHERE room_id = \(bind: roomID) FOR SHARE
+                        """).first(decoding: ReplayContentReviewRoomRow.self),
+                        room.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
+                }
+                didRequeue = try await sql.raw("""
+                    UPDATE im_v2.user_state_event_outbox
+                    SET state = 'pending', claim_token = NULL, lease_until = NULL,
+                        next_attempt_at = \(bind: now), attempt = 0
+                    WHERE source_event_id = \(bind: sourceEventID)
+                      AND user_id = \(bind: targetUserID)
                       AND projection_kind = \(bind: projectionKind)
+                      AND source_room_id IS NOT DISTINCT FROM \(bind: source.sourceRoomID)::uuid
                       AND state = 'paused'
                     RETURNING source_event_id
                     """).first(decoding: ReplayTargetRow.self) != nil
             case .contentReview:
+                // Lock the room before the job, matching review workers. The
+                // enclosing transaction also rolls back the audit reservation.
+                guard let room = try await sql.raw("""
+                    SELECT room.migration_fence_id
+                    FROM im_v2.rooms AS room
+                    JOIN im_v2.content_review_jobs AS job ON job.room_id = room.room_id
+                    WHERE job.message_id = \(bind: sourceEventID)
+                    FOR SHARE OF room
+                    """).first(decoding: ReplayContentReviewRoomRow.self) else {
+                    didRequeue = false
+                    break
+                }
+                guard room.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
                 didRequeue = try await sql.raw("""
                     UPDATE im_v2.content_review_jobs
                     SET state = 'pending', claim_token = NULL, lease_expires_at = NULL,
@@ -276,16 +297,14 @@ public struct PostgresV2DurableWorkReplayStore: V2DurableWorkReplayStore {
         sql: any SQLDatabase
     ) async throws -> [V2DurableWorkReplayBatchTarget] {
         switch kind {
-        case .fanoutDelivery:
+        case .userStateEvent:
             return try await sql.raw("""
-                SELECT target_user_id, projection_kind
-                FROM im_v2.fanout_deliveries
+                SELECT user_id AS target_user_id, projection_kind
+                FROM im_v2.user_state_event_outbox
                 WHERE source_event_id = \(bind: sourceEventID) AND state = 'paused'
-                ORDER BY target_user_id, projection_kind
+                ORDER BY user_id, projection_kind
                 LIMIT \(bind: limit + 1)
                 """).all(decoding: DurableWorkReplayBatchTargetRow.self).map(\.target)
-        case .roomOutbox:
-            return try await batchReplaySingleRow(table: "room_outbox", keyColumn: "source_event_id", key: sourceEventID, sql: sql)
         case .contentReview:
             return try await batchReplaySingleRow(table: "content_review_jobs", keyColumn: "message_id", key: sourceEventID, sql: sql)
         case .mediaScan:
@@ -439,4 +458,15 @@ private func replayUUID(_ identifier: UserID) throws -> UUID {
         throw V2DurableWorkReplayStoreError.corruptPersistenceState
     }
     return value
+}
+
+private struct ReplayContentReviewRoomRow: Decodable {
+    let migrationFenceID: UUID?
+    enum CodingKeys: String, CodingKey { case migrationFenceID = "migration_fence_id" }
+}
+
+
+private struct ReplayUserEventSourceRow: Decodable {
+    let sourceRoomID: UUID?
+    enum CodingKeys: String, CodingKey { case sourceRoomID = "source_room_id" }
 }

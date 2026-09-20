@@ -25,19 +25,19 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
     public private(set) var servedFromLastKnownGood: Bool
     /// 距上次成功刷新经过的秒数。
     public private(set) var lastSuccessfulRefreshAgeSeconds: Int
-    /// 处于待处理状态的房间发件箱行数。
-    public let readyRoomOutboxRows: Int
-    /// 已被认领的房间发件箱行数。
-    public let leasedRoomOutboxRows: Int
-    /// 已安排重试的房间发件箱行数。
-    public let scheduledRoomOutboxRows: Int
-    /// 已暂停的房间发件箱行数。
-    public let pausedRoomOutboxRows: Int
-    /// 仍未完成的房间发件箱行中最长的存在秒数。
+    /// 处于待处理状态的个人事件队列行数。
+    public let readyUserStateEventRows: Int
+    /// 已被认领的个人事件队列行数。
+    public let leasedUserStateEventRows: Int
+    /// 已安排重试的个人事件队列行数。
+    public let scheduledUserStateEventRows: Int
+    /// 已暂停的个人事件队列行数。
+    public let pausedUserStateEventRows: Int
+    /// 仍未完成的个人事件队列行中最长的存在秒数。
     ///
     /// 瞬时失败不再进入暂停，因此"暂停行数为零"不能证明投递正在推进；持续重试但永不
     /// 成功的工作只能由该年龄发现。
-    public let oldestUnfinishedRoomOutboxAgeSeconds: Int
+    public let oldestUnfinishedUserStateEventAgeSeconds: Int
     /// 待处理的私聊资料更新数量。
     public let readyDirectProfileUpdates: Int
     /// 已被认领的私聊资料更新数量。
@@ -50,22 +50,6 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
     public let scheduledReadReceiptPreferencePropagations: Int
     /// 已暂停的已读回执偏好传播数量。
     public let pausedReadReceiptPreferencePropagations: Int
-    /// 仍未关闭的扇出计划数量。
-    public let openFanoutPlans: Int
-    /// 待处理的扇出投递数量。
-    public let readyFanoutDeliveries: Int
-    /// 已被认领的扇出投递数量。
-    public let leasedFanoutDeliveries: Int
-    /// 已安排重试的扇出投递数量。
-    public let scheduledFanoutDeliveries: Int
-    /// 已暂停的扇出投递数量。
-    public let pausedFanoutDeliveries: Int
-    /// 仍未完成的扇出投递行中最长的存在秒数。
-    public let oldestUnfinishedFanoutDeliveryAgeSeconds: Int
-    /// 投影阶段已完成、仍在等待独立释放工作器回收容量的扇出完成单元数量。
-    public let terminalFanoutCompletionUnits: Int
-    /// 上述完成单元中最长的滞留秒数。
-    public let oldestTerminalFanoutCompletionAgeSeconds: Int
     /// 待处理的内容审核任务数量。
     public let readyContentReviews: Int
     /// 已被认领的内容审核任务数量。
@@ -125,12 +109,6 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
     public let messageProjectionStatesEstimatedRows: Int
     /// 消息投影状态占用的关系字节数。
     public let messageProjectionStatesRelationBytes: Int
-    /// 已建立状态引用的消息投影行数估算。
-    public let messageProjectionReferenceEstimatedRows: Int
-    /// 仍待回填状态引用的消息投影行数估算。
-    public let messageProjectionBackfillEstimatedRows: Int
-    /// 仍以内联方式保存载荷的消息投影行数估算。
-    public let messageProjectionInlinePayloadEstimatedRows: Int
     /// 仍可被同库不可变房间事件精确引用替换的修订 1 已接受状态正文行数估算。
     public let messageProjectionStateInlineBodyEstimatedRows: Int
     /// 尚未压缩的投影记录数量。
@@ -158,25 +136,17 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         isAvailable: Bool,
         servedFromLastKnownGood: Bool = false,
         lastSuccessfulRefreshAgeSeconds: Int = 0,
-        readyRoomOutboxRows: Int = 0,
-        leasedRoomOutboxRows: Int = 0,
-        scheduledRoomOutboxRows: Int = 0,
-        pausedRoomOutboxRows: Int = 0,
-        oldestUnfinishedRoomOutboxAgeSeconds: Int = 0,
+        readyUserStateEventRows: Int = 0,
+        leasedUserStateEventRows: Int = 0,
+        scheduledUserStateEventRows: Int = 0,
+        pausedUserStateEventRows: Int = 0,
+        oldestUnfinishedUserStateEventAgeSeconds: Int = 0,
         readyDirectProfileUpdates: Int = 0,
         leasedDirectProfileUpdates: Int = 0,
         readyReadReceiptPreferencePropagations: Int = 0,
         leasedReadReceiptPreferencePropagations: Int = 0,
         scheduledReadReceiptPreferencePropagations: Int = 0,
         pausedReadReceiptPreferencePropagations: Int = 0,
-        openFanoutPlans: Int = 0,
-        readyFanoutDeliveries: Int = 0,
-        leasedFanoutDeliveries: Int = 0,
-        scheduledFanoutDeliveries: Int = 0,
-        pausedFanoutDeliveries: Int = 0,
-        oldestUnfinishedFanoutDeliveryAgeSeconds: Int = 0,
-        terminalFanoutCompletionUnits: Int = 0,
-        oldestTerminalFanoutCompletionAgeSeconds: Int = 0,
         readyContentReviews: Int = 0,
         leasedContentReviews: Int = 0,
         scheduledContentReviews: Int = 0,
@@ -203,9 +173,6 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         projectionVersionGCBacklogEstimatedRows: Int = 0,
         messageProjectionStatesEstimatedRows: Int = 0,
         messageProjectionStatesRelationBytes: Int = 0,
-        messageProjectionReferenceEstimatedRows: Int = 0,
-        messageProjectionBackfillEstimatedRows: Int = 0,
-        messageProjectionInlinePayloadEstimatedRows: Int = 0,
         messageProjectionStateInlineBodyEstimatedRows: Int = 0,
         uncompactedProjectedRecords: Int = 0,
         pendingSyncRecordsAcrossDevices: Int = 0,
@@ -219,30 +186,18 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         self.isAvailable = isAvailable
         self.servedFromLastKnownGood = servedFromLastKnownGood
         self.lastSuccessfulRefreshAgeSeconds = max(0, lastSuccessfulRefreshAgeSeconds)
-        self.readyRoomOutboxRows = max(0, readyRoomOutboxRows)
-        self.leasedRoomOutboxRows = max(0, leasedRoomOutboxRows)
-        self.scheduledRoomOutboxRows = max(0, scheduledRoomOutboxRows)
-        self.pausedRoomOutboxRows = max(0, pausedRoomOutboxRows)
+        self.readyUserStateEventRows = max(0, readyUserStateEventRows)
+        self.leasedUserStateEventRows = max(0, leasedUserStateEventRows)
+        self.scheduledUserStateEventRows = max(0, scheduledUserStateEventRows)
+        self.pausedUserStateEventRows = max(0, pausedUserStateEventRows)
         self.readyDirectProfileUpdates = max(0, readyDirectProfileUpdates)
         self.leasedDirectProfileUpdates = max(0, leasedDirectProfileUpdates)
         self.readyReadReceiptPreferencePropagations = max(0, readyReadReceiptPreferencePropagations)
         self.leasedReadReceiptPreferencePropagations = max(0, leasedReadReceiptPreferencePropagations)
         self.scheduledReadReceiptPreferencePropagations = max(0, scheduledReadReceiptPreferencePropagations)
         self.pausedReadReceiptPreferencePropagations = max(0, pausedReadReceiptPreferencePropagations)
-        self.openFanoutPlans = max(0, openFanoutPlans)
-        self.readyFanoutDeliveries = max(0, readyFanoutDeliveries)
-        self.leasedFanoutDeliveries = max(0, leasedFanoutDeliveries)
-        self.scheduledFanoutDeliveries = max(0, scheduledFanoutDeliveries)
-        self.pausedFanoutDeliveries = max(0, pausedFanoutDeliveries)
-        self.oldestUnfinishedRoomOutboxAgeSeconds = max(
-            0, oldestUnfinishedRoomOutboxAgeSeconds
-        )
-        self.oldestUnfinishedFanoutDeliveryAgeSeconds = max(
-            0, oldestUnfinishedFanoutDeliveryAgeSeconds
-        )
-        self.terminalFanoutCompletionUnits = max(0, terminalFanoutCompletionUnits)
-        self.oldestTerminalFanoutCompletionAgeSeconds = max(
-            0, oldestTerminalFanoutCompletionAgeSeconds
+        self.oldestUnfinishedUserStateEventAgeSeconds = max(
+            0, oldestUnfinishedUserStateEventAgeSeconds
         )
         self.readyContentReviews = max(0, readyContentReviews)
         self.leasedContentReviews = max(0, leasedContentReviews)
@@ -270,9 +225,6 @@ public struct V2DurableWorkMetricsSnapshot: Equatable, Sendable {
         self.projectionVersionGCBacklogEstimatedRows = max(0, projectionVersionGCBacklogEstimatedRows)
         self.messageProjectionStatesEstimatedRows = max(0, messageProjectionStatesEstimatedRows)
         self.messageProjectionStatesRelationBytes = max(0, messageProjectionStatesRelationBytes)
-        self.messageProjectionReferenceEstimatedRows = max(0, messageProjectionReferenceEstimatedRows)
-        self.messageProjectionBackfillEstimatedRows = max(0, messageProjectionBackfillEstimatedRows)
-        self.messageProjectionInlinePayloadEstimatedRows = max(0, messageProjectionInlinePayloadEstimatedRows)
         self.messageProjectionStateInlineBodyEstimatedRows = max(
             0, messageProjectionStateInlineBodyEstimatedRows
         )
@@ -416,7 +368,7 @@ private func v2LoadDurableWorkMetrics(
         }
         let timeoutTask = Task {
             do {
-                try await Task.sleep(for: timeout)
+                try await v2Sleep(for: timeout)
                 race.resolve(.timedOut)
             } catch {
                 // The source won and cancelled this timer.
@@ -503,7 +455,6 @@ public struct V2AggregateDurableWorkMetricsSource: V2DurableWorkMetricsSource {
 /// 告警也能区分「工作器空闲」与「持久化积压持续增长」。
 public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
     private let database: any Database
-    private let deliveryBucket: String?
     private let gatewayNodeID: String?
     private let includesUserShardMetrics: Bool
 
@@ -511,19 +462,16 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
     ///
     /// - Parameters:
     ///   - database: 执行指标查询的数据库。
-    ///   - deliveryBucket: 投递桶过滤；为 `nil` 表示运行时视角下的全部已配置桶。
     ///   - gatewayNodeID: 网关节点标识，用于统计本节点待处理的吊销事件。
     ///   - includesUserShardMetrics: 是否一并统计用户分片指标。
     ///
-    /// 桶级形式保留给针对性测试与分区部署使用。
+    /// 房间来源队列由独立指标来源统计，避免与控制库重复计数。
     public init(
         database: any Database,
-        deliveryBucket: String? = nil,
         gatewayNodeID: String? = nil,
         includesUserShardMetrics: Bool = true
     ) {
         self.database = database
-        self.deliveryBucket = deliveryBucket
         self.gatewayNodeID = gatewayNodeID
         self.includesUserShardMetrics = includesUserShardMetrics
     }
@@ -541,36 +489,12 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
         }
         // PostgreSQL cannot infer a type for a bare NULL bind in `NULL IS
         // NULL`. Bind an explicit Boolean scope flag instead, while keeping
-        // the bucket bind typed by its comparison to the text column.
-        let includesAllDeliveryBuckets = deliveryBucket == nil
-        let scopedDeliveryBucket = deliveryBucket ?? ""
+        // the node bind typed by its comparison to the text column.
         let includesGatewayRevocationMetrics = gatewayNodeID != nil
         let scopedGatewayNodeID = gatewayNodeID ?? ""
         guard let row = try await sql.raw("""
                 WITH snapshot_now AS (
                     SELECT CURRENT_TIMESTAMP AS value
-                ),
-                room_outbox_metrics AS (
-                    SELECT
-                        COUNT(*) FILTER (
-                            WHERE state = 'pending'
-                              AND (next_attempt_at IS NULL OR next_attempt_at <= snapshot_now.value)
-                              AND (lease_expires_at IS NULL OR lease_expires_at <= snapshot_now.value)
-                        ) AS ready_room_outbox_rows,
-                        COUNT(*) FILTER (
-                            WHERE state = 'pending' AND lease_expires_at > snapshot_now.value
-                        ) AS leased_room_outbox_rows,
-                        COUNT(*) FILTER (
-                            WHERE state = 'pending' AND next_attempt_at > snapshot_now.value
-                              AND (lease_expires_at IS NULL OR lease_expires_at <= snapshot_now.value)
-                        ) AS scheduled_room_outbox_rows,
-                        COUNT(*) FILTER (WHERE state = 'paused') AS paused_room_outbox_rows,
-                        COALESCE(
-                            EXTRACT(EPOCH FROM (MAX(snapshot_now.value) - MIN(created_at)))::bigint,
-                            0
-                        ) AS oldest_unfinished_room_outbox_age_seconds
-                    FROM im_v2.room_outbox, snapshot_now
-                    WHERE state <> 'terminal'
                 ),
                 profile_metrics AS (
                     SELECT
@@ -600,54 +524,6 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
                             AS paused_read_receipt_preference_propagations
                     FROM im_v2.read_receipt_preference_propagation_outbox, snapshot_now
                     WHERE state IN ('pending', 'claimed', 'paused')
-                ),
-                fanout_plan_metrics AS (
-                    SELECT COUNT(*) AS open_fanout_plans
-                    FROM im_v2.fanout_plans
-                    WHERE state <> 'terminal'
-                ),
-                fanout_delivery_metrics AS (
-                    SELECT
-                        COUNT(*) FILTER (
-                            WHERE delivery.state = 'pending'
-                              AND (delivery.next_attempt_at IS NULL OR delivery.next_attempt_at <= snapshot_now.value)
-                              AND (delivery.lease_expires_at IS NULL OR delivery.lease_expires_at <= snapshot_now.value)
-                        ) AS ready_fanout_deliveries,
-                        COUNT(*) FILTER (
-                            WHERE delivery.state = 'pending' AND delivery.lease_expires_at > snapshot_now.value
-                        ) AS leased_fanout_deliveries,
-                        COUNT(*) FILTER (
-                            WHERE delivery.state = 'pending' AND delivery.next_attempt_at > snapshot_now.value
-                              AND (delivery.lease_expires_at IS NULL OR delivery.lease_expires_at <= snapshot_now.value)
-                        ) AS scheduled_fanout_deliveries,
-                        COUNT(*) FILTER (WHERE delivery.state = 'paused') AS paused_fanout_deliveries,
-                        -- 投递行本身没有创建时间。它承载的来源事件才是这条工作被提交的
-                        -- 时刻，因此用事件创建时间衡量"这条投递等了多久"。
-                        COALESCE(
-                            EXTRACT(EPOCH FROM (
-                                MAX(snapshot_now.value) - MIN(event.created_at)
-                            ))::bigint,
-                            0
-                        ) AS oldest_unfinished_fanout_delivery_age_seconds
-                    FROM im_v2.fanout_deliveries AS delivery
-                    LEFT JOIN im_v2.room_events AS event
-                      ON event.event_id = delivery.source_event_id,
-                         snapshot_now
-                    WHERE delivery.state <> 'terminal'
-                      AND (\(bind: includesAllDeliveryBuckets) OR delivery.target_shard_bucket = \(bind: scopedDeliveryBucket))
-                ),
-                fanout_completion_release_metrics AS (
-                    SELECT
-                        COUNT(*) AS terminal_fanout_completion_units,
-                        COALESCE(EXTRACT(EPOCH FROM (
-                            MAX(snapshot_now.value) - MIN(event.created_at)
-                        )), 0)::BIGINT
-                            AS oldest_terminal_fanout_completion_age_seconds
-                    FROM im_v2.fanout_completion_units AS unit
-                    JOIN im_v2.room_events AS event
-                      ON event.event_id = unit.source_event_id,
-                         snapshot_now
-                    WHERE unit.state = 'terminal'
                 ),
                 content_review_metrics AS (
                     SELECT
@@ -820,8 +696,7 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
                     FROM im_v2.device_revocation_events AS event
                 )
                 SELECT *
-                FROM room_outbox_metrics, profile_metrics, read_receipt_preference_metrics, fanout_plan_metrics,
-                     fanout_delivery_metrics, fanout_completion_release_metrics,
+                FROM profile_metrics, read_receipt_preference_metrics,
                      content_review_metrics, media_scan_metrics,
                      media_purge_metrics, sync_metrics, sync_log_storage_metrics,
                      projection_effect_storage_metrics,
@@ -834,29 +709,12 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
         }
         return .init(
             isAvailable: true,
-            readyRoomOutboxRows: v2MetricCount(row.readyRoomOutboxRows),
-            leasedRoomOutboxRows: v2MetricCount(row.leasedRoomOutboxRows),
-            scheduledRoomOutboxRows: v2MetricCount(row.scheduledRoomOutboxRows),
-            pausedRoomOutboxRows: v2MetricCount(row.pausedRoomOutboxRows),
-            oldestUnfinishedRoomOutboxAgeSeconds: v2MetricCount(
-                row.oldestUnfinishedRoomOutboxAgeSeconds
-            ),
             readyDirectProfileUpdates: v2MetricCount(row.readyDirectProfileUpdates),
             leasedDirectProfileUpdates: v2MetricCount(row.leasedDirectProfileUpdates),
             readyReadReceiptPreferencePropagations: v2MetricCount(row.readyReadReceiptPreferencePropagations),
             leasedReadReceiptPreferencePropagations: v2MetricCount(row.leasedReadReceiptPreferencePropagations),
             scheduledReadReceiptPreferencePropagations: v2MetricCount(row.scheduledReadReceiptPreferencePropagations),
             pausedReadReceiptPreferencePropagations: v2MetricCount(row.pausedReadReceiptPreferencePropagations),
-            openFanoutPlans: v2MetricCount(row.openFanoutPlans),
-            readyFanoutDeliveries: v2MetricCount(row.readyFanoutDeliveries),
-            leasedFanoutDeliveries: v2MetricCount(row.leasedFanoutDeliveries),
-            scheduledFanoutDeliveries: v2MetricCount(row.scheduledFanoutDeliveries),
-            pausedFanoutDeliveries: v2MetricCount(row.pausedFanoutDeliveries),
-            oldestUnfinishedFanoutDeliveryAgeSeconds: v2MetricCount(
-                row.oldestUnfinishedFanoutDeliveryAgeSeconds
-            ),
-            terminalFanoutCompletionUnits: v2MetricCount(row.terminalFanoutCompletionUnits),
-            oldestTerminalFanoutCompletionAgeSeconds: v2MetricCount(row.oldestTerminalFanoutCompletionAgeSeconds),
             readyContentReviews: v2MetricCount(row.readyContentReviews),
             leasedContentReviews: v2MetricCount(row.leasedContentReviews),
             scheduledContentReviews: v2MetricCount(row.scheduledContentReviews),
@@ -952,23 +810,14 @@ public struct PostgresV2UserShardDurableWorkMetricsSource: V2DurableWorkMetricsS
                               WHERE schemaname = \(bind: schema)
                                 AND relname = 'user_sync_log'), 0)::BIGINT
                         AS user_sync_log_estimated_rows,
-                    pg_total_relation_size(
-                        \(bind: "\(schema).user_sync_log")::regclass
-                    )::BIGINT AS user_sync_log_relation_bytes,
+                    pg_total_relation_size(\(bind: "\(schema).user_sync_log")::regclass)::BIGINT
+                        AS user_sync_log_relation_bytes,
                     COALESCE((SELECT n_live_tup::BIGINT FROM pg_stat_user_tables
                               WHERE schemaname = \(bind: schema)
                                 AND relname = 'user_projection_effects'), 0)::BIGINT
                         AS user_projection_effects_estimated_rows,
-                    pg_total_relation_size(
-                        \(bind: "\(schema).user_projection_effects")::regclass
-                    )::BIGINT AS user_projection_effects_relation_bytes,
-                    COALESCE((SELECT n_live_tup::BIGINT FROM pg_stat_user_tables
-                              WHERE schemaname = \(bind: schema)
-                                AND relname = 'message_projection_states'), 0)::BIGINT
-                        AS message_projection_states_estimated_rows,
-                    pg_total_relation_size(
-                        \(bind: "\(schema).message_projection_states")::regclass
-                    )::BIGINT AS message_projection_states_relation_bytes
+                    pg_total_relation_size(\(bind: "\(schema).user_projection_effects")::regclass)::BIGINT
+                        AS user_projection_effects_relation_bytes
             ),
             projection_metrics AS (
                 SELECT
@@ -1012,40 +861,7 @@ public struct PostgresV2UserShardDurableWorkMetricsSource: V2DurableWorkMetricsS
                       ON namespace.oid = index_stats.relnamespace
                     WHERE namespace.nspname = \(bind: schema)
                       AND index_stats.relname = 'user_projection_versions_gc_idx'
-                ), 0)::BIGINT AS projection_version_gc_backlog_estimated_rows,
-                COALESCE((
-                    SELECT index_stats.reltuples::BIGINT
-                    FROM pg_class AS index_stats
-                    JOIN pg_namespace AS namespace
-                      ON namespace.oid = index_stats.relnamespace
-                    WHERE namespace.nspname = \(bind: schema)
-                      AND index_stats.relname = 'user_projection_versions_message_state_idx'
-                ), 0)::BIGINT AS message_projection_reference_estimated_rows,
-                COALESCE((
-                    SELECT index_stats.reltuples::BIGINT
-                    FROM pg_class AS index_stats
-                    JOIN pg_namespace AS namespace
-                      ON namespace.oid = index_stats.relnamespace
-                    WHERE namespace.nspname = \(bind: schema)
-                      AND index_stats.relname = 'user_projection_versions_message_backfill_idx'
-                ), 0)::BIGINT AS message_projection_backfill_estimated_rows,
-                COALESCE((
-                    SELECT index_stats.reltuples::BIGINT
-                    FROM pg_class AS index_stats
-                    JOIN pg_namespace AS namespace
-                      ON namespace.oid = index_stats.relnamespace
-                    WHERE namespace.nspname = \(bind: schema)
-                      AND index_stats.relname = 'user_projection_versions_message_inline_idx'
-                ), 0)::BIGINT AS message_projection_inline_payload_estimated_rows,
-                COALESCE((
-                    SELECT index_stats.reltuples::BIGINT
-                    FROM pg_class AS index_stats
-                    JOIN pg_namespace AS namespace
-                      ON namespace.oid = index_stats.relnamespace
-                    WHERE namespace.nspname = \(bind: schema)
-                      AND index_stats.relname =
-                          'message_projection_states_inline_accepted_idx'
-                ), 0)::BIGINT AS message_projection_state_inline_body_estimated_rows
+                ), 0)::BIGINT AS projection_version_gc_backlog_estimated_rows
             ),
             retention_metrics AS (
                 SELECT COALESCE(SUM(GREATEST(
@@ -1075,14 +891,6 @@ public struct PostgresV2UserShardDurableWorkMetricsSource: V2DurableWorkMetricsS
             failedSnapshotArtifacts: v2MetricCount(row.failedSnapshotArtifacts),
             oldestBuildingSnapshotAgeSeconds: v2MetricCount(row.oldestBuildingSnapshotAgeSeconds),
             projectionVersionGCBacklogEstimatedRows: v2MetricCount(row.projectionVersionGCBacklogEstimatedRows),
-            messageProjectionStatesEstimatedRows: v2MetricCount(row.messageProjectionStatesEstimatedRows),
-            messageProjectionStatesRelationBytes: v2MetricCount(row.messageProjectionStatesRelationBytes),
-            messageProjectionReferenceEstimatedRows: v2MetricCount(row.messageProjectionReferenceEstimatedRows),
-            messageProjectionBackfillEstimatedRows: v2MetricCount(row.messageProjectionBackfillEstimatedRows),
-            messageProjectionInlinePayloadEstimatedRows: v2MetricCount(row.messageProjectionInlinePayloadEstimatedRows),
-            messageProjectionStateInlineBodyEstimatedRows: v2MetricCount(
-                row.messageProjectionStateInlineBodyEstimatedRows
-            ),
             uncompactedProjectedRecords: v2MetricCount(row.uncompactedProjectedRecords),
             pendingSyncRecordsAcrossDevices: v2MetricCount(row.pendingSyncRecordsAcrossDevices),
             resetPendingDevices: v2MetricCount(row.resetPendingDevices)
@@ -1107,25 +915,17 @@ private func v2AggregateDurableWorkMetrics(
     }
     return .init(
         isAvailable: true,
-        readyRoomOutboxRows: sum(\.readyRoomOutboxRows),
-        leasedRoomOutboxRows: sum(\.leasedRoomOutboxRows),
-        scheduledRoomOutboxRows: sum(\.scheduledRoomOutboxRows),
-        pausedRoomOutboxRows: sum(\.pausedRoomOutboxRows),
-        oldestUnfinishedRoomOutboxAgeSeconds: maximum(\.oldestUnfinishedRoomOutboxAgeSeconds),
+        readyUserStateEventRows: sum(\.readyUserStateEventRows),
+        leasedUserStateEventRows: sum(\.leasedUserStateEventRows),
+        scheduledUserStateEventRows: sum(\.scheduledUserStateEventRows),
+        pausedUserStateEventRows: sum(\.pausedUserStateEventRows),
+        oldestUnfinishedUserStateEventAgeSeconds: maximum(\.oldestUnfinishedUserStateEventAgeSeconds),
         readyDirectProfileUpdates: sum(\.readyDirectProfileUpdates),
         leasedDirectProfileUpdates: sum(\.leasedDirectProfileUpdates),
         readyReadReceiptPreferencePropagations: sum(\.readyReadReceiptPreferencePropagations),
         leasedReadReceiptPreferencePropagations: sum(\.leasedReadReceiptPreferencePropagations),
         scheduledReadReceiptPreferencePropagations: sum(\.scheduledReadReceiptPreferencePropagations),
         pausedReadReceiptPreferencePropagations: sum(\.pausedReadReceiptPreferencePropagations),
-        openFanoutPlans: sum(\.openFanoutPlans),
-        readyFanoutDeliveries: sum(\.readyFanoutDeliveries),
-        leasedFanoutDeliveries: sum(\.leasedFanoutDeliveries),
-        scheduledFanoutDeliveries: sum(\.scheduledFanoutDeliveries),
-        pausedFanoutDeliveries: sum(\.pausedFanoutDeliveries),
-        oldestUnfinishedFanoutDeliveryAgeSeconds: maximum(\.oldestUnfinishedFanoutDeliveryAgeSeconds),
-        terminalFanoutCompletionUnits: sum(\.terminalFanoutCompletionUnits),
-        oldestTerminalFanoutCompletionAgeSeconds: maximum(\.oldestTerminalFanoutCompletionAgeSeconds),
         readyContentReviews: sum(\.readyContentReviews),
         leasedContentReviews: sum(\.leasedContentReviews),
         scheduledContentReviews: sum(\.scheduledContentReviews),
@@ -1152,9 +952,6 @@ private func v2AggregateDurableWorkMetrics(
         projectionVersionGCBacklogEstimatedRows: sum(\.projectionVersionGCBacklogEstimatedRows),
         messageProjectionStatesEstimatedRows: sum(\.messageProjectionStatesEstimatedRows),
         messageProjectionStatesRelationBytes: sum(\.messageProjectionStatesRelationBytes),
-        messageProjectionReferenceEstimatedRows: sum(\.messageProjectionReferenceEstimatedRows),
-        messageProjectionBackfillEstimatedRows: sum(\.messageProjectionBackfillEstimatedRows),
-        messageProjectionInlinePayloadEstimatedRows: sum(\.messageProjectionInlinePayloadEstimatedRows),
         messageProjectionStateInlineBodyEstimatedRows: sum(
             \.messageProjectionStateInlineBodyEstimatedRows
         ),
@@ -1187,15 +984,15 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
         "# HELP im_v2_durable_work_metrics_last_success_age_seconds Age of the last complete durable-work refresh when serving stale data.",
         "# TYPE im_v2_durable_work_metrics_last_success_age_seconds gauge",
         "im_v2_durable_work_metrics_last_success_age_seconds \(snapshot.lastSuccessfulRefreshAgeSeconds)",
-        "# HELP im_v2_room_outbox_backlog Durable room outbox rows owned by this deployment.",
-        "# TYPE im_v2_room_outbox_backlog gauge",
-        "im_v2_room_outbox_backlog{state=\"ready\"} \(snapshot.readyRoomOutboxRows)",
-        "im_v2_room_outbox_backlog{state=\"leased\"} \(snapshot.leasedRoomOutboxRows)",
-        "im_v2_room_outbox_backlog{state=\"scheduled\"} \(snapshot.scheduledRoomOutboxRows)",
-        "im_v2_room_outbox_backlog{state=\"paused\"} \(snapshot.pausedRoomOutboxRows)",
-        "# HELP im_v2_room_outbox_oldest_unfinished_age_seconds Age of the oldest room outbox row that has not reached a terminal state.",
-        "# TYPE im_v2_room_outbox_oldest_unfinished_age_seconds gauge",
-        "im_v2_room_outbox_oldest_unfinished_age_seconds \(snapshot.oldestUnfinishedRoomOutboxAgeSeconds)",
+        "# HELP im_v2_user_state_event_backlog Durable personal event rows across configured source databases.",
+        "# TYPE im_v2_user_state_event_backlog gauge",
+        "im_v2_user_state_event_backlog{state=\"ready\"} \(snapshot.readyUserStateEventRows)",
+        "im_v2_user_state_event_backlog{state=\"leased\"} \(snapshot.leasedUserStateEventRows)",
+        "im_v2_user_state_event_backlog{state=\"scheduled\"} \(snapshot.scheduledUserStateEventRows)",
+        "im_v2_user_state_event_backlog{state=\"paused\"} \(snapshot.pausedUserStateEventRows)",
+        "# HELP im_v2_user_state_event_oldest_unfinished_age_seconds Age of the oldest personal event awaiting completion.",
+        "# TYPE im_v2_user_state_event_oldest_unfinished_age_seconds gauge",
+        "im_v2_user_state_event_oldest_unfinished_age_seconds \(snapshot.oldestUnfinishedUserStateEventAgeSeconds)",
         "# HELP im_v2_direct_profile_update_backlog Durable direct-profile update sources awaiting or held by propagation.",
         "# TYPE im_v2_direct_profile_update_backlog gauge",
         "im_v2_direct_profile_update_backlog{state=\"ready\"} \(snapshot.readyDirectProfileUpdates)",
@@ -1206,24 +1003,6 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
         "im_v2_read_receipt_preference_propagation_backlog{state=\"leased\"} \(snapshot.leasedReadReceiptPreferencePropagations)",
         "im_v2_read_receipt_preference_propagation_backlog{state=\"scheduled\"} \(snapshot.scheduledReadReceiptPreferencePropagations)",
         "im_v2_read_receipt_preference_propagation_backlog{state=\"paused\"} \(snapshot.pausedReadReceiptPreferencePropagations)",
-        "# HELP im_v2_fanout_plans_open Durable fan-out plans not yet terminal.",
-        "# TYPE im_v2_fanout_plans_open gauge",
-        "im_v2_fanout_plans_open \(snapshot.openFanoutPlans)",
-        "# HELP im_v2_fanout_delivery_backlog Durable delivery rows for this replica's configured logical bucket.",
-        "# TYPE im_v2_fanout_delivery_backlog gauge",
-        "im_v2_fanout_delivery_backlog{state=\"ready\"} \(snapshot.readyFanoutDeliveries)",
-        "im_v2_fanout_delivery_backlog{state=\"leased\"} \(snapshot.leasedFanoutDeliveries)",
-        "im_v2_fanout_delivery_backlog{state=\"scheduled\"} \(snapshot.scheduledFanoutDeliveries)",
-        "im_v2_fanout_delivery_backlog{state=\"paused\"} \(snapshot.pausedFanoutDeliveries)",
-        "# HELP im_v2_fanout_delivery_oldest_unfinished_age_seconds Age of the oldest fan-out delivery row that has not reached a terminal state.",
-        "# TYPE im_v2_fanout_delivery_oldest_unfinished_age_seconds gauge",
-        "im_v2_fanout_delivery_oldest_unfinished_age_seconds \(snapshot.oldestUnfinishedFanoutDeliveryAgeSeconds)",
-        "# HELP im_v2_fanout_completion_release_backlog Terminal completion units awaiting admission-capacity release.",
-        "# TYPE im_v2_fanout_completion_release_backlog gauge",
-        "im_v2_fanout_completion_release_backlog \(snapshot.terminalFanoutCompletionUnits)",
-        "# HELP im_v2_fanout_completion_release_oldest_age_seconds Age since the source event of the oldest terminal unit awaiting release.",
-        "# TYPE im_v2_fanout_completion_release_oldest_age_seconds gauge",
-        "im_v2_fanout_completion_release_oldest_age_seconds \(snapshot.oldestTerminalFanoutCompletionAgeSeconds)",
         "# HELP im_v2_content_review_backlog Durable content-review jobs by actionable state.",
         "# TYPE im_v2_content_review_backlog gauge",
         "im_v2_content_review_backlog{state=\"ready\"} \(snapshot.readyContentReviews)",
@@ -1272,21 +1051,12 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
         "# HELP im_v2_projection_version_gc_backlog_estimated_rows Planner estimate from the closed-version partial index.",
         "# TYPE im_v2_projection_version_gc_backlog_estimated_rows gauge",
         "im_v2_projection_version_gc_backlog_estimated_rows \(snapshot.projectionVersionGCBacklogEstimatedRows)",
-        "# HELP im_v2_message_projection_states_estimated_rows PostgreSQL planner estimate of immutable shared message states.",
+        "# HELP im_v2_message_projection_states_estimated_rows PostgreSQL planner estimate of immutable room message states.",
         "# TYPE im_v2_message_projection_states_estimated_rows gauge",
         "im_v2_message_projection_states_estimated_rows \(snapshot.messageProjectionStatesEstimatedRows)",
-        "# HELP im_v2_message_projection_states_relation_bytes Heap, indexes, and TOAST bytes retained by immutable shared message states.",
+        "# HELP im_v2_message_projection_states_relation_bytes Heap, indexes, and TOAST bytes retained by immutable room message states.",
         "# TYPE im_v2_message_projection_states_relation_bytes gauge",
         "im_v2_message_projection_states_relation_bytes \(snapshot.messageProjectionStatesRelationBytes)",
-        "# HELP im_v2_message_projection_references_estimated_rows Planner estimate of user message versions linked to shared state.",
-        "# TYPE im_v2_message_projection_references_estimated_rows gauge",
-        "im_v2_message_projection_references_estimated_rows \(snapshot.messageProjectionReferenceEstimatedRows)",
-        "# HELP im_v2_message_projection_backfill_estimated_rows Planner estimate of legacy message versions still missing a shared-state reference.",
-        "# TYPE im_v2_message_projection_backfill_estimated_rows gauge",
-        "im_v2_message_projection_backfill_estimated_rows \(snapshot.messageProjectionBackfillEstimatedRows)",
-        "# HELP im_v2_message_projection_inline_payload_estimated_rows Planner estimate of duplicated inline message payloads remaining before contract.",
-        "# TYPE im_v2_message_projection_inline_payload_estimated_rows gauge",
-        "im_v2_message_projection_inline_payload_estimated_rows \(snapshot.messageProjectionInlinePayloadEstimatedRows)",
         "# HELP im_v2_message_projection_state_inline_body_estimated_rows Planner estimate of accepted state bodies still eligible for exact room-event compaction.",
         "# TYPE im_v2_message_projection_state_inline_body_estimated_rows gauge",
         "im_v2_message_projection_state_inline_body_estimated_rows \(snapshot.messageProjectionStateInlineBodyEstimatedRows)",
@@ -1314,25 +1084,12 @@ public func v2RenderPrometheusDurableWorkMetrics(_ snapshot: V2DurableWorkMetric
 }
 
 private struct DurableWorkMetricsRow: Decodable {
-    let readyRoomOutboxRows: Int64
-    let leasedRoomOutboxRows: Int64
-    let scheduledRoomOutboxRows: Int64
-    let pausedRoomOutboxRows: Int64
     let readyDirectProfileUpdates: Int64
     let leasedDirectProfileUpdates: Int64
     let readyReadReceiptPreferencePropagations: Int64
     let leasedReadReceiptPreferencePropagations: Int64
     let scheduledReadReceiptPreferencePropagations: Int64
     let pausedReadReceiptPreferencePropagations: Int64
-    let openFanoutPlans: Int64
-    let readyFanoutDeliveries: Int64
-    let leasedFanoutDeliveries: Int64
-    let scheduledFanoutDeliveries: Int64
-    let pausedFanoutDeliveries: Int64
-    let oldestUnfinishedRoomOutboxAgeSeconds: Int64
-    let oldestUnfinishedFanoutDeliveryAgeSeconds: Int64
-    let terminalFanoutCompletionUnits: Int64
-    let oldestTerminalFanoutCompletionAgeSeconds: Int64
     let readyContentReviews: Int64
     let leasedContentReviews: Int64
     let scheduledContentReviews: Int64
@@ -1367,25 +1124,12 @@ private struct DurableWorkMetricsRow: Decodable {
     let pendingRevokedDeviceProjectionCleanupEvents: Int64
 
     enum CodingKeys: String, CodingKey {
-        case readyRoomOutboxRows = "ready_room_outbox_rows"
-        case leasedRoomOutboxRows = "leased_room_outbox_rows"
-        case scheduledRoomOutboxRows = "scheduled_room_outbox_rows"
-        case pausedRoomOutboxRows = "paused_room_outbox_rows"
         case readyDirectProfileUpdates = "ready_direct_profile_updates"
         case leasedDirectProfileUpdates = "leased_direct_profile_updates"
         case readyReadReceiptPreferencePropagations = "ready_read_receipt_preference_propagations"
         case leasedReadReceiptPreferencePropagations = "leased_read_receipt_preference_propagations"
         case scheduledReadReceiptPreferencePropagations = "scheduled_read_receipt_preference_propagations"
         case pausedReadReceiptPreferencePropagations = "paused_read_receipt_preference_propagations"
-        case openFanoutPlans = "open_fanout_plans"
-        case readyFanoutDeliveries = "ready_fanout_deliveries"
-        case leasedFanoutDeliveries = "leased_fanout_deliveries"
-        case scheduledFanoutDeliveries = "scheduled_fanout_deliveries"
-        case pausedFanoutDeliveries = "paused_fanout_deliveries"
-        case oldestUnfinishedRoomOutboxAgeSeconds = "oldest_unfinished_room_outbox_age_seconds"
-        case oldestUnfinishedFanoutDeliveryAgeSeconds = "oldest_unfinished_fanout_delivery_age_seconds"
-        case terminalFanoutCompletionUnits = "terminal_fanout_completion_units"
-        case oldestTerminalFanoutCompletionAgeSeconds = "oldest_terminal_fanout_completion_age_seconds"
         case readyContentReviews = "ready_content_reviews"
         case leasedContentReviews = "leased_content_reviews"
         case scheduledContentReviews = "scheduled_content_reviews"
@@ -1434,12 +1178,6 @@ private struct UserShardDurableWorkMetricsRow: Decodable {
     let failedSnapshotArtifacts: Int64
     let oldestBuildingSnapshotAgeSeconds: Int64
     let projectionVersionGCBacklogEstimatedRows: Int64
-    let messageProjectionStatesEstimatedRows: Int64
-    let messageProjectionStatesRelationBytes: Int64
-    let messageProjectionReferenceEstimatedRows: Int64
-    let messageProjectionBackfillEstimatedRows: Int64
-    let messageProjectionInlinePayloadEstimatedRows: Int64
-    let messageProjectionStateInlineBodyEstimatedRows: Int64
     let uncompactedProjectedRecords: Int64
     let pendingSyncRecordsAcrossDevices: Int64
     let resetPendingDevices: Int64
@@ -1457,12 +1195,6 @@ private struct UserShardDurableWorkMetricsRow: Decodable {
         case failedSnapshotArtifacts = "failed_snapshot_artifacts"
         case oldestBuildingSnapshotAgeSeconds = "oldest_building_snapshot_age_seconds"
         case projectionVersionGCBacklogEstimatedRows = "projection_version_gc_backlog_estimated_rows"
-        case messageProjectionStatesEstimatedRows = "message_projection_states_estimated_rows"
-        case messageProjectionStatesRelationBytes = "message_projection_states_relation_bytes"
-        case messageProjectionReferenceEstimatedRows = "message_projection_reference_estimated_rows"
-        case messageProjectionBackfillEstimatedRows = "message_projection_backfill_estimated_rows"
-        case messageProjectionInlinePayloadEstimatedRows = "message_projection_inline_payload_estimated_rows"
-        case messageProjectionStateInlineBodyEstimatedRows = "message_projection_state_inline_body_estimated_rows"
         case uncompactedProjectedRecords = "uncompacted_projected_records"
         case pendingSyncRecordsAcrossDevices = "pending_sync_records_across_devices"
         case resetPendingDevices = "reset_pending_devices"

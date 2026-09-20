@@ -7,8 +7,8 @@
 
 | 组件 | 职责 | 不承担的职责 |
 | --- | --- | --- |
-| `IMV2Core` | 领域 ID、帧/命令、准入、fan-out 和同步规则 | 网络、数据库、UI、密钥存储 |
-| `IMV2Server` | V2 TLS gateway、PostgreSQL store、持久化 outbox/fan-out、账户/设备服务、operator 控制面 | 将 broker 作为业务真相 |
+| `IMV2Core` | 领域 ID、帧/命令、准入与同步规则 | 网络、数据库、UI、密钥存储 |
+| `IMV2Server` | V2 TLS gateway、PostgreSQL store、房间日志与个人事件 outbox、账户/设备服务、operator 控制面 | 将 broker 作为业务真相 |
 | `IMV2ClientKit` | Keychain 会话、独立 SQLite 同步投影、持久化命令 outbox、TLS/HTTPS 适配器 | SwiftUI 展示、直接访问服务端数据库 |
 | `IMApp` | SwiftUI 状态与用户交互、依赖注入、iOS Push/文件导入边界 | 直接持有 bearer token、直接操作协议或数据库 |
 | `IMV2` | PostgreSQL 当前 canonical schema、隔离测试 Compose、本机账户栈、Prometheus 规则与运行文档 | 生产编排或容量批准 |
@@ -17,47 +17,43 @@
 
 ```mermaid
 flowchart LR
-    C["iOS App / ClientKit\n本地 outbox"] --> G["V2 TLS gateway"]
-    G --> T["PostgreSQL 原子事务\noperation · message · logical room event"]
-    T -->|"群聊 / planner"| P["room outbox + 持久化 planner\n按 checkpoint 枚举"]
-    P --> D["持久化 delivery\nlease + 去重"]
-    D --> S["目标 user store\nconsumer inbox + sync log"]
+    C["App / ClientKit 本地 outbox"] --> G["TLS gateway"]
+    G --> T["PostgreSQL 原子事务"]
+    T --> R["公共房间日志"]
+    T --> P["个人状态事件与可靠 outbox"]
+    P --> S["个人投影 / sync / snapshot"]
     S --> C
-    T -->|"私聊 preplanned"| D
-    T -->|"私聊 room_log"| R["按 room cursor 拉取\nmessage-row / room-events 合并"]
-    R --> C
-    T -. "可选、尽力而为" .-> N["Core NATS / room waterline hint"]
-    N -. "只促使轮询；丢失或重复均可恢复" .-> P
-    N -. "只提示新 waterline" .-> R
+    R --> Q["按房间游标恢复"]
+    Q --> C
+    T -.-> N["房间级唤醒 / NATS"]
+    N -.-> A["账号级房间变化通知"]
+    A --> W["客户端持久恢复待办"]
+    W --> Q
+    D["授权目录 / 按 ID 状态与摘要"] --> W
+    C --> L["SQLite 有效活动排序与分页"]
 ```
 
-客户端先把用户命令写入本机 SQLite outbox；gateway 只在 PostgreSQL 原子事务成功后接受命令。
-群聊及未切换的 mutation 通过 room outbox、fan-out plan、delivery 与 user sync 推进；私聊
-`message.accepted` 可配置为 preplanned delivery，或以 logical room-event cursor 恢复。普通纯文本
-`room_log` 形态由带 `accepted_event_storage='message_row'` 的 `messages` 行承载 accepted event，
-读取端与其他独立 `room_events` 行按 sequence 合并。任何实时提示都只是提示：丢失后必须由 durable
-sync cursor 或 room cursor 恢复，不能把 broker/hint 当作投递成功。
+客户端先将命令写入本地 outbox；gateway 在 PostgreSQL 原子事务成功后确认接受。
+私聊和群聊公共内容统一保存在房间日志，普通接受消息可由 message_row 承载，读取时与 room_events 合并。
+个人事件流保存成员变化、已读、偏好和单侧提示；公共消息不再按成员写入个人同步副本。
+账号级通知只提示变化，丢失或覆盖失效时从目录、状态和持久游标恢复；不能把通知写出当作正文落库。
+会话列表由客户端按有效活动事实维护本地排序，服务端没有活动排行恢复入口。
+设计与验收边界见[会话同步实施方案](reviews/client-owned-conversation-sync-plan.md)及[当前验收](reviews/client-owned-conversation-sync-acceptance.md)。
 
-消息 Snapshot 投影把同一 message revision 的完整正文保存在物理 user store 的
-`message_projection_states` 一次；`user_projection_versions` 只保留用户授权/MVCC 事实和
-稳定 state reference。跨 store fan-out 与用户 shard migration 都先复制 immutable
-state 再写引用。Snapshot 和媒体授权通过用户引用 join state，shared state 本身不授予
-可见性。current-2 仍保留 dual/prefer-shared 灰度模式，生产 contract 尚需按
-[runbook](../IMV2/docs/10-operations/message-projection-sharing-runbook.md) 完成。
+个人 Snapshot 直接读取个人投影版本的载荷，公共消息和群公共事件由房间日志恢复。
+成员撤销、个人会话、单侧提示和收藏等个人状态保留可靠个人事件及独立检查点。
+消息媒体授权使用当前成员关系与接受、编辑时的权限事实；消息状态本身不授予可见性。
+旧消息副本的双写、读取模式与回填任务已删除，运维见
+[个人快照说明](../IMV2/docs/10-operations/personal-snapshot-runbook.md)。
 
-达到重试预算的 room outbox 或 delivery 进入 `paused`，而不是跳过。单条 paused work 只能由独立、loopback-only 的 operator 服务在修复根因后受控 replay。
+个人事件来源队列的暂时失败继续重试，确定性失败暂停。修复后由独立 operator 服务按
+来源分片、用户和事件类型进行审计重放，不跳过事件或手工推进用户序号。
 
 ## 群聊、私聊与接收策略
 
 - 群创建将初始成员、房间和操作结果作为一项幂等写入；成员变更由 owner 授权，移除允许 owner/admin（不得移除 owner），均携带 membership revision。
-- 每条需 fan-out 的事件在提交时固定受众规则：普通群事件按提交时成员资格枚举；成员移除等需要精确历史受众的事件保存冻结目标。随后成员变化不能扩大已经提交事件的可见范围。
-- 私聊 `message.accepted` 有三个互斥部署模式：`planner` 是兼容路径；`preplanned` 从锁定的 direct
-  pair 与两条有效 membership 直接创建一个 completion unit 和两个 durable delivery；`room_log`
-  不创建这些 fan-out 工件，而由双方按 revision-fenced room cursor 恢复 logical event。三者都不
-  接受客户端指定受众，都执行 pair/block/陌生人策略、membership、冻结、容量、幂等和 lease fence。
-  当前 `room_log` 只切换 accepted message，编辑、撤回、reaction 与 moderation mutation 仍走既有
-  fan-out。设计和灰度见 [ADR-017](../IMV2/docs/00-foundation/ADR-017-direct-room-event-log.md) 与
-  [direct fan-out runbook](../IMV2/docs/10-operations/direct-preplanned-fanout-runbook.md)。
+- 公共事件的读取资格以当前授权及提交时成员事实为准，成员变化不能扩大历史事件的可见范围。
+- 私聊和群聊公共内容统一按房间游标恢复，不提供 planner/preplanned/fanout 兼容部署模式。私聊仍执行 pair/block/陌生人策略、成员授权、冻结、容量和幂等检查；单侧受限提示进入个人事件流。
 - 群成员目录不是 fan-out payload；客户端只在打开成员管理时做认证后的 seek-pagination 查询。
 - 每个群成员目录条目都只携带公开 `@handle` 与显示名，并由 active-member 授权；App
   不显示内部 `user_id`。该资料随单个有界页面读取，不进入群 roster 的 fan-out 或 sync

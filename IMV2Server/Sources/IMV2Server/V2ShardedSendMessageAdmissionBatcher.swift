@@ -156,7 +156,9 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
     ///   - divisor: 除数。
     /// - Returns: 向上取整的结果。
     private static func ceilingDivide(_ value: Int, by divisor: Int) -> Int {
-        (value + divisor - 1) / divisor
+        // Inputs are positive. Adding the divisor first can overflow even
+        // though both the threshold and its per-lane result are representable.
+        (value / divisor) + (value % divisor == 0 ? 0 : 1)
     }
 
     /// 聚合各通道快照。

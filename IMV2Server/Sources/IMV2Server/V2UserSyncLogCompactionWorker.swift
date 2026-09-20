@@ -9,27 +9,22 @@ public struct V2UserSyncLogCompactionReport: Equatable, Sendable {
     public let claimedUserCount: Int
     /// 删除的日志行数。
     public let deletedLogRowCount: Int
-    /// 删除的共享载荷行数。
-    public let deletedSharedPayloadCount: Int
 
     /// 保存压缩统计。
     ///
     /// - Parameters:
     ///   - claimedUserCount: 认领用户数量。
     ///   - deletedLogRowCount: 删除日志行数。
-    ///   - deletedSharedPayloadCount: 删除共享载荷行数。
     public init(
         claimedUserCount: Int,
-        deletedLogRowCount: Int,
-        deletedSharedPayloadCount: Int
+        deletedLogRowCount: Int
     ) {
         self.claimedUserCount = claimedUserCount
         self.deletedLogRowCount = deletedLogRowCount
-        self.deletedSharedPayloadCount = deletedSharedPayloadCount
     }
     /// 本轮是否产生了实际删除。
     public var didWork: Bool {
-        deletedLogRowCount > 0 || deletedSharedPayloadCount > 0
+        deletedLogRowCount > 0
     }
 }
 
@@ -65,7 +60,7 @@ public struct PostgresV2UserSyncLogCompactionWorker: Sendable {
 
     /// 执行一轮有界压缩。
     ///
-    /// 认领用户后逐个推进保留下限并删除低于下限的日志与共享载荷；
+    /// 认领用户后逐个推进保留下限并删除低于下限的日志；
     /// 每个用户都在独立的有界事务内处理，单个用户的失败不会阻塞其他用户。
     ///
     /// - Parameters:
@@ -87,15 +82,14 @@ public struct PostgresV2UserSyncLogCompactionWorker: Sendable {
         }
         var report = V2UserSyncLogCompactionReport(
             claimedUserCount: 0,
-            deletedLogRowCount: 0, deletedSharedPayloadCount: 0
+            deletedLogRowCount: 0
         )
         for _ in 0 ..< userLimit {
             try Task.checkCancellation()
             guard let pass = try await compactOne(now: now, cutoff: cutoff, rowLimit: rowLimit) else { break }
             report = .init(
                 claimedUserCount: report.claimedUserCount + 1,
-                deletedLogRowCount: report.deletedLogRowCount + pass.deletedLogRowCount,
-                deletedSharedPayloadCount: report.deletedSharedPayloadCount + pass.deletedSharedPayloadCount
+                deletedLogRowCount: report.deletedLogRowCount + pass.deletedLogRowCount
             )
         }
         return report
@@ -197,54 +191,20 @@ public struct PostgresV2UserSyncLogCompactionWorker: Sendable {
 
             let deleted = try await sql.raw("""
                 WITH candidates AS (
-                    SELECT ctid, source_event_id, projection_kind
+                    SELECT ctid
                     FROM \(unsafeRaw: table("user_sync_log"))
                     WHERE user_id = \(bind: candidate.userID)
                       AND user_sync_sequence <= \(bind: floor)
                     ORDER BY user_sync_sequence
                     LIMIT \(bind: rowLimit)
                     FOR UPDATE SKIP LOCKED
-                ), removed AS (
-                    DELETE FROM \(unsafeRaw: table("user_sync_log")) AS log
-                    USING candidates
-                    WHERE log.ctid = candidates.ctid
-                    RETURNING candidates.source_event_id,
-                              candidates.projection_kind
                 )
-                SELECT source_event_id, projection_kind FROM removed
-                """).all(decoding: CompactedPayloadKeyRow.self)
-            let payloadKeys = Array(Set(deleted))
-            let deletedPayloads: Int
-            if payloadKeys.isEmpty {
-                deletedPayloads = 0
-            } else {
-                let sourceEventIDs = payloadKeys.map(\.sourceEventID)
-                let projectionKinds = payloadKeys.map(\.projectionKind)
-                deletedPayloads = try await sql.raw("""
-                    WITH removed_keys AS (
-                        SELECT DISTINCT key.source_event_id, key.projection_kind
-                        FROM unnest(
-                            \(bind: sourceEventIDs)::uuid[],
-                            \(bind: projectionKinds)::text[]
-                        ) AS key(source_event_id, projection_kind)
-                    )
-                    DELETE FROM \(unsafeRaw: table("fanout_sync_payloads")) AS payload
-                    USING removed_keys AS key
-                    WHERE payload.source_event_id = key.source_event_id
-                      AND payload.projection_kind = key.projection_kind
-                      AND NOT EXISTS (
-                          SELECT 1 FROM \(unsafeRaw: table("user_sync_log")) AS log
-                          WHERE log.source_event_id = payload.source_event_id
-                            AND log.projection_kind = payload.projection_kind
-                            AND log.payload_storage = 'fanout_shared'
-                    )
-                    RETURNING 1 AS value
-                    """).all(decoding: CompactionExistsRow.self).count
-            }
-            return .init(
-                deletedLogRowCount: deleted.count,
-                deletedSharedPayloadCount: deletedPayloads
-            )
+                DELETE FROM \(unsafeRaw: table("user_sync_log")) AS log
+                USING candidates
+                WHERE log.ctid = candidates.ctid
+                RETURNING 1 AS value
+                """).all(decoding: CompactionExistsRow.self)
+            return .init(deletedLogRowCount: deleted.count)
         }
     }
 
@@ -258,10 +218,8 @@ public enum V2UserSyncLogCompactionError: Error, Equatable, Sendable {
 
 private struct CompactionPass {
     let deletedLogRowCount: Int
-    let deletedSharedPayloadCount: Int
-    init(deletedLogRowCount: Int = 0, deletedSharedPayloadCount: Int = 0) {
+    init(deletedLogRowCount: Int = 0) {
         self.deletedLogRowCount = deletedLogRowCount
-        self.deletedSharedPayloadCount = deletedSharedPayloadCount
     }
 }
 private struct CompactionCandidateRow: Decodable {
@@ -275,12 +233,4 @@ private struct CompactionCandidateRow: Decodable {
     }
 }
 private struct OptionalCompactionFloorRow: Decodable { let value: Int64? }
-private struct CompactedPayloadKeyRow: Decodable, Hashable {
-    let sourceEventID: UUID
-    let projectionKind: String
-    enum CodingKeys: String, CodingKey {
-        case sourceEventID = "source_event_id"
-        case projectionKind = "projection_kind"
-    }
-}
 private struct CompactionExistsRow: Decodable { let value: Int }

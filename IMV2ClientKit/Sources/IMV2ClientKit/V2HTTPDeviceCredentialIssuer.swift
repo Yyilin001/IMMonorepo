@@ -6,7 +6,7 @@ import IMV2Core
 
 /// 由应用选择的账户因子提供短期、绑定设备的断言；ClientKit 不解释或持久化断言内容。
 public protocol V2DeviceBoundAccountAssertionProvider: Sendable {
-    /// 为指定设备取得一次性账户断言，失败通过账户因子错误或取消报告。
+    /// 为指定设备取得短期账户断言，失败通过账户因子错误或取消报告。
     func accountAssertion(for deviceID: DeviceID) async throws -> String
 }
 
@@ -144,7 +144,7 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
     ///
     /// - Parameters:
     ///   - issueEndpoint: HTTPS 地址，要求 host 非 nil；不额外排除用户信息、查询或片段。
-    ///   - assertionProvider: 提供设备绑定的一次性账户断言。
+    ///   - assertionProvider: 提供设备绑定的短期账户断言。
     ///   - deviceIdentityProvider: 提供稳定设备身份。
     ///   - operationStore: 签发请求前持久化待注册操作。
     ///   - recovery: 保存已收到凭证的撤销恢复收据。
@@ -373,7 +373,7 @@ private struct IssuedRegistration: Equatable, Sendable {
 
 /// 设备签发请求的 JSON 字段，与稳定取消材料一同提交账户断言。
 private struct IssueRequest: Encodable {
-    /// 一次性敏感账户断言。
+    /// 短期敏感账户断言。
     let accountAssertion: String
     /// 待注册设备的原始标识。
     let deviceID: String

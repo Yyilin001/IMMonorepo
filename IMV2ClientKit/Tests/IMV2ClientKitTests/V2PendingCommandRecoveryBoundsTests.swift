@@ -4,13 +4,25 @@ import GRDB
 import Testing
 
 struct V2PendingCommandRecoveryBoundsTests {
-    @Test(arguments: [
+    static let fields = [
         "edit.expected_message_revision", "edit.resulting_message_revision", "edit.resulting_room_sequence", "edit.terminal_current_revision",
         "withdrawal.expected_message_revision", "withdrawal.resulting_message_revision", "withdrawal.resulting_room_sequence", "withdrawal.terminal_current_revision",
         "membership.expected_membership_revision", "membership.resulting_membership_revision", "membership.resulting_room_sequence", "membership.terminal_current_revision",
         "receipt.read_through_room_sequence", "receipt.resulting_room_sequence"
-    ], [Int64.min, -1, 0, 1, Int64.max])
+    ]
+
+    @Test(arguments: fields, [Int64.min, -1, 0, 1, Int64.max])
     func storedIntegers(scenario: String, value: Int64) throws {
+        try checkStoredValue(scenario: scenario, value: value.databaseValue,
+            expected: value < 0 ? nil : UInt64(value))
+    }
+
+    @Test(arguments: fields, [1.5, Double(Int64.max)])
+    func storedNonintegers(scenario: String, value: Double) throws {
+        try checkStoredValue(scenario: scenario, value: value.databaseValue, expected: nil)
+    }
+
+    private func checkStoredValue(scenario: String, value: DatabaseValue, expected: UInt64?) throws {
         let parts = scenario.split(separator: ".").map(String.init)
         let kind = parts[0], field = parts[1]
         var columns: [String: (any DatabaseValueConvertible)?] = [
@@ -52,10 +64,10 @@ struct V2PendingCommandRecoveryBoundsTests {
                 return field == "read_through_room_sequence" ? item.readThroughRoomSequence : item.resultingRoomSequence
             }
         }
-        if value < 0 {
+        if expected == nil {
             #expect(throws: V2ClientCommandError.commandConflict) { _ = try decodedValue() }
         } else {
-            #expect(try decodedValue() == UInt64(value))
+            #expect(try decodedValue() == expected)
         }
     }
 }

@@ -118,7 +118,6 @@ public struct V2RoutedGroupMessagingStore:
     ///   - roomShardID: 创建时选定的房间归属分片。
     ///   - roomID: 预分配的房间标识。
     ///   - eventID: 建群事件标识。
-    ///   - planID: 关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 建群结果。
     /// - Throws: 归属未配置、意图冲突或归属存储失败时抛出。
@@ -128,7 +127,6 @@ public struct V2RoutedGroupMessagingStore:
         roomShardID _: String,
         roomID: RoomID,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2CreateGroupRoomOutcome {
         let candidate = try V2GroupRoomCreationIntent(
@@ -136,7 +134,6 @@ public struct V2RoutedGroupMessagingStore:
             operationID: command.operationID,
             roomID: roomID,
             eventID: eventID,
-            planID: planID,
             roomShardID: selector.shardID(
                 actorUserID: command.actorUserID,
                 operationID: command.operationID
@@ -177,7 +174,6 @@ public struct V2RoutedGroupMessagingStore:
             roomShardID: intent.roomShardID,
             roomID: intent.roomID,
             eventID: intent.eventID,
-            planID: intent.planID,
             now: now
         )
         switch outcome {
@@ -201,7 +197,6 @@ public struct V2RoutedGroupMessagingStore:
     ///   - roomShardID: 创建时选定的房间归属分片。
     ///   - roomID: 预分配的房间标识。
     ///   - eventID: 建群事件标识。
-    ///   - planID: 关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 建群结果。
     /// - Throws: 归属未配置、创建意图准备失败或归属存储返回错误时抛出。
@@ -211,7 +206,6 @@ public struct V2RoutedGroupMessagingStore:
         roomShardID _: String,
         roomID: RoomID,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2CreateGroupRoomOutcome {
         let candidate = try V2GroupRoomCreationIntent(
@@ -219,7 +213,6 @@ public struct V2RoutedGroupMessagingStore:
             operationID: command.operationID,
             roomID: roomID,
             eventID: eventID,
-            planID: planID,
             roomShardID: selector.shardID(
                 actorUserID: command.actorUserID,
                 operationID: command.operationID
@@ -311,7 +304,7 @@ private struct GroupCreationFingerprintEnvelope: Encodable {
     let actorUserID: String
     let operationID: String
     let title: String
-    let deliveryMode: String
+    let capacityClass: String
     let initialMemberUserIDs: [String]
 
     enum CodingKeys: String, CodingKey {
@@ -319,7 +312,7 @@ private struct GroupCreationFingerprintEnvelope: Encodable {
         case actorUserID = "actor_user_id"
         case operationID = "operation_id"
         case title
-        case deliveryMode = "delivery_mode"
+        case capacityClass = "capacity_class"
         case initialMemberUserIDs = "initial_member_user_ids"
     }
 }
@@ -332,7 +325,7 @@ private func groupCreationFingerprint(
         actorUserID: command.actorUserID.rawValue.lowercased(),
         operationID: command.operationID.rawValue.lowercased(),
         title: command.title,
-        deliveryMode: command.deliveryMode.rawValue,
+        capacityClass: command.capacityClass.rawValue,
         initialMemberUserIDs: command.initialMemberUserIDs
             .map { $0.rawValue.lowercased() }
             .sorted()
@@ -347,7 +340,7 @@ private struct StagedGroupCreationFingerprintEnvelope: Encodable {
     let actorUserID: String
     let operationID: String
     let title: String
-    let deliveryMode: String
+    let capacityClass: String
     let stagedMemberCount: Int
 
     enum CodingKeys: String, CodingKey {
@@ -355,7 +348,7 @@ private struct StagedGroupCreationFingerprintEnvelope: Encodable {
         case actorUserID = "actor_user_id"
         case operationID = "operation_id"
         case title
-        case deliveryMode = "delivery_mode"
+        case capacityClass = "capacity_class"
         case stagedMemberCount = "staged_member_count"
     }
 }
@@ -368,7 +361,7 @@ private func stagedGroupCreationFingerprint(
         actorUserID: command.actorUserID.rawValue.lowercased(),
         operationID: command.operationID.rawValue.lowercased(),
         title: command.title,
-        deliveryMode: command.deliveryMode.rawValue,
+        capacityClass: command.capacityClass.rawValue,
         stagedMemberCount: command.stagedMemberCount
     )
     let encoder = JSONEncoder()

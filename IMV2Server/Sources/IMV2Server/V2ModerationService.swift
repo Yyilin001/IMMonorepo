@@ -74,8 +74,6 @@ public struct V2ModerationResult: Equatable, Sendable {
     public let roomSequence: UInt64
     /// 审核事件标识。
     public let eventID: EventID
-    /// 关联的扇出计划标识。
-    public let fanoutPlanID: FanoutPlanID
     /// 审核事件创建时刻。
     public let createdAt: Date
 
@@ -94,11 +92,10 @@ public struct V2ModerationResult: Equatable, Sendable {
     ///   - muteUntil: 禁言到期时刻。
     ///   - roomSequence: 房间日志序号。
     ///   - eventID: 审核事件标识。
-    ///   - fanoutPlanID: 关联的扇出计划标识。
     ///   - createdAt: 事件创建时刻。
     /// - Throws: 任一修订或序号超出可编码范围时抛出
     ///   ``V2RevisionValidationError/outOfRange``。
-    public init(roomID: RoomID, operationID: ModerationOperationID, action: V2ModerationAction, targetUserID: UserID?, messageID: MessageID?, messageRevision: UInt64? = nil, membershipRevision: UInt64? = nil, muteUntil: Date?, roomSequence: UInt64, eventID: EventID, fanoutPlanID: FanoutPlanID, createdAt: Date) throws {
+    public init(roomID: RoomID, operationID: ModerationOperationID, action: V2ModerationAction, targetUserID: UserID?, messageID: MessageID?, messageRevision: UInt64? = nil, membershipRevision: UInt64? = nil, muteUntil: Date?, roomSequence: UInt64, eventID: EventID, createdAt: Date) throws {
         guard roomSequence > 0, roomSequence <= UInt64(Int64.max),
               messageRevision.map({ $0 > 0 && $0 <= UInt64(Int64.max) }) ?? true,
               membershipRevision.map({ $0 > 0 && $0 <= UInt64(Int64.max) }) ?? true
@@ -113,7 +110,6 @@ public struct V2ModerationResult: Equatable, Sendable {
         self.muteUntil = muteUntil
         self.roomSequence = roomSequence
         self.eventID = eventID
-        self.fanoutPlanID = fanoutPlanID
         self.createdAt = createdAt
     }
 }
@@ -135,7 +131,7 @@ public enum V2ModerationOutcome: Equatable, Sendable {
     /// 被限流，并给出建议重试秒数。
     case rateLimited(retryAfterSeconds: Int)
     /// 准入当前不可用，附带不可用原因。
-    case unavailable(FanoutAdmissionUnavailableReason)
+    case unavailable(V2CommandAdmissionUnavailableReason)
 }
 
 /// 审核命令的持久化能力。
@@ -149,11 +145,10 @@ public protocol V2ModerationStore: Sendable {
     ///   - command: 审核命令。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 审核结果。
     /// - Throws: 房间或消息不存在、无权限、动作不受支持或持久化失败时抛出。
-    func apply(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2ModerationOutcome
+    func apply(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome
 }
 
 /// 单独认证的安全服务房间控制命令。
@@ -250,11 +245,10 @@ public protocol V2TrustedSafetyModerationStore: Sendable {
     ///   - command: 审核命令，发起者由服务配置的受信主体提供。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 审核结果。
     /// - Throws: 房间或消息不存在、动作不受支持或持久化失败时抛出。
-    func applyTrustedSafety(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2ModerationOutcome
+    func applyTrustedSafety(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome
 }
 
 /// 审核命令的事件与扇出标识生成器。
@@ -265,12 +259,12 @@ public struct V2ModerationIDFactory: Sendable {
     /// - Parameter makeUUID: 产生原始 UUID 的闭包。
     public init(makeUUID: @escaping @Sendable () -> UUID = UUID.init) { self.makeUUID = makeUUID }
 
-    /// 生成一对互不相同的事件标识与扇出计划标识。
+    /// 生成一个事件标识。
     ///
     /// - Returns: 本次命令使用的标识组合。
     /// - Throws: 标识类型拒绝生成值时抛出。
-    public func make() throws -> (eventID: EventID, planID: FanoutPlanID) {
-        try (.init(makeUUID().uuidString), .init(makeUUID().uuidString))
+    public func make() throws -> EventID {
+        try .init(makeUUID().uuidString)
     }
 }
 
@@ -301,7 +295,7 @@ public struct V2ModerationService: Sendable {
     /// - Returns: 审核结果；标识与授时由本方法补齐。
     /// - Throws: 命令构造失败、标识生成失败或存储判定失败时抛出。
     public func apply(_ request: V2AuthenticatedModeration) async throws -> V2ModerationOutcome {
-        let ids = try identifiers.make()
+        let eventID = try identifiers.make()
         let command = try V2ModerationCommand(
             roomID: request.roomID,
             actorUserID: request.actorUserID,
@@ -312,7 +306,7 @@ public struct V2ModerationService: Sendable {
             muteUntil: request.muteUntil,
             reasonCode: request.reasonCode
         )
-        return try await store.apply(command: command, capacityProfile: capacityProfile, eventID: ids.eventID, planID: ids.planID, now: now())
+        return try await store.apply(command: command, capacityProfile: capacityProfile, eventID: eventID, now: now())
     }
 }
 
@@ -365,7 +359,7 @@ public struct V2TrustedSafetyModerationService: Sendable {
     /// - Returns: 审核结果。
     /// - Throws: 命令构造失败、标识生成失败或存储判定失败时抛出。
     public func apply(_ request: V2TrustedSafetyModeration) async throws -> V2ModerationOutcome {
-        let ids = try identifiers.make()
+        let eventID = try identifiers.make()
         let command = try V2ModerationCommand(
             roomID: request.roomID,
             actorUserID: safetyActorUserID,
@@ -375,7 +369,7 @@ public struct V2TrustedSafetyModerationService: Sendable {
             expectedMessageRevision: request.expectedMessageRevision,
             reasonCode: request.reasonCode
         )
-        return try await store.applyTrustedSafety(command: command, capacityProfile: capacityProfile, eventID: ids.eventID, planID: ids.planID, now: now())
+        return try await store.applyTrustedSafety(command: command, capacityProfile: capacityProfile, eventID: eventID, now: now())
     }
 }
 

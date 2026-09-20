@@ -140,13 +140,11 @@ public struct V2DefaultClientRuntimeActivity: V2ClientRuntimeActivity, Sendable 
         for lane in commandLifecycles { await lane.suspendCommandFlushing() }
     }
 
-    /// 追赶个人增量；若需 reset，则完成该恢复后通知投影已同步。
+    /// 追赶个人增量；若需 reset，激活快照并追平其后增量，才通知投影已同步。
     ///
     /// 此方法不直接运行无限实时循环；返回后由 runtime 接续命令处理与 live 活动。
     public func synchronizeAfterConnection() async throws {
-        if case .resetPending = try await syncEngine.synchronizeUntilCaughtUp() {
-            try await syncEngine.completePendingReset()
-        }
+        _ = try await syncEngine.synchronizeIncludingResets()
         await onProjectionSynchronized()
     }
 

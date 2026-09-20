@@ -7,22 +7,26 @@ import IMV2Core
 /// 所有标识都在该边界完成解析，非法数据绝不会变成可导航的路由。
 actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationWindowReading, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyAccessing {
     private let localStore: GRDBV2LocalSyncStore
-    private let unreadDirectory: V2ClientConversationUnreadDirectory?
-
-    init(localStore: GRDBV2LocalSyncStore, unreadDirectory: V2ClientConversationUnreadDirectory? = nil) {
+    private let requestLatestVisible: @Sendable ([RoomID]) async throws -> Void
+    init(localStore: GRDBV2LocalSyncStore, requestLatestVisible: @escaping @Sendable ([RoomID]) async throws -> Void) {
         self.localStore = localStore
-        self.unreadDirectory = unreadDirectory
+        self.requestLatestVisible = requestLatestVisible
     }
 
-    /// 推进一次有界的未读轮转。
-    ///
-    /// 只走给定页数：最活跃的房间最先刷新，冷房间靠后续轮转补齐。失败不抛给界面，
-    /// 因为它只影响角标的新鲜度，不影响列表本身。
-    ///
-    /// - Parameter pageBudget: 本次最多取回的摘要页数。
-    func refreshConversationUnread(pageBudget: Int) async {
-        guard let unreadDirectory else { return }
-        _ = try? await unreadDirectory.refresh(pageBudget: pageBudget)
+    private func requestMissingSummaries(_ entries: [V2ClientConversationListEntry]) async throws {
+        let rooms = entries.filter { $0.latestVisible == nil }.map(\.roomID)
+        for start in stride(from: 0, to: rooms.count, by: 100) {
+            try Task.checkCancellation()
+            do {
+                try await requestLatestVisible(Array(rooms[start..<min(start + 100, rooms.count)]))
+            } catch V2RoomRecoveryEngineError.notStarted {
+                // Local pages remain available before the connection starts.
+                return
+            } catch V2RoomRecoveryEngineError.coverageLost {
+                // The next connection rebuilds recovery demand.
+                return
+            }
+        }
     }
 
     /// 该房间是否已被服务端保留裁剪掉一段历史。
@@ -35,15 +39,15 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationWind
 
     /// 按房间标识读取展示未读；目录不可用时返回空映射（界面显示无角标）。
     private func displayedUnread(roomIDs: [RoomID]) async -> [RoomID: UInt64] {
-        guard let unreadDirectory, !roomIDs.isEmpty else { return [:] }
-        guard let rows = try? await unreadDirectory.snapshot(roomIDs: roomIDs) else { return [:] }
+        guard !roomIDs.isEmpty else { return [:] }
+        guard let rows = try? await localStore.roomUnreadSnapshot(roomIDs: roomIDs) else { return [:] }
         return rows.mapValues(\.displayedUnread)
     }
 
     /// 读取进入房间推进已读线所需的本地事实。
     ///
-    /// 房间头来自服务端摘要（复制在本地未读目录里），本地已应用序号来自投影库。两者
-    /// 都可能缺失：目录还没轮转到该房间，或本地还没有任何该房间的事件证据。
+    /// 房间头来自已验证的房间同步状态，本地已应用序号来自投影库。两者
+    /// 都可能缺失：恢复任务尚未核对该房间，或本地还没有任何该房间的事件证据。
     ///
     /// - Parameter roomID: 目标房间标识。
     /// - Returns: 已知的房间头与本地已应用序号。
@@ -51,10 +55,10 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationWind
     func roomReadCheckpoint(roomID: String) async throws -> V2ConversationRoomReadCheckpoint {
         let parsedRoomID = try RoomID(roomID)
         let applied = try await localStore.roomAppliedRoomSequence(roomID: parsedRoomID)
-        // 目录不可用时房间头未知：界面只按本地已应用序号推进，不会凭空跳到未知的 head。
-        let knownHeads = try await unreadDirectory?.knownHeads(roomIDs: [parsedRoomID])
+        // 状态未知时房间头未知：界面只按本地已应用序号推进，不会凭空跳到未知的 head。
+        let states = try await localStore.roomUnreadSnapshot(roomIDs: [parsedRoomID])
         return .init(
-            knownHead: knownHeads?[parsedRoomID],
+            knownHead: states[parsedRoomID]?.head,
             appliedRoomSequence: applied > 0 ? applied : nil
         )
     }
@@ -71,12 +75,14 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationWind
             limit: limit
         )
         let unread = await displayedUnread(roomIDs: page.entries.map(\.roomID))
+        try await requestMissingSummaries(page.entries)
         return Self.listPage(page, userID: userID, unread: unread)
     }
 
     func conversationWindow(for userID: String, isArchived: Bool, around anchor: V2ClientConversationListCursor, limit: Int, precedingCount: Int) async throws -> V2ConversationListWindow {
         let result = try await localStore.conversationListWindow(isArchived: isArchived, around: anchor, limit: limit, precedingCount: precedingCount)
         let unread = await displayedUnread(roomIDs: result.page.entries.map(\.roomID))
+        try await requestMissingSummaries(result.page.entries)
         return .init(page: Self.listPage(result.page, userID: userID, unread: unread), anchorID: result.anchor?.roomID.rawValue, hasEarlier: result.hasEarlier)
     }
 
@@ -101,14 +107,16 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationWind
             return V2ConversationListItem(
                 id: entry.roomID.rawValue,
                 title: entry.roomProfile?.title ?? directTitle ?? Self.roomTitle(entry.roomID.rawValue),
-                preview: entry.lastMessage.map { Self.preview(for: $0) } ?? "暂无消息",
+                preview: entry.latestVisible.map { snapshot in
+                    snapshot.latest.map { $0.preview.isEmpty && $0.mediaCount > 0 ? "[附件]" : $0.preview } ?? "暂无消息"
+                } ?? entry.lastMessage.map { Self.preview(for: $0) } ?? "暂无消息",
                 lastActivity: entry.lastActivity,
-                isOutgoing: entry.lastMessage?.senderUserID.rawValue == userID,
+                isOutgoing: entry.latestVisible.map { $0.latest?.senderID.rawValue == userID } ?? (entry.lastMessage?.senderUserID.rawValue == userID),
                 kind: kind,
                 isPinned: entry.isPinned,
                 isArchived: entry.isArchived,
                 muteUntil: entry.muteUntil,
-                unreadCount: unread[entry.roomID] ?? 0
+                unreadCount: unread[entry.roomID]
             )
         }
         return .init(items: items, nextCursor: page.nextCursor)
@@ -147,7 +155,7 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationWind
                 id: identity.roomID.rawValue,
                 title: directTitles?[identity.roomID] ?? identity.publicIdentity.displayName,
                 preview: "暂无消息",
-                lastActivity: identity.updatedAt,
+                lastActivity: identity.roomCreatedAt,
                 isOutgoing: false,
                 kind: .direct(accountKind: identity.publicIdentity.accountKind),
                 isPinned: conversationStates[identity.roomID]?.isPinned ?? false,

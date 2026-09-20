@@ -18,7 +18,7 @@ public protocol V2OwnerValidatedMessageEditStore: Sendable {
     /// - Returns: 编辑结果。
     /// - Throws: 归属已变更、权限不足或持久化失败时抛出。
     func editOwnerValidated(command: V2EditMessageCommand, ownerRoute: V2RoomShardRoute,
-        capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2MessageEditOutcome
+        capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageEditOutcome
 }
 
 /// 按房间归属执行消息撤回的能力。
@@ -35,7 +35,7 @@ public protocol V2OwnerValidatedMessageWithdrawalStore: Sendable {
     /// - Returns: 撤回结果。
     /// - Throws: 归属已变更、权限不足或持久化失败时抛出。
     func withdrawOwnerValidated(command: V2WithdrawMessageCommand, ownerRoute: V2RoomShardRoute,
-        capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2MessageWithdrawalOutcome
+        capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageWithdrawalOutcome
 }
 
 /// 按房间归属执行消息表情变更的能力。
@@ -52,5 +52,5 @@ public protocol V2OwnerValidatedMessageReactionStore: Sendable {
     /// - Returns: 表情变更结果。
     /// - Throws: 归属已变更、权限不足或持久化失败时抛出。
     func changeOwnerValidated(command: V2ChangeMessageReactionCommand, ownerRoute: V2RoomShardRoute,
-        capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2MessageReactionOutcome
+        capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageReactionOutcome
 }

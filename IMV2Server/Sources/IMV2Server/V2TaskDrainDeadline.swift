@@ -26,7 +26,7 @@ public func v2WaitForTaskDrain(
         }
         let timeoutTask = Task {
             do {
-                try await Task.sleep(for: timeout)
+                try await v2Sleep(for: timeout)
                 race.resolve(false)
             } catch {
                 // The drain won and cancelled this timer.

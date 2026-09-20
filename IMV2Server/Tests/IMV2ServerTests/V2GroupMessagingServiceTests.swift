@@ -12,11 +12,11 @@ struct V2GroupMessagingServiceTests {
         if count < 0 || count == Int.max {
             #expect(throws: V2GroupMessagingPolicyError.invalidInitialMembership) {
                 try V2StagedGroupRoomCommand(actorUserID: owner, operationID: operation,
-                    title: "boundary", deliveryMode: .largeGroupHybrid, stagedMemberCount: count)
+                    title: "boundary", capacityClass: .large, stagedMemberCount: count)
             }
         } else {
             let command = try V2StagedGroupRoomCommand(actorUserID: owner, operationID: operation,
-                title: "boundary", deliveryMode: .largeGroupHybrid, stagedMemberCount: count)
+                title: "boundary", capacityClass: .large, stagedMemberCount: count)
             #expect(command.allMemberCount == count + 1)
         }
     }
@@ -80,7 +80,7 @@ struct V2GroupMessagingServiceTests {
         let command = try #require(await store.command())
         #expect(command.title == "项目群")
         #expect(command.allMemberUserIDs == [owner, member])
-        #expect(command.deliveryMode == .standardFanout)
+        #expect(command.capacityClass == .standard)
     }
 
     @Test("rejects a membership count beyond the assigned profile before persistence")
@@ -102,7 +102,7 @@ struct V2GroupMessagingServiceTests {
     }
 
     @Test("derives the immutable delivery mode at the 5,000-member boundary")
-    func derivesDeliveryModeAtBoundary() async throws {
+    func derivesCapacityClassAtBoundary() async throws {
         let store = GroupStoreSpy()
         let service = try V2GroupMessagingService(
             store: store,
@@ -119,7 +119,7 @@ struct V2GroupMessagingServiceTests {
             initialMemberUserIDs: try members(count: 4_999)
         )
         guard case .created = standard else { Issue.record("expected standard group"); return }
-        #expect(try #require(await store.command()).deliveryMode == .standardFanout)
+        #expect(try #require(await store.command()).capacityClass == .standard)
 
         let hybrid = try await service.create(
             actorUserID: owner,
@@ -128,11 +128,11 @@ struct V2GroupMessagingServiceTests {
             initialMemberUserIDs: try members(count: 5_000)
         )
         guard case .created = hybrid else { Issue.record("expected hybrid group"); return }
-        #expect(try #require(await store.command()).deliveryMode == .largeGroupHybrid)
+        #expect(try #require(await store.command()).capacityClass == .large)
     }
 
     private func profile(maxMembers: Int) throws -> V2CapacityProfile {
-        try .init(id: "standard", limits: .init(maxEligibleMembers: maxMembers, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100, maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 1))
+        try .init(id: "standard", limits: .init(maxEligibleMembers: maxMembers, maxCommandsPerWindow: 10,    retryAfterSeconds: 1))
     }
 
     private func members(count: Int) throws -> [UserID] {
@@ -145,9 +145,9 @@ struct V2GroupMessagingServiceTests {
 private actor GroupStoreSpy: V2GroupMessagingStore {
     private var captured: V2CreateGroupRoomCommand?
 
-    func create(command: V2CreateGroupRoomCommand, capacityProfile _: V2CapacityProfile, roomShardID _: String, roomID: RoomID, eventID _: EventID, planID _: FanoutPlanID, now: Date) throws -> V2CreateGroupRoomOutcome {
+    func create(command: V2CreateGroupRoomCommand, capacityProfile _: V2CapacityProfile, roomShardID _: String, roomID: RoomID, eventID _: EventID, now: Date) throws -> V2CreateGroupRoomOutcome {
         captured = command
-        return .created(try .init(roomID: roomID, ownerUserID: command.actorUserID, title: command.title, deliveryMode: command.deliveryMode, memberUserIDs: command.allMemberUserIDs, createdAt: now))
+        return .created(try .init(roomID: roomID, ownerUserID: command.actorUserID, title: command.title, capacityClass: command.capacityClass, memberUserIDs: command.allMemberUserIDs, createdAt: now))
     }
 
     func command() -> V2CreateGroupRoomCommand? {

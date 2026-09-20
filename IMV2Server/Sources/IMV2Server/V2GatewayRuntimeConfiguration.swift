@@ -22,33 +22,6 @@ public enum V2ContentReviewMode: String, Equatable, Sendable {
     var enqueuesJobs: Bool { self == .enabled }
 }
 
-public enum V2MessageProjectionWriteMode: String, Equatable, Sendable {
-    case inline
-    case dual
-    case shared
-}
-
-public enum V2MessageProjectionReadMode: String, Equatable, Sendable {
-    case inline
-    case preferShared = "prefer_shared"
-    case shared
-}
-
-/// 选择单聊消息固定的双人受众如何变成持久投递工作。
-///
-/// `preplanned` 仍使用常规的投递、收件箱与完成围栏；
-/// 它只是省去冗余的发件箱与成员枚举阶段。
-/// 这是部署策略而非客户端输入，因此灰度回滚无需改动线上协议。
-public enum V2DirectFanoutMode: String, Equatable, Sendable {
-    case planner
-    case preplanned
-    /// 以单聊房间事件日志作为持久事实来源。
-    ///
-    /// 客户端通过房间游标恢复，前台订阅只会收到尽力而为的水位提示，
-    /// 因此固定的双人受众无需每消息的用户投影或投递租约。
-    case roomLog = "room_log"
-}
-
 /// 控制当普通单聊消息的规范投递记录就是房间事件日志时，适用哪一道持久命令速率围栏。
 ///
 /// 这是部署策略而非客户端输入。
@@ -56,19 +29,9 @@ public enum V2DirectFanoutMode: String, Equatable, Sendable {
 /// `room` 保留原先的每房间命令窗口。
 /// `shardOnly` 仍保留持久分片命令窗口、网关用户/设备速率限制、单聊策略检查与陌生人配额，
 /// 但不会再为每条单聊消息改写本应闲置的每房间命令计数器。
-/// 它刻意只在配合 `V2DirectFanoutMode.roomLog` 时才有效。
 public enum V2DirectRoomLogAdmissionMode: String, Equatable, Sendable {
     case room
     case shardOnly = "shard_only"
-}
-
-/// 控制已接受消息的增量同步正文是保留在扇出载荷表中，还是由其不可变消息状态引用表示。
-///
-/// 读取方始终同时支持两种形式，
-/// 因此可以在所有二进制都具备引用 join 之后再灰度开启，并在压缩之前无损回滚。
-public enum V2FanoutPayloadWriteMode: String, Equatable, Sendable {
-    case body
-    case reference
 }
 
 /// 指标刻意只绑定到 loopback 监听器。
@@ -197,11 +160,6 @@ public enum V2PushRuntimeConfiguration: Sendable {
     case apns(V2APNSRuntimeConfiguration)
 }
 
-public enum V2FanoutHintRuntimeConfiguration: Sendable {
-    case durablePollingOnly
-    case nats(V2NATSFanoutHintConfiguration)
-}
-
 /// 混合前台唤醒路由配置。
 ///
 /// 对单个网关它是可选的；
@@ -247,6 +205,9 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let databasePolicy: V2PostgresRuntimePolicy
     public let databaseWorkloadPoolBudget: V2PostgresWorkloadPoolBudget
     public let databaseWorkloadPoolIsolationEnabled: Bool
+    /// Independent authoritative direct-send pool; matches foreground per-loop capacity.
+    public let directSendControlConnectionsPerEventLoop: Int
+    public let directAuthorizationResolutionDatabaseURLs: [String]
     /// 每个事件循环允许的数据库连接数。
     ///
     /// Fluent 默认每个事件循环只用一个 PostgreSQL 连接。
@@ -344,7 +305,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let syncWakeMaximumPendingUsers: Int
     public let syncWakeDeliveryConcurrency: Int
     public let syncWakeCoalescingEnabled: Bool
-    public let acceptedMessageProjectionBatchEnabled: Bool
     /// 成功命令日志独立于完整的 Prometheus 记账进行采样。
     ///
     /// 慢命令、被拒绝命令与失败命令的日志会为每种结果保留一小的突发量，
@@ -352,31 +312,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let commandSuccessLogSamplePermille: Int
     public let commandSlowLogThresholdMilliseconds: Int
     public let commandDiagnosticLogMaximumPerSecond: Int
-    /// 单个数据库事务中最多提交的同置目标投影数量。
-    ///
-    /// 保持较小的值可以约束回滚工作量、锁持有时间与 WAL 突发大小。
-    public let fanoutDeliveryCommitBatchSize: Int
-    /// 跨存储工作者在单独进行控制存储确认之前，最多投影的远端用户分片效果数量。
-    ///
-    /// 它刻意与同置事务边界不同：
-    /// 远端投递每个批次要付一次目标库与一次控制库的往返，
-    /// 因此经验证的最优值更大，同时又不加宽同置路径的锁/WAL 临界区。
-    public let crossStoreFanoutDeliveryCommitBatchSize: Int
-    /// 针对单个物理用户分片桶，同一认领下最多同时在途的远端提交批次数。
-    ///
-    /// 它会让彼此独立的目标库/控制库事务重叠，
-    /// 但刻意限制在通用工作者并发之下，以避免碎片化认领归属或放大锁竞争。
-    public let crossStoreFanoutDeliveryCommitConcurrency: Int
-    /// 单个投递工作者在单轮中最多认领的持久投递租约数量。
-    ///
-    /// 它刻意与同时管控发件箱与规划工作的通用工作者批次区分开。
-    public let fanoutDeliveryClaimBatchSize: Int
-    /// 在插入一轮以恢复为先的认领之前，先执行多少轮完整的新鲜通道认领。
-    ///
-    /// 这是显式的部署策略，因为它界定了在新消息流无限繁忙时的恢复延迟上限。
-    public let fanoutFreshBurstPasses: Int
     public let durableRetryPolicy: V2DurableRetryPolicy
-    public let fanoutHint: V2FanoutHintRuntimeConfiguration
     public let groupEventWake: V2GroupEventWakeRuntimeConfiguration
     /// 持久混合群组元数据唤醒的节律。
     ///
@@ -398,11 +334,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     /// 部署可以延长保留时间，但绝不能缩短这道协议围栏，
     /// 否则一个延迟的客户端可能会执行一条已完成的命令。
     public let idempotencyRetentionSeconds: Int
-    public let messageProjectionWriteMode: V2MessageProjectionWriteMode
-    public let messageProjectionReadMode: V2MessageProjectionReadMode
-    public let directFanoutMode: V2DirectFanoutMode
-    /// 新建标准群的权威副本形态；混合大群始终以房间日志为权威副本。
-    public let groupDeliveryAuthority: V2RoomDeliveryAuthority
     /// 房间日志的保留模式。默认 `permanent`：计入全部历史读者，与既有行为一致，
     /// 也就是不裁剪任何历史。
     public let roomLogRetentionMode: V2RoomLogRetentionMode
@@ -474,7 +405,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let directRoomLogEventCacheMaximumEntriesPerRoom: Int
     public let directRoomLogEventCacheShardCount: Int
     public let directRoomLogEventCacheMaximumPendingWrites: Int
-    public let fanoutPayloadWriteMode: V2FanoutPayloadWriteMode
     /// 未被引用的不可变修订在该宽限期内仍可恢复。
     ///
     /// 默认是七天；部署可以独立于用户投影的 MVCC 保留策略单独延长它。
@@ -525,6 +455,9 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         databaseWorkloadPoolIsolationEnabled = try Self.explicitBoolean(
             "IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED", environment: environment
         )
+        directSendControlConnectionsPerEventLoop = databaseWorkloadPoolIsolationEnabled
+            ? databaseWorkloadPoolBudget.foregroundConnectionsPerEventLoop
+            : databasePolicy.maximumConnectionsPerEventLoop
         tls = try .init(
             host: try Self.required("IM_V2_TLS_HOST", environment: environment),
             port: try Self.integer("IM_V2_TLS_PORT", environment: environment),
@@ -847,9 +780,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         syncWakeCoalescingEnabled = try Self.explicitBoolean(
             "IM_V2_SYNC_WAKE_COALESCING_ENABLED", environment: environment
         )
-        acceptedMessageProjectionBatchEnabled = try Self.explicitBoolean(
-            "IM_V2_ACCEPTED_MESSAGE_PROJECTION_BATCH_ENABLED", environment: environment
-        )
         commandSuccessLogSamplePermille = try Self.integer(
             "IM_V2_COMMAND_SUCCESS_LOG_SAMPLE_PERMILLE", environment: environment
         )
@@ -866,43 +796,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             maximum: 10_000,
             environment: environment
         )
-        let rawProjectionWriteMode = Self.optional(
-            "IM_V2_MESSAGE_PROJECTION_WRITE_MODE", environment: environment
-        )?.lowercased() ?? V2MessageProjectionWriteMode.dual.rawValue
-        let rawProjectionReadMode = Self.optional(
-            "IM_V2_MESSAGE_PROJECTION_READ_MODE", environment: environment
-        )?.lowercased() ?? V2MessageProjectionReadMode.preferShared.rawValue
-        guard let projectionWriteMode = V2MessageProjectionWriteMode(rawValue: rawProjectionWriteMode),
-              let projectionReadMode = V2MessageProjectionReadMode(rawValue: rawProjectionReadMode),
-              !(projectionWriteMode == .shared && projectionReadMode == .inline)
-        else {
-            throw V2GatewayRuntimeConfigurationError.invalid(
-                "IM_V2_MESSAGE_PROJECTION_WRITE_MODE/IM_V2_MESSAGE_PROJECTION_READ_MODE"
-            )
-        }
-        messageProjectionWriteMode = projectionWriteMode
-        messageProjectionReadMode = projectionReadMode
-        // 目标架构里单聊的权威副本就是房间事件日志：不配置时按 room_log 运行，
-        // 让"每个收件人一份"的投递副本不再是默认路径。需要兼容基线的环境必须显式
-        // 设置 IM_V2_DIRECT_FANOUT_MODE=planner（本地 E2E 与灰度 profile 就是这么做的）。
-        let rawDirectFanoutMode = Self.optional(
-            "IM_V2_DIRECT_FANOUT_MODE", environment: environment
-        )?.lowercased() ?? V2DirectFanoutMode.roomLog.rawValue
-        guard let parsedDirectFanoutMode = V2DirectFanoutMode(rawValue: rawDirectFanoutMode) else {
-            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DIRECT_FANOUT_MODE")
-        }
-        directFanoutMode = parsedDirectFanoutMode
-        // 目标架构里标准群的权威副本同样是房间事件日志：不配置时按 room_log 运行，
-        // 让"每个收件人一份"的投递副本不再是默认路径。需要兼容基线的环境必须显式
-        // 设置 IM_V2_GROUP_DELIVERY_AUTHORITY_MODE=fanout（负载与基线画像就是这么固定的）。
-        // 混合大群始终是 room_log，不受本项影响。
-        let rawGroupDeliveryAuthority = Self.optional(
-            "IM_V2_GROUP_DELIVERY_AUTHORITY_MODE", environment: environment
-        )?.lowercased() ?? V2RoomDeliveryAuthority.roomLog.rawValue
-        guard let parsedGroupDeliveryAuthority = V2RoomDeliveryAuthority(rawValue: rawGroupDeliveryAuthority) else {
-            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_DELIVERY_AUTHORITY_MODE")
-        }
-        groupDeliveryAuthority = parsedGroupDeliveryAuthority
         // 房间日志保留窗口。默认永久 = 不裁剪，保持既有行为；切到 window 需要同时给出
         // 宽限秒数（默认 30 天），并明确知晓"超出窗口的读者返回时会看到历史不完整"。
         let rawRoomLogRetention = Self.optional(
@@ -924,7 +817,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         )?.lowercased() ?? V2DirectRoomLogAdmissionMode.room.rawValue
         guard let parsedDirectRoomLogAdmissionMode = V2DirectRoomLogAdmissionMode(
             rawValue: rawDirectRoomLogAdmissionMode
-        ), parsedDirectRoomLogAdmissionMode == .room || parsedDirectFanoutMode == .roomLog
+        )
         else {
             throw V2GatewayRuntimeConfigurationError.invalid(
                 "IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE"
@@ -935,8 +828,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             "IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE", environment: environment
         ) ?? "0"
         guard let parsedDirectRoomLogShardCreditBatchSize = Int(rawDirectRoomLogShardCreditBatchSize),
-              (0 ... 128).contains(parsedDirectRoomLogShardCreditBatchSize),
-              parsedDirectRoomLogShardCreditBatchSize == 0 || parsedDirectFanoutMode == .roomLog
+              (0 ... 128).contains(parsedDirectRoomLogShardCreditBatchSize)
         else {
             throw V2GatewayRuntimeConfigurationError.invalid(
                 "IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"
@@ -949,8 +841,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         guard let parsedDirectRoomLogRoomCreditBatchSize = Int(rawDirectRoomLogRoomCreditBatchSize),
               (0 ... 32).contains(parsedDirectRoomLogRoomCreditBatchSize),
               parsedDirectRoomLogRoomCreditBatchSize == 0 || (
-                  parsedDirectFanoutMode == .roomLog
-                      && parsedDirectRoomLogAdmissionMode == .room
+                  parsedDirectRoomLogAdmissionMode == .room
                       && parsedDirectRoomLogShardCreditBatchSize > 0
               )
         else {
@@ -965,8 +856,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         guard let parsedDirectRoomLogAppendBatchSize = Int(rawDirectRoomLogAppendBatchSize),
               parsedDirectRoomLogAppendBatchSize == 0 || (2 ... 128).contains(parsedDirectRoomLogAppendBatchSize),
               parsedDirectRoomLogAppendBatchSize == 0 || (
-                  parsedDirectFanoutMode == .roomLog
-                      && parsedDirectRoomLogShardCreditBatchSize > 0
+                  parsedDirectRoomLogShardCreditBatchSize > 0
               )
         else {
             throw V2GatewayRuntimeConfigurationError.invalid(
@@ -1146,9 +1036,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES", environment: environment
         ) ?? "0"
         guard let parsedDirectRoomLogEventCacheEntries = Int(rawDirectRoomLogEventCacheEntries),
-              (0 ... 1_048_576).contains(parsedDirectRoomLogEventCacheEntries),
-              parsedDirectRoomLogEventCacheEntries == 0
-                || parsedDirectFanoutMode == .roomLog
+              (0 ... 1_048_576).contains(parsedDirectRoomLogEventCacheEntries)
         else {
             throw V2GatewayRuntimeConfigurationError.invalid(
                 "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES"
@@ -1191,15 +1079,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             directRoomLogEventCacheShardCount = parsedDirectRoomLogEventCacheShardCount
             directRoomLogEventCacheMaximumPendingWrites = parsedDirectRoomLogEventCacheMaximumPendingWrites
         }
-        let rawFanoutPayloadWriteMode = Self.optional(
-            "IM_V2_FANOUT_PAYLOAD_WRITE_MODE", environment: environment
-        )?.lowercased() ?? V2FanoutPayloadWriteMode.body.rawValue
-        guard let parsedFanoutPayloadWriteMode = V2FanoutPayloadWriteMode(
-            rawValue: rawFanoutPayloadWriteMode
-        ) else {
-            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_FANOUT_PAYLOAD_WRITE_MODE")
-        }
-        fanoutPayloadWriteMode = parsedFanoutPayloadWriteMode
         let rawProjectionStateRetention = Self.optional(
             "IM_V2_MESSAGE_PROJECTION_STATE_RETENTION_SECONDS",
             environment: environment
@@ -1212,11 +1091,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             )
         }
         messageProjectionStateRetentionSeconds = projectionStateRetention
-        fanoutDeliveryCommitBatchSize = try Self.deliveryCommitBatchSize(environment: environment)
-        crossStoreFanoutDeliveryCommitBatchSize = try Self.crossStoreDeliveryCommitBatchSize(environment: environment)
-        crossStoreFanoutDeliveryCommitConcurrency = try Self.crossStoreDeliveryCommitConcurrency(environment: environment)
-        fanoutDeliveryClaimBatchSize = try Self.deliveryClaimBatchSize(environment: environment)
-        fanoutFreshBurstPasses = try Self.positive("IM_V2_FANOUT_FRESH_BURST_PASSES", environment: environment)
         let retryInitialDelayMilliseconds = try Self.positive("IM_V2_DURABLE_RETRY_INITIAL_DELAY_MS", environment: environment)
         let retryMaximumDelayMilliseconds = try Self.positive("IM_V2_DURABLE_RETRY_MAX_DELAY_MS", environment: environment)
         guard retryMaximumDelayMilliseconds >= retryInitialDelayMilliseconds else {
@@ -1228,7 +1102,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             maximumAttempts: Self.positive("IM_V2_DURABLE_RETRY_MAX_ATTEMPTS", environment: environment),
             jitterFraction: Self.percentage("IM_V2_DURABLE_RETRY_JITTER_PERCENT", environment: environment)
         )
-        fanoutHint = try Self.fanoutHintConfiguration(environment: environment)
         gatewayReplicaCount = try Self.positive("IM_V2_GATEWAY_REPLICA_COUNT", environment: environment)
         groupEventWake = try Self.groupEventWakeConfiguration(
             environment: environment,
@@ -1383,12 +1256,21 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                 )
             }
         }
+        directAuthorizationResolutionDatabaseURLs = Set([databaseURL] + roomShardStorage.map(\.databaseURL)).sorted()
+        let (baseDedicated, baseOverflow) = directSendControlConnectionsPerEventLoop.addingReportingOverflow(1)
+        let (dedicatedPerLoop, dedicatedOverflow) = baseDedicated.addingReportingOverflow(directAuthorizationResolutionDatabaseURLs.count)
+        let (dedicatedConnections, dedicatedTotalOverflow) = databasePolicy.eventLoopThreads.multipliedReportingOverflow(by: dedicatedPerLoop)
+        guard !baseOverflow, !dedicatedOverflow, !dedicatedTotalOverflow else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS")
+        }
         try databasePolicy.validate(
             databaseURLs: [databaseURL] + userShardStorage.map(\.databaseURL) + roomShardStorage.map(\.databaseURL),
             connectionsPerEventLoopPerPhysicalStore:
                 databaseWorkloadPoolIsolationEnabled
                     ? databaseWorkloadPoolBudget.totalConnectionsPerEventLoop
-                    : databasePolicy.maximumConnectionsPerEventLoop
+                    : databasePolicy.maximumConnectionsPerEventLoop,
+            // Route, reservation and resolution pools never borrow foreground connections.
+            additionalConnections: dedicatedConnections
         )
         strangerMessagePolicy = try .init(
             maximumMessagesPerWindow: try Self.positive("IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW", environment: environment),
@@ -1444,51 +1326,10 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             limits: .init(
                 maxEligibleMembers: try Self.integer("IM_V2_MAX_ELIGIBLE_MEMBERS", environment: environment),
                 maxCommandsPerWindow: try Self.integer("IM_V2_MAX_COMMANDS_PER_WINDOW", environment: environment),
-                maxFanoutUnitsPerWindow: try Self.integer("IM_V2_MAX_FANOUT_UNITS_PER_WINDOW", environment: environment),
-                maxOutstandingFanoutUnits: try Self.integer("IM_V2_MAX_OUTSTANDING_FANOUT_UNITS", environment: environment),
-                maxOutstandingPlans: try Self.integer("IM_V2_MAX_OUTSTANDING_PLANS", environment: environment),
-                maxEnumerationPageSize: try Self.integer("IM_V2_MAX_ENUMERATION_PAGE_SIZE", environment: environment),
-                maxPlannerConcurrency: try Self.integer("IM_V2_MAX_PLANNER_CONCURRENCY", environment: environment),
-                maxDeliveryConcurrency: try Self.integer("IM_V2_MAX_DELIVERY_CONCURRENCY", environment: environment),
+
                 retryAfterSeconds: try Self.integer("IM_V2_RATE_LIMIT_RETRY_AFTER_SECONDS", environment: environment)
             )
         )
-    }
-
-    private static func deliveryCommitBatchSize(environment: any V2RuntimeEnvironment) throws -> Int {
-        let value = try positive("IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE", environment: environment)
-        guard value <= 128 else {
-            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE")
-        }
-        return value
-    }
-
-    private static func crossStoreDeliveryCommitBatchSize(environment: any V2RuntimeEnvironment) throws -> Int {
-        let value = try positive("IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE", environment: environment)
-        guard value <= 256 else {
-            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE")
-        }
-        return value
-    }
-
-    private static func crossStoreDeliveryCommitConcurrency(environment: any V2RuntimeEnvironment) throws -> Int {
-        let value = try positive("IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY", environment: environment)
-        guard value <= 2 else {
-            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY")
-        }
-        return value
-    }
-
-    private static func deliveryClaimBatchSize(environment: any V2RuntimeEnvironment) throws -> Int {
-        let value = try positive("IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE", environment: environment)
-        // A worker processes claimed leases sequentially in commit-sized
-        // transactions. Keep the in-flight lease set bounded to the validated
-        // 100k profile so a slow database cannot turn an aggressive setting
-        // into a lease-recovery burst.
-        guard value <= 2_000 else {
-            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE")
-        }
-        return value
     }
 
     private static func required(_ key: String, environment: any V2RuntimeEnvironment) throws -> String {
@@ -1629,37 +1470,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ROOM_SHARD_STORES_JSON")
         }
         return decoded
-    }
-
-    private static func fanoutHintConfiguration(environment: any V2RuntimeEnvironment) throws -> V2FanoutHintRuntimeConfiguration {
-        let rawURL = optional("IM_V2_NATS_URL", environment: environment)
-        let subject = optional("IM_V2_NATS_SUBJECT", environment: environment)
-        let token = optional("IM_V2_NATS_TOKEN", environment: environment)
-        let tlsCAPath = optional("IM_V2_NATS_TLS_CA_PATH", environment: environment)
-        let tlsServerName = optional("IM_V2_NATS_TLS_SERVER_NAME", environment: environment)
-        switch (rawURL, subject) {
-        case (nil, nil):
-            guard token == nil else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_NATS_TOKEN") }
-            guard tlsCAPath == nil, tlsServerName == nil else {
-                throw V2GatewayRuntimeConfigurationError.invalid(
-                    "IM_V2_NATS_TLS_CA_PATH/IM_V2_NATS_TLS_SERVER_NAME"
-                )
-            }
-            return .durablePollingOnly
-        case let (rawURL?, subject?):
-            guard let url = URL(string: rawURL) else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_NATS_URL") }
-            do {
-                return .nats(try .init(
-                    url: url,
-                    subject: subject,
-                    token: token,
-                    tlsCAPath: tlsCAPath,
-                    tlsServerName: tlsServerName
-                ))
-            }
-            catch { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_NATS_URL/IM_V2_NATS_SUBJECT") }
-        default: throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_NATS_URL/IM_V2_NATS_SUBJECT")
-        }
     }
 
     private static func groupEventWakeConfiguration(

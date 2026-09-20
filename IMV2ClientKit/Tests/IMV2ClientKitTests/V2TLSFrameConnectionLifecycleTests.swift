@@ -220,6 +220,67 @@ struct V2TLSFrameConnectionLifecycleTests {
         await connection.disconnect()
     }
 
+    @Test("Ready and the first account notification share a read; a subsequent gap closes the generation")
+    func accountReadyAndGap() async throws {
+        let peer = TLSTestPeer()
+        let connection = try makeConnection([peer])
+        try await authenticate(connection)
+        let epoch = UUID(), room = UUID()
+        var start = IMV2Envelope()
+        start.protocolVersion = IMV2ProtocolVersion.current
+        start.requestID = 95
+        start.accountRoomChangesStart = .init()
+        let startFrame = try V2ProtobufFrameCodec.encode(start, frameVersion: UInt8(IMV2ProtocolVersion.current))
+        let starting = Task { try await connection.request(startFrame) }
+        await peer.waitForRequest(95)
+        var ready = IMV2Envelope()
+        ready.protocolVersion = IMV2ProtocolVersion.current
+        ready.requestID = 95
+        ready.accountRoomChangesReady.connectionEpoch = epoch.uuidString
+        var notification = IMV2Envelope()
+        notification.protocolVersion = IMV2ProtocolVersion.current
+        notification.accountRoomChanged.connectionEpoch = epoch.uuidString
+        notification.accountRoomChanged.roomID = room.uuidString
+        notification.accountRoomChanged.notificationSequence = 1
+        notification.accountRoomChanged.highWatermark = 7
+        func encode(_ envelope: IMV2Envelope) throws -> Data {
+            try V2FrameCodec.encode(V2ProtobufFrameCodec.encode(envelope, frameVersion: UInt8(IMV2ProtocolVersion.current)), limits: limits())
+        }
+        var bytes = try encode(ready)
+        bytes.append(try encode(notification))
+        await peer.push(bytes)
+        _ = try await starting.value
+        #expect(try await connection.nextAccountRoomChange() == .changed(epoch: epoch, roomID: .init(uuid: room), highWatermark: 7))
+        notification.accountRoomChanged.notificationSequence = 3
+        await peer.push(try encode(notification))
+        await #expect(throws: V2TLSFrameConnectionError.self) { try await connection.nextAccountRoomChange() }
+        await connection.disconnect()
+    }
+
+    @Test("cancelled account Start cannot leave an unconsumed listener alive")
+    func cancelledAccountStartCloses() async throws {
+        let peer = TLSTestPeer()
+        let connection = try makeConnection([peer])
+        try await authenticate(connection)
+        var start = IMV2Envelope()
+        start.protocolVersion = IMV2ProtocolVersion.current
+        start.requestID = 96
+        start.accountRoomChangesStart = .init()
+        let frame = try V2ProtobufFrameCodec.encode(start, frameVersion: UInt8(IMV2ProtocolVersion.current))
+        let starting = Task { try await connection.request(frame) }
+        await peer.waitForRequest(96)
+        starting.cancel()
+        await #expect(throws: CancellationError.self) { try await starting.value }
+        var ready = IMV2Envelope()
+        ready.protocolVersion = IMV2ProtocolVersion.current
+        ready.requestID = 96
+        ready.accountRoomChangesReady.connectionEpoch = UUID().uuidString
+        await peer.push(try V2FrameCodec.encode(V2ProtobufFrameCodec.encode(ready, frameVersion: UInt8(IMV2ProtocolVersion.current)), limits: limits()))
+        await peer.waitForCancellation()
+        await #expect(throws: V2TLSFrameConnectionError.notConnected) { try await connection.nextAccountRoomChange() }
+        await connection.disconnect()
+    }
+
     private func makeConnection(_ peers: [TLSTestPeer], timeout: Duration = .seconds(10), maximumPendingRequests: Int = 8) throws -> V2TLSFrameConnection {
         let factory = TLSTestFactory(peers: peers)
         return V2TLSFrameConnection(connectionFactory: { factory.next() }, frameLimits: try limits(), requestTimeout: timeout, maximumPendingRequests: maximumPendingRequests)

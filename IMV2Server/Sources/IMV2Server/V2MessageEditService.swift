@@ -48,7 +48,7 @@ public enum V2MessageEditOutcome: Equatable, Sendable {
     /// 触发限流；关联值为建议的重试等待秒数。
     case rateLimited(retryAfterSeconds: Int)
     /// 依赖的扇出准入暂时不可用。
-    case unavailable(FanoutAdmissionUnavailableReason)
+    case unavailable(V2CommandAdmissionUnavailableReason)
 }
 
 /// 消息编辑的持久化边界。
@@ -59,25 +59,24 @@ public protocol V2MessageEditStore: Sendable {
     ///   - command: 待执行的编辑命令。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 本次编辑的来源事件标识。
-    ///   - planID: 本次编辑的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 编辑处理结果。
     /// - Throws: 房间/消息不存在、发起者非作者或持久化失败时抛出。
-    func edit(command: V2EditMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2MessageEditOutcome
+    func edit(command: V2EditMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageEditOutcome
 }
 
-/// 为一次消息编辑生成来源事件与扇出计划标识。
+/// 为一次消息编辑生成来源事件标识。
 public struct V2MessageEditIDFactory: Sendable {
     private let makeUUID: @Sendable () -> UUID
     /// 创建标识工厂。
     ///
     /// - Parameter makeUUID: UUID 生成器，默认使用 `UUID.init`。
     public init(makeUUID: @escaping @Sendable () -> UUID = UUID.init) { self.makeUUID = makeUUID }
-    /// 生成一对全新的来源事件与扇出计划标识。
+    /// 生成一个全新的来源事件标识。
     ///
-    /// - Returns: 来源事件标识与扇出计划标识。
+    /// - Returns: 来源事件标识。
     /// - Throws: UUID 生成失败时抛出。
-    public func make() throws -> (eventID: EventID, planID: FanoutPlanID) { try (.init(makeUUID().uuidString), .init(makeUUID().uuidString)) }
+    public func make() throws -> EventID { try .init(makeUUID().uuidString) }
 }
 
 /// 消息编辑服务。
@@ -110,10 +109,10 @@ public struct V2MessageEditService: Sendable {
     /// - Returns: 编辑处理结果。
     /// - Throws: 存储拒绝或持久化失败时抛出。
     public func edit(_ request: V2AuthenticatedMessageEdit) async throws -> V2MessageEditOutcome {
-        let ids = try identifiers.make()
+        let eventID = try identifiers.make()
         return try await store.edit(
             command: .init(roomID: request.roomID, actorUserID: request.actorUserID, operationID: request.operationID, messageID: request.messageID, expectedMessageRevision: request.expectedMessageRevision, text: request.text, maximumUTF8Bytes: maximumTextUTF8Bytes),
-            capacityProfile: capacityProfile, eventID: ids.eventID, planID: ids.planID, now: now()
+            capacityProfile: capacityProfile, eventID: eventID, now: now()
         )
     }
 }

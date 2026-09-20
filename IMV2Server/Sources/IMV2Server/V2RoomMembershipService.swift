@@ -54,7 +54,7 @@ public enum V2RoomMembershipChangeOutcome: Equatable, Sendable {
     /// 被限流，并给出建议重试秒数。
     case rateLimited(retryAfterSeconds: Int)
     /// 准入当前不可用，附带不可用原因。
-    case unavailable(FanoutAdmissionUnavailableReason)
+    case unavailable(V2CommandAdmissionUnavailableReason)
 }
 
 /// 成员变更的持久化能力。
@@ -65,7 +65,6 @@ public protocol V2RoomMembershipStore: Sendable {
     ///   - command: 成员变更命令。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 变更结果。
     /// - Throws: 归属变化、房间不存在、无权限或持久化失败时抛出。
@@ -73,12 +72,11 @@ public protocol V2RoomMembershipStore: Sendable {
         command: V2ChangeRoomMembershipCommand,
         capacityProfile: V2CapacityProfile,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2RoomMembershipChangeOutcome
 }
 
-/// 成员变更命令的事件与扇出标识生成器。
+/// 成员变更命令的事件标识生成器。
 public struct V2RoomMembershipIDFactory: Sendable {
     private let makeUUID: @Sendable () -> UUID
 
@@ -87,12 +85,12 @@ public struct V2RoomMembershipIDFactory: Sendable {
     /// - Parameter makeUUID: 产生原始 UUID 的闭包，测试可注入确定性实现。
     public init(makeUUID: @escaping @Sendable () -> UUID = UUID.init) { self.makeUUID = makeUUID }
 
-    /// 生成一对互不相同的事件标识与扇出计划标识。
+    /// 生成一个事件标识。
     ///
-    /// - Returns: 本次命令使用的事件标识与扇出计划标识。
+    /// - Returns: 本次命令使用的事件标识。
     /// - Throws: 标识类型拒绝生成值时抛出。
-    public func make() throws -> (eventID: EventID, planID: FanoutPlanID) {
-        try (EventID(makeUUID().uuidString), FanoutPlanID(makeUUID().uuidString))
+    public func make() throws -> EventID {
+        try EventID(makeUUID().uuidString)
     }
 }
 
@@ -111,7 +109,7 @@ public struct V2RoomMembershipService: Sendable {
     /// - Parameters:
     ///   - store: 实际执行变更的存储实现。
     ///   - capacityProfile: 固定的容量档位。
-    ///   - identifiers: 事件与扇出标识生成器。
+    ///   - identifiers: 事件标识生成器。
     ///   - now: 可注入的当前时刻读取函数。
     public init(store: any V2RoomMembershipStore, capacityProfile: V2CapacityProfile, identifiers: V2RoomMembershipIDFactory = .init(), now: @escaping @Sendable () -> Date = Date.init) {
         self.store = store
@@ -134,8 +132,8 @@ public struct V2RoomMembershipService: Sendable {
             action: request.action,
             expectedMembershipRevision: request.expectedMembershipRevision
         )
-        let ids = try identifiers.make()
-        return try await store.change(command: command, capacityProfile: capacityProfile, eventID: ids.eventID, planID: ids.planID, now: now())
+        let eventID = try identifiers.make()
+        return try await store.change(command: command, capacityProfile: capacityProfile, eventID: eventID, now: now())
     }
 }
 

@@ -2,6 +2,10 @@
 
 对应 B04/B11/D07；2026-09-05。状态为实施中，不能据此宣布跨 owner 转发或完整内容版本受众已经验收。
 
+历史实现记录中的 v1/v2 指纹、投递模式和迁移脚本已被当前房间日志架构替代。
+当前接受成员权威来自 message_send_completions，普通发送与转发统一 v3；见[接受记录合同](send-completion-retention.md)。
+终态读取与尚未完成的载荷清理见[现行边界](forward-terminal-payload-retention.md)。
+
 ## 已实现的同库边界
 
 - 每个 source/target pair 独立提交。批量命令最多 100 个源、10 个目标，源读取保留一次有序批量查询，目标执行维持有限并发。
@@ -35,7 +39,7 @@ schema 8 为 pair 增加 nullable source revision；只有旧记录可以保持�
 
 该检查不依赖投影 state_event_id 非空，也不依赖可能按幂等保留策略回收的 edit operation 记录。已有部分旧投影的 state_event_id 为 NULL；只要原 accepted 和当前版本的真实事件完整，仍可正常转发。缺失或身份不符的版本事件拒绝，不能回退为当前成员资格。
 
-`room_events_message_edit_revision_idx` 是仅针对编辑事件的唯一索引，约束一个内容版本只有一份提交权威，并提供点查询。`20260905_message_version_audience.sql` 将 schema 8 原子升级到 9；若旧数据存在歧义重复，整笔迁移回滚，保留 schema 8 与原始事件，不选择其中一份继续提供读取。Swift/SQL gate 检查索引所属表、唯一性、可用状态、完整键表达式与 partial predicate。
+`room_events_message_edit_revision_idx` 是针对编辑事件的唯一索引，约束一个内容版本只有一份提交权威并支持点查询。当前 schema 直接创建该索引；Swift/SQL gate 检查所属表、唯一性、可用状态、完整键表达式和部分索引条件。重复版本写入被拒绝，不从冲突记录中猜测权威。
 
 范围仍限于转发初始读取和接受事务。当前版本受众、source revision 与源/目标锁共同保护该路径；不会自动纠正其他 feed 已经发出的未经授权编辑。完整 B03/B04 关闭仍需跨路径受众与恢复、跨 owner export/inbox、媒体等验收。
 
@@ -61,7 +65,7 @@ schema 8 为 pair 增加 nullable source revision；只有旧记录可以保持�
 
 App 勾选时保存源引用，确认时按原 room sequence 排序。后续编辑、撤回或窗口刷新不能把引用变成另一版本，也不能静默漏掉已选但移出窗口的消息；服务端按最新授权拒绝失效来源。初读只在所声明房间查消息，授权通过但 content revision 与选中版本不同返回 SOURCE_CHANGED；房间错误仍为 NOT_FOUND。pair client ID 与 source_room_id/source_content_revision 同事务持久绑定，成功或待定 pair 改动任一字段重试均返回 IDEMPOTENCY_CONFLICT。已成功的精确引用可在源以后修改/撤回后恢复原结果。内部发送 v1/v2 指纹字节不变。
 
-`20260905_forward_source_location.sql` 把 schema 9 原子升级到 10。源消息外键仍有效，故可从原消息回填历史操作的房间；content revision 不回填。迁移事务内替换身份保护 trigger，增加 source_room_id 的不可变检查；Swift/SQL 启动门禁要求新字段。部署时先停止旧 writer，再按 7→8→9→10 或当前实际起点执行迁移，最后启动匹配的服务与协议 23 客户端。门禁不能替代停止已运行旧进程。没有迁移任何用户开发库或线上数据库。
+当前 schema 直接保存转发操作的来源房间与版本，身份保护 trigger 拒绝修改这些字段，Swift/SQL 启动门禁要求完整结构。新环境安装规范 schema；不回填旧操作、不执行历史升级链。
 
 SQLite 的 bindForwardSourceReferences 迁移为普通 pending command、parent plan、chunk 增加 source_references，为 parent 增加 terminal_code。新计划/分块完整保存选中引用，懒分块与重新打开数据库均不查询当前正文来替换来源；相同计划 ID 改房间或版本拒绝。旧队列无法恢复选中版本：未完成普通命令标 rejected、未完成 parent/chunk 标 cancelled，代码 SOURCE_RESELECTION_REQUIRED；成功/失败累计数与完成摘要原样保留，不把未发送项伪装成已失败发送。已有 chunk 的相同完成摘要仍可幂等确认，无需构造可再次发送的旧命令。后台计划状态的持续展示与升级提示仍需补齐，不能把数据库记录存在当作用户已收到提示。
 

@@ -20,7 +20,7 @@ struct V2ConversationStoreTests {
         let items = V2GRDBConversationDataSource.mergingEmptyProjectionItems(
             messageItems: [],
             profiles: [],
-            directIdentities: [.init(roomID: roomID, publicIdentity: identity, updatedAt: updatedAt)]
+            directIdentities: [.init(roomID: roomID, publicIdentity: identity, updatedAt: updatedAt.addingTimeInterval(3600), roomCreatedAt: updatedAt)]
         )
 
         #expect(items == [
@@ -49,7 +49,7 @@ struct V2ConversationStoreTests {
         let items = V2GRDBConversationDataSource.mergingEmptyProjectionItems(
             messageItems: [],
             profiles: [],
-            directIdentities: [.init(roomID: roomID, publicIdentity: identity, updatedAt: updatedAt)],
+            directIdentities: [.init(roomID: roomID, publicIdentity: identity, updatedAt: updatedAt.addingTimeInterval(3600), roomCreatedAt: updatedAt)],
             conversationStates: [roomID: state]
         )
 
@@ -281,7 +281,7 @@ struct V2ConversationStoreTests {
             return try .init(sequence: UInt64(n), sourceEventID: .init(String(format: "00000000-0000-0000-0004-%012d", n)), projectionKind: activity ? "timeline_activity" : "message", payload: JSONSerialization.data(withJSONObject: payload))
         }
         _ = try await local.apply(.init(generation: 1, records: records, nextSyncToken: .init("location-token"), receipt: .init("location-receipt"), hasMore: false, capabilityProfile: "base"))
-        let store = makeConversationDetailStore(dataSource: V2GRDBConversationDataSource(localStore: local), sender: nil, userID: user.rawValue, roomID: room.rawValue)
+        let store = makeConversationDetailStore(dataSource: V2GRDBConversationDataSource(localStore: local, requestLatestVisible: { _ in }), sender: nil, userID: user.rawValue, roomID: room.rawValue)
         await store.refresh()
         await store.loadTimeline(containing: messageID(1))
         #expect(store.timeline.map(\.timelineSequence) == (1...40).map(UInt64.init))
@@ -1553,6 +1553,99 @@ struct V2ConversationStoreTests {
         #expect(store.groupMemberFeedback == nil)
     }
 
+    @Test(arguments: ["conflict", "changed-page", "FORBIDDEN", "NOT_FOUND", "reset", "network"])
+    func groupMemberInvalidationClearsOldManagementState(scenario: String) async {
+        let first = V2GroupMemberPage(membershipRevision: 3, actorRole: "管理员",
+            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
+            nextCursor: "revision-3")
+        var results: [Result<V2GroupMemberPage, V2RealtimeTransportError>] = [.success(first)]
+        if scenario == "conflict" {
+            results.append(.failure(.server(code: "REVISION_CONFLICT", retryable: false, retryAfterSeconds: 0, currentRevision: 4)))
+        } else if scenario == "changed-page" {
+            results.append(.success(.init(membershipRevision: 4, actorRole: "成员", members: [], nextCursor: nil)))
+        }
+        results.append(.failure(.server(code: ["FORBIDDEN", "NOT_FOUND"].contains(scenario) ? scenario : "UNAVAILABLE",
+            retryable: true, retryAfterSeconds: 0, currentRevision: nil)))
+        let reader = V2ScriptedGroupMemberDirectory(results: results)
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            sender: nil, userID: "current-user", roomID: "room-group", kind: .group, groupMemberDirectory: reader)
+        await store.loadGroupMembers(reset: true)
+        #expect(store.canAddGroupMembers)
+        await store.loadGroupMembers(reset: scenario == "reset")
+        if scenario == "network" {
+            #expect(store.groupMembers.map(\.id) == ["member-a"])
+            #expect(store.groupMemberRevision == 3)
+            #expect(store.canLoadMoreGroupMembers)
+        } else {
+            #expect(store.groupMembers.isEmpty)
+            #expect(store.groupActorRole == nil)
+            #expect(store.groupMemberRevision == nil)
+            #expect(!store.canAddGroupMembers)
+            #expect(!store.canLoadMoreGroupMembers)
+        }
+        #expect(!store.isLoadingGroupMembers)
+        #expect(store.groupMemberFeedback != nil)
+    }
+
+    @Test func groupMemberRefreshDiscardsLateRoleAndKeepsOneRequestOwner() async {
+        let reader = V2SuspendingGroupMemberDirectory(page: .init(membershipRevision: 3, actorRole: "管理员",
+            members: [.init(id: "old-member", role: "管理员", handle: "old_member", displayName: "旧成员")], nextCursor: "old"),
+            refreshedPage: .init(membershipRevision: 4, actorRole: "成员", members: [], nextCursor: nil))
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            sender: nil, userID: "current-user", roomID: "room-group", kind: .group, groupMemberDirectory: reader)
+        let request = Task { await store.loadGroupMembers(reset: true) }
+        await reader.waitUntilRequested()
+        await store.loadGroupMembers(reset: true)
+        #expect(await reader.requestedCursors() == [nil])
+        #expect(!store.canAddGroupMembers)
+        await reader.complete()
+        await request.value
+        #expect(await reader.requestedCursors() == [nil, nil])
+        #expect(store.groupMembers.isEmpty)
+        #expect(store.groupMemberRevision == 4)
+        #expect(store.groupActorRole == "成员")
+        #expect(!store.canAddGroupMembers)
+        #expect(!store.isLoadingGroupMembers)
+    }
+
+    @Test func groupMemberDirectoryAdvancesAcrossHiddenMemberPage() async {
+        let reader = V2ScriptedGroupMemberDirectory(results: [
+            .success(.init(membershipRevision: 3, actorRole: "成员", members: [], nextCursor: "hidden-scanned")),
+            .success(.init(membershipRevision: 3, actorRole: "成员", members: [
+                .init(id: "member-b", role: "成员", handle: "member_b", displayName: "成员 B")], nextCursor: nil))
+        ])
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            sender: nil, userID: "current-user", roomID: "room-group", kind: .group, groupMemberDirectory: reader)
+        await store.loadGroupMembers(reset: true)
+        #expect(store.groupMembers.isEmpty && store.canLoadMoreGroupMembers)
+        #expect(store.groupMemberFeedback == nil)
+        await store.loadGroupMembers()
+        #expect(await reader.requestedCursors() == [nil, "hidden-scanned"])
+        #expect(store.groupMembers.map(\.id) == ["member-b"])
+        #expect(!store.canLoadMoreGroupMembers)
+    }
+
+    @Test(arguments: ["duplicate", "stalled"])
+    func groupMemberInvalidPageDoesNotLeavePartialRoster(scenario: String) async {
+        let member = V2GroupMemberItem(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")
+        let next = V2GroupMemberItem(id: "member-b", role: "成员", handle: "member_b", displayName: "成员 B")
+        let reader = V2ScriptedGroupMemberDirectory(results: [
+            .success(.init(membershipRevision: 3, actorRole: "管理员", members: [member], nextCursor: "first")),
+            .success(.init(membershipRevision: 3, actorRole: "管理员",
+                members: scenario == "duplicate" ? [member] : [next],
+                nextCursor: scenario == "stalled" ? "first" : "second"))
+        ])
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            sender: nil, userID: "current-user", roomID: "room-group", kind: .group, groupMemberDirectory: reader)
+        await store.loadGroupMembers(reset: true)
+        await store.loadGroupMembers()
+        #expect(store.groupMembers.isEmpty)
+        #expect(store.groupMemberRevision == nil)
+        #expect(store.groupActorRole == nil)
+        #expect(!store.canLoadMoreGroupMembers)
+        #expect(store.groupMemberFeedback != nil)
+    }
+
     @Test func groupMembershipChangeUsesTheDirectoryRevisionAndRefreshes() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let page = V2GroupMemberPage(
@@ -2409,7 +2502,7 @@ struct V2ConversationStoreTests {
         #expect(await searcher.requests().map(\.scope) == [.room(roomID)])
     }
 
-    @Test func forbiddenGroupSubscriptionPersistsRevokedAccessWithoutErasingDeliveryMode() async throws {
+    @Test func forbiddenGroupSubscriptionPersistsRevokedAccessWithoutErasingCapacityClass() async throws {
         let roomID = try RoomID("00000000-0000-0000-0000-000000000f21")
         let databaseURL = FileManager.default.temporaryDirectory
             .appending(path: "im-v2-group-access-\(UUID().uuidString).sqlite")
@@ -2433,8 +2526,8 @@ struct V2ConversationStoreTests {
                 "target_user_id": "00000000-0000-0000-0000-000000000f25",
                 "action": "remove",
                 "membership_revision": 2,
-                "delivery_mode": "standard_fanout",
-                "delivery_authority": "fanout",
+                "capacity_class": "standard",
+
                 "created_at_ms": 1_750_000_000_000,
                 "server_created_at_ms": 1_750_000_001_000,
             ])
@@ -2452,7 +2545,6 @@ struct V2ConversationStoreTests {
         let subscriptionTransport = V2ForbiddenGroupEventSubscriptionTransportFake()
         let synchronizer = V2RealtimeActiveHybridGroupSynchronizer(
             groupEventSync: .init(transport: eventTransport, store: localStore),
-            foregroundGroupPreview: .init(transport: eventTransport, store: localStore),
             localStore: localStore,
             subscriptionTransport: subscriptionTransport,
             wakeSource: V2UnusedGroupEventWakeSourceFake()
@@ -2460,7 +2552,6 @@ struct V2ConversationStoreTests {
 
         #expect(try await synchronizer.subscribe(roomID: roomID.rawValue) == .notHybridRoom)
         #expect(try await localStore.groupEventAccess(roomID: roomID) == .init(
-            delivery: .foregroundPreview,
             isAuthorized: false
         ))
 
@@ -2492,8 +2583,8 @@ struct V2ConversationStoreTests {
                 "target_user_id": "00000000-0000-0000-0000-000000000f35",
                 "action": "add",
                 "membership_revision": 2,
-                "delivery_mode": "large_group_hybrid",
-                "delivery_authority": "room_log",
+                "capacity_class": "large",
+
                 "created_at_ms": 1_750_000_000_000,
                 "server_created_at_ms": 1_750_000_001_000,
             ])
@@ -2534,7 +2625,6 @@ struct V2ConversationStoreTests {
         let eventTransport = V2UnusedGroupEventTransportFake()
         let synchronizer = V2RealtimeActiveHybridGroupSynchronizer(
             groupEventSync: .init(transport: eventTransport, store: localStore),
-            foregroundGroupPreview: .init(transport: eventTransport, store: localStore),
             localStore: localStore,
             subscriptionTransport: V2ForbiddenGroupEventSubscriptionTransportFake(),
             wakeSource: V2UnusedGroupEventWakeSourceFake()
@@ -3567,16 +3657,19 @@ private actor V2GroupMemberDirectoryFake: V2GroupMemberDirectoryReading {
 
 private actor V2SuspendingGroupMemberDirectory: V2GroupMemberDirectoryReading {
     private let page: V2GroupMemberPage
+    private let refreshedPage: V2GroupMemberPage?
     private var cursors: [String?] = []
     private var requestWaiter: CheckedContinuation<Void, Never>?
     private var completion: CheckedContinuation<Void, Never>?
 
-    init(page: V2GroupMemberPage) {
+    init(page: V2GroupMemberPage, refreshedPage: V2GroupMemberPage? = nil) {
         self.page = page
+        self.refreshedPage = refreshedPage
     }
 
     func members(in _: String, cursor: String?) async throws -> V2GroupMemberPage {
         cursors.append(cursor)
+        if cursors.count > 1 { return refreshedPage ?? page }
         requestWaiter?.resume()
         requestWaiter = nil
         await withCheckedContinuation { completion = $0 }

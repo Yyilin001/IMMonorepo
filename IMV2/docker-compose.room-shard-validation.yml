@@ -82,7 +82,6 @@ services:
         [{"shard_id":"rooms-00","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres-room-00:5432/im_v2","schema":"im_v2"},{"shard_id":"rooms-01","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres-room-01:5432/im_v2","schema":"im_v2"},{"shard_id":"groups-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]
       IM_V2_USER_SHARD_STORES_JSON: >-
         [{"bucket":"users-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres-user-projection:5432/im_v2","schema":"im_v2"}]
-      IM_V2_DIRECT_FANOUT_MODE: room_log
       IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE: shard_only
       IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE: 32
       IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE: 32

@@ -5,6 +5,16 @@ import Testing
 
 @Suite("V2 account assertions")
 struct V2AccountAssertionTests {
+    @Test("password revision is signed and the assertion remains retryable within its lifetime")
+    func signedRevision() throws {
+        let issuer = try V2HMACAccountAssertionIssuer(rawKey: Data(repeating: 4, count: 32))
+        let user = UserID(uuid: UUID()), device = DeviceID(uuid: UUID())
+        let assertion = try issuer.issue(userID: user, deviceID: device, credentialRevision: 7)
+        #expect(try issuer.credentialRevision(for: assertion, deviceID: device) == 7)
+        #expect(try issuer.verifiedUserID(for: assertion, deviceID: device) == user)
+        #expect(try issuer.verifiedUserID(for: assertion, deviceID: device) == user)
+    }
+
     @Test("Assertion lifetimes cannot gain time through negative timestamp rounding",
           arguments: [Double(-1.0005), -1_000_000_000.1255, 1_750_000_000.1255])
     func deadlineRounding(seconds: Double) throws {

@@ -17,19 +17,18 @@ struct V2MessageEditServiceTests {
         #expect(await store.command()?.expectedMessageRevision == 4)
         #expect(edit.text == "replacement")
         #expect(UUID(uuidString: edit.eventID.rawValue) != nil)
-        #expect(UUID(uuidString: edit.fanoutPlanID.rawValue) != nil)
     }
 
     private func profile() throws -> V2CapacityProfile {
-        try .init(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 100, maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 10, maxEnumerationPageSize: 10, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 1))
+        try .init(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 10,    retryAfterSeconds: 1))
     }
 }
 
 private actor EditStoreSpy: V2MessageEditStore {
     private var captured: V2EditMessageCommand?
-    func edit(command: V2EditMessageCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2MessageEditOutcome {
+    func edit(command: V2EditMessageCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2MessageEditOutcome {
         captured = command
-        return .edited(try .init(roomID: command.roomID, messageID: command.messageID, text: command.text, messageRevision: command.expectedMessageRevision + 1, roomSequence: 2, eventID: eventID, fanoutPlanID: planID, createdAt: now))
+        return .edited(try .init(roomID: command.roomID, messageID: command.messageID, text: command.text, messageRevision: command.expectedMessageRevision + 1, roomSequence: 2, eventID: eventID, createdAt: now))
     }
     func command() -> V2EditMessageCommand? { captured }
 }

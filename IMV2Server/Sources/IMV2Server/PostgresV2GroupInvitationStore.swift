@@ -158,11 +158,15 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
                        ) AS is_already_member
                 FROM im_v2.group_invite_links AS invite
                 JOIN im_v2.group_rooms AS room ON room.room_id = invite.room_id
-                LEFT JOIN im_v2.group_join_requests AS request
-                  ON request.invite_id = invite.invite_id
-                 AND request.applicant_user_id = \(bind: try groupInviteUUID(applicantUserID))
+                LEFT JOIN LATERAL (
+                    SELECT request_id, state FROM im_v2.group_join_requests
+                    WHERE invite_id = invite.invite_id
+                      AND applicant_user_id = \(bind: try groupInviteUUID(applicantUserID))
+                    ORDER BY (state <> 'cancelled') DESC, created_at DESC, request_id DESC LIMIT 1
+                ) AS request ON TRUE
                 WHERE invite.token_digest = \(bind: tokenDigest)
-                  AND invite.state = 'active' AND invite.expires_at > \(bind: now)
+                  AND ((invite.state = 'active' AND invite.expires_at > \(bind: now))
+                       OR request.state IN ('pending', 'approving'))
                 LIMIT 1
                 """).first(decoding: GroupInvitePreviewRow.self) else { return .unavailable }
             try validateInvite(invite: row.inviteID, room: row.roomID)
@@ -181,76 +185,86 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
 
     public func submit(_ request: V2GroupJoinSubmissionPersistenceRequest) async throws -> V2GroupJoinSubmissionPersistenceOutcome {
         let actorIsActive = try await isActive(request.applicantUserID)
-        let result: GroupJoinSubmissionResult = try await database.transaction { transaction in
+        let result = try await database.transaction { transaction in
             let sql = try groupInviteSQL(transaction)
-            let applicant = try groupInviteUUID(request.applicantUserID)
-            let operation = try groupInviteUUID(request.operationID)
-            // All operations for this applicant share the quota transaction.
-            // Acquire before invite locks and read the count after acquisition;
-            // an operation-only lock allows two different invites to overbook.
-            // This fence covers this database. Cross-owner quota still needs
-            // one authoritative control reservation, not per-owner counts.
-            try await advisoryLock(sql, value: "group-join-applicant:\(applicant)")
-
-            if let scope { try await fence(room: scope.roomID, sql: sql) }
-            if let priorDigest = try await sql.raw("SELECT invite.token_digest FROM im_v2.group_join_requests AS request JOIN im_v2.group_invite_links AS invite ON invite.invite_id = request.invite_id WHERE request.applicant_user_id = \(bind: applicant) AND request.submission_operation_id = \(bind: operation)").first(decoding: GroupInviteDigestRow.self) {
-                guard priorDigest.tokenDigest == request.tokenDigest,
-                      let prior = try await requestBySubmission(applicant: applicant, operation: operation, sql: sql),
-                      prior.note == request.note
-                else { throw V2GroupInvitationServiceError.conflict }
-                try validateInvite(invite: prior.inviteID, room: prior.roomID)
-                return try submissionOutcome(prior)
-            }
-            guard actorIsActive else { throw V2GroupInvitationServiceError.permissionDenied }
-            guard v2PostgresTimestampCanEncode(request.createdAt) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
-            let currentTime = try V2PostgresTimestamp(date: request.createdAt)
-            guard let invite = try await sql.raw("""
-                SELECT invite.invite_id, invite.room_id, room.title AS room_title,
-                       invite.created_by_user_id, invite.creation_operation_id,
-                       invite.token_digest, invite.requested_lifetime_seconds,
-                       invite.expires_at, invite.maximum_approved_uses,
-                       invite.approved_use_count, invite.state, invite.created_at,
-                       invite.revocation_operation_id
-                FROM im_v2.group_invite_links AS invite
-                JOIN im_v2.group_rooms AS room ON room.room_id = invite.room_id
-                WHERE invite.token_digest = \(bind: request.tokenDigest)
-                FOR UPDATE OF invite
-                """).first(decoding: GroupInviteRow.self),
-                  invite.state == "active", invite.expiresAt.microseconds > currentTime.microseconds,
-                  invite.approvedUseCount < invite.maximumApprovedUses
-            else { return .unavailable }
-
-            try validateInvite(invite: invite.inviteID, room: invite.roomID)
-            guard v2PostgresTimestampCanEncode(invite.expiresAt.date) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
-            if try await isCurrentMember(room: invite.roomID, user: applicant, sql: sql) {
-                return .alreadyMember(.init(inviteID: .init(uuid: invite.inviteID), roomID: .init(uuid: invite.roomID), roomTitle: invite.roomTitle, expiresAt: invite.expiresAt.date, requestState: nil, requestID: nil, isAlreadyMember: true))
-            }
-            if let existing = try await requestByInvite(invite: invite.inviteID, applicant: applicant, sql: sql) {
-                return try submissionOutcome(existing)
-            }
-            let counts = try await sql.raw("""
-                SELECT
-                  (SELECT COUNT(*) FROM im_v2.group_join_requests WHERE applicant_user_id = \(bind: applicant) AND state IN ('pending', 'approving')) AS applicant_count,
-                  (SELECT COUNT(*) FROM im_v2.group_join_requests WHERE invite_id = \(bind: invite.inviteID) AND state IN ('pending', 'approving')) AS invite_count
-                """).first(decoding: GroupInvitePendingCountRow.self)
-            guard let counts else { throw V2GroupInvitationServiceError.corruptPersistenceState }
-            guard counts.applicantCount < request.maximumPendingRequestsPerApplicant,
-                  counts.inviteCount < request.maximumPendingRequestsPerInvite else { return .rateLimited }
-
-            try await sql.raw("""
-                INSERT INTO im_v2.group_join_requests
-                    (request_id, invite_id, room_id, applicant_user_id,
-                     submission_operation_id, note, state, created_at, updated_at)
-                VALUES (\(bind: try groupInviteUUID(request.requestID)), \(bind: invite.inviteID),
-                        \(bind: invite.roomID), \(bind: applicant), \(bind: operation),
-                        \(bind: request.note), 'pending', \(bind: request.createdAt), \(bind: request.createdAt))
-                """).run()
-            guard let inserted = try await requestByID(try groupInviteUUID(request.requestID), sql: sql) else {
-                throw V2GroupInvitationServiceError.corruptPersistenceState
-            }
-            return .submitted(inserted)
+            try await lockSubmission(applicant: groupInviteUUID(request.applicantUserID), sql: sql)
+            return try await submitLocked(request, actorIsActive: actorIsActive, evaluatedAt: request.createdAt, sql: sql)
         }
         return try await hydrate(result)
+    }
+
+    private func lockSubmission(applicant: UUID, sql: any SQLDatabase) async throws {
+        try await advisoryLock(sql, value: "group-join-applicant:\(applicant)")
+        if let scope { try await fence(room: scope.roomID, sql: sql) }
+    }
+
+    private func submitLocked(_ request: V2GroupJoinSubmissionPersistenceRequest, actorIsActive: Bool,
+                              evaluatedAt: Date, sql: any SQLDatabase) async throws -> GroupJoinSubmissionResult {
+        let applicant = try groupInviteUUID(request.applicantUserID), operation = try groupInviteUUID(request.operationID)
+        if let priorDigest = try await sql.raw("SELECT invite.token_digest FROM im_v2.group_join_requests AS request JOIN im_v2.group_invite_links AS invite ON invite.invite_id = request.invite_id WHERE request.applicant_user_id = \(bind: applicant) AND request.submission_operation_id = \(bind: operation)").first(decoding: GroupInviteDigestRow.self) {
+            guard priorDigest.tokenDigest == request.tokenDigest,
+                  let prior = try await requestBySubmission(applicant: applicant, operation: operation, sql: sql),
+                  prior.note == request.note
+            else { throw V2GroupInvitationServiceError.conflict }
+            try validateInvite(invite: prior.inviteID, room: prior.roomID)
+            return try submissionOutcome(prior)
+        }
+        guard actorIsActive else { throw V2GroupInvitationServiceError.permissionDenied }
+        guard v2PostgresTimestampCanEncode(request.createdAt), v2PostgresTimestampCanEncode(evaluatedAt) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+        let currentTime = try V2PostgresTimestamp(date: evaluatedAt)
+        if scope == nil {
+            // Discover the immutable room binding before locking the invite.
+            // Keep the same room -> invite order as approval and revocation.
+            guard let binding = try await sql.raw("""
+                SELECT room_id FROM im_v2.group_invite_links WHERE token_digest = \(bind: request.tokenDigest)
+                """).first(decoding: GroupInviteRoomBinding.self) else { return .unavailable }
+            try await fence(room: binding.roomID, sql: sql)
+        }
+        guard let invite = try await sql.raw("""
+            SELECT invite.invite_id, invite.room_id, room.title AS room_title,
+                   invite.created_by_user_id, invite.creation_operation_id,
+                   invite.token_digest, invite.requested_lifetime_seconds,
+                   invite.expires_at, invite.maximum_approved_uses,
+                   invite.approved_use_count, invite.state, invite.created_at,
+                   invite.revocation_operation_id
+            FROM im_v2.group_invite_links AS invite
+            JOIN im_v2.group_rooms AS room ON room.room_id = invite.room_id
+            WHERE invite.token_digest = \(bind: request.tokenDigest)
+            FOR UPDATE OF invite
+            """).first(decoding: GroupInviteRow.self),
+              invite.state == "active", invite.expiresAt.microseconds > currentTime.microseconds,
+              invite.approvedUseCount < invite.maximumApprovedUses
+        else { return .unavailable }
+
+        try validateInvite(invite: invite.inviteID, room: invite.roomID)
+        guard v2PostgresTimestampCanEncode(invite.expiresAt.date) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+        if try await isCurrentMember(room: invite.roomID, user: applicant, sql: sql) {
+            return .alreadyMember(.init(inviteID: .init(uuid: invite.inviteID), roomID: .init(uuid: invite.roomID), roomTitle: invite.roomTitle, expiresAt: invite.expiresAt.date, requestState: nil, requestID: nil, isAlreadyMember: true))
+        }
+        if let existing = try await requestByInvite(invite: invite.inviteID, applicant: applicant, sql: sql) {
+            return try submissionOutcome(existing)
+        }
+        let counts = try await sql.raw("""
+            SELECT
+              (SELECT COUNT(*) FROM im_v2.group_join_requests WHERE applicant_user_id = \(bind: applicant) AND state IN ('pending', 'approving')) AS applicant_count,
+              (SELECT COUNT(*) FROM im_v2.group_join_requests WHERE invite_id = \(bind: invite.inviteID) AND state IN ('pending', 'approving')) AS invite_count
+            """).first(decoding: GroupInvitePendingCountRow.self)
+        guard let counts else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+        guard counts.applicantCount < request.maximumPendingRequestsPerApplicant,
+              counts.inviteCount < request.maximumPendingRequestsPerInvite else { return .rateLimited }
+
+        try await sql.raw("""
+            INSERT INTO im_v2.group_join_requests
+                (request_id, invite_id, room_id, applicant_user_id,
+                 submission_operation_id, note, state, created_at, updated_at)
+            VALUES (\(bind: try groupInviteUUID(request.requestID)), \(bind: invite.inviteID),
+                    \(bind: invite.roomID), \(bind: applicant), \(bind: operation),
+                    \(bind: request.note), 'pending', \(bind: request.createdAt), \(bind: request.createdAt))
+            """).run()
+        guard let inserted = try await requestByID(try groupInviteUUID(request.requestID), sql: sql) else {
+            throw V2GroupInvitationServiceError.corruptPersistenceState
+        }
+        return .submitted(inserted)
     }
 
     public func pendingRequests(roomID: RoomID, reviewerUserID: UserID, cursor: String?, pageSize: Int, now: Date) async throws -> V2GroupJoinRequestRecordPage {
@@ -296,7 +310,7 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
     public func approve(
         roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID,
         operationID: GroupJoinDecisionOperationID, capacityProfile: V2CapacityProfile,
-        eventID: EventID, planID: FanoutPlanID, now: Date
+        eventID: EventID, now: Date
     ) async throws -> V2GroupJoinApprovalPersistenceOutcome {
         // The applicant ID is immutable business input. Read it without an
         // owner transaction, snapshot control identities, then recheck the ID
@@ -326,7 +340,7 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
                 let revision = try await authorize(room: room, actor: reviewer, actorIsActive: actorIsActive, lockMembership: true, sql: sql)
                 guard let value = try await requestByID(request, lock: true, sql: sql), value.roomID == room else { throw V2GroupInvitationServiceError.requestNotFound }
                 switch value.state {
-                case "approved", "rejected": return .alreadyDecided(value)
+                case "approved", "rejected", "cancelled": return .alreadyDecided(value)
                 // Legacy split transactions require operation-specific recovery.
                 // Never settle them from the applicant's current membership.
                 case "approving": return .conflict
@@ -353,7 +367,7 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
                 )
                 let membership = try await PostgresV2RoomMembershipStore.change(
                     in: sql, command: command, identitySnapshot: membershipIdentity, capacityProfile: capacityProfile,
-                    eventID: eventID, planID: planID, now: now
+                    eventID: eventID, now: now
                 )
                 switch membership {
                 case .changed: break
@@ -388,6 +402,38 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
         }
     }
 
+    public func cancel(roomID: RoomID, requestID: GroupJoinRequestID, applicantUserID: UserID, now: Date) async throws -> V2GroupJoinRequestRecord {
+        guard try await isActive(applicantUserID) else { throw V2GroupInvitationServiceError.permissionDenied }
+        let result = try await database.transaction { transaction in
+            let sql = try groupInviteSQL(transaction)
+            let applicant = try groupInviteUUID(applicantUserID), room = try groupInviteUUID(roomID)
+            // Submission uses this lock too: quota release and a subsequent
+            // submission observe one serial order within this owner database.
+            try await advisoryLock(sql, value: "group-join-applicant:" + applicant.uuidString)
+            try await fence(room: room, sql: sql)
+            guard let value = try await requestByID(try groupInviteUUID(requestID), lock: true, sql: sql),
+                  value.roomID == room, value.applicantUserID == applicant
+            else { throw V2GroupInvitationServiceError.requestNotFound }
+            switch value.state {
+            case "cancelled", "approved", "rejected": return value
+            case "approving": throw V2GroupInvitationServiceError.conflict
+            case "pending":
+                guard v2PostgresTimestampCanEncode(now) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+                try value.validateResponseTimes()
+                try await sql.raw("""
+                    UPDATE im_v2.group_join_requests
+                    SET state = 'cancelled', decided_by_user_id = \(bind: applicant),
+                        decided_at = \(bind: now), updated_at = \(bind: now)
+                    WHERE request_id = \(bind: value.requestID)
+                    """).run()
+                guard let completed = try await requestByID(value.requestID, sql: sql) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+                return completed
+            default: throw V2GroupInvitationServiceError.corruptPersistenceState
+            }
+        }
+        return try await hydrate(result)
+    }
+
     public func reject(roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID, operationID: GroupJoinDecisionOperationID, now: Date) async throws -> V2GroupJoinDecisionPreparationOutcome {
         let actorIsActive = try await isActive(reviewerUserID)
         let result: GroupJoinDecisionResult = try await database.transaction { transaction in
@@ -406,7 +452,7 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
             switch value.state {
             case "approved": return .alreadyApproved(value)
             case "rejected": return .alreadyRejected(value)
-            case "approving": return .decisionConflict
+            case "approving", "cancelled": return .decisionConflict
             case "pending":
                 guard v2PostgresTimestampCanEncode(now) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
                 try value.validateResponseTimes()
@@ -470,7 +516,7 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
     }
 
     private func requestByInvite(invite: UUID, applicant: UUID, sql: any SQLDatabase) async throws -> GroupJoinRequestRow? {
-        try await sql.raw("SELECT \(unsafeRaw: requestSelection) FROM im_v2.group_join_requests AS request JOIN im_v2.group_invite_links AS invite ON invite.invite_id = request.invite_id JOIN im_v2.group_rooms AS group_room ON group_room.room_id = request.room_id WHERE request.invite_id = \(bind: invite) AND request.applicant_user_id = \(bind: applicant)").first(decoding: GroupJoinRequestRow.self)
+        try await sql.raw("SELECT \(unsafeRaw: requestSelection) FROM im_v2.group_join_requests AS request JOIN im_v2.group_invite_links AS invite ON invite.invite_id = request.invite_id JOIN im_v2.group_rooms AS group_room ON group_room.room_id = request.room_id WHERE request.invite_id = \(bind: invite) AND request.applicant_user_id = \(bind: applicant) AND request.state <> 'cancelled'").first(decoding: GroupJoinRequestRow.self)
     }
 
     private func isCurrentMember(room: UUID, user: UUID, sql: any SQLDatabase) async throws -> Bool {
@@ -577,6 +623,9 @@ private func submissionOutcome(_ row: GroupJoinRequestRow) throws -> GroupJoinSu
     case .approved:
         guard v2PostgresTimestampCanEncode(row.inviteExpiresAt) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
         return .alreadyMember(.init(inviteID: .init(uuid: row.inviteID), roomID: .init(uuid: row.roomID), roomTitle: row.roomTitle, expiresAt: row.inviteExpiresAt, requestState: .approved, requestID: .init(uuid: row.requestID), isAlreadyMember: true))
+    case .cancelled:
+        try row.validateResponseTimes()
+        return .cancelled(row)
     case .rejected:
         try row.validateResponseTimes()
         return .rejected(row)
@@ -592,11 +641,12 @@ struct V2GroupInvitationOwnerScope: Sendable {
 private struct InvitationOwnerRow: Decodable {
     let shardID: String
     let epoch: Int64
-    enum CodingKeys: String, CodingKey { case shardID = "room_shard_id", epoch = "owner_epoch" }
+    let migrationFenceID: UUID?
+    enum CodingKeys: String, CodingKey { case shardID = "room_shard_id", epoch = "owner_epoch", migrationFenceID = "migration_fence_id" }
 }
 
 private enum GroupJoinSubmissionResult: Sendable {
-    case submitted(GroupJoinRequestRow), alreadyPending(GroupJoinRequestRow), rejected(GroupJoinRequestRow)
+    case submitted(GroupJoinRequestRow), alreadyPending(GroupJoinRequestRow), rejected(GroupJoinRequestRow), cancelled(GroupJoinRequestRow)
     case alreadyMember(V2GroupInvitePreviewRecord), unavailable, rateLimited
 }
 private enum GroupJoinApprovalResult: Sendable {
@@ -614,14 +664,21 @@ private extension PostgresV2GroupInvitationStore {
     }
 
     func fence(room: UUID, sql: any SQLDatabase, shared: Bool = false) async throws {
-        guard let scope else { return }
-        guard room == scope.roomID else { throw V2GroupInvitationServiceError.conflict }
+        if let scope, room != scope.roomID { throw V2GroupInvitationServiceError.conflict }
         guard let row = try await sql.raw("""
-            SELECT room_shard_id, owner_epoch FROM im_v2.rooms
+            SELECT room_shard_id, owner_epoch, migration_fence_id FROM im_v2.rooms
             WHERE room_id = \(bind: room) \(unsafeRaw: shared ? "FOR SHARE" : "FOR UPDATE")
-            """).first(decoding: InvitationOwnerRow.self),
-              row.shardID == scope.route.shardID, row.epoch == scope.route.epoch
-        else { throw V2GroupInvitationServiceError.ownerChanged }
+            """).first(decoding: InvitationOwnerRow.self) else {
+            // Local callers retain their domain-specific not-found response;
+            // scoped callers must reject a missing selected owner.
+            if scope == nil { return }
+            throw V2GroupInvitationServiceError.ownerChanged
+        }
+        guard row.migrationFenceID == nil else { throw V2GroupInvitationServiceError.ownerChanged }
+        if let scope {
+            guard row.shardID == scope.route.shardID, row.epoch == scope.route.epoch
+            else { throw V2GroupInvitationServiceError.ownerChanged }
+        }
     }
 
     func validateInvite(invite: UUID, room: UUID) throws {
@@ -644,6 +701,7 @@ private extension PostgresV2GroupInvitationStore {
         case .submitted(let row): return .submitted(try await hydrate(row))
         case .alreadyPending(let row): return .alreadyPending(try await hydrate(row))
         case .rejected(let row): return .rejected(try await hydrate(row))
+        case .cancelled(let row): return .cancelled(try await hydrate(row))
         case .alreadyMember(let value): return .alreadyMember(value)
         case .unavailable: return .unavailable
         case .rateLimited: return .rateLimited
@@ -676,4 +734,165 @@ private func validateGroupInviteCreationClock(_ request: V2GroupInviteCreatePers
           v2PostgresTimestampCanEncode(request.evaluatedAt)
     else { throw V2GroupInvitationServiceError.corruptPersistenceState }
     return timestamps
+}
+
+/// Authoritative observation from an immutable owner receipt. Request outcomes
+/// may advance to their terminal state; negative admission outcomes never change.
+struct V2GroupJoinOwnerSubmission: Sendable {
+    let outcome: V2GroupJoinQuotaOutcome
+    let targetRequestID: UUID?
+    let wasInserted: Bool
+}
+
+extension PostgresV2GroupInvitationStore {
+    func applyReservedSubmission(_ intent: V2GroupJoinQuotaIntent, now: Date) async throws -> V2GroupJoinOwnerSubmission {
+        guard intent.generation > 0, intent.tokenDigest.count == 32, intent.maximumPendingPerInvite > 0,
+              v2PostgresTimestampCanEncode(now) else { throw V2GroupInvitationServiceError.invalidRequest }
+        guard let scope, scope.roomID == intent.roomID, scope.inviteID == intent.inviteID else {
+            throw V2GroupInvitationServiceError.conflict
+        }
+        let created = try V2PostgresTimestamp(date: intent.createdAt)
+        let attempted = try V2PostgresTimestamp(date: intent.attemptCreatedAt)
+        let active = try await isActive(.init(uuid: intent.applicantUserID))
+        return try await database.transaction { transaction in
+            let sql = try groupInviteSQL(transaction)
+            try await lockSubmission(applicant: intent.applicantUserID, sql: sql)
+            try validateInvite(invite: intent.inviteID, room: intent.roomID)
+            if let prior = try await quotaReceipt(intent, sql: sql) {
+                try prior.validate(intent, created: created, attempted: attempted)
+                return try await observeQuotaReceipt(prior, sql: sql)
+            }
+            if let previous = try await sql.raw("""
+                SELECT * FROM im_v2.group_join_submission_receipts
+                WHERE applicant_user_id = \(bind: intent.applicantUserID) AND operation_id = \(bind: intent.operationID)
+                ORDER BY generation DESC LIMIT 1
+                """).first(decoding: GroupJoinQuotaReceiptRow.self) {
+                guard previous.generation < Int64.max, intent.generation == previous.generation + 1,
+                      previous.disposition != "request", previous.disposition != "already_member"
+                else { throw V2GroupInvitationServiceError.conflict }
+                try previous.validateBinding(intent, created: created)
+            } else if intent.generation != 1 {
+                throw V2GroupInvitationServiceError.conflict
+            }
+            // Global capacity was reserved in control. The ordinary local path
+            // retains its own limit; reserved submissions use the global slot.
+            let request = V2GroupJoinSubmissionPersistenceRequest(
+                requestID: .init(uuid: intent.requestID), applicantUserID: .init(uuid: intent.applicantUserID),
+                operationID: .init(uuid: intent.operationID), tokenDigest: intent.tokenDigest, note: intent.note,
+                createdAt: intent.createdAt, maximumPendingRequestsPerApplicant: Int.max,
+                maximumPendingRequestsPerInvite: intent.maximumPendingPerInvite)
+            let disposition: String
+            let target: UUID?
+            var inserted = false
+            do {
+                let result = try await submitLocked(request, actorIsActive: active, evaluatedAt: now, sql: sql)
+                switch result {
+                case .submitted(let row): disposition = "request"; target = row.requestID; inserted = true
+                case .alreadyPending(let row), .rejected(let row), .cancelled(let row): disposition = "request"; target = row.requestID
+                case .alreadyMember(let preview):
+                    if let requestID = preview.requestID?.uuidValue { disposition = "request"; target = requestID }
+                    else { disposition = "already_member"; target = nil }
+                case .unavailable: disposition = "unavailable"; target = nil
+                case .rateLimited: disposition = "rate_limited"; target = nil
+                }
+            } catch V2GroupInvitationServiceError.permissionDenied {
+                disposition = "permission_denied"; target = nil
+            }
+            try await sql.raw("""
+                INSERT INTO im_v2.group_join_submission_receipts
+                    (applicant_user_id, operation_id, generation, request_id, room_id, invite_id,
+                     token_digest, note, maximum_pending_per_invite, intent_created_at, attempt_created_at,
+                     disposition, target_request_id, recorded_at)
+                VALUES (\(bind: intent.applicantUserID), \(bind: intent.operationID), \(bind: intent.generation),
+                        \(bind: intent.requestID), \(bind: intent.roomID), \(bind: intent.inviteID),
+                        \(bind: intent.tokenDigest), \(bind: intent.note), \(bind: intent.maximumPendingPerInvite),
+                        \(bind: created), \(bind: attempted), \(bind: disposition), \(bind: target), \(bind: now))
+                """).run()
+            guard let receipt = try await quotaReceipt(intent, sql: sql) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+            let observed = try await observeQuotaReceipt(receipt, sql: sql)
+            return .init(outcome: observed.outcome, targetRequestID: observed.targetRequestID, wasInserted: inserted)
+        }
+    }
+
+    /// Hydration is separate from the commit proof. Missing profile data or a
+    /// lost response cannot erase the receipt or prevent recovery from reading it.
+    func reservedSubmissionResponse(_ intent: V2GroupJoinQuotaIntent, observed: V2GroupJoinOwnerSubmission) async throws -> V2GroupJoinSubmissionPersistenceOutcome {
+        switch observed.outcome {
+        case .unavailable: return .unavailable
+        case .rateLimited: return .rateLimited
+        case .permissionDenied: throw V2GroupInvitationServiceError.permissionDenied
+        default: break
+        }
+        let result: GroupJoinSubmissionResult = try await database.transaction { transaction in
+            let sql = try groupInviteSQL(transaction)
+            try await fence(room: intent.roomID, sql: sql, shared: true)
+            if let target = observed.targetRequestID {
+                guard let row = try await requestByID(target, sql: sql), row.roomID == intent.roomID,
+                      row.inviteID == intent.inviteID, row.applicantUserID == intent.applicantUserID
+                else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+                if observed.wasInserted, row.state == "pending" { return .submitted(row) }
+                return try submissionOutcome(row)
+            }
+            guard observed.outcome == .alreadyMember, let invite = try await inviteByID(intent.inviteID, sql: sql),
+                  invite.roomID == intent.roomID else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+            return .alreadyMember(.init(inviteID: .init(uuid: intent.inviteID), roomID: .init(uuid: intent.roomID),
+                roomTitle: invite.roomTitle, expiresAt: invite.expiresAt.date, requestState: nil, requestID: nil, isAlreadyMember: true))
+        }
+        return try await hydrate(result)
+    }
+
+    private func quotaReceipt(_ intent: V2GroupJoinQuotaIntent, sql: any SQLDatabase) async throws -> GroupJoinQuotaReceiptRow? {
+        try await sql.raw("""
+            SELECT * FROM im_v2.group_join_submission_receipts
+            WHERE applicant_user_id = \(bind: intent.applicantUserID) AND operation_id = \(bind: intent.operationID)
+              AND generation = \(bind: intent.generation)
+            """).first(decoding: GroupJoinQuotaReceiptRow.self)
+    }
+
+    private func observeQuotaReceipt(_ receipt: GroupJoinQuotaReceiptRow, sql: any SQLDatabase) async throws -> V2GroupJoinOwnerSubmission {
+        if receipt.disposition == "request" {
+            guard let id = receipt.targetRequestID, let row = try await requestByID(id, sql: sql),
+                  row.roomID == receipt.roomID, row.inviteID == receipt.inviteID,
+                  row.applicantUserID == receipt.applicantUserID,
+                  let outcome = V2GroupJoinQuotaOutcome(rawValue: row.state), outcome.requiresRequest
+            else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+            return .init(outcome: outcome, targetRequestID: id, wasInserted: false)
+        }
+        guard receipt.targetRequestID == nil, let outcome = V2GroupJoinQuotaOutcome(rawValue: receipt.disposition),
+              !outcome.requiresRequest else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+        return .init(outcome: outcome, targetRequestID: nil, wasInserted: false)
+    }
+}
+
+private struct GroupJoinQuotaReceiptRow: Decodable {
+    let applicantUserID, operationID, requestID, roomID, inviteID: UUID
+    let generation: Int64
+    let tokenDigest: Data
+    let note: String?
+    let maximumPendingPerInvite: Int
+    let intentCreatedAt, attemptCreatedAt: V2PostgresTimestamp
+    let disposition: String
+    let targetRequestID: UUID?
+
+    enum CodingKeys: String, CodingKey {
+        case applicantUserID = "applicant_user_id", operationID = "operation_id", requestID = "request_id"
+        case roomID = "room_id", inviteID = "invite_id", generation, tokenDigest = "token_digest", note
+        case maximumPendingPerInvite = "maximum_pending_per_invite", intentCreatedAt = "intent_created_at"
+        case attemptCreatedAt = "attempt_created_at", disposition, targetRequestID = "target_request_id"
+    }
+    func validateBinding(_ intent: V2GroupJoinQuotaIntent, created: V2PostgresTimestamp) throws {
+        guard applicantUserID == intent.applicantUserID, operationID == intent.operationID,
+              requestID == intent.requestID, roomID == intent.roomID, inviteID == intent.inviteID,
+              tokenDigest == intent.tokenDigest, note == intent.note, maximumPendingPerInvite == intent.maximumPendingPerInvite,
+              intentCreatedAt == created else { throw V2GroupInvitationServiceError.conflict }
+    }
+    func validate(_ intent: V2GroupJoinQuotaIntent, created: V2PostgresTimestamp, attempted: V2PostgresTimestamp) throws {
+        try validateBinding(intent, created: created)
+        guard generation == intent.generation, attemptCreatedAt == attempted else { throw V2GroupInvitationServiceError.conflict }
+    }
+}
+
+private struct GroupInviteRoomBinding: Decodable {
+    let roomID: UUID
+    enum CodingKeys: String, CodingKey { case roomID = "room_id" }
 }

@@ -26,14 +26,18 @@ public struct V2RoutedContentReviewWorker: Sendable {
 
     /// 并发推进所有归属各一轮并汇总计数。
     ///
-    /// - Parameter limitPerOwner: 每个归属单轮最多处理的任务数，需大于零。
+    /// - Parameter limitPerOwner: 每个归属单轮最多处理的任务数，需大于零，且乘以归属数不超过 Int.max。
     /// - Returns: 各归属计数之和。
-    /// - Throws: 上限非正时抛出 ``V2ContentReviewWorkerError/invalidLimit``；
+    /// - Throws: 上限非正或总预算无法表示时抛出 ``V2ContentReviewWorkerError/invalidLimit``；
     ///   全部归属都失败时抛出
     ///   ``V2RoutedContentReviewWorkerError/allOwnersFailed(_:)``。
     public func runOnce(limitPerOwner: Int) async throws
         -> V2ContentReviewReport {
-        guard limitPerOwner > 0 else { throw V2ContentReviewWorkerError.invalidLimit }
+        // Each owner report is bounded by its claim limit. Validate the total
+        // before starting work so aggregation cannot overflow after side effects.
+        guard limitPerOwner > 0, limitPerOwner <= Int.max / workers.count else {
+            throw V2ContentReviewWorkerError.invalidLimit
+        }
         let result = await withTaskGroup(
             of: Result<V2ContentReviewReport, any Error>.self,
             returning: Result<
@@ -87,7 +91,7 @@ public protocol V2ContentReviewProgressing: Sendable {
     /// 推进一轮内容审核。
     ///
     /// - Parameter limit: 本轮最多处理的任务数。
-    /// - Returns: 本轮统计报告。
+    /// - Returns: 本轮统计报告；每项计数均在 0...limit 内。
     /// - Throws: 存储或下游依赖失败时抛出。
     func runOnce(limit: Int) async throws -> V2ContentReviewReport
 }

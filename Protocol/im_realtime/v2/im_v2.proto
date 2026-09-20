@@ -111,8 +111,16 @@ message Envelope {
     MessagesForwarded messages_forwarded = 106;
     GetGroupRolePolicyBaseline get_group_role_policy_baseline = 107;
     GroupRolePolicyBaseline group_role_policy_baseline = 108;
-    RoomSummaryList room_summary_list = 109;
-    RoomSummaryPage room_summary_page = 110;
+    UserRoomDirectoryList user_room_directory_list = 111;
+    UserRoomDirectoryPage user_room_directory_page = 112;
+    RoomSyncStateBatch room_sync_state_batch = 113;
+    RoomSyncStateBatchResult room_sync_state_batch_result = 114;
+    AccountRoomChangesStart account_room_changes_start = 115;
+    AccountRoomChangesReady account_room_changes_ready = 116;
+    AccountRoomChanged account_room_changed = 117;
+    AccountRoomResyncRequired account_room_resync_required = 118;
+    RoomLatestVisibleBatch room_latest_visible_batch = 119;
+    RoomLatestVisibleBatchResult room_latest_visible_batch_result = 120;
   }
 }
 
@@ -521,7 +529,7 @@ message GroupRoomCreated {
   string title = 2;
   repeated string member_user_ids = 3;
   int64 created_at_ms = 4;
-  GroupDeliveryMode delivery_mode = 5;
+  GroupCapacityClass capacity_class = 5;
   uint32 member_count = 6;
 }
 
@@ -566,10 +574,10 @@ message GroupRoomCreationCancelled {
   string operation_id = 1;
 }
 
-enum GroupDeliveryMode {
-  GROUP_DELIVERY_MODE_UNSPECIFIED = 0;
-  GROUP_DELIVERY_MODE_STANDARD_FANOUT = 1;
-  GROUP_DELIVERY_MODE_LARGE_GROUP_HYBRID = 2;
+enum GroupCapacityClass {
+  GROUP_CAPACITY_CLASS_UNSPECIFIED = 0;
+  GROUP_CAPACITY_CLASS_STANDARD = 1;
+  GROUP_CAPACITY_CLASS_LARGE = 2;
 }
 
 // A read-only, seek-paginated directory.  Member lists are never attached to
@@ -617,40 +625,79 @@ message RoomMembersPage {
 //
 // 客户端只把 `cursor` 当作不透明字符串回传；它编码排序键
 // (last_event_at, room_id)，与房间序号、个人时间线序号都无关。
-message RoomSummaryList {
+// Recovery directory order is stable room identity, never recent activity.
+// The authenticated connection determines the user; no caller-selected user ID.
+message UserRoomDirectoryList {
   string cursor = 1;
   uint32 page_size = 2;
 }
 
-message RoomSummaryMessage {
-  string message_id = 1;
-  string sender_user_id = 2;
-  // 该消息在房间日志中的序号，也是继续拉取这条消息之后的起点。
-  uint64 room_sequence = 3;
-  // 当前正文；已撤回的消息仍保留撤回前的正文，由 is_withdrawn 决定展示方式。
-  string text = 4;
-  bool is_withdrawn = 5;
-  // 未被撤销的媒体引用数量；为 0 时正文可能是唯一内容。
-  uint32 media_count = 6;
-  int64 server_created_at_ms = 7;
-}
-
-message RoomSummary {
+message UserRoomDirectoryEntry {
   string room_id = 1;
-  // "group" 或 "direct"；客户端不得据此推断授权，只用于展示。
   string room_kind = 2;
-  // 房间日志头，未读出超过它。
-  uint64 head = 3;
-  int64 last_event_at_ms = 4;
-  uint64 unread_count = 5;
-  // 房间还没有可见消息时为空；此时列表仍必须保留该房间。
-  RoomSummaryMessage latest_message = 6;
+  uint64 viewer_membership_revision = 3;
+  uint64 owner_epoch = 4;
 }
 
-message RoomSummaryPage {
-  repeated RoomSummary rooms = 1;
-  // 为空表示没有更多房间。
+message UserRoomDirectoryPage {
+  repeated UserRoomDirectoryEntry rooms = 1;
+  // Empty rooms may still have a next cursor when candidates were filtered.
   string next_cursor = 2;
+  string topology_generation = 3;
+}
+
+message RoomSyncStateBatch {
+  repeated string room_ids = 1;
+}
+
+message RoomSyncState {
+  string room_id = 1;
+  uint64 owner_epoch = 2;
+  uint64 viewer_membership_revision = 3;
+  uint64 head = 4;
+  uint64 trimmed_through = 5;
+  uint64 read_through = 6;
+  uint64 latest_own_message_sequence = 7;
+  // Must equal head - max(read_through, latest_own_message_sequence).
+  uint64 unread_count = 8;
+}
+
+message RoomSyncStateUnavailable {}
+
+message RoomSyncStateRetry {
+  uint32 retry_after_seconds = 1;
+}
+
+message RoomSyncStateResult {
+  string room_id = 1;
+  oneof result {
+    RoomSyncState state = 2;
+    // Does not distinguish a nonexistent room from one lacking authorization.
+    RoomSyncStateUnavailable unavailable = 3;
+    RoomSyncStateRetry retry = 4;
+  }
+}
+
+message RoomSyncStateBatchResult {
+  // Exactly one result for each distinct requested room; no silent omissions.
+  repeated RoomSyncStateResult rooms = 1;
+}
+
+message AccountRoomChangesStart {}
+
+message AccountRoomChangesReady {
+  string connection_epoch = 1;
+}
+
+message AccountRoomChanged {
+  string connection_epoch = 1;
+  uint64 notification_sequence = 2;
+  string room_id = 3;
+  uint64 high_watermark = 4;
+}
+
+message AccountRoomResyncRequired {
+  string connection_epoch = 1;
 }
 
 // Groups retain one ordered room log. The caller must be an active member now
@@ -971,4 +1018,41 @@ message Error {
   uint32 retry_after_seconds = 3;
   // Present for stale entity mutations such as membership changes.
   uint64 current_revision = 4;
+}
+
+// Display-only snapshots; receiving one must never advance the room log cursor.
+message RoomLatestVisibleBatch {
+  repeated string room_ids = 1;
+}
+
+message RoomLatestVisibleMessage {
+  string message_id = 1;
+  string sender_user_id = 2;
+  uint64 room_sequence = 3;
+  uint64 message_revision = 4;
+  string preview = 5;
+  uint32 media_count = 6;
+  int64 created_at_ms = 7;
+}
+
+message RoomLatestVisibleSnapshot {
+  uint64 owner_epoch = 1;
+  uint64 viewer_membership_revision = 2;
+  uint64 head = 3;
+  // Absent means no currently visible effective message at this observation.
+  RoomLatestVisibleMessage latest = 4;
+}
+
+message RoomLatestVisibleResult {
+  string room_id = 1;
+  oneof result {
+    RoomLatestVisibleSnapshot snapshot = 2;
+    RoomSyncStateUnavailable unavailable = 3;
+    RoomSyncStateRetry retry = 4;
+  }
+}
+
+message RoomLatestVisibleBatchResult {
+  // Every requested ID has an explicit result, including deferred budget items.
+  repeated RoomLatestVisibleResult rooms = 1;
 }

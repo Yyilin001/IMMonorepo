@@ -171,9 +171,8 @@ private actor RecordingAtomicStore: V2OwnerValidatedRoomWriteStore {
 
 private func makeRequests(count: Int) throws -> [V2RoomWriteRequest] {
     let limits = try RoomCapacityProfile(
-        maxEligibleMembers: 8, maxCommandsPerWindow: 100, maxFanoutUnitsPerWindow: 100,
-        maxOutstandingFanoutUnits: 100, maxOutstandingPlans: 100, maxEnumerationPageSize: 8,
-        maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 1
+        maxEligibleMembers: 8, maxCommandsPerWindow: 100,
+          retryAfterSeconds: 1
     )
     let profile = try V2CapacityProfile(id: "test", limits: limits)
     let sender = try UserID("00000000-0000-0000-0000-000000000001")
@@ -189,8 +188,7 @@ private func makeRequests(count: Int) throws -> [V2RoomWriteRequest] {
             command: command, capacityProfile: profile,
             identifiers: try .init(
                 messageID: MessageID("20000000-0000-0000-0000-\(suffix)"),
-                eventID: EventID("30000000-0000-0000-0000-\(suffix)"),
-                planID: FanoutPlanID("40000000-0000-0000-0000-\(suffix)")
+                eventID: EventID("30000000-0000-0000-0000-\(suffix)")
             ),
             now: .init(timeIntervalSince1970: 1_750_000_000)
         )

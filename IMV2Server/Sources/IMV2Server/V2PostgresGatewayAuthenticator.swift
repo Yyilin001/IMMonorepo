@@ -47,6 +47,18 @@ public struct V2AccessTokenHMACKey: Sendable {
         self.rawBytes = rawBytes
     }
 
+    /// Verify a stored hex digest through Crypto's authentication-code comparison.
+    func matches(_ digest: String, value: String) -> Bool {
+        guard digest.utf8.count == 64 else { return false }
+        let chars = Array(digest)
+        var bytes = Data()
+        for index in stride(from: 0, to: 64, by: 2) {
+            guard let byte = UInt8(String(chars[index...index + 1]), radix: 16) else { return false }
+            bytes.append(byte)
+        }
+        return HMAC<SHA256>.isValidAuthenticationCode(bytes, authenticating: Data(value.utf8), using: SymmetricKey(data: rawBytes))
+    }
+
     /// 计算访问令牌的 HMAC-SHA256 查询摘要。
     ///
     /// - Parameter accessToken: 按原样 UTF-8 编码的令牌，不执行空白清理或格式校验。

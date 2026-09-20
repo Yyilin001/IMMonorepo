@@ -1,11 +1,7 @@
-# Opt-in overlay for the direct-room canonical event-log recovery path.
-# Apply only after the client build that owns durable direct room cursors is
-# available. This changes new direct `message.accepted` writes only; group
-# delivery and direct message mutations retain their existing paths.
+# Room-log throughput tuning overlay. Public content always uses room logs.
 services:
   gateway:
     environment:
-      IM_V2_DIRECT_FANOUT_MODE: room_log
       # A clean, same-host A/B found that bypassing this per-room counter did
       # not improve the real room-log workload. Keep the proven room-local
       # admission path as the deployment default; `shard_only` remains an

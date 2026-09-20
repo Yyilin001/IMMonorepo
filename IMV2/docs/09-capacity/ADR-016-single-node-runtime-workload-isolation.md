@@ -27,7 +27,9 @@
 
 启用角色隔离时，每个 event loop 的五项预算之和不得超过
 `IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP`，再乘 event-loop 数和物理数据库数后不得超过
-`IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS`。启动时失败关闭。
+`IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS`。个人事件路由围栏使用控制库专用池，每个 event loop 另占 1 条连接。私聊控制权限另用 direct_send_control 专用池，其每个 event loop 的连接数等于当前 foreground 配额（共享模式下等于共享池配额）。两者都计入总上限，即使关闭角色隔离也不与 owner 数据池合并，防止持有控制事务后嵌套取 owner 连接形成等待环。所有专用池均验证会话策略并随 Application 关闭；监控分别报告用途与连接上限。预算不足时启动失败。
+
+持久授权确认/中止另用 `direct_authorization_resolution` 专用池：按控制库与所有 room owner 的不同 URL 去重，每个 URL、每个 event loop 配 1 条连接；仅用户分片数据库不增加这个池。Gateway 与 Operator 均计入进程总预算。它不借用前台权限写者或授权预留池，避免预留等待权限锁、权限写者又等待确认连接形成环。同一物理 URL 的 owner 中止和控制确认可共用这个专用池，因为两笔事务顺序执行，不嵌套持有连接。此组装已写入运行入口；预算边界和同库/双库下占满单连接业务池后的协调器专项已通过，见[验证记录](../../../docs/reviews/verification-records.md#20260920-direct-authorization-runtime-pools)。正式发送、批量和转发已接自动持久授权；完整进程故障与迁移验收仍待完成，不能视为 D07 已关闭。
 
 同库 Delivery 必须继续通过 Delivery control store 在一笔事务中提交 Inbox、sequence、Sync Log 和 completion 状态；不能为了“拆池”破坏原子性。Sync 使用 Sync control router 获取相同 advisory route fence，Maintenance/Projection 使用各自的数据库句柄。
 
@@ -83,7 +85,6 @@ PostgreSQL 的 `fsync`、`synchronous_commit`、`full_page_writes` 不得为了�
 
 - `IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED=false`：恢复单一 pool；
 - `IM_V2_DATABASE_WORK_ADMISSION_ENABLED=false`：停止返回 `SERVER_BUSY`；
-- `IM_V2_ACCEPTED_MESSAGE_PROJECTION_BATCH_ENABLED=false`：恢复逐条 projector；
 - `IM_V2_SYNC_WAKE_COALESCING_ENABLED=false`：恢复逐次本地 hint。
 
 回滚不会删除数据或改变 wire protocol。是否回滚必须依据运行指标和一致性审计，不能通过关闭 PostgreSQL durability 参数掩盖问题。

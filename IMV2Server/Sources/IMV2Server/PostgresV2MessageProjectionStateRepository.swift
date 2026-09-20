@@ -78,7 +78,8 @@ struct V2StoredMessageProjectionState: Equatable, Sendable {
     var state: V2MessageProjectionState {
         get throws {
             let decoded = try V2MessageProjectionState(payloadJSON: payloadJSON)
-            guard UUID(uuidString: decoded.messageID.rawValue) == messageID,
+            guard messageRevision > 0,
+                  UUID(uuidString: decoded.messageID.rawValue) == messageID,
                   UUID(uuidString: decoded.roomID.rawValue) == roomID,
                   decoded.messageRevision == UInt64(messageRevision),
                   decoded.isWithdrawn == isWithdrawn,

@@ -105,6 +105,7 @@ final class V2ConversationDetailStore {
     private(set) var peerPresence: V2PresenceState?
     private(set) var typingUserIDs: Set<UserID> = []
     private var nextGroupMemberCursor: String?
+    private var groupMemberReloadPending = false
     private var refreshGeneration = 0
     private var newerTimelineBoundary: V2ConversationTimelineCursor?
     private var timelineLocationID: UUID?
@@ -405,9 +406,8 @@ final class V2ConversationDetailStore {
     /// 该任务由详情视图的 `.task` 修饰符持有，因此用户离开会话或场景销毁时会自动停止。
     /// 生产房间在既有 TLS 连接上等待服务端唤醒；30 秒一次的游标拉取仅作为丢消息后的恢复手段。
     ///
-    /// 这里**不按会话类型过滤**：私聊与群聊默认都是按服务端宣告的 `delivery_authority`
-    /// 决定的读模型房间，按类型过滤会让私聊打开时不补齐未读尾部。房间是否是日志权威形态
-    /// 由同步实现自己按服务端宣告判断，不是日志房间会直接返回 `.notHybridRoom`。
+    /// 私聊与群聊均按房间游标补齐未读尾部。同步实现根据成员权限决定能否补拉，
+    /// 房间容量等级不改变公共内容的恢复来源。
     func pollVisibleHybridGroupEvents() async {
         guard let activeHybridGroupSynchronizer
         else { return }
@@ -1532,40 +1532,63 @@ final class V2ConversationDetailStore {
         inFlightMessageActionIDs.remove(message.id)
     }
 
+    private func invalidateGroupMemberDirectory() {
+        groupMembers = []
+        groupMemberRevision = nil
+        groupActorRole = nil
+        nextGroupMemberCursor = nil
+        canLoadMoreGroupMembers = false
+    }
+
     func loadGroupMembers(reset: Bool = false) async {
+        guard !Task.isCancelled else { return }
+        if reset {
+            invalidateGroupMemberDirectory()
+            if isLoadingGroupMembers {
+                // Keep one network owner, but never publish a response that
+                // predates a requested refresh (for example a role change).
+                groupMemberReloadPending = true
+                return
+            }
+        }
         guard !isLoadingGroupMembers else { return }
         guard let groupMemberDirectory else {
             groupMemberFeedback = "成员目录暂不可用。"
             return
         }
-        var cursor = reset ? nil : nextGroupMemberCursor
-        if !reset, cursor == nil, !groupMembers.isEmpty { return }
-        var replaceCurrentRoster = reset
+        var cursor = nextGroupMemberCursor
+        if cursor == nil, !groupMembers.isEmpty { return }
+        var revisionRestarts = 0
         isLoadingGroupMembers = true
-        defer { isLoadingGroupMembers = false }
-        for attempt in 0..<2 {
+        defer { isLoadingGroupMembers = false; groupMemberReloadPending = false }
+        while !Task.isCancelled {
+            if groupMemberReloadPending {
+                groupMemberReloadPending = false
+                cursor = nil
+                revisionRestarts = 0
+            }
             do {
                 let page = try await groupMemberDirectory.members(in: roomID, cursor: cursor)
                 try Task.checkCancellation()
-                // A defensive client-side fence protects older or mixed
-                // server deployments too. Restart once instead of ever
-                // appending pages from different membership revisions.
-                if cursor != nil,
-                   let loadedRevision = groupMemberRevision,
-                   loadedRevision != page.membershipRevision,
-                   attempt == 0 {
+                if groupMemberReloadPending { continue }
+                if cursor != nil, let loadedRevision = groupMemberRevision,
+                   loadedRevision != page.membershipRevision || groupActorRole != page.actorRole {
+                    invalidateGroupMemberDirectory()
+                    guard revisionRestarts == 0 else {
+                        groupMemberFeedback = "成员目录已变化，请刷新后重试。"
+                        return
+                    }
+                    revisionRestarts += 1
                     cursor = nil
-                    replaceCurrentRoster = true
                     continue
-                }
-                if replaceCurrentRoster {
-                    groupMembers = []
-                    groupActorRole = nil
                 }
                 let known = Set(groupMembers.map(\.id))
                 let incoming = Set(page.members.map(\.id))
-                guard incoming.count == page.members.count, known.isDisjoint(with: incoming) else {
-                    groupMemberFeedback = "成员目录返回了重复数据。"
+                guard incoming.count == page.members.count, known.isDisjoint(with: incoming),
+                      page.nextCursor == nil || page.nextCursor != cursor
+                else {
+                    invalidateGroupMemberDirectory()
+                    groupMemberFeedback = "成员目录返回了无效分页，请刷新后重试。"
                     return
                 }
                 groupMembers += page.members
@@ -1577,11 +1600,21 @@ final class V2ConversationDetailStore {
                 return
             } catch is CancellationError {
                 return
-            } catch V2RealtimeTransportError.server(let code, _, _, _) where code == "REVISION_CONFLICT" && cursor != nil && attempt == 0 {
-                cursor = nil
-                replaceCurrentRoster = true
-                continue
             } catch {
+                guard !Task.isCancelled else { return }
+                if groupMemberReloadPending { continue }
+                if case V2RealtimeTransportError.server(let code, _, _, _) = error {
+                    if code == "REVISION_CONFLICT" {
+                        invalidateGroupMemberDirectory()
+                        if cursor != nil, revisionRestarts == 0 {
+                            revisionRestarts += 1
+                            cursor = nil
+                            continue
+                        }
+                    } else if code == "FORBIDDEN" || code == "NOT_FOUND" {
+                        invalidateGroupMemberDirectory()
+                    }
+                }
                 groupMemberFeedback = "无法读取群成员，请检查网络后重试。"
                 return
             }

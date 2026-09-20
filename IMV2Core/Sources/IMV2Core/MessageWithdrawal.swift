@@ -37,7 +37,7 @@ public struct V2WithdrawMessageCommand: Equatable, Sendable {
     }
 }
 
-/// 权威撤回处理返回的消息版本、房间事件顺序及扇出计划元数据。
+/// 权威撤回处理返回的消息版本、房间事件顺序及事件身份。
 ///
 /// 此值不执行持久化或投递，调用方负责从一致的事务结果构造。
 public struct V2MessageWithdrawal: Equatable, Sendable {
@@ -51,8 +51,6 @@ public struct V2MessageWithdrawal: Equatable, Sendable {
     public let roomSequence: UInt64
     /// 本次变更事件身份。
     public let eventID: EventID
-    /// 对应的异步扇出计划身份。
-    public let fanoutPlanID: FanoutPlanID
     /// 变更创建时间，构造器不检查有限性或当前有效性。
     public let createdAt: Date
 
@@ -64,12 +62,11 @@ public struct V2MessageWithdrawal: Equatable, Sendable {
     ///   - messageRevision: 变更后的内容版本。
     ///   - roomSequence: 变更事件的房间序号。
     ///   - eventID: 已确定的事件身份。
-    ///   - fanoutPlanID: 已确定的扇出计划身份。
     ///   - createdAt: 变更创建时间。
     /// - Throws: 任一版本或序号越界时抛出 outOfRange。
     ///
     /// 不验证相对旧版本的递增关系、创建时间或持久化状态。
-    public init(roomID: RoomID, messageID: MessageID, messageRevision: UInt64, roomSequence: UInt64, eventID: EventID, fanoutPlanID: FanoutPlanID, createdAt: Date) throws {
+    public init(roomID: RoomID, messageID: MessageID, messageRevision: UInt64, roomSequence: UInt64, eventID: EventID, createdAt: Date) throws {
         guard messageRevision > 0, messageRevision <= UInt64(Int64.max),
               roomSequence > 0, roomSequence <= UInt64(Int64.max)
         else { throw V2RevisionValidationError.outOfRange }
@@ -78,7 +75,6 @@ public struct V2MessageWithdrawal: Equatable, Sendable {
         self.messageRevision = messageRevision
         self.roomSequence = roomSequence
         self.eventID = eventID
-        self.fanoutPlanID = fanoutPlanID
         self.createdAt = createdAt
     }
 }

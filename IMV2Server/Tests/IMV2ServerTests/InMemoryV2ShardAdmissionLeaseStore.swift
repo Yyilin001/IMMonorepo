@@ -30,7 +30,7 @@ actor InMemoryV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
             validUntil: validUntil,
             profile: capacityProfile.limits
         )
-        pools[key] = try .init(lease: lease, outstandingFanoutUnits: 0, outstandingPlans: 0)
+        pools[key] = try .init(lease: lease)
         return lease
     }
 
@@ -53,16 +53,9 @@ actor InMemoryV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
             id: current.id,
             generation: current.generation,
             validUntil: validUntil,
-            commandWindow: current.commandWindow,
-            fanoutWindow: current.fanoutWindow,
-            maxOutstandingFanoutUnits: current.maxOutstandingFanoutUnits,
-            maxOutstandingPlans: current.maxOutstandingPlans
-        )
+            commandWindow: current.commandWindow)
         state = try .init(
-            lease: renewed,
-            outstandingFanoutUnits: state.outstandingFanoutUnits,
-            outstandingPlans: state.outstandingPlans
-        )
+            lease: renewed)
         pools[key] = state
         return renewed
     }
@@ -98,10 +91,7 @@ actor InMemoryV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
             profile: capacityProfile.limits
         )
         pools[key] = try .init(
-            lease: replacement,
-            outstandingFanoutUnits: state.outstandingFanoutUnits,
-            outstandingPlans: state.outstandingPlans
-        )
+            lease: replacement)
         return replacement
     }
 
@@ -119,10 +109,6 @@ actor InMemoryV2ShardAdmissionLeaseStore: V2ShardAdmissionLeaseStore {
             id: id,
             generation: generation,
             validUntil: validUntil,
-            commandWindow: .init(limit: profile.maxCommandsPerWindow),
-            fanoutWindow: .init(limit: profile.maxFanoutUnitsPerWindow),
-            maxOutstandingFanoutUnits: profile.maxOutstandingFanoutUnits,
-            maxOutstandingPlans: profile.maxOutstandingPlans
-        )
+            commandWindow: .init(limit: profile.maxCommandsPerWindow))
     }
 }

@@ -93,6 +93,38 @@ struct V2AccountAuthenticationTests {
         }
     }
 
+    @Test("registration conflicts preserve the field and unknown conflicts stay generic",
+          arguments: ["account_handle_taken", "public_handle_taken", "unknown"])
+    func registrationConflict(_ code: String) async throws {
+        let url = try #require(URL(string: "https://account.invalid/register"))
+        let response = try #require(HTTPURLResponse(url: url, statusCode: 409, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]))
+        let transport = AccountHTTPTransport(result: .success((try JSONEncoder().encode(["code": code]), response)))
+        let authenticator = try V2HTTPPasswordAccountAuthenticator(registrationEndpoint: url, assertionEndpoint: url, transport: transport)
+        let expected: V2AccountAuthenticationError = switch code {
+        case "account_handle_taken": .accountAlreadyExists
+        case "public_handle_taken": .publicHandleAlreadyExists
+        default: .serverStatus(409)
+        }
+        await #expect(throws: expected) {
+            try await authenticator.register(accountHandle: "new-account", password: "valid-password",
+                publicHandle: "public_user", displayName: "User", deviceID: .init(uuid: UUID()))
+        }
+    }
+
+    @Test("throttling preserves positive delay and tolerates invalid headers",
+          arguments: ["19", "0", "-1", "invalid", "99999999999999999999999999"])
+    func retryAfter(_ value: String) async throws {
+        let url = try #require(URL(string: "https://account.invalid/assertion"))
+        let response = try #require(HTTPURLResponse(url: url, statusCode: 429, httpVersion: nil,
+            headerFields: ["Retry-After": value]))
+        let transport = AccountHTTPTransport(result: .success((Data(), response)))
+        let authenticator = try V2HTTPPasswordAccountAuthenticator(registrationEndpoint: url, assertionEndpoint: url, transport: transport)
+        await #expect(throws: V2AccountAuthenticationError.rateLimited(retryAfterSeconds: value == "19" ? 19 : nil)) {
+            try await authenticator.authenticate(accountHandle: "account", password: "valid-password", deviceID: .init(uuid: UUID()))
+        }
+    }
+
     private func response(for url: URL) throws -> HTTPURLResponse {
         try #require(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Cache-Control": "no-store", "Content-Type": "application/json"]))
     }

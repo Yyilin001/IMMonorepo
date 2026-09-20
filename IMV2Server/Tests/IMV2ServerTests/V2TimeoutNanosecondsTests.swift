@@ -18,10 +18,8 @@ struct V2TimeoutNanosecondsTests {
         for (seconds, expected) in cases {
             let group = try V2NATSGroupEventWakeConfiguration(url: url, subjectPrefix: "test.timeout",
                 routingKey: Data(repeating: 0x23, count: 32), acknowledgementTimeout: seconds)
-            let fanout = try V2NATSFanoutHintConfiguration(url: url, subject: "test.timeout", acknowledgementTimeout: seconds)
             #expect(group.acknowledgementTimeout == seconds)
-            #expect(fanout.acknowledgementTimeout == seconds)
-            for timeout in [group.acknowledgementTimeoutNanoseconds, fanout.acknowledgementTimeoutNanoseconds] {
+            for timeout in [group.acknowledgementTimeoutNanoseconds] {
                 let loop = EmbeddedEventLoop()
                 let fired = Mutex(false)
                 _ = loop.scheduleTask(in: .nanoseconds(timeout)) { fired.withLock { $0 = true } }
@@ -45,17 +43,11 @@ struct V2TimeoutNanosecondsTests {
                 try V2NATSGroupEventWakeConfiguration(url: url, subjectPrefix: "test.timeout",
                     routingKey: Data(repeating: 0x23, count: 32), acknowledgementTimeout: seconds)
             }
-            #expect(throws: V2NATSFanoutHintConfigurationError.invalidConfiguration) {
-                try V2NATSFanoutHintConfiguration(url: url, subject: "test.timeout", acknowledgementTimeout: seconds)
-            }
         }
         for seconds in [(30.0).nextUp, 31, 86_400] {
             #expect(throws: V2NATSGroupEventWakeBrokerError.invalidConfiguration) {
                 try V2NATSGroupEventWakeConfiguration(url: url, subjectPrefix: "test.timeout",
                     routingKey: Data(repeating: 0x23, count: 32), acknowledgementTimeout: seconds)
-            }
-            #expect(throws: V2NATSFanoutHintConfigurationError.invalidConfiguration) {
-                try V2NATSFanoutHintConfiguration(url: url, subject: "test.timeout", acknowledgementTimeout: seconds)
             }
         }
     }

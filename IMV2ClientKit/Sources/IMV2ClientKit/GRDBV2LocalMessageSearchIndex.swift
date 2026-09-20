@@ -15,9 +15,9 @@ extension GRDBV2LocalSyncStore {
                     let observation = ValueObservation.tracking { db in
                         guard let row = try Row.fetchOne(db, sql: "SELECT state, generation, index_version FROM v2_message_search_state WHERE singleton = 1"),
                               let state = V2MessageSearchIndexState(storageValue: row["state"]),
-                              let generation = UInt64(exactly: row["generation"] as Int64), generation > 0
+                              let generation = UInt64(exactly: try Self.searchInteger(row, "generation")), generation > 0
                         else { throw V2ClientProjectionError.invalidMessagePayload }
-                        let version: Int = row["index_version"]
+                        guard let version = Int(exactly: try Self.searchInteger(row, "index_version")) else { throw V2ClientProjectionError.invalidMessagePayload }
                         return V2MessageSearchIndexSnapshot(
                             state: version == V2CharacterGramTokenizer.version ? state : .building,
                             generation: generation, indexVersion: version
@@ -240,7 +240,7 @@ extension GRDBV2LocalSyncStore {
 
     static func readMessageSearchIndexState(db: Database) throws -> V2MessageSearchIndexState {
         guard let row = try Row.fetchOne(db, sql: "SELECT index_version, state FROM v2_message_search_state WHERE singleton = 1"),
-              let version: Int = row["index_version"],
+              let version = Int(exactly: try searchInteger(row, "index_version")),
               let raw: String = row["state"],
               let state = V2MessageSearchIndexState(storageValue: raw)
         else { throw V2ClientProjectionError.invalidMessagePayload }
@@ -248,9 +248,9 @@ extension GRDBV2LocalSyncStore {
     }
 
     static func messageSearchIndexGeneration(db: Database) throws -> Int64 {
-        guard let generation: Int64 = try Row.fetchOne(db, sql: "SELECT generation FROM v2_message_search_state WHERE singleton = 1")?["generation"], generation > 0
+        guard let row = try Row.fetchOne(db, sql: "SELECT generation FROM v2_message_search_state WHERE singleton = 1")
         else { throw V2ClientProjectionError.invalidMessagePayload }
-        return generation
+        return try searchInteger(row, "generation")
     }
 
     @discardableResult
@@ -280,8 +280,8 @@ extension GRDBV2LocalSyncStore {
             db,
             sql: "SELECT message_revision FROM v2_message_projections WHERE message_id = ?",
             arguments: [messageID.rawValue]
-        ), let revision: Int64 = row["message_revision"]
-        else { return }
+        ) else { return }
+        let revision = try searchInteger(row, "message_revision")
         try db.execute(
             sql: """
             INSERT INTO v2_message_search_jobs (message_id, expected_message_revision, generation, enqueued_at)
@@ -324,10 +324,10 @@ extension GRDBV2LocalSyncStore {
         init(row: Row, generation: Int64) throws {
             primaryRowID = row["primary_rowid"]
             messageID = row["message_id"]
-            revision = row["message_revision"]
+            revision = try GRDBV2LocalSyncStore.searchInteger(row, "message_revision")
             self.generation = generation
             roomID = row["room_id"]
-            roomSequence = row["room_sequence"]
+            roomSequence = try GRDBV2LocalSyncStore.searchInteger(row, "room_sequence")
             senderUserID = row["sender_user_id"]
             text = row["text_body"]
             mediaPresentations = row["media_presentations"]
@@ -343,9 +343,10 @@ extension GRDBV2LocalSyncStore {
 
         init(row: Row) throws {
             messageID = row["message_id"]
-            expectedRevision = row["expected_message_revision"]
-            generation = row["generation"]
-            let actualRevision: Int64? = row["message_revision"]
+            expectedRevision = try GRDBV2LocalSyncStore.searchInteger(row, "expected_message_revision")
+            generation = try GRDBV2LocalSyncStore.searchInteger(row, "generation")
+            let storedRevision: DatabaseValue = row["message_revision"]
+            let actualRevision: Int64? = try storedRevision.isNull ? nil : GRDBV2LocalSyncStore.searchInteger(row, "message_revision")
             let withdrawn: Bool? = row["is_withdrawn"]
             if actualRevision == expectedRevision, withdrawn == false {
                 document = try .init(row: row, generation: generation)
@@ -468,9 +469,9 @@ extension GRDBV2LocalSyncStore {
                 sql: "SELECT message_id, message_revision, is_withdrawn FROM v2_message_projections WHERE message_id IN (\(placeholders))",
                 arguments: StatementArguments(identifiers)
             )
-            return Set(rows.compactMap { row -> String? in
+            return Set(try rows.compactMap { row -> String? in
                 let messageID: String = row["message_id"]
-                let revision: Int64 = row["message_revision"]
+                let revision = try searchInteger(row, "message_revision")
                 let isWithdrawn: Bool = row["is_withdrawn"]
                 return !isWithdrawn && expected[messageID] == revision ? messageID : nil
             })
@@ -540,12 +541,20 @@ extension GRDBV2LocalSyncStore {
         }
     }
 
+    private static func searchInteger(_ row: Row, _ column: String) throws -> Int64 {
+        let value: DatabaseValue = row[column]
+        guard case .int64(let integer) = value.storage, integer > 0 else {
+            throw V2ClientProjectionError.invalidMessagePayload
+        }
+        return integer
+    }
+
     private static func searchCandidate(_ row: Row) throws -> IndexedCandidate {
-        guard let sequence = UInt64(exactly: row["room_sequence"] as Int64), sequence > 0 else {
+        guard let sequence = UInt64(exactly: try searchInteger(row, "room_sequence")), sequence > 0 else {
             throw V2ClientProjectionError.invalidMessagePayload
         }
         let hit = try V2MessageSearchHit(messageID: .init(row["message_id"] as String), roomID: .init(row["room_id"] as String), roomSequence: sequence, senderUserID: .init(row["sender_user_id"] as String), text: row["text_body"], createdAt: Date(timeIntervalSince1970: row["server_created_at"] as Double))
-        return .init(hit: hit, revision: row["message_revision"], generation: row["generation"])
+        return try .init(hit: hit, revision: searchInteger(row, "message_revision"), generation: searchInteger(row, "generation"))
     }
 
     private static func searchCursor(for hit: V2MessageSearchHit, scope: V2MessageSearchScope, filterFingerprint: String) -> V2MessageSearchCursor {

@@ -252,15 +252,12 @@ public struct V2ShardAdmissionLeaseService: Sendable {
 
 /// 判断租约携带的上限是否与容量档位完全一致。
 ///
-/// 命令窗口、扇出窗口、未完成扇出量与未完成计划数四项都必须相等。
+/// 持久租约的命令窗口上限必须与当前容量档位相等。
 ///
 /// - Parameters:
 ///   - lease: 待比较的租约。
 ///   - profile: 期望的容量档位配置。
-/// - Returns: 四项上限全部一致时为 `true`。
+/// - Returns: 命令窗口上限一致时为 `true`。
 func v2ShardLeaseMatchesProfile(_ lease: ShardAdmissionLease, _ profile: RoomCapacityProfile) -> Bool {
     lease.commandWindow.limit == profile.maxCommandsPerWindow
-        && lease.fanoutWindow.limit == profile.maxFanoutUnitsPerWindow
-        && lease.maxOutstandingFanoutUnits == profile.maxOutstandingFanoutUnits
-        && lease.maxOutstandingPlans == profile.maxOutstandingPlans
 }

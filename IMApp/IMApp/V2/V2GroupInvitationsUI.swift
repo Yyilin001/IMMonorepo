@@ -31,6 +31,7 @@ final class V2GroupInvitationStore {
         case loading
         case ready(PreviewedInvitation)
         case submitting(PreviewedInvitation)
+        case cancelling(PreviewedInvitation)
         case retryable(PreviewedInvitation, String)
         case completed(PreviewedInvitation, String)
         case failed(String)
@@ -42,13 +43,14 @@ final class V2GroupInvitationStore {
     private var joinState: JoinState = .idle
     @ObservationIgnored private var joinGeneration = UUID()
     @ObservationIgnored private var previewTask: Task<V2GroupInvitePreview, any Error>?
+    @ObservationIgnored private var cancellationTask: Task<V2GroupJoinRequest, any Error>?
     @ObservationIgnored private var submissionTask: Task<V2ClientGroupJoinSubmissionOutcome, any Error>?
     @ObservationIgnored private var joinOperations: [JoinIntent: UUID] = [:]
     @ObservationIgnored private var isInvalidated = false
 
     private var previewedInvitation: PreviewedInvitation? {
         switch joinState {
-        case .ready(let value), .submitting(let value), .retryable(let value, _), .completed(let value, _): value
+        case .ready(let value), .submitting(let value), .cancelling(let value), .retryable(let value, _), .completed(let value, _): value
         case .idle, .loading, .failed: nil
         }
     }
@@ -56,18 +58,23 @@ final class V2GroupInvitationStore {
     var preview: V2GroupInvitePreview? { previewedInvitation?.preview }
     /// 当前是否处于预览加载或提交过程中。
     var isJoining: Bool {
-        switch joinState { case .loading, .submitting: true; default: false }
+        switch joinState { case .loading, .submitting, .cancelling: true; default: false }
     }
     /// 当前是否可以提交入群申请。
     ///
-    /// 已失效、已是成员、已存在申请记录或未完成预览时都返回 `false`。
+    /// 仅无申请或已取消的邀请允许提交；已失效、已是成员或正在处理时返回 `false`。
     var canSubmit: Bool {
         guard !isInvalidated else { return false }
         switch joinState {
         case .ready(let value), .retryable(let value, _):
-            return !value.preview.isAlreadyMember && value.preview.requestState == nil
+            return !value.preview.isAlreadyMember && (value.preview.requestState == nil || value.preview.requestState == .cancelled)
+        case .completed(let value, _):
+            return !value.preview.isAlreadyMember && value.preview.requestState == .cancelled
         default: return false
         }
+    }
+    var canCancelRequest: Bool {
+        !isInvalidated && !isJoining && preview?.requestState == .pending
     }
     /// 面向用户的加入流程反馈文案；无反馈时为 `nil`。
     var joinFeedback: String? {
@@ -219,6 +226,9 @@ final class V2GroupInvitationStore {
                 }
                 updated = value
                 message = "你已经是该群成员。"
+            case .cancelled(let request):
+                updated = try Self.updatedPreview(invitation.preview, request: request)
+                message = "该申请已取消，可重新提交。"
             case .rejected(let request):
                 updated = try Self.updatedPreview(invitation.preview, request: request)
                 message = "该邀请的入群申请已被拒绝。"
@@ -232,6 +242,33 @@ final class V2GroupInvitationStore {
             // Cancellation cannot undo an already submitted HTTP operation.
             // Keep its immutable intent/ID for a same-input retry.
             joinState = .retryable(invitation, error is CancellationError ? "申请尚未确认，可重试查询结果。" : Self.errorMessage(error))
+        }
+    }
+
+    /// 取消当前待审申请；丢失响应后仍使用原申请身份查询终态。
+    func cancelRequest() async {
+        guard canCancelRequest, let invitation = previewedInvitation, let requestID = invitation.preview.requestID else { return }
+        let generation = joinGeneration
+        joinState = .cancelling(invitation)
+        let client = client
+        let task = Task { try await client.cancel(roomID: invitation.preview.roomID, requestID: requestID) }
+        cancellationTask = task
+        do {
+            let request = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+            try Task.checkCancellation()
+            guard generation == joinGeneration, !isInvalidated else { return }
+            guard request.requestID == requestID, [.cancelled, .approved, .rejected].contains(request.state) else {
+                throw V2ClientGroupInvitationError.invalidResponse
+            }
+            let updated = try Self.updatedPreview(invitation.preview, request: request)
+            let message = request.state == .cancelled ? "入群申请已取消。" : "申请已完成审批，无法取消。"
+            cancellationTask = nil
+            joinOperations = joinOperations.filter { $0.key.secret != invitation.secret.rawValue }
+            joinState = .completed(.init(secret: invitation.secret, preview: updated), message)
+        } catch {
+            guard generation == joinGeneration, !isInvalidated else { return }
+            cancellationTask = nil
+            joinState = .retryable(invitation, error is CancellationError ? "取消结果尚未确认，可重试查询。" : Self.errorMessage(error))
         }
     }
 
@@ -255,6 +292,8 @@ final class V2GroupInvitationStore {
         joinGeneration = UUID()
         previewTask?.cancel()
         previewTask = nil
+        cancellationTask?.cancel()
+        cancellationTask = nil
         submissionTask?.cancel()
         submissionTask = nil
     }
@@ -393,13 +432,18 @@ struct V2GroupJoinSheet: View {
             Form {
                 if let preview = store.preview {
                     Section("群聊") { Text(preview.roomTitle).font(.headline); Text(preview.expiresAt, format: .dateTime.year().month().day().hour().minute()).foregroundStyle(.secondary) }
-                    if !preview.isAlreadyMember && preview.requestState == nil {
+                    if !preview.isAlreadyMember && (preview.requestState == nil || preview.requestState == .cancelled) {
                         Section("申请说明") { TextField("可选，最多 500 字节", text: $note, axis: .vertical).accessibilityIdentifier("v2.group-join.note") }
                         Button("提交入群申请") { Task { await store.submit(note: note) } }.disabled(!store.canSubmit).accessibilityIdentifier("v2.group-join.submit")
                     } else {
                         Section("状态") {
                             Text(groupJoinStatus(preview))
                                 .accessibilityIdentifier("v2.group-join.status")
+                            if preview.requestState == .pending {
+                                Button("取消申请", role: .destructive) { Task { await store.cancelRequest() } }
+                                    .disabled(!store.canCancelRequest)
+                                    .accessibilityIdentifier("v2.group-join.cancel")
+                            }
                         }
                     }
                 } else {
@@ -447,6 +491,7 @@ private func groupJoinStatus(_ preview: V2GroupInvitePreview) -> String {
     case .pending, .approving: "入群申请正在等待审批。"
     case .approved: "入群申请已批准。"
     case .rejected: "入群申请已拒绝。"
+    case .cancelled: "入群申请已取消。"
     case nil: "可以提交入群申请。"
     }
 }

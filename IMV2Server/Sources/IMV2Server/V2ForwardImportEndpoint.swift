@@ -52,7 +52,7 @@ public struct V2ForwardImportEndpoint: V2ForwardExportDelivering {
             }
         }
         if case .pending = outcome { return nil }
-        guard let receipt = try await inbox.terminalReceipt(exportID: export.intent.exportID), receipt.export == export
+        guard let receipt = try await inbox.terminalReceipt(exportID: export.intent.exportID), receipt.matches(export)
         else { throw V2ForwardDeliveryError.receiptMismatch }
         return receipt
     }

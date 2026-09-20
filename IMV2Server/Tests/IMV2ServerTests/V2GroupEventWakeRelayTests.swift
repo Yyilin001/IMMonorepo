@@ -80,7 +80,7 @@ struct V2GroupEventWakeRelayTests {
             clientMessageID: try .init("00000000-0000-0000-0000-000000000d13"),
             text: "hello",
             mediaPresentations: [],
-            usesRoomEventLog: true,
+
             sourceEventID: try .init("00000000-0000-0000-0000-000000000d14"),
             acceptedMembershipRevision: 1,
             directRecipientUserID: try .init("00000000-0000-0000-0000-000000000d15"),
@@ -317,8 +317,8 @@ private func acceptedHybridMessage(
         )),
         text: "event-\(sequence)",
         mediaPresentations: [],
-        groupDeliveryMode: .largeGroupHybrid,
-        usesRoomEventLog: true,
+        groupCapacityClass: .large,
+
         sourceEventID: .init(String(format:
             "00000000-0000-0000-0003-%012llx", sequence
         )),

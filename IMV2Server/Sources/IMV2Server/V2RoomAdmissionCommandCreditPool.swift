@@ -60,7 +60,7 @@ public actor V2RoomAdmissionCommandCreditPool {
     /// 当前被限流。
     case rateLimited
     /// 准入当前不可用，附带原因。
-    case unavailable(FanoutAdmissionUnavailableReason)
+    case unavailable(V2CommandAdmissionUnavailableReason)
   }
 
   fileprivate struct Key: Hashable, Sendable {
@@ -438,13 +438,15 @@ public actor V2RoomAdmissionCommandCreditPool {
     }
     guard let current = try await sql.raw(
       """
-      SELECT shard_lease_id, shard_lease_generation
-      FROM im_v2.room_admission
-      WHERE room_id = \(bind: key.roomID)
+      SELECT admission.shard_lease_id, admission.shard_lease_generation, room.migration_fence_id
+      FROM im_v2.room_admission AS admission
+      JOIN im_v2.rooms AS room ON room.room_id = admission.room_id
+      WHERE admission.room_id = \(bind: key.roomID)
       """
     ).first(decoding: CurrentRoomAdmissionFence.self) else {
       return .unavailable(.missingShardLease)
     }
+    guard current.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
     guard current.shardLeaseID == key.shardLeaseID,
       current.shardLeaseGeneration == key.shardLeaseGeneration
     else { return .unavailable(.missingShardLease) }
@@ -459,17 +461,25 @@ public actor V2RoomAdmissionCommandCreditPool {
     guard let sql = database as? any SQLDatabase else {
       throw V2RoomAdmissionCommandCreditError.nonSQLDatabase
     }
+    // The caller may already hold FOR NO KEY UPDATE while awaiting this
+    // independent reservation. KEY SHARE remains compatible with that lock,
+    // but conflicts with the migration installer's explicit FOR UPDATE.
     return try await sql.raw(
       """
-      WITH candidate AS MATERIALIZED (
-          SELECT room_id,
+      WITH writable_room AS MATERIALIZED (
+          SELECT room_id FROM im_v2.rooms
+          WHERE room_id = \(bind: key.roomID) AND migration_fence_id IS NULL
+          FOR KEY SHARE
+      ), candidate AS MATERIALIZED (
+          SELECT admission.room_id,
                  LEAST(\(bind: batchSize), command_window_limit - command_window_used)::bigint AS grant_count
-          FROM im_v2.room_admission
-          WHERE room_id = \(bind: key.roomID)
+          FROM im_v2.room_admission AS admission
+          JOIN writable_room ON writable_room.room_id = admission.room_id
+          WHERE admission.room_id = \(bind: key.roomID)
             AND shard_lease_id = \(bind: key.shardLeaseID)
             AND shard_lease_generation = \(bind: key.shardLeaseGeneration)
             AND command_window_used < command_window_limit
-          FOR UPDATE
+          FOR UPDATE OF admission
       ), updated AS (
           UPDATE im_v2.room_admission AS admission
           SET command_window_used = admission.command_window_used + candidate.grant_count
@@ -499,10 +509,12 @@ private struct Reservation: Sendable {
 }
 
 private struct CurrentRoomAdmissionFence: Decodable, Sendable {
+  let migrationFenceID: UUID?
   let shardLeaseID: UUID
   let shardLeaseGeneration: Int64
 
   enum CodingKeys: String, CodingKey {
+    case migrationFenceID = "migration_fence_id"
     case shardLeaseID = "shard_lease_id"
     case shardLeaseGeneration = "shard_lease_generation"
   }

@@ -13,7 +13,7 @@ struct V2DirectRoomLogEventCacheTests {
         let entities: [V2MessageEntity] = richText ? [try .init(offsetUTF16: 0, lengthUTF16: 5, kind: .bold)] : []
         let draft = V2AcceptedMessageDraft(messageID: .init(uuid: UUID()), roomID: .init(uuid: UUID()), roomSequence: 1,
             senderUserID: .init(uuid: UUID()), clientMessageID: .init(uuid: UUID()), text: "hello", entities: entities, createdAt: date)
-        let message = draft.materialized(mediaPresentations: [], usesRoomEventLog: true, sourceEventID: .init(uuid: UUID()),
+        let message = draft.materialized(mediaPresentations: [], sourceEventID: .init(uuid: UUID()),
             acceptedMembershipRevision: 1, directRecipientUserID: .init(uuid: UUID()), projectionCreatedAtUnixMilliseconds: persisted)
         #expect(try v2MessageProjectionMilliseconds(date) != persisted)
         #expect(message.receipt.createdAt == date)
@@ -45,7 +45,7 @@ struct V2DirectRoomLogEventCacheTests {
         for (index, boundary) in cases.enumerated() {
             let message = V2AcceptedMessage(messageID: .init(uuid: UUID()), roomID: room, roomSequence: UInt64(index + 1),
                 senderUserID: sender, clientMessageID: .init(uuid: UUID()), text: "hello", mediaPresentations: [],
-                entities: entities, usesRoomEventLog: true, sourceEventID: .init(uuid: UUID()),
+                entities: entities, sourceEventID: .init(uuid: UUID()),
                 acceptedMembershipRevision: 4, directRecipientUserID: recipient, createdAt: Date(timeIntervalSince1970: boundary.0))
             let payload = try #require(V2DirectRoomLogPayloadCodec.encode(message))
             let projection = try JSONDecoder().decode(V2MessageProjectionState.self, from: payload)
@@ -75,7 +75,7 @@ struct V2DirectRoomLogEventCacheTests {
         func event(_ sequence: UInt64, at seconds: Double) -> V2AcceptedMessage {
             .init(messageID: .init(uuid: UUID()), roomID: room, roomSequence: sequence,
                   senderUserID: sender, clientMessageID: .init(uuid: UUID()), text: "hello",
-                  mediaPresentations: [], entities: entities, usesRoomEventLog: true,
+                  mediaPresentations: [], entities: entities,
                   sourceEventID: .init(uuid: UUID()), acceptedMembershipRevision: 4,
                   directRecipientUserID: recipient, createdAt: Date(timeIntervalSince1970: seconds))
         }
@@ -124,7 +124,7 @@ struct V2DirectRoomLogEventCacheTests {
             clientMessageID: try .init("00000000-0000-0000-0000-000000000104"),
             text: "quote \" slash \\ controls \u{8}\u{c}\n\r\t\u{1f} 中文🙂",
             mediaPresentations: [],
-            usesRoomEventLog: true,
+
             sourceEventID: try .init("00000000-0000-0000-0000-000000000105"),
             acceptedMembershipRevision: 9,
             createdAt: Date(timeIntervalSince1970: 1_700_000_000.125)
@@ -219,7 +219,7 @@ struct V2DirectRoomLogEventCacheTests {
             roomID: roomID,
             sequence: 1,
             membershipRevision: 7,
-            groupDeliveryMode: .largeGroupHybrid
+            groupCapacityClass: .large
         )
         await cache.recordCommittedPlainDirectMessage(accepted)
 
@@ -257,7 +257,7 @@ struct V2DirectRoomLogEventCacheTests {
                 roomID: roomID,
                 sequence: UInt64(sequence),
                 membershipRevision: 7,
-                groupDeliveryMode: .largeGroupHybrid
+                groupCapacityClass: .large
             ))
         }
         let preparedCache = V2PreparedGroupEventPageCache(configuration: .init(
@@ -308,7 +308,7 @@ struct V2DirectRoomLogEventCacheTests {
             roomID: roomID,
             sequence: 1,
             membershipRevision: 7,
-            groupDeliveryMode: .largeGroupHybrid
+            groupCapacityClass: .large
         ))
         let preparedCache = V2PreparedGroupEventPageCache(configuration: .init(
             maximumEntries: 8,
@@ -360,7 +360,7 @@ struct V2DirectRoomLogEventCacheTests {
                 roomID: roomID,
                 sequence: UInt64(sequence),
                 membershipRevision: 1,
-                groupDeliveryMode: .largeGroupHybrid
+                groupCapacityClass: .large
             ))
         }
         let preparedCache = V2PreparedGroupEventPageCache(configuration: .init(
@@ -553,7 +553,7 @@ struct V2DirectRoomLogEventCacheTests {
                 roomID: roomID,
                 sequence: UInt64(sequence),
                 membershipRevision: 1,
-                groupDeliveryMode: .largeGroupHybrid
+                groupCapacityClass: .large
             ))
         }
 
@@ -579,7 +579,7 @@ struct V2DirectRoomLogEventCacheTests {
             roomID: roomID,
             sequence: 1,
             membershipRevision: 1,
-            groupDeliveryMode: .largeGroupHybrid
+            groupCapacityClass: .large
         ))
         #expect((await cache.snapshot()).cachedEvents == 1_024)
     }
@@ -650,7 +650,7 @@ struct V2DirectRoomLogEventCacheTests {
             roomID: roomID,
             sequence: 1,
             membershipRevision: 1,
-            groupDeliveryMode: .largeGroupHybrid
+            groupCapacityClass: .large
         ))
         #expect((await cache.snapshot()).pendingWrites == 1)
 
@@ -733,7 +733,7 @@ struct V2DirectRoomLogEventCacheTests {
                 roomID: roomID,
                 sequence: UInt64(sequence),
                 membershipRevision: 7,
-                groupDeliveryMode: .largeGroupHybrid
+                groupCapacityClass: .large
             ))?.materialized())
         }
 
@@ -784,7 +784,7 @@ struct V2DirectRoomLogEventCacheTests {
                 roomID: roomID,
                 sequence: UInt64(sequence),
                 membershipRevision: 7,
-                groupDeliveryMode: .largeGroupHybrid
+                groupCapacityClass: .large
             ))?.materialized())
         }
 
@@ -813,7 +813,7 @@ struct V2DirectRoomLogEventCacheTests {
         sequence: UInt64,
         membershipRevision: UInt64,
         sourceEventID: EventID? = try? EventID(UUID().uuidString),
-        groupDeliveryMode: V2GroupDeliveryMode? = nil
+        groupCapacityClass: V2GroupCapacityClass? = nil
     ) throws -> V2AcceptedMessage {
         try .init(
             messageID: .init(UUID().uuidString),
@@ -824,8 +824,8 @@ struct V2DirectRoomLogEventCacheTests {
             clientMessageID: .init(UUID().uuidString),
             text: "cache-message-\(sequence)",
             mediaPresentations: [],
-            groupDeliveryMode: groupDeliveryMode,
-            usesRoomEventLog: true,
+            groupCapacityClass: groupCapacityClass,
+
             sourceEventID: sourceEventID,
             acceptedMembershipRevision: membershipRevision,
             createdAt: Date(timeIntervalSince1970: 1_700_000_000)

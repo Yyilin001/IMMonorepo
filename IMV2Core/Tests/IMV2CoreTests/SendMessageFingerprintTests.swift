@@ -3,26 +3,26 @@ import Testing
 @testable import IMV2Core
 
 struct SendMessageFingerprintTests {
-    @Test("Ordinary v1 and versioned forward v2 match independent Python SHA-256 vectors")
+    @Test("Ordinary and forwarded room-log messages match independent Python SHA-256 vectors")
     func fixedEncodingVectors() throws {
         let plain = try V2SendMessageCommand(
             roomID: RoomID("room-1"), senderUserID: UserID("user-1"),
             clientMessageID: ClientMessageID("client-1"), text: "hello",
             limits: .init(maxUTF8Bytes: 128)
         )
-        #expect(hex(plain.fingerprint.digest) == "b9dd74c465574e6befa5331282391eebe346e5ee5990ef4dba904001f1e25016")
-        #expect(hex(try Fixture().command().fingerprint.digest) == "8572cfa8437d7d1ac1dcfb28ad47cb3d83e77db26b6325bf16ab10db02b59f6d")
-        #expect(plain.fingerprint.version == 1)
+        #expect(hex(plain.fingerprint.digest) == "10a2d96f23b5dfd34684f2a50ac4c51c275286e9b072f86d807df1f7d0567e31")
+        #expect(hex(try Fixture().command().fingerprint.digest) == "f11225c7154de151ff996c84e446047fd72eba472642955b12f3b00e66ec07c8")
+        #expect(plain.fingerprint.version == 3)
         let forward = try Fixture().command().fingerprint
-        #expect(forward.version == 2)
-        #expect(try V2SendMessageFingerprint(version: 2, digest: forward.digest) == forward)
-        #expect(try V2SendMessageFingerprint(version: 1, digest: plain.fingerprint.digest) == plain.fingerprint)
+        #expect(forward.version == 3)
+        #expect(try V2SendMessageFingerprint(version: 3, digest: forward.digest) == forward)
+        #expect(try V2SendMessageFingerprint(version: 3, digest: plain.fingerprint.digest) == plain.fingerprint)
     }
 
     enum Change: CaseIterable {
         case room, sender, client, text, mediaIdentity, mediaOrder, mentionsIdentity, mentionsOrder
         case everyone, entityOffset, entityLength, entityKind, entityLink, entityOrder
-        case reply, noReply, targetRule, targetCount, forwardMessage, forwardSender, forwardRevision, noForward
+        case reply, noReply, forwardMessage, forwardSender, forwardRevision, noForward
     }
 
     @Test(arguments: Change.allCases)
@@ -46,8 +46,6 @@ struct SendMessageFingerprintTests {
         case .entityOrder: changed.entities.reverse()
         case .reply: changed.reply = .init(messageID: try MessageID("message-1"))
         case .noReply: changed.reply = nil
-        case .targetRule: changed.targetRule = .eligibleMemberCount
-        case .targetCount: changed.targetRule = .exactTargetCount(3)
         case .forwardMessage: changed.forward = .init(messageID: try MessageID("message-8"), senderUserID: try UserID("user-9"), sourceRevision: try .init(1))
         case .forwardSender: changed.forward = .init(messageID: try MessageID("message-9"), senderUserID: try UserID("user-8"), sourceRevision: try .init(1))
         case .forwardRevision: changed.forward = .init(messageID: try MessageID("message-9"), senderUserID: try UserID("user-9"), sourceRevision: try .init(3))
@@ -87,20 +85,17 @@ struct SendMessageFingerprintTests {
     }
 
     @Test
-    func malformedStoredFingerprintsAndNegativeTargetAreRejected() throws {
+    func malformedStoredFingerprintsAreRejected() throws {
         for size in [0, 31, 33] {
             #expect(throws: V2SendMessageFingerprintError.invalidStoredFingerprint) {
-                try V2SendMessageFingerprint(version: 1, digest: Data(repeating: 0, count: size))
+                try V2SendMessageFingerprint(version: 3, digest: Data(repeating: 0, count: size))
             }
         }
-        for version: UInt16 in [0, 3, .max] {
+        for version: UInt16 in [0, 1, 2, 4, .max] {
             #expect(throws: V2SendMessageFingerprintError.invalidStoredFingerprint) {
                 try V2SendMessageFingerprint(version: version, digest: Data(repeating: 0, count: 32))
             }
         }
-        var fixture = try Fixture()
-        fixture.targetRule = .exactTargetCount(-1)
-        #expect(throws: V2CoreError.invalidNonNegativeValue) { try fixture.command() }
     }
 
     @Test(arguments: [
@@ -138,7 +133,6 @@ struct SendMessageFingerprintTests {
         var mentions: [V2MentionTarget]
         var entities: [V2MessageEntity]
         var reply: V2MessageReplyReference?
-        var targetRule: FanoutTargetRule = .exactTargetCount(2)
         var forward: V2ForwardMessageSource?
 
         init() throws {
@@ -159,7 +153,7 @@ struct SendMessageFingerprintTests {
             try .init(
                 roomID: roomID, senderUserID: senderID, clientMessageID: clientID,
                 text: text, media: media, mentions: mentions, entities: entities,
-                replyTo: reply, targetRule: targetRule, forwardedFrom: forward,
+                replyTo: reply, forwardedFrom: forward,
                 limits: .init(maxUTF8Bytes: 128)
             )
         }

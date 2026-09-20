@@ -30,16 +30,12 @@ public struct PostgresV2UserProjectionWorker: Sendable {
     private let schema: String
     private let batchSize: Int
     private let retryPolicy: V2DurableRetryPolicy
-    private let messageWriteMode: V2MessageProjectionWriteMode
-    private let acceptedMessageBatchEnabled: Bool
 
     public init(
         database: any Database,
         schema: String = "im_v2",
         batchSize: Int = 100,
-        retryPolicy: V2DurableRetryPolicy = .standard,
-        messageWriteMode: V2MessageProjectionWriteMode = .dual,
-        acceptedMessageBatchEnabled: Bool = true
+        retryPolicy: V2DurableRetryPolicy = .standard
     ) {
         precondition(batchSize > 0)
         precondition(schema.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil)
@@ -47,8 +43,6 @@ public struct PostgresV2UserProjectionWorker: Sendable {
         self.schema = schema
         self.batchSize = batchSize
         self.retryPolicy = retryPolicy
-        self.messageWriteMode = messageWriteMode
-        self.acceptedMessageBatchEnabled = acceptedMessageBatchEnabled
     }
 
     public func runOnce(now: Date = Date()) async throws -> V2UserProjectionWorkerReport {
@@ -80,26 +74,8 @@ public struct PostgresV2UserProjectionWorker: Sendable {
             }
             let rows = try await sql.raw("""
                 SELECT log.user_sync_sequence, log.source_event_id, log.projection_kind,
-                       CASE WHEN log.payload_storage = 'inline' THEN log.payload
-                            ELSE COALESCE(shared.payload, state.payload) END::text AS payload_json,
-                       CASE WHEN log.payload_storage = 'inline' THEN NULL ELSE shared.message_state_id END AS message_state_id,
-                       state.message_id AS state_message_id,
-                       state.room_id AS state_room_id,
-                       state.message_revision AS state_message_revision,
-                       state.variant_key AS state_variant_key,
-                       state.payload_schema_version AS state_payload_schema_version,
-                       state.origin_event_id AS state_origin_event_id,
-                       state.state_event_id AS state_event_id,
-                       state.is_withdrawn AS state_is_withdrawn,
-                       state.payload->>'event_type' AS state_event_type,
-                       state.payload->>'message_id' AS state_message_entity_key,
-                       log.created_at
+                       log.payload::text AS payload_json, log.created_at
                 FROM \(unsafeRaw: table("user_sync_log")) AS log
-                LEFT JOIN \(unsafeRaw: table("fanout_sync_payloads")) AS shared
-                  ON shared.source_event_id = log.source_event_id
-                 AND shared.projection_kind = log.projection_kind
-                LEFT JOIN \(unsafeRaw: table("message_projection_state_values")) AS state
-                  ON state.state_id = shared.message_state_id
                 WHERE log.user_id = \(bind: checkpoint.userID)
                   AND log.user_sync_sequence > \(bind: checkpoint.projectedSequence)
                 ORDER BY log.user_sync_sequence
@@ -110,42 +86,15 @@ public struct PostgresV2UserProjectionWorker: Sendable {
             var lastApplied = checkpoint.projectedSequence
             var rowIndex = 0
             while rowIndex < rows.count {
-                if acceptedMessageBatchEnabled,
-                   let firstInput = acceptedMessageBatchInput(rows[rowIndex]) {
-                    var batch = [firstInput]
-                    var nextIndex = rowIndex + 1
-                    while nextIndex < rows.count,
-                          let input = acceptedMessageBatchInput(rows[nextIndex]) {
-                        batch.append(input)
-                        nextIndex += 1
-                    }
-                    var batchLast = lastApplied
-                    for input in batch {
-                        guard batchLast < Int64.max, input.sequence == batchLast + 1
-                        else { throw V2UserProjectionWorkerError.corruptPersistence }
-                        batchLast = input.sequence
-                    }
-                    do {
-                        try await applyAcceptedMessageBatch(
-                            batch, userID: checkpoint.userID, sql: sql
-                        )
-                    } catch V2UserProjectionWorkerError.invalidPayload {
-                        throw ProjectionApplyFailure(
-                            userID: checkpoint.userID,
-                            expectedCheckpoint: checkpoint.projectedSequence,
-                            failedSequence: firstInput.sequence,
-                            sourceEventID: firstInput.sourceEventID,
-                            code: "invalid_payload"
-                        )
-                    }
-                    lastApplied = batchLast
-                    rowIndex = nextIndex
-                    continue
-                }
                 let row = rows[rowIndex]
                 try Task.checkCancellation()
                 guard lastApplied < Int64.max, row.sequence == lastApplied + 1 else {
                     throw V2UserProjectionWorkerError.corruptPersistence
+                }
+                if ["message", "message_reaction", "group_capability", "moderation"].contains(row.projectionKind) {
+                    throw ProjectionApplyFailure(userID: checkpoint.userID,
+                        expectedCheckpoint: checkpoint.projectedSequence, failedSequence: row.sequence,
+                        sourceEventID: row.sourceEventID, code: "public_content_in_personal_stream")
                 }
                 guard let payloadJSON = row.payloadJSON,
                       let payload = payloadJSON.data(using: .utf8)
@@ -161,7 +110,6 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                 do {
                     try await apply(
                         record: .init(sequence: UInt64(row.sequence), sourceEventID: .init(row.sourceEventID.uuidString), projectionKind: row.projectionKind, payload: payload),
-                        messageStateID: row.messageStateID,
                         userID: checkpoint.userID, createdAt: row.createdAt, sql: sql
                     )
                 } catch V2UserProjectionWorkerError.invalidPayload {
@@ -226,161 +174,6 @@ public struct PostgresV2UserProjectionWorker: Sendable {
         }
     }
 
-    /// 仅在状态符合 `PostgresV2MessageProjectionStateRepository` 产出的不可变修订 1 形态时，
-    /// 返回类型化的快速路径输入。
-    ///
-    /// 完整的载荷校验属于那个唯一的状态创建边界；这条按接收者展开的路径只复核身份、修订、
-    /// 房间、事件与确定性状态标识，避免为每个用户重复解码同一份正文。
-    /// 其余情况一律刻意回落到既有状态机。
-    ///
-    /// - Parameter row: 待判定的投影同步行。
-    /// - Returns: 可走批量快速路径的输入；不满足条件时返回 `nil`。
-    private func acceptedMessageBatchInput(
-        _ row: ProjectionSyncRow
-    ) -> AcceptedMessageProjectionBatchInput? {
-        guard row.projectionKind == "message",
-              let stateID = row.messageStateID,
-              let messageID = row.stateMessageID,
-              let roomID = row.stateRoomID,
-              row.stateMessageRevision == 1,
-              row.stateVariantKey == 0,
-              row.statePayloadSchemaVersion == 1,
-              row.stateOriginEventID == row.sourceEventID,
-              row.stateEventID == row.sourceEventID,
-              row.stateIsWithdrawn == false,
-              row.stateEventType == "message.accepted",
-              let entityKey = row.stateMessageEntityKey,
-              UUID(uuidString: entityKey) == messageID,
-              (try? v2MessageProjectionStateID(
-                  messageID: messageID, messageRevision: 1
-              )) == stateID
-        else { return nil }
-        // The scalar bind and batch SQL both preserve the exact database
-        // offset. Decoding through Date would lose valid microseconds.
-        return .init(
-            sequence: row.sequence,
-            sourceEventID: row.sourceEventID,
-            messageStateID: stateID,
-            messageID: messageID,
-            // Preserve the established projection-key representation from
-            // the already-validated immutable payload. UUID comparison is
-            // case-insensitive, but changing representation only on the fast
-            // path would make batch on/off produce different snapshots.
-            entityKey: entityKey,
-            roomID: roomID,
-            createdAtPostgresMicroseconds: row.createdAt.microseconds
-        )
-    }
-
-    /// 在一次 PostgreSQL 往返内关闭并插入一段相互独立的已接受消息版本。
-    ///
-    /// 最终计数是一道完整性栅栏：只要出现一个非法状态就抛出，并把整个外层检查点事务回滚，
-    /// 与逐条实现的语义完全一致。
-    ///
-    /// - Parameters:
-    ///   - inputs: 本批快速路径输入。
-    ///   - userID: 目标用户。
-    ///   - sql: 当前事务使用的数据库连接。
-    /// - Throws: 任一状态非法或持久化失败时抛出。
-    private func applyAcceptedMessageBatch(
-        _ inputs: [AcceptedMessageProjectionBatchInput],
-        userID: UUID,
-        sql: any SQLDatabase
-    ) async throws {
-        guard !inputs.isEmpty,
-              let inputJSON = String(data: try JSONEncoder().encode(inputs), encoding: .utf8)
-        else { throw V2UserProjectionWorkerError.invalidPayload }
-        let writesInlinePayload = messageWriteMode != .shared
-        let writesStateReference = messageWriteMode != .inline
-        guard let result = try await sql.raw("""
-            WITH input AS MATERIALIZED (
-                SELECT value.sequence, value.source_event_id, value.message_state_id,
-                       value.message_id, value.entity_key, value.room_id,
-                       value.created_at_postgres_microseconds
-                FROM jsonb_to_recordset(\(bind: inputJSON)::jsonb) AS value(
-                    sequence bigint, source_event_id uuid, message_state_id uuid,
-                    message_id uuid, entity_key text, room_id uuid,
-                    created_at_postgres_microseconds bigint
-                )
-            ), validated AS MATERIALIZED (
-                SELECT input.sequence, input.source_event_id, input.message_state_id,
-                       input.message_id, input.entity_key, input.created_at_postgres_microseconds,
-                       state.room_id, state.origin_event_id, state.payload,
-                       (current.source_event_id IS NOT NULL) AS has_current
-                FROM input
-                JOIN \(unsafeRaw: table("message_projection_state_values")) AS state
-                  ON state.state_id = input.message_state_id
-                 AND state.state_event_id = input.source_event_id
-                 AND state.message_id = input.message_id
-                 AND lower(input.entity_key) = input.message_id::text
-                 AND state.room_id = input.room_id
-                 AND state.message_revision = 1
-                 AND state.variant_key = 0
-                 AND state.payload_schema_version = 1
-                 AND state.origin_event_id = state.state_event_id
-                 AND state.is_withdrawn = FALSE
-                 AND state.payload->>'event_type' = 'message.accepted'
-                 AND lower(state.payload->>'message_id') = state.message_id::text
-                 AND lower(state.payload->>'room_id') = state.room_id::text
-                 AND state.payload->>'message_revision' = '1'
-                LEFT JOIN LATERAL (
-                    SELECT version.source_event_id,
-                           COALESCE(current_state.payload, version.payload) AS payload
-                    FROM \(unsafeRaw: table("user_projection_versions")) AS version
-                    LEFT JOIN \(unsafeRaw: table("message_projection_state_values")) AS current_state
-                      ON current_state.state_id = version.message_state_id
-                    WHERE version.user_id = \(bind: userID)
-                      AND version.projection_kind = 'message'
-                      AND version.entity_key = input.entity_key
-                      AND version.valid_to_sequence IS NULL
-                ) AS current ON TRUE
-                WHERE current.source_event_id IS NULL OR (
-                    current.source_event_id = state.origin_event_id
-                    AND lower(current.payload->>'message_id') = state.message_id::text
-                    AND lower(current.payload->>'room_id') = state.room_id::text
-                    AND current.payload->>'room_sequence' = state.payload->>'room_sequence'
-                    AND COALESCE(current.payload->>'timeline_sequence', current.payload->>'room_sequence') = state.payload->>'timeline_sequence'
-                    AND lower(current.payload->>'sender_user_id') = lower(state.payload->>'sender_user_id')
-                    AND current.payload->>'server_created_at_ms' = state.payload->>'server_created_at_ms'
-                    AND ((current.payload->>'message_revision')::bigint > 1 OR current.payload = state.payload)
-                )
-            ), closed AS (
-                UPDATE \(unsafeRaw: table("user_projection_versions")) AS version
-                SET valid_to_sequence = validated.sequence
-                FROM validated
-                WHERE version.user_id = \(bind: userID)
-                  AND version.projection_kind = 'message'
-                  AND version.entity_key = validated.entity_key
-                  AND version.valid_to_sequence IS NULL
-                  AND NOT validated.has_current
-                RETURNING 1
-            ), inserted AS (
-                INSERT INTO \(unsafeRaw: table("user_projection_versions"))
-                    (user_id, projection_kind, entity_key, scope_room_id,
-                     valid_from_sequence, valid_to_sequence, source_event_id,
-                     payload, message_state_id, created_at)
-                SELECT \(bind: userID), 'message', validated.entity_key,
-                       validated.room_id, validated.sequence, NULL,
-                       validated.origin_event_id,
-                       CASE WHEN \(bind: writesInlinePayload) THEN validated.payload ELSE NULL END,
-                       CASE WHEN \(bind: writesStateReference)
-                            THEN validated.message_state_id ELSE NULL END,
-                       (TIMESTAMP '2000-01-01 00:00:00'
-                         + (validated.created_at_postgres_microseconds / 86400000000)
-                           * INTERVAL '1 day'
-                         + (validated.created_at_postgres_microseconds % 86400000000)
-                           * INTERVAL '1 microsecond') AT TIME ZONE 'UTC'
-                FROM validated
-                WHERE NOT validated.has_current
-                ORDER BY validated.sequence
-                RETURNING 1
-            )
-            SELECT (SELECT COUNT(*) FROM inserted) + (SELECT COUNT(*) FROM validated WHERE has_current) AS inserted_count
-            """).first(decoding: ProjectionBatchCountRow.self),
-              result.insertedCount == inputs.count
-        else { throw V2UserProjectionWorkerError.invalidPayload }
-    }
-
     private func recordFailure(
         _ failure: ProjectionApplyFailure,
         now: Date
@@ -405,11 +198,9 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                 throw V2UserProjectionWorkerError.corruptPersistence
             }
             let attempt = Int(clamping: checkpoint.failureCount + 1)
-            switch retryPolicy.disposition(
-                attempt: attempt,
-                claimToken: failure.sourceEventID,
-                now: now
-            ) {
+            let disposition: V2DurableRetryDisposition = failure.code == "public_content_in_personal_stream"
+                ? .pause : retryPolicy.disposition(attempt: attempt, claimToken: failure.sourceEventID, now: now)
+            switch disposition {
             case .retry(let nextAttemptAt):
                 guard v2PostgresFutureTimestamp(now: now, interval: nextAttemptAt.timeIntervalSince(now)) != nil else {
                     throw V2UserProjectionWorkerError.corruptPersistence
@@ -459,7 +250,6 @@ public struct PostgresV2UserProjectionWorker: Sendable {
 
     private func apply(
         record: V2ClientLikeRecord,
-        messageStateID: UUID?,
         userID: UUID,
         createdAt: V2PostgresTimestamp,
         sql: any SQLDatabase
@@ -471,89 +261,94 @@ public struct PostgresV2UserProjectionWorker: Sendable {
             throw V2UserProjectionWorkerError.invalidPayload
         }
         guard let object = payload as? [String: Any] else { throw V2UserProjectionWorkerError.invalidPayload }
+        if record.projectionKind != "room", record.projectionKind != "membership",
+           let room = (object["room_id"] as? String).flatMap(UUID.init(uuidString:)),
+           try await sql.raw("""
+               SELECT TRUE AS revoked FROM \(unsafeRaw: table("user_projection_versions"))
+               WHERE user_id = \(bind: userID) AND projection_kind = 'room' AND scope_room_id = \(bind: room)
+                 AND valid_to_sequence IS NULL AND payload->>'viewer_is_member' = 'false'
+               """).first(decoding: ProjectionRoomRevocationRow.self) != nil { return }
         let eventType = object["event_type"] as? String
         let key: V2SnapshotProjectionKey
         switch record.projectionKind {
-        case "message":
-            key = try projectionKey("message", string("message_id", object))
-            try await applyMessage(
-                record: record,
-                object: object,
-                eventType: eventType,
-                messageStateID: messageStateID,
-                userID: userID,
-                createdAt: createdAt,
-                key: key,
-                sql: sql
-            )
+        case "room", "membership":
+            try await applyMembership(record: record, object: object, userID: userID, createdAt: createdAt, sql: sql)
             return
-        case "message_reaction":
-            guard eventType == "message.reaction_changed" else {
-                throw V2UserProjectionWorkerError.invalidPayload
-            }
-            let messageID = try string("message_id", object)
-            let actorUserID = try string("actor_user_id", object)
-            let reaction = try string("reaction", object)
-            guard UUID(uuidString: messageID) != nil,
-                  UUID(uuidString: actorUserID) != nil,
-                  reaction.utf8.count <= V2MessageReactionLimits.maximumReactionBytes
-            else { throw V2UserProjectionWorkerError.invalidPayload }
-            key = try projectionKey("message_reaction", "\(messageID):\(actorUserID):\(reaction)")
-            let incoming = try JSONDecoder().decode(ReactionSnapshotOrder.self, from: record.payload)
-            guard incoming.roomSequence > 0, incoming.action == "add" || incoming.action == "remove" else { throw V2UserProjectionWorkerError.invalidPayload }
-            let withdrawn = try await sql.raw("""
-                SELECT EXISTS (
-                    SELECT 1 FROM \(unsafeRaw: table("user_projection_versions")) AS message
-                    LEFT JOIN \(unsafeRaw: table("message_projection_state_values")) AS state ON state.state_id = message.message_state_id
-                    WHERE message.user_id = \(bind: userID) AND message.projection_kind = 'message'
-                      AND message.entity_key IN (\(bind: incoming.messageID.uuidString), \(bind: incoming.messageID.uuidString.lowercased()))
-                      AND message.scope_room_id = \(bind: incoming.roomID) AND message.valid_to_sequence IS NULL
-                      AND COALESCE((COALESCE(state.payload, message.payload)->>'is_withdrawn')::boolean, FALSE)
-                ) AS withdrawn
-                """).first(decoding: ReactionMessageWithdrawal.self)?.withdrawn == true
-            if withdrawn {
-                try await remove(key: key, at: record.sequence, userID: userID, sql: sql)
-                return
-            }
-            if let current = try await sql.raw("""
-                SELECT payload::text AS payload_json, source_event_id
-                FROM \(unsafeRaw: table("user_projection_versions"))
-                WHERE user_id = \(bind: userID) AND projection_kind = 'message_reaction'
-                  AND entity_key = \(bind: key.entityKey) AND valid_to_sequence IS NULL
-                """).first(decoding: ProjectionPayloadRow.self) {
-                let prior = try JSONDecoder().decode(ReactionSnapshotOrder.self, from: Data(current.payloadJSON.utf8))
-                guard prior.roomID == incoming.roomID else { throw V2UserProjectionWorkerError.invalidPayload }
-                if prior.roomSequence > incoming.roomSequence { return }
-                if prior.roomSequence == incoming.roomSequence {
-                    guard prior == incoming, current.sourceEventID == record.sourceEventID.uuidValue else { throw V2UserProjectionWorkerError.invalidPayload }
+        case "relationship": key = try projectionKey("relationship", string("target_user_id", object))
+        case "user_block": key = try projectionKey("user_block", string("target_user_id", object))
+        case "stranger_message_permission", "user_add_permission": key = try projectionKey(record.projectionKind, "singleton")
+        case "read_receipt_preferences":
+            key = try projectionKey(record.projectionKind, "singleton")
+            let incoming = try receiptPreferences(record.payload)
+            if let prior = try await currentObjectIfPresent(key: key, userID: userID, sql: sql) {
+                let current = try receiptPreferences(jsonData(prior.object))
+                if incoming.revision < current.revision { return }
+                if incoming.revision == current.revision {
+                    guard incoming == current else { throw V2UserProjectionWorkerError.invalidPayload }
                     return
                 }
             }
-            // Keep negative state in the current snapshot; absence alone
-            // cannot fence an older addition from another delivery stream.
-            try await replace(key: key, record: record, payload: record.payload, userID: userID, createdAt: createdAt, sql: sql)
-            return
-        case "room": key = try projectionKey("room", string("room_id", object))
-        case "membership":
-            try await applyMembership(record: record, object: object, userID: userID, createdAt: createdAt, sql: sql)
-            return
-        case "moderation" where eventType == "room.frozen" || eventType == "room.unfrozen": key = try projectionKey("moderation", string("room_id", object))
-        case "moderation": key = try projectionKey("moderation", "\(try string("room_id", object)):\(try string("target_user_id", object))")
-        case "relationship": key = try projectionKey("relationship", string("target_user_id", object))
-        case "user_block": key = try projectionKey("user_block", string("target_user_id", object))
-        case "stranger_message_permission", "user_add_permission", "read_receipt_preferences": key = try projectionKey(record.projectionKind, "singleton")
-        case "direct_room_profile", "direct_read_receipt", "conversation_state", "direct_sending_capability": key = try projectionKey(record.projectionKind, string("room_id", object))
+        case "own_read_watermark":
+            let incoming = try ownReadWatermark(record.payload)
+            key = try projectionKey(record.projectionKind, incoming.roomID.uuidString.lowercased())
+            if let prior = try await currentObjectIfPresent(key: key, userID: userID, sql: sql) {
+                let current = try ownReadWatermark(jsonData(prior.object))
+                guard incoming.readThroughRoomSequence > current.readThroughRoomSequence ||
+                    (incoming.readThroughRoomSequence == current.readThroughRoomSequence &&
+                     incoming.recordedAtMilliseconds > current.recordedAtMilliseconds) else { return }
+            }
+        case "direct_sending_capability":
+            key = try projectionKey(record.projectionKind, string("room_id", object))
+            let incoming = try sendingCapability(record.payload)
+            if let prior = try await currentObjectIfPresent(key: key, userID: userID, sql: sql) {
+                let current = try sendingCapability(jsonData(prior.object))
+                if incoming.stateVersion < current.stateVersion { return }
+                if incoming.stateVersion == current.stateVersion {
+                    guard incoming == current else { throw V2UserProjectionWorkerError.invalidPayload }
+                    return
+                }
+            }
+        case "direct_room_profile":
+            key = try projectionKey(record.projectionKind, string("room_id", object))
+            let incoming = try directProfile(record.payload)
+            if let prior = try await currentObjectIfPresent(key: key, userID: userID, sql: sql) {
+                let current = try directProfile(jsonData(prior.object))
+                guard incoming.targetUserID == current.targetUserID,
+                      incoming.roomCreatedAtMilliseconds == current.roomCreatedAtMilliseconds else { throw V2UserProjectionWorkerError.invalidPayload }
+                if incoming.revision < current.revision { return }
+                if incoming.revision == current.revision {
+                    guard incoming == current else { throw V2UserProjectionWorkerError.invalidPayload }
+                    return
+                }
+            }
+        case "direct_read_receipt":
+            let incoming = try directReceipt(record.payload)
+            key = try projectionKey(record.projectionKind, incoming.roomID.uuidString.lowercased())
+            if let prior = try await currentObjectIfPresent(key: key, userID: userID, sql: sql) {
+                let current = try directReceipt(jsonData(prior.object))
+                guard incoming.readerUserID == current.readerUserID else {
+                    throw V2UserProjectionWorkerError.invalidPayload
+                }
+                let older = incoming.readerPreferenceRevision < current.readerPreferenceRevision ||
+                    incoming.viewerPreferenceRevision < current.viewerPreferenceRevision
+                let newer = incoming.readerPreferenceRevision > current.readerPreferenceRevision ||
+                    incoming.viewerPreferenceRevision > current.viewerPreferenceRevision
+                guard !(older && newer) else { throw V2UserProjectionWorkerError.invalidPayload }
+                if older { return }
+                if !newer {
+                    guard incoming.isVisible == current.isVisible else {
+                        throw V2UserProjectionWorkerError.invalidPayload
+                    }
+                    if !incoming.isVisible { return }
+                    if incoming.readThroughRoomSequence < current.readThroughRoomSequence { return }
+                    if incoming.readThroughRoomSequence == current.readThroughRoomSequence,
+                       incoming.recordedAtMilliseconds <= current.recordedAtMilliseconds { return }
+                }
+            }
+        case "conversation_state": key = try projectionKey(record.projectionKind, string("room_id", object))
         case "message_favorite": key = try projectionKey(record.projectionKind, string("message_id", object))
         case "timeline_activity": key = try projectionKey(record.projectionKind, record.sourceEventID.rawValue)
         case "profile_invalidation": key = try projectionKey(record.projectionKind, string("user_id", object))
-        case "group_capability" where eventType == "message.pinned_changed":
-            try await applyPinnedMessage(record: record, userID: userID, createdAt: createdAt, sql: sql)
-            return
-        case "group_capability" where eventType == "group.announcement_changed" || eventType == "group.role_permissions_changed" || eventType == "group.member_role_changed":
-            try await applyGroupPolicy(record: record, userID: userID, createdAt: createdAt, sql: sql)
-            return
-        case "group_capability":
-            key = try groupCapabilityKey(eventType: eventType, object: object)
         default: throw V2UserProjectionWorkerError.invalidPayload
         }
         if try representsAbsence(record: record, object: object, eventType: eventType) {
@@ -563,85 +358,113 @@ public struct PostgresV2UserProjectionWorker: Sendable {
         try await replace(key: key, record: record, payload: record.payload, userID: userID, createdAt: createdAt, sql: sql)
     }
 
-    private func applyPinnedMessage(
-        record: V2ClientLikeRecord,
-        userID: UUID,
-        createdAt: V2PostgresTimestamp,
-        sql: any SQLDatabase
-    ) async throws {
-        let incoming = try V2PinnedMessageSnapshotEffect(payload: record.payload)
-        guard let sourceEventID = record.sourceEventID.uuidValue else {
-            throw V2UserProjectionWorkerError.invalidPayload
+    private struct ReceiptPreferencesPayload: Decodable, Equatable {
+        let revision: UInt64
+        let allowsDirect: Bool
+        let allowsGroup: Bool
+        let updatedAt: Int64
+        enum CodingKeys: String, CodingKey {
+            case revision = "preference_revision", updatedAt = "updated_at_ms"
+            case allowsDirect = "allows_direct_read_receipts", allowsGroup = "allows_group_read_receipts"
         }
-        var key = try projectionKey("group_capability", incoming.entityKey)
-        let lowercaseRoomKey = "pin:\(incoming.roomID.uuidString.lowercased()):\(incoming.messageID.uuidString)"
-        let lowercaseMessageKey = "pin:\(incoming.roomID.uuidString):\(incoming.messageID.uuidString.lowercased())"
-        let current = try await sql.raw("""
-            SELECT entity_key, payload::text AS payload_json, source_event_id
-            FROM \(unsafeRaw: table("user_projection_versions"))
-            WHERE user_id = \(bind: userID) AND projection_kind = 'group_capability'
-              AND entity_key IN (\(bind: key.entityKey), \(bind: key.entityKey.lowercased()),
-                                 \(bind: lowercaseRoomKey), \(bind: lowercaseMessageKey))
-              AND valid_to_sequence IS NULL
-            """).all(decoding: GroupPolicyProjectionPayloadRow.self)
-        guard current.count <= 1 else { throw V2UserProjectionWorkerError.invalidPayload }
-        if let prior = current.first {
-            guard try incoming.shouldReplace(
-                V2PinnedMessageSnapshotEffect(payload: Data(prior.payloadJSON.utf8)),
-                sourceEventID: sourceEventID,
-                priorSourceEventID: prior.sourceEventID
-            ) else { return }
-            key = try projectionKey("group_capability", prior.entityKey)
-        }
-        // Unpin is a current negative fact. Deleting it would let an older pin
-        // become current after replay or appear in a newly built snapshot.
-        try await replace(key: key, record: record, payload: record.payload, userID: userID, createdAt: createdAt, sql: sql)
     }
 
-    private func applyGroupPolicy(
-        record: V2ClientLikeRecord,
-        userID: UUID,
-        createdAt: V2PostgresTimestamp,
-        sql: any SQLDatabase
-    ) async throws {
-        let incoming = try V2GroupPolicySnapshotEffect(payload: record.payload)
-        var key = try projectionKey("group_capability", incoming.entityKey)
-        let lowercaseRoomKey: String
-        let lowercaseTargetKey: String
-        if case .memberRole(let target, _, _) = incoming.value {
-            lowercaseRoomKey = "member-role:\(incoming.roomID.uuidString.lowercased()):\(target.uuidString)"
-            lowercaseTargetKey = "member-role:\(incoming.roomID.uuidString):\(target.uuidString.lowercased())"
-        } else {
-            lowercaseRoomKey = key.entityKey
-            lowercaseTargetKey = key.entityKey
+    private func receiptPreferences(_ data: Data) throws -> ReceiptPreferencesPayload {
+        guard let value = try? JSONDecoder().decode(ReceiptPreferencesPayload.self, from: data),
+              value.revision > 0, value.revision <= UInt64(Int64.max), value.updatedAt >= 0 else {
+            throw V2UserProjectionWorkerError.invalidPayload
         }
-        // Canonical UUID spelling must not create a second logical object for
-        // a retained older snapshot key using lowercase PostgreSQL UUID text.
-        let current = try await sql.raw("""
-            SELECT entity_key, payload::text AS payload_json, source_event_id
-            FROM \(unsafeRaw: table("user_projection_versions"))
-            WHERE user_id = \(bind: userID) AND projection_kind = 'group_capability'
-              AND entity_key IN (\(bind: key.entityKey), \(bind: key.entityKey.lowercased()),
-                                 \(bind: lowercaseRoomKey), \(bind: lowercaseTargetKey))
-              AND valid_to_sequence IS NULL
-            """).all(decoding: GroupPolicyProjectionPayloadRow.self)
-        guard current.count <= 1 else { throw V2UserProjectionWorkerError.invalidPayload }
-        if let prior = current.first {
-            let priorEffect = try V2GroupPolicySnapshotEffect(payload: Data(prior.payloadJSON.utf8))
-            guard priorEffect.entityKey == incoming.entityKey else { throw V2UserProjectionWorkerError.invalidPayload }
-            if prior.sourceEventID == record.sourceEventID.uuidValue {
-                guard priorEffect.representsSameFact(as: incoming) else { throw V2UserProjectionWorkerError.invalidPayload }
-                return
-            }
-            if priorEffect.revision > incoming.revision { return }
-            if priorEffect.revision == incoming.revision {
-                throw V2UserProjectionWorkerError.invalidPayload
-            }
-            key = try projectionKey("group_capability", prior.entityKey)
+        return value
+    }
+
+    private struct DirectReceiptPayload: Decodable {
+        let roomID: UUID
+        let readerUserID: UUID
+        let readThroughRoomSequence: UInt64
+        let recordedAtMilliseconds: Int64
+        let isVisible: Bool
+        let readerPreferenceRevision: UInt64
+        let viewerPreferenceRevision: UInt64
+        enum CodingKeys: String, CodingKey {
+            case roomID = "room_id", readerUserID = "reader_user_id"
+            case readThroughRoomSequence = "read_through_room_sequence"
+            case recordedAtMilliseconds = "recorded_at_ms", isVisible = "is_visible"
+            case readerPreferenceRevision = "reader_preference_revision"
+            case viewerPreferenceRevision = "viewer_preference_revision"
         }
-        // Keep explicit empty state. It is an authoritative version, not a
-        // request to erase the object's ordering fence from future snapshots.
-        try await replace(key: key, record: record, payload: record.payload, userID: userID, createdAt: createdAt, sql: sql)
+    }
+
+    private func directReceipt(_ data: Data) throws -> DirectReceiptPayload {
+        guard let value = try? JSONDecoder().decode(DirectReceiptPayload.self, from: data),
+              value.readThroughRoomSequence <= UInt64(Int64.max),
+              value.readerPreferenceRevision <= UInt64(Int64.max),
+              value.viewerPreferenceRevision <= UInt64(Int64.max),
+              value.isVisible || value.readThroughRoomSequence == 0
+        else { throw V2UserProjectionWorkerError.invalidPayload }
+        return value
+    }
+
+    private struct DirectProfilePayload: Decodable, Equatable {
+        let targetUserID: UserID
+        let publicHandle: String
+        let displayName: String
+        let accountKind: String
+        let revision: UInt64
+        let updatedAtMilliseconds: Int64
+        let roomCreatedAtMilliseconds: Int64
+        enum CodingKeys: String, CodingKey {
+            case targetUserID = "target_user_id"
+            case publicHandle = "public_handle"
+            case displayName = "display_name"
+            case accountKind = "account_kind"
+            case revision
+            case updatedAtMilliseconds = "updated_at_ms"
+            case roomCreatedAtMilliseconds = "room_created_at_ms"
+        }
+        init(from decoder: any Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            targetUserID = try UserID(values.decode(String.self, forKey: .targetUserID))
+            publicHandle = try values.decode(String.self, forKey: .publicHandle)
+            displayName = try values.decode(String.self, forKey: .displayName)
+            accountKind = try values.decode(String.self, forKey: .accountKind)
+            revision = try values.decode(UInt64.self, forKey: .revision)
+            updatedAtMilliseconds = try values.decode(Int64.self, forKey: .updatedAtMilliseconds)
+            roomCreatedAtMilliseconds = try values.decode(Int64.self, forKey: .roomCreatedAtMilliseconds)
+        }
+    }
+
+    private func directProfile(_ data: Data) throws -> DirectProfilePayload {
+        guard let value = try? JSONDecoder().decode(DirectProfilePayload.self, from: data),
+              value.revision > 0, value.revision <= UInt64(Int64.max),
+              value.updatedAtMilliseconds >= 0, value.roomCreatedAtMilliseconds >= 0
+        else { throw V2UserProjectionWorkerError.invalidPayload }
+        return value
+    }
+
+    private struct SendingCapabilityPayload: Decodable, Equatable {
+        let stateVersion: UInt64
+        let canSend: Bool
+        let updatedAtMilliseconds: Int64
+        enum CodingKeys: String, CodingKey {
+            case stateVersion = "state_version"
+            case canSend = "can_send"
+            case updatedAtMilliseconds = "updated_at_ms"
+        }
+    }
+
+    private func sendingCapability(_ data: Data) throws -> SendingCapabilityPayload {
+        guard let value = try? JSONDecoder().decode(SendingCapabilityPayload.self, from: data),
+              value.stateVersion > 0, value.stateVersion <= UInt64(Int64.max),
+              value.updatedAtMilliseconds >= 0
+        else { throw V2UserProjectionWorkerError.invalidPayload }
+        return value
+    }
+
+    private func ownReadWatermark(_ data: Data) throws -> OwnReadWatermarkPayload {
+        guard let value = try? JSONDecoder().decode(OwnReadWatermarkPayload.self, from: data),
+              value.readThroughRoomSequence > 0,
+              value.readThroughRoomSequence <= UInt64(Int64.max) else { throw V2UserProjectionWorkerError.invalidPayload }
+        return value
     }
 
     private func applyMembership(
@@ -651,42 +474,61 @@ public struct PostgresV2UserProjectionWorker: Sendable {
         createdAt: V2PostgresTimestamp,
         sql: any SQLDatabase
     ) async throws {
-        guard object["event_type"] as? String == "membership_changed" else {
+        let isCreation = record.projectionKind == "room"
+        guard object["event_type"] as? String == (isCreation ? "room.created" : "membership_changed") else {
             throw V2UserProjectionWorkerError.invalidPayload
         }
         let roomValue = try string("room_id", object)
-        let targetValue = try string("target_user_id", object)
-        guard let roomID = UUID(uuidString: roomValue),
-              let targetUserID = UUID(uuidString: targetValue)
-        else { throw V2UserProjectionWorkerError.invalidPayload }
-        let action = try string("action", object)
-        guard action == "add" || action == "remove" else {
-            throw V2UserProjectionWorkerError.invalidPayload
+        guard let roomID = UUID(uuidString: roomValue) else { throw V2UserProjectionWorkerError.invalidPayload }
+        let targetUserID = isCreation ? userID : UUID(uuidString: try string("target_user_id", object))
+        let action = isCreation ? "add" : try string("action", object)
+        guard targetUserID != nil, action == "add" || action == "remove" else { throw V2UserProjectionWorkerError.invalidPayload }
+        struct Revision: Decodable {
+            let value: Int64
+            enum CodingKeys: String, CodingKey { case value = "membership_revision" }
         }
-        if action == "remove" {
-            // Member-role state is no longer current for any recipient.
-            try await remove(
-                key: projectionKey("group_capability", "member-role:\(roomValue):\(targetValue)"),
-                at: record.sequence,
-                userID: userID,
-                sql: sql
-            )
-            if targetUserID == userID {
-                // A reset must not resurrect any room-scoped value after this
-                // user loses membership. `scope_room_id` makes this one
-                // indexed database update, regardless of room history size.
-                try await removeRoomScope(roomID: roomID, at: record.sequence, userID: userID, sql: sql)
+        let revision: Int64
+        do { revision = try JSONDecoder().decode(Revision.self, from: record.payload).value }
+        catch { throw V2UserProjectionWorkerError.invalidPayload }
+        guard revision > 0 else { throw V2UserProjectionWorkerError.invalidPayload }
+        let key = try projectionKey("room", roomValue)
+        let prior = try await currentObjectIfPresent(key: key, userID: userID, sql: sql)
+        let priorWasOwn = prior.map {
+            $0.object["event_type"] as? String == "room.created" ||
+                ($0.object["target_user_id"] as? String).flatMap(UUID.init(uuidString:)) == userID
+        } ?? false
+        var ownRevision = (prior?.object["viewer_membership_revision"] as? NSNumber)?.int64Value ??
+            (priorWasOwn ? (prior?.object["membership_revision"] as? NSNumber)?.int64Value ?? 0 : 0)
+        var ownSource = (prior?.object["viewer_membership_source_event_id"] as? String) ?? prior?.sourceEventID.uuidString
+        var isMember = (prior?.object["viewer_is_member"] as? Bool) ??
+            !(priorWasOwn && prior?.object["action"] as? String == "remove")
+        if targetUserID == userID {
+            if revision < ownRevision { return }
+            if revision == ownRevision {
+                guard ownSource.flatMap(UUID.init(uuidString:)) == record.sourceEventID.uuidValue,
+                      isMember == (action == "add") else { throw V2UserProjectionWorkerError.invalidPayload }
                 return
             }
+            ownRevision = revision
+            ownSource = record.sourceEventID.rawValue
+            isMember = action == "add"
+        } else {
+            // Other members' changes cannot grant this user's revoked membership.
+            guard isMember else { return }
+            if let previousRevision = (prior?.object["membership_revision"] as? NSNumber)?.int64Value,
+               revision <= previousRevision { return }
         }
-        try await replace(
-            key: projectionKey("room", roomValue),
-            record: record,
-            payload: record.payload,
-            userID: userID,
-            createdAt: createdAt,
-            sql: sql
-        )
+        if !isMember {
+            try await removeRoomScope(roomID: roomID, at: record.sequence, userID: userID, sql: sql)
+        }
+        // Keep the negative room identity in the snapshot. Its scope's content has been closed above.
+        var state = object
+        if ownRevision > 0, let ownSource {
+            state["viewer_membership_revision"] = ownRevision
+            state["viewer_membership_source_event_id"] = ownSource
+            state["viewer_is_member"] = isMember
+        }
+        try await replace(key: key, record: record, payload: jsonData(state), userID: userID, createdAt: createdAt, sql: sql)
     }
 
     private func representsAbsence(
@@ -697,252 +539,14 @@ public struct PostgresV2UserProjectionWorker: Sendable {
         switch record.projectionKind {
         case "relationship": return try string("state", object) == "none"
         case "user_block": return try boolean("is_blocked", object) == false
-        case "direct_read_receipt": return try boolean("is_visible", object) == false
         case "message_favorite": return try boolean("is_favorited", object) == false
         case "conversation_state":
             let mute = object["mute_until_ms"] as? NSNumber
             return try boolean("is_pinned", object) == false
                 && boolean("is_archived", object) == false
                 && (mute?.int64Value ?? 0) == 0
-        case "moderation" where eventType == "room.unfrozen": return true
         default: return false
         }
-    }
-
-    private func applyMessage(
-        record: V2ClientLikeRecord,
-        object: [String: Any],
-        eventType: String?,
-        messageStateID: UUID?,
-        userID: UUID,
-        createdAt: V2PostgresTimestamp,
-        key: V2SnapshotProjectionKey,
-        sql: any SQLDatabase
-    ) async throws {
-        var effectiveStateID = messageStateID
-        if effectiveStateID == nil, eventType == "message.withdrawn" || eventType == "message.redacted" {
-            let identity = try messageVersionIdentity(record.payload)
-            guard identity.messageRevision > 1 else { throw V2UserProjectionWorkerError.invalidPayload }
-            // Inline compatibility records may still have an immutable state
-            // copied with fanout. Never fetch a current owner body as fallback.
-            effectiveStateID = try await PostgresV2MessageProjectionStateRepository(schema: schema)
-                .load(messageID: identity.messageID, revision: identity.messageRevision, sql: sql)?.stateID
-        }
-        if let messageStateID = effectiveStateID {
-            do {
-                try await applySharedMessage(
-                    record: record,
-                    object: object,
-                    eventType: eventType,
-                    messageStateID: messageStateID,
-                    userID: userID,
-                    createdAt: createdAt,
-                    key: key,
-                    sql: sql
-                )
-                return
-            } catch is V2MessageProjectionStateError {
-                throw V2UserProjectionWorkerError.invalidPayload
-            } catch is V2MessageProjectionStatePersistenceError {
-                throw V2UserProjectionWorkerError.invalidPayload
-            }
-        }
-        switch eventType {
-        case "message.accepted":
-            if try await currentObjectIfPresent(key: key, userID: userID, sql: sql) != nil {
-                do {
-                    let state = try V2MessageProjectionState(payloadJSON: String(decoding: record.payload, as: UTF8.self))
-                    guard let origin = UUID(uuidString: record.sourceEventID.rawValue) else { throw V2UserProjectionWorkerError.invalidPayload }
-                    guard try await shouldInstallMessageState(state, origin: origin, key: key, userID: userID, sql: sql) else { return }
-                } catch { throw V2UserProjectionWorkerError.invalidPayload }
-            }
-            try await replace(key: key, record: record, payload: record.payload, userID: userID, createdAt: createdAt, sql: sql)
-        case "message.edited":
-            if let replacement = try editReplacement(object) {
-                guard try await shouldInstallReplacement(replacement, key: key, userID: userID, sql: sql) else { return }
-                try await replace(key: key, record: record, payload: Data(replacement.state.encodedPayloadJSON().utf8), sourceEventID: replacement.acceptedEventID, userID: userID, createdAt: createdAt, sql: sql)
-                return
-            }
-            let stored = try await currentObject(key: key, userID: userID, sql: sql)
-            var current = stored.object
-            let incoming = try messageVersionIdentity(record.payload)
-            let previous = try messageVersionIdentity(jsonData(current))
-            guard incoming.messageID == previous.messageID, incoming.roomID == previous.roomID,
-                  incoming.messageRevision > 1, let text = object["text"] as? String, !text.isEmpty
-            else { throw V2UserProjectionWorkerError.invalidPayload }
-            let entities: [V2MessageEntity]
-            do {
-                entities = try JSONDecoder().decode([V2MessageEntity].self, from: jsonDataArray(object["entities"] ?? []))
-                try V2RichMessageContent.validate(text: text, entities: entities)
-            } catch { throw V2UserProjectionWorkerError.invalidPayload }
-            if incoming.messageRevision < previous.messageRevision { return }
-            guard current["is_withdrawn"] as? Bool != true else { throw V2UserProjectionWorkerError.invalidPayload }
-            if incoming.messageRevision == previous.messageRevision {
-                guard current["text"] as? String == text,
-                      (try? JSONDecoder().decode([V2MessageEntity].self, from: jsonDataArray(current["entities"] ?? []))) == entities
-                else { throw V2UserProjectionWorkerError.invalidPayload }
-                return
-            }
-            guard previous.messageRevision < Int64.max, incoming.messageRevision == previous.messageRevision + 1
-            else { throw V2UserProjectionWorkerError.invalidPayload }
-            current["text"] = text
-            current["entities"] = object["entities"] ?? []
-            current["message_revision"] = object["message_revision"]
-            try await replace(key: key, record: record, payload: try jsonData(current), sourceEventID: stored.sourceEventID, userID: userID, createdAt: createdAt, sql: sql)
-        case "message.withdrawn", "message.redacted":
-            let stored = try await currentObject(key: key, userID: userID, sql: sql)
-            var current = stored.object
-            let incoming = try messageVersionIdentity(record.payload)
-            let previous = try messageVersionIdentity(jsonData(current))
-            guard incoming.messageID == previous.messageID, incoming.roomID == previous.roomID,
-                  incoming.messageRevision > 1
-            else { throw V2UserProjectionWorkerError.invalidPayload }
-            if incoming.messageRevision <= previous.messageRevision {
-                guard hasRemovedContent(current) else { throw V2UserProjectionWorkerError.invalidPayload }
-                try await removeMessageReactions(messageID: incoming.messageID.uuidString, at: record.sequence, userID: userID, sql: sql)
-                return
-            }
-            guard current["is_withdrawn"] as? Bool != true else { throw V2UserProjectionWorkerError.invalidPayload }
-            current["message_revision"] = incoming.messageRevision
-            // A snapshot item is a self-contained current value, not the
-            // latest delta. Keep the accepted envelope so a clean client can
-            // reconstruct the row, but remove every content-bearing field
-            // before this value becomes snapshot-visible.
-            current["event_type"] = "message.accepted"
-            current["is_withdrawn"] = true
-            current["text"] = "[removed]"
-            current["media_ids"] = []
-            current["media_presentations"] = []
-            current["mention_user_ids"] = []
-            current["mentions_everyone"] = false
-            current["entities"] = []
-            current["reply_to_message_id"] = nil
-            current["forwarded_from_message_id"] = nil
-            current["forwarded_from_user_id"] = nil
-            try await replace(key: key, record: record, payload: try jsonData(current), sourceEventID: stored.sourceEventID, userID: userID, createdAt: createdAt, sql: sql)
-            try await removeMessageReactions(messageID: try string("message_id", object), at: record.sequence, userID: userID, sql: sql)
-        default: throw V2UserProjectionWorkerError.invalidPayload
-        }
-    }
-
-    private func applySharedMessage(
-        record: V2ClientLikeRecord,
-        object: [String: Any],
-        eventType: String?,
-        messageStateID: UUID,
-        userID: UUID,
-        createdAt: V2PostgresTimestamp,
-        key: V2SnapshotProjectionKey,
-        sql: any SQLDatabase
-    ) async throws {
-        let identity = try messageVersionIdentity(record.payload)
-        guard let stored = try await PostgresV2MessageProjectionStateRepository(schema: schema)
-            .load(stateID: messageStateID, sql: sql),
-              stored.stateID == messageStateID,
-              stored.messageID == identity.messageID, stored.roomID == identity.roomID,
-              stored.messageRevision == identity.messageRevision,
-              stored.stateEventID == UUID(uuidString: record.sourceEventID.rawValue),
-              stored.messageID.uuidString.lowercased() == key.entityKey.lowercased(),
-              let eventRevision = (object["message_revision"] as? NSNumber)?.int64Value,
-              eventRevision == stored.messageRevision,
-              eventRevision > 0
-        else { throw V2UserProjectionWorkerError.invalidPayload }
-        _ = try stored.state
-        switch eventType {
-        case "message.accepted":
-            guard stored.messageRevision == 1,
-                  stored.originEventID == stored.stateEventID,
-                  !stored.isWithdrawn
-            else { throw V2UserProjectionWorkerError.invalidPayload }
-            guard try await shouldInstallMessageState(stored.state, origin: stored.originEventID, key: key, userID: userID, sql: sql) else { return }
-        case "message.edited" where object["replacement"] != nil:
-            guard let replacement = try editReplacement(object),
-                  replacement.acceptedEventID == stored.originEventID,
-                  replacement.state == (try stored.state)
-            else { throw V2UserProjectionWorkerError.invalidPayload }
-            guard try await shouldInstallReplacement(replacement, key: key, userID: userID, sql: sql) else { return }
-        case "message.withdrawn", "message.redacted":
-            guard stored.isWithdrawn, stored.messageRevision > 1 else { throw V2UserProjectionWorkerError.invalidPayload }
-            // Ordinary withdrawal uses the accepted audience intersection.
-            // Moderation still needs a separate bodyless historical revocation
-            // contract; do not create a baseline for an unseen redaction.
-            if eventType == "message.redacted" {
-                _ = try await currentObject(key: key, userID: userID, sql: sql)
-            }
-            if try await !shouldInstallMessageState(stored.state, origin: stored.originEventID, key: key, userID: userID, sql: sql) {
-                try await removeMessageReactions(messageID: identity.messageID.uuidString, at: record.sequence, userID: userID, sql: sql)
-                return
-            }
-        case "message.edited":
-            let current = try await currentObject(key: key, userID: userID, sql: sql)
-            guard let currentRevision = (current.object["message_revision"] as? NSNumber)?.int64Value,
-                  currentRevision < Int64.max,
-                  currentRevision + 1 == stored.messageRevision,
-                  current.sourceEventID == stored.originEventID,
-                  stored.isWithdrawn == (eventType != "message.edited")
-            else { throw V2UserProjectionWorkerError.invalidPayload }
-        default:
-            throw V2UserProjectionWorkerError.invalidPayload
-        }
-        try await replaceSharedMessage(
-            key: key,
-            record: record,
-            stored: stored,
-            userID: userID,
-            createdAt: createdAt,
-            sql: sql
-        )
-        if eventType == "message.withdrawn" || eventType == "message.redacted" {
-            try await removeMessageReactions(
-                messageID: try string("message_id", object),
-                at: record.sequence,
-                userID: userID,
-                sql: sql
-            )
-        }
-    }
-
-    private func replaceSharedMessage(
-        key: V2SnapshotProjectionKey,
-        record: V2ClientLikeRecord,
-        stored: V2StoredMessageProjectionState,
-        userID: UUID,
-        createdAt: V2PostgresTimestamp,
-        sql: any SQLDatabase
-    ) async throws {
-        guard let sequence = Int64(exactly: record.sequence) else {
-            throw V2UserProjectionWorkerError.invalidPayload
-        }
-        let inlinePayload: String?
-        let stateReference: UUID?
-        switch messageWriteMode {
-        case .inline:
-            inlinePayload = stored.payloadJSON
-            stateReference = nil
-        case .dual:
-            inlinePayload = stored.payloadJSON
-            stateReference = stored.stateID
-        case .shared:
-            inlinePayload = nil
-            stateReference = stored.stateID
-        }
-        try await sql.raw("""
-            UPDATE \(unsafeRaw: table("user_projection_versions"))
-            SET valid_to_sequence = \(bind: sequence)
-            WHERE user_id = \(bind: userID) AND projection_kind = 'message'
-              AND entity_key = \(bind: key.entityKey) AND valid_to_sequence IS NULL
-            """).run()
-        try await sql.raw("""
-            INSERT INTO \(unsafeRaw: table("user_projection_versions"))
-                (user_id, projection_kind, entity_key, scope_room_id,
-                 valid_from_sequence, valid_to_sequence, source_event_id,
-                 payload, message_state_id, created_at)
-            VALUES
-                (\(bind: userID), 'message', \(bind: key.entityKey),
-                 \(bind: stored.roomID), \(bind: sequence), NULL,
-                 \(bind: stored.originEventID), \(bind: inlinePayload)::jsonb,
-                 \(bind: stateReference), \(bind: createdAt))
-            """).run()
     }
 
     private func replace(key: V2SnapshotProjectionKey, record: V2ClientLikeRecord, payload: Data, sourceEventID: UUID? = nil, userID: UUID, createdAt: V2PostgresTimestamp, sql: any SQLDatabase) async throws {
@@ -1000,99 +604,11 @@ public struct PostgresV2UserProjectionWorker: Sendable {
             """).run()
     }
 
-    private func removeMessageReactions(
-        messageID: String,
-        at sequence: UInt64,
-        userID: UUID,
-        sql: any SQLDatabase
-    ) async throws {
-        guard let sequence = Int64(exactly: sequence) else {
-            throw V2UserProjectionWorkerError.invalidPayload
-        }
-        let prefix = messageID + ":"
-        try await sql.raw("""
-            UPDATE \(unsafeRaw: table("user_projection_versions"))
-            SET valid_to_sequence = \(bind: sequence)
-            WHERE user_id = \(bind: userID)
-              AND projection_kind = 'message_reaction'
-              AND entity_key LIKE \(bind: prefix + "%")
-              AND valid_to_sequence IS NULL
-            """).run()
-    }
-
-    private struct MessageVersionIdentity: Decodable {
-        let messageID: UUID
-        let roomID: UUID
-        let messageRevision: Int64
-        enum CodingKeys: String, CodingKey {
-            case messageID = "message_id", roomID = "room_id", messageRevision = "message_revision"
-        }
-    }
-
-    private func messageVersionIdentity(_ payload: Data) throws -> MessageVersionIdentity {
-        do {
-            let value = try JSONDecoder().decode(MessageVersionIdentity.self, from: payload)
-            guard value.messageRevision > 0 else { throw V2UserProjectionWorkerError.invalidPayload }
-            return value
-        } catch { throw V2UserProjectionWorkerError.invalidPayload }
-    }
-
-    private func jsonDataArray(_ value: Any) throws -> Data {
-        try JSONSerialization.data(withJSONObject: value)
-    }
-
-    private func hasRemovedContent(_ object: [String: Any]) -> Bool {
-        object["is_withdrawn"] as? Bool == true && object["text"] as? String == "[removed]"
-            && ["media_ids", "media_presentations", "mention_user_ids", "entities"].allSatisfy { (object[$0] as? [Any])?.isEmpty == true }
-            && object["mentions_everyone"] as? Bool == false
-            && ["reply_to_message_id", "forwarded_from_message_id", "forwarded_from_user_id"].allSatisfy { object[$0] == nil || object[$0] is NSNull }
-    }
-
-    private func editReplacement(_ object: [String: Any]) throws -> V2MessageEditReplacement? {
-        do { return try V2MessageEditReplacement.decodeIfPresent(in: object) }
-        catch { throw V2UserProjectionWorkerError.invalidPayload }
-    }
-
-    private func shouldInstallReplacement(_ replacement: V2MessageEditReplacement, key: V2SnapshotProjectionKey, userID: UUID, sql: any SQLDatabase) async throws -> Bool {
-        try await shouldInstallMessageState(replacement.state, origin: replacement.acceptedEventID, key: key, userID: userID, sql: sql)
-    }
-
-    private func shouldInstallMessageState(_ incoming: V2MessageProjectionState, origin: UUID, key: V2SnapshotProjectionKey, userID: UUID, sql: any SQLDatabase) async throws -> Bool {
-        guard let current = try await currentObjectIfPresent(key: key, userID: userID, sql: sql) else { return true }
-        do {
-            let previous = try V2MessageProjectionState(payloadJSON: String(decoding: jsonData(current.object), as: UTF8.self))
-            guard current.sourceEventID == origin,
-                  previous.messageID == incoming.messageID, previous.roomID == incoming.roomID,
-                  previous.acceptedRoomSequence == incoming.acceptedRoomSequence,
-                  previous.timelineSequence == incoming.timelineSequence,
-                  previous.senderUserID == incoming.senderUserID,
-                  previous.acceptedAtUnixMilliseconds == incoming.acceptedAtUnixMilliseconds
-            else { throw V2UserProjectionWorkerError.invalidPayload }
-            if previous.messageRevision > incoming.messageRevision {
-                guard !incoming.isWithdrawn || previous.isWithdrawn else { throw V2UserProjectionWorkerError.invalidPayload }
-                return false
-            }
-            if previous.messageRevision == incoming.messageRevision {
-                guard previous == incoming else { throw V2UserProjectionWorkerError.invalidPayload }
-                return false
-            }
-            guard !previous.isWithdrawn else { throw V2UserProjectionWorkerError.invalidPayload }
-            return true
-        } catch { throw V2UserProjectionWorkerError.invalidPayload }
-    }
-
-    private func currentObject(key: V2SnapshotProjectionKey, userID: UUID, sql: any SQLDatabase) async throws -> (object: [String: Any], sourceEventID: UUID) {
-        guard let current = try await currentObjectIfPresent(key: key, userID: userID, sql: sql) else { throw V2UserProjectionWorkerError.invalidPayload }
-        return current
-    }
-
     private func currentObjectIfPresent(key: V2SnapshotProjectionKey, userID: UUID, sql: any SQLDatabase) async throws -> (object: [String: Any], sourceEventID: UUID)? {
         guard let row = try await sql.raw("""
-            SELECT COALESCE(state.payload, version.payload)::text AS payload_json,
+            SELECT version.payload::text AS payload_json,
                    version.source_event_id
             FROM \(unsafeRaw: table("user_projection_versions")) AS version
-            LEFT JOIN \(unsafeRaw: table("message_projection_state_values")) AS state
-              ON state.state_id = version.message_state_id
             WHERE version.user_id = \(bind: userID)
               AND version.projection_kind = \(bind: key.projectionKind)
               AND version.entity_key = \(bind: key.entityKey)
@@ -1109,17 +625,6 @@ public struct PostgresV2UserProjectionWorker: Sendable {
             throw V2UserProjectionWorkerError.invalidPayload
         }
         return (object, row.sourceEventID)
-    }
-
-    private func groupCapabilityKey(eventType: String?, object: [String: Any]) throws -> V2SnapshotProjectionKey {
-        let room = try string("room_id", object)
-        switch eventType {
-        case "message.pinned_changed": return try projectionKey("group_capability", "pin:\(room):\(try string("message_id", object))")
-        case "group.announcement_changed": return try projectionKey("group_capability", "announcement:\(room)")
-        case "group.role_permissions_changed": return try projectionKey("group_capability", "permissions:\(room):\(try string("role", object))")
-        case "group.member_role_changed": return try projectionKey("group_capability", "member-role:\(room):\(try string("target_user_id", object))")
-        default: throw V2UserProjectionWorkerError.invalidPayload
-        }
     }
 
     private func projectionKey(_ kind: String, _ key: @autoclosure () throws -> String) throws -> V2SnapshotProjectionKey {
@@ -1191,17 +696,6 @@ private struct ProjectionSyncRow: Decodable {
     let sourceEventID: UUID
     let projectionKind: String
     let payloadJSON: String?
-    let messageStateID: UUID?
-    let stateMessageID: UUID?
-    let stateRoomID: UUID?
-    let stateMessageRevision: Int64?
-    let stateVariantKey: Int64?
-    let statePayloadSchemaVersion: Int64?
-    let stateOriginEventID: UUID?
-    let stateEventID: UUID?
-    let stateIsWithdrawn: Bool?
-    let stateEventType: String?
-    let stateMessageEntityKey: String?
     let createdAt: V2PostgresTimestamp
 
     enum CodingKeys: String, CodingKey {
@@ -1209,66 +703,24 @@ private struct ProjectionSyncRow: Decodable {
         case sourceEventID = "source_event_id"
         case projectionKind = "projection_kind"
         case payloadJSON = "payload_json"
-        case messageStateID = "message_state_id"
-        case stateMessageID = "state_message_id"
-        case stateRoomID = "state_room_id"
-        case stateMessageRevision = "state_message_revision"
-        case stateVariantKey = "state_variant_key"
-        case statePayloadSchemaVersion = "state_payload_schema_version"
-        case stateOriginEventID = "state_origin_event_id"
-        case stateEventID = "state_event_id"
-        case stateIsWithdrawn = "state_is_withdrawn"
-        case stateEventType = "state_event_type"
-        case stateMessageEntityKey = "state_message_entity_key"
         case createdAt = "created_at"
     }
 }
-private struct AcceptedMessageProjectionBatchInput: Encodable, Sendable {
-    let sequence: Int64
-    let sourceEventID: UUID
-    let messageStateID: UUID
-    let messageID: UUID
-    let entityKey: String
-    let roomID: UUID
-    let createdAtPostgresMicroseconds: Int64
 
-    enum CodingKeys: String, CodingKey {
-        case sequence
-        case sourceEventID = "source_event_id"
-        case messageStateID = "message_state_id"
-        case messageID = "message_id"
-        case entityKey = "entity_key"
-        case roomID = "room_id"
-        case createdAtPostgresMicroseconds = "created_at_postgres_microseconds"
-    }
-}
-private struct ProjectionBatchCountRow: Decodable {
-    let insertedCount: Int
-    enum CodingKeys: String, CodingKey { case insertedCount = "inserted_count" }
-}
 private struct ProjectionPayloadRow: Decodable {
     let payloadJSON: String; let sourceEventID: UUID
     enum CodingKeys: String, CodingKey { case payloadJSON = "payload_json", sourceEventID = "source_event_id" }
 }
 
-private struct ReactionSnapshotOrder: Decodable, Equatable {
+private struct ProjectionRoomRevocationRow: Decodable { let revoked: Bool }
+
+private struct OwnReadWatermarkPayload: Decodable {
     let roomID: UUID
-    let messageID: UUID
-    let actorID: UUID
-    let reaction: String
-    let action: String
-    let roomSequence: Int64
+    let readThroughRoomSequence: UInt64
+    let recordedAtMilliseconds: Int64
     enum CodingKeys: String, CodingKey {
-        case roomID = "room_id", messageID = "message_id", actorID = "actor_user_id"
-        case reaction, action, roomSequence = "room_sequence"
-    }
-}
-
-private struct ReactionMessageWithdrawal: Decodable { let withdrawn: Bool }
-
-private struct GroupPolicyProjectionPayloadRow: Decodable {
-    let entityKey: String; let payloadJSON: String; let sourceEventID: UUID
-    enum CodingKeys: String, CodingKey {
-        case entityKey = "entity_key", payloadJSON = "payload_json", sourceEventID = "source_event_id"
+        case roomID = "room_id"
+        case readThroughRoomSequence = "read_through_room_sequence"
+        case recordedAtMilliseconds = "recorded_at_ms"
     }
 }

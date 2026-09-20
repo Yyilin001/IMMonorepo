@@ -3,6 +3,39 @@ import Testing
 @testable import IMV2Core
 
 struct SendMessageAcceptanceTests {
+    @Test("fresh accepts reject invalid or exhausted persisted sequences", arguments: [UInt64(0), UInt64(Int64.max) + 1, UInt64.max])
+    func rejectsInvalidSequence(sequence: UInt64) throws {
+        let initial = try initialRoomState()
+        let state = V2RoomCommandState(roomID: initial.roomID, nextRoomSequence: sequence, admission: initial.admission)
+        #expect(throws: V2SendMessageReducerError.invalidRoomSequence) {
+            try V2SendMessageReducer.reduce(command: command(clientMessageID: "boundary", text: "hello"),
+                roomState: state, shardState: shardState(), profile: profile(), identifiers: identifiers(), now: Date(timeIntervalSince1970: 1_000))
+        }
+        #expect(state.acceptedCommands.isEmpty && state.admission.commandWindow.used == 0)
+    }
+
+    @Test("last legal sequence succeeds and exhausted state still replays the exact original operation")
+    func exhaustionPreservesReplay() throws {
+        let initial = try initialRoomState()
+        let state = V2RoomCommandState(roomID: initial.roomID, nextRoomSequence: UInt64(Int64.max), admission: initial.admission)
+        let original = try command(clientMessageID: "boundary", text: "hello")
+        let first = try V2SendMessageReducer.reduce(command: original, roomState: state, shardState: shardState(),
+            profile: profile(), identifiers: identifiers(), now: Date(timeIntervalSince1970: 1_000))
+        guard case .accepted(let transaction) = first else { Issue.record("Last persisted sequence must remain usable"); return }
+        #expect(transaction.acceptedMessage.roomSequence == UInt64(Int64.max))
+        #expect(transaction.nextRoomState.nextRoomSequence == UInt64(Int64.max) + 1)
+        #expect(try V2SendMessageReducer.reduce(command: original, roomState: transaction.nextRoomState,
+            shardState: transaction.nextShardState, profile: profile(), identifiers: identifiers(), now: Date(timeIntervalSince1970: 2_000)) == .idempotent(transaction.acceptedMessage))
+        #expect(try V2SendMessageReducer.reduce(command: command(clientMessageID: "boundary", text: "changed"),
+            roomState: transaction.nextRoomState, shardState: transaction.nextShardState, profile: profile(), identifiers: identifiers(),
+            now: Date(timeIntervalSince1970: 2_000)) == .idempotencyConflict)
+        #expect(throws: V2SendMessageReducerError.invalidRoomSequence) {
+            try V2SendMessageReducer.reduce(command: command(clientMessageID: "fresh", text: "hello"),
+                roomState: transaction.nextRoomState, shardState: transaction.nextShardState, profile: profile(), identifiers: identifiers(),
+                now: Date(timeIntervalSince1970: 2_000))
+        }
+    }
+
     @Test
     func successfulAcceptanceProducesOneAtomicWriteSet() throws {
         let state = try initialRoomState()
@@ -22,11 +55,10 @@ struct SendMessageAcceptanceTests {
             return
         }
         #expect(transaction.acceptedMessage.roomSequence == 1)
-        #expect(transaction.fanoutPlan.reservation.cost.targetCount == 2)
         #expect(transaction.nextRoomState.nextRoomSequence == 2)
         #expect(transaction.nextRoomState.acceptedCommands.count == 1)
-        #expect(transaction.nextRoomState.admission.outstandingFanoutUnits == 2)
-        #expect(transaction.nextShardState.outstandingFanoutUnits == 2)
+        #expect(transaction.nextRoomState.admission.commandWindow.used == 1)
+        #expect(transaction.nextShardState.lease?.commandWindow.used == 1)
     }
 
     @Test
@@ -52,8 +84,7 @@ struct SendMessageAcceptanceTests {
             profile: try profile(),
             identifiers: try V2AcceptanceIdentifiers(
                 messageID: MessageID("message-should-not-be-used"),
-                eventID: EventID("event-should-not-be-used"),
-                planID: FanoutPlanID("plan-should-not-be-used")
+                eventID: EventID("event-should-not-be-used")
             ),
             now: Date(timeIntervalSince1970: 2_000)
         )
@@ -98,19 +129,13 @@ struct SendMessageAcceptanceTests {
 
     @Test
     func capacityRejectionDoesNotAllocateSequenceOrDedupeRecord() throws {
-        var profile = try profile()
-        profile = try RoomCapacityProfile(
-            maxEligibleMembers: profile.maxEligibleMembers,
-            maxCommandsPerWindow: profile.maxCommandsPerWindow,
-            maxFanoutUnitsPerWindow: profile.maxFanoutUnitsPerWindow,
-            maxOutstandingFanoutUnits: 1,
-            maxOutstandingPlans: profile.maxOutstandingPlans,
-            maxEnumerationPageSize: profile.maxEnumerationPageSize,
-            maxPlannerConcurrency: profile.maxPlannerConcurrency,
-            maxDeliveryConcurrency: profile.maxDeliveryConcurrency,
-            retryAfterSeconds: profile.retryAfterSeconds
+        let profile = try profile()
+        let state = try V2RoomCommandState(
+            roomID: RoomID("room-1"), nextRoomSequence: 1,
+            admission: RoomAdmissionState(
+                eligibleMemberCount: 2,
+                commandWindow: CapacityWindow(limit: 10, used: 10))
         )
-        let state = try initialRoomState()
 
         let result = try V2SendMessageReducer.reduce(
             command: try command(clientMessageID: "client-1", text: "hello"),
@@ -136,7 +161,7 @@ struct SendMessageAcceptanceTests {
         )
     }
 
-    @Test("Same text with different forward attribution or business rule is a conflict")
+    @Test("Same text with different forward attribution is a conflict")
     func retriesCompareOriginalIntentFingerprint() throws {
         let original = try command(clientMessageID: "client-1", text: "hello")
         let first = try V2SendMessageReducer.reduce(
@@ -148,11 +173,6 @@ struct SendMessageAcceptanceTests {
             return
         }
         let variants = [
-            try V2SendMessageCommand(
-                roomID: original.roomID, senderUserID: original.senderUserID,
-                clientMessageID: original.clientMessageID, text: original.text,
-                targetRule: .exactTargetCount(2), limits: .init(maxUTF8Bytes: 128)
-            ),
             try V2SendMessageCommand(
                 roomID: original.roomID, senderUserID: original.senderUserID,
                 clientMessageID: original.clientMessageID, text: original.text,
@@ -176,11 +196,7 @@ struct SendMessageAcceptanceTests {
             nextRoomSequence: 1,
             admission: RoomAdmissionState(
                 eligibleMemberCount: 2,
-                commandWindow: try CapacityWindow(limit: 10),
-                fanoutWindow: try CapacityWindow(limit: 100),
-                outstandingFanoutUnits: 0,
-                outstandingPlans: 0
-            )
+                commandWindow: try CapacityWindow(limit: 10))
         )
     }
 
@@ -190,26 +206,14 @@ struct SendMessageAcceptanceTests {
                 id: ShardAdmissionLeaseID("lease-1"),
                 generation: 1,
                 validUntil: .distantFuture,
-                commandWindow: try CapacityWindow(limit: 10),
-                fanoutWindow: try CapacityWindow(limit: 100),
-                maxOutstandingFanoutUnits: 100,
-                maxOutstandingPlans: 10
-            ),
-            outstandingFanoutUnits: 0,
-            outstandingPlans: 0
-        )
+                commandWindow: try CapacityWindow(limit: 10)))
     }
 
     private func profile() throws -> RoomCapacityProfile {
         try RoomCapacityProfile(
             maxEligibleMembers: 100,
             maxCommandsPerWindow: 10,
-            maxFanoutUnitsPerWindow: 100,
-            maxOutstandingFanoutUnits: 100,
-            maxOutstandingPlans: 10,
-            maxEnumerationPageSize: 10,
-            maxPlannerConcurrency: 2,
-            maxDeliveryConcurrency: 4,
+
             retryAfterSeconds: 3
         )
     }
@@ -217,8 +221,7 @@ struct SendMessageAcceptanceTests {
     private func identifiers() throws -> V2AcceptanceIdentifiers {
         try V2AcceptanceIdentifiers(
             messageID: MessageID("message-1"),
-            eventID: EventID("event-1"),
-            planID: FanoutPlanID("plan-1")
+            eventID: EventID("event-1")
         )
     }
 }

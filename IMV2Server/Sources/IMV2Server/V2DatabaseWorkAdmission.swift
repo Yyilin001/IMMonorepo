@@ -458,7 +458,7 @@ public actor V2DatabaseWorkAdmissionController {
         let timeout = policy.timeout
         let timeoutTask = Task { [weak self] in
             do {
-                try await Task.sleep(for: timeout)
+                try await v2Sleep(for: timeout)
             } catch {
                 return
             }

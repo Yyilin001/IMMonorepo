@@ -23,15 +23,17 @@ public struct V2PasswordCredential: Equatable, Sendable {
     public let userID: UserID
     /// 符合部署策略的密码哈希串。
     public let passwordHash: String
+    public let revision: Int64
 
     /// 保存密码凭据。
     ///
     /// - Parameters:
     ///   - userID: 凭据所属用户。
     ///   - passwordHash: 已完成的密码哈希串。
-    public init(userID: UserID, passwordHash: String) {
+    public init(userID: UserID, passwordHash: String, revision: Int64 = 1) {
         self.userID = userID
         self.passwordHash = passwordHash
+        self.revision = revision
     }
 }
 
@@ -173,8 +175,8 @@ public struct V2PostgresPasswordAccountStore: V2PasswordAccountStoring, Sendable
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2PasswordAccountStoreError.unavailable }
             try await v2LockPasswordAttempts(sql, handle: handle)
-            guard let row = try await sql.raw("SELECT user_id, password_hash FROM im_v2.account_password_credentials WHERE account_handle=\(bind: handle) FOR SHARE").first(decoding: PasswordCredentialRow.self),
-                  row.userID == expected.userID.uuidValue, row.passwordHash == expected.passwordHash,
+            guard let row = try await sql.raw("SELECT user_id, password_hash, credential_revision FROM im_v2.account_password_credentials WHERE account_handle=\(bind: handle) FOR SHARE").first(decoding: PasswordCredentialRow.self),
+                  row.userID == expected.userID.uuidValue, row.passwordHash == expected.passwordHash, row.revision == expected.revision,
                   try await sql.raw("SELECT 1 FROM im_v2.account_disables WHERE user_id=\(bind: row.userID)").first() == nil else { return false }
             let current = now()
             guard v2PostgresTimestampCanEncode(current) else { throw V2PasswordAccountStoreError.unavailable }
@@ -197,10 +199,10 @@ public struct V2PostgresPasswordAccountStore: V2PasswordAccountStoring, Sendable
         guard let sql = database as? any SQLDatabase else {
             throw V2PasswordAccountStoreError.unavailable
         }
-        guard let row = try await sql.raw("SELECT credential.user_id, credential.password_hash FROM im_v2.account_password_credentials AS credential LEFT JOIN im_v2.account_disables AS disabled ON disabled.user_id = credential.user_id WHERE credential.account_handle = \(bind: handle) AND disabled.user_id IS NULL").first(decoding: PasswordCredentialRow.self),
+        guard let row = try await sql.raw("SELECT credential.user_id, credential.password_hash, credential.credential_revision FROM im_v2.account_password_credentials AS credential LEFT JOIN im_v2.account_disables AS disabled ON disabled.user_id = credential.user_id WHERE credential.account_handle = \(bind: handle) AND disabled.user_id IS NULL").first(decoding: PasswordCredentialRow.self),
               let userID = try? UserID(row.userID.uuidString)
         else { return nil }
-        return .init(userID: userID, passwordHash: row.passwordHash)
+        return .init(userID: userID, passwordHash: row.passwordHash, revision: row.revision)
     }
 }
 
@@ -226,9 +228,11 @@ public func canonicalAccountHandle(_ value: String) throws -> String {
 private struct PasswordCredentialRow: Decodable {
     let userID: UUID
     let passwordHash: String
+    let revision: Int64
 
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
         case passwordHash = "password_hash"
+        case revision = "credential_revision"
     }
 }

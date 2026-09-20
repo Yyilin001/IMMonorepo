@@ -5,8 +5,15 @@ import SQLKit
 
 /// 密码传输适配器使用的窄接口。
 ///
-/// 失败计数与审计持久化始终位于同一个服务端事务内。
+/// 生产路径先原子预扣校验预算，再单独记录校验结果；未完成的请求不会退回预算。
+/// recordRejectedAttempt 保留计数与拒绝审计的原子组合，供已有受信调用方使用。
 public protocol V2PasswordLoginAttemptLimiting: Sendable {
+    /// 原子检查并预扣一次校验预算。未完成、取消或基础设施失败的尝试仍占预算，
+    /// 防止通过断开请求绕过限制；成功认证重置预算，其他情况由窗口到期恢复。
+    func consumeAttempt(accountHandle: String) async throws -> Int?
+    /// 已预扣尝试的拒绝审计，不再次计数。
+    func auditRejectedAttempt(accountHandle: String, userID: UserID?, deviceID: DeviceID) async throws
+
     /// 查询账号当前是否处于锁定状态。
     ///
     /// - Parameter accountHandle: 账号标识。
@@ -48,6 +55,18 @@ public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimit
     public init(database: any Database, policy: V2PasswordLoginRateLimitPolicy) {
         self.database = database
         self.policy = policy
+    }
+
+    public func consumeAttempt(accountHandle: String) async throws -> Int? {
+        try await accountForAttempt(accountHandle: accountHandle, audit: nil)
+    }
+
+    public func auditRejectedAttempt(accountHandle: String, userID: UserID?, deviceID: DeviceID) async throws {
+        _ = try canonicalAccountHandle(accountHandle)
+        guard let sql = database as? any SQLDatabase else { throw V2PasswordLoginRateLimitError.unavailable }
+        let observed: V2PostgresTimestamp = try await databaseNow(on: sql)
+        try await recordPasswordAuthenticationAudit(outcome: .assertionRejected, userID: userID,
+            deviceID: deviceID, occurredAt: observed, on: sql)
     }
 
     /// 查询账号当前剩余锁定时间。
@@ -99,8 +118,12 @@ public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimit
         userID: UserID?,
         deviceID: DeviceID
     ) async throws {
+        _ = try await accountForAttempt(accountHandle: accountHandle, audit: (userID, deviceID))
+    }
+
+    private func accountForAttempt(accountHandle: String, audit: (UserID?, DeviceID)?) async throws -> Int? {
         let handle = try canonicalAccountHandle(accountHandle)
-        try await database.transaction { transaction in
+        return try await database.transaction { transaction -> Int? in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2PasswordLoginRateLimitError.unavailable
             }
@@ -111,7 +134,13 @@ public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimit
 
             if let existing, let blockedUntil = existing.blockedUntil,
                blockedUntil.microseconds > observed.microseconds {
-                return
+                let scale: Int64 = 1_000_000
+                let seconds = blockedUntil.microseconds / scale - observed.microseconds / scale
+                let remainder = blockedUntil.microseconds % scale - observed.microseconds % scale
+                guard let retry = Int(exactly: seconds + remainder / scale + (remainder % scale > 0 ? 1 : 0)), retry > 0 else {
+                    throw V2PasswordLoginRateLimitError.unavailable
+                }
+                return retry
             }
 
             guard let windowMicroseconds = Int64(exactly: (policy.window * 1_000_000).rounded(.up)) else {
@@ -149,13 +178,11 @@ public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimit
             } else {
                 try await sql.raw("UPDATE im_v2.account_password_login_rate_limits SET window_started_at = \(bind: windowStartedAt), failure_count = \(bind: nextFailureCount), blocked_until = \(bind: blockedUntil), updated_at = \(bind: observed) WHERE account_handle = \(bind: handle)").run()
             }
-            try await recordPasswordAuthenticationAudit(
-                outcome: .assertionRejected,
-                userID: userID,
-                deviceID: deviceID,
-                occurredAt: observed,
-                on: sql
-            )
+            if let audit {
+                try await recordPasswordAuthenticationAudit(outcome: .assertionRejected,
+                    userID: audit.0, deviceID: audit.1, occurredAt: observed, on: sql)
+            }
+            return nil
         }
     }
 

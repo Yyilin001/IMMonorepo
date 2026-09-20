@@ -137,7 +137,10 @@ private actor GroupInvitationStoreSpy: V2GroupInvitationStore {
     func preview(tokenDigest: Data, applicantUserID: UserID, now: Date) async throws -> V2GroupInvitePreviewPersistenceOutcome { throw UnusedStorePath() }
     func submit(_ request: V2GroupJoinSubmissionPersistenceRequest) async throws -> V2GroupJoinSubmissionPersistenceOutcome { throw UnusedStorePath() }
     func pendingRequests(roomID: RoomID, reviewerUserID: UserID, cursor: String?, pageSize: Int, now: Date) async throws -> V2GroupJoinRequestRecordPage { throw UnusedStorePath() }
-    func approve(roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID, operationID: GroupJoinDecisionOperationID, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) async throws -> V2GroupJoinApprovalPersistenceOutcome { throw UnusedStorePath() }
+    func approve(roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID, operationID: GroupJoinDecisionOperationID, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupJoinApprovalPersistenceOutcome { throw UnusedStorePath() }
+    func cancel(roomID: RoomID, requestID: GroupJoinRequestID, applicantUserID: UserID, now: Date) async throws -> V2GroupJoinRequestRecord {
+        throw V2GroupInvitationServiceError.requestNotFound
+    }
     func reject(roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID, operationID: GroupJoinDecisionOperationID, now: Date) async throws -> V2GroupJoinDecisionPreparationOutcome { throw UnusedStorePath() }
 }
 
@@ -148,9 +151,8 @@ private func invitationCapacityProfile() -> V2CapacityProfile {
         id: "standard",
         limits: .init(
             maxEligibleMembers: 100, maxCommandsPerWindow: 100,
-            maxFanoutUnitsPerWindow: 1_000, maxOutstandingFanoutUnits: 10_000,
-            maxOutstandingPlans: 100, maxEnumerationPageSize: 100,
-            maxPlannerConcurrency: 2, maxDeliveryConcurrency: 2, retryAfterSeconds: 1
+
+             retryAfterSeconds: 1
         )
     )
 }

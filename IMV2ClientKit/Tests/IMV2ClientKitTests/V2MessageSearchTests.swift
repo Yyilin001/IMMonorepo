@@ -6,6 +6,77 @@ import Testing
 
 @Suite("V2 message character search")
 struct V2MessageSearchTests {
+    @Test("search rejects REAL metadata and source revisions before consuming work",
+          arguments: ["state-generation", "state-version", "document-sequence", "document-revision", "primary-revision", "primary-sequence", "job-revision"],
+          [1.5, Double(Int64.max)])
+    func searchStorageTypes(location: String, value: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-search-storage-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
+        let room = RoomID(uuid: UUID()), message = MessageID(uuid: UUID()), sender = UserID(uuid: UUID())
+        do {
+            try await apply(store, records: [acceptedRecord(sequence: 1, sourceEvent: UUID().uuidString,
+                roomID: room, senderID: sender, messageID: message, roomSequence: 1,
+                text: "boundary search", createdAtMilliseconds: 1_750_000_000_000)], token: "storage")
+            try await store.rebuildMessageSearchIndex()
+            let primary = await store.databasePool
+            let pool = location.hasPrefix("document-") ? await store.messageSearchDatabasePool : primary
+            let table: String, column: String
+            switch location {
+            case "state-generation": table = "v2_message_search_state"; column = "generation"
+            case "state-version": table = "v2_message_search_state"; column = "index_version"
+            case "document-sequence": table = "v2_search_documents"; column = "room_sequence"
+            case "document-revision": table = "v2_search_documents"; column = "message_revision"
+            case "primary-sequence": table = "v2_message_projections"; column = "room_sequence"
+            case "primary-revision": table = "v2_message_projections"; column = "message_revision"
+            default: table = "v2_message_search_jobs"; column = "expected_message_revision"
+            }
+            if location.hasPrefix("primary-") || location == "job-revision" {
+                try await primary.write { db in try GRDBV2LocalSyncStore.enqueueMessageSearchIndexJob(messageID: message, db: db) }
+            }
+            let original = try await pool.write { db in
+                let old = try #require(try Int64.fetchOne(db, sql: "SELECT \(column) FROM \(table) LIMIT 1"))
+                try db.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [value])
+                return old
+            }
+            if location.hasPrefix("primary-") || location == "job-revision" {
+                await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { _ = try await store.processPendingMessageSearchIndexJobs() }
+                #expect(try await primary.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM v2_message_search_jobs") } == 1)
+                if location == "primary-revision" {
+                    await #expect(throws: V2ClientProjectionError.invalidMessagePayload) {
+                        try await primary.write { db in try GRDBV2LocalSyncStore.enqueueMessageSearchIndexJob(messageID: message, db: db) }
+                    }
+                }
+            }
+            if location.hasPrefix("state-") {
+                var updates = store.messageSearchIndexUpdates().makeAsyncIterator()
+                await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { _ = try await updates.next() }
+            }
+            if location != "primary-sequence" && location != "job-revision" {
+                for scope: V2MessageSearchScope in [.room(room), .allMessages, .sender(sender)] {
+                    await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { _ = try await store.searchMessages(.init(query: "boundary", scope: scope)) }
+                }
+            }
+            try await pool.read { db in
+                let type = try String.fetchOne(db, sql: "SELECT typeof(\(column)) FROM \(table) LIMIT 1")
+                let stored = try Double.fetchOne(db, sql: "SELECT \(column) FROM \(table) LIMIT 1")
+                #expect(type == "real" && stored == value)
+            }
+            if location.hasPrefix("document-") {
+                // Only the derived index is replaced by a normal rebuild.
+                try await store.rebuildMessageSearchIndex()
+            } else {
+                try await pool.write { db in try db.execute(sql: "UPDATE \(table) SET \(column) = ?", arguments: [original]) }
+                if location.hasPrefix("primary-") || location == "job-revision" {
+                    #expect(try await store.processPendingMessageSearchIndexJobs() == 1)
+                }
+            }
+            #expect(try await store.searchMessages(.init(query: "boundary", scope: .room(room))).hits.map(\.messageID) == [message])
+            try await store.close()
+        } catch { try? await store.close(); throw error }
+    }
+
     @Test("search preserves the largest persistent room sequence and rejects invalid source positions", arguments: [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max])
     func roomSequencePersistenceBounds(sequence: UInt64) async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: "im-search-bounds-\(UUID())")

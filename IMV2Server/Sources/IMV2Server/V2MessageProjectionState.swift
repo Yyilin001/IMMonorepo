@@ -65,7 +65,7 @@ struct V2MessageProjectionState: Codable, Equatable, Sendable {
         entities: [V2MessageEntity]
     ) throws -> Self {
         guard !isWithdrawn,
-              messageRevision < UInt64.max,
+              messageRevision < UInt64(Int64.max),
               revision == messageRevision + 1
         else { throw V2MessageProjectionStateError.invalidTransition }
         return try .init(
@@ -91,7 +91,7 @@ struct V2MessageProjectionState: Codable, Equatable, Sendable {
 
     func applyingRemoval(revision: UInt64) throws -> Self {
         guard !isWithdrawn,
-              messageRevision < UInt64.max,
+              messageRevision < UInt64(Int64.max),
               revision == messageRevision + 1
         else { throw V2MessageProjectionStateError.invalidTransition }
         return try .init(
@@ -194,9 +194,9 @@ struct V2MessageProjectionState: Codable, Equatable, Sendable {
         forwardedFromUserID: UserID?,
         isWithdrawn: Bool
     ) throws {
-        guard acceptedRoomSequence > 0,
-              timelineSequence > 0,
-              messageRevision > 0,
+        guard acceptedRoomSequence > 0, acceptedRoomSequence <= UInt64(Int64.max),
+              timelineSequence > 0, timelineSequence <= UInt64(Int64.max),
+              messageRevision > 0, messageRevision <= UInt64(Int64.max),
               Set(mediaIDs).count == mediaIDs.count,
               Set(mentionUserIDs).count == mentionUserIDs.count,
               mediaPresentations.map(\.mediaID) == mediaIDs,

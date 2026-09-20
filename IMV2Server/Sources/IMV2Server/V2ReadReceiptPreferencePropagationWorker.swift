@@ -44,27 +44,21 @@ public struct V2ReadReceiptPreferencePropagationReport: Equatable, Sendable {
 /// `limit` 是按房间计的预算，因此命令事务与单轮工作器处理的规模都不会随该账号的联系人图增长。
 public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
     private let database: any Database
-    private let shadowForwarder: any V2UserShardProjectionShadowing
-    private let liveNotifier: (any V2LiveSyncNotifier)?
     private let leaseDuration: TimeInterval
     private let retryPolicy: V2DurableRetryPolicy
     private let makeUUID: @Sendable () -> UUID
     private let now: @Sendable () -> Date
 
-    /// 组合数据库、影子转发器与重试策略。
+    /// 组合控制数据库与重试策略。
     ///
     /// - Parameters:
     ///   - database: 存放偏好传播操作的数据库。
-    ///   - shadowForwarder: 把投影变更转发到影子分片的实现。
-    ///   - liveNotifier: 同步变更通知器，可选。
     ///   - leaseDuration: 认领租约秒数，需大于零，默认 30 秒。
     ///   - retryPolicy: 失败退避策略。
     ///   - makeUUID: 标识生成方式。
     ///   - now: 可注入的当前时刻读取函数。
     public init(
         database: any Database,
-        shadowForwarder: any V2UserShardProjectionShadowing,
-        liveNotifier: (any V2LiveSyncNotifier)? = nil,
         leaseDuration: TimeInterval = 30,
         retryPolicy: V2DurableRetryPolicy = .standard,
         makeUUID: @escaping @Sendable () -> UUID = UUID.init,
@@ -72,8 +66,6 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
     ) {
         precondition(leaseDuration > 0)
         self.database = database
-        self.shadowForwarder = shadowForwarder
-        self.liveNotifier = liveNotifier
         self.leaseDuration = leaseDuration
         self.retryPolicy = retryPolicy
         self.makeUUID = makeUUID
@@ -112,25 +104,7 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
 
                 for target in targets {
                     try Task.checkCancellation()
-                    try await appendControlTombstones(target: target, lease: lease)
-                    let eventID = try EventID(receiptTombstoneSourceEventID(
-                        operationID: lease.operationID,
-                        roomID: target.roomID
-                    ).uuidString)
-                    for userID in [lease.actorUserID, target.peerUserID] {
-                        guard let sequence = try await shadowForwarder.shadowIfForwarding(
-                            userID: try .init(userID.uuidString),
-                            sourceEventID: eventID,
-                            projectionKinds: ["direct_read_receipt"]
-                        ) else {
-                            throw V2ReadReceiptPreferencePropagationError.missingControlProjection
-                        }
-                        await liveNotifier?.notifySyncAvailable(
-                            userID: try .init(userID.uuidString),
-                            eventID: sequence,
-                            highWatermark: sequence
-                        )
-                    }
+                    try await enqueuePolicyCandidates(target: target, lease: lease)
                     projected += 1
                     consumedBudget += 1
                 }
@@ -210,7 +184,7 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
             SELECT pair.room_id,
                    CASE WHEN pair.lower_user_id = \(bind: lease.actorUserID)
                         THEN pair.higher_user_id ELSE pair.lower_user_id END AS peer_user_id
-            FROM im_v2.direct_room_pairs AS pair
+            FROM im_v2.direct_room_owner_routes AS pair
             WHERE (pair.lower_user_id = \(bind: lease.actorUserID)
                 OR pair.higher_user_id = \(bind: lease.actorUserID))
               AND (\(bind: lease.enumerationCheckpoint) IS NULL
@@ -220,72 +194,24 @@ public struct V2ReadReceiptPreferencePropagationWorker: Sendable {
             """).all(decoding: ReadReceiptPreferencePropagationTarget.self)
     }
 
-    private func appendControlTombstones(
+    private func enqueuePolicyCandidates(
         target: ReadReceiptPreferencePropagationTarget,
         lease: ReadReceiptPreferencePropagationLease
     ) async throws {
-        guard let recordedAtMilliseconds = try? v2GatewayMilliseconds(lease.recordedAt.date) else {
-            throw V2ReadReceiptPreferencePropagationError.corruptPersistenceState
-        }
+        let milliseconds = try v2GatewayMilliseconds(lease.recordedAt.date)
+        let source = receiptTombstoneSourceEventID(operationID: lease.operationID, roomID: target.roomID)
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2ReadReceiptPreferencePropagationError.corruptPersistenceState
             }
-            let sourceEventID = receiptTombstoneSourceEventID(
-                operationID: lease.operationID,
-                roomID: target.roomID
-            )
-            let existing = try await sql.raw("""
-                SELECT user_id, payload->>'room_id' AS room_id,
-                       payload->>'reader_user_id' AS reader_user_id,
-                       (payload->>'read_through_room_sequence')::bigint AS read_through_room_sequence,
-                       (payload->>'recorded_at_ms')::bigint AS recorded_at_ms,
-                       (payload->>'is_visible')::boolean AS is_visible
-                FROM im_v2.user_projection_effects
-                WHERE source_event_id = \(bind: sourceEventID)
-                  AND projection_kind = 'direct_read_receipt'
-                  AND user_id IN (\(bind: lease.actorUserID), \(bind: target.peerUserID))
-                """).all(decoding: ExistingReadReceiptTombstone.self)
-            if !existing.isEmpty {
-                guard existing.count == 2,
-                      existing.allSatisfy({ $0.matches(target: target, lease: lease, recordedAtMilliseconds: recordedAtMilliseconds) })
-                else { throw V2ReadReceiptPreferencePropagationError.corruptPersistenceState }
-                return
-            }
-
-            let inserted = try await sql.raw("""
-                WITH recipients(user_id, reader_user_id) AS (
-                    VALUES
-                        (\(bind: target.peerUserID), \(bind: lease.actorUserID)),
-                        (\(bind: lease.actorUserID), \(bind: target.peerUserID))
-                ), allocated AS (
-                    INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence)
-                    SELECT user_id, 1 FROM recipients ORDER BY user_id
-                    ON CONFLICT (user_id) DO UPDATE
-                    SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1
-                    WHERE im_v2.user_sync_sequences.next_sequence < \(bind: Int64.max)
-                    RETURNING user_id, next_sequence
-                )
-                INSERT INTO im_v2.user_sync_log
-                    (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at)
-                SELECT allocated.user_id, allocated.next_sequence, \(bind: sourceEventID),
-                       'direct_read_receipt',
-                       jsonb_build_object(
-                           'room_id', \(bind: target.roomID.uuidString),
-                           'reader_user_id', recipients.reader_user_id::text,
-                           'read_through_room_sequence', 1,
-                           'recorded_at_ms', \(bind: recordedAtMilliseconds),
-                           'is_visible', FALSE
-                       ),
-                       \(bind: lease.recordedAt)
-                FROM allocated
-                INNER JOIN recipients USING (user_id)
-                RETURNING user_id
-                """).all()
-            // Both recipients form one effect. Roll back the other allocation
-            // as well if either recipient has exhausted its sequence space.
-            guard inserted.count == 2 else {
-                throw V2ReadReceiptPreferencePropagationError.corruptPersistenceState
+            let outbox = try PostgresV2UserStateEventOutbox(database: transaction)
+            for (viewer, reader) in [(target.peerUserID, lease.actorUserID), (lease.actorUserID, target.peerUserID)] {
+                let candidate = try V2UserStateEvent(sourceEventID: .init(uuid: source), userID: .init(uuid: viewer),
+                    kind: .directReadReceipt, payload: JSONSerialization.data(withJSONObject: [
+                        "room_id": target.roomID.uuidString, "reader_user_id": reader.uuidString,
+                        "read_through_room_sequence": 0, "recorded_at_ms": milliseconds,
+                    ]), createdAt: lease.recordedAt)
+                try await outbox.enqueue(candidate, in: sql)
             }
         }
     }
@@ -404,37 +330,5 @@ private struct ReadReceiptPreferencePropagationTarget: Decodable, Sendable {
     enum CodingKeys: String, CodingKey {
         case roomID = "room_id"
         case peerUserID = "peer_user_id"
-    }
-}
-
-private struct ExistingReadReceiptTombstone: Decodable {
-    let userID: UUID
-    let roomID: String
-    let readerUserID: String
-    let readThroughRoomSequence: Int64
-    let recordedAtMilliseconds: Int64
-    let isVisible: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case userID = "user_id"
-        case roomID = "room_id"
-        case readerUserID = "reader_user_id"
-        case readThroughRoomSequence = "read_through_room_sequence"
-        case recordedAtMilliseconds = "recorded_at_ms"
-        case isVisible = "is_visible"
-    }
-
-    func matches(
-        target: ReadReceiptPreferencePropagationTarget,
-        lease: ReadReceiptPreferencePropagationLease,
-        recordedAtMilliseconds expectedRecordedAtMilliseconds: Int64
-    ) -> Bool {
-        let expectedReader = userID == lease.actorUserID ? target.peerUserID : lease.actorUserID
-        return (userID == lease.actorUserID || userID == target.peerUserID)
-            && roomID == target.roomID.uuidString
-            && readerUserID == expectedReader.uuidString
-            && readThroughRoomSequence == 1
-            && recordedAtMilliseconds == expectedRecordedAtMilliseconds
-            && !isVisible
     }
 }

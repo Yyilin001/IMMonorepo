@@ -32,7 +32,7 @@ Owner SQL 不再 JOIN public_user_profiles 或 account_disables。申请行只�
 
 ## Schema 23
 
-`20260906_group_invitation_owner_identity.sql` 要求 current-22，事务内删除链接 creator/revoker、申请 applicant/reviewer 指向 public_user_profiles 的四个外键，再推进到 23。不复制或删除历史数据，room/invite/request 的本地关系约束保留。迁移前停止旧邀请写进程；旧程序仍依赖 owner profile JOIN，不能在本迁移后混合运行。
+当前 schema 的链接 creator/revoker、申请 applicant/reviewer 不引用公共资料缓存；room/invite/request 的本地关系约束继续保留。新库直接创建这些边界，不提供历史升级或混合版本运行流程。
 
 Swift 与 SQL readiness 除完整旧合同外，还拒绝 invite/request 对 profile 或 account_disables 的外键依赖，包含 NOT VALID 外键。物理 owner 目前仍使用统一 schema（空身份表存在），无需复制身份行。
 

@@ -48,6 +48,8 @@ public enum V2GroupJoinRequestState: String, Codable, Equatable, Sendable {
     case approving
     /// 已批准申请。
     case approved
+    /// 申请人已取消。
+    case cancelled
     /// 已拒绝申请。
     case rejected
 }
@@ -200,7 +202,7 @@ public struct V2GroupJoinRequest: Equatable, Sendable, Identifiable {
     public let resumableDecisionOperationID: GroupJoinDecisionOperationID?
     /// 申请创建时间。
     public let createdAt: Date
-    /// 可选决定时间，仅 approved 或 rejected 阶段允许存在。
+    /// 可选决定时间，仅 approved、rejected 或 cancelled 阶段允许存在。
     public let decidedAt: Date?
 
     /// 提供申请身份作为稳定列表标识。
@@ -217,7 +219,7 @@ public struct V2GroupJoinRequest: Equatable, Sendable, Identifiable {
     ///   - state: 当前审核阶段。
     ///   - resumableDecisionOperationID: 仅 approving 阶段可存在的恢复决定身份，由服务端限定同一审核者可使用。
     ///   - createdAt: 申请创建时间。
-    ///   - decidedAt: 可选决定时间，仅 approved 或 rejected 阶段允许存在。
+    ///   - decidedAt: 可选决定时间，仅 approved、rejected 或 cancelled 阶段允许存在。
     ///
     /// 校验备注长度与状态字段组合，否则抛出 invalidRequest；approving 不强制有恢复身份，终态也不强制有决定时间，不校验日期先后或有限性。
     public init(
@@ -234,7 +236,7 @@ public struct V2GroupJoinRequest: Equatable, Sendable, Identifiable {
         let normalizedNote = note?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard normalizedNote?.utf8.count ?? 0 <= 500,
               state == .approving || resumableDecisionOperationID == nil,
-              state == .approved || state == .rejected || decidedAt == nil
+              state == .approved || state == .rejected || state == .cancelled || decidedAt == nil
         else { throw V2GroupInvitationValidationError.invalidRequest }
         self.requestID = requestID
         self.inviteID = inviteID

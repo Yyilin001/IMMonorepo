@@ -6,8 +6,9 @@ import IMV2Core
 /// 该能力通过受信归属通道传递；客户端上报的状态或校验和都不构成终态回执，
 /// 也不能用于替代收件箱中的持久化记录。
 public struct V2ForwardTerminalReceipt: Equatable, Sendable {
-    /// 产生该回执的转发导出记录。
-    public let export: V2ForwardExport
+    /// 产生回执的不可变导出身份与完整载荷摘要，不携带正文。
+    public let exportID: UUID
+    public let payloadDigest: Data
     /// 目标侧持久化的导入结果，仅允许终态取值。
     public let outcome: V2ForwardImportOutcome
 
@@ -20,6 +21,11 @@ public struct V2ForwardTerminalReceipt: Equatable, Sendable {
     /// - Throws: 结果仍为 `pending`，或字段不满足上述约束时抛出
     ///   ``V2ForwardInboxError/corruptPersistenceState``。
     init(export: V2ForwardExport, outcome: V2ForwardImportOutcome) throws {
+        try self.init(exportID: export.intent.exportID, payloadDigest: export.digest, outcome: outcome)
+    }
+
+    init(exportID: UUID, payloadDigest: Data, outcome: V2ForwardImportOutcome) throws {
+        guard payloadDigest.count == 32 else { throw V2ForwardInboxError.corruptPersistenceState }
         switch outcome {
         case .accepted(let messageID, let sequence):
             guard messageID.uuidValue != nil, sequence > 0, sequence <= UInt64(Int64.max)
@@ -29,7 +35,12 @@ public struct V2ForwardTerminalReceipt: Equatable, Sendable {
             else { throw V2ForwardInboxError.corruptPersistenceState }
         case .pending: throw V2ForwardInboxError.corruptPersistenceState
         }
-        self.export = export
+        self.exportID = exportID
+        self.payloadDigest = payloadDigest
         self.outcome = outcome
+    }
+
+    func matches(_ export: V2ForwardExport) -> Bool {
+        exportID == export.intent.exportID && payloadDigest == export.digest
     }
 }

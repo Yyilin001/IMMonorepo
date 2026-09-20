@@ -32,7 +32,6 @@ public protocol V2GroupMessagingStore: Sendable {
     ///   - roomShardID: 创建时选定的房间归属分片。
     ///   - roomID: 预分配的房间标识。
     ///   - eventID: 建群事件标识。
-    ///   - planID: 关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 建群结果。
     /// - Throws: 准入不足、成员非法或持久化失败时抛出。
@@ -42,14 +41,13 @@ public protocol V2GroupMessagingStore: Sendable {
         roomShardID: String,
         roomID: RoomID,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2CreateGroupRoomOutcome
 }
 
 /// 只在控制面已原子校验并持久化精确初始受众之后使用的归属侧能力。
 ///
-/// 它与普通 ``V2GroupMessagingStore/create(command:capacityProfile:roomShardID:roomID:eventID:planID:now:)``
+/// 它与普通 ``V2GroupMessagingStore/create(command:capacityProfile:roomShardID:roomID:eventID:now:)``
 /// 分开声明，避免路由协调器意外依赖归属库中过期或不完整的身份副本。
 public protocol V2ControlValidatedGroupMessagingStore: V2GroupMessagingStore {
     /// 以控制面校验过的成员列表创建群房间。
@@ -61,7 +59,6 @@ public protocol V2ControlValidatedGroupMessagingStore: V2GroupMessagingStore {
     ///   - roomShardID: 创建时选定的房间归属分片。
     ///   - roomID: 预分配的房间标识。
     ///   - eventID: 建群事件标识。
-    ///   - planID: 关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 建群结果。
     /// - Throws: 成员列表与命令不符、准入不足或持久化失败时抛出。
@@ -72,7 +69,6 @@ public protocol V2ControlValidatedGroupMessagingStore: V2GroupMessagingStore {
         roomShardID: String,
         roomID: RoomID,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2CreateGroupRoomOutcome
 }
@@ -90,7 +86,6 @@ public protocol V2StagedGroupMessagingStore: Sendable {
     ///   - roomShardID: 创建时选定的房间归属分片。
     ///   - roomID: 预分配的房间标识。
     ///   - eventID: 建群事件标识。
-    ///   - planID: 关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 建群结果。
     /// - Throws: 分阶段受众缺失、摘要不符或持久化失败时抛出。
@@ -100,7 +95,6 @@ public protocol V2StagedGroupMessagingStore: Sendable {
         roomShardID: String,
         roomID: RoomID,
         eventID: EventID,
-        planID: FanoutPlanID,
         now: Date
     ) async throws -> V2CreateGroupRoomOutcome
 }
@@ -114,7 +108,7 @@ public struct V2StagedGroupRoomCommand: Equatable, Sendable {
     /// 房间标题，沿用公开命令的规范化结果。
     public let title: String
     /// 房间投递模式。
-    public let deliveryMode: V2GroupDeliveryMode
+    public let capacityClass: V2GroupCapacityClass
     /// 分阶段成员数量。
     ///
     /// 该计数不含群主，与分阶段草稿关系保持一致。
@@ -128,7 +122,7 @@ public struct V2StagedGroupRoomCommand: Equatable, Sendable {
     ///   - actorUserID: 发起建群的用户。
     ///   - operationID: 建群操作标识。
     ///   - title: 房间标题。
-    ///   - deliveryMode: 投递模式。
+    ///   - capacityClass: 投递模式。
     ///   - stagedMemberCount: 不含群主的分阶段成员数量。
     /// - Throws: 标题不合法或成员数量越界时抛出
     ///   ``V2GroupMessagingPolicyError/invalidInitialMembership``。
@@ -136,7 +130,7 @@ public struct V2StagedGroupRoomCommand: Equatable, Sendable {
         actorUserID: UserID,
         operationID: GroupRoomOperationID,
         title: String,
-        deliveryMode: V2GroupDeliveryMode,
+        capacityClass: V2GroupCapacityClass,
         stagedMemberCount: Int
     ) throws {
         // Reuse the public command's exact title normalization contract.
@@ -144,7 +138,7 @@ public struct V2StagedGroupRoomCommand: Equatable, Sendable {
             actorUserID: actorUserID,
             operationID: operationID,
             title: title,
-            deliveryMode: deliveryMode,
+            capacityClass: capacityClass,
             initialMemberUserIDs: []
         )
         guard stagedMemberCount >= 0, stagedMemberCount < Int.max else {
@@ -153,7 +147,7 @@ public struct V2StagedGroupRoomCommand: Equatable, Sendable {
         self.actorUserID = actorUserID
         self.operationID = operationID
         self.title = validated.title
-        self.deliveryMode = deliveryMode
+        self.capacityClass = capacityClass
         self.stagedMemberCount = stagedMemberCount
     }
 
@@ -172,12 +166,12 @@ public struct V2GroupMessagingIDFactory: Sendable {
         self.makeUUID = makeUUID
     }
 
-    /// 生成房间、事件与扇出计划三个标识。
+    /// 生成房间与事件两个标识。
     ///
     /// - Returns: 本次建群使用的标识组合。
     /// - Throws: 标识类型拒绝生成值时抛出。
-    public func make() throws -> (roomID: RoomID, eventID: EventID, planID: FanoutPlanID) {
-        try (.init(makeUUID().uuidString), .init(makeUUID().uuidString), .init(makeUUID().uuidString))
+    public func make() throws -> (roomID: RoomID, eventID: EventID) {
+        try (.init(makeUUID().uuidString), .init(makeUUID().uuidString))
     }
 }
 
@@ -188,7 +182,7 @@ public struct V2GroupMessagingIDFactory: Sendable {
 public struct V2GroupMessagingService: Sendable {
     private let store: any V2GroupMessagingStore
     private let capacityProfile: V2CapacityProfile
-    private let deliveryPolicy: V2GroupDeliveryPolicy
+    private let deliveryPolicy: V2GroupCapacityPolicy
     private let roomShardID: String
     private let identifiers: V2GroupMessagingIDFactory
     private let now: @Sendable () -> Date
@@ -207,7 +201,7 @@ public struct V2GroupMessagingService: Sendable {
     public init(
         store: any V2GroupMessagingStore,
         capacityProfile: V2CapacityProfile,
-        deliveryPolicy: V2GroupDeliveryPolicy = .init(),
+        deliveryPolicy: V2GroupCapacityPolicy = .init(),
         roomShardID: String,
         identifiers: V2GroupMessagingIDFactory = .init(),
         now: @escaping @Sendable () -> Date = Date.init
@@ -245,29 +239,29 @@ public struct V2GroupMessagingService: Sendable {
         // Validate untrusted membership input before evaluating capacity.  A
         // malformed request must not be reclassified as an apparent limit
         // rejection merely because it also has a large submitted array.
-        let provisionalMode = deliveryPolicy.deliveryMode(forInitialMemberCount: initialMemberCount) ?? .largeGroupHybrid
+        let provisionalMode = deliveryPolicy.capacityClass(forInitialMemberCount: initialMemberCount) ?? .large
         let command = try V2CreateGroupRoomCommand(
             actorUserID: actorUserID,
             operationID: operationID,
             title: title,
-            deliveryMode: provisionalMode,
+            capacityClass: provisionalMode,
             initialMemberUserIDs: initialMemberUserIDs
         )
         guard command.allMemberUserIDs.count <= capacityProfile.limits.maxEligibleMembers,
-              let deliveryMode = deliveryPolicy.deliveryMode(forInitialMemberCount: command.allMemberUserIDs.count)
+              let capacityClass = deliveryPolicy.capacityClass(forInitialMemberCount: command.allMemberUserIDs.count)
         else {
             return .memberLimitReached
         }
         // `V2CreateGroupRoomCommand` canonicalizes and validates the member
         // list, so its count is the authority after duplicate/owner checks.
         guard command.allMemberUserIDs.count == initialMemberCount,
-              deliveryPolicy.acceptsInitialMemberCount(command.allMemberUserIDs.count, mode: deliveryMode)
+              deliveryPolicy.acceptsInitialMemberCount(command.allMemberUserIDs.count, mode: capacityClass)
         else { throw V2GroupMessagingPolicyError.invalidInitialMembership }
         let derivedCommand = try V2CreateGroupRoomCommand(
             actorUserID: command.actorUserID,
             operationID: command.operationID,
             title: command.title,
-            deliveryMode: deliveryMode,
+            capacityClass: capacityClass,
             initialMemberUserIDs: command.initialMemberUserIDs
         )
         let ids = try identifiers.make()
@@ -277,7 +271,6 @@ public struct V2GroupMessagingService: Sendable {
             roomShardID: roomShardID,
             roomID: ids.roomID,
             eventID: ids.eventID,
-            planID: ids.planID,
             now: now()
         )
     }
@@ -305,14 +298,14 @@ public struct V2GroupMessagingService: Sendable {
         guard stagedMemberCount < Int.max else { return .memberLimitReached }
         let memberCount = stagedMemberCount + 1
         guard memberCount <= capacityProfile.limits.maxEligibleMembers,
-              let deliveryMode = deliveryPolicy.deliveryMode(forInitialMemberCount: memberCount),
-              deliveryPolicy.acceptsInitialMemberCount(memberCount, mode: deliveryMode)
+              let capacityClass = deliveryPolicy.capacityClass(forInitialMemberCount: memberCount),
+              deliveryPolicy.acceptsInitialMemberCount(memberCount, mode: capacityClass)
         else { return .memberLimitReached }
         let command = try V2StagedGroupRoomCommand(
             actorUserID: actorUserID,
             operationID: operationID,
             title: title,
-            deliveryMode: deliveryMode,
+            capacityClass: capacityClass,
             stagedMemberCount: stagedMemberCount
         )
         guard let stagedStore = store as? any V2StagedGroupMessagingStore else {
@@ -325,7 +318,6 @@ public struct V2GroupMessagingService: Sendable {
             roomShardID: roomShardID,
             roomID: ids.roomID,
             eventID: ids.eventID,
-            planID: ids.planID,
             now: now()
         )
     }

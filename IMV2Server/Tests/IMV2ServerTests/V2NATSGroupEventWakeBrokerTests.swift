@@ -753,6 +753,7 @@ struct V2NATSGroupEventWakeBrokerTests {
     func reconnectsAndReplaysSubscriptions() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let recorder = V2NATSGroupWakeTestRecorder()
+        let losses = Mutex(0)
         let server = try await ServerBootstrap(group: group)
             .childChannelInitializer { channel in
                 channel.pipeline.addHandler(
@@ -764,7 +765,8 @@ struct V2NATSGroupEventWakeBrokerTests {
         do {
             let broker = try makeBroker(
                 port: try #require(server.localAddress?.port),
-                timeout: 1
+                timeout: 1,
+                coverageLost: { losses.withLock { $0 += 1 } }
             )
             let roomID = try RoomID("00000000-0000-0000-0000-000000000910")
             try await broker.activate(roomID: roomID)
@@ -776,6 +778,7 @@ struct V2NATSGroupEventWakeBrokerTests {
             let observation = recorder.observation()
             #expect(observation.connectionCount == 2)
             #expect(observation.subscriptionCount == 2)
+            #expect(losses.withLock { $0 } == 1)
 
             await broker.shutdown()
             try await server.close().get()
@@ -827,7 +830,8 @@ struct V2NATSGroupEventWakeBrokerTests {
         port: Int,
         timeout: TimeInterval,
         token: String? = nil,
-        payloadEncoding: V2NATSGroupEventPayloadEncoding = .json
+        payloadEncoding: V2NATSGroupEventPayloadEncoding = .json,
+        coverageLost: @escaping @Sendable () async -> Void = {}
     ) throws -> V2NATSGroupEventWakeBroker {
         let url = try #require(URL(string: "nats://127.0.0.1:\(port)"))
         return V2NATSGroupEventWakeBroker(
@@ -839,6 +843,7 @@ struct V2NATSGroupEventWakeBrokerTests {
                 payloadEncoding: payloadEncoding,
                 acknowledgementTimeout: timeout
             ),
+            coverageLost: coverageLost,
             receiveWake: { _ in }
         )
     }

@@ -9,6 +9,7 @@ import SQLKit
 public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging {
     private let database: any Database
     private let now: @Sendable () -> Date
+    private let nicknameScope: (roomID: RoomID, route: V2RoomShardRoute)?
 
     /// 创建资料展示存储。
     ///
@@ -18,6 +19,13 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
     public init(database: any Database, now: @escaping @Sendable () -> Date = Date.init) {
         self.database = database
         self.now = now
+        self.nicknameScope = nil
+    }
+
+    init(database: any Database, roomID: RoomID, ownerRoute: V2RoomShardRoute, now: @escaping @Sendable () -> Date) {
+        self.database = database
+        self.now = now
+        self.nicknameScope = (roomID, ownerRoute)
     }
 
     /// 按目标用户游标分页读取联系人备注。
@@ -99,12 +107,24 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
     /// - Returns: 群昵称分页，含下一页游标。
     /// - Throws: 无权限、条数越界或持久化状态损坏时抛出。
     public func groupNicknames(actorUserID: UserID, roomID: RoomID, afterUserID: UserID?, limit: Int) async throws -> V2GroupNicknamePage {
+        if let scope = nicknameScope {
+            guard scope.roomID == roomID else { throw V2RoomOwnerFenceError.ownerChanged }
+            return try await database.transaction { transaction in
+                guard let sql = transaction as? any SQLDatabase else { throw V2ProfilePresentationError.corruptPersistenceState }
+                try await v2RequireRoomOwner(roomID: uuid(roomID), route: scope.route, sql: sql)
+                return try await readGroupNicknames(actorUserID: actorUserID, roomID: roomID, afterUserID: afterUserID, limit: limit, sql: sql)
+            }
+        }
+        guard let sql = database as? any SQLDatabase else { throw V2ProfilePresentationError.corruptPersistenceState }
+        return try await readGroupNicknames(actorUserID: actorUserID, roomID: roomID, afterUserID: afterUserID, limit: limit, sql: sql)
+    }
+
+    private func readGroupNicknames(actorUserID: UserID, roomID: RoomID, afterUserID: UserID?, limit: Int, sql: any SQLDatabase) async throws -> V2GroupNicknamePage {
         guard (1...500).contains(limit) else { throw V2ProfilePresentationError.invalidPresentation }
         let actor = try uuid(actorUserID), room = try uuid(roomID)
         let afterUser = try afterUserID.map(uuid)
-        guard let sql = database as? any SQLDatabase else { throw V2ProfilePresentationError.corruptPersistenceState }
         let rows = try await sql.raw("""
-            WITH authorization AS MATERIALIZED (
+            WITH nickname_authorization AS MATERIALIZED (
                 SELECT EXISTS (
                     SELECT 1
                     FROM im_v2.rooms AS room
@@ -121,7 +141,7 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
                 SELECT nickname.user_id, nickname.nickname, nickname.revision
                 FROM im_v2.room_member_nicknames AS nickname
                 JOIN im_v2.rooms AS room ON room.room_id = nickname.room_id
-                WHERE (SELECT authorized FROM authorization)
+                WHERE (SELECT authorized FROM nickname_authorization)
                   AND nickname.room_id = \(bind: room)
                   AND nickname.user_id > COALESCE(
                       \(bind: afterUser),
@@ -140,9 +160,9 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
                 ORDER BY nickname.user_id
                 LIMIT \(bind: limit + 1)
             )
-            SELECT authorization.authorized,
+            SELECT nickname_authorization.authorized,
                    page.user_id, page.nickname, page.revision
-            FROM authorization
+            FROM nickname_authorization
             LEFT JOIN page ON TRUE
             ORDER BY page.user_id NULLS LAST
             """).all(decoding: AuthorizedNicknameRow.self)
@@ -171,6 +191,10 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
             guard let sql = transaction as? any SQLDatabase else { throw V2ProfilePresentationError.corruptPersistenceState }
             try await presentationLock(scope: actor.uuidString + ":nickname-operation:" + operation.uuidString, sql: sql)
             try await presentationLock(scope: room.uuidString + ":nickname:" + actor.uuidString, sql: sql)
+            if let scope = nicknameScope {
+                guard scope.roomID == roomID else { throw V2RoomOwnerFenceError.ownerChanged }
+                try await v2RequireRoomOwner(roomID: room, route: scope.route, sql: sql)
+            }
             if let saved = try await nicknameOperation(actor: actor, operation: operation, sql: sql) {
                 guard saved.room == room, saved.expectedRevision == expectedSignedRevision, saved.nickname == normalizedNickname,
                       saved.resultRevision > 0,
@@ -178,6 +202,10 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
                 else { throw V2ProfilePresentationError.operationPayloadMismatch }
                 return try .init(roomID: roomID, userID: actorUserID, groupNickname: saved.nickname, revision: revision)
             }
+            guard let owner = try await sql.raw("""
+                SELECT migration_fence_id FROM im_v2.rooms WHERE room_id = \(bind: room) FOR SHARE
+                """).first(decoding: NicknameRoomFenceRow.self) else { throw V2ProfilePresentationError.forbidden }
+            guard owner.migrationFenceID == nil else { throw V2RoomOwnerFenceError.ownerChanged }
             guard try await activeMember(userID: actor, roomID: room, sql: sql) else { throw V2ProfilePresentationError.forbidden }
             let current = try await nicknameRow(room: room, user: actor, sql: sql)
             guard current?.revision == expectedSignedRevision else { throw V2ProfilePresentationError.revisionConflict(current?.profileRevision) }
@@ -240,4 +268,9 @@ private func nextPresentationRevision(current: Int64?, unchanged: Bool) throws -
 }
 private func presentationLock(scope: String, sql: any SQLDatabase) async throws {
     try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: scope), 0))").run()
+}
+
+private struct NicknameRoomFenceRow: Decodable {
+    let migrationFenceID: UUID?
+    enum CodingKeys: String, CodingKey { case migrationFenceID = "migration_fence_id" }
 }

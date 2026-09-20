@@ -41,7 +41,6 @@ struct V2RoutedRoomMutationStoresTests {
             command: command,
             capacityProfile: profile(),
             eventID: .init("00000000-0000-0000-0000-00000000d005"),
-            planID: .init("00000000-0000-0000-0000-00000000d006"),
             now: .init(timeIntervalSince1970: 100)
         ) == .targetAlreadyMember)
         #expect(await first.membershipCommand() == nil)
@@ -103,7 +102,6 @@ struct V2RoutedRoomMutationStoresTests {
             ),
             capacityProfile: profile(),
             eventID: .init("00000000-0000-0000-0000-00000000d015"),
-            planID: .init("00000000-0000-0000-0000-00000000d016"),
             now: .init(timeIntervalSince1970: 101)
         )
         _ = try await withdrawal.withdraw(
@@ -118,7 +116,6 @@ struct V2RoutedRoomMutationStoresTests {
             ),
             capacityProfile: profile(),
             eventID: .init("00000000-0000-0000-0000-00000000d018"),
-            planID: .init("00000000-0000-0000-0000-00000000d019"),
             now: .init(timeIntervalSince1970: 102)
         )
         _ = try await reaction.change(
@@ -134,7 +131,6 @@ struct V2RoutedRoomMutationStoresTests {
             ),
             capacityProfile: profile(),
             eventID: .init("00000000-0000-0000-0000-00000000d01b"),
-            planID: .init("00000000-0000-0000-0000-00000000d01c"),
             now: .init(timeIntervalSince1970: 103)
         )
 
@@ -178,7 +174,6 @@ struct V2RoutedRoomMutationStoresTests {
             ),
             capacityProfile: profile(),
             eventID: .init("00000000-0000-0000-0000-00000000d025"),
-            planID: .init("00000000-0000-0000-0000-00000000d026"),
             now: .init(timeIntervalSince1970: 104)
         ) == .alreadyWithdrawn)
         #expect(await router.requestedRooms() == [roomID])
@@ -191,12 +186,7 @@ struct V2RoutedRoomMutationStoresTests {
             limits: .init(
                 maxEligibleMembers: 100,
                 maxCommandsPerWindow: 100,
-                maxFanoutUnitsPerWindow: 1_000,
-                maxOutstandingFanoutUnits: 1_000,
-                maxOutstandingPlans: 100,
-                maxEnumerationPageSize: 100,
-                maxPlannerConcurrency: 2,
-                maxDeliveryConcurrency: 2,
+
                 retryAfterSeconds: 1
             )
         )
@@ -257,7 +247,6 @@ private actor RoutedMutationStoreSpy:
         command _: V2ChangeRoomMembershipCommand,
         capacityProfile _: V2CapacityProfile,
         eventID _: EventID,
-        planID _: FanoutPlanID,
         now _: Date
     ) throws -> V2RoomMembershipChangeOutcome {
         throw V2RoomMembershipStoreError.corruptPersistenceState
@@ -271,7 +260,6 @@ private actor RoutedMutationStoreSpy:
         identitySnapshot: V2MembershipIdentitySnapshot,
         capacityProfile _: V2CapacityProfile,
         eventID _: EventID,
-        planID _: FanoutPlanID,
         now _: Date
     ) -> V2RoomMembershipChangeOutcome {
         membership = command
@@ -285,7 +273,6 @@ private actor RoutedMutationStoreSpy:
         ownerRoute: V2RoomShardRoute,
         capacityProfile _: V2CapacityProfile,
         eventID _: EventID,
-        planID _: FanoutPlanID,
         now _: Date
     ) -> V2MessageEditOutcome {
         messageMutations += 1
@@ -298,7 +285,6 @@ private actor RoutedMutationStoreSpy:
         ownerRoute: V2RoomShardRoute,
         capacityProfile _: V2CapacityProfile,
         eventID _: EventID,
-        planID _: FanoutPlanID,
         now _: Date
     ) -> V2MessageWithdrawalOutcome {
         messageMutations += 1
@@ -311,7 +297,6 @@ private actor RoutedMutationStoreSpy:
         ownerRoute: V2RoomShardRoute,
         capacityProfile _: V2CapacityProfile,
         eventID _: EventID,
-        planID _: FanoutPlanID,
         now _: Date
     ) -> V2MessageReactionOutcome {
         messageMutations += 1

@@ -179,7 +179,7 @@ extension GRDBV2LocalSyncStore {
                 let roomID: String = existing["room_id"]
                 let targetUserID: String = existing["target_user_id"]
                 let action: String = existing["action"]
-                let expectedRevision: Int64 = existing["expected_membership_revision"]
+                let expectedRevision = try Self.commandStorageInteger(existing, column: "expected_membership_revision")
                 guard roomID == command.roomID.rawValue,
                       targetUserID == command.targetUserID.rawValue,
                       action == command.action.rawValue,
@@ -320,7 +320,7 @@ extension GRDBV2LocalSyncStore {
                   command.terminalCode == nil, command.terminalCurrentRevision == nil
             else { throw V2ClientCommandError.commandConflict }
             if let existing = try Row.fetchOne(db, sql: "SELECT room_id, message_id, expected_message_revision FROM v2_pending_message_withdrawals WHERE operation_id = ?", arguments: [command.operationID.rawValue]) {
-                let roomID: String = existing["room_id"]; let messageID: String = existing["message_id"]; let revision: Int64 = existing["expected_message_revision"]
+                let roomID: String = existing["room_id"]; let messageID: String = existing["message_id"]; let revision = try Self.commandStorageInteger(existing, column: "expected_message_revision")
                 guard roomID == command.roomID.rawValue, messageID == command.messageID.rawValue, revision == (try Self.commandStorageInteger(command.expectedMessageRevision)) else { throw V2ClientCommandError.commandConflict }
                 return
             }
@@ -692,7 +692,7 @@ extension GRDBV2LocalSyncStore {
         try databasePool.write { db in
             guard !command.text.isEmpty, command.state == .pending, command.attemptCount == 0, command.resultingMessageRevision == nil, command.resultingRoomSequence == nil, command.terminalCode == nil, command.terminalCurrentRevision == nil else { throw V2ClientCommandError.commandConflict }
             if let row = try Row.fetchOne(db, sql: "SELECT room_id, message_id, expected_message_revision, text_body FROM v2_pending_message_edits WHERE operation_id = ?", arguments: [command.operationID.rawValue]) {
-                let room: String = row["room_id"], message: String = row["message_id"], revision: Int64 = row["expected_message_revision"], text: String = row["text_body"]
+                let room: String = row["room_id"], message: String = row["message_id"], revision = try Self.commandStorageInteger(row, column: "expected_message_revision"), text: String = row["text_body"]
                 guard room == command.roomID.rawValue, message == command.messageID.rawValue, revision == (try Self.commandStorageInteger(command.expectedMessageRevision)), text == command.text else { throw V2ClientCommandError.commandConflict }; return
             }
             try db.execute(sql: "INSERT INTO v2_pending_message_edits (operation_id, room_id, message_id, expected_message_revision, text_body, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, command.messageID.rawValue, try Self.commandStorageInteger(command.expectedMessageRevision), command.text, try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)])
@@ -774,17 +774,23 @@ extension GRDBV2LocalSyncStore {
     public func enqueue(_ command: V2PendingReadReceipt) throws { try databasePool.write { db in
         guard command.readThroughRoomSequence > 0, command.readThroughRoomSequence <= UInt64(Int64.max), command.state == .pending, command.attemptCount == 0, command.resultingRoomSequence == nil, command.terminalCode == nil else { throw V2ClientCommandError.commandConflict }
         let requestedSequence = Int64(command.readThroughRoomSequence)
-        if let row = try Row.fetchOne(db, sql: "SELECT room_id, read_through_room_sequence FROM v2_pending_read_receipts WHERE operation_id = ?", arguments: [command.operationID.rawValue]) { let room: String = row["room_id"], sequence: Int64 = row["read_through_room_sequence"]; guard room == command.roomID.rawValue, sequence == requestedSequence else { throw V2ClientCommandError.commandConflict }; return }
+        if let row = try Row.fetchOne(db, sql: "SELECT room_id, read_through_room_sequence FROM v2_pending_read_receipts WHERE operation_id = ?", arguments: [command.operationID.rawValue]) { let room: String = row["room_id"], sequence = try Self.commandStorageInteger(row, column: "read_through_room_sequence"); guard room == command.roomID.rawValue, sequence == requestedSequence else { throw V2ClientCommandError.commandConflict }; return }
         try db.execute(sql: "INSERT INTO v2_pending_read_receipts (operation_id, room_id, read_through_room_sequence, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, requestedSequence, try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)])
     } }
     public func enqueueIfReadReceiptAdvances(_ command: V2PendingReadReceipt) throws -> Bool { try databasePool.write { db in
         guard command.readThroughRoomSequence > 0, command.readThroughRoomSequence <= UInt64(Int64.max), command.state == .pending, command.attemptCount == 0, command.resultingRoomSequence == nil, command.terminalCode == nil else { throw V2ClientCommandError.commandConflict }
         let requestedSequence = Int64(command.readThroughRoomSequence)
-        let currentHighWater: Int64 = try Int64.fetchOne(
-            db,
-            sql: "SELECT COALESCE(MAX(CASE WHEN state = 'acknowledged' THEN resulting_room_sequence ELSE read_through_room_sequence END), 0) FROM v2_pending_read_receipts WHERE room_id = ? AND state IN ('pending', 'acknowledged')",
-            arguments: [command.roomID.rawValue]
-        ) ?? 0
+        // Validate every contributing sequence: MAX alone could hide a corrupt
+        // fractional/negative row behind a larger valid integer.
+        guard let water = try Row.fetchOne(db, sql: """
+            SELECT CASE WHEN MIN(CASE WHEN typeof(sequence) = 'integer' AND sequence > 0 THEN 1 ELSE 0 END) = 0
+                        THEN NULL ELSE COALESCE(MAX(sequence), 0) END AS high_water
+            FROM (
+                SELECT CASE WHEN state = 'acknowledged' THEN resulting_room_sequence ELSE read_through_room_sequence END AS sequence
+                FROM v2_pending_read_receipts WHERE room_id = ? AND state IN ('pending', 'acknowledged')
+            )
+            """, arguments: [command.roomID.rawValue]) else { throw V2ClientCommandError.commandConflict }
+        let currentHighWater = try Self.commandStorageInteger(water, column: "high_water")
         guard requestedSequence > currentHighWater else { return false }
         try db.execute(sql: "INSERT INTO v2_pending_read_receipts (operation_id, room_id, read_through_room_sequence, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.roomID.rawValue, requestedSequence, try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)])
         return true
@@ -1192,14 +1198,14 @@ extension GRDBV2LocalSyncStore {
         try databasePool.write { db in
             guard command.state == .pending, command.attemptCount == 0, command.createdRoomID == nil, command.terminalCode == nil else { throw V2ClientCommandError.commandConflict }
             let members = try Self.encodeGroupMemberUserIDs(command.initialMemberUserIDs)
-            if let existing = try Row.fetchOne(db, sql: "SELECT title, delivery_mode, initial_member_user_ids FROM v2_pending_group_room_creations WHERE operation_id = ?", arguments: [command.operationID.rawValue]) {
+            if let existing = try Row.fetchOne(db, sql: "SELECT title, capacity_class, initial_member_user_ids FROM v2_pending_group_room_creations WHERE operation_id = ?", arguments: [command.operationID.rawValue]) {
                 let title: String = existing["title"]
-                let deliveryMode: String = existing["delivery_mode"]
+                let capacityClass: String = existing["capacity_class"]
                 let existingMembers: String = existing["initial_member_user_ids"]
-                guard title == command.title, deliveryMode == command.deliveryMode.rawValue, existingMembers == members else { throw V2ClientCommandError.commandConflict }
+                guard title == command.title, capacityClass == command.capacityClass.rawValue, existingMembers == members else { throw V2ClientCommandError.commandConflict }
                 return
             }
-            try db.execute(sql: "INSERT INTO v2_pending_group_room_creations (operation_id, title, delivery_mode, initial_member_user_ids, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.title, command.deliveryMode.rawValue, members, try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)])
+            try db.execute(sql: "INSERT INTO v2_pending_group_room_creations (operation_id, title, capacity_class, initial_member_user_ids, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, command.title, command.capacityClass.rawValue, members, try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)])
         }
     }
 
@@ -1220,7 +1226,7 @@ extension GRDBV2LocalSyncStore {
             ) {
                 let decoded = try Self.decodePendingGroupRoomCreation(existing)
                 guard decoded.title == command.title,
-                      decoded.deliveryMode == command.deliveryMode,
+                      decoded.capacityClass == command.capacityClass,
                       decoded.initialMemberUserIDs == command.initialMemberUserIDs,
                       decoded.state == .pending || decoded.state == .finalizing
                 else { throw V2ClientCommandError.commandConflict }
@@ -1230,24 +1236,24 @@ extension GRDBV2LocalSyncStore {
                 db,
                 sql: """
                 SELECT * FROM v2_pending_group_room_creations
-                WHERE title = ? AND delivery_mode = ? AND initial_member_user_ids = ? AND state IN ('pending', 'finalizing')
+                WHERE title = ? AND capacity_class = ? AND initial_member_user_ids = ? AND state IN ('pending', 'finalizing')
                 ORDER BY created_at, operation_id
                 LIMIT 1
                 """,
-                arguments: [command.title, command.deliveryMode.rawValue, members]
+                arguments: [command.title, command.capacityClass.rawValue, members]
             ) {
                 return try Self.decodePendingGroupRoomCreation(existing)
             }
             try db.execute(
                 sql: """
                 INSERT INTO v2_pending_group_room_creations
-                (operation_id, title, delivery_mode, initial_member_user_ids, state, attempt_count, next_attempt_at, created_at)
+                (operation_id, title, capacity_class, initial_member_user_ids, state, attempt_count, next_attempt_at, created_at)
                 VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)
                 """,
                 arguments: [
                     command.operationID.rawValue,
                     command.title,
-                    command.deliveryMode.rawValue,
+                    command.capacityClass.rawValue,
                     members,
                     try Self.commandRetryTimestamp(command.nextAttemptAt),
                     try Self.commandRetryTimestamp(command.nextAttemptAt)

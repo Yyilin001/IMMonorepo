@@ -507,7 +507,7 @@ public final class V2ForegroundGroupEventHintDispatcher:
         for await _ in signal {
             if Task.isCancelled { return }
             if groupBatchDelay > .zero {
-                try? await Task.sleep(for: groupBatchDelay)
+                try? await v2Sleep(for: groupBatchDelay)
             }
             // Quiet rooms retain the base latency. A room that has already
             // accumulated enough events gets exactly one bounded extension,
@@ -520,7 +520,7 @@ public final class V2ForegroundGroupEventHintDispatcher:
                     }
             }
             if shouldExtendGroupBatch {
-                try? await Task.sleep(for: groupBatchExtensionDelay)
+                try? await v2Sleep(for: groupBatchExtensionDelay)
             }
             let batch = state.withLock { state in
                 let batch = Array(state.pending.values)

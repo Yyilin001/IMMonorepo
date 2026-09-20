@@ -1,9 +1,9 @@
 import Foundation
 import IMV2Core
 
-/// 把每条群已读回执保留在与其房间序号、成员历史相同的物理事务域内。
+/// 把每条已读回执保留在与其房间序号、成员历史相同的物理事务域内。
 ///
-/// 用户偏好变更与私聊回执投影仍走控制面与用户路径，不进入房间归属存储。
+/// 用户偏好属于控制面；私聊对端回执由房间待办交给用户投递路径。
 public struct V2RoutedReadReceiptStore: V2ReadReceiptBatchStore {
     private let router: any V2RoomShardRouting
     private let ownerStores: [String: any V2OwnerValidatedReadReceiptStore]
@@ -15,7 +15,7 @@ public struct V2RoutedReadReceiptStore: V2ReadReceiptBatchStore {
     /// - Parameters:
     ///   - router: 房间归属路由来源。
     ///   - ownerStores: 逻辑分片标识到已读回执存储的映射。
-    ///   - controlStore: 处理私聊与偏好变更的控制面存储。
+    ///   - controlStore: 处理偏好变更的控制面存储。
     ///   - physicalStoreKeyByShard: 逻辑分片到物理存储键的映射；为 `nil` 时按标识自身映射。
     /// - Throws: 归属存储为空、含空白标识，或物理键与逻辑标识不匹配时抛出
     ///   ``V2RoomShardStorageRegistryError/invalidLocation``。
@@ -43,7 +43,7 @@ public struct V2RoutedReadReceiptStore: V2ReadReceiptBatchStore {
     /// 批量记录已读回执。
     ///
     /// 请求按物理存储键分组后并发提交，同组内由归属存储原子处理；归属判定为非群聊的条目
-    /// 回落到控制面存储。结果按原始请求顺序回填，任一归属返回值数量不符即视为状态损坏。
+    /// 继续在其房间归属处理。结果按原始请求顺序回填，任一归属返回值数量不符即视为状态损坏。
     ///
     /// - Parameter requests: 待记录的回执请求列表，数量需落在 `1...128`。
     /// - Returns: 与输入顺序对应的结果；单条失败以失败结果返回而非整体抛出。
@@ -112,8 +112,12 @@ public struct V2RoutedReadReceiptStore: V2ReadReceiptBatchStore {
                 results[index] = .success(outcome)
             case .success(.notGroup):
                 do {
-                    results[index] = .success(try await controlStore.record(
-                        command: requests[index].command,
+                    guard let route = routes[requests[index].command.roomID],
+                          let owner = ownerStores[route.shardID] else {
+                        throw V2RoomShardStorageRegistryError.unknownShardID
+                    }
+                    results[index] = .success(try await owner.recordOwnerValidated(
+                        command: requests[index].command, ownerRoute: route,
                         now: requests[index].now
                     ))
                 } catch let error as V2ReadReceiptStoreError {
@@ -147,11 +151,7 @@ public struct V2RoutedReadReceiptStore: V2ReadReceiptBatchStore {
         guard let owner = ownerStores[route.shardID] else {
             throw V2RoomShardStorageRegistryError.unknownShardID
         }
-        switch try await owner.recordGroupOwnerValidated(command: command, ownerRoute: route, now: now) {
-        case .handled(let outcome): return outcome
-        case .notGroup:
-            return try await controlStore.record(command: command, now: now)
-        }
+        return try await owner.recordOwnerValidated(command: command, ownerRoute: route, now: now)
     }
 
     /// 设置当前用户的已读回执偏好。

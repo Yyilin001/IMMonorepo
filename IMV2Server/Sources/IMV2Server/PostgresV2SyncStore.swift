@@ -159,14 +159,8 @@ public struct PostgresV2SyncStore: V2SyncStore {
             }
             let rows = try await sql.raw("""
                 SELECT log.user_sync_sequence, log.source_event_id, log.projection_kind,
-                       CASE WHEN log.payload_storage = 'inline' THEN log.payload
-                            ELSE COALESCE(shared.payload, state.payload) END::text AS payload_json
+                       log.payload::text AS payload_json
                 FROM \(unsafeRaw: table("user_sync_log")) AS log
-                LEFT JOIN \(unsafeRaw: table("fanout_sync_payloads")) AS shared
-                  ON shared.source_event_id = log.source_event_id
-                 AND shared.projection_kind = log.projection_kind
-                LEFT JOIN \(unsafeRaw: table("message_projection_state_values")) AS state
-                  ON state.state_id = shared.message_state_id
                 WHERE log.user_id = \(bind: userUUID) AND log.user_sync_sequence > \(bind: startSequence)
                 ORDER BY log.user_sync_sequence LIMIT \(bind: maxRecords + 1)
                 """).all(decoding: SyncLogRow.self)

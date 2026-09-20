@@ -9,7 +9,7 @@ import VaporTesting
 @Suite("V2 group invitation response clocks")
 struct V2VaporGroupInvitationRoutesTests {
     @Test("invitation responses reject invalid dates and preserve valid results", arguments: [
-        "create:created_at_ms", "create:expires_at_ms", "list:created_at_ms", "list:expires_at_ms",
+        "cancel:created_at_ms", "cancel:decided_at_ms", "cancelled_submission:decided_at_ms", "create:created_at_ms", "create:expires_at_ms", "list:created_at_ms", "list:expires_at_ms",
         "preview:expires_at_ms", "submitted:created_at_ms", "pending_submission:created_at_ms",
         "rejected_submission:created_at_ms", "rejected_submission:decided_at_ms", "member_submission:expires_at_ms",
         "pending_page:created_at_ms", "approve:created_at_ms", "approve:decided_at_ms",
@@ -27,6 +27,7 @@ struct V2VaporGroupInvitationRoutesTests {
             let method: HTTPMethod = route == "list" || route == "pending_page" ? .GET : .POST
             let path: String
             switch route {
+            case "cancel": path = "v2/group-join-requests/\(fixture.requestID.rawValue)/cancel"
             case "create": path = "v2/group-invites"
             case "list": path = "v2/group-invites?room_id=\(fixture.roomID.rawValue)"
             case "preview": path = "v2/group-invites/preview"
@@ -62,10 +63,11 @@ struct V2VaporGroupInvitationRoutesTests {
                         #expect(items.count == 2)
                         value = try #require(items.last)
                         if route == "pending_page" { #expect(root["next_cursor"] as? String == "next-page") }
-                    case "submitted", "pending_submission", "rejected_submission", "approve", "reject", "already":
+                    case "submitted", "pending_submission", "cancelled_submission", "rejected_submission", "approve", "reject", "already":
                         value = try #require(root["request"] as? [String: Any])
                         let expectedKind: String
                         switch route {
+                        case "cancelled_submission": expectedKind = "cancelled"
                         case "pending_submission": expectedKind = "already_pending"
                         case "rejected_submission", "reject": expectedKind = "rejected"
                         case "approve": expectedKind = "approved"
@@ -158,12 +160,13 @@ private actor InvitationClockStore: V2GroupInvitationStore {
     private func record(at date: Date) throws -> V2GroupJoinRequestRecord {
         let state: V2GroupJoinRequestState
         switch route {
+        case "cancel", "cancelled_submission": state = .cancelled
         case "approve", "already": state = .approved
         case "reject", "rejected_submission": state = .rejected
         default: state = .pending
         }
-        let decided = state == .approved || state == .rejected
-        return try .init(requestID: fixture.requestID, inviteID: fixture.inviteID, roomID: fixture.roomID, applicant: .init(userID: fixture.userID, handle: .init("clock_applicant"), displayName: "Clock Applicant", accountKind: .regular), note: "fixture request", state: state, decisionOperationID: decided ? .init(uuid: fixture.operationID) : nil, decidedByUserID: decided ? fixture.userID : nil, createdAt: field == "created_at_ms" ? date : fixture.base, decidedAt: decided ? (field == "decided_at_ms" ? date : fixture.base) : nil)
+        let decided = state == .approved || state == .rejected || state == .cancelled
+        return try .init(requestID: fixture.requestID, inviteID: fixture.inviteID, roomID: fixture.roomID, applicant: .init(userID: fixture.userID, handle: .init("clock_applicant"), displayName: "Clock Applicant", accountKind: .regular), note: "fixture request", state: state, decisionOperationID: decided && state != .cancelled ? .init(uuid: fixture.operationID) : nil, decidedByUserID: decided ? fixture.userID : nil, createdAt: field == "created_at_ms" ? date : fixture.base, decidedAt: decided ? (field == "decided_at_ms" ? date : fixture.base) : nil)
     }
     func create(_ request: V2GroupInviteCreatePersistenceRequest) -> V2StoredGroupInvite { link(at: date) }
     func activeInvites(roomID: RoomID, actorUserID: UserID, now: Date) -> [V2StoredGroupInvite] { [link(at: fixture.base), link(at: date)] }
@@ -171,6 +174,7 @@ private actor InvitationClockStore: V2GroupInvitationStore {
     func preview(tokenDigest: Data, applicantUserID: UserID, now: Date) -> V2GroupInvitePreviewPersistenceOutcome { .available(preview()) }
     func submit(_ request: V2GroupJoinSubmissionPersistenceRequest) throws -> V2GroupJoinSubmissionPersistenceOutcome {
         switch route {
+        case "cancelled_submission": .cancelled(try record(at: date))
         case "pending_submission": .alreadyPending(try record(at: date))
         case "rejected_submission": .rejected(try record(at: date))
         case "member_submission": .alreadyMember(preview())
@@ -180,12 +184,16 @@ private actor InvitationClockStore: V2GroupInvitationStore {
     func pendingRequests(roomID: RoomID, reviewerUserID: UserID, cursor: String?, pageSize: Int, now: Date) throws -> V2GroupJoinRequestRecordPage {
         try .init(requests: [record(at: fixture.base), record(at: date)], nextCursor: "next-page")
     }
-    func approve(roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID, operationID: GroupJoinDecisionOperationID, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2GroupJoinApprovalPersistenceOutcome {
+    func approve(roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID, operationID: GroupJoinDecisionOperationID, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2GroupJoinApprovalPersistenceOutcome {
         route == "already" ? .alreadyDecided(try record(at: date)) : .approved(try record(at: date))
+    }
+    func cancel(roomID: RoomID, requestID: GroupJoinRequestID, applicantUserID: UserID, now: Date) async throws -> V2GroupJoinRequestRecord {
+        #expect(roomID == fixture.roomID && requestID == fixture.requestID && applicantUserID == fixture.userID)
+        return try record(at: date)
     }
     func reject(roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID, operationID: GroupJoinDecisionOperationID, now: Date) throws -> V2GroupJoinDecisionPreparationOutcome { .rejected(try record(at: date)) }
 }
 
 private func invitationClockProfile() throws -> V2CapacityProfile {
-    try .init(id: "standard", limits: .init(maxEligibleMembers: 100, maxCommandsPerWindow: 100, maxFanoutUnitsPerWindow: 1_000, maxOutstandingFanoutUnits: 10_000, maxOutstandingPlans: 100, maxEnumerationPageSize: 100, maxPlannerConcurrency: 2, maxDeliveryConcurrency: 2, retryAfterSeconds: 1))
+    try .init(id: "standard", limits: .init(maxEligibleMembers: 100, maxCommandsPerWindow: 100,    retryAfterSeconds: 1))
 }

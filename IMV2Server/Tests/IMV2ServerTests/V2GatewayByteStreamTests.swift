@@ -8,6 +8,114 @@ import Synchronization
 import Testing
 
 struct V2GatewayByteStreamTests {
+    @Test("NIO required notifications confirm writes or close failed channels", arguments: [0, 1, 2, 3])
+    func nioRequiredNotificationWrite(mode: Int) async throws {
+        let stream = V2GatewayByteStream(
+            frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
+            session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(),
+                capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
+            handler: ByteStreamCommandFake(), registry: V2DeviceConnectionRegistry())
+        let channel = NIOAsyncTestingChannel()
+        let metrics = V2GatewayTransportMetrics()
+        try await channel.testingEventLoop.executeInContext {
+            let handler = try V2NIOGatewayChannelHandler(stream: stream, maximumQueuedInboundBytes: 4096,
+                maximumQueuedInboundChunks: 4, authenticationTimeoutMilliseconds: 60_000,
+                idleTimeoutMilliseconds: 60_000, transportMetrics: metrics)
+            try channel.pipeline.syncOperations.addHandler(handler)
+        }
+        try await channel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: 1)).get()
+        var ready = false
+        for _ in 0..<10_000 {
+            if await stream.supportsRequiredNotifications() { ready = true; break }
+            await Task.yield()
+        }
+        #expect(ready)
+        var hello = IMV2Envelope(); hello.requestID = 1
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        _ = try await stream.receive(encoded(hello, version: 0))
+        var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(protocolVersion)
+        auth.authenticate.accessToken = "opaque"; auth.authenticate.deviceID = "device-a"
+        _ = try await stream.receive(encoded(auth, version: protocolVersion))
+        if mode == 1 { channel.isWritable = false }
+        if mode == 2 {
+            try await channel.pipeline.addHandler(RequiredNotificationFailingWriter(), position: .first).get()
+        }
+        let stalled = RequiredNotificationStallingWriter()
+        if mode == 3 {
+            try await channel.pipeline.addHandler(stalled, position: .first).get()
+        }
+        let notification = V2AccountRoomNotification.resyncRequired(epoch: UUID())
+        let written: Bool
+        if mode == 3 {
+            let send = Task { await stream.sendAccountRoomNotification(notification) }
+            for _ in 0..<10_000 {
+                if stalled.hasPending { break }
+                await Task.yield()
+            }
+            #expect(stalled.hasPending)
+            await channel.testingEventLoop.advanceTime(by: .seconds(11))
+            written = await send.value
+        } else { written = await stream.sendAccountRoomNotification(notification) }
+        #expect(written == (mode == 0))
+        if mode == 0 {
+            let buffer = try #require(await channel.readOutbound(as: ByteBuffer.self))
+            #expect(try decode(Data(buffer.readableBytesView)).body == notification.envelope().body)
+        } else {
+            try await channel.closeFuture.get()
+            #expect(!channel.isActive)
+            let reason: V2GatewayConnectionClosure = switch mode {
+            case 1: .requiredNotificationBackpressure
+            case 3: .requiredNotificationWriteTimeout
+            default: .requestFailure
+            }
+            let snapshot = await metrics.gatewayTransportMetricsSnapshot()
+            #expect(snapshot.closureCount(for: reason) == 1)
+            #expect(V2GatewayConnectionClosure.allCases.reduce(UInt64(0)) {
+                $0 + snapshot.closureCount(for: $1)
+            } == 1)
+        }
+        _ = try await channel.finish(acceptAlreadyClosed: true)
+    }
+
+    @Test("account notifications require authentication and an acknowledged writer", arguments: [false, true])
+    func requiredNotificationWrite(written: Bool) async throws {
+        let stream = V2GatewayByteStream(
+            frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
+            session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(),
+                capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
+            handler: ByteStreamCommandFake(), registry: V2DeviceConnectionRegistry())
+        let recorder = OutboundFrameRecorder()
+        #expect(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+            requiredNotificationWriter: { bytes in
+                await recorder.append(bytes)
+                return written
+            }))
+        let epoch = UUID(), room = RoomID(uuid: UUID())
+        let notification = V2AccountRoomNotification.changed(epoch: epoch, sequence: 1, roomID: room, highWatermark: 3)
+        #expect(!(await stream.sendAccountRoomNotification(notification)))
+        #expect(await recorder.all().isEmpty)
+        var hello = IMV2Envelope(); hello.requestID = 1
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        _ = try await stream.receive(encoded(hello, version: 0))
+        var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(protocolVersion)
+        auth.authenticate.accessToken = "opaque"; auth.authenticate.deviceID = "device-a"
+        _ = try await stream.receive(encoded(auth, version: protocolVersion))
+        #expect(await stream.sendAccountRoomNotification(notification) == written)
+        let frames = await recorder.all()
+        let envelope = try decode(#require(frames.first))
+        #expect(envelope.requestID == 0)
+        #expect(envelope.accountRoomChanged.connectionEpoch == epoch.uuidString.lowercased())
+        #expect(envelope.accountRoomChanged.highWatermark == 3)
+        try await stream.finish()
+        #expect(!(await stream.supportsRequiredNotifications()))
+        #expect(!(await stream.sendAccountRoomNotification(notification)))
+        #expect(!(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+            requiredNotificationWriter: { _ in true })))
+        #expect(await recorder.all().count == 1)
+    }
+
     @Test("subscription responses match canonical UUID identity and preserve opaque spelling", arguments: ["group", "presence"])
     func canonicalSubscriptionIdentity(kind: String) async throws {
         for spelling in ["00000000-0000-0000-0000-abcdef123456", "00000000-0000-0000-0000-ABCDEF123456", "Room-A"] {
@@ -1065,6 +1173,37 @@ struct V2GatewayByteStreamTests {
 
     private func decode(_ bytes: Data) throws -> IMV2Envelope {
         try V2ServerProtobufFrameCodec.decode(V2FrameCodec.decodeExactlyOne(bytes, limits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion])))
+    }
+}
+
+private final class RequiredNotificationFailingWriter: ChannelOutboundHandler, Sendable {
+    typealias OutboundIn = ByteBuffer
+    typealias OutboundOut = ByteBuffer
+    private struct Failure: Error {}
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        promise?.fail(Failure())
+    }
+}
+
+private final class RequiredNotificationStallingWriter: ChannelOutboundHandler, Sendable {
+    typealias OutboundIn = ByteBuffer
+    typealias OutboundOut = ByteBuffer
+    private struct Failure: Error {}
+    private let pending = Mutex<EventLoopPromise<Void>?>(nil)
+    var hasPending: Bool { pending.withLock { $0 != nil } }
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        pending.withLock { $0 = promise }
+    }
+    func close(context: ChannelHandlerContext, mode: CloseMode, promise: EventLoopPromise<Void>?) {
+        let write = pending.withLock { value in
+            let result = value
+            value = nil
+            return result
+        }
+        // The write fails after the timeout resolved its result. This also
+        // proves that a late completion cannot resume the continuation twice.
+        write?.fail(Failure())
+        context.close(mode: mode, promise: promise)
     }
 }
 

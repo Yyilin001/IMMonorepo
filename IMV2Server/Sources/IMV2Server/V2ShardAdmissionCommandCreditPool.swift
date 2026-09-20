@@ -56,7 +56,7 @@ public actor V2ShardAdmissionCommandCreditPool {
     /// 当前被限流。
     case rateLimited
     /// 准入当前不可用，附带原因。
-    case unavailable(FanoutAdmissionUnavailableReason)
+    case unavailable(V2CommandAdmissionUnavailableReason)
   }
 
   fileprivate struct Key: Hashable, Sendable {
@@ -474,16 +474,9 @@ public actor V2ShardAdmissionCommandCreditPool {
       id: lease.id,
       generation: lease.generation,
       validUntil: lease.validUntil,
-      commandWindow: .init(limit: lease.commandWindow.limit, used: effectiveUsed),
-      fanoutWindow: lease.fanoutWindow,
-      maxOutstandingFanoutUnits: lease.maxOutstandingFanoutUnits,
-      maxOutstandingPlans: lease.maxOutstandingPlans
-    )
+      commandWindow: .init(limit: lease.commandWindow.limit, used: effectiveUsed))
     return try .init(
-      lease: effectiveLease,
-      outstandingFanoutUnits: shardState.outstandingFanoutUnits,
-      outstandingPlans: shardState.outstandingPlans
-    )
+      lease: effectiveLease)
   }
 
   private func rejection(for key: Key, now: Date) async throws -> Acquisition {

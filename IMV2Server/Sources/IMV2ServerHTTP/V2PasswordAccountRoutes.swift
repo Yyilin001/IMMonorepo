@@ -47,9 +47,9 @@ public struct V2PasswordAccountRoutes: Sendable {
                 )
                 return try noStoreJSONResponse(.init(accountAssertion: try assertionIssuer.issue(userID: userID, deviceID: deviceID)))
             } catch V2PasswordAccountStoreError.accountAlreadyExists {
-                throw Abort(.conflict)
+                return try conflictResponse(code: "account_handle_taken")
             } catch V2PasswordAccountStoreError.publicHandleAlreadyExists {
-                throw Abort(.conflict)
+                return try conflictResponse(code: "public_handle_taken")
             } catch V2PasswordAccountStoreError.invalidAccountHandle {
                 throw Abort(.badRequest)
             } catch V2PasswordAccountStoreError.invalidPublicIdentity {
@@ -73,14 +73,14 @@ public struct V2PasswordAccountRoutes: Sendable {
             do {
                 try validatePassword(input.password)
                 _ = try canonicalAccountHandle(input.accountHandle)
-                if let retryAfter = try await loginAttemptLimiter.blockedRetryAfterSeconds(accountHandle: input.accountHandle) {
+                if let retryAfter = try await loginAttemptLimiter.consumeAttempt(accountHandle: input.accountHandle) {
                     return noStoreRetryAfterResponse(seconds: retryAfter)
                 }
                 let credential = try await store.passwordCredential(for: input.accountHandle)
                 let candidateHash = credential?.passwordHash ?? V2PasswordHashPolicy.dummyDigest
                 let matches = try await passwords.verify(input.password, created: candidateHash)
                 guard let credential, matches else {
-                    try await loginAttemptLimiter.recordRejectedAttempt(
+                    try await loginAttemptLimiter.auditRejectedAttempt(
                         accountHandle: input.accountHandle,
                         userID: credential?.userID,
                         deviceID: deviceID
@@ -91,7 +91,7 @@ public struct V2PasswordAccountRoutes: Sendable {
                     expected: credential, deviceID: deviceID) else {
                     throw V2PasswordRouteError.rejected
                 }
-                return try noStoreJSONResponse(.init(accountAssertion: try assertionIssuer.issue(userID: credential.userID, deviceID: deviceID)))
+                return try noStoreJSONResponse(.init(accountAssertion: try assertionIssuer.issue(userID: credential.userID, deviceID: deviceID, credentialRevision: credential.revision)))
             } catch V2PasswordRouteError.rejected {
                 throw Abort(.unauthorized)
             } catch V2PasswordAccountStoreError.invalidAccountHandle {
@@ -136,6 +136,11 @@ public struct V2PasswordAccountRoutes: Sendable {
         } catch {
             throw V2PasswordAccountStoreError.invalidPublicIdentity
         }
+    }
+
+    private func conflictResponse(code: String) throws -> Response {
+        let data = try JSONEncoder().encode(["code": code])
+        return .init(status: .conflict, headers: ["Content-Type": "application/json", "Cache-Control": "no-store", "Pragma": "no-cache"], body: .init(data: data))
     }
 
     /// 返回 no-store JSON。

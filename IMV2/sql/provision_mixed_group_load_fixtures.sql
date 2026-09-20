@@ -31,7 +31,7 @@ CREATE TEMP TABLE imv2_mixed_group_fixture_specs (
     fixture_name text PRIMARY KEY,
     room_id uuid UNIQUE NOT NULL,
     member_count bigint NOT NULL,
-    delivery_mode text NOT NULL,
+    capacity_class text NOT NULL,
     room_shard_id text NOT NULL
 ) ON COMMIT DROP;
 
@@ -40,25 +40,25 @@ SELECT :'capacity_profile_id'::text AS capacity_profile_id,
        :expected_sender_count::bigint AS expected_sender_count;
 
 INSERT INTO imv2_mixed_group_fixture_specs
-    (fixture_name, room_id, member_count, delivery_mode, room_shard_id)
+    (fixture_name, room_id, member_count, capacity_class, room_shard_id)
 VALUES
-    ('sf-20',   '00000000-0000-4000-8000-000000000014',     20, 'standard_fanout',   'rooms-load-00'),
-    ('sf-200',  '00000000-0000-4000-8000-0000000000c8',    200, 'standard_fanout',   'rooms-load-01'),
-    ('sf-1000', '00000000-0000-4000-8000-0000000003e8',   1000, 'standard_fanout',   'rooms-load-02'),
-    ('sf-5000', '00000000-0000-4000-8000-000000001388',   5000, 'standard_fanout',   'rooms-load-03'),
-    ('hy-5001', '00000000-0000-4000-8000-000000001389',   5001, 'large_group_hybrid','rooms-load-04'),
-    ('hy-10k-00','00000000-0000-4000-8000-000000002710',  10000, 'large_group_hybrid','rooms-load-05'),
-    ('hy-10k-01','00000000-0000-4001-8000-000000002710',  10000, 'large_group_hybrid','rooms-load-06'),
-    ('hy-10k-02','00000000-0000-4002-8000-000000002710',  10000, 'large_group_hybrid','rooms-load-07'),
-    ('hy-10k-03','00000000-0000-4003-8000-000000002710',  10000, 'large_group_hybrid','rooms-load-04'),
-    ('hy-10k-04','00000000-0000-4004-8000-000000002710',  10000, 'large_group_hybrid','rooms-load-05'),
-    ('hy-10k-05','00000000-0000-4005-8000-000000002710',  10000, 'large_group_hybrid','rooms-load-06'),
-    ('hy-10k-06','00000000-0000-4006-8000-000000002710',  10000, 'large_group_hybrid','rooms-load-07'),
-    ('hy-10k-07','00000000-0000-4007-8000-000000002710',  10000, 'large_group_hybrid','rooms-load-04'),
-    ('hy-10k-08','00000000-0000-4008-8000-000000002710',  10000, 'large_group_hybrid','rooms-load-05'),
-    ('hy-10k-09','00000000-0000-4009-8000-000000002710',  10000, 'large_group_hybrid','rooms-load-06'),
-    ('hy-50k',  '00000000-0000-4000-8000-00000000c350',  50000, 'large_group_hybrid','rooms-load-06'),
-    ('hy-100k', '00000000-0000-4000-8000-0000000186a0', 100000, 'large_group_hybrid','rooms-load-07');
+    ('sf-20',   '00000000-0000-4000-8000-000000000014',     20, 'standard',   'rooms-load-00'),
+    ('sf-200',  '00000000-0000-4000-8000-0000000000c8',    200, 'standard',   'rooms-load-01'),
+    ('sf-1000', '00000000-0000-4000-8000-0000000003e8',   1000, 'standard',   'rooms-load-02'),
+    ('sf-5000', '00000000-0000-4000-8000-000000001388',   5000, 'standard',   'rooms-load-03'),
+    ('hy-5001', '00000000-0000-4000-8000-000000001389',   5001, 'large','rooms-load-04'),
+    ('hy-10k-00','00000000-0000-4000-8000-000000002710',  10000, 'large','rooms-load-05'),
+    ('hy-10k-01','00000000-0000-4001-8000-000000002710',  10000, 'large','rooms-load-06'),
+    ('hy-10k-02','00000000-0000-4002-8000-000000002710',  10000, 'large','rooms-load-07'),
+    ('hy-10k-03','00000000-0000-4003-8000-000000002710',  10000, 'large','rooms-load-04'),
+    ('hy-10k-04','00000000-0000-4004-8000-000000002710',  10000, 'large','rooms-load-05'),
+    ('hy-10k-05','00000000-0000-4005-8000-000000002710',  10000, 'large','rooms-load-06'),
+    ('hy-10k-06','00000000-0000-4006-8000-000000002710',  10000, 'large','rooms-load-07'),
+    ('hy-10k-07','00000000-0000-4007-8000-000000002710',  10000, 'large','rooms-load-04'),
+    ('hy-10k-08','00000000-0000-4008-8000-000000002710',  10000, 'large','rooms-load-05'),
+    ('hy-10k-09','00000000-0000-4009-8000-000000002710',  10000, 'large','rooms-load-06'),
+    ('hy-50k',  '00000000-0000-4000-8000-00000000c350',  50000, 'large','rooms-load-06'),
+    ('hy-100k', '00000000-0000-4000-8000-0000000186a0', 100000, 'large','rooms-load-07');
 
 DO $guard$
 DECLARE
@@ -156,9 +156,9 @@ $pool_guard$;
 
 INSERT INTO im_v2.rooms
     (room_id, room_kind, room_shard_id, room_sequence,
-     membership_revision, capacity_profile_id, delivery_mode, created_at)
+     membership_revision, capacity_profile_id, capacity_class, created_at)
 SELECT fixture.room_id, 'group', fixture.room_shard_id, 0,
-       1, :'capacity_profile_id', fixture.delivery_mode, now()
+       1, :'capacity_profile_id', fixture.capacity_class, now()
 FROM imv2_mixed_group_fixture_specs AS fixture;
 
 INSERT INTO im_v2.group_rooms (room_id, owner_user_id, title, created_at)
@@ -184,18 +184,8 @@ JOIN imv2_mixed_group_member_pool AS member
   ON member.ordinal <= fixture.member_count;
 
 INSERT INTO im_v2.room_admission
-    (room_id, eligible_member_count,
-     command_window_limit, command_window_used,
-     fanout_window_limit, fanout_window_used,
-     max_outstanding_fanout_units, outstanding_fanout_units,
-     max_outstanding_plans, outstanding_plans,
-     shard_lease_id, shard_lease_generation)
-SELECT fixture.room_id, fixture.member_count,
-       pool.command_window_limit, 0,
-       pool.fanout_window_limit, 0,
-       pool.max_outstanding_fanout_units, 0,
-       pool.max_outstanding_plans, 0,
-       pool.lease_id, pool.generation
+    (room_id, eligible_member_count, command_window_limit, command_window_used, shard_lease_id, shard_lease_generation)
+SELECT fixture.room_id, fixture.member_count, pool.command_window_limit, 0, pool.lease_id, pool.generation
 FROM imv2_mixed_group_fixture_specs AS fixture
 JOIN im_v2.shard_admission_pools AS pool
   ON pool.room_shard_id = fixture.room_shard_id
@@ -203,7 +193,7 @@ JOIN im_v2.shard_admission_pools AS pool
 
 COMMIT;
 
-SELECT fixture.fixture_name, room.room_id, room.delivery_mode,
+SELECT fixture.fixture_name, room.room_id, room.capacity_class,
        room.room_shard_id, room.capacity_profile_id,
        count(membership.user_id) AS active_members
 FROM (VALUES
@@ -228,6 +218,6 @@ FROM (VALUES
 JOIN im_v2.rooms AS room USING (room_id)
 JOIN im_v2.room_memberships AS membership USING (room_id)
 WHERE membership.left_revision IS NULL
-GROUP BY fixture.fixture_name, room.room_id, room.delivery_mode,
+GROUP BY fixture.fixture_name, room.room_id, room.capacity_class,
          room.room_shard_id, room.capacity_profile_id
 ORDER BY active_members;

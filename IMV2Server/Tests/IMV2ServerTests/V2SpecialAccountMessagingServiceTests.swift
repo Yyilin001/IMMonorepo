@@ -14,21 +14,12 @@ struct V2SpecialAccountMessagingServiceTests {
         let profile = try V2CapacityProfile(id: "standard", limits: .init(
             maxEligibleMembers: 10,
             maxCommandsPerWindow: 10,
-            maxFanoutUnitsPerWindow: 10,
-            maxOutstandingFanoutUnits: 10,
-            maxOutstandingPlans: 10,
-            maxEnumerationPageSize: 10,
-            maxPlannerConcurrency: 1,
-            maxDeliveryConcurrency: 1,
+
             retryAfterSeconds: 1
         ))
         let roomAdmission = try RoomAdmissionState(
             eligibleMemberCount: 2,
-            commandWindow: .init(limit: 10),
-            fanoutWindow: .init(limit: 10),
-            outstandingFanoutUnits: 0,
-            outstandingPlans: 0
-        )
+            commandWindow: .init(limit: 10))
         let roomState = V2RoomCommandState(
             roomID: roomID,
             nextRoomSequence: 1,
@@ -39,14 +30,7 @@ struct V2SpecialAccountMessagingServiceTests {
                 id: try .init("00000000-0000-0000-0000-000000000a04"),
                 generation: 1,
                 validUntil: now.addingTimeInterval(60),
-                commandWindow: .init(limit: 10),
-                fanoutWindow: .init(limit: 10),
-                maxOutstandingFanoutUnits: 10,
-                maxOutstandingPlans: 10
-            ),
-            outstandingFanoutUnits: 0,
-            outstandingPlans: 0
-        )
+                commandWindow: .init(limit: 10)))
         let specialStore = SpecialAccountStoreSpy(account: .init(userID: accountID, stableKey: "system_notice", kind: .system))
         let direct = try V2DirectMessagingService(
             store: DirectRoomStoreSpy(roomID: roomID),

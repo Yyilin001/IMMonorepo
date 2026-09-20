@@ -127,6 +127,8 @@ let package = Package(
                 .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
                 .product(name: "Vapor", package: "vapor"),
                 .product(name: "VaporTesting", package: "vapor"),
+                .product(name: "NIOTLS", package: "swift-nio"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
                 .product(name: "AsyncKit", package: "async-kit"),
                 .product(name: "SQLKit", package: "sql-kit"),
                 .product(name: "NIOCore", package: "swift-nio"),

@@ -71,7 +71,8 @@ private struct V2UnsupportedGatewayTestDependency: Error,
     V2GatewayGroupAudienceImportHandling,
     V2GatewayGroupEventLogHandling,
     V2GatewayRoomMembershipDirectoryHandling,
-    V2GatewayRoomSummaryHandling,
+    V2RoomRecoveryCommandHandling,
+    V2AccountRoomChangesStarting,
     V2GatewaySocialRelationshipHandling,
     V2GatewayModerationHandling,
     V2GatewayConversationCapabilitiesHandling,
@@ -79,6 +80,10 @@ private struct V2UnsupportedGatewayTestDependency: Error,
     V2GroupRolePolicyBaselineReading,
     V2GatewayForwardMessagesHandling
 {
+    func startAccountRoomChanges(connectionID _: UUID, userID _: UserID) async throws -> String { throw self }
+    func list(_: IMV2UserRoomDirectoryList, actorUserID _: UserID) async throws -> IMV2Envelope { throw self }
+    func batch(_: IMV2RoomLatestVisibleBatch, actorUserID _: UserID) async throws -> IMV2Envelope { throw self }
+    func batch(_: IMV2RoomSyncStateBatch, actorUserID _: UserID) async throws -> IMV2Envelope { throw self }
     func change(_: V2AuthenticatedMembershipChange) async throws -> V2RoomMembershipChangeOutcome { throw self }
     func withdraw(_: V2AuthenticatedMessageWithdrawal) async throws -> V2MessageWithdrawalOutcome { throw self }
     func change(_: V2AuthenticatedMessageReaction) async throws -> V2MessageReactionOutcome { throw self }
@@ -100,7 +105,6 @@ private struct V2UnsupportedGatewayTestDependency: Error,
     func pull(roomID _: RoomID, actorUserID _: UserID, afterRoomSequence _: UInt64, pageSize _: Int) async throws -> V2GroupEventLogPage { throw self }
     func subscribe(roomID _: RoomID, actorUserID _: UserID) async throws -> V2GroupEventSubscription { throw self }
     func list(_: V2RoomMembershipDirectoryRequest) async throws -> V2RoomMembershipDirectoryPage { throw self }
-    func summaries(_: V2RoomSummaryRequest) async throws -> V2RoomSummaryPage { throw self }
     func changeRelationship(actorUserID _: UserID, operationID _: RelationshipOperationID, targetUserID _: UserID, action _: V2RelationshipAction) async throws -> V2RelationshipOutcome { throw self }
     func changeUserBlock(actorUserID _: UserID, operationID _: UserBlockOperationID, targetUserID _: UserID, action _: V2UserBlockAction) async throws -> V2UserBlockOutcome { throw self }
     func apply(_: V2AuthenticatedModeration) async throws -> V2ModerationOutcome { throw self }
@@ -127,7 +131,8 @@ func makeGatewayDomainCommandHandler(
     groupEventLog: V2GroupEventLogService? = nil,
     foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting = V2DiscardingForegroundGroupEventHintPublisher(),
     membershipDirectory: V2RoomMembershipDirectoryService? = nil,
-    roomSummaries: V2RoomSummaryService? = nil,
+    roomRecovery: (any V2RoomRecoveryCommandHandling)? = nil,
+    accountChanges: (any V2AccountRoomChangesStarting)? = nil,
     socialRelationships: V2SocialRelationshipService? = nil,
     moderation: V2ModerationService? = nil,
     conversationCapabilities: V2ConversationCapabilitiesService? = nil,
@@ -155,7 +160,8 @@ func makeGatewayDomainCommandHandler(
         groupEventLogHandler: groupEventLog.map { $0 as any V2GatewayGroupEventLogHandling } ?? unsupported,
         foregroundGroupEventHints: foregroundGroupEventHints,
         membershipDirectoryHandler: membershipDirectory.map { $0 as any V2GatewayRoomMembershipDirectoryHandling } ?? unsupported,
-        roomSummaryHandler: roomSummaries.map { $0 as any V2GatewayRoomSummaryHandling } ?? unsupported,
+        roomRecovery: roomRecovery ?? unsupported,
+        accountChanges: accountChanges ?? unsupported,
         socialRelationshipHandler: socialRelationships.map { $0 as any V2GatewaySocialRelationshipHandling } ?? unsupported,
         moderationHandler: moderation.map { $0 as any V2GatewayModerationHandling } ?? unsupported,
         conversationCapabilitiesHandler: conversationCapabilities.map { $0 as any V2GatewayConversationCapabilitiesHandling } ?? unsupported,
@@ -204,41 +210,23 @@ extension PostgresV2RoomWriteStore {
         self.init(
             database: database,
             strangerMessagePolicy: try! .init(maximumMessagesPerWindow: 3, window: 86_400),
-            shadowForwarder: V2DiscardingUserShardProjectionShadower(),
-            contentReviewMode: .enabled,
-            directFanoutMode: .planner
-        )
+            contentReviewMode: .enabled)
     }
 
     init(database: any Database, contentReviewMode: V2ContentReviewMode) {
         self.init(
             database: database,
             strangerMessagePolicy: try! .init(maximumMessagesPerWindow: 3, window: 86_400),
-            shadowForwarder: V2DiscardingUserShardProjectionShadower(),
-            contentReviewMode: contentReviewMode,
-            directFanoutMode: .planner
-        )
+            contentReviewMode: contentReviewMode)
     }
 
     init(database: any Database, strangerMessagePolicy: V2StrangerMessagePolicy) {
         self.init(
             database: database,
             strangerMessagePolicy: strangerMessagePolicy,
-            shadowForwarder: V2DiscardingUserShardProjectionShadower(),
-            contentReviewMode: .enabled,
-            directFanoutMode: .planner
-        )
+            contentReviewMode: .enabled)
     }
 
-    init(database: any Database, directFanoutMode: V2DirectFanoutMode) {
-        self.init(
-            database: database,
-            strangerMessagePolicy: try! .init(maximumMessagesPerWindow: 3, window: 86_400),
-            shadowForwarder: V2DiscardingUserShardProjectionShadower(),
-            contentReviewMode: .enabled,
-            directFanoutMode: directFanoutMode
-        )
-    }
 }
 
 extension PostgresV2MessageEditStore {
@@ -268,63 +256,5 @@ extension PostgresV2SocialRelationshipStore {
 extension PostgresV2ConversationCapabilitiesStore {
     init(database: any Database) {
         self.init(database: database, shadowForwarder: V2DiscardingUserShardProjectionShadower())
-    }
-}
-
-private struct V2ObservedFanoutDeliveryRouteResolver: V2FanoutDeliveryRouteResolving {
-    func routes(for leases: [V2FanoutDeliveryLease]) async throws -> [V2UserShardRoute] {
-        leases.map(\.observedRoute)
-    }
-}
-
-extension V2FanoutDeliveryWorker {
-    init(
-        store: any V2FanoutDeliveryStore,
-        bucket: String? = nil,
-        leaseDuration: TimeInterval = 30,
-        liveNotifier: (any V2LiveSyncNotifier)? = nil,
-        retryPolicy: V2DurableRetryPolicy = .standard,
-        claimScheduler: V2FanoutDeliveryClaimScheduler = .init(),
-        commitBatchSize: Int = 128,
-        batchFailureIsolationAttempt: Int = 2,
-        maximumConcurrentCommitBatches: Int = 1,
-        now: @escaping @Sendable () -> Date = Date.init
-    ) {
-        self.init(
-            store: store,
-            bucket: bucket,
-            leaseDuration: leaseDuration,
-            liveNotifier: liveNotifier,
-            routeResolver: V2ObservedFanoutDeliveryRouteResolver(),
-            retryPolicy: retryPolicy,
-            claimScheduler: claimScheduler,
-            commitBatchSize: commitBatchSize,
-            batchFailureIsolationAttempt: batchFailureIsolationAttempt,
-            maximumConcurrentCommitBatches: maximumConcurrentCommitBatches,
-            now: now
-        )
-    }
-}
-
-extension V2FanoutDeliveryStore {
-    func claimPending(
-        bucket: String?,
-        now: Date,
-        leaseDuration: TimeInterval,
-        limit: Int
-    ) async throws -> [V2FanoutDeliveryLease] {
-        for lane in [.fresh, .retryDue, .expiredLease] as [V2FanoutDeliveryClaimLane] {
-            let leases = try await claimPending(
-                bucket: bucket,
-                lane: lane,
-                now: now,
-                leaseDuration: leaseDuration,
-                limit: limit
-            )
-            if !leases.isEmpty {
-                return leases
-            }
-        }
-        return []
     }
 }

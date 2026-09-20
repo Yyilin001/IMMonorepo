@@ -38,17 +38,20 @@ public struct V2TrustedDeviceRegistration: Sendable {
     public let deviceID: DeviceID
     public let operationID: UUID
     public let metadata: V2DeviceRegistrationMetadata
+    public let credentialRevision: Int64?
 
     public init(
         userID: UserID,
         deviceID: DeviceID,
         operationID: UUID,
-        metadata: V2DeviceRegistrationMetadata = .unknown
+        metadata: V2DeviceRegistrationMetadata = .unknown,
+        credentialRevision: Int64? = nil
     ) {
         self.userID = userID
         self.deviceID = deviceID
         self.operationID = operationID
         self.metadata = metadata
+        self.credentialRevision = credentialRevision
     }
 }
 
@@ -297,6 +300,9 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
             let metadata = try normalizedMetadata(request.metadata)
             if let cancellation { try await V2PostgresDeviceRegistrationCancellationService.lock(sql, request: cancellation) }
             try await lockAccountState(sql, userID: userUUID)
+            if let revision = request.credentialRevision {
+                guard try await sql.raw("SELECT 1 FROM im_v2.account_password_credentials WHERE user_id = \(bind: userUUID) AND credential_revision = \(bind: revision)").first() != nil else { return .deviceUnavailable }
+            }
             guard !(try await isAccountDisabled(sql, userID: userUUID)) else { return .deviceUnavailable }
             // Special accounts are operated only through the trusted service
             // boundary. Never mint a client/device credential that could make

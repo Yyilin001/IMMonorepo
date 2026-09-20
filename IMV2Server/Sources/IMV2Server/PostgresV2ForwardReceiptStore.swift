@@ -17,7 +17,7 @@ public struct PostgresV2ForwardReceiptStore: Sendable {
 
     /// 记录或重放一次终态回执。
     ///
-    /// 顺序为：复核导出原文与摘要未变、命中已有回执则校验一致性、锁定源房间并校验归属、
+    /// 顺序为：复核导出身份与摘要未变、命中已有回执则校验一致性、锁定源房间并校验归属、
     /// 写入回执、再读回校验。归属校验会与新导出串行化配额释放，并在归属迁移后栅栏掉旧源端工作器；
     /// 完全一致的终态回放不需要重新授权原始消息。
     ///
@@ -29,17 +29,15 @@ public struct PostgresV2ForwardReceiptStore: Sendable {
     ///   ``V2ForwardExportError/idempotencyConflict`` 或
     ///   ``V2ForwardExportError/corruptPersistenceState``。
     public func record(_ receipt: V2ForwardTerminalReceipt, now: Date) async throws {
-        let export = receipt.export
-        let intent = export.intent
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ForwardExportError.corruptPersistenceState }
             guard let original = try await sql.raw("""
-                SELECT payload, payload_digest FROM im_v2.message_forward_exports
-                WHERE export_id = \(bind: intent.exportID)
+                SELECT source_room_id, source_shard_id, source_epoch, payload_digest FROM im_v2.message_forward_exports
+                WHERE export_id = \(bind: receipt.exportID)
                 """).first(decoding: ReceiptExportRow.self),
-                  original.payload == export.payload, original.digest == export.digest
+                  original.digest == receipt.payloadDigest
             else { throw V2ForwardExportError.idempotencyConflict }
-            if let prior = try await read(exportID: intent.exportID, sql: sql) {
+            if let prior = try await read(exportID: receipt.exportID, sql: sql) {
                 try match(prior, receipt: receipt)
                 return
             }
@@ -47,10 +45,10 @@ public struct PostgresV2ForwardReceiptStore: Sendable {
             // source worker after ownership has changed. Exact terminal replay
             // above remains valid without reauthorizing the original message.
             guard let room = try await sql.raw("""
-                SELECT room_shard_id, owner_epoch FROM im_v2.rooms
-                WHERE room_id = \(bind: intent.sourceRoomID) FOR UPDATE
+                SELECT room_shard_id, owner_epoch, migration_fence_id FROM im_v2.rooms
+                WHERE room_id = \(bind: original.sourceRoomID) FOR UPDATE
                 """).first(decoding: ReceiptOwnerRow.self),
-                  room.shardID == intent.sourceShardID, room.epoch == intent.sourceEpoch
+                  room.shardID == original.sourceShardID, room.epoch == original.sourceEpoch, room.migrationFenceID == nil
             else { throw V2ForwardExportError.ownerChanged }
             let state: String, messageID: UUID?, sequence: Int64?, code: String?
             switch receipt.outcome {
@@ -66,14 +64,41 @@ public struct PostgresV2ForwardReceiptStore: Sendable {
             try await sql.raw("""
                 INSERT INTO im_v2.message_forward_export_receipts
                     (export_id, payload_digest, state, result_message_id, result_room_sequence, error_code, recorded_at)
-                VALUES (\(bind: intent.exportID), \(bind: export.digest), \(bind: state),
+                VALUES (\(bind: receipt.exportID), \(bind: receipt.payloadDigest), \(bind: state),
                         \(bind: messageID), \(bind: sequence), \(bind: code), \(bind: now))
                 ON CONFLICT (export_id) DO NOTHING
                 """).run()
-            guard let saved = try await read(exportID: intent.exportID, sql: sql)
+            guard let saved = try await read(exportID: receipt.exportID, sql: sql)
             else { throw V2ForwardExportError.corruptPersistenceState }
             try match(saved, receipt: receipt)
         }
+    }
+
+    /// Replay a terminal pair without loading its content envelope. The export
+    /// identity remains authoritative; a changed source binding is a conflict.
+    func terminalStatus(actor: UserID, operation: MessageForwardOperationID,
+                        source: V2ForwardMessageReference, target: RoomID) async throws -> V2ForwardImportOutcome? {
+        guard let actorID = actor.uuidValue, let operationID = operation.uuidValue,
+              let sourceID = source.messageID.uuidValue, let sourceRoom = source.roomID.uuidValue,
+              let targetID = target.uuidValue else { throw V2ForwardExportError.invalidRequest }
+        guard let sql = database as? any SQLDatabase else { throw V2ForwardExportError.corruptPersistenceState }
+        guard let row = try await sql.raw("""
+            SELECT export.source_room_id, export.source_content_revision,
+                   export.payload_digest AS export_digest,
+                   receipt.payload_digest, receipt.state, receipt.result_message_id,
+                   receipt.result_room_sequence, receipt.error_code
+            FROM im_v2.message_forward_exports AS export
+            JOIN im_v2.message_forward_export_receipts AS receipt USING (export_id)
+            WHERE export.actor_user_id = \(bind: actorID) AND export.operation_id = \(bind: operationID)
+              AND export.source_message_id = \(bind: sourceID) AND export.target_room_id = \(bind: targetID)
+            """).first(decoding: TerminalPairRow.self) else { return nil }
+        guard row.sourceRoomID == sourceRoom, row.sourceRevision == source.revision.signedValue else {
+            throw V2ForwardExportError.idempotencyConflict
+        }
+        guard row.exportDigest.count == 32, row.exportDigest == row.receipt.digest else {
+            throw V2ForwardExportError.corruptPersistenceState
+        }
+        return try row.receipt.outcome
     }
 
     /// 查询导出当前的终态结果。
@@ -94,11 +119,11 @@ public struct PostgresV2ForwardReceiptStore: Sendable {
     ///   - sql: 当前事务使用的数据库连接。
     /// - Returns: 回执行；不存在时返回 `nil`。
     /// - Throws: 查询失败时抛出。
-    private func read(exportID: UUID, sql: any SQLDatabase) async throws -> ReceiptRow? {
+    private func read(exportID: UUID, sql: any SQLDatabase) async throws -> V2ForwardReceiptRow? {
         try await sql.raw("""
             SELECT payload_digest, state, result_message_id, result_room_sequence, error_code
             FROM im_v2.message_forward_export_receipts WHERE export_id = \(bind: exportID)
-            """).first(decoding: ReceiptRow.self)
+            """).first(decoding: V2ForwardReceiptRow.self)
     }
 
     /// 校验已有回执与本次终态结果完全一致。
@@ -108,21 +133,23 @@ public struct PostgresV2ForwardReceiptStore: Sendable {
     ///   - receipt: 本次提交的终态回执。
     /// - Throws: 摘要或结果不一致时抛出
     ///   ``V2ForwardExportError/idempotencyConflict``。
-    private func match(_ row: ReceiptRow, receipt: V2ForwardTerminalReceipt) throws {
-        guard row.digest == receipt.export.digest, try row.outcome == receipt.outcome
+    private func match(_ row: V2ForwardReceiptRow, receipt: V2ForwardTerminalReceipt) throws {
+        guard row.digest == receipt.payloadDigest, try row.outcome == receipt.outcome
         else { throw V2ForwardExportError.idempotencyConflict }
     }
 }
 
 private struct ReceiptExportRow: Decodable {
-    let payload: Data; let digest: Data
-    enum CodingKeys: String, CodingKey { case payload; case digest = "payload_digest" }
+    let sourceRoomID: UUID; let sourceShardID: String; let sourceEpoch: Int64; let digest: Data
+    enum CodingKeys: String, CodingKey {
+        case sourceRoomID = "source_room_id", sourceShardID = "source_shard_id", sourceEpoch = "source_epoch", digest = "payload_digest"
+    }
 }
 private struct ReceiptOwnerRow: Decodable {
-    let shardID: String; let epoch: Int64
-    enum CodingKeys: String, CodingKey { case shardID = "room_shard_id"; case epoch = "owner_epoch" }
+    let shardID: String; let epoch: Int64; let migrationFenceID: UUID?
+    enum CodingKeys: String, CodingKey { case shardID = "room_shard_id"; case epoch = "owner_epoch"; case migrationFenceID = "migration_fence_id" }
 }
-private struct ReceiptRow: Decodable {
+struct V2ForwardReceiptRow: Decodable {
     let digest: Data; let state: String; let messageID: UUID?; let sequence: Int64?; let code: String?
     enum CodingKeys: String, CodingKey {
         case digest = "payload_digest", state, messageID = "result_message_id"
@@ -138,5 +165,22 @@ private struct ReceiptRow: Decodable {
             }
             throw V2ForwardExportError.corruptPersistenceState
         }
+    }
+}
+
+private struct TerminalPairRow: Decodable {
+    let sourceRoomID: UUID
+    let sourceRevision: Int64
+    let exportDigest: Data
+    let receipt: V2ForwardReceiptRow
+    enum CodingKeys: String, CodingKey {
+        case sourceRoomID = "source_room_id", sourceRevision = "source_content_revision", exportDigest = "export_digest"
+    }
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        sourceRoomID = try values.decode(UUID.self, forKey: .sourceRoomID)
+        sourceRevision = try values.decode(Int64.self, forKey: .sourceRevision)
+        exportDigest = try values.decode(Data.self, forKey: .exportDigest)
+        receipt = try V2ForwardReceiptRow(from: decoder)
     }
 }

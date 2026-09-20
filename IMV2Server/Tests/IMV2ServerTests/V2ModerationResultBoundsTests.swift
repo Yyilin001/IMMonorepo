@@ -14,7 +14,7 @@ struct V2ModerationResultBoundsTests {
                       messageRevision: field == "message" ? value : nil,
                       membershipRevision: field == "membership" ? value : nil,
                       muteUntil: nil, roomSequence: field == "sequence" ? value : 1,
-                      eventID: .init("event"), fanoutPlanID: .init("plan"), createdAt: .distantPast)
+                      eventID: .init("event"), createdAt: .distantPast)
         }
         if value == 0 || value > UInt64(Int64.max) {
             #expect(throws: V2RevisionValidationError.outOfRange) { _ = try result() }

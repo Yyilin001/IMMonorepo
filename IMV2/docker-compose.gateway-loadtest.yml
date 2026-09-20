@@ -13,10 +13,8 @@ services:
     environment:
       # 负载画像显式固定单聊模式，保证历史数字与当前运行的写入路径一致；
       # 部署默认值（room_log）只影响没有显式配置的环境。
-      IM_V2_DIRECT_FANOUT_MODE: planner
       # 新建标准群同样显式固定历史行为（逐用户投递），否则默认值切换会让同一份
       # 负载画像在两次运行之间改变写入路径，历史数字不再可比。
-      IM_V2_GROUP_DELIVERY_AUTHORITY_MODE: fanout
       # The normal local profile intentionally allows only 1,000 commands per
       # 24-hour fenced lease. A distinct immutable profile keeps performance
       # testing from weakening or mutating that application safety contract.

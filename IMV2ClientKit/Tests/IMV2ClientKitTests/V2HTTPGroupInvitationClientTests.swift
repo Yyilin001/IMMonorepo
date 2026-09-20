@@ -87,6 +87,37 @@ struct V2HTTPGroupInvitationClientTests {
         }
     }
 
+    @Test("cancellation binds request and room and accepts only complete terminal responses", arguments: ["cancelled", "approved", "rejected", "pending", "approving", "wrong-room", "wrong-request", "missing-time"])
+    func cancelContract(_ scenario: String) async throws {
+        let baseURL = try #require(URL(string: "https://account.example"))
+        let room = RoomID(uuid: UUID()), requestID = GroupJoinRequestID(uuid: UUID())
+        let endpoint = baseURL.appendingPathComponent("v2/group-join-requests/\(requestID.rawValue)/cancel")
+        let state = scenario.contains("-") ? "cancelled" : scenario
+        let body: [String: Any] = [
+            "request_id": scenario == "wrong-request" ? UUID().uuidString : requestID.rawValue,
+            "room_id": scenario == "wrong-room" ? UUID().uuidString : room.rawValue,
+            "invite_id": UUID().uuidString,
+            "applicant": ["user_id": UUID().uuidString, "handle": "applicant", "display_name": "Applicant", "account_kind": "regular"],
+            "state": state, "created_at_ms": 1750000000000,
+            "decided_at_ms": scenario == "missing-time" || state == "pending" || state == "approving" ? NSNull() : 1750000001000
+        ]
+        let transport = RecordingGroupInvitationTransport(responses: [try response(status: 200, endpoint: endpoint, body: String(decoding: JSONSerialization.data(withJSONObject: body), as: UTF8.self))])
+        let client = try V2HTTPGroupInvitationClient(baseURL: baseURL, credentials: GroupInvitationCredentials(accessToken: "edge-token", deviceID: .init(uuid: UUID())), transport: transport)
+        if ["cancelled", "approved", "rejected"].contains(scenario) {
+            let result = try await client.cancel(roomID: room, requestID: requestID)
+            #expect(result.state.rawValue == scenario && result.requestID == requestID)
+        } else {
+            await #expect(throws: V2ClientGroupInvitationError.invalidResponse) { _ = try await client.cancel(roomID: room, requestID: requestID) }
+        }
+        let sent = try #require(await transport.requests().first)
+        #expect(sent.url == endpoint && sent.httpMethod == "POST")
+        #expect(sent.value(forHTTPHeaderField: "Authorization") == "Bearer edge-token")
+        #expect(sent.value(forHTTPHeaderField: "Cache-Control") == "no-store")
+        let data = try #require(sent.httpBody)
+        let payload = try #require(try JSONSerialization.jsonObject(with: data) as? [String: String])
+        #expect(payload == ["room_id": room.rawValue])
+    }
+
     private func response(status: Int, endpoint: URL, body: String) throws -> (Data, HTTPURLResponse) {
         var headers = ["Cache-Control": "no-store"]
         if status == 200 { headers["Content-Type"] = "application/json" }

@@ -16,6 +16,10 @@ public enum V2AccountAssertionError: Error, Equatable, Sendable {
 
 /// 基于 HMAC 的短时账号断言签发与校验实现。
 ///
+/// 这是有效期内可重复验证的 bearer 凭据，不提供一次性消费保证或设备私钥持有证明。
+/// 注册与旧注册清理共用它完成同一次登录交接；幂等和取消边界由各操作账本负责。
+/// 设备 ID 绑定只限制目标标识，持有断言的调用方仍可在有效期内提交该标识。
+///
 /// 断言绑定到即将注册的具体 V2 设备。由于载荷只包含不透明 UUID 与时间戳，
 /// 这里选择签名而非加密；移动客户端在把它交给设备凭据边界之后既不会记录也不会保留它。
 public struct V2HMACAccountAssertionIssuer: V2DeviceBoundAccountAssertionVerifier, Sendable {
@@ -75,7 +79,7 @@ public struct V2HMACAccountAssertionIssuer: V2DeviceBoundAccountAssertionVerifie
     /// - Returns: 形如 `v2a1.<载荷>.<签名>` 的断言字符串。
     /// - Throws: 时刻无法表示为毫秒时间戳，或到期时间不晚于签发时间时抛出
     ///   ``V2AccountAssertionError/invalidClock``。
-    public func issue(userID: UserID, deviceID: DeviceID) throws -> String {
+    public func issue(userID: UserID, deviceID: DeviceID, credentialRevision: Int64 = 1) throws -> String {
         let issuedAt = now()
         let issuedMilliseconds = issuedAt.timeIntervalSince1970 * 1_000
         let expiry = issuedAt.addingTimeInterval(lifetime).timeIntervalSince1970 * 1_000
@@ -88,7 +92,8 @@ public struct V2HMACAccountAssertionIssuer: V2DeviceBoundAccountAssertionVerifie
         let claims = Claims(
             userID: userID.rawValue,
             deviceID: deviceID.rawValue,
-            expiresAtMilliseconds: expiresAtMilliseconds
+            expiresAtMilliseconds: expiresAtMilliseconds,
+            credentialRevision: credentialRevision
         )
         let payload = try JSONEncoder().encode(claims)
         let encodedPayload = base64URL(payload)
@@ -102,7 +107,7 @@ public struct V2HMACAccountAssertionIssuer: V2DeviceBoundAccountAssertionVerifie
     /// - Returns: 断言确认的用户标识。
     /// - Throws: 断言非法、过期或时钟不可用时抛出。
     public func verifiedUserID(for accountAssertion: String) throws -> UserID {
-        try verifiedClaims(for: accountAssertion, expectedDeviceID: nil)
+        try verifiedClaims(for: accountAssertion, expectedDeviceID: nil).userID
     }
 
     /// 校验断言并确认其绑定到指定设备。
@@ -113,7 +118,11 @@ public struct V2HMACAccountAssertionIssuer: V2DeviceBoundAccountAssertionVerifie
     /// - Returns: 断言确认的用户标识。
     /// - Throws: 断言非法、过期、绑定到其他设备或时钟不可用时抛出。
     public func verifiedUserID(for accountAssertion: String, deviceID: DeviceID) throws -> UserID {
-        try verifiedClaims(for: accountAssertion, expectedDeviceID: deviceID)
+        try verifiedClaims(for: accountAssertion, expectedDeviceID: deviceID).userID
+    }
+
+    public func credentialRevision(for accountAssertion: String, deviceID: DeviceID) throws -> Int64? {
+        try verifiedClaims(for: accountAssertion, expectedDeviceID: deviceID).revision
     }
 
     /// 校验断言结构、签名、时效与可选设备绑定。
@@ -126,7 +135,7 @@ public struct V2HMACAccountAssertionIssuer: V2DeviceBoundAccountAssertionVerifie
     ///   载荷无法解码、标识非法、已过期、设备不匹配时抛出
     ///   ``V2AccountAssertionError/invalidAssertion``；
     ///   当前时钟无法表示时抛出 ``V2AccountAssertionError/invalidClock``。
-    private func verifiedClaims(for assertion: String, expectedDeviceID: DeviceID?) throws -> UserID {
+    private func verifiedClaims(for assertion: String, expectedDeviceID: DeviceID?) throws -> (userID: UserID, revision: Int64) {
         guard assertion.utf8.count <= 4_096 else { throw V2AccountAssertionError.invalidAssertion }
         let parts = assertion.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count == 3, parts[0] == "v2a1",
@@ -134,6 +143,7 @@ public struct V2HMACAccountAssertionIssuer: V2DeviceBoundAccountAssertionVerifie
               let signature = decodeBase64URL(String(parts[2])),
               HMAC<SHA256>.isValidAuthenticationCode(signature, authenticating: Data(parts[1].utf8), using: SymmetricKey(data: rawKey)),
               let claims = try? JSONDecoder().decode(Claims.self, from: payload),
+              claims.credentialRevision > 0,
               let userID = try? UserID(claims.userID),
               let assertionDeviceID = try? DeviceID(claims.deviceID)
         else { throw V2AccountAssertionError.invalidAssertion }
@@ -142,7 +152,7 @@ public struct V2HMACAccountAssertionIssuer: V2DeviceBoundAccountAssertionVerifie
         guard Double(claims.expiresAtMilliseconds) > nowMilliseconds,
               expectedDeviceID.map({ $0 == assertionDeviceID }) ?? true
         else { throw V2AccountAssertionError.invalidAssertion }
-        return userID
+        return (userID, claims.credentialRevision)
     }
 }
 
@@ -151,6 +161,7 @@ private struct Claims: Codable, Sendable {
     let userID: String
     let deviceID: String
     let expiresAtMilliseconds: Int64
+    let credentialRevision: Int64
 }
 
 /// 编码为无填充的 URL 安全 Base64。

@@ -17,7 +17,7 @@ struct V2PendingIntentIndexTests {
         let actual = try database.read { db in
             try String.fetchAll(
                 db,
-                sql: "SELECT name FROM sqlite_master WHERE type = 'index' AND (name LIKE 'v2_pending%intent_idx' OR name LIKE 'v2_pending%intent_with_delivery_mode_idx')"
+                sql: "SELECT name FROM sqlite_master WHERE type = 'index' AND (name LIKE 'v2_pending%intent_idx' OR name LIKE 'v2_pending%intent_with_capacity_class_idx')"
             )
         }
         #expect(Set(actual) == [
@@ -29,7 +29,7 @@ struct V2PendingIntentIndexTests {
             "v2_pending_message_edits_intent_idx",
             "v2_pending_message_reactions_intent_idx",
             "v2_pending_social_commands_intent_idx",
-            "v2_pending_group_room_creations_intent_with_delivery_mode_idx"
+            "v2_pending_group_room_creations_intent_with_capacity_class_idx"
         ])
     }
 

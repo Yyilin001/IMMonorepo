@@ -1,6 +1,10 @@
 # SendMessage 请求指纹实施合同
 
-这是 B11/D07 的当前实施记录，配合 [47 项修复进度](archive/2026-09-05-system-remediation-progress.md) 阅读。Core 编码、纯 reducer、9 处消息 INSERT 的原子完成记录、PostgreSQL 重放读取和无正文 ACK 已接入。协议为 22，schema 为 9；GC、owner 迁移与性能证据仍待完成，B11 保持实施中。
+状态：历史实施记录。下文版本、向量与验证数对应 2026-09-05，不是当前协议合同。
+当前保留与清理要求见[现行合同](send-completion-retention.md)。当前实现见 [SendMessageFingerprint.swift](../../IMV2Core/Sources/IMV2Core/SendMessageFingerprint.swift)
+和[当前实施记录](room-log-only-implementation.md)。旧升级脚本已移除，新环境只安装规范 schema。
+
+这是 B11/D07 的历史实施记录，配合 [47 项修复进度](archive/2026-09-05-system-remediation-progress.md) 阅读。Core 编码、纯 reducer、9 处消息 INSERT 的原子完成记录、PostgreSQL 重放读取和无正文 ACK 已接入。协议为 22，schema 为 9；GC、owner 迁移与性能证据仍待完成，B11 保持实施中。
 
 ## 编码版本与兼容边界
 
@@ -47,7 +51,7 @@
 
 ## Schema 7→8 迁移
 
-`IMV2/sql/migrations/20260905_forward_source_revision.sql` 在单一事务内增加 `message_forward_operations.source_content_revision` 与身份不变 trigger，将完成/拒绝记录的 fingerprint version 约束扩为 1/2，并最后提交 schema 8 合同。未自动修改任何开发者数据库。旧 pending 记录的未知版本保留 NULL；不能伪造为 1，未完成旧操作的再次接受返回冲突。旧成功 pair 先查不可变完成结果，可继续恢复。
+旧 source revision 升级脚本已移除；本段仅记录当时的历史工作，不再提供升级执行步骤。
 
 部署该迁移需要先停止旧版本写入，再依次完成 7→8 与 8→9 迁移并启用要求 schema 9 的服务；启动 gate 不能撤销已经启动的旧进程。普通发送的 v1 仍保持固定向量，已有 v1 receipt/denial 无需重写。迁移拒绝非 schema 7 的输入，重复执行失败后必须保持现有 schema 和记录。
 

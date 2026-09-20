@@ -142,6 +142,51 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                         context.writeAndFlush(boundHandler.value.wrapOutboundOut(buffer), promise: nil)
                     }
                 }
+            }, requiredNotificationWriter: { bytes in
+                await withCheckedContinuation { continuation in
+                    eventLoop.execute {
+                        let handler = boundHandler.value
+                        let context = boundContext.value
+                        guard !handler.closed, context.channel.isActive, context.channel.isWritable else {
+                            let reason: V2GatewayConnectionClosure = context.channel.isActive && !context.channel.isWritable
+                                ? .requiredNotificationBackpressure : .requestFailure
+                            handler.close(context: context, reason: reason)
+                            continuation.resume(returning: false)
+                            return
+                        }
+                        let completion = NIOLoopBound(
+                            V2RequiredNotificationCompletion(continuation), eventLoop: eventLoop)
+                        let timeout = eventLoop.scheduleTask(in: .seconds(10)) {
+                            if completion.value.finish(false) {
+                                boundHandler.value.close(context: boundContext.value, reason: .requiredNotificationWriteTimeout)
+                            }
+                        }
+                        let promise = eventLoop.makePromise(of: Void.self)
+                        promise.futureResult.whenComplete { result in
+                            timeout.cancel()
+                            switch result {
+                            case .success:
+                                _ = completion.value.finish(true)
+                            case .failure:
+                                if completion.value.finish(false) {
+                                    boundHandler.value.close(context: boundContext.value, reason: .requestFailure)
+                                }
+                            }
+                        }
+                        var buffer = context.channel.allocator.buffer(capacity: bytes.count)
+                        buffer.writeBytes(bytes)
+                        context.writeAndFlush(handler.wrapOutboundOut(buffer), promise: promise)
+                    }
+                }
+            }, requiredNotificationClose: {
+                await withCheckedContinuation { continuation in
+                    eventLoop.execute {
+                        let promise = eventLoop.makePromise(of: Void.self)
+                        promise.futureResult.whenComplete { _ in continuation.resume() }
+                        boundHandler.value.close(context: boundContext.value, reason: .requestFailure,
+                            revokeDevice: false, closePromise: promise)
+                    }
+                }
             }, foregroundWriter: foregroundWriter)
             eventLoop.execute {
                 let handler = boundHandler.value
@@ -844,6 +889,18 @@ struct V2GatewayInboundQueue {
     mutating func removeAll() {
         chunks.removeAll(keepingCapacity: false)
         queuedBytes = 0
+    }
+}
+
+/// Accessed only through NIOLoopBound on its owning event loop.
+private final class V2RequiredNotificationCompletion {
+    private var continuation: CheckedContinuation<Bool, Never>?
+    init(_ continuation: CheckedContinuation<Bool, Never>) { self.continuation = continuation }
+    func finish(_ result: Bool) -> Bool {
+        guard let continuation else { return false }
+        self.continuation = nil
+        continuation.resume(returning: result)
+        return true
     }
 }
 

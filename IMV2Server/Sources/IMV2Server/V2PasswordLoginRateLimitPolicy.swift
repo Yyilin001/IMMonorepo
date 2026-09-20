@@ -5,7 +5,7 @@ import Foundation
 /// 代码刻意不提供默认值：运维必须按自身恢复流程与支持策略选择合适参数，
 /// 以免默认值掩盖未配置的部署。
 public struct V2PasswordLoginRateLimitPolicy: Equatable, Sendable {
-    /// 窗口内允许的最大失败次数。
+    /// 窗口内的校验预算上限；生产路径预扣，因此未完成的尝试也占用预算。
     public let maximumFailures: Int
     /// 失败计数窗口长度。
     public let window: TimeInterval

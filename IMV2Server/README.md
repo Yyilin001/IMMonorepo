@@ -12,11 +12,14 @@ and the [V2 document entry](../IMV2/docs/README.md).
 1. Create an empty PostgreSQL database and install the single current schema:
    `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f IMV2/sql/schema.sql`. Before
    deployment, run `bash scripts/test_v2_postgres_schema_bootstrap.sh` against
-   a disposable PostgreSQL instance to verify clean bootstrap and schema drift.
-   Existing current-2 databases must also apply the additive online index
-   migration `IMV2/sql/changes/2026-08-17-user-projection-ready-index-expand.sql`
-   before starting this binary; it uses `CREATE INDEX CONCURRENTLY` and does
-   not require a schema downgrade on application rollback.
+   an isolated Docker PostgreSQL instance to verify clean bootstrap, the current
+   structure contract, and schema export/restore equivalence. To use an existing
+   PostgreSQL server instead, set `IMV2_SCHEMA_BOOTSTRAP_NATIVE=1` together with
+   `PGHOST`, `PGPORT`, and `PGUSER` (and credentials if required); put PostgreSQL
+   16 `psql` and `pg_dump` on `PATH`. The native check creates and removes two
+   uniquely named test databases and requires permission to create databases.
+   This unreleased project installs only the current schema; historical upgrade
+   scripts and mixed-version deployment paths are removed.
 2. Provision PEM certificate-chain and private-key files through the deployment
    secret store.
 3. Provision a random 32-byte-or-longer access-token HMAC key as base64. The
@@ -97,8 +100,9 @@ legacy password; knowing a bcrypt-equivalent prefix is insufficient.
 Keep the
 account assertion HMAC key and the device-credential replay-envelope key in
 this service's secret scope only; neither belongs in the realtime gateway.
-Each failed password assertion also updates the canonical-account failure
-state in PostgreSQL, shared across account-service replicas. Its maximum
+Password verification atomically debits the canonical-account attempt budget
+in PostgreSQL before KDF work, shared across account-service replicas. Incomplete
+attempts remain charged; a successful authentication resets the budget. Its maximum
 failures, window and lockout duration are required `IM_V2_PASSWORD_LOGIN_*`
 configuration values; a lockout returns no-store `429` with `Retry-After`.
 The service also applies the required
@@ -114,7 +118,10 @@ implemented account-disable operator path.
 The client-side passkey flow has a complete challenge/assertion transport
 boundary, but this executable does not yet mount public WebAuthn endpoints:
 doing so requires an audited server verifier plus one-time challenge storage.
-Password fallback is the presently deployable initial-account path.
+Password fallback is the presently deployable initial-account path. Password
+changes and offline recovery codes are available through Account Security; see
+[the lifecycle contract](../docs/reviews/account-authentication-lifecycle.md)
+for API behavior, assertion revisions, migration and verification.
 
 Every account request must carry the base64 edge-authorization secret and one
 valid client address injected by that same HTTPS proxy. The account process
@@ -183,16 +190,11 @@ evidence remains local-stack coverage, not a production deployment approval.
   concurrency, accepted-message batch projection, Sync-hint coalescing,
   metrics, staged rollout and rollback are documented in
   [the single-node performance runbook](../IMV2/docs/10-operations/single-node-performance-rollout-runbook.md).
-- Message Snapshot payloads use an expand/contract rollout controlled by
-  `IM_V2_MESSAGE_PROJECTION_WRITE_MODE` (`inline`, `dual`, `shared`) and
-  `IM_V2_MESSAGE_PROJECTION_READ_MODE` (`inline`, `prefer_shared`, `shared`).
-  The safe initial pair is `dual/prefer_shared`; do not select strict shared
-  read before the backfill audit is zero. Unreferenced immutable revisions use
-  `IM_V2_MESSAGE_PROJECTION_STATE_RETENTION_SECONDS` (default seven days).
-  Existing databases must apply the current-2 expand SQL to the control store
-  and every physical user store before this binary can pass readiness. The
-  staged commands, metrics, rollback limits and optional final contract are in
-  [the projection-sharing runbook](../IMV2/docs/10-operations/message-projection-sharing-runbook.md).
+- Personal snapshots read their payloads directly from personal projection versions.
+  Public content is recovered through room logs. Immutable room message states
+  retain their own bounded compaction and garbage collection; the retention
+  setting is `IM_V2_MESSAGE_PROJECTION_STATE_RETENTION_SECONDS`.
+  See [personal snapshot operations](../IMV2/docs/10-operations/personal-snapshot-runbook.md).
 - `IM_V2_DIRECT_FANOUT_MODE=preplanned` derives a direct message's fixed
   two-user audience from the locked pair and revision-fenced memberships, then
   creates the completion unit and two durable deliveries in the source
@@ -245,11 +247,9 @@ evidence remains local-stack coverage, not a production deployment approval.
 - Groups use the existing authenticated TLS/protobuf connection rather than
   WebSocket or one-second foreground polling. An active detail view sends a
   room subscription, receives a metadata-only availability frame, then pulls
-  authorized room events. For `large_group_hybrid`, the local room cursor is
-  durable; for `standard_fanout`, the pull is an in-memory preview only and
-  the personal sync stream remains the sole ACK/recovery authority. Each
-  committed Hybrid event is coalesced in a PostgreSQL wake outbox, while an
-  accepted message in either group mode may emit an immediate lossy hint.
+  authorized room events. Both `standard` and `large` capacity classes retain
+  durable room cursors. Best-effort hints trigger pulls and never replace
+  persisted room history or advance the cursor themselves.
   In a multi-Gateway deployment set
   `IM_V2_GROUP_WAKE_NATS_URL`, `...SUBJECT_PREFIX`, `...TOKEN`, and
   `...ROUTING_KEY_BASE64` on every replica. The routing key derives opaque HMAC

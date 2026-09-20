@@ -40,6 +40,8 @@ public enum V2ClientGroupJoinSubmissionOutcome: Equatable, Sendable {
     case alreadyPending(V2GroupJoinRequest)
     /// 申请人已是群成员，无需再申请。
     case alreadyMember(V2GroupInvitePreview)
+    /// 原提交已被申请人取消，重放不会重新创建。
+    case cancelled(V2GroupJoinRequest)
     /// 申请被拒绝。
     case rejected(V2GroupJoinRequest)
 }
@@ -104,6 +106,8 @@ public protocol V2ClientGroupInvitationManaging: Sendable {
     /// - Returns: 待处理申请分页。
     /// - Throws: 无权限、游标非法或网络失败时抛出。
     func pendingRequests(roomID: RoomID, cursor: String?, pageSize: Int) async throws -> V2GroupJoinRequestPage
+    /// 取消本人的申请；重复调用返回持久终态，审批已完成时返回实际结果。
+    func cancel(roomID: RoomID, requestID: GroupJoinRequestID) async throws -> V2GroupJoinRequest
     /// 批准或拒绝一条入群申请。
     ///
     /// - Parameters:
@@ -206,6 +210,7 @@ public struct V2HTTPGroupInvitationClient: V2ClientGroupInvitationManaging, Send
             case "submitted": guard let value = body.request else { throw V2ClientGroupInvitationError.invalidResponse }; return .submitted(try decodeRequest(value))
             case "already_pending": guard let value = body.request else { throw V2ClientGroupInvitationError.invalidResponse }; return .alreadyPending(try decodeRequest(value))
             case "already_member": guard let value = body.preview else { throw V2ClientGroupInvitationError.invalidResponse }; return .alreadyMember(try decodePreview(value))
+            case "cancelled": guard let value = body.request, value.state == "cancelled" else { throw V2ClientGroupInvitationError.invalidResponse }; return .cancelled(try decodeRequest(value))
             case "rejected": guard let value = body.request else { throw V2ClientGroupInvitationError.invalidResponse }; return .rejected(try decodeRequest(value))
             default: throw V2ClientGroupInvitationError.invalidResponse
             }
@@ -220,6 +225,18 @@ public struct V2HTTPGroupInvitationClient: V2ClientGroupInvitationManaging, Send
         let data = try await execute(path: ["v2", "group-join-requests"], method: "GET", query: query)
         do { let body = try JSONDecoder().decode(RequestPageBody.self, from: data); return .init(requests: try body.items.map(decodeRequest), nextCursor: body.nextCursor) }
         catch let error as V2ClientGroupInvitationError { throw error }
+        catch { throw V2ClientGroupInvitationError.invalidResponse }
+    }
+
+    public func cancel(roomID: RoomID, requestID: GroupJoinRequestID) async throws -> V2GroupJoinRequest {
+        let data = try await execute(path: ["v2", "group-join-requests", requestID.rawValue, "cancel"], method: "POST", body: CancelBody(roomID: roomID.rawValue))
+        do {
+            let value = try decodeRequest(JSONDecoder().decode(RequestBody.self, from: data))
+            guard value.roomID == roomID, value.requestID == requestID,
+                  [.cancelled, .approved, .rejected].contains(value.state), value.decidedAt != nil
+            else { throw V2ClientGroupInvitationError.invalidResponse }
+            return value
+        } catch let error as V2ClientGroupInvitationError { throw error }
         catch { throw V2ClientGroupInvitationError.invalidResponse }
     }
 
@@ -290,6 +307,7 @@ private struct CreateBody: Encodable { let roomID, operationID: String; let life
 private struct RevokeBody: Encodable { let roomID, operationID: String; enum CodingKeys: String, CodingKey { case roomID = "room_id", operationID = "operation_id" } }
 private struct TokenBody: Encodable { let token: String }
 private struct SubmitBody: Encodable { let token, operationID: String; let note: String?; enum CodingKeys: String, CodingKey { case token, operationID = "operation_id", note } }
+private struct CancelBody: Encodable { let roomID: String; enum CodingKeys: String, CodingKey { case roomID = "room_id" } }
 private struct DecisionRequestBody: Encodable { let roomID, operationID, decision: String; enum CodingKeys: String, CodingKey { case roomID = "room_id", operationID = "operation_id", decision } }
 private struct LinksBody: Decodable { let items: [LinkBody] }
 private struct LinkBody: Decodable { let inviteID, roomID, roomTitle, token, state: String; let expiresAtMilliseconds: Int64; let maximumApprovedUses, approvedUseCount: Int; let createdAtMilliseconds: Int64; enum CodingKeys: String, CodingKey { case inviteID = "invite_id", roomID = "room_id", roomTitle = "room_title", token, state, expiresAtMilliseconds = "expires_at_ms", maximumApprovedUses = "maximum_approved_uses", approvedUseCount = "approved_use_count", createdAtMilliseconds = "created_at_ms" } }

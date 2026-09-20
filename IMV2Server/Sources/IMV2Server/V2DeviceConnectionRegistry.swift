@@ -26,6 +26,8 @@ public actor V2DeviceConnectionRegistry {
     private var streamsByDevice: [DeviceID: [UUID: V2GatewayByteStream]] = [:]
     private var streamsByUser: [UserID: [UUID: V2GatewayByteStream]] = [:]
     private var identityByConnection: [UUID: V2AuthenticatedConnection] = [:]
+    private var accountChangeService: V2AccountRoomChangeService?
+    private var accountChangeTickets: [UUID: V2AccountRoomCoverageIndex.Ticket] = [:]
     /// 每次注册都会获得一个新令牌。
     ///
     /// actor 方法会在外部 await 之后重新校验它，
@@ -153,6 +155,10 @@ public actor V2DeviceConnectionRegistry {
         if streamsByDevice[identity.deviceID]?.isEmpty == true { streamsByDevice.removeValue(forKey: identity.deviceID) }
         streamsByUser[identity.userID]?.removeValue(forKey: connectionID)
         if streamsByUser[identity.userID]?.isEmpty == true { streamsByUser.removeValue(forKey: identity.userID) }
+        if let ticket = accountChangeTickets.removeValue(forKey: connectionID), let accountChangeService {
+            await accountChangeService.stop(ticket)
+        }
+        guard lifecycleByConnection[connectionID] == nil else { return }
         do {
             let mutation = makeGeneration()
             foregroundMutationByConnection[connectionID] = mutation
@@ -308,6 +314,7 @@ public actor V2DeviceConnectionRegistry {
         roomID: RoomID,
         highWatermark: UInt64
     ) async {
+        await notifyAccountRoomAvailable(roomID: roomID)
         let streams = foregroundRoutes.streams(roomID: roomID)
         let prepared = foregroundFrameLimits.flatMap {
             V2PreparedGatewayGroupEventAvailable(
@@ -339,6 +346,7 @@ public actor V2DeviceConnectionRegistry {
     public nonisolated func notifyForegroundDirectEvent(
         _ event: V2DirectRoomLiveEvent
     ) async {
+        await notifyAccountRoomAvailable(roomID: event.roomID)
         let streams = foregroundRoutes.streams(for: event)
         let prepared = foregroundFrameLimits.flatMap {
             V2PreparedGatewayGroupEventAvailable(
@@ -454,6 +462,7 @@ public actor V2DeviceConnectionRegistry {
     public nonisolated func notifyForegroundGroupEvents(
         _ events: [V2DirectRoomLiveEvent]
     ) async {
+        if let roomID = events.first?.roomID { await notifyAccountRoomAvailable(roomID: roomID) }
         guard let first = events.first,
               first.groupMembershipRevision != nil,
               let foregroundFrameLimits,
@@ -1109,3 +1118,79 @@ private struct V2LiveObservationKey: Hashable, Sendable {
 
 extension V2DeviceConnectionRegistry: V2LiveSyncNotifier {}
 extension V2DeviceConnectionRegistry: V2ConnectionMetricsSource {}
+
+extension V2DeviceConnectionRegistry: V2AccountRoomChangesStarting {
+    public func invalidateAccountRoomCoverage() async {
+        await accountChangeService?.invalidateCoverage()
+    }
+
+    public func configureAccountRoomChanges(_ service: V2AccountRoomChangeService) {
+        precondition(accountChangeService == nil)
+        accountChangeService = service
+    }
+
+    public func startAccountRoomChanges(connectionID: UUID, userID: UserID) async throws -> String {
+        guard let service = accountChangeService,
+              let identity = identityByConnection[connectionID], identity.userID == userID,
+              let lifecycle = lifecycleByConnection[connectionID],
+              let stream = streamsByUser[userID]?[connectionID],
+              accountChangeTickets[connectionID] == nil else {
+            throw V2AccountRoomChangeService.Failure.staleConnection
+        }
+        guard await stream.supportsRequiredNotifications(), lifecycleByConnection[connectionID] == lifecycle else {
+            throw V2AccountRoomChangeService.Failure.staleConnection
+        }
+        let ticket = try await service.begin(userID: userID, connectionID: connectionID,
+            send: { [weak stream] notification in
+                guard let stream else { return false }
+                return await stream.sendAccountRoomNotification(notification)
+            }, close: { [weak stream] in await stream?.closeForAccountRecovery() })
+        guard lifecycleByConnection[connectionID] == lifecycle else {
+            await service.stop(ticket)
+            throw V2AccountRoomChangeService.Failure.staleConnection
+        }
+        accountChangeTickets[connectionID] = ticket
+        return ticket.epoch.uuidString.lowercased()
+    }
+
+    func accountRoomChangesReadyWritten(connectionID: UUID, epoch: String) async throws {
+        guard let ticket = accountChangeTickets[connectionID], UUID(uuidString: epoch) == ticket.epoch,
+              let service = accountChangeService else { throw V2AccountRoomChangeService.Failure.staleConnection }
+        await service.resume(ticket)
+    }
+
+    func installAccountRoomDirectory(connectionID: UUID, page: IMV2UserRoomDirectoryPage) async throws {
+        guard let ticket = accountChangeTickets[connectionID], let service = accountChangeService else {
+            throw V2AccountRoomChangeService.Failure.staleConnection
+        }
+        let entries = try page.rooms.map { room -> V2UserRoomDirectoryEntry in
+            guard let kind = V2RoomKind(rawValue: room.roomKind) else { throw V2RoomRecoveryReadError.corruptPersistence }
+            return try .init(roomID: RoomID(room.roomID), roomKind: kind,
+                viewerMembershipRevision: room.viewerMembershipRevision, ownerEpoch: room.ownerEpoch)
+        }
+        try await service.install(entries, ticket: ticket)
+    }
+
+    func refreshAccountRoomMemberships(connectionID: UUID, batch: IMV2SyncBatch) async throws {
+        // Connections that have not started account coverage retain ordinary
+        // personal sync behavior. Once started, discovery installs before reply.
+        guard let ticket = accountChangeTickets[connectionID], let service = accountChangeService else { return }
+        let changes = try batch.records.compactMap { try V2AccountRoomMembershipChange.decode($0, userID: ticket.userID) }
+        for start in stride(from: 0, to: changes.count, by: 100) {
+            try await service.refreshMemberships(Array(changes[start..<min(start + 100, changes.count)]), ticket: ticket)
+        }
+    }
+
+    func refreshAccountRoomSnapshotMemberships(connectionID: UUID, page: IMV2SnapshotPage) async throws {
+        guard let ticket = accountChangeTickets[connectionID], let service = accountChangeService else { return }
+        let decoded = try V2SnapshotProjectionV3Codec.decode(page.payload)
+        let changes = try decoded.items.compactMap { try V2AccountRoomMembershipChange.decode($0, userID: ticket.userID) }
+        for start in stride(from: 0, to: changes.count, by: 100) {
+            try await service.refreshMemberships(Array(changes[start..<min(start + 100, changes.count)]), ticket: ticket)
+        }
+    }
+
+    func notifyAccountRoomAvailable(roomID: RoomID) async {
+        await accountChangeService?.notify(roomID: roomID)
+    }
+}

@@ -55,7 +55,7 @@ public struct V2ChangeMessageReactionCommand: Equatable, Sendable {
     }
 }
 
-/// 消息反应变更事件及其房间顺序、扇出元数据；不在模型中执行集合变更或授权。
+/// 消息反应变更事件及其房间顺序和身份；不在模型中执行集合变更或授权。
 public struct V2MessageReactionChange: Equatable, Sendable {
     /// 目标房间身份。
     public let roomID: RoomID
@@ -71,13 +71,11 @@ public struct V2MessageReactionChange: Equatable, Sendable {
     public let roomSequence: UInt64
     /// 本次变更事件身份。
     public let eventID: EventID
-    /// 对应扇出计划身份。
-    public let fanoutPlanID: FanoutPlanID
     /// 事件创建时间，构造器不校验有限性。
     public let createdAt: Date
 
     /// 保存变更结果并校验房间序号为 1 到 Int64.max，越界抛出 outOfRange；不重复校验反应文本或日期。
-    public init(roomID: RoomID, messageID: MessageID, actorUserID: UserID, reaction: String, action: V2MessageReactionAction, roomSequence: UInt64, eventID: EventID, fanoutPlanID: FanoutPlanID, createdAt: Date) throws {
+    public init(roomID: RoomID, messageID: MessageID, actorUserID: UserID, reaction: String, action: V2MessageReactionAction, roomSequence: UInt64, eventID: EventID, createdAt: Date) throws {
         guard roomSequence > 0, roomSequence <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
         self.roomID = roomID
         self.messageID = messageID
@@ -86,7 +84,6 @@ public struct V2MessageReactionChange: Equatable, Sendable {
         self.action = action
         self.roomSequence = roomSequence
         self.eventID = eventID
-        self.fanoutPlanID = fanoutPlanID
         self.createdAt = createdAt
     }
 }

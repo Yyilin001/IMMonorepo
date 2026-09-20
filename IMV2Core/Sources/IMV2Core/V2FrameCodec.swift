@@ -199,10 +199,17 @@ public struct V2FrameCommand: RawRepresentable, Equatable, Hashable, Sendable {
     public static let getGroupRolePolicyBaseline = Self(rawValue: 107)
     /// 群角色权限基线响应。
     public static let groupRolePolicyBaseline = Self(rawValue: 108)
-    /// 会话摘要请求。
-    public static let roomSummaryList = Self(rawValue: 109)
-    /// 会话摘要分页响应。
-    public static let roomSummaryPage = Self(rawValue: 110)
+    public static let userRoomDirectoryList = Self(rawValue: 111)
+    public static let userRoomDirectoryPage = Self(rawValue: 112)
+    public static let roomSyncStateBatch = Self(rawValue: 113)
+    public static let roomSyncStateBatchResult = Self(rawValue: 114)
+    public static let accountRoomChangesStart = Self(rawValue: 115)
+    public static let accountRoomChangesReady = Self(rawValue: 116)
+    public static let accountRoomChanged = Self(rawValue: 117)
+    public static let accountRoomResyncRequired = Self(rawValue: 118)
+    public static let roomLatestVisibleBatch = Self(rawValue: 119)
+    public static let roomLatestVisibleBatchResult = Self(rawValue: 120)
+
 }
 
 /// 帧头标志集合；构造保留位值，上层负责验证协商与适用命令。
@@ -260,7 +267,7 @@ public struct V2Frame: Equatable, Sendable {
 
 /// 帧解码与编码的版本／包体预算，以及单次解码调度上限。
 public struct V2FrameLimits: Equatable, Sendable {
-    /// 允许的包体字节上限，不包含 18 字节帧头；编码调用者还需遵守线格式 UInt32 长度范围。
+    /// 允许的包体字节上限，不包含 18 字节帧头；构造时限定为线格式 UInt32 可表达范围。
     public let maximumPayloadBytes: Int
     /// 一次 append 最多返回的完整帧数，范围为 1...4096。
     ///
@@ -275,6 +282,8 @@ public struct V2FrameLimits: Equatable, Sendable {
         acceptedVersions: Set<UInt8>
     ) throws {
         guard maximumPayloadBytes >= 0,
+              UInt32(exactly: maximumPayloadBytes) != nil,
+              maximumPayloadBytes <= Int.max - V2Frame.headerLength,
               maximumFramesPerAppend > 0,
               maximumFramesPerAppend <= 4_096,
               !acceptedVersions.isEmpty

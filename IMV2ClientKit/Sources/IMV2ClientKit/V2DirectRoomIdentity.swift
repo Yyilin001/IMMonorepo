@@ -11,12 +11,14 @@ public struct V2ClientDirectRoomIdentity: Equatable, Sendable {
     public let publicIdentity: V2PublicIdentity
     /// 该本地关联记录的更新时间。
     public let updatedAt: Date
+    public let roomCreatedAt: Date
 
     /// 保存本地关联字段，不检查时间范围、房间权限或目标是否仍为当前公开身份。
-    public init(roomID: RoomID, publicIdentity: V2PublicIdentity, updatedAt: Date) {
+    public init(roomID: RoomID, publicIdentity: V2PublicIdentity, updatedAt: Date, roomCreatedAt: Date) {
         self.roomID = roomID
         self.publicIdentity = publicIdentity
         self.updatedAt = updatedAt
+        self.roomCreatedAt = roomCreatedAt
     }
 }
 
@@ -34,17 +36,19 @@ public struct V2ClientDirectRoomProfileProjection: Equatable, Sendable {
     public let revision: UInt64
     /// 服务端资料更新时间。
     public let updatedAt: Date
+    public let roomCreatedAt: Date
 
     /// 直接保存已准备的投影字段，不执行修订号或日期校验；来自传输的数据应走同步记录解码入口。
     public init(
         sourceEventID: EventID, roomID: RoomID,
-        publicIdentity: V2PublicIdentity, revision: UInt64, updatedAt: Date
+        publicIdentity: V2PublicIdentity, revision: UInt64, updatedAt: Date, roomCreatedAt: Date
     ) {
         self.sourceEventID = sourceEventID
         self.roomID = roomID
         self.publicIdentity = publicIdentity
         self.revision = revision
         self.updatedAt = updatedAt
+        self.roomCreatedAt = roomCreatedAt
     }
 
     /// 从 direct_room_profile 同步记录解码并校验资料投影。
@@ -59,7 +63,7 @@ public struct V2ClientDirectRoomProfileProjection: Equatable, Sendable {
         let payload: Wire
         do { payload = try JSONDecoder().decode(Wire.self, from: record.payload) }
         catch { throw V2ClientProjectionError.invalidMessagePayload }
-        guard payload.revision > 0, payload.updatedAtMilliseconds >= 0 else { throw V2ClientProjectionError.invalidMessagePayload }
+        guard payload.revision > 0, payload.updatedAtMilliseconds >= 0, payload.roomCreatedAtMilliseconds >= 0 else { throw V2ClientProjectionError.invalidMessagePayload }
         sourceEventID = record.sourceEventID
         roomID = try .init(payload.roomID)
         publicIdentity = try .init(
@@ -68,6 +72,7 @@ public struct V2ClientDirectRoomProfileProjection: Equatable, Sendable {
             displayName: payload.displayName,
             accountKind: payload.accountKind
         )
+        roomCreatedAt = Date(timeIntervalSince1970: TimeInterval(payload.roomCreatedAtMilliseconds) / 1_000)
         revision = payload.revision
         updatedAt = Date(timeIntervalSince1970: TimeInterval(payload.updatedAtMilliseconds) / 1_000)
     }
@@ -88,6 +93,7 @@ public struct V2ClientDirectRoomProfileProjection: Equatable, Sendable {
         let revision: UInt64
         /// 必须非负的 Unix 毫秒更新时间。
         let updatedAtMilliseconds: Int64
+        let roomCreatedAtMilliseconds: Int64
 
         /// 将 Swift 字段映射为协议约定的下划线 JSON 键。
         enum CodingKeys: String, CodingKey {
@@ -98,6 +104,7 @@ public struct V2ClientDirectRoomProfileProjection: Equatable, Sendable {
             case accountKind = "account_kind"
             case revision
             case updatedAtMilliseconds = "updated_at_ms"
+            case roomCreatedAtMilliseconds = "room_created_at_ms"
         }
     }
 }

@@ -19,17 +19,17 @@ struct V2MessageEditReplacement: Codable, Equatable, Sendable {
     ///
     /// - Parameters:
     ///   - state: 编辑后的投影状态。
-    ///   - delivery: 原始接受凭据，用于冻结接受身份。
+    ///   - acceptance: 原始接受凭据，用于冻结接受身份。
     /// - Throws: 修订号不大于 1、消息已撤回、房间序号与接受凭据不符，
     ///   或成员修订为负时抛出 ``V2MessageProjectionStateError/invalidPayload``。
-    init(state: V2MessageProjectionState, delivery: V2MessageAcceptedDelivery) throws {
+    init(state: V2MessageProjectionState, acceptance: V2MessageAcceptanceFact) throws {
         guard state.messageRevision > 1, !state.isWithdrawn,
-              state.acceptedRoomSequence == delivery.roomSequence,
-              delivery.membershipRevision >= 0
+              state.acceptedRoomSequence == acceptance.roomSequence,
+              acceptance.membershipRevision >= 0
         else { throw V2MessageProjectionStateError.invalidPayload }
         schemaVersion = 1
-        acceptedEventID = delivery.eventID
-        acceptedMembershipRevision = delivery.membershipRevision
+        acceptedEventID = acceptance.eventID
+        acceptedMembershipRevision = acceptance.membershipRevision
         self.state = state
     }
 

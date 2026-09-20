@@ -13,7 +13,7 @@ struct V2ConversationWindowTests {
     func productionWindowLifecycle() async throws {
         let local = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-app-window-\(UUID().uuidString).sqlite"), installationBinding: .init(value: UUID()))
         try await seed(local, range: 1...2_000)
-        let source = V2GRDBConversationDataSource(localStore: local)
+        let source = V2GRDBConversationDataSource(localStore: local, requestLatestVisible: { _ in })
         let store = V2ConversationListStore(environment: .init(userID: "user", projections: .init(dataSource: source)))
         await store.refresh()
         #expect(store.items.count == 50)
@@ -58,7 +58,7 @@ struct V2ConversationWindowTests {
         let local = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-scroll-read-\(UUID().uuidString).sqlite"), installationBinding: .init(value: UUID()))
         try await seed(local, range: 1...1_000)
         let gate = V2ListWindowReadGate()
-        let source = V2GatedConversationWindows(source: .init(localStore: local), gate: gate)
+        let source = V2GatedConversationWindows(source: .init(localStore: local, requestLatestVisible: { _ in }), gate: gate)
         let store = V2ConversationListStore(environment: .init(userID: "user", projections: .init(dataSource: source)))
         await store.refresh()
         for _ in 0..<7 { await store.loadMoreConversations(); consumeRestoration(in: store) }
@@ -84,7 +84,7 @@ struct V2ConversationWindowTests {
         let local = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-page-scroll-\(UUID().uuidString).sqlite"), installationBinding: .init(value: UUID()))
         try await seed(local, range: 1...1_000)
         let gate = V2ListWindowReadGate()
-        let source = V2GatedConversationWindows(source: .init(localStore: local), gate: gate)
+        let source = V2GatedConversationWindows(source: .init(localStore: local, requestLatestVisible: { _ in }), gate: gate)
         let store = V2ConversationListStore(environment: .init(userID: "user", projections: .init(dataSource: source)))
         await store.refresh()
         for _ in 0..<7 { await store.loadMoreConversations(); consumeRestoration(in: store) }
@@ -173,7 +173,7 @@ struct V2ConversationWindowTests {
         let previousWindow = scene.windows.first(where: \.isKeyWindow)
         let local = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-app-list-layout-\(UUID().uuidString).sqlite"), installationBinding: .init(value: UUID()))
         try await seed(local, range: 1...1_000)
-        let source = V2GRDBConversationDataSource(localStore: local)
+        let source = V2GRDBConversationDataSource(localStore: local, requestLatestVisible: { _ in })
         let store = V2ConversationListStore(environment: .init(userID: "user", projections: .init(dataSource: source)))
         await store.refresh()
         let window = UIWindow(windowScene: scene)
@@ -240,7 +240,7 @@ struct V2ConversationWindowTests {
                 try V2ClientSyncRecord(sequence: UInt64(value), sourceEventID: .init(UUID().uuidString), projectionKind: "room", payload: JSONSerialization.data(withJSONObject: [
                     "event_type": "room.created", "room_id": Self.identifier(value), "title": "Room \(value)",
                     "owner_user_id": Self.identifier(99_999), "membership_revision": 1,
-                    "delivery_mode": "standard_fanout", "delivery_authority": "fanout",
+                    "capacity_class": "standard",
                     "created_at_ms": 1_750_000_000_000 + value * 1_000
                 ]))
             }

@@ -41,48 +41,6 @@ struct V2ForwardSourceReferenceTests {
         try await reopened.close()
     }
 
-    @Test("upgrading an old queue preserves completed receipts but never invents the selected version")
-    func legacyQueueMigration() async throws {
-        let url = FileManager.default.temporaryDirectory.appending(path: "im-forward-legacy-\(UUID().uuidString).sqlite")
-        let binding = V2LocalInstallationBinding(value: UUID())
-        let local = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        let transport = V2ProtobufSyncTransport(wire: ReferenceForwardWire(), protocolVersion: UInt8(IMV2ProtocolVersion.current))
-        let sources = try (0..<25).map { _ in try testForwardReference(.init(uuid: UUID())) }
-        let target = RoomID(uuid: UUID())
-        let engine = V2BulkForwardMessagesOutboxEngine(store: local, transport: transport)
-        let plan = try await engine.enqueue(sources: sources, targetRoomIDs: [target])
-        guard case .chunkAcknowledged(_, let completedID, let results) = try await engine.flushOnce() else { Issue.record("expected first chunk"); return }
-        _ = try await local.nextReadyForwardPlanChunk(now: .now)
-        let ordinary = try await V2ForwardMessagesOutboxEngine(store: local, transport: transport).enqueue(sources: [sources[0]], targetRoomIDs: [target])
-        try await local.close()
-        let old = try DatabaseQueue(path: url.path)
-        try await old.write { db in
-            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'bindForwardSourceReferences'")
-            for table in ["v2_pending_forward_messages", "v2_forward_message_plans", "v2_forward_message_chunks"] {
-                try db.execute(sql: "ALTER TABLE \(table) DROP COLUMN source_references")
-            }
-            try db.execute(sql: "ALTER TABLE v2_forward_message_plans DROP COLUMN terminal_code")
-        }
-        try old.close()
-        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        let migrated = try #require(try await reopened.forwardPlan(operationID: plan.operationID))
-        #expect(migrated.state == .cancelled && migrated.terminalCode == "SOURCE_RESELECTION_REQUIRED")
-        #expect(migrated.succeededCount == 20 && migrated.failedCount == 0 && migrated.totalForwardCount == 25)
-        #expect(try await reopened.nextReadyForwardPlanChunk(now: .distantFuture) == nil)
-        #expect(try await reopened.nextReadyForwardMessages(now: .distantFuture) == nil)
-        // The already committed chunk digest remains independently replayable.
-        #expect(try await reopened.markForwardPlanChunkAcknowledged(operationID: completedID, results: results, now: .now) == plan.operationID)
-        let inspection = try DatabaseQueue(path: url.path)
-        try await inspection.read { db in
-            let row = try #require(try Row.fetchOne(db, sql: "SELECT state, terminal_code, source_references FROM v2_pending_forward_messages WHERE operation_id = ?", arguments: [ordinary.command.operationID.rawValue]))
-            #expect(row["state"] as String == "rejected")
-            #expect(row["terminal_code"] as String == "SOURCE_RESELECTION_REQUIRED")
-            #expect(row["source_references"] as String? == nil)
-            #expect(try Int.fetchOne(db, sql: "SELECT count(*) FROM v2_forward_message_chunks WHERE state = 'cancelled' AND terminal_code = 'SOURCE_RESELECTION_REQUIRED'") == 1)
-        }
-        try inspection.close()
-        try await reopened.close()
-    }
 }
 
 private actor ReferenceForwardWire: V2AuthenticatedFrameTransport {

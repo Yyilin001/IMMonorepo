@@ -76,44 +76,50 @@ struct V2DirectSendPolicyCacheTests {
         #expect(snapshot.misses == 2)
     }
 
-    @Test("reply-marker refinement preserves the durable revision fence")
-    func replyMarkerRefinementAdvancesPairRevision() throws {
+    @Test("reply-marker refinement preserves the durable revision fence", arguments: [Int64(41), Int64.max - 1])
+    func replyMarkerRefinementAdvancesPairRevision(revision: Int64) throws {
         let entry = makeEntry(
-            directPairRevision: 41,
+            directPairRevision: revision,
             senderHasReplied: false
         )
         let refined = entry.markingSenderHasReplied()
 
         #expect(refined.senderHasReplied)
-        #expect(refined.directPairRevision == 42)
+        #expect(refined.directPairRevision == revision + 1)
         #expect(refined.recipientID == entry.recipientID)
         #expect(refined.recipientPolicyRevision == entry.recipientPolicyRevision)
     }
 
-    @Test("reciprocal reply promotion is revision fenced")
-    func reciprocalReplyPromotionRequiresExactPreviousRevision() async {
+    @Test("reciprocal reply promotion is revision fenced", arguments: [Int64(41), Int64.max - 1])
+    func reciprocalReplyPromotionRequiresExactPreviousRevision(revision: Int64) async {
         let cache = V2DirectSendPolicyCache(capacity: 2)
         let key = V2DirectSendPolicyCache.Key(roomID: UUID(), senderID: UUID())
         let entry = makeEntry(
-            directPairRevision: 41,
+            directPairRevision: revision,
             recipientHasReplied: false
         )
         await cache.insert(entry, for: key)
 
         await cache.markRecipientsHaveReplied([.init(
             key: key,
-            expectedDirectPairRevision: 40
+            expectedDirectPairRevision: revision - 1
         )])
         #expect(await cache.value(for: key) == entry)
 
         await cache.markRecipientsHaveReplied([.init(
             key: key,
-            expectedDirectPairRevision: 41
+            expectedDirectPairRevision: revision
         )])
         let promoted = await cache.value(for: key)
         #expect(promoted?.recipientHasReplied == true)
-        #expect(promoted?.directPairRevision == 42)
+        #expect(promoted?.directPairRevision == revision + 1)
         #expect(promoted?.senderHasReplied == entry.senderHasReplied)
+        // Repeated and late callbacks must not advance the final revision again.
+        await cache.markRecipientsHaveReplied([
+            .init(key: key, expectedDirectPairRevision: revision),
+            .init(key: key, expectedDirectPairRevision: revision + 1)
+        ])
+        #expect(await cache.value(for: key) == promoted)
     }
 
     private func makeEntry(

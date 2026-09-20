@@ -8,7 +8,7 @@
 
 limit 为 1–100。每页使用独立 operationID；同一页遇到响应丢失时必须重试原 operation 和完整输入。reason 沿用 dependency_recovered、data_repaired、false_positive。
 
-发布前停止旧邀请写进程，对 control 和全部 owner 执行 `20260906_group_invite_directory_import.sql`（要求 current-24），随后启动 schema-25 进程。旧链接按 room 分页导入时必须已排空绕过 control 目录的旧写者。UUID 游标不是所有页共享的数据库快照；并发旧写者在已扫描游标之前插入的链接会被遗漏。新路由写者自身完成目录，并保持既有幂等重试/持久恢复合同。
+新环境的 control 与各 owner 使用同一当前 schema。正常跨所有者目录导入和幂等恢复仍保留；不运行历史结构升级。分页导入不能假定 UUID 游标代表跨所有页的数据库快照，当前路由写入仍须独立完成目录登记。
 
 导入需要显式持久 `room_owner_routes` 行；不使用本地 rooms 回退、不广播 owner、不猜测 shard。旧单库部署也需先完成显式 route 登记。operator registry 必须配置该 shard，物理数据库 schema 仅接受 im_v2。
 

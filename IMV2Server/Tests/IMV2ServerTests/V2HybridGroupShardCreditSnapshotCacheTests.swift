@@ -53,7 +53,7 @@ struct V2HybridGroupShardCreditSnapshotCacheTests {
             roomShardID: shard,
             capacityProfileID: "loadtest-v18",
             kind: "group",
-            deliveryMode: .largeGroupHybrid,
+            capacityClass: .large,
             frozenAt: nil,
             roomShardLeaseID: leaseID,
             roomShardLeaseGeneration: 1,
@@ -62,14 +62,7 @@ struct V2HybridGroupShardCreditSnapshotCacheTests {
                     id: .init(leaseID.uuidString),
                     generation: 1,
                     validUntil: Date().addingTimeInterval(60),
-                    commandWindow: .init(limit: 1_000_000),
-                    fanoutWindow: .init(limit: 1_000_000),
-                    maxOutstandingFanoutUnits: 1_000_000,
-                    maxOutstandingPlans: 1_000_000
-                ),
-                outstandingFanoutUnits: 0,
-                outstandingPlans: 0
-            )
+                    commandWindow: .init(limit: 1_000_000)))
         )
     }
 }

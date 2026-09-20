@@ -77,6 +77,7 @@ public protocol V2AccountDisabling: Sendable {
 /// 基于 PostgreSQL 的账号停用实现。
 public struct V2PostgresAccountDisableService: V2AccountDisabling, Sendable {
     private let database: any Database
+    private let authorizationCoordinator: V2DirectAuthorizationCoordinator?
     private let operatorPrincipal: String
     private let now: @Sendable () -> Date
 
@@ -91,12 +92,14 @@ public struct V2PostgresAccountDisableService: V2AccountDisabling, Sendable {
     public init(
         database: any Database,
         operatorPrincipal: String,
+        authorizationCoordinator: V2DirectAuthorizationCoordinator? = nil,
         now: @escaping @Sendable () -> Date = Date.init
     ) throws {
         guard V2DurableWorkOperatorReplayService.isValidPrincipal(operatorPrincipal) else {
             throw V2AccountDisableError.invalidOperatorPrincipal
         }
         self.database = database
+        self.authorizationCoordinator = authorizationCoordinator
         self.operatorPrincipal = operatorPrincipal
         self.now = now
     }
@@ -138,6 +141,13 @@ public struct V2PostgresAccountDisableService: V2AccountDisabling, Sendable {
             }
 
             guard v2PostgresTimestampCanEncode(occurredAt) else { throw V2AccountDisableError.unavailable }
+            do {
+                try await v2DrainDirectAuthorizations(.user(userUUID), coordinator: authorizationCoordinator, transaction: transaction, now: occurredAt)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw V2AccountDisableError.unavailable
+            }
 
             guard let persisted = try await sql.raw("""
                 INSERT INTO im_v2.account_disables (user_id, operation_id, reason, operator_principal, disabled_at)

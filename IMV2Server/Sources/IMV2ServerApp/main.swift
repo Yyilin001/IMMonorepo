@@ -23,6 +23,8 @@ enum IMV2ServerApp {
         }
         V2RedactedHTTPMiddlewareConfiguration.install(on: app)
         var natsGroupWakeBroker: V2NATSGroupEventWakeBroker?
+        var sharedGroupWakeInterests: V2SharedGroupEventWakeInterests?
+        var accountRoomChangeService: V2AccountRoomChangeService?
         var natsLiveActivityBroker: V2NATSLiveActivityBroker?
         do {
             let databaseEventLoops = Array(applicationEventLoops.makeIterator())
@@ -88,6 +90,59 @@ enum IMV2ServerApp {
                   let deliveryDatabase = databaseForRole(for: .delivery, url: configuration.databaseURL),
                   let maintenanceDatabase = databaseForRole(for: .maintenance, url: configuration.databaseURL)
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
+
+            // 独立控制连接持有路由围栏，数据连接先提交源端再镜像。
+            // 即使关闭工作类别隔离也不能合并这两个池；总连接数已在配置阶段计入预算。
+            let userStateRouteDatabaseID = DatabaseID(string: "gateway-user-state-route")
+            app.databases.use(try postgresDatabaseConfiguration(
+                url: configuration.databaseURL,
+                policy: configuration.databasePolicy,
+                maximumConnectionsPerEventLoop: 1
+            ), as: userStateRouteDatabaseID)
+            let userStateRoutePool = try V2ApplicationEventLoopDatabasePool(
+                application: app, identifier: userStateRouteDatabaseID, eventLoops: databaseEventLoops
+            )
+            for routeDatabase in userStateRoutePool.eventLoopDatabases {
+                try await V2PostgresSessionReadiness.verify(database: routeDatabase, policy: configuration.databasePolicy)
+            }
+            let userStateRouter = V2PostgresUserShardRouter(database: userStateRoutePool.database)
+
+            let directSendControlID = DatabaseID(string: "gateway-direct-send-control")
+            app.databases.use(try postgresDatabaseConfiguration(url: configuration.databaseURL,
+                policy: configuration.databasePolicy,
+                maximumConnectionsPerEventLoop: configuration.directSendControlConnectionsPerEventLoop),
+                as: directSendControlID)
+            let directSendControlPool = try V2ApplicationEventLoopDatabasePool(application: app,
+                identifier: directSendControlID, eventLoops: databaseEventLoops)
+            for policyDatabase in directSendControlPool.eventLoopDatabases {
+                try await V2PostgresSessionReadiness.verify(database: policyDatabase, policy: configuration.databasePolicy)
+            }
+
+            // Resolution never borrows from reservation or policy-writer pools.
+            // Control acknowledgement and owner abort can share this dedicated
+            // physical pool: each transaction finishes before the next begins.
+            var authorizationResolutionDatabases: [String: any Database] = [:]
+            for (index, url) in configuration.directAuthorizationResolutionDatabaseURLs.enumerated() {
+                let id = DatabaseID(string: "gateway-authorization-resolution-\(index)")
+                app.databases.use(try postgresDatabaseConfiguration(url: url, policy: configuration.databasePolicy,
+                    maximumConnectionsPerEventLoop: 1), as: id)
+                let pool = try V2ApplicationEventLoopDatabasePool(application: app, identifier: id, eventLoops: databaseEventLoops)
+                for member in pool.eventLoopDatabases {
+                    try await V2PostgresSessionReadiness.verify(database: member, policy: configuration.databasePolicy)
+                }
+                authorizationResolutionDatabases[url] = pool.database
+            }
+            guard let authorizationControlDatabase = authorizationResolutionDatabases[configuration.databaseURL] else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            let authorizationOwners = try Dictionary(uniqueKeysWithValues: configuration.roomShardStorage.map { storage in
+                guard let owner = authorizationResolutionDatabases[storage.databaseURL] else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+                return (storage.shardID, owner)
+            })
+            let directAuthorizationCoordinator = V2DirectAuthorizationCoordinator(
+                controlDatabase: authorizationControlDatabase, ownerDatabases: authorizationOwners)
 
             // Schema readiness is topology state rather than work-class
             // state. Verify each configured schema once through its foreground
@@ -157,12 +212,7 @@ enum IMV2ServerApp {
             var seenSyncStores: Set<String> = []
             var snapshotArtifactBuilders: [PostgresV2SnapshotArtifactBuilder] = []
             var userProjectionWorkers: [PostgresV2UserProjectionWorker] = []
-            var messageProjectionBackfillWorkers: [PostgresV2MessageProjectionBackfillWorker] = []
-            var messageProjectionStateBodyCompactionWorkers:
-                [PostgresV2MessageProjectionStateBodyCompactionWorker] = []
-            var fanoutPayloadReferenceBackfillWorkers: [PostgresV2FanoutPayloadReferenceBackfillWorker] = []
             var projectionVersionGCWorkers: [PostgresV2ProjectionVersionGCWorker] = []
-            var messageProjectionStateGCWorkers: [PostgresV2MessageProjectionStateGCWorker] = []
             var syncLogCompactionWorkers: [PostgresV2UserSyncLogCompactionWorker] = []
             var userShardMetricsSources: [any V2DurableWorkMetricsSource] = []
             let syncHousekeepingWorkers: [V2SyncHousekeepingWorker] = zip(
@@ -176,40 +226,16 @@ enum IMV2ServerApp {
                 }) else { return nil }
                 snapshotArtifactBuilders.append(.init(
                     database: projectionLocation.database,
-                    schema: projectionLocation.schema,
-                    messageReadMode: configuration.messageProjectionReadMode
+                    schema: projectionLocation.schema
                 ))
                 userProjectionWorkers.append(.init(
                     database: projectionLocation.database, schema: projectionLocation.schema,
                     batchSize: configuration.workerBatchSize,
-                    retryPolicy: configuration.durableRetryPolicy,
-                    messageWriteMode: configuration.messageProjectionWriteMode,
-                    acceptedMessageBatchEnabled:
-                        configuration.acceptedMessageProjectionBatchEnabled
+                    retryPolicy: configuration.durableRetryPolicy
                 ))
-                messageProjectionBackfillWorkers.append(.init(
-                    database: maintenanceLocation.database,
-                    schema: maintenanceLocation.schema,
-                    compactInlinePayloads: configuration.messageProjectionWriteMode == .shared
-                ))
-                messageProjectionStateBodyCompactionWorkers.append(.init(
-                    database: maintenanceLocation.database,
-                    schema: maintenanceLocation.schema
-                ))
-                if configuration.fanoutPayloadWriteMode == .reference {
-                    fanoutPayloadReferenceBackfillWorkers.append(.init(
-                        database: maintenanceLocation.database,
-                        schema: maintenanceLocation.schema
-                    ))
-                }
                 projectionVersionGCWorkers.append(.init(
                     database: maintenanceLocation.database,
                     schema: maintenanceLocation.schema
-                ))
-                messageProjectionStateGCWorkers.append(.init(
-                    database: maintenanceLocation.database,
-                    schema: maintenanceLocation.schema,
-                    retention: TimeInterval(configuration.messageProjectionStateRetentionSeconds)
                 ))
                 syncLogCompactionWorkers.append(.init(
                     database: maintenanceLocation.database, schema: maintenanceLocation.schema
@@ -286,11 +312,11 @@ enum IMV2ServerApp {
                     )
                 )
             )
-            let databasePoolTopology: V2DatabasePoolTopologySnapshot
+            let workloadPoolTopology: V2DatabasePoolTopologySnapshot
             let configuredHandleCount = configuration.databasePolicy.eventLoopThreads *
                 physicalDatabaseURLs.count
             if configuration.databaseWorkloadPoolIsolationEnabled {
-                databasePoolTopology = .init(
+                workloadPoolTopology = .init(
                     pools: V2PostgresWorkloadPoolBudget.Role.allCases.map { role in
                         .init(
                             poolClass: databasePoolMetricClass(for: role),
@@ -302,7 +328,7 @@ enum IMV2ServerApp {
                     }
                 )
             } else {
-                databasePoolTopology = .init(pools: [
+                workloadPoolTopology = .init(pools: [
                     .init(
                         poolClass: .shared,
                         eventLoopHandles: configuredHandleCount,
@@ -311,6 +337,18 @@ enum IMV2ServerApp {
                     )
                 ])
             }
+            let databasePoolTopology = V2DatabasePoolTopologySnapshot(pools: workloadPoolTopology.pools + [
+                .init(poolClass: .userStateRoute,
+                      eventLoopHandles: configuration.databasePolicy.eventLoopThreads,
+                      connectionCeiling: configuration.databasePolicy.eventLoopThreads),
+                .init(poolClass: .directSendControl,
+                      eventLoopHandles: configuration.databasePolicy.eventLoopThreads,
+                      connectionCeiling: configuration.databasePolicy.eventLoopThreads *
+                        configuration.directSendControlConnectionsPerEventLoop),
+                .init(poolClass: .directAuthorizationResolution,
+                      eventLoopHandles: configuration.databasePolicy.eventLoopThreads * configuration.directAuthorizationResolutionDatabaseURLs.count,
+                      connectionCeiling: configuration.databasePolicy.eventLoopThreads * configuration.directAuthorizationResolutionDatabaseURLs.count)
+            ])
             let prometheusTelemetry = V2PrometheusTelemetrySink()
             let transportMetrics = V2GatewayTransportMetrics()
             let directRoomLogAppendStageMetrics = V2DirectRoomLogAppendStageMetrics()
@@ -327,6 +365,32 @@ enum IMV2ServerApp {
             let directSendPolicyCache = V2DirectSendPolicyCache(
                 capacity: configuration.directSendPolicyCacheMaximumEntries
             )
+            let roomOwnerDatabaseURLs = Set(
+                [configuration.databaseURL]
+                    + configuration.roomShardStorage.map(\.databaseURL)
+            ).sorted()
+            let roomOwnerMaintenanceDatabases = try roomOwnerDatabaseURLs.map { ownerURL in
+                guard let ownerDatabase = databaseForRole(for: .maintenance, url: ownerURL) else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+                return ownerDatabase
+            }
+            let personalEventGCWorkers = roomOwnerMaintenanceDatabases.map {
+                PostgresV2UserStateEventGCWorker(database: $0)
+            }
+            let personalEventMetricsSources = roomOwnerMaintenanceDatabases.map {
+                PostgresV2UserStateEventMetricsSource(database: $0)
+            }
+            let roomMessageStateMetricsSources = roomOwnerMaintenanceDatabases.map {
+                PostgresV2RoomMessageStateMetricsSource(database: $0)
+            }
+            let messageProjectionStateBodyCompactionWorkers = roomOwnerMaintenanceDatabases.map {
+                PostgresV2MessageProjectionStateBodyCompactionWorker(database: $0)
+            }
+            let messageProjectionStateGCWorkers = roomOwnerMaintenanceDatabases.map {
+                PostgresV2MessageProjectionStateGCWorker(database: $0,
+                    retention: TimeInterval(configuration.messageProjectionStateRetentionSeconds))
+            }
             let durableWorkMetrics = V2CachedDurableWorkMetricsSource(
                 source: V2AggregateDurableWorkMetricsSource(sources: [
                     PostgresV2DurableWorkMetricsSource(
@@ -334,7 +398,7 @@ enum IMV2ServerApp {
                         gatewayNodeID: configuration.gatewayNodeID,
                         includesUserShardMetrics: false
                     )
-                ] + userShardMetricsSources),
+                ] + userShardMetricsSources + personalEventMetricsSources + roomMessageStateMetricsSources),
                 minimumRefreshInterval: TimeInterval(
                     configuration.metricsMinimumRefreshIntervalMilliseconds
                 ) / 1_000,
@@ -361,9 +425,6 @@ enum IMV2ServerApp {
             let deliveryUserShardRouter = V2PostgresUserShardRouter(database: deliveryDatabase)
             let maintenanceUserShardRouter = V2PostgresUserShardRouter(
                 database: maintenanceDatabase
-            )
-            let userShardMigrations = PostgresV2UserShardMigrationStore(
-                database: deliveryDatabase
             )
             // Projection shadowing is post-commit cross-store delivery work.
             // Acquiring its route fence from the foreground pool can create a
@@ -409,10 +470,19 @@ enum IMV2ServerApp {
             let roomPhysicalLocationKeys = Set(configuration.roomShardStorage.map {
                 $0.databaseURL + "\u{0}" + $0.schema
             })
-            let roomOwnerDatabaseURLs = Set(
-                [configuration.databaseURL]
-                    + configuration.roomShardStorage.map(\.databaseURL)
-            ).sorted()
+            let userStateProjector = try V2RoutedUserStateEventProjector(
+                routeFence: userStateRouter,
+                registry: deliveryUserShardStorage
+            )
+            let userStateWorkers = try roomOwnerDatabaseURLs.map { ownerURL in
+                guard let ownerDatabase = databaseForRole(for: .delivery, url: ownerURL) else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+                return V2UserStateEventWorker(
+                    outbox: try PostgresV2UserStateEventOutbox(database: ownerDatabase),
+                    projector: userStateProjector
+                )
+            }
             let singleRoomOwnerIsControlDatabase =
                 roomPhysicalLocationKeys.count == 1
                 && configuration.roomShardStorage.allSatisfy {
@@ -476,7 +546,6 @@ enum IMV2ServerApp {
             let groupCapabilitiesStore: any V2GroupCapabilitiesStore
             let moderationStore: any V2RoutedModerationOwnerStore
             let readReceiptStore: any V2ReadReceiptBatchStore
-            let roomSummaryStore: any V2RoomSummaryStore
             if singleRoomOwnerIsControlDatabase
                 && configuration.groupRoomShardIDs.count == 1
             {
@@ -488,17 +557,14 @@ enum IMV2ServerApp {
                 let localRoomWriteStore = PostgresV2RoomWriteStore(
                     database: database,
                     strangerMessagePolicy: configuration.strangerMessagePolicy,
-                    shadowForwarder: userShardShadowForwarder,
                     contentReviewMode: configuration.contentReviewMode,
-                    directFanoutMode: configuration.directFanoutMode,
                     directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode,
-                    payloadWriteMode: configuration.fanoutPayloadWriteMode,
                     directSendPolicyCache: directSendPolicyCache,
                     directRoomLogFastAppendCache: directRoomLogFastAppendCache,
                     shardAdmissionCommandCreditPool: directRoomLogShardAdmissionCredits,
                     roomAdmissionCommandCreditPool: directRoomLogRoomAdmissionCredits,
                     appendStageMetrics: directRoomLogAppendStageMetrics
-                )
+                ).usingControlDatabase(directSendControlPool.database, authorizationResolutionDatabase: authorizationControlDatabase)
                 // Direct and group shard IDs may differ even on one database.
                 // Register every configured owner while sharing the same actors.
                 func localStores<Store>(_ store: Store) -> [String: Store] {
@@ -515,7 +581,8 @@ enum IMV2ServerApp {
                         capacityProfile: configuration.capacityProfile, limits: configuration.messageLimits)),
                     physicalStoreKeyByShard: localStores("control"))
                 directMessagingStore = PostgresV2DirectMessagingStore(
-                    database: database, shadowForwarder: userShardShadowForwarder
+                    database: database, shadowForwarder: userShardShadowForwarder,
+                    authorizationCoordinator: directAuthorizationCoordinator
                 )
                 groupEventLogStore = PostgresV2GroupEventLogStore(
                     database: database, directRoomLogEventCache: directRoomLogEventCache
@@ -552,7 +619,6 @@ enum IMV2ServerApp {
                     controlStore: localReadReceiptStore,
                     physicalStoreKeyByShard: localStores("control")
                 )
-                roomSummaryStore = PostgresV2RoomSummaryStore(database: database)
             } else {
                 var forwardServicesByShard: [String: any V2OwnerValidatedForwardMessagesHandling] = [:]
                 var roomWriteStoresByShard: [String: any V2OwnerValidatedRoomWriteStore] = [:]
@@ -572,7 +638,6 @@ enum IMV2ServerApp {
                     [String: any V2OwnerValidatedModerationStore] = [:]
                 var readReceiptStoresByShard:
                     [String: any V2OwnerValidatedReadReceiptStore] = [:]
-                var summaryStoresByShard: [String: any V2RoomSummaryStore] = [:]
                 var roomStoreKeyByShard: [String: String] = [:]
                 var roomWriteStoresByPhysicalLocation: [String: PostgresV2RoomWriteStore] = [:]
                 var directMessagingStoresByPhysicalLocation: [String: any V2DirectMessagingStore] = [:]
@@ -636,7 +701,7 @@ enum IMV2ServerApp {
                         configuration.directRoomLogRoomAdmissionCreditBatchSize > 0
                         ? .init(database: ownerDatabase, batchSize: configuration.directRoomLogRoomAdmissionCreditBatchSize)
                         : nil
-                    let write = PostgresV2RoomWriteStore(database: ownerDatabase, strangerMessagePolicy: configuration.strangerMessagePolicy, shadowForwarder: userShardShadowForwarder, contentReviewMode: configuration.contentReviewMode, directFanoutMode: configuration.directFanoutMode, directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode, payloadWriteMode: configuration.fanoutPayloadWriteMode, directSendPolicyCache: directSendPolicyCache, directRoomLogFastAppendCache: directRoomLogFastAppendCache, shardAdmissionCommandCreditPool: shardCredits, roomAdmissionCommandCreditPool: roomCredits, appendStageMetrics: directRoomLogAppendStageMetrics)
+                    let write = PostgresV2RoomWriteStore(database: ownerDatabase, strangerMessagePolicy: configuration.strangerMessagePolicy, contentReviewMode: configuration.contentReviewMode, directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode, directSendPolicyCache: directSendPolicyCache, directRoomLogFastAppendCache: directRoomLogFastAppendCache, shardAdmissionCommandCreditPool: shardCredits, roomAdmissionCommandCreditPool: roomCredits, appendStageMetrics: directRoomLogAppendStageMetrics).usingControlDatabase(directSendControlPool.database, authorizationResolutionDatabase: authorizationControlDatabase)
                     let direct = PostgresV2DirectMessagingStore(database: ownerDatabase, shadowForwarder: userShardShadowForwarder)
                     let events = PostgresV2GroupEventLogStore(database: ownerDatabase, directRoomLogEventCache: directRoomLogEventCache)
                     let membership = PostgresV2RoomMembershipStore(
@@ -693,8 +758,6 @@ enum IMV2ServerApp {
                         groupCapabilities
                     moderationStoresByShard[storage.shardID] = moderation
                     readReceiptStoresByShard[storage.shardID] = readReceipt
-                    summaryStoresByShard[storage.shardID] =
-                        PostgresV2RoomSummaryStore(database: ownerDatabase)
                 }
                 let forwardSources = try Dictionary(uniqueKeysWithValues: forwardServicesByShard.keys.map { shardID in
                     guard let source = roomShardDatabases[shardID] else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -706,7 +769,7 @@ enum IMV2ServerApp {
                     crossOwner: V2CrossOwnerForwardService(sources: forwardSources)
                 )
                 roomWriteStore = try V2RoutedRoomWriteStore(router: roomShardRouter, stores: roomWriteStoresByShard, physicalStoreKeyByShard: roomStoreKeyByShard)
-                directMessagingStore = try V2RoutedDirectMessagingStore(router: roomShardRouter, ownerStores: directMessagingStoresByShard, controlStore: PostgresV2DirectMessagingStore(database: database, shadowForwarder: userShardShadowForwarder))
+                directMessagingStore = try V2RoutedDirectMessagingStore(router: roomShardRouter, ownerStores: directMessagingStoresByShard, controlStore: PostgresV2DirectMessagingStore(database: database, shadowForwarder: userShardShadowForwarder, authorizationCoordinator: directAuthorizationCoordinator))
                 groupEventLogStore = try V2RoutedGroupEventLogStore(router: roomShardRouter, stores: groupEventLogStoresByShard)
                 membershipStore = try V2RoutedRoomMembershipStore(
                     router: roomShardRouter,
@@ -750,11 +813,6 @@ enum IMV2ServerApp {
                     ),
                     physicalStoreKeyByShard: roomStoreKeyByShard
                 )
-                roomSummaryStore = try V2RoutedRoomSummaryStore(
-                    router: roomShardRouter,
-                    stores: summaryStoresByShard,
-                    physicalStoreKeyByShard: roomStoreKeyByShard
-                )
             }
             let groupMessagingStore: any V2GroupMessagingStore
             if singleRoomOwnerIsControlDatabase {
@@ -763,9 +821,7 @@ enum IMV2ServerApp {
                 // because the operation ledger and room route share one
                 // PostgreSQL transaction domain.
                 groupMessagingStore = PostgresV2GroupMessagingStore(
-                    database: database,
-                    groupDeliveryAuthority: configuration.groupDeliveryAuthority
-                )
+                    database: database)
             } else {
                 var ownerStoresByShard:
                     [String: any V2ControlValidatedStagedGroupMessagingStore] = [:]
@@ -784,9 +840,7 @@ enum IMV2ServerApp {
                         continue
                     }
                     let store = PostgresV2GroupMessagingStore(
-                        database: ownerDatabase,
-                        groupDeliveryAuthority: configuration.groupDeliveryAuthority
-                    )
+                        database: ownerDatabase)
                     ownerStoresByPhysicalLocation[physicalLocationKey] = store
                     ownerStoresByShard[storage.shardID] = store
                 }
@@ -935,9 +989,7 @@ enum IMV2ServerApp {
                 && configuration.groupRoomShardIDs.count == 1
             {
                 maintenanceGroupMessagingStore = PostgresV2GroupMessagingStore(
-                    database: maintenanceDatabase,
-                    groupDeliveryAuthority: configuration.groupDeliveryAuthority
-                )
+                    database: maintenanceDatabase)
             } else {
                 let groupOwnerShardIDs = Set(configuration.groupRoomShardIDs)
                 var ownerStoresByShard:
@@ -1009,6 +1061,9 @@ enum IMV2ServerApp {
                         }
                     },
                     metrics: transportMetrics,
+                    coverageLost: { [weak connectionRegistry] in
+                        await connectionRegistry?.invalidateAccountRoomCoverage()
+                    },
                     receiveWake: { [weak connectionRegistry] notification in
                         switch notification {
                         case .wake(let wake):
@@ -1024,7 +1079,9 @@ enum IMV2ServerApp {
                     }
                 )
                 natsGroupWakeBroker = broker
-                await connectionRegistry.configureForegroundGroupInterestManager(broker)
+                let interests = V2SharedGroupEventWakeInterests(underlying: broker)
+                sharedGroupWakeInterests = interests
+                await connectionRegistry.configureForegroundGroupInterestManager(interests.manager(for: .foreground))
                 let liveActivityBroker = V2NATSLiveActivityBroker(
                     configuration: nats,
                     receivePresence: { [weak connectionRegistry] userID, isOnline, expiresAt in
@@ -1061,12 +1118,54 @@ enum IMV2ServerApp {
             )
             committedHybridGroupEvents.install(sink: foregroundGroupEventHints)
             let membershipDirectory = V2RoomMembershipDirectoryService(
-                store: PostgresV2RoomMembershipDirectoryStore(database: database)
+                store: try V2RoutedRoomMembershipDirectoryStore(controlDatabase: database,
+                    ownerDatabases: roomShardDatabases)
             )
             // 会话摘要按房间分片扇出；未读与预览都由服务端聚合，客户端只回传游标。
-            let roomSummaries = V2RoomSummaryService(store: roomSummaryStore)
+            // Recovery scans use uncached control-plane routing, so a cached
+            // owner cannot validate a stale physical copy after migration.
+            let recoveryRouter = V2PostgresRoomShardRouter(database: syncControlDatabase)
+            let recoveryStorageGroups = Dictionary(grouping: configuration.roomShardStorage) {
+                $0.databaseURL + "\u{0}" + $0.schema
+            }
+            var recoveryDirectoryStores: [any V2UserRoomDirectoryReading] = []
+            var recoveryStorageIdentities: [String] = []
+            var recoveryLocations: [V2RoomShardStorageLocation] = []
+            for key in recoveryStorageGroups.keys.sorted() {
+                guard let group = recoveryStorageGroups[key], let first = group.first,
+                      let owner = databaseForRole(for: .sync, url: first.databaseURL) else {
+                    throw V2RoomRecoveryReadError.corruptPersistence
+                }
+                let shardIDs = Set(group.map(\.shardID))
+                let store = try PostgresV2RoomRecoveryStore(database: owner, schema: first.schema)
+                recoveryDirectoryStores.append(try V2OwnerValidatedRoomDirectoryStore(
+                    underlying: store, router: recoveryRouter, physicalStoreShardIDs: shardIDs))
+                // Include aliases as well as physical identity in the deployment
+                // fingerprint. Connection material is hashed, never returned.
+                recoveryStorageIdentities.append(try JSONEncoder().encode([key] + shardIDs.sorted()).base64EncodedString())
+                for shardID in shardIDs.sorted() {
+                    recoveryLocations.append(try .init(shardID: shardID, database: owner, schema: first.schema))
+                }
+            }
+            let recoveryTopology = try PostgresV2RoomRecoveryTopology(
+                database: syncControlDatabase, stores: recoveryDirectoryStores,
+                orderedStoreIdentities: recoveryStorageIdentities)
+            let recoveryDirectory = V2UserRoomDirectoryService(topologySource: recoveryTopology,
+                cursorCodec: try .init(key: Data(configuration.accessTokenKey
+                    .digest("im-v2-room-recovery-cursor-root-v1").utf8)))
+            let recoveryStates = V2RoutedRoomStateStore(router: recoveryRouter,
+                registry: try V2StaticRoomShardStorageRegistry(locations: recoveryLocations))
+            let latestVisible = try V2RoomLatestVisibleCommandService(reader: V2RoutedRoomLatestVisibleStore(
+                router: recoveryRouter, registry: V2StaticRoomShardStorageRegistry(locations: recoveryLocations)))
+            let roomRecovery = V2RoomRecoveryCommandService(directory: recoveryDirectory, states: recoveryStates, latestVisible: latestVisible)
+            let accountInterests = sharedGroupWakeInterests
+                ?? V2SharedGroupEventWakeInterests(underlying: V2LocalRoomChangeInterest())
+            sharedGroupWakeInterests = accountInterests
+            let accountChanges = try V2AccountRoomChangeService(states: recoveryStates, interests: accountInterests)
+            accountRoomChangeService = accountChanges
+            await connectionRegistry.configureAccountRoomChanges(accountChanges)
             let socialRelationships = V2SocialRelationshipService(
-                store: PostgresV2SocialRelationshipStore(database: database, shadowForwarder: userShardShadowForwarder)
+                store: PostgresV2SocialRelationshipStore(database: database, shadowForwarder: userShardShadowForwarder, authorizationCoordinator: directAuthorizationCoordinator)
             )
             let moderation = V2ModerationService(
                 store: moderationStore,
@@ -1136,7 +1235,8 @@ enum IMV2ServerApp {
                 groupEventLog: groupEventLog,
                 foregroundGroupEventHints: foregroundGroupEventHints,
                 membershipDirectory: membershipDirectory,
-                roomSummaries: roomSummaries,
+                roomRecovery: roomRecovery,
+                accountChanges: connectionRegistry,
                 socialRelationships: socialRelationships,
                 moderation: moderation,
                 conversationCapabilities: conversationCapabilities,
@@ -1166,104 +1266,9 @@ enum IMV2ServerApp {
                     configuration.frameLimits.maximumPayloadBytes - 4_096
                 )
             )
-            let natsFanoutHintPublisher: (any V2FanoutPlanHintPublishing)? =
-                switch configuration.fanoutHint {
-                case .durablePollingOnly: nil
-                case .nats(let nats):
-                    V2NATSFanoutPlanHintPublisher(configuration: nats)
-                }
-            var physicalFanoutPipelines: [V2FanoutPipeline] = []
-            var physicalCompletionWorkers:
-                [V2FanoutCompletionReleaseWorker] = []
-            for ownerDatabaseURL in roomOwnerDatabaseURLs {
-                guard let ownerDeliveryDatabase = databaseForRole(
-                    for: .delivery,
-                    url: ownerDatabaseURL
-                ) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                let ownerDeliveryStore = PostgresV2FanoutDeliveryStore(
-                    database: ownerDeliveryDatabase,
-                    payloadWriteMode: configuration.fanoutPayloadWriteMode
-                )
-                physicalCompletionWorkers.append(.init(
-                    store: ownerDeliveryStore
-                ))
-                let durablePublisher = V2LocalFanoutPlanPublisher(
-                    planner: .init(
-                        store: PostgresV2FanoutPlanStore(
-                            database: ownerDeliveryDatabase
-                        ),
-                        pageSize: configuration.capacityProfile.limits
-                            .maxEnumerationPageSize
-                    )
-                )
-                let publisher: any V2FanoutPlanPublisher =
-                    if let natsFanoutHintPublisher {
-                        V2BestEffortFanoutPlanHintPublisher(
-                            durablePublisher: durablePublisher,
-                            hintPublisher: natsFanoutHintPublisher
-                        )
-                    } else {
-                        durablePublisher
-                    }
-                physicalFanoutPipelines.append(.init(
-                    relay: .init(
-                        store: PostgresV2RoomOutboxStore(
-                            database: ownerDeliveryDatabase
-                        ),
-                        publisher: publisher,
-                        retryPolicy: configuration.durableRetryPolicy
-                    ),
-                    deliveryWorkers: configuration.userShardStorage
-                        .map(\.bucket)
-                        .sorted()
-                        .map { bucket in
-                            let userStorage = configuration.userShardStorage
-                                .first { $0.bucket == bucket }
-                            let isCoLocated = userStorage?.databaseURL
-                                == ownerDatabaseURL
-                                && userStorage?.schema == "im_v2"
-                            return V2FanoutDeliveryWorker(
-                                store: V2CrossStoreFanoutDeliveryStore(
-                                    control: ownerDeliveryStore,
-                                    registry: deliveryUserShardStorage,
-                                    migrations: userShardMigrations,
-                                    coLocatedControlBucket:
-                                        isCoLocated ? bucket : nil,
-                                    payloadWriteMode:
-                                        configuration.fanoutPayloadWriteMode
-                                ),
-                                bucket: bucket,
-                                liveNotifier: liveSyncNotifier,
-                                router: deliveryUserShardRouter,
-                                retryPolicy: configuration.durableRetryPolicy,
-                                claimScheduler: .init(
-                                    freshBurstPasses:
-                                        configuration.fanoutFreshBurstPasses
-                                ),
-                                commitBatchSize: isCoLocated
-                                    ? configuration
-                                        .fanoutDeliveryCommitBatchSize
-                                    : configuration
-                                        .crossStoreFanoutDeliveryCommitBatchSize,
-                                maximumConcurrentCommitBatches: isCoLocated
-                                    ? 1
-                                    : configuration
-                                        .crossStoreFanoutDeliveryCommitConcurrency
-                            )
-                        },
-                    telemetry: telemetry
-                ))
-            }
-            let fanoutPipeline = try V2RoutedFanoutPipeline(
-                pipelines: physicalFanoutPipelines
-            )
-            let fanoutCompletionReleaseWorker =
-                try V2RoutedFanoutCompletionReleaseWorker(
-                    workers: physicalCompletionWorkers
-                )
             // The wake relay is not a delivery dependency: a failed or
             // duplicated publication only changes foreground latency because
-            // Hybrid clients always cursor-pull the room event log.
+            // Clients always cursor-pull the room event log.
             let groupEventWakeRelay = V2GroupEventWakeRelay(
                 store: groupEventWakeStore,
                 publisher: groupEventWakePublisher
@@ -1274,9 +1279,7 @@ enum IMV2ServerApp {
                 liveNotifier: liveSyncNotifier
             )
             let readReceiptPreferencePropagationWorker = V2ReadReceiptPreferencePropagationWorker(
-                database: maintenanceDatabase,
-                shadowForwarder: maintenanceUserShardShadowForwarder,
-                liveNotifier: liveSyncNotifier
+                database: maintenanceDatabase
             )
             let deviceRevocationWorker = V2DeviceRevocationWorker(
                 store: V2PostgresDeviceRevocationEventStore(database: maintenanceDatabase),
@@ -1300,13 +1303,15 @@ enum IMV2ServerApp {
                 store: PostgresV2MediaRetentionStore(database: maintenanceDatabase),
                 withdrawnRetention: TimeInterval(configuration.mediaWithdrawnRetentionSeconds)
             )
-            // 房间日志保留：默认 permanent 只做有界检查、不删除任何历史；窗口模式下按
-            // 活跃读者已读线下界裁剪，并由房间列把"历史不完整"告知返回的客户端。
-            let roomLogRetentionWorker = V2RoomLogRetentionWorker(
-                store: PostgresV2RoomLogRetentionStore(database: maintenanceDatabase),
-                mode: configuration.roomLogRetentionMode,
-                window: configuration.roomLogRetentionWindowSeconds
-            )
+            // 房间日志保留：permanent 计入全部回执，window 只计入窗口内回执；
+            // 缺少回执的当前成员始终保护历史，裁剪下界告知返回客户端历史不完整。
+            let roomLogRetentionWorkers = roomOwnerMaintenanceDatabases.map { ownerDatabase in
+                V2RoomLogRetentionWorker(
+                    store: PostgresV2RoomLogRetentionStore(database: ownerDatabase),
+                    mode: configuration.roomLogRetentionMode,
+                    window: configuration.roomLogRetentionWindowSeconds
+                )
+            }
             let controlPlaneHousekeepingWorker = V2ControlPlaneHousekeepingWorker(
                 store: PostgresV2ControlPlaneHousekeepingStore(database: maintenanceDatabase),
                 idempotencyRetention: TimeInterval(configuration.idempotencyRetentionSeconds)
@@ -1424,6 +1429,20 @@ enum IMV2ServerApp {
             app.logger.notice("IM V2 metrics listener bound", metadata: ["host": "\(configuration.metrics.host)", "port": "\(configuration.metrics.port)"])
             let logger = app.logger
             let forwardDeliveryTask = Task { await forwardRuntime.run() }
+            let directAuthorizationRecoveryTask = Task {
+                while !Task.isCancelled {
+                    do {
+                        let report = try await directAuthorizationCoordinator.recover(limit: 8, now: Date())
+                        if report.deferred > 0 {
+                            logger.warning("IM V2 authorization recovery deferred owner work", metadata: ["count": "\(report.deferred)"])
+                        }
+                    } catch is CancellationError { break }
+                    catch { logger.error("IM V2 authorization recovery failed; retrying") }
+                    do { try await v2Sleep(for: .milliseconds(configuration.workerPollIntervalMilliseconds)) }
+                    catch { break }
+                }
+            }
+
             let maintenanceCadence = try V2MaintenanceCadence(
                 intervalMilliseconds: configuration.maintenancePollIntervalMilliseconds
             )
@@ -1467,7 +1486,7 @@ enum IMV2ServerApp {
                                configuration.databaseWorkAdmissionEnabled,
                                await databaseWorkAdmission.snapshot().queued > 0 {
                                 do {
-                                    try await Task.sleep(for: .milliseconds(
+                                    try await v2Sleep(for: .milliseconds(
                                         configuration.workerPollIntervalMilliseconds
                                     ))
                                 } catch {
@@ -1495,7 +1514,7 @@ enum IMV2ServerApp {
                                 await Task.yield()
                             case .sleep(let duration):
                                 do {
-                                    try await Task.sleep(for: duration)
+                                    try await v2Sleep(for: duration)
                                 } catch {
                                     break
                                 }
@@ -1519,7 +1538,7 @@ enum IMV2ServerApp {
                             logger.error("IM V2 snapshot artifact build failed; retrying")
                         }
                         do {
-                            try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
+                            try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
                         } catch {
                             break
                         }
@@ -1529,33 +1548,6 @@ enum IMV2ServerApp {
             // Historical conversion is isolated from latency-sensitive user
             // projection. Busy batches drain continuously; an empty shard
             // backs off to a cheap bounded poll.
-            let messageProjectionBackfillTasks = messageProjectionBackfillWorkers.map { worker in
-                Task {
-                    var cadence = V2AdaptiveWorkerCadence(
-                        minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
-                    )
-                    while !Task.isCancelled {
-                        var didWork = false
-                        do {
-                            let report = try await worker.runOnce(
-                                limit: cadence.claimLimit(
-                                    configuredLimit: configuration.workerBatchSize
-                                )
-                            )
-                            didWork = report.didWork
-                        } catch is CancellationError {
-                            break
-                        } catch {
-                            logger.error("IM V2 message projection backfill failed; retrying")
-                        }
-                        do {
-                            try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
-                        } catch {
-                            break
-                        }
-                    }
-                }
-            }
             let messageProjectionStateBodyCompactionTasks =
                 messageProjectionStateBodyCompactionWorkers.map { worker in
                     Task {
@@ -1589,7 +1581,7 @@ enum IMV2ServerApp {
                         }
                     }
                 }
-            let fanoutPayloadReferenceBackfillTasks = fanoutPayloadReferenceBackfillWorkers.map { worker in
+            let userStateTasks = userStateWorkers.map { worker in
                 Task {
                     var cadence = V2AdaptiveWorkerCadence(
                         minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
@@ -1597,67 +1589,24 @@ enum IMV2ServerApp {
                     while !Task.isCancelled {
                         var didWork = false
                         do {
-                            let report = try await worker.runOnce(
-                                limit: cadence.claimLimit(
-                                    configuredLimit: configuration.workerBatchSize
-                                )
-                            )
-                            didWork = report.didWork
+                            didWork = try await worker.runOnce(limit: min(1024, cadence.claimLimit(
+                                configuredLimit: configuration.workerBatchSize
+                            ))) > 0
                         } catch is CancellationError {
                             break
                         } catch {
-                            logger.error("IM V2 fan-out payload reference backfill failed; retrying")
+                            logger.error("IM V2 personal state delivery failed; retrying")
                         }
                         do {
-                            try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
-                        } catch {
-                            break
-                        }
+                            try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
+                        } catch { break }
                     }
                 }
             }
-            // Planning stays on its own cadence. A delivery pass may hold a
-            // large, lease-fenced batch while it commits several bounded
-            // transactions; serially placing planning behind it would add the
-            // entire drain duration to a newly committed room event.
-            let fanoutPlanningTask = Task {
-                var cadence = V2AdaptiveWorkerCadence(
-                    minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
-                )
-                while !Task.isCancelled {
-                    var didWork = false
-                    do {
-                        // An idle planner lane publishes each claimed outbox
-                        // item sequentially. Probe with one item so a burst
-                        // cannot strand a full batch at idle concurrency; the
-                        // next pass immediately restores both the configured
-                        // batch and planner concurrency.
-                        let report = try await fanoutPipeline.runRelayAndPlanOnce(
-                            limit: cadence.claimLimit(configuredLimit: configuration.workerBatchSize),
-                            concurrencyPerOwner: cadence.isIdle ? 1 : configuration.capacityProfile.limits.maxPlannerConcurrency
-                        )
-                        didWork = report.claimedCount > 0 || report.publishedCount > 0 ||
-                            report.releasedCount > 0 || report.pausedCount > 0
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        logger.error("IM V2 fan-out relay and planner failed; retrying")
-                    }
-                    do {
-                        try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        break
-                    }
-                }
-            }
-            // Full Hybrid payloads already use the low-latency foreground
+            // Room event payloads already use the low-latency foreground
             // dispatcher. The durable wake is a coalesced repair hint: give
             // independent Gateway publishers time to deliver their payloads
             // before announcing a later waterline to every active client.
-            // Keeping this cadence separate also prevents that recovery grace
-            // from delaying standard fan-out planning.
             let groupEventWakeTask = Task {
                 var cadence = V2AdaptiveWorkerCadence(
                     minimumIntervalMilliseconds:
@@ -1689,100 +1638,7 @@ enum IMV2ServerApp {
                     }
                 }
             }
-            // Delivery owns its own cadence. It must not wait behind Push,
-            // revocation, profile propagation, or retention work: those
-            // workers have independent durable retry semantics, while a
-            // delayed delivery pass directly increases a standard group's
-            // recipient-visible convergence age.
-            let fanoutDeliveryTask = Task {
-                var cadence = V2AdaptiveWorkerCadence(
-                    minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
-                )
-                var concurrencyController = V2AdaptiveFanoutDeliveryConcurrency(
-                    configuredMaximum: configuration.capacityProfile.limits.maxDeliveryConcurrency
-                )
-                while !Task.isCancelled {
-                    var didWork = false
-                    var selectedConcurrency = 1
-                    do {
-                        try Task.checkCancellation()
-                        let pressure = await databaseWorkAdmission.snapshot()
-                        selectedConcurrency = concurrencyController.concurrencyForPass(
-                            isIdle: cadence.isIdle,
-                            foregroundInFlight: pressure.foregroundInFlight,
-                            foregroundQueued: pressure.foregroundQueued
-                        )
-                        let report = try await fanoutPipeline.runDeliveryOnce(
-                            claimLimit: cadence.claimLimit(
-                                configuredLimit: configuration.fanoutDeliveryClaimBatchSize
-                            ),
-                            concurrencyPerOwner: selectedConcurrency
-                        )
-                        didWork = report.claimedCount > 0 || report.committedCount > 0 ||
-                            report.staleCount > 0 || report.staleRouteCount > 0 ||
-                            report.releasedCount > 0 || report.pausedCount > 0
-                        let pressureAfterPass = await databaseWorkAdmission.snapshot()
-                        concurrencyController.observePass(
-                            selectedConcurrency: selectedConcurrency,
-                            claimedCount: report.claimedCount,
-                            perLaneSaturationCount: configuration.fanoutDeliveryCommitBatchSize,
-                            foregroundInFlight: pressureAfterPass.foregroundInFlight,
-                            foregroundQueued: pressureAfterPass.foregroundQueued
-                        )
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        let pressure = await databaseWorkAdmission.snapshot()
-                        concurrencyController.observePass(
-                            selectedConcurrency: selectedConcurrency,
-                            claimedCount: 0,
-                            perLaneSaturationCount: configuration.fanoutDeliveryCommitBatchSize,
-                            foregroundInFlight: pressure.foregroundInFlight,
-                            foregroundQueued: pressure.foregroundQueued,
-                            failed: true
-                        )
-                        logger.error("IM V2 fan-out delivery failed; retrying")
-                    }
-                    do {
-                        try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        break
-                    }
-                }
-            }
-            // Projection completion and admission-capacity release are two
-            // durable phases with disjoint lock sets. This independent polling
-            // worker is the crash-recovery path for units committed immediately
-            // before a process exit; an in-process wake is never required for
-            // correctness.
-            let fanoutCompletionReleaseTask = Task {
-                var cadence = V2AdaptiveWorkerCadence(
-                    minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
-                )
-                while !Task.isCancelled {
-                    var didWork = false
-                    do {
-                        let report = try await fanoutCompletionReleaseWorker.runOnce(
-                            limitPerOwner: configuration.workerBatchSize
-                        )
-                        didWork = report.releasedCount > 0
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        logger.error("IM V2 fan-out completion release failed; retrying")
-                    }
-                    do {
-                        try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        break
-                    }
-                }
-            }
-            // Review is intentionally separate from fan-out and maintenance.
+            // Review runs independently of personal state delivery and maintenance.
             // A slow external/OCR adapter must never increase the accepted
             // message's recipient delivery latency or delay media retention.
             let contentReviewTask = Task {
@@ -1806,7 +1662,7 @@ enum IMV2ServerApp {
                         logger.error("IM V2 content-review worker failed; retrying")
                     }
                     do {
-                        try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
+                        try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
                     } catch is CancellationError {
                         break
                     } catch {
@@ -1833,7 +1689,7 @@ enum IMV2ServerApp {
                         logger.error("IM V2 Push wake worker failed; retrying")
                     }
                     do {
-                        try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
+                        try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
                     } catch is CancellationError {
                         break
                     } catch {
@@ -1860,7 +1716,7 @@ enum IMV2ServerApp {
                         logger.error("IM V2 revoked-device projection cleanup failed; retrying")
                     }
                     do {
-                        try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
+                        try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
                     } catch is CancellationError {
                         break
                     } catch {
@@ -1903,7 +1759,7 @@ enum IMV2ServerApp {
                         await Task.yield()
                     case .sleep(let duration):
                         do {
-                            try await Task.sleep(for: duration)
+                            try await v2Sleep(for: duration)
                         } catch {
                             break
                         }
@@ -1945,7 +1801,7 @@ enum IMV2ServerApp {
                         await Task.yield()
                     case .sleep(let duration):
                         do {
-                            try await Task.sleep(for: duration)
+                            try await v2Sleep(for: duration)
                         } catch {
                             break
                         }
@@ -2035,12 +1891,14 @@ enum IMV2ServerApp {
                         } catch {
                             logger.error("IM V2 media retention worker failed; retrying")
                         }
-                        do {
-                            _ = try await roomLogRetentionWorker.runOnce(limit: configuration.workerBatchSize)
-                        } catch is CancellationError {
-                            break
-                        } catch {
-                            logger.error("IM V2 room log retention worker failed; retrying")
+                        for worker in roomLogRetentionWorkers {
+                            do {
+                                _ = try await worker.runOnce(limit: configuration.workerBatchSize)
+                            } catch is CancellationError {
+                                return
+                            } catch {
+                                logger.error("IM V2 room log retention worker failed; retrying")
+                            }
                         }
                         for worker in syncHousekeepingWorkers {
                             do {
@@ -2058,6 +1916,15 @@ enum IMV2ServerApp {
                                 return
                             } catch {
                                 logger.error("IM V2 snapshot projection history cleanup failed; retrying")
+                            }
+                        }
+                        for worker in personalEventGCWorkers {
+                            do {
+                                _ = try await worker.runOnce(limit: configuration.workerBatchSize)
+                            } catch is CancellationError {
+                                return
+                            } catch {
+                                logger.error("IM V2 completed personal event cleanup failed; retrying")
                             }
                         }
                         for worker in messageProjectionStateGCWorkers {
@@ -2079,10 +1946,28 @@ enum IMV2ServerApp {
                             // source/target details in process logs.
                             logger.error("IM V2 user-shard retention worker failed; retrying")
                         }
+                        for database in forwardBackgroundDatabases.values {
+                            do {
+                                _ = try await PostgresV2ForwardExportCompactor(database: database).runOnce(
+                                    limit: min(1_024, max(1, configuration.workerBatchSize)))
+                            } catch is CancellationError {
+                                return
+                            } catch {
+                                logger.error("IM V2 terminal forward export compaction failed; retrying")
+                            }
+                            do {
+                                _ = try await PostgresV2ForwardInboxCompactor(database: database).runOnce(
+                                    limit: min(1_024, max(1, configuration.workerBatchSize)))
+                            } catch is CancellationError {
+                                return
+                            } catch {
+                                logger.error("IM V2 terminal forward inbox compaction failed; retrying")
+                            }
+                        }
                         nextMaintenanceAt = maintenanceCadence.nextScheduledAt(after: maintenanceNow)
                     }
                     do {
-                        try await Task.sleep(for: cadence.delayAfterPass(didWork: didWork))
+                        try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
                     } catch is CancellationError {
                         break
                     } catch {
@@ -2097,16 +1982,13 @@ enum IMV2ServerApp {
             // drain and are closed by the full server shutdown below.
             try await server.stopAccepting()
             logger.notice("IM V2 public listener closed")
+            userStateTasks.forEach { $0.cancel() }
             userProjectionTasks.forEach { $0.cancel() }
             snapshotArtifactTasks.forEach { $0.cancel() }
-            messageProjectionBackfillTasks.forEach { $0.cancel() }
             messageProjectionStateBodyCompactionTasks.forEach { $0.cancel() }
-            fanoutPayloadReferenceBackfillTasks.forEach { $0.cancel() }
+            directAuthorizationRecoveryTask.cancel()
             forwardDeliveryTask.cancel()
-            fanoutPlanningTask.cancel()
             groupEventWakeTask.cancel()
-            fanoutDeliveryTask.cancel()
-            fanoutCompletionReleaseTask.cancel()
             contentReviewTask.cancel()
             pushWakeTask.cancel()
             revokedDeviceProjectionCleanupTask.cancel()
@@ -2119,17 +2001,14 @@ enum IMV2ServerApp {
             foregroundGroupEventHints.finish()
             await directRoomLogEventCache?.finish()
             var serviceTasks: [Task<Void, Never>] = []
+            serviceTasks.append(contentsOf: userStateTasks)
             serviceTasks.append(contentsOf: userProjectionTasks)
             serviceTasks.append(contentsOf: snapshotArtifactTasks)
-            serviceTasks.append(contentsOf: messageProjectionBackfillTasks)
             serviceTasks.append(contentsOf: messageProjectionStateBodyCompactionTasks)
-            serviceTasks.append(contentsOf: fanoutPayloadReferenceBackfillTasks)
             serviceTasks.append(contentsOf: [
+                directAuthorizationRecoveryTask,
                 forwardDeliveryTask,
-                fanoutPlanningTask,
                 groupEventWakeTask,
-                fanoutDeliveryTask,
-                fanoutCompletionReleaseTask,
                 contentReviewTask,
                 pushWakeTask,
                 revokedDeviceProjectionCleanupTask,
@@ -2152,6 +2031,8 @@ enum IMV2ServerApp {
             await connectionRegistry.detachForegroundGroupInterestManager()
             await connectionRegistry.detachLiveActivityBroker()
             await natsLiveActivityBroker?.shutdown()
+            await accountRoomChangeService?.shutdown()
+            await sharedGroupWakeInterests?.shutdown()
             await natsGroupWakeBroker?.shutdown()
             logger.notice("IM V2 broker and presence shutdown finished")
             try await server.shutdown()
@@ -2161,6 +2042,8 @@ enum IMV2ServerApp {
             try await applicationEventLoops.shutdownGracefully()
         } catch {
             await natsLiveActivityBroker?.shutdown()
+            await accountRoomChangeService?.shutdown()
+            await sharedGroupWakeInterests?.shutdown()
             await natsGroupWakeBroker?.shutdown()
             try? await app.asyncShutdown()
             try? await applicationEventLoops.shutdownGracefully()
@@ -2231,29 +2114,7 @@ private struct V2ApplicationTelemetrySink: V2TelemetrySink {
                 "rejection": "\(rejection?.rawValue ?? "none")",
                 "elapsed_ms": "\(elapsedMilliseconds)",
             ])
-        case .fanoutProgress(let traceID, let claimedOutboxRows, let publishedOutboxRows, let releasedOutboxRows, let pausedOutboxRows, let claimedDeliveries, let committedDeliveries, let staleDeliveries, let staleRouteDeliveries, let releasedDeliveries, let pausedDeliveries, let relayElapsedMilliseconds, let deliveryElapsedMilliseconds, let elapsedMilliseconds):
-            logger.info("im_v2.fanout.progress", metadata: [
-                "trace_id": "\(traceID.uuidString)",
-                "claimed_outbox_rows": "\(claimedOutboxRows)",
-                "published_outbox_rows": "\(publishedOutboxRows)",
-                "released_outbox_rows": "\(releasedOutboxRows)",
-                "paused_outbox_rows": "\(pausedOutboxRows)",
-                "claimed_deliveries": "\(claimedDeliveries)",
-                "committed_deliveries": "\(committedDeliveries)",
-                "stale_deliveries": "\(staleDeliveries)",
-                "stale_route_deliveries": "\(staleRouteDeliveries)",
-                "released_deliveries": "\(releasedDeliveries)",
-                "paused_deliveries": "\(pausedDeliveries)",
-                "relay_elapsed_ms": "\(relayElapsedMilliseconds)",
-                "delivery_elapsed_ms": "\(deliveryElapsedMilliseconds)",
-                "elapsed_ms": "\(elapsedMilliseconds)",
-            ])
-        case .fanoutFailure(let traceID, let stage, let elapsedMilliseconds):
-            logger.error("im_v2.fanout.failure", metadata: [
-                "trace_id": "\(traceID.uuidString)",
-                "stage": "\(stage.rawValue)",
-                "elapsed_ms": "\(elapsedMilliseconds)",
-            ])
+
         }
     }
 

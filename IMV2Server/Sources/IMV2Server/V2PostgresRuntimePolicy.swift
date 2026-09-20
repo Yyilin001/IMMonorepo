@@ -210,14 +210,16 @@ public struct V2PostgresRuntimePolicy: Equatable, Sendable {
     /// - Parameters:
     ///   - databaseURLs: 涉及的数据库地址。
     ///   - connectionsPerEventLoopPerPhysicalStore: 每个物理库每事件循环的连接数。
+    ///   - additionalConnections: 控制面专用池的额外连接数，同样计入进程总上限。
     /// - Throws: 物理库数量为零、单池连接数非法或超过上限，或总连接数越界时抛出
     ///   ``V2GatewayRuntimeConfigurationError/invalid(_:)``。
     public func validate(
         databaseURLs: [String],
-        connectionsPerEventLoopPerPhysicalStore: Int
+        connectionsPerEventLoopPerPhysicalStore: Int,
+        additionalConnections: Int = 0
     ) throws {
         let physicalPoolCount = Set(databaseURLs).count
-        guard physicalPoolCount > 0, connectionsPerEventLoopPerPhysicalStore > 0,
+        guard physicalPoolCount > 0, additionalConnections >= 0, connectionsPerEventLoopPerPhysicalStore > 0,
               connectionsPerEventLoopPerPhysicalStore <= maximumConnectionsPerEventLoop
         else {
             if physicalPoolCount == 0 {
@@ -231,7 +233,8 @@ public struct V2PostgresRuntimePolicy: Equatable, Sendable {
             by: connectionsPerEventLoopPerPhysicalStore
         )
         let (total, totalOverflow) = perPool.multipliedReportingOverflow(by: physicalPoolCount)
-        guard !perPoolOverflow, !totalOverflow, total <= maximumTotalConnections else {
+        let (combinedTotal, additionalOverflow) = total.addingReportingOverflow(additionalConnections)
+        guard !perPoolOverflow, !totalOverflow, !additionalOverflow, combinedTotal <= maximumTotalConnections else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS")
         }
     }

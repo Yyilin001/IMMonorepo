@@ -37,9 +37,7 @@ SELECT :'profile_id'::text AS profile_id,
 
 CREATE TEMP TABLE disposable_pool_reset_before ON COMMIT DROP AS
 SELECT room_shard_id, capacity_profile_id, lease_id, generation,
-       command_window_limit, command_window_used,
-       fanout_window_limit, fanout_window_used,
-       outstanding_fanout_units, outstanding_plans
+       command_window_limit, command_window_used
 FROM im_v2.shard_admission_pools
 WHERE capacity_profile_id = (
   SELECT profile_id FROM disposable_pool_reset_config
@@ -53,12 +51,6 @@ BEGIN
        <> (SELECT expected_shards FROM disposable_pool_reset_config) THEN
     RAISE EXCEPTION 'unexpected disposable shard count';
   END IF;
-  IF EXISTS (
-    SELECT 1 FROM disposable_pool_reset_before
-    WHERE outstanding_fanout_units <> 0 OR outstanding_plans <> 0
-  ) THEN
-    RAISE EXCEPTION 'durable fanout work is still outstanding';
-  END IF;
 END
 $guard$;
 
@@ -68,8 +60,7 @@ SET lease_id = gen_random_uuid(),
     valid_until = CURRENT_TIMESTAMP + make_interval(hours => (
       SELECT lease_hours FROM disposable_pool_reset_config
     )),
-    command_window_used = 0,
-    fanout_window_used = 0
+    command_window_used = 0
 WHERE pool.capacity_profile_id = (
   SELECT profile_id FROM disposable_pool_reset_config
 );
@@ -80,8 +71,7 @@ BEGIN
       WHERE capacity_profile_id = (
         SELECT profile_id FROM disposable_pool_reset_config
       )
-        AND command_window_used = 0
-        AND fanout_window_used = 0)
+        AND command_window_used = 0)
        <> (SELECT expected_shards FROM disposable_pool_reset_config) THEN
     RAISE EXCEPTION 'not every disposable pool was reset';
   END IF;
@@ -107,8 +97,7 @@ BEGIN
     WHERE room.capacity_profile_id = (
       SELECT profile_id FROM disposable_pool_reset_config
     )
-      AND (admission.command_window_used <> 0
-           OR admission.fanout_window_used <> 0)
+      AND (admission.command_window_used <> 0)
   ) THEN
     RAISE EXCEPTION 'room admission windows did not reset with the new shard lease';
   END IF;

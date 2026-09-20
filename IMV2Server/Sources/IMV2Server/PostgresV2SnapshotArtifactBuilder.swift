@@ -25,7 +25,6 @@ public struct PostgresV2SnapshotArtifactBuilder: Sendable {
     private let pageItemLimit: Int
     private let maximumCandidateItems: Int
     private let leaseDuration: TimeInterval
-    private let messageReadMode: V2MessageProjectionReadMode
     private let makeUUID: @Sendable () -> UUID
 
     /// 校验并保存数据库、schema 与分页参数。
@@ -36,7 +35,6 @@ public struct PostgresV2SnapshotArtifactBuilder: Sendable {
     ///   - pageItemLimit: 单页条目上限，需落在编解码器允许范围内。
     ///   - maximumCandidateItems: 单次候选读取上限，需不小于单页上限。
     ///   - leaseDuration: 认领租约秒数，需大于零。
-    ///   - messageReadMode: 消息投影读取模式，默认优先共享状态。
     ///   - makeUUID: 页面或产物标识生成方式。
     ///
     /// 参数越界时直接失败，避免出现越界分页或非法 schema 拼接。
@@ -46,7 +44,6 @@ public struct PostgresV2SnapshotArtifactBuilder: Sendable {
         pageItemLimit: Int = V2SnapshotProjectionV3Codec.maximumPageItems,
         maximumCandidateItems: Int = 500,
         leaseDuration: TimeInterval = 30,
-        messageReadMode: V2MessageProjectionReadMode = .preferShared,
         makeUUID: @escaping @Sendable () -> UUID = UUID.init
     ) {
         precondition((1 ... V2SnapshotProjectionV3Codec.maximumPageItems).contains(pageItemLimit))
@@ -57,7 +54,6 @@ public struct PostgresV2SnapshotArtifactBuilder: Sendable {
         self.pageItemLimit = pageItemLimit
         self.maximumCandidateItems = maximumCandidateItems
         self.leaseDuration = leaseDuration
-        self.messageReadMode = messageReadMode
         self.makeUUID = makeUUID
     }
 
@@ -182,17 +178,8 @@ public struct PostgresV2SnapshotArtifactBuilder: Sendable {
             return try await sql.raw("""
                 SELECT version.projection_kind, version.entity_key, version.valid_from_sequence,
                        version.source_event_id,
-                       CASE
-                           WHEN version.projection_kind <> 'message' THEN version.payload
-                           WHEN \(bind: messageReadMode.rawValue) = 'inline' THEN
-                               COALESCE(version.payload, state.payload)
-                           WHEN \(bind: messageReadMode.rawValue) = 'prefer_shared' THEN
-                               COALESCE(state.payload, version.payload)
-                           ELSE state.payload
-                       END::text AS payload_json
+                       version.payload::text AS payload_json
                 FROM \(unsafeRaw: table("user_projection_versions")) AS version
-                LEFT JOIN \(unsafeRaw: table("message_projection_state_values")) AS state
-                  ON state.state_id = version.message_state_id
                 WHERE version.user_id = \(bind: claim.userID)
                   AND version.valid_from_sequence <= \(bind: claim.baseSequence)
                   AND (version.valid_to_sequence IS NULL OR version.valid_to_sequence > \(bind: claim.baseSequence))
@@ -204,17 +191,8 @@ public struct PostgresV2SnapshotArtifactBuilder: Sendable {
         return try await sql.raw("""
             SELECT version.projection_kind, version.entity_key, version.valid_from_sequence,
                    version.source_event_id,
-                   CASE
-                       WHEN version.projection_kind <> 'message' THEN version.payload
-                       WHEN \(bind: messageReadMode.rawValue) = 'inline' THEN
-                           COALESCE(version.payload, state.payload)
-                       WHEN \(bind: messageReadMode.rawValue) = 'prefer_shared' THEN
-                           COALESCE(state.payload, version.payload)
-                       ELSE state.payload
-                   END::text AS payload_json
+                   version.payload::text AS payload_json
             FROM \(unsafeRaw: table("user_projection_versions")) AS version
-            LEFT JOIN \(unsafeRaw: table("message_projection_state_values")) AS state
-              ON state.state_id = version.message_state_id
             WHERE version.user_id = \(bind: claim.userID)
               AND version.valid_from_sequence <= \(bind: claim.baseSequence)
               AND (version.valid_to_sequence IS NULL OR version.valid_to_sequence > \(bind: claim.baseSequence))

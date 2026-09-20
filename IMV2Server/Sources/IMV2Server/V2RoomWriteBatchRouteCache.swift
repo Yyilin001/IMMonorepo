@@ -11,7 +11,7 @@ actor V2RoomWriteBatchRouteCache {
         /// 私聊房间写入。
         case direct
         /// 混合大群写入。
-        case largeGroupHybrid
+        case large
         /// 无法合并的单条写入。
         case individual
     }

@@ -369,12 +369,15 @@ public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
             let rows = try await sql.raw("""
                 WITH candidates AS (
                     SELECT message_id
-                    FROM im_v2.content_review_jobs
-                    WHERE (state = 'pending' AND COALESCE(next_attempt_at, created_at) <= \(bind: now))
-                       OR (state = 'claimed' AND lease_expires_at <= \(bind: now))
+                    FROM im_v2.content_review_jobs AS job
+                    WHERE ((state = 'pending' AND COALESCE(next_attempt_at, created_at) <= \(bind: now))
+                       OR (state = 'claimed' AND lease_expires_at <= \(bind: now)))
+                      AND (SELECT true FROM im_v2.rooms AS room
+                           WHERE room.room_id = job.room_id AND room.migration_fence_id IS NULL
+                           FOR SHARE OF room SKIP LOCKED)
                     ORDER BY created_at, message_id
                     LIMIT \(bind: limit)
-                    FOR UPDATE SKIP LOCKED
+                    FOR UPDATE OF job SKIP LOCKED
                 )
                 UPDATE im_v2.content_review_jobs AS job
                 SET state = 'claimed', claim_token = \(bind: token), lease_expires_at = \(bind: expiresAt),
@@ -433,11 +436,13 @@ public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
         let enforcedRevision = expected + 1
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            try await lockReviewRoom(lease, sql: sql)
             let renewed = try await sql.raw("""
                 UPDATE im_v2.content_review_jobs AS job
                 SET lease_expires_at = GREATEST(job.lease_expires_at, \(bind: renewedUntil))
                 FROM im_v2.messages AS message
                 WHERE job.message_id = \(bind: messageID)
+                  AND job.room_id = \(bind: roomID)
                   AND job.state = 'claimed' AND job.claim_token = \(bind: lease.claimToken)
                   AND message.message_id = job.message_id
                   AND (
@@ -466,6 +471,7 @@ public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
                     finding_category = NULL, finding_severity = NULL, finding_confidence = NULL
                 FROM im_v2.messages AS message
                 WHERE job.message_id = \(bind: messageID)
+                  AND job.room_id = \(bind: roomID)
                   AND job.state = 'claimed' AND job.claim_token = \(bind: lease.claimToken)
                   AND message.message_id = job.message_id
                   AND (message.withdrawn_at IS NOT NULL OR message.content_revision <> \(bind: expected))
@@ -481,13 +487,15 @@ public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
         let data = contentReviewData(verdict)
         return try await database.transaction { transaction in
             guard let tx = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            try await lockReviewRoom(lease, sql: tx)
             let updated = try await tx.raw("""
                 UPDATE im_v2.content_review_jobs
                 SET state = \(bind: data.state), decision = \(bind: data.decision), completed_at = \(bind: now),
                     claim_token = NULL, lease_expires_at = NULL, next_attempt_at = NULL, paused_at = NULL,
                     finding_category = \(bind: data.category), finding_severity = \(bind: data.severity),
                     finding_confidence = \(bind: data.confidence)
-                WHERE message_id = \(bind: messageID) AND state = 'claimed' AND claim_token = \(bind: lease.claimToken)
+                WHERE message_id = \(bind: messageID)
+                  AND room_id = \(bind: try contentReviewRoomUUID(lease.input.roomID)) AND state = 'claimed' AND claim_token = \(bind: lease.claimToken)
                 RETURNING message_id
                 """).first(decoding: ContentReviewMessageRow.self)
             guard updated != nil else { return false }
@@ -515,41 +523,61 @@ public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
     }
 
     public func stageViolation(_ lease: V2ContentReviewLease, finding: V2ContentReviewFinding) async throws -> Bool {
-        guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        return try await sql.raw("""
+        return try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            try await lockReviewRoom(lease, sql: sql)
+            return try await sql.raw("""
             UPDATE im_v2.content_review_jobs
             SET decision = 'violation', finding_category = \(bind: finding.category),
                 finding_severity = \(bind: finding.severity), finding_confidence = \(bind: finding.confidence)
             WHERE message_id = \(bind: try contentReviewUUID(lease.input.messageID))
+              AND room_id = \(bind: try contentReviewRoomUUID(lease.input.roomID))
               AND expected_content_revision = \(bind: try contentReviewSigned(lease.input.contentRevision))
               AND state = 'claimed' AND claim_token = \(bind: lease.claimToken)
             RETURNING message_id
             """).first(decoding: ContentReviewMessageRow.self) != nil
+        }
     }
 
     public func scheduleRetry(_ lease: V2ContentReviewLease, disposition: V2DurableRetryDisposition, now: Date) async throws {
-        guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        let messageID = try contentReviewUUID(lease.input.messageID)
-        switch disposition {
-        case .retry(let retryAt):
-            guard v2PostgresTimestampCanEncode(retryAt) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            try await sql.raw("""
-                UPDATE im_v2.content_review_jobs
-                SET state = 'pending', claim_token = NULL, lease_expires_at = NULL,
-                    next_attempt_at = \(bind: retryAt), paused_at = NULL
-                WHERE message_id = \(bind: messageID)
-                  AND state = 'claimed' AND claim_token = \(bind: lease.claimToken)
-                """).run()
-        case .pause:
-            guard v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            try await sql.raw("""
-                UPDATE im_v2.content_review_jobs
-                SET state = 'paused', claim_token = NULL, lease_expires_at = NULL,
-                    next_attempt_at = NULL, paused_at = \(bind: now)
-                WHERE message_id = \(bind: messageID)
-                  AND state = 'claimed' AND claim_token = \(bind: lease.claimToken)
-                """).run()
+        try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            try await lockReviewRoom(lease, sql: sql)
+            let messageID = try contentReviewUUID(lease.input.messageID)
+            switch disposition {
+            case .retry(let retryAt):
+                guard v2PostgresTimestampCanEncode(retryAt) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                try await sql.raw("""
+                    UPDATE im_v2.content_review_jobs
+                    SET state = 'pending', claim_token = NULL, lease_expires_at = NULL,
+                        next_attempt_at = \(bind: retryAt), paused_at = NULL
+                    WHERE message_id = \(bind: messageID)
+                      AND room_id = \(bind: try contentReviewRoomUUID(lease.input.roomID))
+                      AND state = 'claimed' AND claim_token = \(bind: lease.claimToken)
+                    """).run()
+            case .pause:
+                guard v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                try await sql.raw("""
+                    UPDATE im_v2.content_review_jobs
+                    SET state = 'paused', claim_token = NULL, lease_expires_at = NULL,
+                        next_attempt_at = NULL, paused_at = \(bind: now)
+                    WHERE message_id = \(bind: messageID)
+                      AND room_id = \(bind: try contentReviewRoomUUID(lease.input.roomID))
+                      AND state = 'claimed' AND claim_token = \(bind: lease.claimToken)
+                    """).run()
+            }
         }
+    }
+
+    /// Keep the source room stable through task and derived-result writes.
+    /// This is a database fence, not cancellation of an in-flight reviewer.
+    private func lockReviewRoom(_ lease: V2ContentReviewLease, sql: any SQLDatabase) async throws {
+        guard try await sql.raw("""
+            SELECT room_id FROM im_v2.rooms
+            WHERE room_id = \(bind: try contentReviewRoomUUID(lease.input.roomID))
+              AND migration_fence_id IS NULL
+            FOR SHARE
+            """).first() != nil else { throw V2RoomOwnerFenceError.ownerChanged }
     }
 }
 

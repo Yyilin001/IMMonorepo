@@ -419,6 +419,11 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         await restore()
     }
 
+    func passwordLifecycleClient() -> V2PasswordLifecycleClient? {
+        guard let configuration else { return nil }
+        return try? V2PasswordLifecycleClient(baseURL: configuration.endpoint("v2/account-auth/password"))
+    }
+
     func authenticatePassword(accountHandle: String, password: String, mode: PasswordMode, publicHandle: String? = nil, displayName: String? = nil) async {
         guard route == .signedOut, !signOutAttemptGate.isInFlight else { return }
         guard let configuration,
@@ -493,6 +498,15 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
             authenticationMessage = "该账号已存在，请改用密码登录。"
+        } catch V2AccountAuthenticationError.publicHandleAlreadyExists {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
+            route = .signedOut
+            authenticationMessage = "该公开 ID 已被占用，请更换公开 ID 后重新注册。"
+        } catch V2AccountAuthenticationError.rateLimited(let seconds) {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
+            route = .signedOut
+            authenticationMessage = seconds.map { "登录尝试过于频繁，请在 \($0) 秒后重试。" }
+                ?? "登录尝试过于频繁，请稍后重试。"
         } catch V2AccountAuthenticationError.authenticationRejected {
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
@@ -741,9 +755,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             endpoint: configuration.endpoint("v2/public-identities/resolve"),
             credentials: accountHTTP, transport: accountHTTP
         )
+        let roomRecovery = realtime.roomRecovery
         let conversationDataSource = V2GRDBConversationDataSource(
             localStore: localStore,
-            unreadDirectory: realtime.conversationUnreadDirectory
+            requestLatestVisible: { try await roomRecovery.requestLatestVisible(roomIDs: $0) }
         )
         let contactsDataSource = V2GRDBContactsDataSource(
             localStore: localStore,

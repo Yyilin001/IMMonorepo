@@ -6,6 +6,62 @@ import Testing
 
 @Suite("Durable local Push intent")
 struct V2LocalPushIntentTests {
+    @Test("reopened Push intents reject REAL integer fields without replacing durable intent",
+          arguments: ["intent_revision", "acknowledged_revision", "attempt_count", "expected_epoch", "session_epoch"],
+          [1.5, Double(Int64.max)])
+    func reopenedIntegerStorageTypes(field: String, value: Double) async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "im-push-storage-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let scope = try V2PushIntentScope(userID: .init(uuid: UUID()), deviceID: .init(uuid: UUID()), installation: .init(value: UUID()))
+        let owner = UUID(), url = directory.appending(path: "state.sqlite")
+        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: scope.installation, userID: scope.userID)
+        let initial: V2LocalPushIntent
+        let original: Int64
+        do {
+            var state = try await store.activatePushIntent(scope: scope, ownerID: owner, initialPreference: true)
+            #expect(try await store.savePushClaim(.init(requestID: UUID(), expectedEpoch: 7), expected: state))
+            state = try await store.pushIntent(scope: scope, ownerID: owner)
+            #expect(try await store.completePushClaim(epoch: 8, expected: state))
+            initial = try await store.pushIntent(scope: scope, ownerID: owner)
+            let pool = await store.databasePool
+            original = try await pool.write { db in
+                let old = try #require(try Int64.fetchOne(db, sql: "SELECT \(field) FROM v2_push_intent"))
+                // Fractional attempt_count is allowed by the normal numeric CHECK.
+                // Other injections model corrupted storage by explicitly bypassing constraints.
+                let bypass = field != "attempt_count" || value != 1.5
+                if bypass { try db.execute(sql: "PRAGMA ignore_check_constraints = ON") }
+                defer { if bypass { try? db.execute(sql: "PRAGMA ignore_check_constraints = OFF") } }
+                try db.execute(sql: "UPDATE v2_push_intent SET \(field) = ?", arguments: [value])
+                return old
+            }
+            try await store.close()
+        } catch { try? await store.close(); throw error }
+        let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: scope.installation, userID: scope.userID)
+        do {
+            await #expect(throws: V2LocalPushIntentError.invalidState) { _ = try await reopened.inspectPushIntent(scope: scope) }
+            await #expect(throws: V2LocalPushIntentError.invalidState) { _ = try await reopened.pushIntent(scope: scope, ownerID: owner) }
+            await #expect(throws: V2LocalPushIntentError.invalidState) { _ = try await reopened.retryPushIntent(at: .init(timeIntervalSince1970: 50), expected: initial) }
+            await #expect(throws: V2LocalPushIntentError.invalidState) {
+                _ = try await reopened.activatePushIntent(scope: scope, ownerID: UUID(), initialPreference: false, replacing: initial)
+            }
+            let pool = await reopened.databasePool
+            try await pool.read { db in
+                let type = try String.fetchOne(db, sql: "SELECT typeof(\(field)) FROM v2_push_intent")
+                let stored = try Double.fetchOne(db, sql: "SELECT \(field) FROM v2_push_intent")
+                let storedOwner = try String.fetchOne(db, sql: "SELECT owner_id FROM v2_push_intent")
+                let retryAt = try Double.fetchOne(db, sql: "SELECT next_attempt_at FROM v2_push_intent")
+                #expect(type == "real" && stored == value)
+                #expect(storedOwner == owner.uuidString && retryAt == initial.nextAttemptAt.timeIntervalSince1970)
+            }
+            try await pool.write { db in try db.execute(sql: "UPDATE v2_push_intent SET \(field) = ?", arguments: [original]) }
+            #expect(try await reopened.pushIntent(scope: scope, ownerID: owner) == initial)
+            #expect(try await reopened.retryPushIntent(at: .init(timeIntervalSince1970: 50), expected: initial))
+            #expect(try await reopened.pushIntent(scope: scope, ownerID: owner).attemptCount == initial.attemptCount + 1)
+            try await reopened.close()
+        } catch { try? await reopened.close(); throw error }
+    }
+
     @Test("restored Push retry counters are bounded before arithmetic", arguments: [Int64.min, -1, 0, 1, Int64(Int32.max), Int64(Int32.max) + 1, Int64.max])
     func restoredRetryCounterBounds(value: Int64) async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: "im-push-counter-bounds-\(UUID())")
@@ -179,26 +235,21 @@ struct V2LocalPushIntentTests {
         try await store.close()
     }
 
-    @Test("schema migration adds no invented intent and preserves account, cursor and pending commands")
-    func migrationPreservesOutbox() async throws {
+    @Test("reopening preserves account, cursor and pending commands without inventing push intent")
+    func reopenPreservesOutbox() async throws {
         let f = try Fixture(); let store = try f.open()
-        let pool = await store.databasePool
         let outbox = V2CommandOutboxEngine(store: store, transport: NoPushTestSend())
-        let command = try await outbox.enqueueMessage(roomID: .init(uuid: UUID()), text: "pending during migration")
+        let command = try await outbox.enqueueMessage(roomID: .init(uuid: UUID()), text: "pending during restart")
         try await store.beginReset(.init(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 0, expiresAt: .distantFuture))
         let cursor = try #require(try await store.cursor())
         #expect(cursor.pendingReset != nil)
-        try await pool.write { db in
-            try db.execute(sql: "DROP TABLE v2_push_intent")
-            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'recordPushIntent'")
-        }
         try await store.close()
         let reopened = try f.open()
         #expect(try await reopened.boundAccountID() == f.scope.userID)
         #expect(try await reopened.cursor() == cursor)
         #expect(try await reopened.pendingMessageCommands().first?.clientMessageID == command.clientMessageID)
-        let migratedPool = await reopened.databasePool
-        #expect(try await migratedPool.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM v2_push_intent") } == 0)
+        let reopenedPool = await reopened.databasePool
+        #expect(try await reopenedPool.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM v2_push_intent") } == 0)
         let state = try await reopened.activatePushIntent(scope: f.scope, ownerID: UUID(), initialPreference: false)
         #expect(!state.desiredEnabled && state.pending && state.revision == 1)
         try await reopened.close()

@@ -7,7 +7,7 @@ struct MessageMutationResultBoundsTests {
     func editResult(revision: UInt64, sequence: UInt64) throws {
         func result() throws -> V2MessageEdit {
             try .init(roomID: .init("room"), messageID: .init("message"), text: "text", messageRevision: revision,
-                roomSequence: sequence, eventID: .init("event"), fanoutPlanID: .init("plan"), createdAt: .distantPast)
+                roomSequence: sequence, eventID: .init("event"), createdAt: .distantPast)
         }
         if revision == 0 || sequence == 0 || revision > UInt64(Int64.max) || sequence > UInt64(Int64.max) {
             #expect(throws: V2RevisionValidationError.outOfRange) { _ = try result() }
@@ -23,7 +23,7 @@ struct MessageMutationResultBoundsTests {
     func withdrawalResult(revision: UInt64, sequence: UInt64) throws {
         func result() throws -> V2MessageWithdrawal {
             try .init(roomID: .init("room"), messageID: .init("message"), messageRevision: revision,
-                roomSequence: sequence, eventID: .init("event"), fanoutPlanID: .init("plan"), createdAt: .distantPast)
+                roomSequence: sequence, eventID: .init("event"), createdAt: .distantPast)
         }
         if revision == 0 || sequence == 0 || revision > UInt64(Int64.max) || sequence > UInt64(Int64.max) {
             #expect(throws: V2RevisionValidationError.outOfRange) { _ = try result() }

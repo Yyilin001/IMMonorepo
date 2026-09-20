@@ -54,30 +54,16 @@ v2_local_compose "${env_file}" \
     --username im_v2 \
     --dbname im_v2 <<'SQL'
 INSERT INTO im_v2.shard_admission_pools AS pool
-    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
-     command_window_limit, fanout_window_limit,
-     max_outstanding_fanout_units, max_outstanding_plans)
+    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until, command_window_limit)
 SELECT
-    'rooms-load-' || lpad(shard_number::text, 2, '0'),
-    :'capacity_profile_id',
-    gen_random_uuid(),
-    1,
-    CURRENT_TIMESTAMP + make_interval(hours => :lease_hours),
-    :command_window_limit,
-    100000,
-    1000000,
-    10000
+    'rooms-load-' || lpad(shard_number::text, 2, '0'), :'capacity_profile_id', gen_random_uuid(), 1, CURRENT_TIMESTAMP + make_interval(hours => :lease_hours), :command_window_limit
 FROM generate_series(0, :expected_shards - 1) AS shard_number
 ON CONFLICT (room_shard_id, capacity_profile_id) DO UPDATE
 SET lease_id = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN EXCLUDED.lease_id ELSE pool.lease_id END,
     generation = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN pool.generation + 1 ELSE pool.generation END,
     valid_until = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN EXCLUDED.valid_until ELSE pool.valid_until END,
     command_window_limit = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN EXCLUDED.command_window_limit ELSE pool.command_window_limit END,
-    fanout_window_limit = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN EXCLUDED.fanout_window_limit ELSE pool.fanout_window_limit END,
-    max_outstanding_fanout_units = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN EXCLUDED.max_outstanding_fanout_units ELSE pool.max_outstanding_fanout_units END,
-    max_outstanding_plans = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN EXCLUDED.max_outstanding_plans ELSE pool.max_outstanding_plans END,
-    command_window_used = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN 0 ELSE pool.command_window_used END,
-    fanout_window_used = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN 0 ELSE pool.fanout_window_used END;
+    command_window_used = CASE WHEN pool.valid_until <= CURRENT_TIMESTAMP THEN 0 ELSE pool.command_window_used END;
 SQL
 
 printf 'gateway load admission pools ready: profile=%s shards=%s command_window_limit=%s lease_hours=%s\n' \

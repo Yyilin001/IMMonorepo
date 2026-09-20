@@ -12,12 +12,21 @@
 
 | 你想知道 | 看这里 |
 | --- | --- |
+| 账号密码变更、离线恢复码、断言版本与登录限流 | [账号认证生命周期](account-authentication-lifecycle.md) |
 | 系统由哪些组件组成、消息怎么流动 | [当前系统架构](../current-system-map.md) |
 | 现在有哪些能力、证据到什么等级 | [当前实现与发布证据](../../IMV2/docs/implementation-status.md) |
 | 47 项问题的当前状态、未关闭项 | [当前问题状态表](status.md) |
 | 为什么这样设计（设计决定与状态） | [ADR 登记册](../../IMV2/docs/ADR-REGISTER.md) |
 | 还有哪些外部风险没有关闭 | [开放风险登记表](../../IMV2/docs/10-operations/residual-risk-register.md) |
 | 某个结论是怎么验证出来的 | [验证运行记录索引](verification-records.md) |
+| 房间日志改造的最终范围与完成清单 | [实施与验收记录](room-log-only-implementation.md) |
+| 当前房间日志负载、重启和个人事件验收 | [当前版本运行验收](room-log-current-runtime-2026-09-13.md) |
+| 独立分片裁剪与摘要数据分布复核 | [房间分片后续验证](room-log-shard-followup.md) |
+| 客户端排序与房间恢复的目标设计 | [具体实施方案](client-owned-conversation-sync-plan.md) |
+| 客户端房间恢复当前验收状态 | [验收矩阵](client-owned-conversation-sync-acceptance.md) |
+| 客户端房间恢复事务与强杀覆盖 | [事务边界审计](client-owned-conversation-sync-transaction-audit.md) |
+| 客户端房间恢复规模测量与边界 | [规模验收结果](client-owned-conversation-sync-scale-results.md) |
+| 客户端房间恢复阶段证据（历史） | [阶段记录](client-owned-conversation-sync-evidence-2026-09-13.md) |
 | 历史过程、被替换的旧结论 | [归档目录](archive/) |
 
 ## 当前合同
@@ -53,10 +62,13 @@
 
 ### 消息、变更与投递
 
+[仅保留房间日志：实施与验收记录](room-log-only-implementation.md)（旧流水线移除及该范围验收已完成；后续客户端会话恢复的完整验收仍开放，见[验收矩阵](client-owned-conversation-sync-acceptance.md)）。
+
 | 主题 | 当前合同 | 覆盖 |
 | --- | --- | --- |
 | 房间读模型：投递、未读与保留窗口（**已实施**：单聊与标准群默认都走读模型、未读、保留窗口与运维重放；列表为本地优先 + 服务端未读；进入房间按 §5.4 推进到已应用序号／房间头） | [房间读模型合同](room-read-model-contract.md) | B03、B04、D07 |
-| 发送请求指纹与幂等 | [SendMessage 请求指纹实施合同](2026-09-05-send-message-fingerprint-contract.md) | B11、D07 |
+| 发送请求指纹与幂等 | [发送接受记录保留与清理](send-completion-retention.md)；[旧指纹实施历史](2026-09-05-send-message-fingerprint-contract.md)仅供追溯 | B11、D07 |
+| 房间 owner 完整迁移（待实现） | [冻结、复制、发布与恢复实施合同](room-owner-migration-contract.md) | B27、B04、B11、D08 |
 | 消息发送的 owner 栅栏 | [消息发送 owner 事务栅栏](send-message-owner-fence-contract.md) | B27 |
 | 编辑、撤回、reaction 的分发归属 | [沿用原接受记录的分发归属](message-mutation-delivery-authority-contract.md) | B03 |
 | 变更受众与历史读取 | [历史受众与预留结算](message-mutation-audience-contract.md)、[历史读取与扫描游标](message-mutation-read-contract.md) | B03 |
@@ -66,6 +78,7 @@
 | 回复、置顶与共享内容授权 | [引用可见性合同](message-reference-visibility-contract.md) | B03、B04 |
 | 旧媒体入口授权 | [旧媒体授权与兑换边界](legacy-media-authorization-contract.md) | B03、B04 |
 | 消息变更的 owner 栅栏 | [消息编辑、撤回与 reaction 的 owner 栅栏](message-mutation-owner-fence-contract.md) | B27 |
+| 转发终态载荷清理 | [终态载荷保留与清理](forward-terminal-payload-retention.md) | B04、B27 |
 | 转发源授权 | [转发源授权合同与当前实现边界](forward-source-authorization.md) | B04 |
 | 转发导入与前台转发栅栏 | [后台转发导入](forward-import-owner-fence-contract.md)、[前台同库转发](foreground-forward-owner-fence-contract.md) | B04、B27 |
 | 转发暂停任务恢复 | [转发暂停任务的审计恢复](forward-operator-replay.md) | B04 |
@@ -96,6 +109,8 @@
 
 | 主题 | 当前合同 | 覆盖 |
 | --- | --- | --- |
+| 跨 owner 全局申请名额与恢复边界 | [全局配额合同](group-join-global-quota-contract.md) | B23 |
+| 申请人取消、审批竞态与重新申请 | [申请取消合同](group-join-cancellation-contract.md) | D06 |
 | 邀请 token 目录与创建意图 | [token 目录与创建意图合同](group-invite-directory-contract.md) | B27 |
 | 邀请创建后台恢复 | [创建恢复合同](group-invite-creation-recovery-contract.md) | B27 |
 | 邀请 owner 路由与 control 身份 | [owner 路由合同](group-invitation-owner-routing-contract.md) | B27 |
@@ -103,7 +118,7 @@
 | 历史邀请创建的目录绑定 | [兼容补充合同](group-invite-legacy-binding-contract.md) | B27 |
 | 群申请原子审批 | [原子审批合同](atomic-group-approval-contract.md) | B26 |
 | 遗留审批恢复 | [受控恢复](group-approval-recovery-contract.md)、[证据保留](approval-recovery-evidence-contract.md) | D05、B26 |
-| 申请人配额 | [单库事务修复](invitation-applicant-quota-contract.md) | B23 |
+| 申请人配额 | [历史单库事务修复](invitation-applicant-quota-contract.md) | B23 |
 
 ### Owner 与分片栅栏
 
@@ -134,6 +149,7 @@
 
 | 主题 | 当前合同 | 覆盖 |
 | --- | --- | --- |
+| 消息投影与整数入口审计 | [消息投影整数边界](message-projection-integer-boundaries.md) | B01 |
 | 服务端时间戳转换 | [时间戳整数边界](timestamp-integer-boundaries.md) | B01 |
 | 客户端时间戳与禁言投影 | [客户端时间戳与禁言投影边界](client-timestamp-integer-boundaries.md) | B01 |
 | 资料版本与个人投影 | [资料版本与个人投影整数边界](profile-and-projection-integer-boundaries.md) | B01 |

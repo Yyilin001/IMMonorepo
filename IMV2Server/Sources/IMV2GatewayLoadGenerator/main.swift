@@ -770,11 +770,12 @@ private struct LoadRun {
         }
 
         scenarioPhases = scenarioPhaseReports.snapshot()
+        let roomCursorSnapshots = await snapshotRoomCursors(channels: slots.compactMap(\.channel))
         await close(channels: slots.compactMap(\.channel))
         eventLoopLagMetrics.stop()
         let eventLoopLag = eventLoopLagMetrics.snapshot()
         try await group.shutdownGracefully()
-        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), eventLoopLag: eventLoopLag, scenarioPhases: scenarioPhases, scenarioDrain: scenarioDrain, terminalError: terminalError)
+        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), eventLoopLag: eventLoopLag, scenarioPhases: scenarioPhases, scenarioDrain: scenarioDrain, terminalError: terminalError, roomCursorSnapshots: roomCursorSnapshots)
         if let terminalError {
             let data = try JSONEncoder.loadReport.encode(report)
             try data.write(to: URL(fileURLWithPath: configuration.reportPath), options: .atomic)
@@ -1023,6 +1024,24 @@ private struct LoadRun {
         return values.reduce(into: .zero) { total, next in total.add(next) }
     }
 
+    // Read each handler on its own event loop before closing the transport.
+    // Missing channels produce no snapshots; consumers must check coverage.
+    private func snapshotRoomCursors(channels: [Channel]) async -> [RoomCursorSnapshot] {
+        guard let first = channels.first else { return [] }
+        let futures = channels.map { channel -> EventLoopFuture<[RoomCursorSnapshot]> in
+            let promise = channel.eventLoop.makePromise(of: [RoomCursorSnapshot].self)
+            channel.eventLoop.execute {
+                guard channel.isActive else { promise.succeed([]); return }
+                channel.pipeline.fireUserInboundEventTriggered(RoomCursorProbe(completion: promise))
+            }
+            return promise.futureResult
+        }
+        let values = (try? await EventLoopFuture.whenAllSucceed(futures, on: first.eventLoop).get()) ?? []
+        return values.flatMap { $0 }.sorted {
+            ($0.connectionIndex, $0.roomID) < ($1.connectionIndex, $1.roomID)
+        }
+    }
+
     private func targetUserIDs(for connectionIndex: Int) -> [String] {
         guard configuration.messagesPerSecond > 0 || configuration.scenario != nil else { return [] }
         if configuration.peerTopology == .pairs {
@@ -1127,6 +1146,16 @@ private struct ScenarioPendingMessages: Sendable, Equatable, Encodable {
         queued += other.queued
         inFlight += other.inFlight
     }
+}
+
+private struct RoomCursorSnapshot: Encodable, Sendable {
+    let connectionIndex: Int
+    let roomID: String
+    let appliedRoomSequence: UInt64
+}
+
+private struct RoomCursorProbe {
+    let completion: EventLoopPromise<[RoomCursorSnapshot]>
 }
 
 private struct ScenarioDrainProbe {
@@ -1877,6 +1906,11 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 )
                 context.close(promise: nil)
             }
+        case let probe as RoomCursorProbe:
+            probe.completion.succeed(directRoomIDs.map { roomID in
+                RoomCursorSnapshot(connectionIndex: connectionIndex, roomID: roomID,
+                                   appliedRoomSequence: roomEventCursors[roomID, default: 0])
+            })
         case let probe as ScenarioDrainProbe:
             probe.completion.succeed(.init(
                 queued: queuedScenarioMessages,
@@ -2611,10 +2645,11 @@ private struct LoadReport: Encodable {
     let maximumQueuedScenarioMessagesPerConnection: Int?
     let scenarioPhases: [ScenarioPhaseReport]
     let scenarioDrain: ScenarioDrainReport?
+    let roomCursorSnapshots: [RoomCursorSnapshot]
     let scenarioPostDrainHoldSeconds: Int?
     let terminalError: String?
 
-    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, eventLoopLag: V2RuntimeLatencyHistogramSnapshot, scenarioPhases: [ScenarioPhaseReport], scenarioDrain: ScenarioDrainReport?, terminalError: Error?) {
+    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, eventLoopLag: V2RuntimeLatencyHistogramSnapshot, scenarioPhases: [ScenarioPhaseReport], scenarioDrain: ScenarioDrainReport?, terminalError: Error?, roomCursorSnapshots: [RoomCursorSnapshot]) {
         revision = configuration.revision
         host = configuration.host
         port = configuration.port
@@ -2704,6 +2739,7 @@ private struct LoadReport: Encodable {
         }
         self.scenarioPhases = scenarioPhases
         self.scenarioDrain = scenarioDrain
+        self.roomCursorSnapshots = roomCursorSnapshots
         scenarioPostDrainHoldSeconds = configuration.scenario?.postDrainHoldSeconds
         self.terminalError = terminalError.map(String.init(describing:))
     }

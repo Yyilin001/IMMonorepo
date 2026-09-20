@@ -16,6 +16,7 @@ public struct V2TrustedLegacyDeviceRegistrationCancellation: Sendable {
     public let targetDeviceID: DeviceID
     /// 本次取消的幂等操作标识。
     public let operationID: UUID
+    public let credentialRevision: Int64?
 
     /// 校验并保存取消请求。
     ///
@@ -26,11 +27,12 @@ public struct V2TrustedLegacyDeviceRegistrationCancellation: Sendable {
     ///   - operationID: 幂等操作标识。
     /// - Throws: 任一标识无法解析，或认证设备与目标设备相同时抛出
     ///   ``V2DeviceSessionServiceError/invalidRequest``。
-    public init(userID: UserID, assertionDeviceID: DeviceID, targetDeviceID: DeviceID, operationID: UUID) throws {
+    public init(userID: UserID, assertionDeviceID: DeviceID, targetDeviceID: DeviceID, operationID: UUID, credentialRevision: Int64? = nil) throws {
         guard userID.uuidValue != nil, assertionDeviceID.uuidValue != nil, targetDeviceID.uuidValue != nil,
               assertionDeviceID != targetDeviceID else { throw V2DeviceSessionServiceError.invalidRequest }
         self.userID = userID; self.assertionDeviceID = assertionDeviceID
         self.targetDeviceID = targetDeviceID; self.operationID = operationID
+        self.credentialRevision = credentialRevision
     }
 }
 
@@ -90,6 +92,9 @@ public struct V2PostgresLegacyDeviceRegistrationCancellationService: V2LegacyDev
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DeviceSessionServiceError.unavailable }
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "account-state:" + user.uuidString), 0))").run()
+            if let revision = request.credentialRevision {
+                guard try await sql.raw("SELECT 1 FROM im_v2.account_password_credentials WHERE user_id = \(bind: user) AND credential_revision = \(bind: revision)").first() != nil else { return .accountUnavailable }
+            }
             guard try await sql.raw("SELECT 1 FROM im_v2.account_disables WHERE user_id = \(bind: user)").first() == nil,
                   try await sql.raw("SELECT 1 FROM im_v2.special_accounts WHERE account_user_id = \(bind: user) AND status = 'active'").first() == nil
             else { return .accountUnavailable }

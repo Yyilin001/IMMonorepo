@@ -7,6 +7,82 @@ import Testing
 
 @Suite("V2 gateway domain command handler")
 struct V2GatewayDomainCommandHandlerTests {
+    @Test("durable authorization errors remain request-scoped", arguments:
+        ["owner", "drain", "aborted", "conflict", "corrupt"])
+    func directAuthorizationErrorMapping(kind: String) async throws {
+        let fixture = try GatewayDomainFixture()
+        let store = GatewayAcceptedMessageStore(outcome: .rateLimited(retryAfterSeconds: 1), beforeReturn: {
+            switch kind {
+            case "owner": throw V2DirectAuthorizationCoordinationError.ownerUnavailable
+            case "drain": throw V2DirectAuthorizationCoordinationError.revocationIncomplete
+            case "aborted": throw V2DirectAuthorizationReceiptError.attemptAborted
+            case "conflict": throw V2DirectAuthorizationIntentError.identityConflict
+            default: throw V2DirectAuthorizationIntentError.corruptPersistence
+            }
+        })
+        let handler = makeGatewayDomainCommandHandler(sendMessage: fixture.sendService(store: store), sync: fixture.syncService())
+        var request = IMV2Envelope()
+        request.sendMessage.roomID = fixture.roomID.rawValue
+        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
+        request.sendMessage.content.text = "authorization"
+        for _ in 0..<2 {
+            let response = try await handler.handle(envelope: request, identity: fixture.identity)
+            #expect(response.error.code == (kind == "conflict" ? "IDEMPOTENCY_CONFLICT" : "UNAVAILABLE"))
+            #expect(response.error.retryable == (kind != "conflict"))
+        }
+    }
+
+    @Test("Account coverage start uses the authenticated origin connection", arguments: [false, true])
+    func accountCoverageStart(hasOrigin: Bool) async throws {
+        let fixture = try GatewayDomainFixture(), probe = GatewayAccountStartProbe()
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .rateLimited(retryAfterSeconds: 1))),
+            accountChanges: probe, sync: fixture.syncService())
+        let connection = UUID()
+        var request = IMV2Envelope(); request.accountRoomChangesStart = .init()
+        let response = try await handler.handle(envelope: request, identity: fixture.identity,
+            originatingConnectionID: hasOrigin ? connection : nil)
+        if hasOrigin {
+            #expect(response.accountRoomChangesReady.connectionEpoch == probe.epoch.uuidString)
+            #expect(await probe.connectionID == connection)
+            #expect(await probe.userID == fixture.userID)
+        } else {
+            #expect(response.error.code == "UNAVAILABLE")
+            #expect(await probe.connectionID == nil)
+        }
+    }
+
+    @Test("Recovery reads receive the authenticated actor", arguments: [0, 1, 2])
+    func recoveryAuthenticatedActor(batch: Int) async throws {
+        let fixture = try GatewayDomainFixture()
+        let recovery = GatewayRecoveryProbe()
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .rateLimited(retryAfterSeconds: 1))),
+            roomRecovery: recovery, sync: fixture.syncService())
+        var request = IMV2Envelope()
+        if batch == 2 { request.roomLatestVisibleBatch.roomIds = [fixture.roomID.rawValue] }
+        else if batch == 1 { request.roomSyncStateBatch.roomIds = [fixture.roomID.rawValue] }
+        else { request.userRoomDirectoryList.pageSize = 10 }
+        let response = try await handler.handle(envelope: request, identity: fixture.identity)
+        #expect(await recovery.actor == fixture.userID)
+        if batch == 2 { #expect(response.body == .roomLatestVisibleBatchResult(.init())) }
+        else if batch == 1 { #expect(response.body == .roomSyncStateBatchResult(.init())) }
+        else { #expect(response.body == .userRoomDirectoryPage(.init())) }
+    }
+
+    @Test("Recovery topology errors explicitly request a fresh directory scan")
+    func recoveryTopologyReset() async throws {
+        let fixture = try GatewayDomainFixture()
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .rateLimited(retryAfterSeconds: 1))),
+            roomRecovery: GatewayRecoveryProbe(failure: .topologyChanged), sync: fixture.syncService())
+        var request = IMV2Envelope()
+        request.userRoomDirectoryList.pageSize = 10
+        let response = try await handler.handle(envelope: request, identity: fixture.identity)
+        #expect(response.error.code == "ROOM_DIRECTORY_RESET_REQUIRED")
+        #expect(response.error.retryable)
+    }
+
     @Test("Gateway response metrics measure elapsed time despite wall-clock corrections",
           arguments: [Double(-3_600), 3_600, .nan], ["accepted", "rejected", "failed"])
     func telemetryElapsedClock(wallShift: Double, outcome: String) async throws {
@@ -407,7 +483,7 @@ struct V2GatewayDomainCommandHandlerTests {
         let clock = Mutex(fixture.now)
         let accepted = V2AcceptedMessage(messageID: .init(uuid: UUID()), roomID: fixture.roomID, roomSequence: 9,
             senderUserID: fixture.userID, clientMessageID: fixture.clientMessageID,
-            text: "hello", mediaPresentations: [], usesRoomEventLog: true,
+            text: "hello", mediaPresentations: [],
             sourceEventID: .init(uuid: UUID()), acceptedMembershipRevision: 3,
             directRecipientUserID: .init(uuid: UUID()), createdAt: fixture.now)
         let store = GatewayTimestampSequenceStore(outcomes: [.accepted(accepted)])
@@ -578,7 +654,7 @@ struct V2GatewayDomainCommandHandlerTests {
         func message(at date: Date) -> V2AcceptedMessage {
             .init(messageID: .init(uuid: UUID()), roomID: fixture.roomID, roomSequence: 9,
                   senderUserID: fixture.userID, clientMessageID: fixture.clientMessageID,
-                  text: "hello", mediaPresentations: [], usesRoomEventLog: true,
+                  text: "hello", mediaPresentations: [],
                   sourceEventID: .init(uuid: UUID()), acceptedMembershipRevision: 3,
                   directRecipientUserID: .init(uuid: UUID()), createdAt: date)
         }
@@ -650,6 +726,9 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(response.error.retryable)
         var baseline = IMV2Envelope(); baseline.getGroupRolePolicyBaseline.roomID = fixture.roomID.rawValue
         #expect(try await handler.handle(envelope: baseline, identity: fixture.identity).error.code == "SERVER_BUSY")
+        var latest = IMV2Envelope(); latest.roomLatestVisibleBatch.roomIds = [fixture.roomID.rawValue]
+        let latestBusy = try await handler.handle(envelope: latest, identity: fixture.identity)
+        #expect(latestBusy.error.code == "SERVER_BUSY" && latestBusy.error.retryable)
         guard case .gatewayCommand(_, .sendMessage, .rejected, .serverBusy, _) =
             await telemetry.events().first
         else {
@@ -991,7 +1070,7 @@ struct V2GatewayDomainCommandHandlerTests {
             clientMessageID: fixture.clientMessageID,
             text: "hello",
             mediaPresentations: [],
-            groupDeliveryMode: .standardFanout,
+            groupCapacityClass: .standard,
             createdAt: fixture.now
         )
         let hints = GatewayForegroundHintRecorder()
@@ -1023,7 +1102,7 @@ struct V2GatewayDomainCommandHandlerTests {
             clientMessageID: fixture.clientMessageID,
             text: "private-log",
             mediaPresentations: [],
-            usesRoomEventLog: true,
+
             createdAt: fixture.now
         )
         let hints = GatewayForegroundHintRecorder()
@@ -1056,7 +1135,7 @@ struct V2GatewayDomainCommandHandlerTests {
             clientMessageID: fixture.clientMessageID,
             text: "private-live",
             mediaPresentations: [],
-            usesRoomEventLog: true,
+
             sourceEventID: try .init("00000000-0000-0000-0000-000000000044"),
             acceptedMembershipRevision: 3,
             directRecipientUserID: recipientID,
@@ -1100,8 +1179,8 @@ struct V2GatewayDomainCommandHandlerTests {
             clientMessageID: fixture.clientMessageID,
             text: "group-live",
             mediaPresentations: [],
-            groupDeliveryMode: .largeGroupHybrid,
-            usesRoomEventLog: true,
+            groupCapacityClass: .large,
+
             sourceEventID: try .init("00000000-0000-0000-0000-000000000054"),
             acceptedMembershipRevision: 7,
             createdAt: fixture.now
@@ -1737,6 +1816,20 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(await store.actor() == fixture.userID)
     }
 
+    @Test("member directory owner changes request a fresh page")
+    func membershipDirectoryOwnerChangeRestartsPagination() async throws {
+        let fixture = try GatewayDomainFixture()
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
+            membershipDirectory: .init(store: GatewayMovedMembershipDirectory()), sync: fixture.syncService())
+        var request = IMV2Envelope(); request.listRoomMembers = .init()
+        request.listRoomMembers.roomID = fixture.roomID.rawValue
+        request.listRoomMembers.pageSize = 100
+        let response = try await handler.handle(envelope: request, identity: fixture.identity)
+        #expect(response.error.code == "REVISION_CONFLICT")
+        #expect(response.error.retryable)
+    }
+
     @Test("member directory takes its requester only from the authenticated session")
     func membershipDirectoryUsesAuthenticatedActor() async throws {
         let fixture = try GatewayDomainFixture()
@@ -1761,68 +1854,9 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(await store.actor() == fixture.userID)
     }
 
-    @Test("room summary list takes its requester only from the authenticated session")
-    func roomSummaryUsesAuthenticatedActor() async throws {
-        let fixture = try GatewayDomainFixture()
-        let base = Date(timeIntervalSince1970: 1_750_005_000)
-        let room = try RoomID("00000000-0000-0000-0000-00000000e001")
-        let store = GatewayRoomSummaryStore(watermark: .init(
-            roomID: room, roomKind: .group, head: 9,
-            lastEventAtMicroseconds: 1_750_005_000_123_456, unreadCount: 4
-        ), message: .init(
-            roomID: room, messageID: try MessageID("00000000-0000-0000-0000-00000000e101"),
-            senderUserID: fixture.userID, roomSequence: 9, text: "hello",
-            isWithdrawn: false, mediaCount: 2, serverCreatedAt: base
-        ))
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            roomSummaries: .init(store: store),
-            sync: fixture.syncService()
-        )
-        var request = IMV2Envelope(); request.roomSummaryList = .init()
-        request.roomSummaryList.pageSize = 10
 
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
 
-        #expect(response.roomSummaryPage.rooms.count == 1)
-        #expect(response.roomSummaryPage.rooms[0].roomID == room.rawValue)
-        #expect(response.roomSummaryPage.rooms[0].roomKind == "group")
-        #expect(response.roomSummaryPage.rooms[0].head == 9)
-        #expect(response.roomSummaryPage.rooms[0].unreadCount == 4)
-        // 微秒精度的事件时间在毫秒线上字段里向下取整，不改变排序键。
-        #expect(response.roomSummaryPage.rooms[0].lastEventAtMs == 1_750_005_000_123)
-        #expect(response.roomSummaryPage.rooms[0].latestMessage.text == "hello")
-        #expect(response.roomSummaryPage.rooms[0].latestMessage.mediaCount == 2)
-        #expect(!response.roomSummaryPage.nextCursor.isEmpty)
-        #expect(await store.actor() == fixture.userID)
 
-        // 游标必须原样往返：服务端解码后得到与上一行完全相同的排序键。
-        var next = IMV2Envelope(); next.roomSummaryList = .init()
-        next.roomSummaryList.cursor = response.roomSummaryPage.nextCursor
-        next.roomSummaryList.pageSize = 10
-        _ = try await handler.handle(envelope: next, identity: fixture.identity)
-        #expect(await store.cursor() == V2RoomSummaryCursor(
-            lastEventAtMicroseconds: 1_750_005_000_123_456, roomID: room
-        ))
-    }
-
-    @Test("room summary list rejects unparseable cursors and out-of-range page sizes")
-    func roomSummaryRejectsInvalidRequests() async throws {
-        let fixture = try GatewayDomainFixture()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            roomSummaries: .init(store: GatewayRoomSummaryStore()),
-            sync: fixture.syncService()
-        )
-        for (cursor, pageSize) in [("not-a-cursor", UInt32(10)), ("", UInt32(0)), ("", UInt32(1_000))] {
-            var request = IMV2Envelope(); request.roomSummaryList = .init()
-            request.roomSummaryList.cursor = cursor
-            request.roomSummaryList.pageSize = pageSize
-            let response = try await handler.handle(envelope: request, identity: fixture.identity)
-            #expect(response.error.code == "INVALID_ARGUMENT")
-            #expect(!response.error.retryable)
-        }
-    }
 
     @Test("relationship and block commands use only the authenticated actor")
     func socialCommandsUseAuthenticatedActor() async throws {
@@ -1975,6 +2009,44 @@ private struct GatewayResponseAuthenticator: V2GatewayAuthenticator {
     }
 }
 
+private actor GatewayAccountStartProbe: V2AccountRoomChangesStarting {
+    let epoch = UUID()
+    private(set) var connectionID: UUID?
+    private(set) var userID: UserID?
+    func startAccountRoomChanges(connectionID: UUID, userID: UserID) async throws -> String {
+        self.connectionID = connectionID
+        self.userID = userID
+        return epoch.uuidString
+    }
+}
+
+private actor GatewayRecoveryProbe: V2RoomRecoveryCommandHandling {
+    private(set) var actor: UserID?
+    let failure: V2RoomRecoveryReadError?
+    init(failure: V2RoomRecoveryReadError? = nil) { self.failure = failure }
+    func list(_ request: IMV2UserRoomDirectoryList, actorUserID: UserID) async throws -> IMV2Envelope {
+        actor = actorUserID
+        if let failure { throw failure }
+        var response = IMV2Envelope()
+        response.userRoomDirectoryPage = .init()
+        return response
+    }
+    func batch(_ request: IMV2RoomLatestVisibleBatch, actorUserID: UserID) async throws -> IMV2Envelope {
+        actor = actorUserID
+        if let failure { throw failure }
+        var response = IMV2Envelope()
+        response.roomLatestVisibleBatchResult = .init()
+        return response
+    }
+    func batch(_ request: IMV2RoomSyncStateBatch, actorUserID: UserID) async throws -> IMV2Envelope {
+        actor = actorUserID
+        if let failure { throw failure }
+        var response = IMV2Envelope()
+        response.roomSyncStateBatchResult = .init()
+        return response
+    }
+}
+
 private struct GatewayDomainFixture: Sendable {
     let roomID = try! RoomID("00000000-0000-0000-0000-000000000011")
     let userID = try! UserID("00000000-0000-0000-0000-000000000012")
@@ -1986,9 +2058,9 @@ private struct GatewayDomainFixture: Sendable {
     let shardState: ShardAdmissionState
 
     init() throws {
-        profile = try .init(maxEligibleMembers: 10, maxCommandsPerWindow: 10, maxFanoutUnitsPerWindow: 10, maxOutstandingFanoutUnits: 10, maxOutstandingPlans: 10, maxEnumerationPageSize: 10, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 7)
-        roomState = try .init(roomID: roomID, nextRoomSequence: 1, admission: .init(eligibleMemberCount: 3, commandWindow: .init(limit: 10), fanoutWindow: .init(limit: 10), outstandingFanoutUnits: 0, outstandingPlans: 0))
-        shardState = try .init(lease: .init(id: try .init("00000000-0000-0000-0000-000000000015"), generation: 1, validUntil: now.addingTimeInterval(60), commandWindow: .init(limit: 10), fanoutWindow: .init(limit: 10), maxOutstandingFanoutUnits: 10, maxOutstandingPlans: 10), outstandingFanoutUnits: 0, outstandingPlans: 0)
+        profile = try .init(maxEligibleMembers: 10, maxCommandsPerWindow: 10,    retryAfterSeconds: 7)
+        roomState = try .init(roomID: roomID, nextRoomSequence: 1, admission: .init(eligibleMemberCount: 3, commandWindow: .init(limit: 10)))
+        shardState = try .init(lease: .init(id: try .init("00000000-0000-0000-0000-000000000015"), generation: 1, validUntil: now.addingTimeInterval(60), commandWindow: .init(limit: 10)))
     }
 
     var identity: V2AuthenticatedConnection { .init(userID: userID, deviceID: deviceID, capabilityProfile: "base") }
@@ -2238,10 +2310,10 @@ private actor GatewayMembershipStore: V2RoomMembershipStore {
     private let failure: V2RoomMembershipStoreError?
     init(failure: V2RoomMembershipStoreError? = nil) { self.failure = failure }
 
-    func change(command: V2ChangeRoomMembershipCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2RoomMembershipChangeOutcome {
+    func change(command: V2ChangeRoomMembershipCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2RoomMembershipChangeOutcome {
         capturedActor = command.actorUserID
         if let failure { throw failure }
-        return .changed(try .init(roomID: command.roomID, targetUserID: command.targetUserID, action: command.action, membershipRevision: command.expectedMembershipRevision + 1, roomSequence: 1, eventID: eventID, fanoutPlanID: planID, createdAt: now))
+        return .changed(try .init(roomID: command.roomID, targetUserID: command.targetUserID, action: command.action, membershipRevision: command.expectedMembershipRevision + 1, roomSequence: 1, eventID: eventID, createdAt: now))
     }
 
     func actor() -> UserID? { capturedActor }
@@ -2250,39 +2322,7 @@ private actor GatewayMembershipStore: V2RoomMembershipStore {
 /// 会话摘要假存储：记录调用者与游标，按构造时给定的单行摘要回答。
 ///
 /// 只要给出水位就返回 `hasMore`，用于验证网关确实把下一页游标发了出去。
-private actor GatewayRoomSummaryStore: V2RoomSummaryStore {
-    private let watermark: V2RoomActivityWatermark?
-    private let message: V2RoomSummaryMessage?
-    private var capturedActor: UserID?
-    private var capturedCursor: V2RoomSummaryCursor?
-    private var capturedLimit: Int?
 
-    init(watermark: V2RoomActivityWatermark? = nil, message: V2RoomSummaryMessage? = nil) {
-        self.watermark = watermark
-        self.message = message
-    }
-
-    func roomActivityWatermarks(
-        after cursor: V2RoomSummaryCursor?,
-        actorUserID: UserID,
-        limit: Int
-    ) async throws -> V2RoomActivityPage {
-        capturedActor = actorUserID
-        capturedCursor = cursor
-        capturedLimit = limit
-        guard let watermark else { return .init(rooms: [], hasMore: false) }
-        return .init(rooms: [watermark], hasMore: true)
-    }
-
-    func visibleMessages(roomIDs: [RoomID], actorUserID _: UserID) async throws -> [V2RoomSummaryMessage] {
-        guard let message, roomIDs.contains(message.roomID) else { return [] }
-        return [message]
-    }
-
-    func actor() -> UserID? { capturedActor }
-    func cursor() -> V2RoomSummaryCursor? { capturedCursor }
-    func pageSize() -> Int? { capturedLimit }
-}
 
 private actor GatewayMembershipDirectoryStore: V2RoomMembershipDirectoryStore {
     private var capturedActor: UserID?
@@ -2318,11 +2358,11 @@ private actor GatewayGroupStore: V2GroupMessagingStore {
         self.replay = replay
     }
 
-    func create(command: V2CreateGroupRoomCommand, capacityProfile _: V2CapacityProfile, roomShardID _: String, roomID: RoomID, eventID _: EventID, planID _: FanoutPlanID, now: Date) throws -> V2CreateGroupRoomOutcome {
+    func create(command: V2CreateGroupRoomCommand, capacityProfile _: V2CapacityProfile, roomShardID _: String, roomID: RoomID, eventID _: EventID, now: Date) throws -> V2CreateGroupRoomOutcome {
         capturedActor = command.actorUserID
         capturedMembers = command.allMemberUserIDs
         let room = try V2GroupRoom(roomID: roomID, ownerUserID: command.actorUserID, title: command.title,
-            deliveryMode: command.deliveryMode, memberUserIDs: command.allMemberUserIDs,
+            capacityClass: command.capacityClass, memberUserIDs: command.allMemberUserIDs,
             memberCount: returnedMemberCount, createdAt: now)
         return replay ? .idempotent(room) : .created(room)
     }
@@ -2430,10 +2470,10 @@ private actor GatewayModerationStore: V2ModerationStore {
     private let failure: V2RoomOwnerFenceError?
     init(failure: V2RoomOwnerFenceError? = nil) { self.failure = failure }
     func actor() -> UserID? { capturedActor }
-    func apply(command: V2ModerationCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2ModerationOutcome {
+    func apply(command: V2ModerationCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2ModerationOutcome {
         capturedActor = command.actorUserID
         if let failure { throw failure }
-        return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: command.action, targetUserID: command.targetUserID, messageID: command.messageID, messageRevision: command.action == .redactMessage ? 2 : nil, membershipRevision: command.action == .removeMember ? 4 : nil, muteUntil: command.muteUntil, roomSequence: 3, eventID: eventID, fanoutPlanID: planID, createdAt: now))
+        return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: command.action, targetUserID: command.targetUserID, messageID: command.messageID, messageRevision: command.action == .redactMessage ? 2 : nil, membershipRevision: command.action == .removeMember ? 4 : nil, muteUntil: command.muteUntil, roomSequence: 3, eventID: eventID, createdAt: now))
     }
 }
 
@@ -2452,15 +2492,15 @@ private actor GatewaySocialRelationshipStore: V2SocialRelationshipStore {
 
 private actor GatewayOwnerChangedMutationStore: V2MessageEditStore, V2MessageWithdrawalStore, V2MessageReactionStore {
     private var received: [String] = []
-    func edit(command: V2EditMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2MessageEditOutcome {
+    func edit(command: V2EditMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2MessageEditOutcome {
         received.append("edit")
         throw V2RoomOwnerFenceError.ownerChanged
     }
-    func withdraw(command: V2WithdrawMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2MessageWithdrawalOutcome {
+    func withdraw(command: V2WithdrawMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2MessageWithdrawalOutcome {
         received.append("withdraw")
         throw V2RoomOwnerFenceError.ownerChanged
     }
-    func change(command: V2ChangeMessageReactionCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2MessageReactionOutcome {
+    func change(command: V2ChangeMessageReactionCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2MessageReactionOutcome {
         received.append("reaction")
         throw V2RoomOwnerFenceError.ownerChanged
     }
@@ -2471,17 +2511,17 @@ private actor GatewayRevisionBoundaryStore: V2RoomMembershipStore, V2MessageEdit
     private var count = 0
     private let conflictRevision: UInt64?
     init(conflictRevision: UInt64? = nil) { self.conflictRevision = conflictRevision }
-    func change(command: V2ChangeRoomMembershipCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2RoomMembershipChangeOutcome {
+    func change(command: V2ChangeRoomMembershipCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2RoomMembershipChangeOutcome {
         count += 1
         if let conflictRevision { return .revisionConflict(current: conflictRevision) }
         return .targetAlreadyMember
     }
-    func edit(command: V2EditMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) -> V2MessageEditOutcome {
+    func edit(command: V2EditMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) -> V2MessageEditOutcome {
         count += 1
         if let conflictRevision { return .revisionConflict(current: conflictRevision) }
         return .alreadyWithdrawn
     }
-    func withdraw(command: V2WithdrawMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) -> V2MessageWithdrawalOutcome {
+    func withdraw(command: V2WithdrawMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) -> V2MessageWithdrawalOutcome {
         count += 1
         if let conflictRevision { return .revisionConflict(current: conflictRevision) }
         return .alreadyWithdrawn
@@ -2550,19 +2590,19 @@ private actor GatewayPolicyBaselineReader: V2GroupRolePolicyBaselineReading {
 
 private actor GatewayOwnerChangedGroupCapabilityStore: V2GroupCapabilitiesStore {
     private var received: [String] = []
-    func setPinnedMessage(actorUserID: UserID, command: V2PinnedMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage> {
+    func setPinnedMessage(actorUserID: UserID, command: V2PinnedMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage> {
         received.append("pin")
         throw V2RoomOwnerFenceError.ownerChanged
     }
-    func setAnnouncement(actorUserID: UserID, command: V2GroupAnnouncementCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement> {
+    func setAnnouncement(actorUserID: UserID, command: V2GroupAnnouncementCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement> {
         received.append("announcement")
         throw V2RoomOwnerFenceError.ownerChanged
     }
-    func setRolePermissions(actorUserID: UserID, command: V2GroupRolePermissionsCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange> {
+    func setRolePermissions(actorUserID: UserID, command: V2GroupRolePermissionsCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange> {
         received.append("permissions")
         throw V2RoomOwnerFenceError.ownerChanged
     }
-    func changeMemberRole(actorUserID: UserID, command: V2GroupMemberRoleCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> {
+    func changeMemberRole(actorUserID: UserID, command: V2GroupMemberRoleCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> {
         received.append("role")
         throw V2RoomOwnerFenceError.ownerChanged
     }
@@ -2585,8 +2625,7 @@ private struct GatewayOwnerChangedSendStore: V2RoomWriteStore {
 
 private struct GatewayGroupIntentClockFailure: V2GroupMessagingStore {
     func create(command: V2CreateGroupRoomCommand, capacityProfile: V2CapacityProfile,
-                roomShardID: String, roomID: RoomID, eventID: EventID,
-                planID: FanoutPlanID, now: Date) async throws -> V2CreateGroupRoomOutcome {
+                roomShardID: String, roomID: RoomID, eventID: EventID, now: Date) async throws -> V2CreateGroupRoomOutcome {
         throw V2GroupRoomCreationIntentStoreError.corruptPersistenceState
     }
 }
@@ -2612,54 +2651,54 @@ private actor GatewayResponseClockStore: V2RoomMembershipStore, V2ModerationStor
         let value = V2MessageFavorite(roomID: command.roomID, messageID: command.messageID, isFavorited: command.isFavorited, updatedAt: date)
         return replay ? .idempotent(value) : .applied(value)
     }
-    func setPinnedMessage(actorUserID: UserID, command: V2PinnedMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage> {
+    func setPinnedMessage(actorUserID: UserID, command: V2PinnedMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage> {
         calls += 1
         let value = try V2PinnedMessage(roomID: command.roomID, messageID: command.messageID, isPinned: command.isPinned, roomSequence: 3, updatedAt: date)
         return replay ? .idempotent(value) : .applied(value)
     }
-    func setAnnouncement(actorUserID: UserID, command: V2GroupAnnouncementCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement> {
+    func setAnnouncement(actorUserID: UserID, command: V2GroupAnnouncementCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement> {
         calls += 1
         let value = try V2GroupAnnouncement(roomID: command.roomID, body: command.body, revision: 2, roomSequence: 3, updatedAt: date)
         return replay ? .idempotent(value) : .applied(value)
     }
-    func setRolePermissions(actorUserID: UserID, command: V2GroupRolePermissionsCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange> { throw CancellationError() }
-    func changeMemberRole(actorUserID: UserID, command: V2GroupMemberRoleCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> { throw CancellationError() }
-    func create(command: V2CreateGroupRoomCommand, capacityProfile: V2CapacityProfile, roomShardID: String, roomID: RoomID, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2CreateGroupRoomOutcome {
+    func setRolePermissions(actorUserID: UserID, command: V2GroupRolePermissionsCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange> { throw CancellationError() }
+    func changeMemberRole(actorUserID: UserID, command: V2GroupMemberRoleCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> { throw CancellationError() }
+    func create(command: V2CreateGroupRoomCommand, capacityProfile: V2CapacityProfile, roomShardID: String, roomID: RoomID, eventID: EventID, now: Date) throws -> V2CreateGroupRoomOutcome {
         calls += 1
         let value = try V2GroupRoom(roomID: roomID, ownerUserID: command.actorUserID, title: command.title,
-            deliveryMode: command.deliveryMode, memberUserIDs: command.allMemberUserIDs, createdAt: date)
+            capacityClass: command.capacityClass, memberUserIDs: command.allMemberUserIDs, createdAt: date)
         return replay ? .idempotent(value) : .created(value)
     }
-    func edit(command: V2EditMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2MessageEditOutcome {
+    func edit(command: V2EditMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2MessageEditOutcome {
         calls += 1
         let value = try V2MessageEdit(roomID: command.roomID, messageID: command.messageID, text: command.text,
-            messageRevision: 2, roomSequence: 3, eventID: eventID, fanoutPlanID: planID, createdAt: date)
+            messageRevision: 2, roomSequence: 3, eventID: eventID, createdAt: date)
         return replay ? .idempotent(value) : .edited(value)
     }
-    func withdraw(command: V2WithdrawMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2MessageWithdrawalOutcome {
+    func withdraw(command: V2WithdrawMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2MessageWithdrawalOutcome {
         calls += 1
         let value = try V2MessageWithdrawal(roomID: command.roomID, messageID: command.messageID,
-            messageRevision: 2, roomSequence: 3, eventID: eventID, fanoutPlanID: planID, createdAt: date)
+            messageRevision: 2, roomSequence: 3, eventID: eventID, createdAt: date)
         return replay ? .idempotent(value) : .withdrawn(value)
     }
-    func change(command: V2ChangeMessageReactionCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2MessageReactionOutcome {
+    func change(command: V2ChangeMessageReactionCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2MessageReactionOutcome {
         calls += 1
         let value = try V2MessageReactionChange(roomID: command.roomID, messageID: command.messageID, actorUserID: command.actorUserID,
-            reaction: command.reaction, action: command.action, roomSequence: 3, eventID: eventID, fanoutPlanID: planID, createdAt: date)
+            reaction: command.reaction, action: command.action, roomSequence: 3, eventID: eventID, createdAt: date)
         return replay ? .idempotent(value) : .changed(value)
     }
-    func change(command: V2ChangeRoomMembershipCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2RoomMembershipChangeOutcome {
+    func change(command: V2ChangeRoomMembershipCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2RoomMembershipChangeOutcome {
         calls += 1
         let value = try V2RoomMembershipChange(roomID: command.roomID, targetUserID: command.targetUserID, action: command.action,
-            membershipRevision: 2, roomSequence: 3, eventID: eventID, fanoutPlanID: planID, createdAt: date)
+            membershipRevision: 2, roomSequence: 3, eventID: eventID, createdAt: date)
         return replay ? .idempotent(value) : .changed(value)
     }
-    func apply(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2ModerationOutcome {
+    func apply(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2ModerationOutcome {
         calls += 1
         let value = try V2ModerationResult(roomID: command.roomID, operationID: command.operationID, action: command.action,
             targetUserID: command.targetUserID, messageID: command.messageID, messageRevision: command.action == .redactMessage ? 2 : nil,
             membershipRevision: command.action == .removeMember ? 2 : nil, muteUntil: muteExpiryOnly ? date : command.muteUntil,
-            roomSequence: 3, eventID: eventID, fanoutPlanID: planID, createdAt: muteExpiryOnly ? now : date)
+            roomSequence: 3, eventID: eventID, createdAt: muteExpiryOnly ? now : date)
         return replay ? .idempotent(value) : .applied(value)
     }
     func changeRelationship(_ command: V2ChangeRelationshipCommand, now: Date) -> V2RelationshipOutcome {
@@ -2738,5 +2777,11 @@ private struct GatewayForwardSequence: V2ForwardMessagesHandling {
         [try .init(sourceMessageID: command.sources[0].messageID, targetRoomID: command.targetRoomIDs[0],
                messageID: failed ? nil : command.sources[0].messageID,
                roomSequence: failed ? nil : sequence, errorCode: failed ? "FORBIDDEN" : nil)]
+    }
+}
+
+private struct GatewayMovedMembershipDirectory: V2RoomMembershipDirectoryStore {
+    func list(_ request: V2RoomMembershipDirectoryRequest) async throws -> V2RoomMembershipDirectoryPage {
+        throw V2RoomMembershipDirectoryError.ownerChanged
     }
 }

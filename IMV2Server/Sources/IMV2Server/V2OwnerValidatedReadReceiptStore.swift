@@ -22,6 +22,9 @@ public struct V2OwnerValidatedReadReceiptRequest: Sendable {
 
 /// 带房间归属的已读回执写入与查询能力。
 public protocol V2OwnerValidatedReadReceiptStore: Sendable {
+    /// Record either room kind while validating its owner in the source transaction.
+    func recordOwnerValidated(command: V2RecordReadReceiptCommand, ownerRoute: V2RoomShardRoute, now: Date) async throws -> V2ReadReceiptOutcome
+
     /// 按房间归属记录一次群已读回执。
     ///
     /// - Parameters:

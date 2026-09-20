@@ -23,8 +23,6 @@ public struct V2GroupRoomCreationIntent: Equatable, Sendable {
     public let roomID: RoomID
     /// 建群事件标识。
     public let eventID: EventID
-    /// 关联的扇出计划标识。
-    public let planID: FanoutPlanID
     /// 逻辑房间分片标识，已去除首尾空白。
     public let roomShardID: String
     /// 路由代次。
@@ -43,7 +41,6 @@ public struct V2GroupRoomCreationIntent: Equatable, Sendable {
     ///   - operationID: 建群操作标识。
     ///   - roomID: 预分配的房间标识。
     ///   - eventID: 建群事件标识。
-    ///   - planID: 关联的扇出计划标识。
     ///   - roomShardID: 逻辑分片标识，去除首尾空白后需非空。
     ///   - routeEpoch: 非负的路由代次。
     ///   - requestFingerprint: 请求指纹，需为 32 字节。
@@ -56,7 +53,7 @@ public struct V2GroupRoomCreationIntent: Equatable, Sendable {
         operationID: GroupRoomOperationID,
         roomID: RoomID,
         eventID: EventID,
-        planID: FanoutPlanID,
+
         roomShardID: String,
         routeEpoch: Int64,
         requestFingerprint: Data,
@@ -73,7 +70,6 @@ public struct V2GroupRoomCreationIntent: Equatable, Sendable {
         self.operationID = operationID
         self.roomID = roomID
         self.eventID = eventID
-        self.planID = planID
         self.roomShardID = shard
         self.routeEpoch = routeEpoch
         self.requestFingerprint = requestFingerprint
@@ -95,7 +91,7 @@ public struct V2GroupRoomCreationIntent: Equatable, Sendable {
             operationID: operationID,
             roomID: roomID,
             eventID: eventID,
-            planID: planID,
+
             roomShardID: roomShardID,
             routeEpoch: routeEpoch,
             requestFingerprint: requestFingerprint,
@@ -294,13 +290,13 @@ public struct PostgresV2GroupRoomCreationIntentStore:
 
             guard let inserted = try await sql.raw("""
                 INSERT INTO im_v2.group_room_creation_intents
-                    (actor_user_id, operation_id, room_id, event_id, plan_id,
+                    (actor_user_id, operation_id, room_id, event_id,
                      room_shard_id, route_epoch, request_fingerprint,
                      audience_member_count, state, created_at, updated_at)
                 VALUES (
                     \(bind: values.actorUserID), \(bind: values.operationID),
                     \(bind: values.roomID), \(bind: values.eventID),
-                    \(bind: values.planID), \(bind: candidate.roomShardID),
+                    \(bind: candidate.roomShardID),
                     \(bind: candidate.routeEpoch),
                     \(bind: candidate.requestFingerprint),
                     \(bind: candidate.audienceMemberCount), 'prepared',
@@ -308,7 +304,7 @@ public struct PostgresV2GroupRoomCreationIntentStore:
                 )
                 ON CONFLICT DO NOTHING
                 RETURNING actor_user_id, operation_id, room_id, event_id,
-                          plan_id, room_shard_id, route_epoch,
+                          room_shard_id, route_epoch,
                           request_fingerprint, audience_member_count, state
                 """).first(decoding: IntentRow.self) else {
                 // The operation key is advisory-locked. A missing returned
@@ -421,13 +417,13 @@ public struct PostgresV2GroupRoomCreationIntentStore:
 
             guard let inserted = try await sql.raw("""
                 INSERT INTO im_v2.group_room_creation_intents
-                    (actor_user_id, operation_id, room_id, event_id, plan_id,
+                    (actor_user_id, operation_id, room_id, event_id,
                      room_shard_id, route_epoch, request_fingerprint,
                      audience_member_count, state, created_at, updated_at)
                 VALUES (
                     \(bind: values.actorUserID), \(bind: values.operationID),
                     \(bind: values.roomID), \(bind: values.eventID),
-                    \(bind: values.planID), \(bind: candidate.roomShardID),
+                    \(bind: candidate.roomShardID),
                     \(bind: candidate.routeEpoch),
                     \(bind: candidate.requestFingerprint),
                     \(bind: candidate.audienceMemberCount), 'prepared',
@@ -435,7 +431,7 @@ public struct PostgresV2GroupRoomCreationIntentStore:
                 )
                 ON CONFLICT DO NOTHING
                 RETURNING actor_user_id, operation_id, room_id, event_id,
-                          plan_id, room_shard_id, route_epoch,
+                          room_shard_id, route_epoch,
                           request_fingerprint, audience_member_count, state
                 """).first(decoding: IntentRow.self) else {
                 throw V2GroupRoomCreationIntentStoreError.routeConflict
@@ -481,7 +477,7 @@ public struct PostgresV2GroupRoomCreationIntentStore:
                 throw V2GroupRoomCreationIntentStoreError.corruptPersistenceState
             }
             guard let persistedRow = try await sql.raw("""
-                SELECT actor_user_id, operation_id, room_id, event_id, plan_id,
+                SELECT actor_user_id, operation_id, room_id, event_id,
                        room_shard_id, route_epoch, request_fingerprint,
                        audience_member_count, state
                 FROM im_v2.group_room_creation_intents
@@ -496,7 +492,6 @@ public struct PostgresV2GroupRoomCreationIntentStore:
                   persisted.operationID == intent.operationID,
                   persisted.roomID == intent.roomID,
                   persisted.eventID == intent.eventID,
-                  persisted.planID == intent.planID,
                   persisted.roomShardID == intent.roomShardID,
                   persisted.routeEpoch == intent.routeEpoch,
                   persisted.requestFingerprint == intent.requestFingerprint,
@@ -617,20 +612,17 @@ private struct IntentValues {
     let operationID: UUID
     let roomID: UUID
     let eventID: UUID
-    let planID: UUID
 
     init(_ intent: V2GroupRoomCreationIntent) throws {
         guard let actorUserID = UUID(uuidString: intent.actorUserID.rawValue),
               let operationID = UUID(uuidString: intent.operationID.rawValue),
               let roomID = UUID(uuidString: intent.roomID.rawValue),
-              let eventID = UUID(uuidString: intent.eventID.rawValue),
-              let planID = UUID(uuidString: intent.planID.rawValue)
+              let eventID = UUID(uuidString: intent.eventID.rawValue)
         else { throw V2GroupRoomCreationIntentStoreError.invalidIntent }
         self.actorUserID = actorUserID
         self.operationID = operationID
         self.roomID = roomID
         self.eventID = eventID
-        self.planID = planID
     }
 }
 
@@ -639,7 +631,6 @@ private struct IntentRow: Decodable {
     let operationID: UUID
     let roomID: UUID
     let eventID: UUID
-    let planID: UUID
     let roomShardID: String
     let routeEpoch: Int64
     let requestFingerprint: Data
@@ -651,7 +642,6 @@ private struct IntentRow: Decodable {
         case operationID = "operation_id"
         case roomID = "room_id"
         case eventID = "event_id"
-        case planID = "plan_id"
         case roomShardID = "room_shard_id"
         case routeEpoch = "route_epoch"
         case requestFingerprint = "request_fingerprint"
@@ -668,7 +658,7 @@ private struct IntentRow: Decodable {
             operationID: .init(operationID.uuidString),
             roomID: .init(roomID.uuidString),
             eventID: .init(eventID.uuidString),
-            planID: .init(planID.uuidString),
+
             roomShardID: roomShardID,
             routeEpoch: routeEpoch,
             requestFingerprint: requestFingerprint,
@@ -699,7 +689,7 @@ private func persistedIntent(
     sql: any SQLDatabase
 ) async throws -> IntentRow? {
     try await sql.raw("""
-        SELECT actor_user_id, operation_id, room_id, event_id, plan_id,
+        SELECT actor_user_id, operation_id, room_id, event_id,
                room_shard_id, route_epoch, request_fingerprint,
                audience_member_count, state
         FROM im_v2.group_room_creation_intents

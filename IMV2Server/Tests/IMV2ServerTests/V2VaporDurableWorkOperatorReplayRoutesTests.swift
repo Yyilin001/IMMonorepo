@@ -16,14 +16,15 @@ struct V2VaporDurableWorkOperatorReplayRoutesTests {
         let store = OperatorReplayRouteStore()
         V2VaporDurableWorkOperatorReplayRoutes(
             authenticator: try .init(base64EncodedBearerToken: token),
-            service: .init(store: store, operatorPrincipal: "oncall-primary")
+            service: .init(store: store, roomOwnerStores: ["room-a": store], operatorPrincipal: "oncall-primary")
         ).register(on: app)
         let request = V2DurableWorkReplayHTTPRequest(
             operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000891")!,
-            targetKind: .fanoutDelivery,
+            targetKind: .userStateEvent,
+            sourceShardID: "room-a",
             sourceEventID: "00000000-0000-0000-0000-000000000892",
             targetUserID: "00000000-0000-0000-0000-000000000893",
-            projectionKind: "message_created",
+            projectionKind: "membership",
             reason: .dependencyRecovered
         )
 
@@ -44,6 +45,50 @@ struct V2VaporDurableWorkOperatorReplayRoutesTests {
         #expect(recorded.principal == "oncall-primary")
     }
 
+    @Test("personal replay selects its configured source owner and never falls back to control")
+    func sourceOwnerSelection() async throws {
+        let app = try await Application.make(.testing)
+        defer { Task { try? await app.asyncShutdown() } }
+        let token = Data(repeating: 12, count: 32).base64EncodedString()
+        let control = OperatorReplayRouteStore()
+        let owner = OperatorReplayRouteStore()
+        V2VaporDurableWorkOperatorReplayRoutes(
+            authenticator: try .init(base64EncodedBearerToken: token),
+            service: .init(store: control, roomOwnerStores: ["room-a": owner], operatorPrincipal: "oncall-primary")
+        ).register(on: app)
+        for shard in [nil, "unknown", " room-a", "room-a"] as [String?] {
+            let single = V2DurableWorkReplayHTTPRequest(operationID: UUID(), targetKind: .userStateEvent,
+                sourceShardID: shard, sourceEventID: UUID().uuidString, targetUserID: UUID().uuidString,
+                projectionKind: "membership", reason: .dataRepaired)
+            try await app.testing().test(.POST, "internal/v2/durable-work/replay", headers: ["Authorization": "Bearer \(token)"], beforeRequest: { request in
+                try request.content.encode(single)
+            }) { response async in
+                #expect(response.status == (shard == "room-a" ? .ok : .badRequest))
+            }
+            let batch = V2DurableWorkEventReplayHTTPRequest(operationID: UUID(), targetKind: .userStateEvent,
+                sourceShardID: shard, sourceEventID: UUID().uuidString, reason: .dataRepaired, limit: 10)
+            try await app.testing().test(.POST, "internal/v2/durable-work/replay-event", headers: ["Authorization": "Bearer \(token)"], beforeRequest: { request in
+                try request.content.encode(batch)
+            }) { response async in
+                #expect(response.status == (shard == "room-a" ? .ok : .badRequest))
+                if shard == "room-a" { #expect(response.headers.first(name: .cacheControl) == "no-store") }
+            }
+        }
+        #expect(await owner.commands().count == 1)
+        #expect(await owner.events().count == 1)
+        #expect(await control.commands().isEmpty)
+        #expect(await control.events().isEmpty)
+        let invalid = V2DurableWorkReplayHTTPRequest(operationID: UUID(), targetKind: .mediaScan,
+            sourceShardID: "room-a", sourceEventID: UUID().uuidString, reason: .dataRepaired)
+        try await app.testing().test(.POST, "internal/v2/durable-work/replay", headers: ["Authorization": "Bearer \(token)"], beforeRequest: { request in
+            try request.content.encode(invalid)
+        }) { response async in
+            #expect(response.status == .badRequest)
+        }
+        #expect(await control.commands().isEmpty)
+        #expect(await owner.commands().count == 1)
+    }
+
     @Test("route refuses absent or invalid bearer credentials before invoking replay")
     func rejectsUnauthenticatedReplay() async throws {
         let app = try await Application.make(.testing)
@@ -52,11 +97,11 @@ struct V2VaporDurableWorkOperatorReplayRoutesTests {
         let store = OperatorReplayRouteStore()
         V2VaporDurableWorkOperatorReplayRoutes(
             authenticator: try .init(base64EncodedBearerToken: token),
-            service: .init(store: store, operatorPrincipal: "oncall-primary")
+            service: .init(store: store, roomOwnerStores: ["room-a": store], operatorPrincipal: "oncall-primary")
         ).register(on: app)
         let request = V2DurableWorkReplayHTTPRequest(
             operationID: UUID(),
-            targetKind: .roomOutbox,
+            targetKind: .mediaScan,
             sourceEventID: "00000000-0000-0000-0000-000000000894",
             reason: .falsePositive
         )
@@ -82,11 +127,12 @@ struct V2VaporDurableWorkOperatorReplayRoutesTests {
         let store = OperatorReplayRouteStore()
         V2VaporDurableWorkOperatorReplayRoutes(
             authenticator: try .init(base64EncodedBearerToken: token),
-            service: .init(store: store, operatorPrincipal: "oncall-primary")
+            service: .init(store: store, roomOwnerStores: ["room-a": store], operatorPrincipal: "oncall-primary")
         ).register(on: app)
         let malformed = V2DurableWorkReplayHTTPRequest(
             operationID: UUID(),
-            targetKind: .fanoutDelivery,
+            targetKind: .userStateEvent,
+            sourceShardID: "room-a",
             sourceEventID: "00000000-0000-0000-0000-000000000895",
             reason: .dataRepaired
         )

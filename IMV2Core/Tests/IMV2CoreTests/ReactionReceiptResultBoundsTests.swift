@@ -7,7 +7,7 @@ struct ReactionReceiptResultBoundsTests {
         func resultSequence() throws -> UInt64 {
             if kind == "reaction" {
                 return try V2MessageReactionChange(roomID: .init("room"), messageID: .init("message"), actorUserID: .init("user"),
-                    reaction: "👍", action: .add, roomSequence: sequence, eventID: .init("event"), fanoutPlanID: .init("plan"), createdAt: .distantPast).roomSequence
+                    reaction: "👍", action: .add, roomSequence: sequence, eventID: .init("event"), createdAt: .distantPast).roomSequence
             }
             return try V2ReadReceipt(roomID: .init("room"), userID: .init("user"), readThroughRoomSequence: sequence, recordedAt: .distantPast).readThroughRoomSequence
         }

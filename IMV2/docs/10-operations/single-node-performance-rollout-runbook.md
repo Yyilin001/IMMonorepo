@@ -25,7 +25,7 @@
 | 慢命令阈值 | 250 ms |
 | 慢/拒绝/失败诊断日志 burst | 每个封闭结果键 20 条/秒 |
 
-以上 Gateway 总连接 ceiling 为 `4 × 16 = 64`，但连接按需建立。Account、Operator 也各自按其 EventLoop 数乘每 loop ceiling 计算，不能再按一个长期 `app.db` 句柄估算。其他环境必须把所有进程、物理数据库 URL 和运维连接预算相加；不要让理论最大值等于 PostgreSQL `max_connections`。
+当前 Gateway 数据工作池 ceiling 为 `4 × 16 = 64`；个人事件路由围栏另使用控制库每 EventLoop 1 条专用连接，因此单物理库总 ceiling 为 `64 + 4 = 68`，连接按需建立。该专用池即使关闭 workload isolation 也保留，以保证源端独立提交时仍持有迁移路由围栏；所有连接仍受 `IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS` 约束。历史性能记录中的 64 条预算属于添加该池之前的版本。Account、Operator 也各自按其 EventLoop 数乘每 loop ceiling 计算，不能再按一个长期 `app.db` 句柄估算。其他环境必须把所有进程、物理数据库 URL 和运维连接预算相加；不要让理论最大值等于 PostgreSQL `max_connections`。
 
 配置中保留的 foreground/Sync/Delivery/Projection/Maintenance 每-loop 数值只在显式启用 workload isolation 时生效。当前默认不启用；固定角色池在相同负载下不能借用空闲连接，曾出现总吞吐回退。写入和交互读取在同一 foreground pool 上各有 24/8 的准入保留额：空闲保留额可被另一类暂借，但一旦对端出现排队，后续释放的 permit 优先归还给对端；两个保留额之和仍不得超过 foreground pool。若实验启用，多个 schema 共用同一数据库 URL 时，Projection pool 至少覆盖每个 schema 的 `projector concurrency + 1 snapshot builder`。
 
@@ -37,29 +37,18 @@
 
 ## 上线顺序
 
-1. 对既有数据库按 migration regression 的顺序执行 expand SQL，最后包含
-   `2026-08-18-user-sync-log-statement-triggers-expand.sql`、
-   `2026-08-18-user-projection-ready-queue-expand.sql`、
-   `2026-08-18-user-projection-ready-queue-v6-expand.sql`、
-   `2026-08-18-user-projection-ready-queue-v7-expand.sql`、
-   `2026-08-18-fanout-direct-user-microbatch-expand.sql`、
-   `2026-08-18-fanout-autovacuum-expand.sql` 和
-   `2026-08-18-fanout-direct-integrity-and-projection-index-expand.sql`、
-   `2026-08-20-direct-room-log-content-reference-expand.sql`、
-   `2026-08-20-direct-room-log-content-reference-integrity-expand.sql`；新库直接安装 canonical
-   schema。确认逻辑 view、validated storage constraint、append-only trigger、
-   `message_content_versions` 与其 revision snapshot trigger 存在后再部署 binary。该表是
-   plain direct room-log 正文引用的历史版本围栏，不能跳过。
+1. 使用明确的新库安装 `IMV2/sql/schema.sql`，运行当前 SQL contract 与服务端 readiness。
+   不执行历史 expand、回填或旧模式切换。确认房间内容版本、不可变事件与接受台账约束存在，
+   这些约束在当前快速发送和历史读取中仍然必需。
 2. 部署 binary，保持 workload isolation 为 `false`，确认每个 pool 的 EventLoop handle 数、连接 ceiling、readiness 和基本链路。
 3. 启用 database work admission。客户端必须把 `SERVER_BUSY` 当作可重试错误并使用带 jitter 的指数退避；取消的请求不得记作过载。
-4. 启用 Projection batch，将 Projection concurrency 从 1 调到 2。只有 backlog 和前台尾延迟同时改善才继续增加；每一步都等待 backlog 清空并执行一致性查询。
-   Delivery 的配置值是上限，不再是持续忙时固定值：空闲探测使用 1 lane，正常前台安全值为 4；只有前台 `in-flight = 0`、`queued = 0` 且连续满批时才逐级升到 8，一旦出现已接纳或排队的前台工作立即回落到 4。仅观察 queue 会在前台槽位已经占满但尚未形成队列时错误扩容，造成尾延迟放大。
+4. 分别观察个人事件队列、用户投影和房间维护任务。调整并发时固定其他变量，仅在积压和
+   前台尾延迟同时改善后继续增加；不能使用旧公共消息 fanout worker 的并发经验作为当前结论。
 5. 启用 Sync wake coalescing。比较 Pull 平均 records、Pull QPS、hint delivered/drop 和消息可见延迟。
 6. 最后开启成功日志采样，并保持慢/拒绝/失败日志的有界 burst。两者都只控制结构化日志，
    Prometheus 计数不受采样或限流影响。workload isolation 只作为单变量 A/B 实验，不作为默认上线步骤。
-7. 空库或 backfill/inline 三项精确审计已经为 0 的压测环境，叠加
-   `docker-compose.gateway-shared.yml`，固定 `shared/shared + reference + preplanned`；旧库未完成
-   审计时禁止直接套用。
+7. 压测使用当前配置与可丢弃夹具，记录完整参数、构建版本和结果。旧 shared/preplanned
+   模式及 backfill 审计不属于当前启动条件，历史性能数字只能与其原始版本关联。
 
 ## 必看指标与告警
 

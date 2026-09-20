@@ -416,17 +416,17 @@ private actor RecordingTrustedModerationStore: V2TrustedSafetyModerationStore {
         self.outcome = outcome
     }
 
-    func applyTrustedSafety(command: V2ModerationCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2ModerationOutcome {
+    func applyTrustedSafety(command: V2ModerationCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2ModerationOutcome {
         received = command
         if let failure { throw failure }
         if let outcome { return outcome }
-        return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: command.action, targetUserID: nil, messageID: command.messageID, messageRevision: 2, muteUntil: nil, roomSequence: 2, eventID: eventID, fanoutPlanID: planID, createdAt: now))
+        return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: command.action, targetUserID: nil, messageID: command.messageID, messageRevision: 2, muteUntil: nil, roomSequence: 2, eventID: eventID, createdAt: now))
     }
     func command() -> V2ModerationCommand? { received }
 }
 
 private func reviewTestProfile() throws -> V2CapacityProfile {
-    try .init(id: "standard", limits: .init(maxEligibleMembers: 16, maxCommandsPerWindow: 32, maxFanoutUnitsPerWindow: 32, maxOutstandingFanoutUnits: 64, maxOutstandingPlans: 16, maxEnumerationPageSize: 16, maxPlannerConcurrency: 1, maxDeliveryConcurrency: 1, retryAfterSeconds: 3))
+    try .init(id: "standard", limits: .init(maxEligibleMembers: 16, maxCommandsPerWindow: 32,    retryAfterSeconds: 3))
 }
 
 private enum ReviewRetryFailure: Error { case unavailable }

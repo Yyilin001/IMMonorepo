@@ -49,6 +49,32 @@ enum IMV2OperatorServerApp {
             }
             let database: any Database = controlPool.database
             try await V2SchemaReadiness.verify(database: database)
+            // Resolution never borrows from reservation or policy-writer pools.
+            // Control acknowledgement and owner abort can share this dedicated
+            // physical pool: each transaction finishes before the next begins.
+            var authorizationResolutionDatabases: [String: any Database] = [:]
+            for (index, url) in configuration.directAuthorizationResolutionDatabaseURLs.enumerated() {
+                let id = DatabaseID(string: "operator-authorization-resolution-\(index)")
+                app.databases.use(try postgresDatabaseConfiguration(url: url, policy: configuration.databasePolicy,
+                    maximumConnectionsPerEventLoop: 1), as: id)
+                let pool = try V2ApplicationEventLoopDatabasePool(application: app, identifier: id, eventLoops: databaseEventLoops)
+                for member in pool.eventLoopDatabases {
+                    try await V2PostgresSessionReadiness.verify(database: member, policy: configuration.databasePolicy)
+                }
+                authorizationResolutionDatabases[url] = pool.database
+            }
+            guard let authorizationControlDatabase = authorizationResolutionDatabases[configuration.databaseURL] else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            let authorizationOwners = try Dictionary(uniqueKeysWithValues: configuration.roomShardStorage.map { storage in
+                guard let owner = authorizationResolutionDatabases[storage.databaseURL] else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+                return (storage.shardID, owner)
+            })
+            let directAuthorizationCoordinator = V2DirectAuthorizationCoordinator(
+                controlDatabase: authorizationControlDatabase, ownerDatabases: authorizationOwners)
+
             var shardDatabasesByURL: [String: any Database] = [
                 configuration.databaseURL: database
             ]
@@ -84,6 +110,7 @@ enum IMV2OperatorServerApp {
                 shardLocations.append(try .init(bucket: storage.bucket, database: shardDatabase, schema: storage.schema))
             }
             let userShardStorage = try V2StaticUserShardStorageRegistry(locations: shardLocations)
+            var userStateReplayStores: [String: any V2DurableWorkReplayStore] = [:]
             var forwardReplayStores: [String: any V2ForwardWorkReplayStore] = [:]
             var approvalRecoveryStores: [String: any V2GroupApprovalRecoveryStore] = [:]
             var inviteImportLocations: [V2RoomShardStorageLocation] = []
@@ -102,6 +129,7 @@ enum IMV2OperatorServerApp {
                     shardDatabasesByURL[storage.databaseURL] = ownerDatabase
                 }
                 try await V2SchemaReadiness.verify(database: ownerDatabase)
+                userStateReplayStores[storage.shardID] = PostgresV2DurableWorkReplayStore(database: ownerDatabase)
                 forwardReplayStores[storage.shardID] = PostgresV2ForwardWorkReplayStore(database: ownerDatabase)
                 approvalRecoveryStores[storage.shardID] = PostgresV2GroupApprovalRecoveryStore(database: ownerDatabase)
                 inviteImportLocations.append(try .init(shardID: storage.shardID, database: ownerDatabase, schema: storage.schema))
@@ -123,6 +151,7 @@ enum IMV2OperatorServerApp {
                 authenticator: configuration.authenticator,
                 service: .init(
                     store: PostgresV2DurableWorkReplayStore(database: database),
+                    roomOwnerStores: userStateReplayStores,
                     operatorPrincipal: configuration.operatorPrincipal
                 )
             ).register(on: app)
@@ -152,7 +181,8 @@ enum IMV2OperatorServerApp {
                 authenticator: configuration.accountDisableAuthenticator,
                 service: try V2PostgresAccountDisableService(
                     database: database,
-                    operatorPrincipal: configuration.accountDisableOperatorPrincipal
+                    operatorPrincipal: configuration.accountDisableOperatorPrincipal,
+                    authorizationCoordinator: directAuthorizationCoordinator
                 )
             ).register(on: app)
             V2VaporDeviceSnapshotResetOperatorRoutes(
@@ -185,7 +215,8 @@ enum IMV2OperatorServerApp {
 
 private func postgresDatabaseConfiguration(
     url: String,
-    policy: V2PostgresRuntimePolicy
+    policy: V2PostgresRuntimePolicy,
+    maximumConnectionsPerEventLoop: Int? = nil
 ) throws -> DatabaseConfigurationFactory {
     var configuration = try SQLPostgresConfiguration(url: url)
     configuration.coreConfiguration.options.connectTimeout = .milliseconds(
@@ -196,7 +227,7 @@ private func postgresDatabaseConfiguration(
     )
     return .postgres(
         configuration: configuration,
-        maxConnectionsPerEventLoop: policy.maximumConnectionsPerEventLoop,
+        maxConnectionsPerEventLoop: maximumConnectionsPerEventLoop ?? policy.maximumConnectionsPerEventLoop,
         connectionPoolTimeout: .milliseconds(Int64(policy.poolTimeoutMilliseconds))
     )
 }

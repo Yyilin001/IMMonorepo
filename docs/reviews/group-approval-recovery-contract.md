@@ -38,7 +38,7 @@
 
 ## Schema 与上线条件
 
-`20260906_group_approval_recovery.sql` 从 current-20 原子升级至 current-21，增加两张表、不可变 trigger/function 和候选部分索引，不自动修改旧 approving。上线前排空所有旧成员/审批/清理写进程，升级全部相关 owner schema；旧二进制不认识阻断记录，不能混用。
+当前 schema 直接提供审批恢复表、不可变 trigger/function 和候选部分索引。正常 approving 恢复仍按当前证据和所有者围栏执行；不执行旧版本升级或自动改写审批状态。
 
 Swift 与 SQL readiness 同时检查列类型/空值约束、PK/FK、精确 CHECK 定义、不可变 trigger 的启用状态和函数体、有效的候选索引。只改版本 marker、放入同名弱约束或替换函数体不能通过。
 

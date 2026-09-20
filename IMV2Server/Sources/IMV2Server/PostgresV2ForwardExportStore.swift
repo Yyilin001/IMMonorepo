@@ -60,6 +60,27 @@ public struct PostgresV2ForwardExportStore: Sendable {
         targetRoute: V2RoomShardRoute,
         now: Date
     ) async throws -> V2ForwardExport {
+        let result = try await prepareResult(actorUserID: actorUserID, operationID: operationID, source: source,
+            sourceRoute: sourceRoute, targetRoomID: targetRoomID, targetRoute: targetRoute, now: now, replayTerminal: false)
+        guard case .export(let export) = result else { throw V2ForwardExportError.corruptPersistenceState }
+        return export
+    }
+
+    /// Read the original envelope or terminal receipt in one database snapshot.
+    /// A receipt committed after the service preflight must not require content.
+    func prepareForDelivery(
+        actorUserID: UserID, operationID: MessageForwardOperationID, source: V2ForwardMessageReference,
+        sourceRoute: V2RoomShardRoute, targetRoomID: RoomID, targetRoute: V2RoomShardRoute, now: Date
+    ) async throws -> V2ForwardExportPreparation {
+        try await prepareResult(actorUserID: actorUserID, operationID: operationID, source: source,
+            sourceRoute: sourceRoute, targetRoomID: targetRoomID, targetRoute: targetRoute, now: now, replayTerminal: true)
+    }
+
+    private func prepareResult(
+        actorUserID: UserID, operationID: MessageForwardOperationID, source: V2ForwardMessageReference,
+        sourceRoute: V2RoomShardRoute, targetRoomID: RoomID, targetRoute: V2RoomShardRoute, now: Date,
+        replayTerminal: Bool
+    ) async throws -> V2ForwardExportPreparation {
         guard let actor = actorUserID.uuidValue, let operation = operationID.uuidValue,
               let sourceRoom = source.roomID.uuidValue, let message = source.messageID.uuidValue,
               let target = targetRoomID.uuidValue
@@ -72,11 +93,31 @@ public struct PostgresV2ForwardExportStore: Sendable {
             let key = "v2-forward-export:\(actor):\(operation):\(message):\(target)"
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
             if let prior = try await sql.raw("""
-                SELECT payload, payload_digest FROM im_v2.message_forward_exports
-                WHERE actor_user_id = \(bind: actor) AND operation_id = \(bind: operation)
-                  AND source_message_id = \(bind: message) AND target_room_id = \(bind: target)
-                """).first(decoding: ExportPayloadRow.self) {
-                let export = try V2ForwardExport(payload: prior.payload, digest: prior.digest)
+                SELECT export.source_room_id, export.source_content_revision,
+                       CASE WHEN \(bind: replayTerminal) AND receipt.export_id IS NOT NULL
+                            THEN NULL ELSE export.payload END AS payload,
+                       export.payload_digest AS export_digest,
+                       receipt.payload_digest, receipt.state, receipt.result_message_id,
+                       receipt.result_room_sequence, receipt.error_code
+                FROM im_v2.message_forward_exports AS export
+                LEFT JOIN im_v2.message_forward_export_receipts AS receipt USING (export_id)
+                WHERE export.actor_user_id = \(bind: actor) AND export.operation_id = \(bind: operation)
+                  AND export.source_message_id = \(bind: message) AND export.target_room_id = \(bind: target)
+                """).first(decoding: ExportPreparationRow.self) {
+                guard prior.sourceRoomID == sourceRoom, prior.sourceRevision == source.revision.signedValue
+                else { throw V2ForwardExportError.idempotencyConflict }
+                if replayTerminal, let receipt = prior.receipt {
+                    guard prior.digest.count == 32, prior.digest == receipt.digest
+                    else { throw V2ForwardExportError.corruptPersistenceState }
+                    return .terminal(try receipt.outcome)
+                }
+                guard let payload = prior.payload else {
+                    guard let receipt = prior.receipt, prior.digest.count == 32, prior.digest == receipt.digest
+                    else { throw V2ForwardExportError.corruptPersistenceState }
+                    _ = try receipt.outcome
+                    throw V2ForwardExportError.payloadCompacted
+                }
+                let export = try V2ForwardExport(payload: payload, digest: prior.digest)
                 guard export.intent.actorUserID == actor, export.intent.operationID == operation,
                       export.intent.sourceMessageID == message, export.intent.targetRoomID == target,
                       export.intent.sourceRoomID == sourceRoom,
@@ -85,14 +126,14 @@ public struct PostgresV2ForwardExportStore: Sendable {
                 // Original routing epochs are immutable evidence. A future
                 // migration delivery protocol must carry them, never regrant
                 // from a changed source or rewrite this envelope on retry.
-                return export
+                return .export(export)
             }
             guard let room = try await sql.raw("""
-                SELECT room_shard_id, owner_epoch FROM im_v2.rooms
+                SELECT room_shard_id, owner_epoch, migration_fence_id FROM im_v2.rooms
                 WHERE room_id = \(bind: sourceRoom) FOR UPDATE
                 """).first(decoding: ExportRoomRow.self)
             else { throw V2ForwardExportError.sourceUnavailable }
-            guard room.shardID == sourceRoute.shardID, room.epoch == sourceRoute.epoch
+            guard room.shardID == sourceRoute.shardID, room.epoch == sourceRoute.epoch, room.migrationFenceID == nil
             else { throw V2ForwardExportError.ownerChanged }
             guard let content = try await sql.raw("""
                 SELECT message.sender_user_id, message.content_revision, message.text_body,
@@ -177,22 +218,42 @@ public struct PostgresV2ForwardExportStore: Sendable {
                 INSERT INTO im_v2.message_forward_delivery_jobs (export_id, state, next_attempt_at, created_at)
                 VALUES (\(bind: export.intent.exportID), 'pending', \(bind: now), \(bind: now))
                 """).run()
-            return export
+            return .export(export)
         }
     }
 }
 
-private struct ExportPayloadRow: Decodable {
-    let payload: Data; let digest: Data
-    enum CodingKeys: String, CodingKey { case payload; case digest = "payload_digest" }
+enum V2ForwardExportPreparation: Sendable {
+    case export(V2ForwardExport)
+    case terminal(V2ForwardImportOutcome)
+}
+
+private struct ExportPreparationRow: Decodable {
+    let sourceRoomID: UUID
+    let sourceRevision: Int64
+    let payload: Data?
+    let digest: Data
+    let receipt: V2ForwardReceiptRow?
+    enum CodingKeys: String, CodingKey {
+        case sourceRoomID = "source_room_id", sourceRevision = "source_content_revision", payload
+        case digest = "export_digest", state
+    }
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        sourceRoomID = try values.decode(UUID.self, forKey: .sourceRoomID)
+        sourceRevision = try values.decode(Int64.self, forKey: .sourceRevision)
+        payload = try values.decodeIfPresent(Data.self, forKey: .payload)
+        digest = try values.decode(Data.self, forKey: .digest)
+        receipt = try values.decodeIfPresent(String.self, forKey: .state) == nil ? nil : V2ForwardReceiptRow(from: decoder)
+    }
 }
 private struct ExportIDRow: Decodable {
     let exportID: UUID
     enum CodingKeys: String, CodingKey { case exportID = "export_id" }
 }
 private struct ExportRoomRow: Decodable {
-    let shardID: String; let epoch: Int64
-    enum CodingKeys: String, CodingKey { case shardID = "room_shard_id"; case epoch = "owner_epoch" }
+    let shardID: String; let epoch: Int64; let migrationFenceID: UUID?
+    enum CodingKeys: String, CodingKey { case shardID = "room_shard_id"; case epoch = "owner_epoch"; case migrationFenceID = "migration_fence_id" }
 }
 private struct ExportContentRow: Decodable {
     let senderID: UUID; let revision: Int64; let text: String; let entitiesJSON: String

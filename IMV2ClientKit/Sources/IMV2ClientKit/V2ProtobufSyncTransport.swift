@@ -283,120 +283,6 @@ public enum V2ClientRoomMembersPageLimits {
     public static let maximumCursorBytes = 512
 }
 
-/// 会话列表中的一条最新可见消息摘要。
-///
-/// 它不是正文副本：`text` 已被服务端截断为预览，完整正文必须经房间游标拉取。
-public struct V2ClientRoomSummaryMessage: Equatable, Sendable {
-    /// 消息标识。
-    public let messageID: MessageID
-    /// 发送者用户标识。
-    public let senderUserID: UserID
-    /// 该消息在房间日志中的序号。
-    public let roomSequence: UInt64
-    /// 正文预览。
-    public let text: String
-    /// 是否已撤回。
-    public let isWithdrawn: Bool
-    /// 未被撤销的媒体引用数量。
-    public let mediaCount: Int
-    /// 服务端创建时间。
-    public let serverCreatedAt: Date
-
-    /// 保存消息摘要。
-    ///
-    /// - Parameters:
-    ///   - messageID: 消息标识。
-    ///   - senderUserID: 发送者用户标识。
-    ///   - roomSequence: 房间日志序号。
-    ///   - text: 正文预览。
-    ///   - isWithdrawn: 是否已撤回。
-    ///   - mediaCount: 未撤销的媒体数量。
-    ///   - serverCreatedAt: 服务端创建时间。
-    public init(messageID: MessageID, senderUserID: UserID, roomSequence: UInt64, text: String, isWithdrawn: Bool, mediaCount: Int, serverCreatedAt: Date) {
-        self.messageID = messageID
-        self.senderUserID = senderUserID
-        self.roomSequence = roomSequence
-        self.text = text
-        self.isWithdrawn = isWithdrawn
-        self.mediaCount = mediaCount
-        self.serverCreatedAt = serverCreatedAt
-    }
-}
-
-/// 会话列表中的一条房间摘要。
-public struct V2ClientRoomSummary: Equatable, Sendable {
-    /// 房间标识。
-    public let roomID: RoomID
-    /// 房间类型。
-    public let roomKind: V2ClientRoomKind
-    /// 房间日志头。
-    public let head: UInt64
-    /// 房间日志头最后一次前进的时刻。
-    public let lastEventAt: Date
-    /// 未读数，由服务端计算；客户端只做本地乐观更新。
-    public let unreadCount: UInt64
-    /// 最新可见消息预览；房间还没有可见消息时为空。
-    public let latestMessage: V2ClientRoomSummaryMessage?
-
-    /// 保存房间摘要。
-    ///
-    /// - Parameters:
-    ///   - roomID: 房间标识。
-    ///   - roomKind: 房间类型。
-    ///   - head: 房间日志头。
-    ///   - lastEventAt: 房间日志头最后一次前进的时刻。
-    ///   - unreadCount: 未读数。
-    ///   - latestMessage: 最新可见消息预览。
-    public init(roomID: RoomID, roomKind: V2ClientRoomKind, head: UInt64, lastEventAt: Date, unreadCount: UInt64, latestMessage: V2ClientRoomSummaryMessage?) {
-        self.roomID = roomID
-        self.roomKind = roomKind
-        self.head = head
-        self.lastEventAt = lastEventAt
-        self.unreadCount = unreadCount
-        self.latestMessage = latestMessage
-    }
-}
-
-/// 房间类型。
-public enum V2ClientRoomKind: String, Equatable, Sendable {
-    /// 群聊房间。
-    case group
-    /// 单聊房间。
-    case direct
-}
-
-/// 会话列表的一页。
-public struct V2ClientRoomSummaryPage: Equatable, Sendable {
-    /// 本页房间摘要，按活动倒序。
-    public let rooms: [V2ClientRoomSummary]
-    /// 下一页游标；为空表示没有更多。
-    public let nextCursor: String?
-
-    /// 保存会话列表分页。
-    ///
-    /// - Parameters:
-    ///   - rooms: 本页房间摘要。
-    ///   - nextCursor: 下一页游标。
-    public init(rooms: [V2ClientRoomSummary], nextCursor: String?) {
-        self.rooms = rooms
-        self.nextCursor = nextCursor
-    }
-}
-
-/// 会话列表读取的传输边界。
-public protocol V2ClientRoomSummaryTransport: Sendable {
-    /// 按不透明游标和页大小获取会话摘要；返回值不自动持久化。
-    func roomSummaries(cursor: String?, pageSize: Int) async throws -> V2ClientRoomSummaryPage
-}
-
-/// 客户端会话列表请求和响应使用的分页预算。
-public enum V2ClientRoomSummaryPageLimits {
-    /// 单页最多请求 100 个房间。
-    public static let maximumPageSize = 100
-    /// 会话摘要游标最多 512 个 UTF-8 字节。
-    public static let maximumCursorBytes = 512
-}
-
 /// 发起私聊后返回的房间、目标用户和创建时间摘要。
 public struct V2ClientDirectRoom: Equatable, Sendable {
     /// 正式私聊房间身份。
@@ -442,7 +328,7 @@ public struct V2ClientGroupRoom: Equatable, Sendable {
     /// 服务端返回的群名称。
     public let title: String
     /// 群的消息投递模式。
-    public let deliveryMode: V2GroupDeliveryMode
+    public let capacityClass: V2GroupCapacityClass
     /// 初始化时排序的成员身份数组；建群传输当前要求为空，完整目录另行分页读取。
     public let memberUserIDs: [UserID]
     /// 服务端声明的正式成员总数。
@@ -455,14 +341,14 @@ public struct V2ClientGroupRoom: Equatable, Sendable {
     /// - Parameters:
     ///   - roomID: 房间身份。
     ///   - title: 名称。
-    ///   - deliveryMode: 投递模式。
+    ///   - capacityClass: 投递模式。
     ///   - memberUserIDs: 可选的成员身份列表。
     ///   - memberCount: 声明的总成员数，不要求等于数组长度。
     ///   - createdAt: 创建时间。
-    public init(roomID: RoomID, title: String, deliveryMode: V2GroupDeliveryMode, memberUserIDs: [UserID], memberCount: UInt32, createdAt: Date) {
+    public init(roomID: RoomID, title: String, capacityClass: V2GroupCapacityClass, memberUserIDs: [UserID], memberCount: UInt32, createdAt: Date) {
         self.roomID = roomID
         self.title = title
-        self.deliveryMode = deliveryMode
+        self.capacityClass = capacityClass
         self.memberUserIDs = memberUserIDs.sorted()
         self.memberCount = memberCount
         self.createdAt = createdAt
@@ -967,7 +853,7 @@ public struct V2SHA256SnapshotPageDigestVerifier: V2SnapshotPageDigestVerifier {
 ///
 /// 本层校验响应关联、版本和各方法声明的业务字段，不保存同步投影，也不管理持久化命令重试。
 /// 请求号由 actor 在发送前分配；等待期间允许其他请求进入，实际关联与网络生命周期由底层连接负责。
-public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePolicyBaselineTransport, V2ClientMessageTransport, V2ClientConversationCapabilitiesTransport, V2ClientGroupCapabilitiesTransport, V2ClientForwardMessagesTransport, V2ClientMembershipTransport, V2ClientMembershipDirectoryTransport, V2ClientRoomSummaryTransport, V2ClientDirectMessagingTransport, V2ClientGroupMessagingTransport, V2ClientGroupEventTransport, V2ClientGroupEventSubscriptionTransport, V2ClientSocialRelationshipTransport, V2ClientMessageWithdrawalTransport, V2ClientMessageRedactionTransport, V2ClientMemberMuteTransport, V2ClientModeratedMemberRemovalTransport, V2ClientMessageEditTransport, V2ClientMessageReactionTransport, V2ClientReadReceiptTransport, V2ClientLiveActivityTransport, V2HeartbeatSender {
+public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePolicyBaselineTransport, V2ClientMessageTransport, V2ClientConversationCapabilitiesTransport, V2ClientGroupCapabilitiesTransport, V2ClientForwardMessagesTransport, V2ClientMembershipTransport, V2ClientMembershipDirectoryTransport, V2ClientDirectMessagingTransport, V2ClientGroupMessagingTransport, V2ClientGroupEventTransport, V2ClientGroupEventSubscriptionTransport, V2ClientSocialRelationshipTransport, V2ClientMessageWithdrawalTransport, V2ClientMessageRedactionTransport, V2ClientMemberMuteTransport, V2ClientModeratedMemberRemovalTransport, V2ClientMessageEditTransport, V2ClientMessageReactionTransport, V2ClientReadReceiptTransport, V2ClientLiveActivityTransport, V2HeartbeatSender {
     /// 拥有认证连接与帧请求关联的底层传输。
     private let wire: any V2AuthenticatedFrameTransport
     /// 所有请求使用的已协商非零协议版本。
@@ -1472,70 +1358,6 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
         return try .init(roomID: .init(page.roomID), membershipRevision: page.membershipRevision, actorRole: actorRole, members: members, nextCursor: page.nextCursor.isEmpty ? nil : page.nextCursor)
     }
 
-    /// 按游标读取会话摘要并核对未读、房间头与预览的一致性。
-    ///
-    /// - Parameters:
-    ///   - cursor: 首次为 nil；非空时必须有内容且不超过 512 个 UTF-8 字节。
-    ///   - pageSize: 1 到 100 的页大小。
-    /// - Returns: 房间标识唯一、未读不超过房间头、预览序号不越过房间头的摘要页。
-    /// - Throws: 请求预算、响应一致性、标识构造、服务端或传输错误。
-    ///
-    /// 未读数是服务端权威值：本方法只校验，不自行推算，也不把结果保存为本地状态。
-    public func roomSummaries(cursor: String?, pageSize: Int) async throws -> V2ClientRoomSummaryPage {
-        guard pageSize > 0, pageSize <= V2ClientRoomSummaryPageLimits.maximumPageSize,
-              cursor.map({ !$0.isEmpty && $0.utf8.count <= V2ClientRoomSummaryPageLimits.maximumCursorBytes }) ?? true
-        else {
-            throw V2RealtimeTransportError.unexpectedResponse
-        }
-        var request = IMV2Envelope(); request.roomSummaryList = .init()
-        request.roomSummaryList.cursor = cursor ?? ""
-        request.roomSummaryList.pageSize = UInt32(pageSize)
-        let response = try await requestEnvelope(request)
-        guard case .roomSummaryPage(let page)? = response.body else {
-            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
-        }
-        guard page.rooms.count <= pageSize,
-              page.nextCursor.utf8.count <= V2ClientRoomSummaryPageLimits.maximumCursorBytes
-        else { throw V2RealtimeTransportError.unexpectedResponse }
-        let rooms: [V2ClientRoomSummary] = try page.rooms.map { room in
-            guard let roomKind = V2ClientRoomKind(rawValue: room.roomKind),
-                  room.lastEventAtMs >= 0,
-                  // 未读不可能超过房间头；越界说明服务端聚合自相矛盾。
-                  room.unreadCount <= room.head
-            else { throw V2RealtimeTransportError.unexpectedResponse }
-            return try .init(
-                roomID: .init(room.roomID),
-                roomKind: roomKind,
-                head: room.head,
-                lastEventAt: Date(timeIntervalSince1970: TimeInterval(room.lastEventAtMs) / 1_000),
-                unreadCount: room.unreadCount,
-                latestMessage: room.hasLatestMessage
-                    ? Self.roomSummaryMessage(room.latestMessage, roomHead: room.head)
-                    : nil
-            )
-        }
-        guard Set(rooms.map(\.roomID)).count == rooms.count else { throw V2RealtimeTransportError.unexpectedResponse }
-        return .init(rooms: rooms, nextCursor: page.nextCursor.isEmpty ? nil : page.nextCursor)
-    }
-
-    /// 校验一条摘要预览：序号必须落在房间内，时间与媒体数量必须可表示。
-    private static func roomSummaryMessage(_ message: IMV2RoomSummaryMessage, roomHead: UInt64) throws -> V2ClientRoomSummaryMessage {
-        guard message.serverCreatedAtMs >= 0,
-              message.roomSequence > 0,
-              message.roomSequence <= roomHead,
-              message.mediaCount <= UInt32.max
-        else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(
-            messageID: .init(message.messageID),
-            senderUserID: .init(message.senderUserID),
-            roomSequence: message.roomSequence,
-            text: message.text,
-            isWithdrawn: message.isWithdrawn,
-            mediaCount: Int(message.mediaCount),
-            serverCreatedAt: Date(timeIntervalSince1970: TimeInterval(message.serverCreatedAtMs) / 1_000)
-        )
-    }
-
     /// 映射群主、管理员和普通成员角色；未指定或未知协议值作为异常响应拒绝。
     private static func membershipRole(from wireRole: IMV2RoomMembershipRole) throws -> V2RoomMembershipRole {
         switch wireRole {
@@ -1583,7 +1405,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
         let response = try await requestEnvelope(request)
         guard case .groupRoomCreationPrepared(let prepared)? = response.body,
               prepared.operationID == operationID.rawValue,
-              prepared.stagedMemberCount <= UInt32(V2GroupDeliveryPolicy.largeGroupHybridMaximumMembers - 1)
+              prepared.stagedMemberCount <= UInt32(V2GroupCapacityPolicy.largeMaximumMembers - 1)
         else {
             try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
         }
@@ -1609,7 +1431,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
         let response = try await requestEnvelope(request)
         guard case .groupRoomCreationMembersAppended(let appended)? = response.body,
               appended.operationID == operationID.rawValue,
-              appended.stagedMemberCount <= UInt32(V2GroupDeliveryPolicy.largeGroupHybridMaximumMembers - 1)
+              appended.stagedMemberCount <= UInt32(V2GroupCapacityPolicy.largeMaximumMembers - 1)
         else {
             try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
         }
@@ -1630,9 +1452,9 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
         guard case .groupRoomCreated(let created)? = response.body else {
             try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
         }
-        let returnedDeliveryMode: V2GroupDeliveryMode = switch created.deliveryMode {
-        case .standardFanout: .standardFanout
-        case .largeGroupHybrid: .largeGroupHybrid
+        let returnedCapacityClass: V2GroupCapacityClass = switch created.capacityClass {
+        case .standard: .standard
+        case .large: .large
         case .unspecified, .UNRECOGNIZED: throw V2RealtimeTransportError.unexpectedResponse
         }
         let members = try created.memberUserIds.map { try UserID($0) }
@@ -1641,7 +1463,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
               created.memberCount > 0,
               members.isEmpty
         else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(roomID: .init(created.roomID), title: created.title, deliveryMode: returnedDeliveryMode, memberUserIDs: members, memberCount: created.memberCount, createdAt: Date(timeIntervalSince1970: TimeInterval(created.createdAtMs) / 1_000))
+        return try .init(roomID: .init(created.roomID), title: created.title, capacityClass: returnedCapacityClass, memberUserIDs: members, memberCount: created.memberCount, createdAt: Date(timeIntervalSince1970: TimeInterval(created.createdAtMs) / 1_000))
     }
 
     /// 取消服务端可变建群草稿，并核对确认中的操作身份。
@@ -2214,7 +2036,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
     ///
     /// 编码与解码使用适配器默认预算，未在此传入压缩协商；响应必须匹配本次请求号和协议版本。
     /// 计数器回绕跳过零，但不在此扫描仍在途的历史编号。返回的业务错误 envelope 由各命令方法另行映射。
-    private func requestEnvelope(_ envelope: IMV2Envelope) async throws -> IMV2Envelope {
+    func requestEnvelope(_ envelope: IMV2Envelope) async throws -> IMV2Envelope {
         var outbound = envelope
         let requestID = nextRequestID
         nextRequestID &+= 1
@@ -2230,7 +2052,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
     /// 把错误消息体映射为服务端错误，其他消息体不操作。
     ///
     /// 仅对 REVISION_CONFLICT 保留当前修订，并检查其可持久化整数范围；不在此自动重试或等待。
-    private func throwServerErrorIfPresent(_ envelope: IMV2Envelope) throws {
+    func throwServerErrorIfPresent(_ envelope: IMV2Envelope) throws {
         if case .error(let error)? = envelope.body {
             guard error.code != "REVISION_CONFLICT" || error.currentRevision <= UInt64(Int64.max) else {
                 throw V2RealtimeTransportError.unexpectedResponse

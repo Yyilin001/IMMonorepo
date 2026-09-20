@@ -30,7 +30,6 @@ struct V2ModerationServiceTests {
         #expect(received.targetUserID == request.targetUserID)
         #expect(received.reasonCode == request.reasonCode)
         #expect(result.eventID.rawValue == "00000000-0000-0000-0000-000000000855")
-        #expect(result.fanoutPlanID.rawValue == "00000000-0000-0000-0000-000000000856")
     }
 
     @Test("invalid command shapes fail before the persistence boundary")
@@ -50,9 +49,9 @@ private actor RecordingModerationStore: V2ModerationStore {
 
     func command() -> V2ModerationCommand? { received }
 
-    func apply(command: V2ModerationCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, planID: FanoutPlanID, now: Date) throws -> V2ModerationOutcome {
+    func apply(command: V2ModerationCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2ModerationOutcome {
         received = command
-        return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: command.action, targetUserID: command.targetUserID, messageID: command.messageID, muteUntil: command.muteUntil, roomSequence: 1, eventID: eventID, fanoutPlanID: planID, createdAt: now))
+        return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: command.action, targetUserID: command.targetUserID, messageID: command.messageID, muteUntil: command.muteUntil, roomSequence: 1, eventID: eventID, createdAt: now))
     }
 }
 
@@ -70,12 +69,7 @@ private func testModerationProfile() throws -> V2CapacityProfile {
     try .init(id: "standard", limits: .init(
         maxEligibleMembers: 16,
         maxCommandsPerWindow: 32,
-        maxFanoutUnitsPerWindow: 32,
-        maxOutstandingFanoutUnits: 64,
-        maxOutstandingPlans: 16,
-        maxEnumerationPageSize: 16,
-        maxPlannerConcurrency: 1,
-        maxDeliveryConcurrency: 1,
+
         retryAfterSeconds: 3
     ))
 }

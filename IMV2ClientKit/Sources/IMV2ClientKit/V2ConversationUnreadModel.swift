@@ -3,7 +3,7 @@ import IMV2Core
 
 /// 会话列表展示未读所需的本设备已读水位读取能力。
 ///
-/// 只回答"我已经读到哪个房间序号"，不回答未读本身：未读数的权威在服务端摘要，
+/// 只回答"我已经读到哪个房间序号"，不回答未读本身：未读数的权威在服务端房间状态，
 /// 本地水位唯一的用途是在等待服务端确认期间把计数**变小**。
 public protocol V2ClientRoomReadWatermarkReading: Sendable {
     /// 批量读取若干房间的有效已读水位。
@@ -35,13 +35,12 @@ extension GRDBV2LocalSyncStore: V2ClientRoomReadWatermarkReading {}
 /// - 本地水位落后服务端（投影还没到）：服务端更小，取服务端，绝不虚报。
 /// - 没有本地水位：退化为服务端值。
 ///
-/// 规则只减不增：任何本地状态都不可能把未读显示得比服务端更大，因此一次乐观推进
-/// 不会掩盖真实未读。
+/// 规则只减不增：任何本地状态都不可能把未读显示得比服务端更大，乐观显示仍需由后续权威状态校准。
 public enum V2ClientConversationUnread {
     /// 计算展示用未读数。
     ///
     /// - Parameters:
-    ///   - serverUnread: 服务端摘要给出的未读数。
+    ///   - serverUnread: 服务端房间状态给出的未读数。
     ///   - head: 房间日志头。
     ///   - localWatermark: 本设备已读水位；未知时为 `nil`。
     /// - Returns: 展示用未读数。

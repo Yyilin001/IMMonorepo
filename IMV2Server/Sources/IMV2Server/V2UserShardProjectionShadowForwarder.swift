@@ -199,7 +199,7 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
                   AND projection_kind = \(bind: kind)
                 """).first(decoding: ShadowSourceRow.self)
             else { continue }
-            let currentProjector = try PostgresV2UserShardFanoutProjector(database: current.database, schema: current.schema)
+            let currentProjector = try PostgresV2UserProjectionStore(database: current.database, schema: current.schema)
             let sequence = try await currentProjector.projectAllocated(
                 userID: userID, sourceEventID: sourceEventID, projectionKind: row.projectionKind,
                 payloadJSON: row.payloadJSON, createdAt: row.createdAt.date, persistedCreatedAt: row.createdAt
@@ -219,7 +219,7 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
                         schema: target.schema
                     )
                 }
-                let targetProjector = try PostgresV2UserShardFanoutProjector(database: target.database, schema: target.schema)
+                let targetProjector = try PostgresV2UserProjectionStore(database: target.database, schema: target.schema)
                 _ = try await targetProjector.mirror(.init(
                     userID: userID, sequence: sequence, sourceEventID: sourceEventID,
                     projectionKind: row.projectionKind, payloadJSON: row.payloadJSON, createdAt: row.createdAt.date
@@ -348,7 +348,7 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
                 if currentIsCoLocated {
                     sequence = try shadowUnsigned(row.sequence)
                 } else {
-                    let projector = try PostgresV2UserShardFanoutProjector(
+                    let projector = try PostgresV2UserProjectionStore(
                         database: current.database,
                         schema: current.schema
                     )
@@ -373,7 +373,7 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
                             schema: target.schema
                         )
                     }
-                    let targetProjector = try PostgresV2UserShardFanoutProjector(
+                    let targetProjector = try PostgresV2UserProjectionStore(
                         database: target.database,
                         schema: target.schema
                     )

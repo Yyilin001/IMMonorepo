@@ -386,24 +386,16 @@ struct V2ForwardChunkCompletionTests {
         try await fixture.store.close()
     }
 
-    @Test("additive migration preserves old progress and pending work without inventing old results")
-    func upgradesExistingOutbox() async throws {
+    @Test("reopening preserves completion receipts and pending work")
+    func reopensExistingOutbox() async throws {
         let fixture = try await Fixture(sourceCount: 21)
         let completed = try #require(await fixture.store.nextReadyForwardPlanChunk(now: fixture.now))
         _ = try await fixture.store.markForwardPlanChunkAcknowledged(operationID: completed.command.operationID, results: fixture.results(completed), now: fixture.now)
         let pending = try #require(await fixture.store.nextReadyForwardPlanChunk(now: fixture.now))
         try await fixture.store.close()
-        let legacy = try DatabaseQueue(path: fixture.url.path)
-        try await legacy.write { db in
-            try db.execute(sql: "ALTER TABLE v2_forward_message_chunks DROP COLUMN completion_digest")
-            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'addForwardChunkCompletionDigest'")
-        }
-        try legacy.close()
         let reopened = try GRDBV2LocalSyncStore(databaseURL: fixture.url, installationBinding: fixture.binding)
         #expect(try await reopened.nextReadyForwardPlanChunk(now: fixture.now) == pending)
-        await #expect(throws: V2ClientCommandError.commandConflict) {
-            try await reopened.markForwardPlanChunkAcknowledged(operationID: completed.command.operationID, results: fixture.results(completed), now: fixture.now)
-        }
+        #expect(try await reopened.markForwardPlanChunkAcknowledged(operationID: completed.command.operationID, results: fixture.results(completed), now: fixture.now) == fixture.plan.operationID)
         _ = try await reopened.markForwardPlanChunkAcknowledged(operationID: pending.command.operationID, results: fixture.results(pending), now: fixture.now)
         #expect(try await reopened.forwardPlan(operationID: fixture.plan.operationID)?.succeededCount == 21)
         try await reopened.close()

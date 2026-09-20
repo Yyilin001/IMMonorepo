@@ -1,6 +1,6 @@
 # 群聊 room-owner 横向扩展设计
 
-状态：房间热路径、创建 saga、标准 fan-out、核心消息派生写与 read receipt owner 边界已实现；完整控制面仍在补齐（2026-09-02）
+状态：房间热路径、创建 saga、核心消息派生写与 read receipt owner 边界已实现；公共内容正统一为房间日志，旧扇出运行时已删除，完整清理仍在进行。下文性能数字保留其原测试日期，不代表清理后的新基线。
 
 ## 1. 目标与不可修改的语义
 
@@ -36,10 +36,10 @@
 | 内容审核 | `V2RoutedContentReviewWorker` | 每个物理 owner 独立 claim，违规裁决再按 room route 执行 redaction；单 owner 故障不阻塞健康 owner |
 | read receipt | `V2RoutedReadReceiptStore` + owner candidate/control visibility 两阶段查询 | 群回执写入 room owner；读者候选由 owner 按消息与成员 revision 过滤，控制库再按最新账号状态、隐私偏好补全；私聊投影/偏好保留控制域 |
 | forward、成员目录 | 多个 Store 仍固定使用控制库 | 尚未 owner 化；仍需拆分 source/room 查询与控制面 hydration |
-| standard fan-out planner/outbox | `V2RoutedFanoutPipeline` | 每个物理 owner 有独立 relay/planner/delivery/completion worker；健康 owner 在另一 owner 故障时继续恢复 |
+| 个人状态派发 | `V2UserStateEventWorker` + `V2RoutedUserStateEventProjector` | 每个物理 owner 独立派发个人待办，目标 receipt 去重；公共内容不再通过旧 planner/delivery 流水线 |
 
 因此，现有代码已经越过“只分片 append”的骨架阶段：群创建、初始成员、
-`room.created` standard fan-out、后续成员变更以及消息编辑/撤回/reaction 已进入
+建群个人发现事件、后续成员变更以及消息编辑/撤回/reaction 已进入
 相同 owner 事务域，群能力、moderation 与审核也已按 owner 推进。但它还不是完成
 的全功能数据库分片；forward source read、房间成员目录与 owner
 迁移协议仍需闭环后才能生产启用。

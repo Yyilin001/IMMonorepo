@@ -218,7 +218,7 @@ extension GRDBV2LocalSyncStore {
         })
         let profiles = try Dictionary(uniqueKeysWithValues: Row.fetchAll(
             db,
-            sql: "SELECT source_event_id, room_id, title, owner_user_id, delivery_mode, delivery_authority, membership_revision, created_at FROM v2_room_profile_projections WHERE room_id IN (\(placeholders))",
+            sql: "SELECT source_event_id, room_id, title, owner_user_id, capacity_class, membership_revision, created_at FROM v2_room_profile_projections WHERE room_id IN (\(placeholders))",
             arguments: roomArguments
         ).map { row -> (RoomID, V2ClientRoomProfileProjection) in
             let profile = try Self.decodeRoomProfileProjection(row)
@@ -227,7 +227,7 @@ extension GRDBV2LocalSyncStore {
 
         var directIdentities = try Dictionary(uniqueKeysWithValues: Row.fetchAll(
             db,
-            sql: "SELECT room_id, target_user_id, public_handle, display_name, account_kind, updated_at FROM v2_direct_room_identities WHERE room_id IN (\(placeholders))",
+            sql: "SELECT room_id, target_user_id, public_handle, display_name, account_kind, updated_at, room_created_at FROM v2_direct_room_identities WHERE room_id IN (\(placeholders))",
             arguments: roomArguments
         ).map { row -> (RoomID, V2ClientDirectRoomIdentity) in
             let identity = try Self.decodeDirectRoomIdentity(row)
@@ -235,7 +235,7 @@ extension GRDBV2LocalSyncStore {
         })
         for row in try Row.fetchAll(
             db,
-            sql: "SELECT room_id, target_user_id, public_handle, display_name, account_kind, updated_at FROM v2_direct_room_profile_projections WHERE room_id IN (\(placeholders))",
+            sql: "SELECT room_id, target_user_id, public_handle, display_name, account_kind, updated_at, room_created_at FROM v2_direct_room_profile_projections WHERE room_id IN (\(placeholders))",
             arguments: roomArguments
         ) {
             let identity = try Self.decodeDirectRoomIdentity(row)
@@ -256,6 +256,17 @@ extension GRDBV2LocalSyncStore {
             }
         }
 
+        let latestRows = try Row.fetchAll(db, sql: """
+            SELECT cache.* FROM v2_room_latest_visible AS cache
+            JOIN v2_sync_cursor AS cursor ON cursor.singleton = 1 AND cursor.state = 'ready'
+                AND cursor.generation = cache.personal_generation
+            WHERE cache.room_id IN (\(placeholders))
+            """, arguments: roomArguments)
+        let latest = try Dictionary(uniqueKeysWithValues: latestRows.map { row in
+            let snapshot = try Self.decodeLatestVisible(row)
+            return (snapshot.roomID, snapshot)
+        })
+
         let entries = try pageRows.map { row -> V2ClientConversationListEntry in
             let roomID = try RoomID(row["room_id"] as String)
             let directIdentity = directIdentities[roomID]
@@ -269,7 +280,8 @@ extension GRDBV2LocalSyncStore {
                 lastActivity: Date(timeIntervalSince1970: row["last_activity"] as Double),
                 isPinned: row["is_pinned"],
                 isArchived: row["is_archived"],
-                muteUntil: muteUntil == 0 ? nil : Date(timeIntervalSince1970: muteUntil)
+                muteUntil: muteUntil == 0 ? nil : Date(timeIntervalSince1970: muteUntil),
+                latestVisible: latest[roomID]
             )
         }
         return entries

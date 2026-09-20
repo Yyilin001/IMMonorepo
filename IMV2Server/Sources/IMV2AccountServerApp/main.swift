@@ -65,6 +65,9 @@ enum IMV2AccountServerApp {
                 limitedPaths: [
                     "/v2/account-auth/password/register",
                     "/v2/account-auth/password/assertion",
+                    "/v2/account-auth/password/change",
+                    "/v2/account-auth/password/recovery-code",
+                    "/v2/account-auth/password/recover",
                     "/v2/device-credentials",
                     "/v2/device-credentials/refresh",
                     V2VaporDeviceRevocationCapabilityRoutes.path,
@@ -97,7 +100,7 @@ enum IMV2AccountServerApp {
                         app.logger.error("IM V2 account-edge rate-limit retention failed; retrying")
                     }
                     do {
-                        try await Task.sleep(for: .seconds(60))
+                        try await v2Sleep(for: .seconds(60))
                     } catch {
                         break
                     }
@@ -156,18 +159,10 @@ enum IMV2AccountServerApp {
                     try await V2SchemaReadiness.verify(database: owner)
                     mediaOwners[storage.shardID] = .init(database: owner, provider: provider)
                 }
-                var mediaUserLocations: [V2UserShardStorageLocation] = []
-                for storage in configuration.userShardStorage {
-                    guard let owner = accountStorageDatabases[storage.databaseURL] else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                    try await V2SchemaReadiness.verify(database: owner, schema: storage.schema)
-                    mediaUserLocations.append(try .init(bucket: storage.bucket, database: owner, schema: storage.schema))
-                }
                 let mediaDownloads = V2RoutedMediaDownloadService(
-                    legacy: .init(media: media, providerSessions: downloadProviderSessions),
+                    local: .init(media: media, providerSessions: downloadProviderSessions),
                     rooms: V2PostgresRoomShardRouter(database: database), owners: mediaOwners,
-                    userRoutes: V2PostgresUserShardRouter(database: database),
-                    userStores: try V2StaticUserShardStorageRegistry(locations: mediaUserLocations),
-                    coLocatedControlBuckets: Set(configuration.userShardStorage.filter { $0.databaseURL == configuration.databaseURL && $0.schema == "im_v2" }.map(\.bucket))
+                    controlDatabase: database
                 )
                 V2VaporMediaUploadRoutes(
                     authenticator: authenticator,
@@ -206,7 +201,7 @@ enum IMV2AccountServerApp {
                             logger.error("IM V2 local media maintenance worker failed; retrying")
                         }
                         do {
-                            try await Task.sleep(for: .milliseconds(200))
+                            try await v2Sleep(for: .milliseconds(200))
                         } catch is CancellationError {
                             break
                         } catch {
@@ -252,7 +247,11 @@ enum IMV2AccountServerApp {
             ).register(on: authenticatedAccountRoutes)
             V2VaporProfilePresentationRoutes(
                 authenticator: authenticator,
-                presentations: PostgresV2ProfilePresentationStore(database: database)
+                presentations: V2RoutedProfilePresentationStore(
+                    aliases: PostgresV2ProfilePresentationStore(database: database),
+                    router: V2PostgresRoomShardRouter(database: database),
+                    owners: invitationOwners
+                )
             ).register(on: authenticatedAccountRoutes)
             let routedInvitations = V2RoutedGroupInvitationStore(controlDatabase: database, router: V2PostgresRoomShardRouter(database: database), owners: invitationOwners)
             let inviteRecovery = V2GroupInviteCreationRecoveryWorker(jobs: PostgresV2GroupInviteDirectory(database: database), invitations: routedInvitations)
@@ -267,7 +266,20 @@ enum IMV2AccountServerApp {
                         }
                     } catch is CancellationError { break }
                     catch { app.logger.error("IM V2 invite creation recovery failed; retrying") }
-                    do { try await Task.sleep(for: .seconds(5)) } catch { break }
+                    do { try await v2Sleep(for: .seconds(5)) } catch { break }
+                }
+            }
+            let joinQuotaRecovery = V2GroupJoinQuotaRecoveryWorker(controlDatabase: database, invitations: routedInvitations)
+            await runtimeTasks.start {
+                while !Task.isCancelled {
+                    do {
+                        let report = try await joinQuotaRecovery.runOnce(limit: 8)
+                        if report.deferred > 0 {
+                            app.logger.warning("IM V2 join quota recovery deferred", metadata: ["deferred": "\(report.deferred)"])
+                        }
+                    } catch is CancellationError { break }
+                    catch { app.logger.error("IM V2 join quota recovery failed; retrying") }
+                    do { try await v2Sleep(for: .seconds(5)) } catch { break }
                 }
             }
             let groupInvitations = V2GroupInvitationService(
@@ -279,6 +291,9 @@ enum IMV2AccountServerApp {
                 authenticator: authenticator,
                 invitations: groupInvitations
             ).register(on: authenticatedAccountRoutes)
+            V2PasswordLifecycleRoutes(service: V2PasswordLifecycleService(database: database, passwords: passwordWorker,
+                limiter: V2PostgresPasswordLoginAttemptLimiter(database: database, policy: configuration.passwordLoginRateLimit),
+                recoveryKey: configuration.accessTokenKey)).register(on: app)
             V2PasswordAccountRoutes(
                 store: V2PostgresPasswordAccountStore(database: database),
                 assertionIssuer: assertionIssuer,

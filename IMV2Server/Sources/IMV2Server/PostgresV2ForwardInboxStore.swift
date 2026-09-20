@@ -83,10 +83,10 @@ public struct PostgresV2ForwardInboxStore: Sendable {
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
             if try await matchesExisting(export, sql: sql) { return }
             guard let room = try await sql.raw("""
-                SELECT room_shard_id, owner_epoch FROM im_v2.rooms WHERE room_id = \(bind: intent.targetRoomID) FOR SHARE
+                SELECT room_shard_id, owner_epoch, migration_fence_id FROM im_v2.rooms WHERE room_id = \(bind: intent.targetRoomID) FOR SHARE
                 """).first(decoding: ForwardInboxOwnerRow.self)
             else { throw V2ForwardInboxError.targetNotFound }
-            guard room.shardID == intent.targetShardID, room.epoch == intent.targetEpoch
+            guard room.shardID == intent.targetShardID, room.epoch == intent.targetEpoch, room.migrationFenceID == nil
             else { throw V2ForwardInboxError.ownerChanged }
             let pending = try await sql.raw("""
                 SELECT export_id FROM im_v2.message_forward_inbox
@@ -98,10 +98,10 @@ public struct PostgresV2ForwardInboxStore: Sendable {
             try await sql.raw("""
                 INSERT INTO im_v2.message_forward_inbox
                     (export_id, actor_user_id, operation_id, source_message_id, target_room_id,
-                     target_client_message_id, payload, payload_digest, state, created_at)
+                     target_client_message_id, target_shard_id, target_epoch, payload, payload_digest, state, created_at)
                 VALUES (\(bind: intent.exportID), \(bind: intent.actorUserID), \(bind: intent.operationID),
                         \(bind: intent.sourceMessageID), \(bind: intent.targetRoomID),
-                        \(bind: intent.targetClientMessageID), \(bind: export.payload), \(bind: export.digest),
+                        \(bind: intent.targetClientMessageID), \(bind: intent.targetShardID), \(bind: intent.targetEpoch), \(bind: export.payload), \(bind: export.digest),
                         'pending', \(bind: now)) ON CONFLICT DO NOTHING
                 """).run()
             guard try await matchesExisting(export, sql: sql) else { throw V2ForwardInboxError.idempotencyConflict }
@@ -117,9 +117,9 @@ public struct PostgresV2ForwardInboxStore: Sendable {
 
     private func matchesExisting(_ export: V2ForwardExport, sql: any SQLDatabase) async throws -> Bool {
         guard let row = try await sql.raw("""
-            SELECT payload, payload_digest FROM im_v2.message_forward_inbox WHERE export_id = \(bind: export.intent.exportID)
+            SELECT payload_digest FROM im_v2.message_forward_inbox WHERE export_id = \(bind: export.intent.exportID)
             """).first(decoding: ForwardInboxPayloadRow.self) else { return false }
-        guard row.payload == export.payload, row.digest == export.digest else { throw V2ForwardInboxError.idempotencyConflict }
+        guard row.digest == export.digest else { throw V2ForwardInboxError.idempotencyConflict }
         return true
     }
 
@@ -132,7 +132,8 @@ public struct PostgresV2ForwardInboxStore: Sendable {
     public func status(exportID: UUID) async throws -> V2ForwardImportOutcome? {
         guard let sql = database as? any SQLDatabase else { throw V2ForwardInboxError.corruptPersistenceState }
         guard let row = try await sql.raw("""
-            SELECT export_id, payload, payload_digest, state, result_message_id, result_room_sequence, error_code
+            SELECT export_id, CASE WHEN state IN ('pending', 'accepted') THEN payload ELSE NULL END AS payload,
+               payload_digest, state, result_message_id, result_room_sequence, error_code
             FROM im_v2.message_forward_inbox WHERE export_id = \(bind: exportID)
             """).first(decoding: ForwardInboxRow.self) else { return nil }
         return try row.outcome
@@ -150,18 +151,18 @@ public struct PostgresV2ForwardInboxStore: Sendable {
     public func terminalReceipt(exportID: UUID) async throws -> V2ForwardTerminalReceipt? {
         guard let sql = database as? any SQLDatabase else { throw V2ForwardInboxError.corruptPersistenceState }
         guard let row = try await sql.raw("""
-            SELECT export_id, payload, payload_digest, state, result_message_id, result_room_sequence, error_code
-            FROM im_v2.message_forward_inbox WHERE export_id = \(bind: exportID)
+            SELECT export_id, NULL::bytea AS payload, payload_digest, state, result_message_id, result_room_sequence, error_code
+            FROM im_v2.message_forward_inbox WHERE export_id = \(bind: exportID) AND state IN ('completed', 'rejected')
             """).first(decoding: ForwardInboxRow.self) else { return nil }
         let outcome = try row.outcome
         if case .pending = outcome { return nil }
-        return try .init(export: row.export, outcome: outcome)
+        return try .init(exportID: row.exportID, payloadDigest: row.digest, outcome: outcome)
     }
 }
 
 struct ForwardInboxRow: Decodable, Sendable {
     let exportID: UUID
-    let payload: Data
+    let payload: Data?
     let digest: Data
     let state: String
     let messageID: UUID?
@@ -173,6 +174,7 @@ struct ForwardInboxRow: Decodable, Sendable {
     }
     var export: V2ForwardExport {
         get throws {
+            guard let payload else { throw V2ForwardInboxError.corruptPersistenceState }
             let value = try V2ForwardExport(payload: payload, digest: digest)
             guard value.intent.exportID == exportID else { throw V2ForwardInboxError.corruptPersistenceState }
             return value
@@ -232,7 +234,8 @@ struct ForwardInboxAuthorization: Sendable {
 ///   持久化异常时抛出 ``V2ForwardInboxError/corruptPersistenceState``。
 func v2LockForwardInbox(exportID: UUID, sql: any SQLDatabase) async throws -> ForwardInboxRow {
     guard let row = try await sql.raw("""
-        SELECT export_id, payload, payload_digest, state, result_message_id, result_room_sequence, error_code
+        SELECT export_id, CASE WHEN state IN ('pending', 'accepted') THEN payload ELSE NULL END AS payload,
+               payload_digest, state, result_message_id, result_room_sequence, error_code
         FROM im_v2.message_forward_inbox WHERE export_id = \(bind: exportID) FOR UPDATE
         """).first(decoding: ForwardInboxRow.self) else { throw V2ForwardInboxError.corruptPersistenceState }
     return row
@@ -323,23 +326,23 @@ func v2AssertForwardInboxOwner(_ authorization: ForwardInboxAuthorization, sql: 
     // calls after the inbox lock. Retain the owner through the caller's commit,
     // including when a migration changed it while this statement waited.
     guard let room = try await sql.raw("""
-        SELECT room_shard_id, owner_epoch FROM im_v2.rooms WHERE room_id = \(bind: intent.targetRoomID) FOR NO KEY UPDATE
+        SELECT room_shard_id, owner_epoch, migration_fence_id FROM im_v2.rooms WHERE room_id = \(bind: intent.targetRoomID) FOR NO KEY UPDATE
         """).first(decoding: ForwardInboxOwnerRow.self),
-          room.shardID == intent.targetShardID, room.epoch == intent.targetEpoch
+          room.shardID == intent.targetShardID, room.epoch == intent.targetEpoch, room.migrationFenceID == nil
     else { throw V2ForwardInboxError.ownerChanged }
 }
 
 private struct ForwardInboxPayloadRow: Decodable {
-    let payload: Data; let digest: Data
-    enum CodingKeys: String, CodingKey { case payload; case digest = "payload_digest" }
+    let digest: Data
+    enum CodingKeys: String, CodingKey { case digest = "payload_digest" }
 }
 private struct ForwardInboxIDRow: Decodable {
     let exportID: UUID
     enum CodingKeys: String, CodingKey { case exportID = "export_id" }
 }
 private struct ForwardInboxOwnerRow: Decodable {
-    let shardID: String; let epoch: Int64
-    enum CodingKeys: String, CodingKey { case shardID = "room_shard_id"; case epoch = "owner_epoch" }
+    let shardID: String; let epoch: Int64; let migrationFenceID: UUID?
+    enum CodingKeys: String, CodingKey { case shardID = "room_shard_id"; case epoch = "owner_epoch"; case migrationFenceID = "migration_fence_id" }
 }
 private struct ForwardInboxMediaRow: Decodable {
     let ordinal: Int; let sourceID: UUID; let targetID: UUID?; let digest: Data?; let state: String

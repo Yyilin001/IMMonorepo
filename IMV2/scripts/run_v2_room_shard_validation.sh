@@ -48,22 +48,15 @@ for service_and_shard in 'postgres-room-00 rooms-00' 'postgres-room-01 rooms-01'
   lease_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
   compose exec -T "${service}" psql --quiet --set=ON_ERROR_STOP=1 --username im_v2 --dbname im_v2 <<SQL
 INSERT INTO im_v2.shard_admission_pools
-    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until,
-     command_window_limit, fanout_window_limit,
-     max_outstanding_fanout_units, max_outstanding_plans)
+    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until, command_window_limit)
 VALUES
-    ('${shard}', 'standard', '${lease_id}', 1, CURRENT_TIMESTAMP + INTERVAL '24 hours',
-     1000000, 1000000, 1000000, 1000000)
+    ('${shard}', 'standard', '${lease_id}', 1, CURRENT_TIMESTAMP + INTERVAL '24 hours', 1000000)
 ON CONFLICT (room_shard_id, capacity_profile_id) DO UPDATE
 SET lease_id = EXCLUDED.lease_id,
     generation = im_v2.shard_admission_pools.generation + 1,
     valid_until = EXCLUDED.valid_until,
     command_window_limit = EXCLUDED.command_window_limit,
-    fanout_window_limit = EXCLUDED.fanout_window_limit,
-    max_outstanding_fanout_units = EXCLUDED.max_outstanding_fanout_units,
-    max_outstanding_plans = EXCLUDED.max_outstanding_plans,
-    command_window_used = 0,
-    fanout_window_used = 0;
+    command_window_used = 0;
 SQL
 done
 

@@ -4,7 +4,7 @@
 
 ## 运行前提
 
-数据库必须为 schema 16。现有 schema 15 先停旧 writer，再执行 `IMV2/sql/migrations/20260906_forward_work_replay.sql`，验证 Swift 与 SQL readiness 后启动匹配服务；更早起点需先执行既有迁移链。迁移增加 `forward_work_replay_audit` 和不可变审计 trigger，不改已有 export、任务和媒体标识。未对用户数据库执行迁移或部署。
+数据库从当前 `IMV2/sql/schema.sql` 初始化，包含 `forward_work_replay_audit` 和不可变审计 trigger。启动前验证 Swift 与 SQL readiness。转发 export、任务和媒体标识的幂等约束保留；不执行旧 schema 升级。
 
 接口只注册在独立、loopback 绑定的 `IMV2OperatorServerApp`，复用现有 operator replay bearer 凭据和服务配置的审计 principal，不接受普通账户或群管理员身份。运维访问沿用受控的 operator 通道。
 

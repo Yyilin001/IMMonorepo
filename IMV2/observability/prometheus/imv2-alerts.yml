@@ -17,55 +17,30 @@ groups:
           summary: IM V2 durable-work metrics are unavailable
           runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
 
-      # A paused row has exhausted its retry budget. It is deliberately never
-      # terminally skipped, so any non-zero value must create an incident.
+      # Personal events pause on deterministic errors; transient failures keep
+      # retrying. Paused work is never skipped, so any non-zero value is actionable.
       # Use max rather than sum because multiple gateway replicas can scrape
       # the same authoritative PostgreSQL aggregate.
-      - alert: IMV2PausedRoomOutbox
-        expr: max(im_v2_room_outbox_backlog{state="paused"}) > 0
+      - alert: IMV2PausedUserStateEvent
+        expr: max(im_v2_user_state_event_backlog{state="paused"}) > 0
         for: 2m
         labels:
           severity: critical
           owner: im-v2-platform-oncall
           service: im-v2
         annotations:
-          summary: IM V2 room-outbox work is paused pending operator replay
+          summary: IM V2 personal-event work is paused pending operator replay
           runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
 
-      - alert: IMV2PausedFanoutDelivery
-        expr: max(im_v2_fanout_delivery_backlog{state="paused"}) > 0
-        for: 2m
-        labels:
-          severity: critical
-          owner: im-v2-platform-oncall
-          service: im-v2
-        annotations:
-          summary: IM V2 fan-out delivery work is paused pending operator replay
-          runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
-
-      # Transient failures no longer pause, so a row that keeps failing stays
-      # pending instead of appearing in the paused gauges. Surface the oldest
-      # unfinished row so stuck work is still detected.
-      - alert: IMV2StalledRoomOutbox
-        expr: max(im_v2_room_outbox_oldest_unfinished_age_seconds) > 1800
+      - alert: IMV2StalledUserStateEvent
+        expr: max(im_v2_user_state_event_oldest_unfinished_age_seconds) > 1800
         for: 15m
         labels:
           severity: critical
           owner: im-v2-platform-oncall
           service: im-v2
         annotations:
-          summary: IM V2 room-outbox work has not reached a terminal state for over 30 minutes
-          runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
-
-      - alert: IMV2StalledFanoutDelivery
-        expr: max(im_v2_fanout_delivery_oldest_unfinished_age_seconds) > 1800
-        for: 15m
-        labels:
-          severity: critical
-          owner: im-v2-platform-oncall
-          service: im-v2
-        annotations:
-          summary: IM V2 fan-out delivery work has not reached a terminal state for over 30 minutes
+          summary: IM V2 personal-event work has not reached a terminal state for over 30 minutes
           runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
 
       - alert: IMV2PausedContentReview
@@ -167,17 +142,6 @@ groups:
           summary: IM V2 closed projection versions are not being reclaimed
           runbook: IMV2/docs/10-operations/observability.md
 
-      - alert: IMV2MessageProjectionBackfillStalled
-        expr: max(im_v2_message_projection_backfill_estimated_rows) > 0
-        for: 30m
-        labels:
-          severity: warning
-          owner: im-v2-platform-oncall
-          service: im-v2
-        annotations:
-          summary: IM V2 legacy message projections are not converging to shared state
-          runbook: IMV2/docs/10-operations/message-projection-sharing-runbook.md
-
       - alert: IMV2SyncCompactionBacklog
         expr: max(im_v2_sync_uncompacted_projected_records) > 10000000
         for: 30m
@@ -229,16 +193,6 @@ groups:
           summary: IM V2 revoked-device shard cleanup is not converging
           runbook: IMV2/docs/10-operations/account-disable-runbook.md
 
-      - alert: IMV2FanoutFailureRate
-        expr: sum(rate(im_v2_fanout_failures_total[5m])) > 0
-        for: 10m
-        labels:
-          severity: warning
-          owner: im-v2-platform-oncall
-          service: im-v2
-        annotations:
-          summary: IM V2 durable fan-out failures are continuing
-          runbook: IMV2/docs/10-operations/durable-work-operator-replay.md
 
   - name: im-v2-runtime-pressure
     rules:

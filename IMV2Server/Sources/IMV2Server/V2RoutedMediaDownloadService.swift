@@ -22,36 +22,33 @@ public struct V2MessageMediaOwner: Sendable {
 
 /// 按消息定位房间归属的媒体下载服务。
 ///
-/// 消息定位符用于选择已持久化的房间归属；个人投递路径在路由后的用户存储上校验，
+/// 消息定位符用于选择已持久化的房间归属，消息访问权限在归属库中校验，
 /// 设备权威仍留在控制面。
 public struct V2RoutedMediaDownloadService: V2MediaDownloadTargetResolving {
-    private let legacy: V2MediaEdgeDownloadService
+    private let local: V2MediaEdgeDownloadService
     private let rooms: any V2RoomShardRouting
     private let owners: [String: V2MessageMediaOwner]
     private let authorization: MessageMediaAuthorization
     private let now: @Sendable () -> Date
 
-    /// 组合兼容路径、路由来源与各归属端点。
+    /// 组合本地下载、路由来源与各归属端点。
     ///
     /// - Parameters:
-    ///   - legacy: 无消息定位符时使用的兼容下载服务。
+    ///   - local: 无消息定位符时使用的本地下载服务。
     ///   - rooms: 房间归属路由来源。
     ///   - owners: 逻辑分片标识到归属端点的映射。
-    ///   - userRoutes: 用户归属栅栏。
-    ///   - userStores: 用户归属存储解析器。
-    ///   - coLocatedControlBuckets: 与控制库同库部署、需复用栅栏连接的归属桶。
+    ///   - controlDatabase: 保存设备与账号状态的控制库。
     ///   - now: 可注入的当前时刻读取函数。
-    public init(legacy: V2MediaEdgeDownloadService, rooms: any V2RoomShardRouting,
-                owners: [String: V2MessageMediaOwner], userRoutes: any V2UserShardRouteFencing,
-                userStores: any V2UserShardStorageResolving, coLocatedControlBuckets: Set<String> = [],
+    public init(local: V2MediaEdgeDownloadService, rooms: any V2RoomShardRouting,
+                owners: [String: V2MessageMediaOwner], controlDatabase: any Database,
                 now: @escaping @Sendable () -> Date = Date.init) {
-        self.legacy = legacy; self.rooms = rooms; self.owners = owners; self.now = now
-        authorization = .init(userRoutes: userRoutes, userStores: userStores, coLocatedControlBuckets: coLocatedControlBuckets)
+        self.local = local; self.rooms = rooms; self.owners = owners; self.now = now
+        authorization = .init(controlDatabase: controlDatabase)
     }
 
     /// 解析媒体下载目标。
     ///
-    /// 未给出消息定位符时直接走兼容路径；给出时先解析房间归属，若房间不存在则按未授权处理，
+    /// 未给出消息定位符时使用本地下载服务；给出时先解析房间归属，若房间不存在则按未授权处理，
     /// 归属未配置则返回消息归属不可用。授权通过后签发下载会话并兑换提供方目标，
     /// 返回前再次确认目标未过期。
     ///
@@ -67,7 +64,7 @@ public struct V2RoutedMediaDownloadService: V2MediaDownloadTargetResolving {
     ///   时刻不可编码时抛出 ``V2RoomWriteStoreError/corruptPersistenceState``；
     ///   目标已过期时抛出 ``V2MediaProviderSessionError/expiredSession``。
     public func downloadTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation?) async throws -> V2MediaProviderObjectTarget {
-        guard let message else { return try await legacy.downloadTarget(actorUserID: actorUserID, deviceID: deviceID, mediaID: mediaID) }
+        guard let message else { return try await local.downloadTarget(actorUserID: actorUserID, deviceID: deviceID, mediaID: mediaID) }
         try Task.checkCancellation()
         let route: V2RoomShardRoute
         do { route = try await rooms.route(for: message.roomID) }
@@ -116,24 +113,19 @@ private struct MessageMediaSnapshot: Decodable, Equatable, Sendable {
     let contentRevision: Int64
     let mediaUpdatedAt: Date
     let uploadSessionID: UUID
-    let authority: String
     enum CodingKeys: String, CodingKey {
         case membershipRevision = "membership_revision", contentRevision = "content_revision"
-        case mediaUpdatedAt = "state_updated_at", uploadSessionID = "upload_session_id", authority
+        case mediaUpdatedAt = "state_updated_at", uploadSessionID = "upload_session_id"
     }
 }
 
 /// 消息媒体访问的跨存储授权逻辑。
 private struct MessageMediaAuthorization: Sendable {
-    let userRoutes: any V2UserShardRouteFencing
-    let userStores: any V2UserShardStorageResolving
-    let coLocatedControlBuckets: Set<String>
+    let controlDatabase: any Database
 
-    /// 在用户切栅栏内执行归属事务操作。
+    /// 校验控制面设备状态，并在房间归属事务内执行操作。
     ///
-    /// 唯一的跨存储事务栅栏是既有的有界用户切栅栏，且此处不进行任何提供方 I/O。
-    /// 房间事实先于用户证明读取，随后在本地锁下比对，避免退群重入或编辑竞态把
-    /// 互不兼容的授权拼接在一起。
+    /// 房间事实在加锁前后精确比较，避免退群重入或编辑竞态拼接不一致的授权。
     ///
     /// - Parameters:
     ///   - owner: 房间归属数据库。
@@ -146,38 +138,17 @@ private struct MessageMediaAuthorization: Sendable {
     func withOwner<Result: Sendable>(owner: any Database, context: MessageMediaContext,
         operation: @escaping @Sendable (any SQLDatabase) async throws -> Result) async throws -> Result {
         try Task.checkCancellation()
-        return try await userRoutes.withCurrentRoute(for: .init(uuid: context.actor)) { route, control in
-            guard let controlSQL = control as? any SQLDatabase, let ownerSQL = owner as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            try await checkDevice(context, sql: controlSQL)
-            let before = try await snapshot(context, sql: ownerSQL, locking: false)
-            if before.authority == "personal" {
-                let location = try userStores.location(for: route.bucket)
-                let userDB = coLocatedControlBuckets.contains(route.bucket) ? control : location.database
-                guard let userSQL = userDB as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                let prefix = location.schema
-                guard try await userSQL.raw("""
-                    SELECT 1 FROM \(unsafeRaw: prefix).user_projection_versions AS delivery
-                    LEFT JOIN \(unsafeRaw: prefix).message_projection_state_values AS state ON state.state_id = delivery.message_state_id
-                    WHERE delivery.user_id = \(bind: context.actor) AND delivery.projection_kind = 'message'
-                      AND delivery.entity_key IN (\(bind: context.message.uuidString.lowercased()), \(bind: context.message.uuidString))
-                      AND delivery.scope_room_id = \(bind: context.room) AND delivery.valid_to_sequence IS NULL
-                      AND COALESCE(state.payload, delivery.payload)->>'event_type' = 'message.accepted'
-                      AND lower(COALESCE(state.payload, delivery.payload)->>'room_id') = \(bind: context.room.uuidString.lowercased())
-                      AND lower(COALESCE(state.payload, delivery.payload)->>'message_id') = \(bind: context.message.uuidString.lowercased())
-                      AND COALESCE(COALESCE(state.payload, delivery.payload)->>'message_revision', '1') = \(bind: String(before.contentRevision))
-                      AND COALESCE((COALESCE(state.payload, delivery.payload)->>'is_withdrawn')::boolean, FALSE) = FALSE
-                      AND (COALESCE(state.payload, delivery.payload)->'media_ids' @> jsonb_build_array(\(bind: context.media.uuidString.lowercased())::text)
-                        OR COALESCE(state.payload, delivery.payload)->'media_ids' @> jsonb_build_array(\(bind: context.media.uuidString)::text))
-                    """).first() != nil else { throw V2MediaStoreError.downloadNotAuthorized }
-            } else if before.authority != "room_log" { throw V2MediaStoreError.downloadNotAuthorized }
-            try await checkDevice(context, sql: controlSQL)
-            try Task.checkCancellation()
-            return try await owner.transaction { transaction in
-                guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                let after = try await snapshot(context, sql: sql, locking: true)
-                guard after == before else { throw V2MediaStoreError.downloadNotAuthorized }
-                return try await operation(sql)
-            }
+        guard let controlSQL = controlDatabase as? any SQLDatabase,
+              let ownerSQL = owner as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        try await checkDevice(context, sql: controlSQL)
+        let before = try await snapshot(context, sql: ownerSQL, locking: false)
+        try await checkDevice(context, sql: controlSQL)
+        try Task.checkCancellation()
+        return try await owner.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            let after = try await snapshot(context, sql: sql, locking: true)
+            guard after == before else { throw V2MediaStoreError.downloadNotAuthorized }
+            return try await operation(sql)
         }
     }
 
@@ -214,15 +185,11 @@ private struct MessageMediaAuthorization: Sendable {
             _ = try await sql.raw("SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: context.room) FOR SHARE").first()
         }
         var query: SQLQueryString = """
-            SELECT room.membership_revision, message.content_revision, media.state_updated_at, media.upload_session_id,
-                   COALESCE(completion.delivery_authority, 'personal') AS authority
+            SELECT room.membership_revision, message.content_revision, media.state_updated_at, media.upload_session_id
             FROM im_v2.messages AS message
             JOIN im_v2.rooms AS room ON room.room_id = message.room_id
             JOIN im_v2.message_media_references AS reference ON reference.message_id = message.message_id
             JOIN im_v2.media_objects AS media ON media.media_id = reference.media_id
-            LEFT JOIN im_v2.message_send_completions AS completion
-              ON completion.room_id = message.room_id AND completion.sender_user_id = message.sender_user_id
-             AND completion.client_message_id = message.client_message_id AND completion.message_id = message.message_id
             WHERE message.message_id = \(bind: context.message) AND message.room_id = \(bind: context.room)
               AND room.room_shard_id = \(bind: context.route.shardID) AND room.owner_epoch = \(bind: context.route.epoch)
               AND media.media_id = \(bind: context.media) AND media.state = 'available'

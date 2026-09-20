@@ -61,7 +61,7 @@ public enum V2SendMessageOutcome: Equatable, Sendable {
     /// 准入限流及建议重试等待秒数；调用者负责转换为传输层响应。
     case rateLimited(retryAfterSeconds: Int)
     /// 扇出准入当前不可用，附带容量或状态原因。
-    case unavailable(FanoutAdmissionUnavailableReason)
+    case unavailable(V2CommandAdmissionUnavailableReason)
     /// 已为本次操作持久化私有活动与输入能力状态，但没有创建消息、房间事件或扇出计划。
     case denied(V2DirectMessageDenied)
 
@@ -279,7 +279,7 @@ public struct V2AtomicRoomWriteBatchPartition: Hashable, Sendable {
     /// 存储实现提供的加速批次类别。
     public static let accelerated = Self(rawValue: 1)
     /// 采用房间日志的大群纯文本、无提及消息类别，避免与私聊策略事务图混合。
-    public static let largeGroupHybrid = Self(rawValue: 2)
+    public static let large = Self(rawValue: 2)
 
     /// 进程内兼容类别值，由存储实现解释。
     public let rawValue: UInt8
@@ -403,44 +403,42 @@ public enum V2AcceptanceIdentifierError: Error, Equatable, Sendable {
     case invalidTimestamp
 }
 
-/// 为一次消息接受生成消息、事件和扇出计划三个标识，支持生产生成器与测试注入。
+/// 为一次消息接受生成消息和事件两个标识，支持生产生成器与测试注入。
 public struct V2AcceptanceIDFactory: Sendable {
     /// 实际标识生成闭包，生产路径使用接受时间，测试路径可忽略时间。
     private let makeIdentifiers: @Sendable (Date) throws -> V2AcceptanceIdentifiers
 
     /// 使用进程共享生成器生成带时间前缀的接受标识。
     ///
-    /// 生成器用进程密钥和计数器进行 HMAC 扩展，给三个标识分配不同字节段；毫秒前缀在进程内防回退。
+    /// 生成器用进程密钥和计数器进行 HMAC 扩展，给两个标识分配不同字节段；毫秒前缀在进程内防回退。
     /// 接受时间仍以请求中的日期为准，有序标识的前缀在时钟回拨后可能保持在较早观察到的最大时间。
     public init() {
         let generator = V2SecureProcessUUIDGenerator.shared
         makeIdentifiers = { acceptedAt in
-            let identifiers = try generator.makeOrderedTriple(at: acceptedAt)
+            let identifiers = try generator.makeOrderedPair(at: acceptedAt)
             return V2AcceptanceIdentifiers(
                 messageID: MessageID(uuid: identifiers.0),
-                eventID: EventID(uuid: identifiers.1),
-                planID: FanoutPlanID(uuid: identifiers.2)
+                eventID: EventID(uuid: identifiers.1)
             )
         }
     }
 
     /// 使用可注入的 UUID 来源，便于确定性领域测试。
     ///
-    /// - Parameter makeUUID: 每次调用依次生成消息、事件和计划标识；调用方负责唯一性。此路径不使用接受时间生成有序前缀。
+    /// - Parameter makeUUID: 每次调用依次生成消息和事件标识；调用方负责唯一性。此路径不使用接受时间生成有序前缀。
     public init(makeUUID: @escaping @Sendable () -> UUID) {
         makeIdentifiers = { _ in
             try V2AcceptanceIdentifiers(
                 messageID: MessageID(makeUUID().uuidString),
-                eventID: EventID(makeUUID().uuidString),
-                planID: FanoutPlanID(makeUUID().uuidString)
+                eventID: EventID(makeUUID().uuidString)
             )
         }
     }
 
-    /// 生成同一次接受操作使用的三个标识。
+    /// 生成同一次接受操作使用的两个标识。
     ///
     /// - Parameter acceptedAt: 接受时间，生产路径用于生成毫秒前缀。
-    /// - Returns: 消息、事件和计划标识；事务重试应复用返回值。
+    /// - Returns: 消息和事件标识；事务重试应复用返回值。
     /// - Throws: 生产路径遇到不可表示时间时抛出 `V2AcceptanceIdentifierError.invalidTimestamp`，或传播注入生成路径的错误。
     public func make(at acceptedAt: Date) throws -> V2AcceptanceIdentifiers {
         try makeIdentifiers(acceptedAt)
@@ -507,19 +505,18 @@ final class V2SecureProcessUUIDGenerator: @unchecked Sendable {
         ))
     }
 
-    /// 生成共享毫秒前缀、使用不同伪随机字节段的三个有序标识。
+    /// 生成共享毫秒前缀、使用不同伪随机字节段的两个有序标识。
     ///
     /// - Parameter date: 本次接受时间。
-    /// - Returns: 依次用于消息、事件和计划的标识。
+    /// - Returns: 依次用于消息和事件的标识。
     /// - Throws: 时间不在可表示范围内时抛出无效时间错误。
-    func makeOrderedTriple(at date: Date) throws -> (UUID, UUID, UUID) {
+    func makeOrderedPair(at date: Date) throws -> (UUID, UUID) {
         let unixMilliseconds = try orderedUnixMilliseconds(for: date)
         let authenticationCode = nextAuthenticationCode()
         return authenticationCode.withUnsafeBytes { bytes in
             (
                 v2UUIDv7(bytes, offset: 0, unixMilliseconds: unixMilliseconds),
-                v2UUIDv7(bytes, offset: 10, unixMilliseconds: unixMilliseconds),
-                v2UUIDv7(bytes, offset: 20, unixMilliseconds: unixMilliseconds)
+                v2UUIDv7(bytes, offset: 10, unixMilliseconds: unixMilliseconds)
             )
         }
     }

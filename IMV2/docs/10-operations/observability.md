@@ -60,7 +60,10 @@ room wake 的 viewer/room 数同样是进程内短暂兴趣状态，必须单独
 `im_v2_gateway_inbound_queue_peak_bytes` 是进程启动以来的入站待处理字节峰值，
 `im_v2_gateway_connection_closures_total` 只按固定原因
 (`peer_disconnected`、`idle_timeout`、`inbound_queue_limit`、`frame_limit_violation`、`request_failure`、
-`device_revoked`) 分组。它用于定位 idle heartbeat、队列背压和撤销断连，
+`required_notification_backpressure`、`required_notification_write_timeout`、`device_revoked`) 分组。
+其中两个 required_notification 原因分别表示必须送达的通知遇到不可写通道，
+以及写入 promise 超过 10 秒未完成；它们不代表客户端已落库。
+它用于定位 idle heartbeat、队列背压和撤销断连，
 不保存或输出任意连接 ID、IP、用户、设备或请求 ID。
 
 同一私有 endpoint 还在每次抓取时读取 PostgreSQL 的 durable-work 快照。
@@ -72,9 +75,10 @@ room wake 的 viewer/room 数同样是进程内短暂兴趣状态，必须单独
 单独告警。超时后如存在成功快照，endpoint 返回 last-known-good 数值并设置
 `im_v2_durable_work_metrics_last_known_good=1` 与
 `im_v2_durable_work_metrics_last_success_age_seconds`，而不是挂住所有后续 scrape；
-下一次刷新仍可恢复。快照包含
-`im_v2_room_outbox_backlog`、`im_v2_fanout_plans_open`、
-`im_v2_direct_profile_update_backlog`、`im_v2_fanout_delivery_backlog`、
+下一次刷新仍可恢复。个人事件来源按配置中的实际房间数据库去重统计，计数相加、
+最老年龄取最大；任一来源失败都不能作为完整零积压发布。快照包含
+`im_v2_user_state_event_backlog`、`im_v2_user_state_event_oldest_unfinished_age_seconds`、
+`im_v2_direct_profile_update_backlog`、
 `im_v2_read_receipt_preference_propagation_backlog`、
 `im_v2_content_review_backlog`、`im_v2_media_scan_backlog`、
 `im_v2_media_purge_backlog`、
@@ -121,11 +125,9 @@ poison-paused 用户；snapshot 指标区分正在构建与失败 artifact，并
 使用 closed-version partial index 的 planner estimate，不为 scrape 扫描 MVCC 全表；
 uncompacted records 表示 canonical checkpoint 与 retained floor 的聚合距离。它们共同定位
 增长来自 projector、builder、GC 还是 compactor，不再只能看到最终 relation size。
-消息 projection 去重另外暴露 shared-state estimated rows/relation bytes、reference、
-missing-reference backfill 和 inline-payload planner estimates。backfill 在 dual 和 shared
-阶段都应收敛到 0；inline 只在 shared 收缩完成后要求为 0。切换前必须先 `ANALYZE` 并
-执行精确审计，不能把 planner estimate 当作数据完整性证明。完整阶段与 SQL 见
-[`message-projection-sharing-runbook.md`](message-projection-sharing-runbook.md)。
+个人快照不再运行公共消息回填，旧 missing-reference 和 inline-payload 指标与告警已删除。
+房间消息状态仍保留行数、关系大小和可压缩正文估算，按主库与已配置房间库 URL 去重采集，用户分片不重复统计；这些估算用于容量观察，不能代替
+数据完整性验证。个人快照排障见 [个人快照运维](personal-snapshot-runbook.md)。
 `user_projection_effects` 是控制投影的稳定幂等结果，和 operation ledger 同类，不属于可仅按
 retained floor 删除的增量历史。独立 housekeeping 只在首方重试窗口结束、projector 已物化、
 原 sync-log 行已压缩且 migration fence 失效后按物理 store 分批删除；普通 operation ledger
@@ -165,8 +167,8 @@ loopback `/metrics`，断言 `no-store`、未发布 9464 端口及 ready/leased/
 | 告警 | 阈值 / 持续时间 | 严重度 | 处置 |
 | --- | --- | --- | --- |
 | `IMV2DurableWorkMetricsUnavailable` | scrape 值为 `0` 或指标缺失，5 分钟 | critical | 恢复 PostgreSQL metrics source 后确认 backlog；不能据此执行 replay |
-| `IMV2PausedRoomOutbox` | paused outbox 大于 `0`，2 分钟 | critical | 按 replay runbook 先修复根因再单目标回放 |
-| `IMV2PausedFanoutDelivery` | paused delivery 大于 `0`，2 分钟 | critical | 按 replay runbook 先修复根因再单目标回放 |
+| `IMV2PausedUserStateEvent` | paused personal event 大于 `0`，2 分钟 | critical | 按 replay runbook 先修复根因再单目标回放 |
+| `IMV2StalledUserStateEvent` | 最老未完成个人事件超过 30 分钟，持续 15 分钟 | critical | 调查来源队列、目标路由和数据库；修复后只重放已暂停事件 |
 | `IMV2PausedContentReview` | paused content review 大于 `0`，2 分钟 | critical | 按 replay runbook 先修复审核依赖或策略错误，再单目标回放 |
 | `IMV2PausedMediaScan` | paused media scan 大于 `0`，2 分钟 | critical | 修复扫描 provider 后按 runbook 单目标回放 |
 | `IMV2PausedMediaPurge` | paused media purge 大于 `0`，2 分钟 | critical | 修复对象清理 provider 后按 runbook 单目标回放 |
@@ -176,13 +178,11 @@ loopback `/metrics`，断言 `no-store`、未发布 9464 端口及 ready/leased/
 | `IMV2SnapshotBuildStalled` | 最老 building artifact 超过 15 分钟，5 分钟 | critical | 检查 builder lease、checkpoint fence 和页尺寸失败 |
 | `IMV2SnapshotBuildFailures` | failed artifact 大于 `0`，5 分钟 | warning | 按 failure code 调查尺寸/编码/存储，再确认过期清理 |
 | `IMV2ProjectionGCBacklog` | closed-version estimate 超过 1,000,000，30 分钟 | warning | 检查活跃 building baseline、migration fence 和 GC cadence |
-| `IMV2MessageProjectionBackfillStalled` | missing-reference estimate 大于 0，30 分钟 | warning | 停止 shared 切换，按 message projection sharing runbook 检查坏 payload、state collision、migration fence 和 worker 错误 |
 | `IMV2SyncCompactionBacklog` | projected-retained 差值超过 10,000,000，30 分钟 | warning | 检查未过期 capability、低 cursor reset 与 compactor cadence |
 | `IMV2DeviceRevocationBacklog` | 任一 gateway 的未消费撤销事件大于 `0`，2 分钟 | critical | 按账号禁用 runbook 调查 worker、数据库与连接关闭；不得 replay 或忽略该事件 |
 | `IMV2RevokedDeviceProjectionCleanupBacklog` | 集群分片清理未消费撤销事件大于 `0`，2 分钟 | critical | 按账号禁用 runbook 检查 route fence、当前/fallback user store 与 tombstone 写入；不得手工推进 cursor |
-| `IMV2FanoutFailureRate` | 任意 fan-out failure 持续 10 分钟 | warning | 调查依赖、路由与失败 stage，避免演变为 paused |
 
-paused 阈值刻意为零；它代表重试预算已耗尽的正确性事件，不能依靠容量基准把它
+paused 阈值刻意为零；个人事件暂停表示确定性错误，瞬时故障继续退避重试，不能依靠容量基准把它
 延后告警。规则用 `max` 而不是跨副本求和，因为每个 gateway replica 都可能读取
 同一份 PostgreSQL 聚合快照。ready/scheduled backlog 的容量阈值仍必须由经批准的
 拓扑和负载报告决定，不能由此模板伪造生产 SLO。

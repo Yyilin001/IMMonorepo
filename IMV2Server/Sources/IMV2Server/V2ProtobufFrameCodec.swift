@@ -287,8 +287,17 @@ public enum V2ServerProtobufFrameCodec {
         case .messagesForwarded?: return .messagesForwarded
         case .getGroupRolePolicyBaseline?: return .getGroupRolePolicyBaseline
         case .groupRolePolicyBaseline?: return .groupRolePolicyBaseline
-        case .roomSummaryList?: return .roomSummaryList
-        case .roomSummaryPage?: return .roomSummaryPage
+        case .userRoomDirectoryList?: return .userRoomDirectoryList
+        case .userRoomDirectoryPage?: return .userRoomDirectoryPage
+        case .roomSyncStateBatch?: return .roomSyncStateBatch
+        case .roomSyncStateBatchResult?: return .roomSyncStateBatchResult
+        case .accountRoomChangesStart?: return .accountRoomChangesStart
+        case .accountRoomChangesReady?: return .accountRoomChangesReady
+        case .accountRoomChanged?: return .accountRoomChanged
+        case .accountRoomResyncRequired?: return .accountRoomResyncRequired
+        case .roomLatestVisibleBatch?: return .roomLatestVisibleBatch
+        case .roomLatestVisibleBatchResult?: return .roomLatestVisibleBatchResult
+
         case .changeRelationship?: return .changeRelationship
         case .relationshipChanged?: return .relationshipChanged
         case .changeUserBlock?: return .changeUserBlock
