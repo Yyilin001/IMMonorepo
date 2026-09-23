@@ -13,14 +13,14 @@
 | G2：真实双 host + PostgreSQL 激活/接管/排空 | [真实 SQL activation fence 与 Host 单元测试](r1-d1-progress-evidence.md)，以及[独立进程被杀后接管探针](g4-business-probe-evidence.md)通过；[双 Host 原生进程竞争与旧实例恢复](g6-multihost-evidence.md)也通过；Linux 双 Host、仅 Actor 网络分区及旧 token 拒绝也已通过；[真实 Host/PG 生命周期](g2-host-pg-lifecycle-evidence.md)与[慢事务排空](g5-host-pg-drain-evidence.md)通过；[真实 Linux 应用 busy SIGTERM](g2-real-app-sigterm-evidence.md)在最终版本通过：原 Gateway 保留、唯一持久效果、epoch 接管；修正探针期限与只读定位后，2 次重放在测试端共约 4 秒完成，零 gossip 解码/连接上限错误 | 慢事务与接管通过；新增满队列及 pending batch 排空原生 PG 2/2 通过，Linux 待全量 |
 | G3：真实远端 send/read 与领域合同 | [实际 Factory 与共享合批的 PostgreSQL 局部验证](i1-composition-progress-evidence.md)，以及[真实远端发送、日志、订阅与恢复](g4-business-probe-evidence.md)通过；[caller-only Gateway → 独立 Host 的 Linux TCP/HTTP 闭环](g3-caller-only-gateway-evidence.md)已通过；[独立 Host 的真实远程合批](g3-remote-batch-evidence.md)已通过：8 请求合为 4 原子批，序号/幂等/非成员拒绝同时验证；相对性能仍待验收 | 未完成 |
 | G4：全部房间写者、查询和后台迁移 | Gateway 与 Account 生产入口已接入；[维护与投影压缩竞态验证](d6-maintenance-evidence.md)通过；[完整 Linux 应用协议及 Account 房间 HTTP 闭环](i1-application-smoke-harness.md)已通过；[Host 取消与 retention/review/import 临界接管](g2-pg-cancellation-maintenance-evidence.md)原生真实 PG 4/4 通过；新增两项 Linux 与单 owner 故障仍待验证 | 未完成 |
-| G5：故障矩阵、Linux checks、相对性能 | [Linux 客户端先启动与 Host 重启恢复](g5-linux-functional-evidence.md)通过；[Linux 回归问题与后续变更已聚焦复验，合同检查通过](g5-linux-regression-evidence.md)；完整[故障矩阵](v1-fault-harness.md)仍在收口；[优化后 hot SQL 已过、CPU 仍超预算](g5-hot-performance-regression.md)，固定门禁已停止后续轮次，正定位 CPU 开销 | 未完成 |
+| G5：故障矩阵、Linux checks、相对性能 | [Linux 客户端先启动与 Host 重启恢复](g5-linux-functional-evidence.md)通过；[Linux 回归问题与后续变更已聚焦复验，合同检查通过](g5-linux-regression-evidence.md)；完整[故障矩阵](v1-fault-harness.md)仍在收口；[优化后 hot SQL 已过、CPU 仍超预算](g5-hot-performance-regression.md)，固定门禁已停止后续轮次；[独立 CPU 采样](g5-hot-cpu-profile-evidence.md)定位到逐调用签名与验签开销，同进程优化实施中，尚无新正式性能结论 | 未完成 |
 
 ## 核对出的基线差异
 
 - 数据 ownerEpoch 在 canonical schema 和 V2RoomShardRoute 中允许零，不能复用从一开始的 activationEpoch 类型。公共契约保持该区别。
 - 逻辑 shardID 沿用现有 trim 后非空的规则，不为内部 wire 类型增加新的字符限制。
 - DistributedCluster 的最新发布 tag 不能直接视为兼容当前依赖；实际 resolver 结果决定固定提交，不能降级 Vapor/ServiceLifecycle 绕过。
-- 当前默认 Docker context colima-imv2-tests 的磁盘不足；Linux 工作使用显式 colima-imv2-vapor5 context 及本任务专用资源，保持全局 context 和原有服务不变。宿主 bind scratch/cache 避免继续挤占 VM 磁盘。
+- 早期 Linux 工作在显式 colima-imv2-vapor5 context 的任务资源中执行；容量校准与后续验证使用任务专用 colima-imv2-va-capacity VM。全局 context 及两个既有 VM 的用户服务保持不变，宿主 bind scratch/cache 复用依赖。
 
 各子包的实际命令、退出码与工件在交付后登记。未执行、进行中和已通过必须明确区分，不能用宿主构建替代 Linux Release 双进程证据。
 
