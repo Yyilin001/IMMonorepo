@@ -156,7 +156,15 @@ enum DatabaseEdgeProbe {
         let end = ContinuousClock.now + .seconds(65)
         var failure: any Error = Failure.invalid("no attempt")
         while ContinuousClock.now < end {
-            do { return try await call(application, request) }
+            do {
+                let response = try await call(application, request)
+                switch response {
+                case .messaging(.send(.unavailable)), .messaging(.edit(.unavailable)):
+                    failure = Failure.invalid("temporarily unavailable")
+                    try await Task.sleep(for: .milliseconds(250))
+                default: return response
+                }
+            }
             catch { failure = error; try await Task.sleep(for: .milliseconds(250)) }
         }
         throw failure
@@ -175,16 +183,25 @@ enum DatabaseEdgeProbe {
         default: throw Failure.invalid("edit was not accepted")
         }
     }
-    private static func rejected(_ application: V2RoomActorApplication, _ request: V2RoomRequest) async throws {
+    private static func rejected(_ application: V2RoomActorApplication, _ request: V2RoomRequest) async throws -> String {
         do {
             let response = try await call(application, request, seconds: 8)
             // An ordinary business denial is not proof of a DB-edge failure.
             switch response {
-            case .messaging(.send(.unavailable)), .messaging(.edit(.unavailable)): return
+            case .messaging(.send(.unavailable)), .messaging(.edit(.unavailable)): return "businessUnavailable"
             default: throw Failure.invalid("fault call returned a non-unavailable business result")
             }
-        } catch let failure as Failure { throw failure }
-        catch { return } // SQL/transport/deadline failure: persistence is checked independently.
+        } catch let failure as V2RoomCallFailure {
+            switch failure {
+            case .outcomeUnknown: return "outcomeUnknown"
+            case .notAccepted(let reason), .rolledBack(let reason):
+                switch reason {
+                case .unavailable, .deadlineExceeded, .leaseLost, .staleActivation, .notReady, .retired:
+                    return String(describing: failure)
+                default: throw failure
+                }
+            }
+        }
     }
     private static func client(_ application: V2RoomActorApplication) async throws {
         let firstA = try message(await eventually(application, send(1, operation: 101)))
@@ -197,9 +214,9 @@ enum DatabaseEdgeProbe {
 
         let faultEdit = edit(1, message: firstA, operation: 301, expected: 2)
         try await wait("control-cut-start")
-        try await rejected(application, faultEdit)
+        let controlFailure = try await rejected(application, faultEdit)
         try edited(await call(application, edit(2, message: firstB, operation: 302, expected: 2)), revision: 3)
-        try marker("control-cut-result.json", ["affectedUnavailable": true, "healthyEditAccepted": true])
+        try marker("control-cut-result.json", ["affectedFailure": controlFailure, "healthyEdit": "accepted"])
         try await wait("control-restored")
         try edited(await eventually(application, faultEdit), revision: 3)
         try edited(await call(application, faultEdit), revision: 3)
@@ -207,9 +224,9 @@ enum DatabaseEdgeProbe {
 
         let faultSend = send(1, operation: 401)
         try await wait("owner-cut-expired")
-        try await rejected(application, faultSend)
+        let ownerFailure = try await rejected(application, faultSend)
         _ = try message(await call(application, send(2, operation: 402)))
-        try marker("owner-cut-result.json", ["affectedUnavailable": true, "healthySendAccepted": true])
+        try marker("owner-cut-result.json", ["affectedFailure": ownerFailure, "healthySend": "accepted"])
         try await wait("owner-restored")
         let recovered = try message(await eventually(application, faultSend))
         guard try message(await call(application, faultSend)) == recovered else {

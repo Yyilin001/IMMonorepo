@@ -238,6 +238,12 @@ class Probe:
             self.wait_file(name + "-ready.json", watched=(name,))
         self.start("client")
         self.wait_file("warm.json")
+        lease_query = "SELECT host_id, host_incarnation_id, activation_epoch, " \
+            "(expires_at > clock_timestamp())::text FROM im_v2.room_activation_leases " \
+            f"WHERE room_id = '{identifier(11)}'"
+        lease_before = self.query("owner-a", lease_query).split("|")
+        if len(lease_before) != 4 or lease_before[3] != "true":
+            raise RuntimeError("target lease not live before control fault")
         self.cut("control", "control-cut")
         self.mark("control-cut-start")
         self.wait_file("control-cut-result.json")
@@ -245,12 +251,18 @@ class Probe:
             f"WHERE operation_id = '{identifier(301)}'")
         if self.query("owner-a", "SELECT content_revision FROM im_v2.messages") != "2":
             raise RuntimeError("failed control-dependent edit changed content")
+        lease_isolated = self.query("owner-a", lease_query).split("|")
+        if lease_isolated != lease_before:
+            raise RuntimeError("control edge failure interrupted owner lease renewal")
+        self.save("control-cut-lease.json", {"before": lease_before, "afterMoreThanLeaseDuration": lease_isolated})
         self.restore("control")
         self.mark("control-restored")
         self.wait_file("control-recovered.json")
         if self.query("owner-a", "SELECT count(*) FROM im_v2.message_edit_operations "
                       f"WHERE operation_id = '{identifier(301)}'") != "1":
             raise RuntimeError("control recovery was not exactly once")
+        if self.query("owner-a", lease_query).split("|") != lease_before:
+            raise RuntimeError("control recovery unexpectedly replaced the live activation")
 
         self.cut("owner-a", "owner-cut")
         self.wait(lambda: self.query("owner-a", "SELECT (expires_at <= clock_timestamp())::text "
