@@ -3,19 +3,21 @@ import IMV2ActorContracts
 import IMV2Core
 
 /// A read turn has already passed host admission for exactly one room. The
-/// deadline is the original monotonic deadline from that turn, never a fresh
-/// batching window. The caller owns release of its own turn after this call.
+/// batch deadline is the original monotonic batching cutoff; the call deadline
+/// is the separately granted end-to-end deadline. The caller releases its turn.
 public struct V2GrantedRoomReadTurn: Sendable {
     public let token: V2RoomActivationToken
     public let actorUserID: UserID
     public let batchDeadline: ContinuousClock.Instant
+    public let callDeadline: ContinuousClock.Instant
 
     // Construct only in IMV2Server after runtime admission grants this room.
     init(token: V2RoomActivationToken, actorUserID: UserID,
-         batchDeadline: ContinuousClock.Instant) {
+         batchDeadline: ContinuousClock.Instant, callDeadline: ContinuousClock.Instant) {
         self.token = token
         self.actorUserID = actorUserID
         self.batchDeadline = batchDeadline
+        self.callDeadline = callDeadline
     }
 }
 
@@ -70,16 +72,24 @@ public actor V2HostRoomRecoveryQueryBatcher {
         let continuation: CheckedContinuation<Value, any Error>
     }
 
-    private let executor: V2ActorRoomQueryExecutor
+    private let execute: @Sendable (V2RoomRecoveryQuery, [V2RoomActivationToken]) async throws -> V2RoomRecoveryResult
     private let configuration: Configuration
     private var pending: [Key: [Pending]] = [:]
     private var scheduled: [Key: Task<Void, Never>] = [:]
     private var generations: [Key: UInt64] = [:]
-    private var pendingCount = 0
+    internal private(set) var pendingCount = 0
     private var inFlightCount = 0
 
     public init(executor: V2ActorRoomQueryExecutor, configuration: Configuration) {
-        self.executor = executor
+        self.execute = { query, tokens in try await executor.recovery(query, tokens: tokens) }
+        self.configuration = configuration
+    }
+
+    // Deterministic phase barriers for admission/capacity tests; production
+    // construction always supplies the activation-fenced executor above.
+    init(configuration: Configuration,
+         execute: @escaping @Sendable (V2RoomRecoveryQuery, [V2RoomActivationToken]) async throws -> V2RoomRecoveryResult) {
+        self.execute = execute
         self.configuration = configuration
     }
 
@@ -119,7 +129,7 @@ public actor V2HostRoomRecoveryQueryBatcher {
     private func enqueue(_ item: Pending, kind: Kind) {
         let key = Key(userID: item.turn.actorUserID, kind: kind)
         guard !Task.isCancelled else { item.continuation.resume(throwing: CancellationError()); return }
-        guard item.turn.batchDeadline > .now else {
+        guard item.turn.callDeadline > .now else {
             item.continuation.resume(throwing: V2HostRoomRecoveryBatchError.deadlineExceeded); return
         }
         guard item.byteCount <= configuration.maximumBytes else {
@@ -128,18 +138,26 @@ public actor V2HostRoomRecoveryQueryBatcher {
         guard pendingCount < configuration.maximumPendingItems else {
             item.continuation.resume(throwing: V2HostRoomRecoveryBatchError.busy); return
         }
-        if let queued = pending[key], queued.contains(where: {
-            $0.turn.token.roomID == item.turn.token.roomID && $0.turn.token != item.turn.token
-        }) {
-            flush(key)
-        }
-        if let queued = pending[key], !queued.isEmpty,
-           (queued.count >= configuration.maximumItems || queued.reduce(0, { $0 + $1.byteCount }) + item.byteCount > configuration.maximumBytes) {
-            flush(key)
+        if let queued = pending[key], !queued.isEmpty {
+            let differentEpoch = queued.contains {
+                $0.turn.token.roomID == item.turn.token.roomID && $0.turn.token != item.turn.token
+            }
+            let overLimit = queued.count >= configuration.maximumItems ||
+                queued.reduce(0, { $0 + $1.byteCount }) + item.byteCount > configuration.maximumBytes
+            if differentEpoch || overLimit {
+                // flush cannot remove the old queue when every in-flight slot
+                // is occupied. Reject the new item rather than merge epochs
+                // or exceed the queue's item/byte limits.
+                guard inFlightCount < configuration.maximumInFlightBatches else {
+                    item.continuation.resume(throwing: V2HostRoomRecoveryBatchError.busy)
+                    return
+                }
+                flush(key)
+            }
         }
         pending[key, default: []].append(item)
         pendingCount += 1
-        if pending[key]!.count >= configuration.maximumItems { flush(key) }
+        if pending[key]!.count >= configuration.maximumItems || item.turn.batchDeadline <= .now { flush(key) }
         else { schedule(key) }
     }
 
@@ -148,16 +166,18 @@ public actor V2HostRoomRecoveryQueryBatcher {
         scheduled[key]?.cancel()
         let generation = generations[key, default: 0] &+ 1
         generations[key] = generation
+        let deadline = pending[key]!.map { min($0.turn.batchDeadline, $0.turn.callDeadline) }.min()!
         scheduled[key] = Task {
-            // Coalesce turns already granted in the current scheduling wave.
-            // No new time window is created from the current clock.
-            await Task.yield()
+            // Wait only until the original earliest cutoff; never create a
+            // fresh batching window from the enqueue time.
+            do { try await ContinuousClock().sleep(until: deadline) }
+            catch { return }
             flushIfCurrent(key, generation: generation)
         }
     }
 
-    private func scheduleDeadline(_ key: Key) {
-        guard let queue = pending[key], let deadline = queue.map(\.turn.batchDeadline).min() else { return }
+    private func scheduleCallDeadline(_ key: Key) {
+        guard let queue = pending[key], let deadline = queue.map(\.turn.callDeadline).min() else { return }
         scheduled[key]?.cancel()
         let generation = generations[key, default: 0] &+ 1
         generations[key] = generation
@@ -178,7 +198,7 @@ public actor V2HostRoomRecoveryQueryBatcher {
         guard let queue = pending[key], !queue.isEmpty else { return }
         let now = ContinuousClock.now
         let live = queue.filter { item in
-            if item.turn.batchDeadline <= now {
+            if item.turn.callDeadline <= now {
                 item.continuation.resume(throwing: V2HostRoomRecoveryBatchError.deadlineExceeded)
                 pendingCount -= 1
                 return false
@@ -188,7 +208,7 @@ public actor V2HostRoomRecoveryQueryBatcher {
         pending[key] = live.isEmpty ? nil : live
         guard !live.isEmpty else { return }
         guard inFlightCount < configuration.maximumInFlightBatches else {
-            scheduleDeadline(key)
+            scheduleCallDeadline(key)
             return
         }
         pending[key] = nil
@@ -207,8 +227,7 @@ public actor V2HostRoomRecoveryQueryBatcher {
                 return token
             }
             let wire = try V2ActorRoomRecoveryBatchQueryWire(roomIDs: roomIDs, actorUserID: key.userID)
-            let result = try await executor.recovery(key.kind == .state ? .states(wire) : .latestVisible(wire),
-                tokens: tokens)
+            let result = try await execute(key.kind == .state ? .states(wire) : .latestVisible(wire), tokens)
             guard let resultBytes = try? JSONEncoder().encode(result).count else {
                 throw V2HostRoomRecoveryBatchError.corruptResult
             }
@@ -247,7 +266,7 @@ public actor V2HostRoomRecoveryQueryBatcher {
     }
 
     private func complete(_ item: Pending, value: Value) {
-        if item.turn.batchDeadline <= .now {
+        if item.turn.callDeadline <= .now {
             item.continuation.resume(throwing: V2HostRoomRecoveryBatchError.deadlineExceeded)
         } else {
             item.continuation.resume(returning: value)
