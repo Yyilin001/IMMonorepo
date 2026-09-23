@@ -10,14 +10,14 @@ import HTTPTypes
 /// 所有操作都要求已鉴权身份，返回值默认走 `no-store`，避免会话级邀请信息被缓存。
 public struct V2VaporGroupInvitationRoutes: Sendable {
     private let authenticator: any V2GatewayAuthenticator
-    private let invitations: V2GroupInvitationService
+    private let invitations: any V2GroupInvitationHandling
 
     /// 初始化路由。
     ///
     /// - Parameters:
     ///   - authenticator: 鉴权组件，解析并校验 `Request` 身份上下文。
     ///   - invitations: 邀请服务（命令执行与状态机）。
-    public init(authenticator: any V2GatewayAuthenticator, invitations: V2GroupInvitationService) {
+    public init(authenticator: any V2GatewayAuthenticator, invitations: any V2GroupInvitationHandling) {
         self.authenticator = authenticator
         self.invitations = invitations
     }
