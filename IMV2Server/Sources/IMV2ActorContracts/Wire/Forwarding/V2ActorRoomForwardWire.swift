@@ -171,9 +171,24 @@ public enum V2ActorForwardImportPendingReasonWire: String, Codable, Equatable, S
 }
 
 public enum V2RoomForwardResult: Codable, Equatable, Sendable {
+    case failure(V2ActorForwardFailureWire)
     case pair(V2ActorForwardMessageResultWire)
     case preparedExport(V2ActorForwardExportWire)
     case terminalExport(V2ActorForwardImportOutcomeWire)
     case receiptRecorded
     case imported(V2ActorForwardImportOutcomeWire)
+}
+
+/// Business failures only. Lease/owner changes and uncertain SQL completion
+/// travel through the runtime failure envelope and cannot become a rejection.
+public enum V2ActorForwardFailureWire: Codable, Equatable, Sendable {
+    case export(V2ActorForwardExportFailureWire)
+    case inbox(V2ActorForwardInboxFailureWire)
+}
+public enum V2ActorForwardExportFailureWire: String, Codable, Equatable, Sendable {
+    case invalidRequest, sourceUnavailable, sourceChanged, mediaUnavailable
+    case idempotencyConflict, capacityExceeded, payloadCompacted
+}
+public enum V2ActorForwardInboxFailureWire: String, Codable, Equatable, Sendable {
+    case targetNotFound, idempotencyConflict, capacityExceeded
 }

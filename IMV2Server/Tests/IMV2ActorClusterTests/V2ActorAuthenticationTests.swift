@@ -171,6 +171,49 @@ struct V2ActorAuthenticationTests {
         }
     }
 
+    @Test("forward workflow commands require service authority and pairs require reservations")
+    func forwardingAuthority() async throws {
+        let fixture = try Fixture(workerPermissions: [.roomCoordination])
+        let source = V2ForwardMessageReference(roomID: fixture.token.roomID,
+            messageID: .init(uuid: UUID()), revision: try .init(1))
+        let request = V2RoomRequest.forward(.prepareExport(.init(actorUserID: fixture.user,
+            operationID: .init(uuid: UUID()), source: source, targetRoomID: .init(uuid: UUID()),
+            targetShardID: "target", targetEpoch: 0)))
+        let userGrant = try await fixture.open()
+        await failure(.forbidden) {
+            _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: userGrant,
+                principal: .user(fixture.user), request: request), maximumBytes: 10_000))
+        }
+        let workerGrant = try await fixture.auth.openSession(fixture.worker.sign(
+            fixture.hello(serviceID: fixture.worker.serviceID), maximumBytes: 10_000))
+        await failure(.forbidden) {
+            _ = try await fixture.auth.accept(fixture.worker.sign(fixture.call(grant: workerGrant,
+                principal: .user(fixture.user), request: request), maximumBytes: 10_000))
+        }
+        _ = try await fixture.auth.accept(fixture.worker.sign(fixture.call(grant: workerGrant,
+            sequence: 2, principal: .service, request: request), maximumBytes: 10_000))
+        let pair = V2RoomRequest.forward(.sameOwnerPair(.init(actorUserID: fixture.user,
+            operationID: .init(uuid: UUID()), source: source, targetRoomID: fixture.token.roomID)))
+        await failure(.forbidden) {
+            _ = try await fixture.auth.accept(fixture.worker.sign(fixture.call(grant: workerGrant,
+                sequence: 3, principal: .service, request: pair), maximumBytes: 10_000))
+        }
+    }
+
+    @Test("owner readers cannot bypass current control privacy filtering")
+    func readersPrivacyBoundary() async throws {
+        let fixture = try Fixture()
+        let grant = try await fixture.open()
+        let query = try V2ActorReadReceiptReadersQueryWire(roomID: fixture.token.roomID,
+            messageID: .init(uuid: UUID()), actorUserID: fixture.user, cursor: nil, pageSize: 10)
+        await failure(.forbidden) {
+            _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant,
+                request: .receiptQuery(.readers(query))), maximumBytes: 10_000))
+        }
+        _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant,
+            sequence: 2, request: .receiptQuery(.readerCandidates(query))), maximumBytes: 10_000))
+    }
+
     @Test("wrong process incarnation, protocol and oversized payload fail before dispatch")
     func versionAndLimits() async throws {
         let fixture = try Fixture()

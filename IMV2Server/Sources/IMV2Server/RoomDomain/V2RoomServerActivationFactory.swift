@@ -159,6 +159,17 @@ private actor V2RoomServerActivation {
                           batchDeadline: ContinuousClock.Instant,
                           callDeadline: ContinuousClock.Instant) async throws -> V2RoomResponse {
         switch request {
+        case .forward(let command):
+            do { return .forward(try await handlers.forwarding.execute(command)) }
+            catch V2ForwardExportError.ownerChanged, V2ForwardInboxError.ownerChanged {
+                throw V2RoomActivationLeaseError.activationChanged
+            } catch {
+                if let failure = V2ActorForwardFailureWire(domainError: error) { return .forward(.failure(failure)) }
+                throw error
+            }
+        case .mediaAuthorization(let query):
+            do { return .mediaAuthorization(try await handlers.media.execute(query)) }
+            catch V2MediaStoreError.downloadNotAuthorized { return .mediaAuthorization(.notVisible) }
         case .maintenance(let command):
             return .maintenance(try await handlers.maintenance.execute(command, token: token))
         case .messaging(let command):
@@ -232,9 +243,14 @@ private actor V2RoomServerActivation {
         let audit: V2RoomSpecialAccountAuditExecutor
         let invitations: V2RoomInvitationDomainExecutor
         let maintenance: V2ActorRoomMaintenanceExecutor
+        let forwarding: V2RoomForwardDomainExecutor
+        let media: V2RoomMediaAuthorizationDomainExecutor
 
         init(token: V2RoomActivationToken, resources: V2RoomServerOwnerResources,
              now: @escaping @Sendable () -> Date) throws {
+            forwarding = try .init(database: resources.database, token: token, write: resources.writes,
+                capacityProfile: resources.capacity, limits: resources.messageLimits, now: now)
+            media = try .init(database: resources.database, token: token)
             maintenance = .init(database: resources.database, now: now)
             messages = try .init(token: token, writes: resources.writes, edits: resources.edits,
                 withdrawals: resources.withdrawals, reactions: resources.reactions,
