@@ -39,7 +39,7 @@ public struct PostgresV2RoomActivationStore: V2RoomActivationLeaseStore {
         duration: V2ActorMilliseconds
     ) async throws -> V2RoomActivationAcquisition {
         let roomUUID = try uuid(roomID)
-        return try await database.transaction { transaction in
+        return try await mutation { transaction in
             let sql = try activationSQL(transaction)
             try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
             try await v2LockRoomActivationOwner(roomID: roomUUID, owner: owner, sql: sql, schema: schema)
@@ -85,7 +85,7 @@ public struct PostgresV2RoomActivationStore: V2RoomActivationLeaseStore {
 
     public func renew(token: V2RoomActivationToken, duration: V2ActorMilliseconds) async throws -> V2RoomActivationLease {
         let roomUUID = try uuid(token.roomID)
-        return try await database.transaction { transaction in
+        return try await mutation { transaction in
             let sql = try activationSQL(transaction)
             try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
             try await v2LockRoomActivationOwner(roomID: roomUUID, owner: token.owner, sql: sql, schema: schema)
@@ -104,7 +104,7 @@ public struct PostgresV2RoomActivationStore: V2RoomActivationLeaseStore {
 
     public func release(token: V2RoomActivationToken) async throws -> Bool {
         let roomUUID = try uuid(token.roomID)
-        return try await database.transaction { transaction in
+        return try await mutation { transaction in
             let sql = try activationSQL(transaction)
             try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
             do {
@@ -121,6 +121,17 @@ public struct PostgresV2RoomActivationStore: V2RoomActivationLeaseStore {
                 WHERE room_id = \(bind: roomUUID)
                 """).run()
             return true
+        }
+    }
+
+    private func mutation<Value: Sendable>(
+        _ operation: @escaping @Sendable (any Database) async throws -> Value
+    ) async throws -> Value {
+        do {
+            return try await v2WithPostgresTransactionRetry(database: database,
+                maximumRetryCount: 0, classifyCommitFailure: true, operation)
+        } catch is V2RoomTransactionOutcomeUnknown {
+            throw V2RoomActivationLeaseError.outcomeUnknown
         }
     }
 

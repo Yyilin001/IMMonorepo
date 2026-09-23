@@ -10,6 +10,35 @@ import Testing
 struct PostgresV2RoomActivationTests {
     private let duration = try! V2ActorMilliseconds(10_000)
 
+    @Test("failure at deferred COMMIT stays uncertain at the lease boundary")
+    func commitStageFailure() async throws {
+        try await withUserEventDatabase { database, sql, schema in
+            let room = try await createRoom(sql: sql, schema: schema)
+            let owner = try V2RoomDataOwner(shardID: "owner-a", epoch: 0)
+            let identity = try host("commit-stage")
+            try await sql.raw("""
+                CREATE FUNCTION \(unsafeRaw: schema).reject_lease_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN RAISE EXCEPTION 'injected deferred lease failure'; END; $$
+                """).run()
+            try await sql.raw("""
+                CREATE CONSTRAINT TRIGGER reject_lease_commit AFTER INSERT ON \(unsafeRaw: schema).room_activation_leases
+                DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+                EXECUTE FUNCTION \(unsafeRaw: schema).reject_lease_commit()
+                """).run()
+            let store = PostgresV2RoomActivationStore(database: database, schema: schema)
+            await #expect(throws: V2RoomActivationLeaseError.outcomeUnknown) {
+                _ = try await store.acquire(roomID: room, owner: owner, host: identity, duration: duration)
+            }
+            // This injection actually rolls back. The public boundary remains
+            // conservative because it must also cover a lost successful ACK.
+            #expect(try await store.locate(roomID: room, owner: owner) == nil)
+            try await sql.raw("DROP TRIGGER reject_lease_commit ON \(unsafeRaw: schema).room_activation_leases").run()
+            guard case .acquired(let lease) = try await store.acquire(roomID: room,
+                owner: owner, host: identity, duration: duration) else { Issue.record("recovery"); return }
+            #expect(try await store.release(token: lease.token))
+        }
+    }
+
     @Test("acquire race, complete token equality, release retains epoch")
     func acquisitionAndRelease() async throws {
         try await withUserEventDatabase { database, sql, schema in
