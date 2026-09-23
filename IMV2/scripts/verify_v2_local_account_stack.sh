@@ -17,6 +17,11 @@ gateway_tls_address="${V2_LOCAL_GATEWAY_TLS_ADDRESS:-localhost:7443}"
 registration_recovery_directory="${V2_LOCAL_REGISTRATION_RECOVERY_DIRECTORY:-${v2_dir}/local-ca/registration-recovery}"
 busy_term_fixture="${V2_LOCAL_BUSY_TERM_FIXTURE_PATH:-}"
 busy_term_release="${V2_LOCAL_BUSY_TERM_RELEASE_PATH:-}"
+cross_entry_fixture="${V2_LOCAL_CROSS_ENTRY_FIXTURE_PATH:-}"
+cross_entry_warm_release="${V2_LOCAL_CROSS_ENTRY_WARM_RELEASE_PATH:-}"
+cross_entry_disable_ready="${V2_LOCAL_CROSS_ENTRY_DISABLE_READY_PATH:-}"
+cross_entry_disable_release="${V2_LOCAL_CROSS_ENTRY_DISABLE_RELEASE_PATH:-}"
+cross_entry_disabled="${V2_LOCAL_CROSS_ENTRY_DISABLED_PATH:-}"
 phase="preflight"
 
 source "${script_dir}/local_compose.sh"
@@ -293,6 +298,56 @@ if [[ -n "${busy_term_fixture}" || -n "${busy_term_release}" ]]; then
   done
 fi
 
+# Opt-in G5/#20 handoff. The direct room has been accepted and read through
+# Gateway already. The runner now holds two authenticated sessions for this
+# sender before allowing the ordinary Account/Operator HTTP checks to proceed.
+# Only the runner's 0700 private directory receives the short-lived credential.
+if [[ -n "${cross_entry_fixture}" || -n "${cross_entry_warm_release}" ||
+      -n "${cross_entry_disable_ready}" || -n "${cross_entry_disable_release}" ||
+      -n "${cross_entry_disabled}" ]]; then
+  phase="cross-entry warm-room handoff"
+  [[ "${cross_entry_fixture}" == /* && "${cross_entry_warm_release}" == /* &&
+     "${cross_entry_disable_ready}" == /* && "${cross_entry_disable_release}" == /* &&
+     "${cross_entry_disabled}" == /* &&
+     "${cross_entry_fixture}" != "${cross_entry_warm_release}" &&
+     "${cross_entry_fixture}" != "${cross_entry_disable_ready}" &&
+     "${cross_entry_fixture}" != "${cross_entry_disable_release}" &&
+     "${cross_entry_fixture}" != "${cross_entry_disabled}" &&
+     "${cross_entry_warm_release}" != "${cross_entry_disable_ready}" &&
+     "${cross_entry_warm_release}" != "${cross_entry_disable_release}" &&
+     "${cross_entry_warm_release}" != "${cross_entry_disabled}" &&
+     "${cross_entry_disable_ready}" != "${cross_entry_disable_release}" &&
+     "${cross_entry_disable_ready}" != "${cross_entry_disabled}" &&
+     "${cross_entry_disable_release}" != "${cross_entry_disabled}" &&
+     -d "$(dirname "${cross_entry_fixture}")" &&
+     -d "$(dirname "${cross_entry_warm_release}")" &&
+     -d "$(dirname "${cross_entry_disable_ready}")" &&
+     -d "$(dirname "${cross_entry_disable_release}")" &&
+     -d "$(dirname "${cross_entry_disabled}")" &&
+     ! -e "${cross_entry_fixture}" && ! -e "${cross_entry_warm_release}" &&
+     ! -e "${cross_entry_disable_ready}" && ! -e "${cross_entry_disable_release}" &&
+     ! -e "${cross_entry_disabled}" ]] || {
+    printf 'invalid private cross-entry fixture/barrier paths\n' >&2
+    exit 1
+  }
+  ( umask 077; set -C; printf '%s\n' "${gateway_room_id}" "${access_token}" \
+      "${device_id}" "${user_id}" "${gateway_message_id}" > "${cross_entry_fixture}" )
+  phase="cross-entry pre-disable barrier"
+  cross_entry_timeout="${V2_LOCAL_CROSS_ENTRY_BARRIER_TIMEOUT_SECONDS:-150}"
+  [[ "${cross_entry_timeout}" =~ ^[1-9][0-9]*$ ]] && (( cross_entry_timeout <= 180 )) || {
+    printf 'invalid cross-entry barrier timeout\n' >&2
+    exit 1
+  }
+  cross_entry_deadline=$(( $(date +%s) + cross_entry_timeout ))
+  while [[ ! -f "${cross_entry_warm_release}" ]]; do
+    (( $(date +%s) < cross_entry_deadline )) || {
+      printf 'cross-entry pre-disable barrier was not released\n' >&2
+      exit 1
+    }
+    sleep 0.05
+  done
+fi
+
 # Capture a second, short-lived device-bound assertion before disabling the
 # account. It remains intentionally unexchanged until after the operator
 # action, where the credential issuer must fence it even though its HMAC is
@@ -347,6 +402,20 @@ test "${push_delete_status}" = '204' || {
 # Caddy. Probe it only from its own container namespace, preserving the
 # production invariant that this destructive API is loopback-only. The bearer
 # comes from that container's local environment and is never printed.
+if [[ -n "${cross_entry_fixture}" ]]; then
+  # The runner checks that neither old Gateway socket closed during the
+  # ordinary pre-disable HTTP work before acknowledging this second barrier.
+  phase="cross-entry before-operator barrier"
+  ( umask 077; set -C; printf 'ready\n' > "${cross_entry_disable_ready}" )
+  cross_entry_deadline=$(( $(date +%s) + cross_entry_timeout ))
+  while [[ ! -f "${cross_entry_disable_release}" ]]; do
+    (( $(date +%s) < cross_entry_deadline )) || {
+      printf 'cross-entry before-operator barrier was not released\n' >&2
+      exit 1
+    }
+    sleep 0.05
+  done
+fi
 disable_operation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 disable_body="{\"operationID\":\"${disable_operation_id}\",\"userID\":\"${user_id}\",\"reason\":\"credential_compromise\"}"
 phase="operator account disable"
@@ -369,6 +438,9 @@ printf '%s' "${operator_response}" | grep -Fq '"outcome":"disabled"' || {
   printf 'operator account-disable response did not report a new disable\n' >&2
   exit 1
 }
+if [[ -n "${cross_entry_fixture}" ]]; then
+  ( umask 077; set -C; printf 'disabled\n' > "${cross_entry_disabled}" )
+fi
 
 phase="disabled access credential rejection"
 disabled_access_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \

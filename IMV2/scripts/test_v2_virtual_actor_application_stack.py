@@ -32,6 +32,245 @@ PRODUCT_INPUTS = ["IMV2Server/Sources", "IMV2Server/Vendor", "IMV2Server/Package
                   "IMV2Server/Package.resolved", "IMV2Core", "IMV2Compression", "IMV2/sql"]
 
 
+def cross_entry_disable_smoke(*, root: Path, run: Path, private: Path,
+                              compose: list[str], environment: dict[str, str],
+                              barrier: Path, actor_host_id: str,
+                              gateway_container: str, actor_container: str,
+                              evidence: dict[str, object]) -> None:
+    """Keep two real Gateway sessions alive across the Account HTTP disable."""
+    fixture = private / "cross-entry-fixture"
+    warm_release = private / "cross-entry-warm-release"
+    disable_ready = private / "cross-entry-disable-ready"
+    disable_release = private / "cross-entry-disable-release"
+    disabled = private / "cross-entry-disabled"
+    smoke_environment = dict(environment)
+    smoke_environment.update({"V2_LOCAL_CROSS_ENTRY_FIXTURE_PATH": str(fixture),
+        "V2_LOCAL_CROSS_ENTRY_WARM_RELEASE_PATH": str(warm_release),
+        "V2_LOCAL_CROSS_ENTRY_DISABLE_READY_PATH": str(disable_ready),
+        "V2_LOCAL_CROSS_ENTRY_DISABLE_RELEASE_PATH": str(disable_release),
+        "V2_LOCAL_CROSS_ENTRY_DISABLED_PATH": str(disabled),
+        "V2_LOCAL_CROSS_ENTRY_BARRIER_TIMEOUT_SECONDS": "150"})
+    smoke: subprocess.Popen[str] | None = None
+    probes: dict[str, subprocess.Popen[str]] = {}
+
+    def psql(query: str) -> str:
+        return subprocess.check_output(compose + ["exec", "-T", "postgres", "psql", "-X",
+            "-v", "ON_ERROR_STOP=1", "-U", "im_v2", "-d", "im_v2", "-tA", "-F", "|", "-c", query],
+            cwd=root, env=environment, text=True, stderr=subprocess.DEVNULL, timeout=15).strip()
+
+    def await_stage(check, *, seconds: float, stage: str):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            value = check()
+            if value:
+                return value
+            time.sleep(0.05)
+        raise RuntimeError("cross-entry stage timed out: " + stage)
+
+    def container_state(container: str) -> dict:
+        return json.loads(subprocess.check_output(["docker", "--context", environment["DOCKER_CONTEXT"],
+            "inspect", container], cwd=root, env=environment, text=True, timeout=10))[0]["State"]
+
+    def stop_remote_probe(name: str) -> None:
+        pid_file = "/run/im-v2-cross-entry/" + name + ".pid"
+        # A timed-out compose exec may leave the actual probe in Gateway. Only
+        # signal a PID whose live cmdline still identifies this test product.
+        script = ('path=$1; if [ -r "$path" ]; then pid=$(cat "$path"); '
+            'case "$pid" in ""|*[!0-9]*) exit 2;; esac; '
+            'if [ -r "/proc/$pid/cmdline" ] && '
+            'grep -aq IMV2LocalGatewayProbe "/proc/$pid/cmdline"; '
+            'then kill -TERM "$pid" 2>/dev/null || true; '
+            'i=0; while [ "$i" -lt 20 ] && [ -r "/proc/$pid/cmdline" ] && '
+            'grep -aq IMV2LocalGatewayProbe "/proc/$pid/cmdline"; '
+            'do sleep 0.1; i=$((i+1)); done; '
+            'if [ -r "/proc/$pid/cmdline" ] && '
+            'grep -aq IMV2LocalGatewayProbe "/proc/$pid/cmdline"; '
+            'then kill -KILL "$pid" 2>/dev/null || true; fi; fi; fi; rm -f "$path"')
+        subprocess.run(compose + ["exec", "-T", "gateway", "sh", "-c", script,
+            "cross-entry-stop", pid_file], cwd=root, env=environment,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=True)
+
+    try:
+        with (run / "smoke.log").open("a") as output:
+            smoke = subprocess.Popen(["bash", str(root / "IMV2/scripts/verify_v2_local_account_stack.sh")],
+                cwd=root, env=smoke_environment, stdout=output, stderr=subprocess.STDOUT, text=True)
+
+        def fixture_ready() -> list[str] | None:
+            if smoke is not None and smoke.poll() is not None:
+                raise RuntimeError("Account smoke exited before warm-room cross-entry fixture")
+            if not fixture.is_file():
+                return None
+            parts = fixture.read_text().splitlines()
+            return parts if len(parts) == 5 else None
+
+        room_id, token, device_id, user_id, baseline_message_id = await_stage(
+            fixture_ready, seconds=180, stage="warm room and private credential fixture")
+        if stat.S_IMODE(fixture.stat().st_mode) != 0o600:
+            raise RuntimeError("cross-entry credential fixture is not private")
+        for value in (room_id, device_id, user_id, baseline_message_id):
+            uuid.UUID(value)
+        operation_id = str(uuid.uuid4())
+        lease_before = psql("SELECT COALESCE(host_id, ''), activation_epoch, "
+            f"COALESCE((expires_at > clock_timestamp())::text, 'false') "
+            f"FROM im_v2.room_activation_leases WHERE room_id = '{room_id}'").split("|")
+        if len(lease_before) != 3 or lease_before[0].lower() != actor_host_id.lower() or \
+                lease_before[2] != "true":
+            raise RuntimeError("warm room lease is not held by the separate Actor Host")
+        baseline_count = int(psql(f"SELECT count(*) FROM im_v2.messages WHERE room_id = '{room_id}'"))
+        if baseline_count < 1:
+            raise RuntimeError("warm room has no accepted baseline message")
+        gateway_started = container_state(gateway_container)["StartedAt"]
+        actor_started = container_state(actor_container)["StartedAt"]
+        evidence.update({"stage": "warm-room-observed", "roomID": room_id,
+            "userID": user_id, "clientMessageID": operation_id, "baselineMessageID": baseline_message_id,
+            "baselineMessageCount": baseline_count, "leaseBefore": lease_before})
+
+        for name, mode in (("send", "heldRoomSend"), ("read", "heldRoomRead")):
+            values = {"IM_V2_GATEWAY_PROBE_MODE": mode,
+                "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN": token,
+                "IM_V2_GATEWAY_PROBE_DEVICE_ID": device_id,
+                "IM_V2_GATEWAY_PROBE_EXPECTED_ROOM_ID": room_id,
+                "IM_V2_GATEWAY_PROBE_HELD_READY_PATH": "/run/im-v2-cross-entry/" + name + ".ready",
+                "IM_V2_GATEWAY_PROBE_HELD_RELEASE_PATH": "/run/im-v2-cross-entry/release",
+                "IM_V2_GATEWAY_PROBE_HELD_DISABLE_STARTED_PATH":
+                    "/run/im-v2-cross-entry/disable-started"}
+            if name == "send":
+                values["IM_V2_GATEWAY_PROBE_CLIENT_MESSAGE_ID"] = operation_id
+            else:
+                values["IM_V2_GATEWAY_PROBE_EXPECTED_MESSAGE_ID"] = baseline_message_id
+            flags = [part for key, value in values.items() for part in ("--env", key + "=" + value)]
+            launch = ('printf "%s\\n" "$$" > "$1"; '
+                      'exec /workspace/IMV2Server/.build/release/IMV2LocalGatewayProbe')
+            with (run / ("cross-entry-" + name + ".log")).open("a") as output:
+                probes[name] = subprocess.Popen(compose + ["exec", "-T", *flags, "gateway",
+                    "sh", "-c", launch, "cross-entry-probe",
+                    "/run/im-v2-cross-entry/" + name + ".pid"],
+                    cwd=root, env=environment, stdout=output, stderr=subprocess.STDOUT,
+                    text=True, start_new_session=True)
+
+        def both_authenticated_and_live() -> bool:
+            if any(process.poll() is not None or (barrier / (name + ".ready.closed")).exists()
+                   for name, process in probes.items()):
+                raise RuntimeError("held Gateway session closed before Account disable began")
+            return all((barrier / (name + ".ready")).read_text() == "authenticated\n"
+                for name in probes if (barrier / (name + ".ready")).is_file()) and \
+                all((barrier / (name + ".ready")).is_file() for name in probes)
+
+        await_stage(both_authenticated_and_live, seconds=30,
+            stage="two live authenticated Gateway sessions, including a warm room read")
+        if any(process.poll() is not None or (barrier / (name + ".ready.closed")).exists()
+               for name, process in probes.items()):
+            raise RuntimeError("held Gateway session closed at the warm-room barrier")
+        evidence["stage"] = "two-old-sessions-live-before-http-disable"
+        warm_release.touch(mode=0o600)
+
+        def before_operator_ready() -> bool:
+            if smoke is not None and smoke.poll() is not None:
+                raise RuntimeError("Account smoke exited before the Operator disable request")
+            if any(process.poll() is not None or (barrier / (name + ".ready.closed")).exists()
+                   for name, process in probes.items()):
+                raise RuntimeError("held Gateway session closed during pre-disable Account HTTP checks")
+            return disable_ready.is_file()
+
+        await_stage(before_operator_ready, seconds=90,
+            stage="two old sessions live immediately before Operator HTTP disable")
+        evidence["stage"] = "old-sessions-live-at-operator-request-barrier"
+        (barrier / "disable-started").touch(mode=0o600)
+        disable_release.touch(mode=0o600)
+
+        def operator_committed() -> bool:
+            if smoke is not None and smoke.poll() is not None and not disabled.is_file():
+                raise RuntimeError("Account/Operator smoke exited before disable committed")
+            return disabled.is_file()
+
+        await_stage(operator_committed, seconds=90, stage="Operator HTTP 200 after persisted disable")
+        if stat.S_IMODE(disabled.stat().st_mode) != 0o600:
+            raise RuntimeError("cross-entry disable marker is not private")
+        disabled_row = psql("SELECT operation_id::text, reason "
+            f"FROM im_v2.account_disables WHERE user_id = '{user_id}'").split("|")
+        if len(disabled_row) != 2 or disabled_row[1] != "credential_compromise":
+            raise RuntimeError("Operator HTTP disable had no matching committed Account row")
+        uuid.UUID(disabled_row[0])
+        evidence.update({"stage": "http-disable-and-db-row-committed",
+            "disableOperationID": disabled_row[0]})
+        (barrier / "release").touch(mode=0o600)
+
+        denied: dict[str, dict[str, object]] = {}
+        for name, process in probes.items():
+            try:
+                status = process.wait(timeout=40)
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError("held Gateway " + name + " request did not settle") from error
+            output = (run / ("cross-entry-" + name + ".log")).read_text().strip().splitlines()
+            if status != 0 or len(output) != 1:
+                raise RuntimeError("held Gateway " + name + " request was not explicitly denied")
+            reason = output[0]
+            if reason not in ("denied-closed-held",
+                    "denied-closed-after-dispatch", "denied-UNAUTHENTICATED", "denied-FORBIDDEN"):
+                raise RuntimeError("held Gateway " + name + " returned an unexpected response")
+            denied[name] = {"reason": reason}
+        evidence["heldSessionResults"] = denied
+        if any(item["reason"] == "denied-closed-after-dispatch" for item in denied.values()):
+            # Closing a socket after dispatch is not proof that the server
+            # rolled back. Wait out the normal 30-second business deadline
+            # before asserting that this stable operation had no durable effect.
+            time.sleep(35)
+            evidence["postDispatchClosureSettleSeconds"] = 35
+        message_state = psql("SELECT (SELECT count(*) FROM im_v2.messages WHERE "
+            f"room_id = '{room_id}' AND sender_user_id = '{user_id}' AND "
+            f"client_message_id = '{operation_id}'), "
+            "(SELECT count(*) FROM im_v2.message_send_completions WHERE "
+            f"room_id = '{room_id}' AND sender_user_id = '{user_id}' AND "
+            f"client_message_id = '{operation_id}'), "
+            f"(SELECT count(*) FROM im_v2.messages WHERE room_id = '{room_id}')").split("|")
+        if message_state != ["0", "0", str(baseline_count)]:
+            raise RuntimeError("post-disable held send created or completed a room message")
+        evidence["postDisableMessageState"] = message_state
+        if smoke is None or smoke.wait(timeout=90) != 0:
+            raise RuntimeError("ordinary Account/Gateway/Operator smoke failed after the disable")
+        smoke = None
+        lease_after = psql("SELECT COALESCE(host_id, ''), activation_epoch "
+            f"FROM im_v2.room_activation_leases WHERE room_id = '{room_id}'").split("|")
+        if lease_after != lease_before[:2] or \
+                container_state(gateway_container)["StartedAt"] != gateway_started or \
+                container_state(actor_container)["StartedAt"] != actor_started:
+            raise RuntimeError("cross-entry assertion did not retain the original Gateway and Actor Host")
+        evidence.update({"stage": "cross-entry-revocation-verified", "leaseAfter": lease_after,
+            "originalGatewayAndActorHostRetained": True})
+    finally:
+        warm_release.touch(mode=0o600, exist_ok=True)
+        disable_release.touch(mode=0o600, exist_ok=True)
+        (barrier / "release").touch(mode=0o600, exist_ok=True)
+        cleanup_failed = False
+        for name, process in probes.items():
+            try:
+                stop_remote_probe(name)
+            except (subprocess.SubprocessError, OSError):
+                cleanup_failed = True
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait(timeout=2)
+        if smoke is not None and smoke.poll() is None:
+            try:
+                smoke.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                smoke.terminate()
+                try:
+                    smoke.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    smoke.kill()
+                    smoke.wait(timeout=2)
+        if cleanup_failed:
+            raise RuntimeError("cross-entry Gateway probe cleanup was not confirmed")
+
+
 def busy_sigterm_smoke(*, root: Path, run: Path, private: Path, docker: list[str],
                        compose: list[str], environment: dict[str, str],
                        actor_container: str, gateway_container: str,
@@ -378,6 +617,8 @@ def main() -> int:
                         help="Run Gateway as a caller of a separate Room Actor Host process")
     parser.add_argument("--busy-sigterm", action="store_true",
                         help="Signal the remote Actor Host while a real room SQL send is blocked")
+    parser.add_argument("--cross-entry-disable", action="store_true",
+                        help="Hold two authenticated Gateway sessions across Account HTTP disable")
     parser.add_argument("--products-dir", type=Path,
                         help="Read-only directory containing prebuilt Linux Release products")
     parser.add_argument("--products-metadata", type=Path,
@@ -385,6 +626,10 @@ def main() -> int:
     args = parser.parse_args()
     if args.busy_sigterm and not args.remote_gateway:
         parser.error("--busy-sigterm requires --remote-gateway")
+    if args.cross_entry_disable and not args.remote_gateway:
+        parser.error("--cross-entry-disable requires --remote-gateway")
+    if args.cross_entry_disable and args.busy_sigterm:
+        parser.error("--cross-entry-disable and --busy-sigterm are separate opt-in scenarios")
     if (args.products_dir is None) != (args.products_metadata is None):
         parser.error("--products-dir and --products-metadata must be provided together")
     if args.products_dir is None and args.scratch_dir is None:
@@ -402,6 +647,9 @@ def main() -> int:
     docker = ["docker", "--context", args.context]
     private = run / "private"
     private.mkdir(mode=0o700)
+    cross_entry_barrier = private / "cross-entry-barrier"
+    if args.cross_entry_disable:
+        cross_entry_barrier.mkdir(mode=0o700)
     env_file = private / ".env.local"
     compose_file = private / "compose.json"
     compose = docker + ["compose", "--project-name", project, "--env-file", str(env_file),
@@ -521,6 +769,10 @@ def main() -> int:
                 if volume.get("target") == "/run/im-v2-room-actor" else volume
                 for volume in actor_host["volumes"]]
             document["services"]["actor-host"] = actor_host
+        if args.cross_entry_disable:
+            document["services"]["gateway"].setdefault("volumes", []).append({
+                "type": "bind", "source": str(cross_entry_barrier),
+                "target": "/run/im-v2-cross-entry", "read_only": False})
         # Compose's normalized volume names otherwise retain the first config's
         # project name. Bind every named resource to this unique test project.
         for key, volume in document.get("volumes", {}).items():
@@ -600,6 +852,14 @@ def main() -> int:
                 actor_container=containers["actor-host"]["containerID"],
                 gateway_container=containers["gateway"]["containerID"], actor_host_id=expected_host,
                 evidence=result["busySigterm"])
+        elif args.cross_entry_disable:
+            result["crossEntryDisable"] = {}
+            cross_entry_disable_smoke(root=ROOT, run=run, private=private,
+                compose=compose, environment=environment, barrier=cross_entry_barrier,
+                actor_host_id=expected_host,
+                gateway_container=containers["gateway"]["containerID"],
+                actor_container=containers["actor-host"]["containerID"],
+                evidence=result["crossEntryDisable"])
         else:
             execute(["bash", str(ROOT / "IMV2/scripts/verify_v2_local_account_stack.sh")], "smoke.log", timeout=300)
         if args.remote_gateway:
