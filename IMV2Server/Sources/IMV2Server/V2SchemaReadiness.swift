@@ -8,10 +8,10 @@ public enum V2SchemaReadinessError: Error, Equatable, Sendable { case unavailabl
 /// 它把 schema 供应变为部署前置条件，避免在 TLS 监听已经开始接受已认证流量之后
 /// 才发现缺表。
 public enum V2SchemaReadiness {
-    public static let currentSchemaID = "im-v2-current-51"
+    public static let currentSchemaID = "im-v2-current-52"
     private static let requiredTables = [
         "direct_authorization_intents", "direct_authorization_receipts", "schema_contract", "control_housekeeping_cursor", "auth_devices", "device_access_tokens", "device_refresh_sessions", "device_refresh_token_history", "device_credential_operations", "device_revocation_events", "gateway_worker_cursors", "device_session_operations", "device_revocation_capabilities", "device_registration_cancellations", "device_registration_rate_limits", "account_password_credentials", "account_password_login_rate_limits", "account_password_authentication_audit", "account_edge_client_rate_limits", "account_disables", "public_user_profiles", "public_identity_lookup_rate_limits",
-        "rooms", "room_owner_routes", "direct_room_owner_routes", "group_room_creation_intents", "group_room_creation_intent_members", "group_room_creation_intent_pages", "direct_room_pairs", "direct_room_operations", "direct_message_denials", "room_timeline_activities", "special_accounts", "support_conversation_sessions", "special_account_message_operations", "special_account_message_audit", "public_profile_update_outbox", "public_profile_update_operations", "user_contact_aliases", "user_contact_alias_operations", "room_member_nicknames", "room_member_nickname_operations", "group_rooms", "group_room_operations", "group_room_creation_drafts", "group_room_creation_draft_members", "group_invite_links", "group_invite_directory", "group_invite_creation_recovery", "group_join_requests", "group_join_quota_intents",
+        "rooms", "room_activation_leases", "room_owner_routes", "direct_room_owner_routes", "group_room_creation_intents", "group_room_creation_intent_members", "group_room_creation_intent_pages", "direct_room_pairs", "direct_room_operations", "direct_message_denials", "room_timeline_activities", "special_accounts", "support_conversation_sessions", "special_account_message_operations", "special_account_message_audit", "public_profile_update_outbox", "public_profile_update_operations", "user_contact_aliases", "user_contact_alias_operations", "room_member_nicknames", "room_member_nickname_operations", "group_rooms", "group_room_operations", "group_room_creation_drafts", "group_room_creation_draft_members", "group_invite_links", "group_invite_directory", "group_invite_creation_recovery", "group_join_requests", "group_join_quota_intents",
         "group_join_quota_aliases", "group_join_submission_receipts", "user_relationships", "user_relationship_operations", "user_blocks", "user_block_operations", "user_stranger_message_preferences", "stranger_message_preference_operations", "user_add_preferences", "user_add_preference_operations", "stranger_message_windows", "user_direct_send_policy_versions", "room_memberships", "room_member_mutes", "room_membership_operations", "message_withdrawal_operations", "message_edit_operations", "message_reactions", "message_reaction_operations", "room_read_receipts", "read_receipt_operations", "user_read_receipt_preferences", "read_receipt_preference_operations", "read_receipt_preference_propagation_outbox", "user_live_activity_preferences", "user_live_activity_preference_operations", "user_live_presence_leases", "room_admission",
         "shard_admission_pools", "messages", "message_send_completions", "message_content_versions", "message_projection_states", "message_projection_state_values", "room_events", "group_event_wake_outbox", "durable_work_replay_audit", "forward_work_replay_audit",
         "user_room_preferences", "user_room_preference_operations", "user_message_favorites", "user_message_favorite_operations", "room_pinned_messages", "room_pinned_message_operations", "group_announcements", "group_announcement_operations", "group_role_permissions", "group_role_policies", "group_permission_operations", "group_role_operations", "message_forward_operations", "message_forward_exports", "message_forward_inbox", "message_forward_inbox_media", "message_forward_media_imports", "message_forward_export_receipts", "message_forward_delivery_jobs",
@@ -68,6 +68,49 @@ public enum V2SchemaReadiness {
             guard let row = try await sql.raw("SELECT to_regclass(\(bind: name)) IS NOT NULL AS exists").first(decoding: ExistsRow.self), row.exists else {
                 throw V2SchemaReadinessError.unavailableTable(name)
             }
+        }
+        guard let activationContract = try await sql.raw("""
+            SELECT (SELECT count(*) = 7 FROM information_schema.columns
+                WHERE table_schema = \(bind: schema) AND table_name = 'room_activation_leases'
+                  AND (column_name, udt_name, is_nullable) IN (
+                    ('room_id','uuid','NO'), ('activation_epoch','int8','NO'),
+                    ('owner_shard_id','text','NO'), ('owner_epoch','int8','NO'),
+                    ('host_id','text','YES'), ('host_incarnation_id','uuid','YES'),
+                    ('expires_at','timestamptz','YES')))
+              AND (SELECT count(*) = 6 FROM pg_constraint
+                   WHERE conrelid = to_regclass(\(bind: schema + ".room_activation_leases"))
+                     AND convalidated AND NOT condeferrable
+                     AND conname IN ('room_activation_leases_pkey',
+                       'room_activation_leases_room_id_fkey',
+                       'room_activation_leases_activation_epoch_check',
+                       'room_activation_leases_owner_shard_id_check',
+                       'room_activation_leases_owner_epoch_check',
+                       'room_activation_leases_holder_check'))
+              AND EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = to_regclass(\(bind: schema + ".room_activation_leases"))
+                     AND conname = 'room_activation_leases_room_id_fkey'
+                     AND pg_get_constraintdef(oid) = 'FOREIGN KEY (room_id) REFERENCES \(unsafeRaw: schema).rooms(room_id) ON DELETE RESTRICT')
+              AND EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = to_regclass(\(bind: schema + ".room_activation_leases"))
+                     AND conname = 'room_activation_leases_activation_epoch_check'
+                     AND pg_get_constraintdef(oid) = 'CHECK ((activation_epoch > 0))')
+              AND EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = to_regclass(\(bind: schema + ".room_activation_leases"))
+                     AND conname = 'room_activation_leases_owner_epoch_check'
+                     AND pg_get_constraintdef(oid) = 'CHECK ((owner_epoch >= 0))')
+              AND EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = to_regclass(\(bind: schema + ".room_activation_leases"))
+                     AND conname = 'room_activation_leases_owner_shard_id_check'
+                     AND pg_get_constraintdef(oid) = 'CHECK ((length(btrim(owner_shard_id)) > 0))')
+              AND EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conrelid = to_regclass(\(bind: schema + ".room_activation_leases"))
+                     AND conname = 'room_activation_leases_holder_check'
+                     AND pg_get_constraintdef(oid) LIKE '%host_id IS NULL%host_incarnation_id IS NULL%expires_at IS NULL%host_id IS NOT NULL%host_incarnation_id IS NOT NULL%expires_at IS NOT NULL%isfinite(expires_at)%')
+              AND EXISTS (SELECT 1 FROM pg_index
+                   WHERE indexrelid = to_regclass(\(bind: schema + ".room_activation_leases_pkey"))
+                     AND indisunique AND indisvalid AND indisready) AS exists
+            """).first(decoding: ExistsRow.self), activationContract.exists else {
+            throw V2SchemaReadinessError.unavailableTable("\(schema).room_activation_leases[activation-contract]")
         }
         guard let authorizationIntents = try await sql.raw("""
             SELECT (SELECT count(*) = 18 FROM information_schema.columns

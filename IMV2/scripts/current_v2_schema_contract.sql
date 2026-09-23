@@ -555,7 +555,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
        AND table_name = 'schema_contract'
        AND column_name = 'schema_id'
        AND is_nullable = 'NO'
-       AND column_default = '''im-v2-current-51''::text'
+       AND column_default = '''im-v2-current-52''::text'
    )
    AND EXISTS (
      SELECT 1
@@ -565,7 +565,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
      WHERE namespace.nspname = 'im_v2'
        AND relation.relname = 'schema_contract'
        AND constraint_record.contype = 'c'
-       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-51%'
+       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-52%'
    )
    AND EXISTS (
      SELECT 1 FROM information_schema.columns
@@ -703,5 +703,44 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
    AND (SELECT count(*) = 3 FROM pg_constraint
        WHERE conrelid = to_regclass('im_v2.control_housekeeping_cursor') AND convalidated AND NOT condeferrable
          AND pg_get_constraintdef(oid) IN ('PRIMARY KEY (singleton)', 'CHECK (singleton)', 'CHECK ((rotation >= 0))'))
+   AND (SELECT count(*) = 7 FROM information_schema.columns
+       WHERE table_schema = 'im_v2' AND table_name = 'room_activation_leases'
+         AND (column_name, udt_name, is_nullable) IN (
+           ('room_id','uuid','NO'), ('activation_epoch','int8','NO'),
+           ('owner_shard_id','text','NO'), ('owner_epoch','int8','NO'),
+           ('host_id','text','YES'), ('host_incarnation_id','uuid','YES'),
+           ('expires_at','timestamptz','YES')))
+   AND (SELECT count(*) = 6 FROM pg_constraint
+       WHERE conrelid = to_regclass('im_v2.room_activation_leases')
+         AND convalidated AND NOT condeferrable
+         AND conname IN ('room_activation_leases_pkey',
+           'room_activation_leases_room_id_fkey',
+           'room_activation_leases_activation_epoch_check',
+           'room_activation_leases_owner_shard_id_check',
+           'room_activation_leases_owner_epoch_check',
+           'room_activation_leases_holder_check'))
+   AND EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conrelid = to_regclass('im_v2.room_activation_leases')
+         AND conname = 'room_activation_leases_room_id_fkey'
+         AND pg_get_constraintdef(oid) = 'FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT')
+   AND EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conrelid = to_regclass('im_v2.room_activation_leases')
+         AND conname = 'room_activation_leases_activation_epoch_check'
+         AND pg_get_constraintdef(oid) = 'CHECK ((activation_epoch > 0))')
+   AND EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conrelid = to_regclass('im_v2.room_activation_leases')
+         AND conname = 'room_activation_leases_owner_epoch_check'
+         AND pg_get_constraintdef(oid) = 'CHECK ((owner_epoch >= 0))')
+   AND EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conrelid = to_regclass('im_v2.room_activation_leases')
+         AND conname = 'room_activation_leases_owner_shard_id_check'
+         AND pg_get_constraintdef(oid) = 'CHECK ((length(btrim(owner_shard_id)) > 0))')
+   AND EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conrelid = to_regclass('im_v2.room_activation_leases')
+         AND conname = 'room_activation_leases_holder_check'
+         AND pg_get_constraintdef(oid) LIKE '%host_id IS NULL%host_incarnation_id IS NULL%expires_at IS NULL%host_id IS NOT NULL%host_incarnation_id IS NOT NULL%expires_at IS NOT NULL%isfinite(expires_at)%')
+   AND EXISTS (SELECT 1 FROM pg_index
+       WHERE indexrelid = to_regclass('im_v2.room_activation_leases_pkey')
+         AND indisunique AND indisvalid AND indisready)
    AND to_regclass('im_v2.local_schema_migrations') IS NULL)))
 FROM schema_visibility WHERE active_path = '';
