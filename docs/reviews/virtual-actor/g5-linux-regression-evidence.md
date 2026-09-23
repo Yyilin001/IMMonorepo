@@ -34,3 +34,7 @@
 同一次最新 Linux 运行的协议生成、local environment 合同、schema 表关系、Prometheus 20 条规则及配置、运行环境样例、文档链接与结构均通过；Ubuntu Jammy 的 `protoc` 显式启用 proto3 optional 后，生成文件与仓库内容一致。文档链接脚本现对 Git 文件枚举失败直接报错；挂载 worktree 对应的 Git 元数据后重新运行通过。初始全量运行与针对实际失败及后续变更的聚焦复验共同构成本记录；没有将它们描述为同一提交上的一次全量全绿运行。
 
 真实应用与故障证据另见 [busy SIGTERM](g2-real-app-sigterm-evidence.md)、[caller-only Gateway](g3-caller-only-gateway-evidence.md)与[多 Host 故障](g6-multihost-evidence.md)。这些正确性记录不替代[容量对照](v1-baseline-protocol.md)。
+
+## Compose 环境优先级检查
+
+固定干净源码 `77831cceb3834790f2dd2ccbcce9536c90a45c00` 的 `IMV2/scripts/test_v2_local_compose_env_precedence.sh` 退出 0。按 CI 方式临时复制 `.env.local.example`，验证冲突的 shell 导出不能覆盖 Compose 中的持久配置；检查后移除临时文件，源码仍干净。证据在 `/Users/yyl/.codex/virtual-actor-builds/local-compose-77831cce/{check.log,result.json}`。此项仅渲染配置，没有启动应用或替代待执行的完整 Linux 测试。
