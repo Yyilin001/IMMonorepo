@@ -114,6 +114,8 @@ enum VirtualActorBusinessProbe {
             case "multi-replay": try await multiReplay()
             case "multi-partition-client": try await multiPartitionClient()
             case "multi-partition-rejoin": try await multiPartitionRejoin()
+            case "database-edge-host": try await DatabaseEdgeProbe.run(host: true)
+            case "database-edge-client": try await DatabaseEdgeProbe.run(host: false)
             default: throw ProbeError.missingEnvironment("host|client mode")
             }
         } catch {
