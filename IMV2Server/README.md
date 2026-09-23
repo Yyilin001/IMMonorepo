@@ -47,7 +47,12 @@ for database ownership, shutdown order, dependency boundaries and validation.
    The account service also requires its own Push endpoint envelope key, used
    to encrypt the opaque APNs token at rest; do not place this key in the iOS
    app or a client-visible configuration file.
-5. Set every required variable in [`.env.example`](.env.example), then run the
+5. Provide `IMV2_ROOM_ACTOR_CONFIGURATION_FILE` for Gateway and Account. The
+   Gateway can host rooms or use a caller-only identity; Account requires a
+   caller-only identity. Provision each node's signing key, private CA trust and
+   DNS-valid mutual TLS certificate using the [Room Virtual Actor contract](../docs/reviews/room-virtual-actor-contract.md).
+   The local stack script creates isolated test identities automatically.
+6. Set every required variable in [`.env.example`](.env.example), then run the
    V2 app. The `IM_V2_NATS_*` and `IM_V2_GROUP_WAKE_NATS_*` variables are
    all-or-nothing optional hint layers, not required broker dependencies.
 

@@ -9,6 +9,7 @@
 | --- | --- | --- |
 | `IMV2Core` | 领域 ID、帧/命令、准入与同步规则 | 网络、数据库、UI、密钥存储 |
 | `IMV2Server` | V2 TLS gateway、PostgreSQL store、房间日志与个人事件 outbox、账户/设备服务、operator 控制面 | 将 broker 作为业务真相 |
+| `IMV2ActorContracts/Runtime/Cluster/Application` | 房间逻辑引用、租约激活、FIFO/回收、认证集群调用与应用生命周期 | 把内存 Actor 或 membership 当持久完成事实 |
 | `IMV2ClientKit` | Keychain 会话、独立 SQLite 同步投影、持久化命令 outbox、TLS/HTTPS 适配器 | SwiftUI 展示、直接访问服务端数据库 |
 | `IMApp` | SwiftUI 状态与用户交互、依赖注入、iOS Push/文件导入边界 | 直接持有 bearer token、直接操作协议或数据库 |
 | `IMV2` | PostgreSQL 当前 canonical schema、隔离测试 Compose、本机账户栈、Prometheus 规则与运行文档 | 生产编排或容量批准 |
@@ -18,7 +19,9 @@
 ```mermaid
 flowchart LR
     C["App / ClientKit 本地 outbox"] --> G["TLS gateway"]
-    G --> T["PostgreSQL 原子事务"]
+    G --> V["RoomRef / Directory"]
+    V --> H["房间 Host / FIFO turn"]
+    H --> T["PostgreSQL activation fence 原子事务"]
     T --> R["公共房间日志"]
     T --> P["个人状态事件与可靠 outbox"]
     P --> S["个人投影 / sync / snapshot"]
@@ -33,7 +36,8 @@ flowchart LR
     C --> L["SQLite 有效活动排序与分页"]
 ```
 
-客户端先将命令写入本地 outbox；gateway 在 PostgreSQL 原子事务成功后确认接受。
+客户端先将命令写入本地 outbox；Gateway 经 RoomRef 调用房间 Host，在 PostgreSQL 原子事务成功后确认接受。
+Gateway 可托管房间或仅调用远端 Host；Account 的房间能力使用 caller-only 节点。寻址、租约、完整 token fence 和回收边界见[房间 Virtual Actor 合同](reviews/room-virtual-actor-contract.md)。
 私聊和群聊公共内容统一保存在房间日志，普通接受消息可由 message_row 承载，读取时与 room_events 合并。
 个人事件流保存成员变化、已读、偏好和单侧提示；公共消息不再按成员写入个人同步副本。
 账号级通知只提示变化，丢失或覆盖失效时从目录、状态和持久游标恢复；不能把通知写出当作正文落库。
