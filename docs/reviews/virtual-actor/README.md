@@ -23,3 +23,10 @@
 - 当前默认 Docker context colima-imv2-tests 的磁盘不足；Linux 工作使用显式 colima-imv2-vapor5 context 及本任务专用资源，保持全局 context 和原有服务不变。宿主 bind scratch/cache 避免继续挤占 VM 磁盘。
 
 各子包的实际命令、退出码与工件在交付后登记。未执行、进行中和已通过必须明确区分，不能用宿主构建替代 Linux Release 双进程证据。
+
+## 并行开发输入
+
+- [能力与完整方法签名目录](capability-catalog.md)：34 行能力分组与 219 个 DTO 的所属模块/字段记录；不是全部已经远程化。
+- [房间写者台账](writer-ledger.md)：29 个 writer 分组、37 个源符号/表的静态证据。逐项迁移后仍需补真实 fence 和运行测试证据。
+- [文件归属](file-ownership.md)：172 个既有文件的唯一 owner；混合文件须先由 C0 抽取，再转交领域包。
+- 静态一致性检查：python3 scripts/check_v2_virtual_actor_inventory.py。该脚本检查文件、符号和清单一致性，不证明没有其他 writer 或已具备运行时覆盖。

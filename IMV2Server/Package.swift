@@ -61,6 +61,7 @@ let package = Package(
         .target(
             name: "IMV2Server",
             dependencies: [
+                "IMV2ActorContracts",
                 "IMV2Core",
                 "IMV2Compression",
                 "CIMV2Argon2",
@@ -169,6 +170,7 @@ let package = Package(
         .testTarget(
             name: "IMV2ServerTests",
             dependencies: [
+                "IMV2ActorContracts",
                 "IMV2Server",
                 "CIMV2Argon2",
                 "IMV2ServerHTTP",
