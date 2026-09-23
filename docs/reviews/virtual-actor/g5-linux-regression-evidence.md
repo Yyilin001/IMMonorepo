@@ -2,7 +2,9 @@
 
 这些记录来自固定 checkout、只读源码挂载、Swift 6.4 Jammy 与三个独立 PostgreSQL 16 实例。使用本任务专属 `colima-imv2-va-capacity` 的随机隔离资源，未使用或重建用户原有服务。客户端 Apple 平台代码未改，不把其他线程的原生测试日志纳入本记录。
 
-## 最终冻结源码的完整 required run
+后续[事务上下文 SQL 复用](g5-sql-context-evidence.md)已改变生产源码，并有 10 项原生真实 PostgreSQL 聚焦测试通过；该改动仍须在最终候选上取得完整 Linux required run。下面 `d5623259` 的成功记录保留，不把它当成新 SQL 改动已通过全量验证。
+
+## 既有冻结源码的完整 required run
 
 冻结源码 `d56232592b05c94d6e933534a985159ec14ff673` 的一次完整 Linux 运行保存在 `/Users/yyl/.codex/virtual-actor-builds/final-linux-capability-d5623259/`。Swift 6.4 Jammy 以只读源码和 Git 元数据挂载执行 Core、Server、Contracts、Runtime、Cluster、Application 的全部测试及后置检查，使用独立的 control、primary、secondary PostgreSQL 16 和 NATS。原 `suite.log` 中完整 suite 退出码 **0**，Compose 配置、容器日志收集与项目清理也均退出 **0**；运行后 checkout HEAD 仍为指定 SHA、工作树干净、`Package.resolved` SHA-256 仍为 `3af1e16190f46bdd8fad3de86c6b386dc196443291463355bf36edb62b7fd15c`。有效 Compose 配置、镜像 ID 与 plugin SHA 保存在同目录的 `effective-compose.json`、`metadata.json`。
 

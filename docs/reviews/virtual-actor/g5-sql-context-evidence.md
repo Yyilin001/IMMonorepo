@@ -1,0 +1,28 @@
+# Transaction-bound room fence reuse
+
+Implementation `ba1358c2572cf9eb63b97bdcdb336525d97f6c0d` was integrated as `10126bd5e58e4ef1cdad4ac87f3481aa0dedb296`. Server source, tests, manifest and lockfile compare identically between those commits. This removes a repeated LOCAL-timeout statement and room-owner lookup from ordinary activation-fenced sends. Performance improvement is not yet established.
+
+The preceding [formal hot measurement](g5-hot-performance-regression.md) dispatched all 52,500 messages as singletons and attempted no atomic batches. The explicit context therefore reaches both scalar `acceptanceCommit` / `acceptInTransaction` and conditional ordinary-group batches. Scalar reuse requires an activation scope, no forwarded message, no imported-forward authorization, no forward-owner source and no authorization grants. Group reuse also excludes authorization grants. Other branches retain the original complete fence and authorization-receipt preparation. The original one-argument transaction/retry entry does not create a context.
+
+Only the physical transaction constructs `V2ConfiguredRoomFenceContext`, after BEGIN and the first LOCAL settings. It privately retains that borrowed SQL handle and exposes one fixed, one-shot fence operation, without a caller-supplied SQL handle or generic SQL callback. It locks the complete canonical room set, checks kind/routes and token owners, locks canonical lease rows, then separately reads `clock_timestamp()` and checks the leases. It preserves kind-before-route error priority. Different requested timeouts take the complete original fence after installing the requested limits. Canonical `im_v2` avoids a repeated regular-expression check; other schemas retain the original validation.
+
+The body must await its SQL before returning. Success and error both invalidate the context before transaction completion, including unused escaped contexts. If the fixed fence is still in flight when the body returns, invalidation stops the physical transaction, rejects COMMIT and waits for physical close through the existing transaction primitive. This is not a general API for unstructured SQL tasks. Absolute deadlines, cancellation, retry classification and missing COMMIT-ACK handling remain in that primitive.
+
+## Focused native PostgreSQL evidence
+
+Eight serial filters exercised ten actual tests against disposable PostgreSQL 16; every command exited 0. They used `swift test -j 2 --no-parallel --disable-automatic-resolution` with build path `/Users/yyl/.codex/virtual-actor-builds/p0/credit-fence-native/.build`. Logs are under `/Users/yyl/.codex/virtual-actor-builds/p0/credit-fence-native/`:
+
+| Log | Actual cases | Evidence and SHA-256 |
+| --- | --- | --- |
+| `sql-context-scalar-real.log` | 1 | Scalar send/replay and old-token rejection after successor acquisition; 1.890 s case time. `021b4cf908af56310022d8001bdc8dc83a926c116b3d5fb2333ea27b3ff67cfa`. |
+| `sql-context-combined-final.log` | 1 | Reverse-input two-room fence, route/kind drift, expired lease, changed LOCAL settings, unused context rejection after success/throw; 1.825 s. `804a62904d264d6a0e2320e48d49142e53a1dfa8bec701575cee8efeedf5f44f`. |
+| `sql-context-actor-two.log` | 1 | Two granted rooms share an atomic PostgreSQL batch; 1.928 s. `6b88f6295e0717302e3027ce9ee0bfa5da497070f23312144876ad7b9e1a7858`. |
+| `sql-context-actor-stale.log` | 1 | Mixed stale token rejects the shared batch; 1.662 s. `578b38f2ba37fca4ad2fbc478f71c9e0fc0590491105ccce01144c67698a0b00`. |
+| `sql-context-deadline-final.log` | 1 | Physical-connection total deadline and commit uncertainty; 5.102 s. `68ec0e0a64546fa178af64daa3cd43c4f592de87a88c072bdc633dc0e660694a`. |
+| `sql-context-credit.log` | 2 | Warm direct credit exhaustion/refill against a fence, rollback credit return and old-epoch rejection; 1.826 s suite time. `ed68c0d4d9f1943033c432edc0a216b2fb3d9b14fa2d32bdb1183ff716092e3b`. |
+| `sql-context-ack.log` | 1 | Successful COMMIT with lost ACK makes both shared-batch turns unknown; original IDs replay once; 0.886 s. `68a1f75c8d268ba69605e4c109a079c7de91ad44c5df5f983070c98920de4b98`. |
+| `sql-context-host-drain.log` | 2 | Production Host queue limits/healthy-room progress and pending shared-batch drain retain leases until work settles; 2.723 s suite time. `07f8a5f4d66f7f5ce5b4a614249ea30674a8c667cc6f15b33334be3adc6aef0b`. |
+
+The earlier `sql-context-scalar.log` used a misspelled secondary-database environment key and completed through a skip in 0.001 s. It is preserved and excluded. The corrected run used `IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL`. Task-only container `imv2-va-sqlctx-pg` in context `colima-imv2-va-capacity` was stopped and removed; independent container/volume name checks returned no matches. `Package.resolved` remains SHA-256 `3af1e16190f46bdd8fad3de86c6b386dc196443291463355bf36edb62b7fd15c`.
+
+Release construction, a fresh formal hot campaign against the original freeze, and a final complete Linux required run for this changed production source remain pending. The earlier [complete Linux run](g5-linux-regression-evidence.md) covers `d5623259`; its source-equivalence claim does not extend across this SQL change. The other four performance workloads and fault-matrix case #19 remain open.
