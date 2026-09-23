@@ -10,7 +10,7 @@ The coordinator can then call `inject <scenario-id>`: it waits for an exact, val
 
 The namespace defaults to `imv2-va-v1`; `down` keeps volumes, while `purge` removes volumes only with `IMV2_VA_FAULT_DATABASE_IS_DISPOSABLE=1`. The Linux build/test wrapper uses a separate `imv2-va-v1-linux` project, preserving the existing isolated test Compose behavior. Neither command starts the fixed-port local-account stack.
 
-Both scripts accept a per-invocation `DOCKER_CONTEXT` and never run `docker context use`. On a VM whose Docker volume partition is constrained, set both `IMV2_VA_LINUX_CACHE_DIR` and `IMV2_VA_LINUX_SCRATCH_DIR` to distinct absolute host paths outside the repository. The optional Compose overlay binds only `/tmp/cache` and `/tmp/swiftpm`; `/workspace` stays read-only. For example:
+Both scripts accept a per-invocation `DOCKER_CONTEXT` and never run `docker context use`. On a VM whose Docker volume partition is constrained, set both `IMV2_VA_LINUX_CACHE_DIR` and `IMV2_VA_LINUX_SCRATCH_DIR` to distinct absolute host paths. The wrapper rejects paths inside the source tree, ancestors containing it, symlinks to either, and cache/scratch nesting. The optional Compose overlay binds only `/tmp/cache` and `/tmp/swiftpm`; `/workspace` stays read-only. For example:
 
 ```bash
 DOCKER_CONTEXT=colima-imv2-vapor5 \

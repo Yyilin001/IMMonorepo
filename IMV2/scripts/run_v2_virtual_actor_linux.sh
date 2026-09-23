@@ -19,21 +19,9 @@ if [[ -n "${IMV2_VA_LINUX_CACHE_DIR:-}" || -n "${IMV2_VA_LINUX_SCRATCH_DIR:-}" ]
   [[ -n "${IMV2_VA_LINUX_CACHE_DIR:-}" && -n "${IMV2_VA_LINUX_SCRATCH_DIR:-}" ]] || {
     printf 'set both IMV2_VA_LINUX_CACHE_DIR and IMV2_VA_LINUX_SCRATCH_DIR\n' >&2; exit 64;
   }
-  for path in "$IMV2_VA_LINUX_CACHE_DIR" "$IMV2_VA_LINUX_SCRATCH_DIR"; do
-    [[ "$path" == /* && "$path" != / ]] || {
-      printf 'cache/scratch bind must be an absolute path outside the source tree: %s\n' "$path" >&2
-      exit 64
-    }
-    mkdir -p "$path"
-    resolved="$(realpath "$path")"
-    [[ "$resolved" != "$repo_root" && "$resolved" != "$repo_root"/* ]] || {
-      printf 'cache/scratch bind resolves inside the source tree: %s\n' "$path" >&2
-      exit 64
-    }
-  done
-  [[ "$(realpath "$IMV2_VA_LINUX_CACHE_DIR")" != "$(realpath "$IMV2_VA_LINUX_SCRATCH_DIR")" ]] || {
-    printf 'cache and scratch paths must differ\n' >&2; exit 64;
-  }
+  python3 "$script_dir/v2_virtual_actor_bind_paths.py" \
+    "$repo_root" "$IMV2_VA_LINUX_CACHE_DIR" "$IMV2_VA_LINUX_SCRATCH_DIR"
+  mkdir -p "$IMV2_VA_LINUX_CACHE_DIR" "$IMV2_VA_LINUX_SCRATCH_DIR"
   export IMV2_VA_LINUX_CACHE_DIR IMV2_VA_LINUX_SCRATCH_DIR
   compose+=(-f "$repo_root/IMV2/docker-compose.virtual-actor-linux-bind.yml")
 fi
