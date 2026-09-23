@@ -312,7 +312,9 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
                     entry.request.map { .init(ordinal: entry.ordinal, request: $0, deadline: entry.deadline) }
                 }
             )
-            let completion = await execute(turn)
+            let completion = await V2RoomTurnScope.$roomID.withValue(token.roomID) {
+                await execute(turn)
+            }
             await finish(completion)
         }
         consumer = nil
