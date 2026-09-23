@@ -13,6 +13,9 @@ public enum V2RoomActivationLeaseError: Error, Equatable, Sendable {
     case activationChanged
     case leaseExpired
     case epochExhausted
+    /// The database may have committed a new lease, but no token was returned.
+    /// Callers must locate the fence again; they cannot claim rollback.
+    case outcomeUnknown
 }
 
 /// The actual room database is the sole authority for activation placement.

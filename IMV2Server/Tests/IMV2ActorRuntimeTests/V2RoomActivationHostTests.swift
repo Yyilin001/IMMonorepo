@@ -107,6 +107,23 @@ struct V2RoomActivationHostTests {
         #expect(await fixture.host.snapshot().activeRooms == 0)
     }
 
+    @Test("unknown acquire commit never publishes or releases an unreturned lease")
+    func unknownAcquire() async throws {
+        let fixture = try Fixture(unknownAcquire: true)
+        await fixture.host.start()
+        await expectFailure(.outcomeUnknown, fixture.activate())
+        #expect(await fixture.host.readyTokens().isEmpty)
+        #expect(await fixture.probe.restoreCount == 0)
+        #expect(await fixture.store.releaseCount == 0)
+        guard case .occupied(let lease) = try await fixture.activate().value else {
+            Issue.record("the possibly committed self lease must remain occupied"); return
+        }
+        #expect(lease.token.roomID == fixture.room)
+        #expect(await fixture.host.readyTokens().isEmpty)
+        #expect(await fixture.probe.restoreCount == 0)
+        #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+    }
+
     @Test("restore failure closes executor and conditionally releases its token")
     func restoreFailure() async throws {
         let fixture = try Fixture(failRestore: true)
@@ -329,7 +346,7 @@ struct V2RoomActivationHostTests {
              invalidationGate: Gate? = nil, releaseFailures: Int = 0,
              idleMilliseconds: Int64 = 2_000, failRestore: Bool = false,
              unknownCompletion: Bool = false, missingRoom: Bool = false,
-             occupiedByOther: Bool = false) throws {
+             occupiedByOther: Bool = false, unknownAcquire: Bool = false) throws {
             owner = try .init(shardID: "test", epoch: 0)
             let config = try V2RoomRuntimeConfiguration(
                 maximumActiveRooms: maximumActiveRooms, maximumConcurrentRestores: 1,
@@ -349,7 +366,7 @@ struct V2RoomActivationHostTests {
             let identity = V2ActorHostIdentity(hostID: V2ActorHostID(uuid: UUID()), incarnationID: UUID())
             store = FakeLeaseStore(renewGate: renewGate, acquireGate: acquireGate,
                                    releaseFailures: releaseFailures, missingRoom: missingRoom,
-                                   occupiedByOther: occupiedByOther)
+                                   occupiedByOther: occupiedByOther, unknownAcquire: unknownAcquire)
             probe = Probe(restoreGate: restoreGate, executeGate: executeGate,
                           invalidationGate: invalidationGate,
                           failRestore: failRestore, unknownCompletion: unknownCompletion)
@@ -390,17 +407,19 @@ struct V2RoomActivationHostTests {
         private var releaseFailures: Int
         private let missingRoom: Bool
         private let occupiedByOther: Bool
+        private var unknownAcquire: Bool
         var acquireCount = 0
         var renewCount = 0
         var releaseCount = 0
 
         init(renewGate: Gate?, acquireGate: Gate?, releaseFailures: Int,
-             missingRoom: Bool, occupiedByOther: Bool) {
+             missingRoom: Bool, occupiedByOther: Bool, unknownAcquire: Bool) {
             self.renewGate = renewGate
             self.acquireGate = acquireGate
             self.releaseFailures = releaseFailures
             self.missingRoom = missingRoom
             self.occupiedByOther = occupiedByOther
+            self.unknownAcquire = unknownAcquire
         }
 
         func locate(roomID: RoomID, owner: V2RoomDataOwner) async throws -> V2RoomActivationLease? {
@@ -421,6 +440,10 @@ struct V2RoomActivationHostTests {
                                                activationEpoch: try .init(epoch), host: grantHost)
             let lease = try makeLease(token, duration: duration)
             current[roomID] = lease
+            if unknownAcquire {
+                unknownAcquire = false
+                throw V2RoomActivationLeaseError.outcomeUnknown
+            }
             if occupiedByOther { return .occupied(lease) }
             return .acquired(lease)
         }

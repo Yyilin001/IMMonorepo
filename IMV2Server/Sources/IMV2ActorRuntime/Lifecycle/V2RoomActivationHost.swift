@@ -409,6 +409,12 @@ public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Senda
             }
         } catch {
             guard entries[roomID] === entry else { return }
+            if error as? V2RoomActivationLeaseError == .outcomeUnknown {
+                // A committed lease may exist but there is no returned token
+                // to restore or release. It remains occupied until DB expiry.
+                finishPending(entry, result: .failure(V2RoomCallFailure.outcomeUnknown))
+                return
+            }
             let reason: V2RoomFailureReason = error as? V2RoomActivationLeaseError == .roomNotFound
                 ? .notFound : .unavailable
             finishPending(entry, result: .failure(V2RoomCallFailure.notAccepted(reason)))
