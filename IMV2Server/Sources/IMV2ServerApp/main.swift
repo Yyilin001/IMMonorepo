@@ -715,6 +715,8 @@ enum IMV2ServerApp {
                 deadline: { .now + callTimeout.duration })
             let directRoomLogAppendBatcher = V2AggregatedSendMessageBatchMetrics(
                 owners: ownerBatchers.values.map { $0 as any V2SendMessageBatchMetricsReading })
+            let readReceiptBatcher = V2AggregatedReadReceiptBatchMetrics(
+                owners: physicalResources.values.map(\.receiptBatchMetrics))
             V2VaporMetricsRoutes.register(on: app, telemetry: prometheusTelemetry,
                 connectionMetrics: connectionRegistry, transportMetrics: transportMetrics,
                 durableWorkMetrics: durableWorkMetrics,
@@ -724,6 +726,7 @@ enum IMV2ServerApp {
                     shardAdmissionCommandCredits: directRoomLogShardAdmissionCredits,
                     roomAdmissionCommandCredits: directRoomLogRoomAdmissionCredits,
                     directRoomLogAppendBatcher: directRoomLogAppendBatcher,
+                    readReceiptBatcher: readReceiptBatcher,
                     directRoomLogAppendStageMetrics: directRoomLogAppendStageMetrics,
                     gatewayEventLoopLagMetrics: gatewayEventLoopLagMetrics,
                     directSendPolicyCache: directSendPolicyCache,
