@@ -16,7 +16,7 @@
 测试文件：
 
 - `IMV2Server/Tests/IMV2ActorClusterTests/V2ActorAuthenticationTests.swift`：坏签名 Hello、跨 issuer capability、共享权限/replay/expiry、canonical 请求大小和回执绑定。
-- `IMV2Server/Tests/IMV2ActorClusterTests/V2RoomClusterBridgeTests.swift`：本地入站的 generation、shard、bound-token 门禁，并保留远端签名传输测试。
+- `IMV2Server/Tests/IMV2ActorClusterTests/V2RoomClusterBridgeTests.swift`：本地入站的 generation、shard、bound-token 门禁，并保留原签名包路径测试。
 - `IMV2Server/Tests/IMV2ActorClusterTests/V2RoomLocalCapabilityIntegrationTests.swift`：真实 Node/ClusterSystem TLS fixture 的本地激活与调用、caller/Host 双侧 request 限额、Host reply 限额、超时后的在途任务与 stop/drain、旧 descriptor 在途完成及新 incarnation 拒绝。fixture 在成功或失败时打开执行屏障、等待 Node 停止并删除临时证书。
 
 原生验证使用独立缓存，无 PG 或 Docker。`IMV2Server/Package.resolved` SHA-256 为 `3af1e16190f46bdd8fad3de86c6b386dc196443291463355bf36edb62b7fd15c`，验证期间未变。
