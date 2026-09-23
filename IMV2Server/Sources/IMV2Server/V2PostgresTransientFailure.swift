@@ -88,17 +88,26 @@ func v2WithPostgresTransactionRetry<Result: Sendable>(
     database: any Database,
     maximumRetryCount: Int = 2,
     classifyCommitFailure: Bool = false,
+    useRoomDeadline: Bool = false,
     _ operation: @escaping @Sendable (any Database) async throws -> Result
 ) async throws -> Result {
     precondition(maximumRetryCount >= 0)
     var retryCount = 0
+    // Fix one absolute budget before the first attempt; retries borrow a new
+    // connection without ever extending the original room SQL deadline.
+    let roomDeadline = useRoomDeadline ? V2RoomSQLDeadline.boundedTransactionDeadline() : nil
     while true {
         try Task.checkCancellation()
         let attempt = V2RoomTransactionAttempt()
         do {
-            return try await database.transaction { transaction in
+            let body: @Sendable (any Database) async throws -> Result = { transaction in
                 try await attempt.body { try await operation(transaction) }
             }
+            if let deadline = roomDeadline {
+                return try await v2WithRoomActivationTransaction(
+                    database: database, deadline: deadline, body)
+            }
+            return try await database.transaction(body)
         } catch {
             let error = classifyCommitFailure ? attempt.classify(error) : error
             guard v2PostgresFailureDisposition(error) == .retryTransaction,
