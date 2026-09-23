@@ -53,6 +53,22 @@ struct V2RoomLocalCapabilityIntegrationTests {
         }
     }
 
+    @Test("the host's smaller reply ceiling is enforced after local execution")
+    func hostReplyCeiling() async throws {
+        try await withFixture(hostLimits: .init(maximumReplyBytes: 1_024),
+                              largeReply: true) { fixture in
+            let token = try await fixture.activate()
+            do {
+                _ = try await fixture.client.invoke(token, request: fixture.send(text: "reply"),
+                    principal: .user(fixture.user), deadline: .now + .seconds(5))
+                Issue.record("oversized host reply was accepted")
+            } catch {
+                #expect(error as? V2RoomCallFailure == .outcomeUnknown)
+            }
+            #expect(await fixture.executions.count() == 1)
+        }
+    }
+
     @Test("timed-out local SQL-like work remains tracked until drain can finish")
     func localTimeoutAndDrain() async throws {
         let gate = ExecutionGate(closed: true)
@@ -71,14 +87,40 @@ struct V2RoomLocalCapabilityIntegrationTests {
         }
     }
 
+    @Test("a replaced local descriptor retains its in-flight result but cannot reuse its capability")
+    func localDescriptorReplacement() async throws {
+        let gate = ExecutionGate(closed: true)
+        try await withFixture(executionGate: gate) { fixture in
+            let token = try await fixture.activate()
+            let call = Task {
+                try await fixture.client.invoke(token, request: fixture.send(text: "old-generation"),
+                    principal: .user(fixture.user), deadline: .now + .seconds(5))
+            }
+            try await gate.waitForEntry()
+            let replacement = V2ActorHostIdentity(hostID: fixture.identity.hostID,
+                                                  incarnationID: UUID())
+            let oldDescriptor = fixture.descriptor
+            try await fixture.client.installDiscovered(.init(identity: replacement,
+                endpointID: oldDescriptor.endpointID, address: oldDescriptor.address,
+                port: oldDescriptor.port, accessibleShardIDs: oldDescriptor.accessibleShardIDs,
+                availableRooms: oldDescriptor.availableRooms, isHealthy: true))
+            #expect(await fixture.client.retiredDescriptorCount() == 1)
+            await gate.open()
+            #expect(try await call.value == .recovery(.failure(.invalidRequest)))
+            try await fixture.expectReplacementRejected(replacement)
+            #expect(await fixture.executions.count() == 1)
+        }
+    }
+
     private func withFixture(
         hostLimits: V2ActorAuthenticationLimits = try! .init(),
         clientLimits: V2ActorAuthenticationLimits = try! .init(),
         executionGate: ExecutionGate = .init(),
+        largeReply: Bool = false,
         operation: (Fixture) async throws -> Void
     ) async throws {
         let fixture = try await Fixture(hostLimits: hostLimits, clientLimits: clientLimits,
-                                        executionGate: executionGate)
+                                        executionGate: executionGate, largeReply: largeReply)
         var operationError: (any Error)?
         do { try await operation(fixture) }
         catch { operationError = error }
@@ -101,6 +143,7 @@ struct V2RoomLocalCapabilityIntegrationTests {
     private struct Fixture: Sendable {
         let node: V2RoomClusterNode
         let client: V2RoomClusterClient
+        let descriptor: V2RoomClusterHostDescriptor
         let executions: ExecutionGate
         let identity: V2ActorHostIdentity
         let room = RoomID(uuid: UUID())
@@ -110,7 +153,7 @@ struct V2RoomLocalCapabilityIntegrationTests {
 
         init(hostLimits: V2ActorAuthenticationLimits = try! .init(),
              clientLimits: V2ActorAuthenticationLimits = try! .init(),
-             executionGate: ExecutionGate = .init()) async throws {
+             executionGate: ExecutionGate = .init(), largeReply: Bool = false) async throws {
             self.executions = executionGate
             let directory = FileManager.default.temporaryDirectory
                 .appending(path: "imv2-local-capability-\(UUID())")
@@ -159,14 +202,22 @@ struct V2RoomLocalCapabilityIntegrationTests {
             let runtime = try V2RoomRuntimeConfiguration(
                 maximumActiveRooms: 2, maximumConcurrentRestores: 1,
                 maximumActivationWaitersPerRoom: 2, maximumPendingActivations: 2,
-                maximumActivationWaitersPerHost: 4, maximumConcurrentResolutions: 1)
+                maximumActivationWaitersPerHost: 4, maximumConcurrentResolutions: 1,
+                maximumConcurrentReservations: 1)
+            let oversizedResponse: V2RoomResponse = .roomLog(.page(try .init(
+                roomID: .init(uuid: UUID()),
+                events: [try .init(sourceEventID: .init(uuid: UUID()), roomSequence: 1,
+                                   projectionKind: "test", payload: Data(repeating: 7, count: 4_096))],
+                nextRoomSequence: 1, hasMore: false, logTrimmedThroughRoomSequence: 0)))
             let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: hostIdentity,
                 leaseStore: LocalLeaseStore(), configuration: runtime,
                 budget: V2RoomCommandBudget(configuration: runtime), classify: { _ in .barrier },
                 factory: .init { _ in
                     .init(restore: { _ in }, execute: { turn in
                         await executionGate.waitIfClosed()
-                        return .committed(turn.items.map { _ in .recovery(.failure(.invalidRequest)) })
+                        return .committed(turn.items.map { _ in
+                            largeReply ? oversizedResponse : .recovery(.failure(.invalidRequest))
+                        })
                     }, invalidateReservation: { _ in }, close: {})
                 })
             let config = try V2RoomClusterNodeConfiguration(name: "v2-local-capability-test",
@@ -179,6 +230,7 @@ struct V2RoomLocalCapabilityIntegrationTests {
             node = hostedNode
             do {
                 let descriptor = try await hostedNode.start()
+                self.descriptor = descriptor
                 let hostedClient = try await hostedNode.makeClient(signer: caller, trust: trust,
                                                                    limits: clientLimits)
                 client = hostedClient
@@ -205,6 +257,16 @@ struct V2RoomLocalCapabilityIntegrationTests {
 
         func removeTemporaryFiles() throws {
             try FileManager.default.removeItem(at: temporaryDirectory)
+        }
+
+        func expectReplacementRejected(_ replacement: V2ActorHostIdentity) async throws {
+            do {
+                _ = try await client.activate(on: replacement, roomID: .init(uuid: UUID()),
+                    owner: owner, deadline: .now + .milliseconds(500))
+                Issue.record("old local capability accepted a replacement host incarnation")
+            } catch {
+                #expect(error as? V2RoomCallFailure != nil)
+            }
         }
     }
 

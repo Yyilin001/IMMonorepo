@@ -242,10 +242,22 @@ struct V2ActorAuthenticationTests {
         let fixture = try Fixture(limits: .init(sessionLifetimeMilliseconds: 1_000), clock: clock)
         let generation = UUID()
         let hello = fixture.hello()
+        let helloPacket = try fixture.client.sign(hello, maximumBytes: fixture.limits.maximumRequestBytes)
+        var tampered = helloPacket.body
+        tampered[tampered.startIndex] ^= 1
+        await failure(.invalidSignature) {
+            _ = try await fixture.auth.openLocalSession(.init(signerID: helloPacket.signerID,
+                body: tampered, signature: helloPacket.signature), generation: generation)
+        }
         let (grant, capability) = try await fixture.auth.openLocalSession(
-            fixture.client.sign(hello, maximumBytes: fixture.limits.maximumRequestBytes),
-            generation: generation)
+            helloPacket, generation: generation)
         let first = try fixture.call(grant: grant)
+        let otherIssuer = V2ActorSessionAuthenticator(host: fixture.token.host,
+            trust: fixture.trust, limits: fixture.limits, now: { clock.now })
+        await failure(.wrongRecipient) {
+            _ = try await otherIssuer.acceptLocal(V2ActorLocalPayload(first),
+                capability: capability, generation: generation)
+        }
         #expect(try await fixture.auth.acceptLocal(V2ActorLocalPayload(first), capability: capability,
                                                    generation: generation).call == first)
         await failure(.replay) {
@@ -275,7 +287,7 @@ struct V2ActorAuthenticationTests {
 
     @Test("local typed admission retains the canonical signed-body byte ceiling and reply binding")
     func localSizeAndReplyBinding() async throws {
-        let limits = try V2ActorAuthenticationLimits(maximumRequestBytes: 1_024)
+        let limits = try V2ActorAuthenticationLimits(maximumRequestBytes: 4_096)
         let fixture = try Fixture(limits: limits)
         let generation = UUID()
         let hello = fixture.hello()
@@ -284,7 +296,7 @@ struct V2ActorAuthenticationTests {
             generation: generation)
         let large = V2RoomRequest.messaging(.send(.init(
             roomID: fixture.token.roomID, actorUserID: fixture.user,
-            clientMessageID: .init(uuid: UUID()), text: String(repeating: "x", count: 1_024),
+            clientMessageID: .init(uuid: UUID()), text: String(repeating: "x", count: 4_096),
             media: [], mentions: [], entities: [], replyTo: nil)))
         await failure(.oversized) {
             _ = try await fixture.auth.acceptLocal(V2ActorLocalPayload(try fixture.call(
