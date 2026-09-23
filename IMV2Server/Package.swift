@@ -7,6 +7,7 @@ let package = Package(
     products: [
         .library(name: "IMV2ActorContracts", targets: ["IMV2ActorContracts"]),
         .library(name: "IMV2ActorRuntime", targets: ["IMV2ActorRuntime"]),
+        .library(name: "IMV2ActorCluster", targets: ["IMV2ActorCluster"]),
         .library(name: "IMV2Server", targets: ["IMV2Server"]),
         .library(name: "IMV2ServerHTTP", targets: ["IMV2ServerHTTP"]),
         .executable(name: "IMV2ServerApp", targets: ["IMV2ServerApp"]),
@@ -52,6 +53,20 @@ let package = Package(
         .testTarget(
             name: "IMV2ActorRuntimeTests",
             dependencies: ["IMV2ActorRuntime", "IMV2ActorContracts", "IMV2Core"]
+        ),
+        .target(
+            name: "IMV2ActorCluster",
+            dependencies: [
+                "IMV2ActorRuntime", "IMV2ActorContracts", "IMV2Core",
+                .product(name: "DistributedCluster", package: "swift-distributed-actors"),
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+            ]
+        ),
+        .testTarget(
+            name: "IMV2ActorClusterTests",
+            dependencies: ["IMV2ActorCluster", "IMV2ActorContracts", "IMV2Core",
+                           .product(name: "Crypto", package: "swift-crypto")]
         ),
         .target(
             name: "CIMV2Argon2",
