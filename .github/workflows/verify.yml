@@ -72,6 +72,10 @@ jobs:
           IMV2_ACTOR_ACK_LOSS_TEST_DATABASE_IS_DISPOSABLE: "1"
           IMV2_SHARED_SEND_ACK_LOSS_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
           IMV2_SHARED_SEND_ACK_LOSS_TEST_DATABASE_IS_DISPOSABLE: "1"
+          IMV2_ACTOR_HOST_DRAIN_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+          IMV2_ACTOR_HOST_DRAIN_DATABASE_IS_DISPOSABLE: "1"
+          IMV2_ACTOR_HOST_G2_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+          IMV2_ACTOR_HOST_G2_DATABASE_IS_DISPOSABLE: "1"
           IMV2_ACTOR_D2_TEST_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
           IMV2_ACTOR_D2_TEST_DATABASE_IS_DISPOSABLE: "1"
           IMV2_ACTOR_D4_CONTROL_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres-control:5432/im_v2_test
@@ -104,6 +108,14 @@ jobs:
           export VA_G4_LINUX_RUN_ROOT="$RUNNER_TEMP/actor-process-evidence"
           mkdir -p "$VA_G4_LINUX_SCRATCH_DIR" "$VA_G4_LINUX_RUN_ROOT"
           bash ./IMV2/scripts/test_v2_virtual_actor_business_probe.sh
+      - name: Exercise concurrent Hosts and peer-only network partition
+        env:
+          DOCKER_CONTEXT: default
+          VA_G6_MODE: linux
+        run: |
+          export VA_G6_LINUX_SCRATCH_DIR="$RUNNER_TEMP/actor-swiftpm"
+          export VA_G6_LINUX_RUN_ROOT="$RUNNER_TEMP/actor-process-evidence"
+          python3 ./IMV2/scripts/test_v2_virtual_actor_multihost_probe.py
       - name: Upload process recovery evidence
         if: always()
         uses: actions/upload-artifact@v4

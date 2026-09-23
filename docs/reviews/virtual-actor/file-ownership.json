@@ -15,10 +15,6 @@
       "owner": "V1"
     },
     {
-      "path": "IMV2/docker-compose.virtual-actor-tests.yml",
-      "owner": "V1"
-    },
-    {
       "path": "IMV2/scripts/current_v2_schema_contract.sql",
       "owner": "R1"
     },
@@ -43,10 +39,6 @@
       "owner": "I1"
     },
     {
-      "path": "IMV2/scripts/run_v2_virtual_actor_faults.sh",
-      "owner": "V1"
-    },
-    {
       "path": "IMV2/scripts/run_v2_virtual_actor_linux.sh",
       "owner": "V1"
     },
@@ -64,6 +56,14 @@
     },
     {
       "path": "IMV2/scripts/test_v2_virtual_actor_business_probe.sh",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/test_v2_virtual_actor_capacity_canary.py",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/test_v2_virtual_actor_capacity_canary_runner.py",
       "owner": "V1"
     },
     {
@@ -92,10 +92,6 @@
     },
     {
       "path": "IMV2/scripts/virtual-actor-fixtures/capacity-main-v1.json",
-      "owner": "V1"
-    },
-    {
-      "path": "IMV2/scripts/virtual-actor-fixtures/fault-scenarios.json",
       "owner": "V1"
     },
     {
@@ -300,6 +296,10 @@
     },
     {
       "path": "IMV2Server/Sources/IMV2ActorRuntime/Lifecycle/V2RoomActivationHost.swift",
+      "owner": "R2"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ActorRuntime/Observability/V2RoomRuntimeMetrics.swift",
       "owner": "R2"
     },
     {
@@ -1019,6 +1019,10 @@
       "owner": "D3"
     },
     {
+      "path": "IMV2Server/Sources/IMV2Server/V2RoomActorMetrics.swift",
+      "owner": "I1"
+    },
+    {
       "path": "IMV2Server/Sources/IMV2Server/V2RoomAdmissionCommandCreditPool.swift",
       "owner": "D1"
     },
@@ -1421,6 +1425,18 @@
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomActorMediaAuthorizationPortTests.swift",
       "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomActorMetricsTests.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomHostPostgresDrainTests.swift",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomHostPostgresLifecycleTests.swift",
+      "owner": "V1"
     },
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomRecoveryBatcherLifecycleTests.swift",

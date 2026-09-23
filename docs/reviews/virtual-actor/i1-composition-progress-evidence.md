@@ -95,3 +95,7 @@ Gateway RoomRef 入口不再占用等待 Host 的数据库许可。普通房间�
 ## 共享事务成功提交但 ACK 丢失
 
 `a13d246d` 的 `V2SharedRoomSendCommitAckLossTests` 使用真实生产 send batcher 与可丢弃 PostgreSQL：首 turn 已排队后放入第二房间，一笔原子事务承载两个房间，实际代理观察成功 COMMIT 再截断 ACK。两项均返回 unknown 且该 token 后续被拒绝，不执行新 SQL；独立连接确认各一条消息/completion，重放原 operation ID 返回原 messageID，紧凑 accepted event 仍保存在原消息行。Native 1/1 通过；Host unknown 退役另由现有 19 项 Host 测试覆盖，本测试本身未实例化 Host。专用环境开关已接入 CI 与隔离 Linux gate。
+
+## Gateway 角色与运行指标
+
+`5765185e` 的七个 Linux Release 产品均成功构建，冻结产品和摘要位于 `/Users/yyl/.codex/virtual-actor-builds/candidate-release-wiring/`。Gateway 可从已验证配置选择 Host 或 caller-only，Account 继续强制 caller-only；worker caller 服务权限由生成器显式参数授予。新增私有 Actor 状态/命令许可峰值与 Directory 指标，不输出身份标签，caller-only 不捏造 Host 零值。`/tmp/imv2-va-final-runtime-metrics.log` 的真实生成配置测试 3 项、budget 4 项、metrics 2 项通过。完整 remote Gateway 应用拓扑验收另行登记。
