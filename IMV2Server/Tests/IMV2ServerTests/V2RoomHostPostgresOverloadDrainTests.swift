@@ -76,23 +76,28 @@ struct V2RoomHostPostgresOverloadDrainTests {
                         deadline: .now + .seconds(12))
                 }
                 try await overloadWaitUntil { await hosted.budget.snapshot().commandCount == 2 }
+                // The host still has one free permit. This rejection must be
+                // the per-room limit, independently of the later host limit.
+                await overloadExpectFailure(.notAccepted(.overloaded), Task {
+                    try await host.invoke(token: hotToken,
+                        encodedRequest: try overloadSendBytes(room: roomID, operation: rejectedID),
+                        deadline: .now + .seconds(5))
+                })
+                #expect(try await overloadCompletionCount(sql, room: roomID, operation: rejectedID) == 0)
+                #expect(await hosted.budget.snapshot().commandCount == 2)
                 let healthyCall = Task {
                     try await host.invoke(token: healthyToken,
                         encodedRequest: try overloadRecoveryBytes(room: healthy),
                         deadline: .now + .seconds(12))
                 }
                 try await overloadWaitUntil { await hosted.budget.snapshot().commandCount == 3 }
-                await overloadExpectFailure(.notAccepted(.overloaded), Task {
-                    try await host.invoke(token: hotToken,
-                        encodedRequest: try overloadSendBytes(room: roomID, operation: rejectedID),
-                        deadline: .now + .seconds(5))
-                })
+                // A distinct room has available room-local capacity here; its
+                // rejection can only come from the host-wide three-call cap.
                 await overloadExpectFailure(.notAccepted(.overloaded), Task {
                     try await host.invoke(token: excessToken,
                         encodedRequest: try overloadRecoveryBytes(room: excess),
                         deadline: .now + .seconds(5))
                 })
-                #expect(try await overloadCompletionCount(sql, room: roomID, operation: rejectedID) == 0)
                 #expect(await hosted.budget.snapshot().commandCount == 3)
 
                 // The healthy room completes through its real executor while
