@@ -21,7 +21,13 @@ struct V2RoomCommandBudgetTests {
         #expect(await budget.release(first))
         #expect(await budget.release(second))
         #expect(await budget.release(third))
-        #expect(await budget.snapshot().roomCount == 0)
+        let drained = await budget.snapshot()
+        #expect(drained.roomCount == 0)
+        #expect(drained.commandCount == 0)
+        #expect(drained.byteCount == 0)
+        #expect(drained.peakCommandCount == 3)
+        #expect(drained.peakByteCount == 30)
+        #expect(await budget.snapshot() == drained)
     }
 
     @Test("simultaneous rooms cannot exceed the host's count or byte budget")

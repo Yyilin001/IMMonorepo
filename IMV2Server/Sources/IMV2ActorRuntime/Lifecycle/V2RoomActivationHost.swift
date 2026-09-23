@@ -7,7 +7,7 @@ public enum V2RoomActivationResolution: Equatable, Sendable {
     case occupied(V2RoomActivationLease)
 }
 
-public struct V2RoomActivationHostSnapshot: Sendable {
+public struct V2RoomActivationHostSnapshot: Equatable, Sendable {
     public let accepting: Bool
     public let activeRooms: Int
     public let pendingRooms: Int

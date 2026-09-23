@@ -1,4 +1,5 @@
 import Foundation
+import IMV2ActorRuntime
 
 /// 数据库连接池的固定指标分类，原始字符串用作 Prometheus 的 `pool` 标签。
 ///
@@ -104,6 +105,8 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     public let preparedGroupEventPageCache: V2PreparedGroupEventPageCache.Snapshot?
     /// 心跳租约续期的合并与数据库批处理统计，不使用连接或用户标识作为标签。
     public let livePresenceRenewals: V2LivePresenceRenewalBatcher.Snapshot?
+    /// Local Actor host and directory pressure; caller-only nodes omit host fields.
+    public let roomActors: V2RoomRuntimeMetricsSnapshot?
 
     /// 从各组件的观测构造聚合值，不执行采集、不清零计数，也不校验组件间的一致性。
     ///
@@ -136,7 +139,8 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         directRoomLogFastAppend: V2DirectRoomLogFastAppendCache.Snapshot? = nil,
         directRoomLogEventCache: V2DirectRoomLogEventCache.Snapshot? = nil,
         preparedGroupEventPageCache: V2PreparedGroupEventPageCache.Snapshot? = nil,
-        livePresenceRenewals: V2LivePresenceRenewalBatcher.Snapshot? = nil
+        livePresenceRenewals: V2LivePresenceRenewalBatcher.Snapshot? = nil,
+        roomActors: V2RoomRuntimeMetricsSnapshot? = nil
     ) {
         self.databaseWork = databaseWork
         self.databasePools = databasePools
@@ -152,6 +156,7 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         self.directRoomLogEventCache = directRoomLogEventCache
         self.preparedGroupEventPageCache = preparedGroupEventPageCache
         self.livePresenceRenewals = livePresenceRenewals
+        self.roomActors = roomActors
     }
 }
 
@@ -184,6 +189,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     private let directRoomLogEventCache: V2DirectRoomLogEventCache?
     private let preparedGroupEventPageCache: V2PreparedGroupEventPageCache?
     private let connectionRegistry: V2DeviceConnectionRegistry?
+    private let roomActors: (any V2RoomRuntimeMetricsReading)?
 
     /// 连接指标来源，保存依赖而不立即采样。
     ///
@@ -218,7 +224,8 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache? = nil,
         directRoomLogEventCache: V2DirectRoomLogEventCache? = nil,
         preparedGroupEventPageCache: V2PreparedGroupEventPageCache? = nil,
-        connectionRegistry: V2DeviceConnectionRegistry? = nil
+        connectionRegistry: V2DeviceConnectionRegistry? = nil,
+        roomActors: (any V2RoomRuntimeMetricsReading)? = nil
     ) {
         self.databaseWorkAdmission = databaseWorkAdmission
         self.databasePools = databasePools
@@ -234,6 +241,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         self.directRoomLogEventCache = directRoomLogEventCache
         self.preparedGroupEventPageCache = preparedGroupEventPageCache
         self.connectionRegistry = connectionRegistry
+        self.roomActors = roomActors
     }
 
     /// 采集一次基础压力与已注入组件的状态。
@@ -256,6 +264,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         let eventCache = await directRoomLogEventCache?.snapshot()
         let preparedPageCache = preparedGroupEventPageCache?.snapshot()
         let livePresenceRenewals = await connectionRegistry?.livePresenceRenewalMetrics()
+        let actorMetrics = await roomActors?.roomRuntimeMetricsSnapshot()
         return await .init(
             databaseWork: databaseWork,
             databasePools: databasePools,
@@ -270,7 +279,8 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
             directRoomLogFastAppend: fastAppend,
             directRoomLogEventCache: eventCache,
             preparedGroupEventPageCache: preparedPageCache,
-            livePresenceRenewals: livePresenceRenewals
+            livePresenceRenewals: livePresenceRenewals,
+            roomActors: actorMetrics
         )
     }
 }
@@ -293,6 +303,9 @@ public func v2RenderPrometheusRuntimePressureMetrics(
         "# HELP im_v2_database_pool_event_loop_handles Configured Fluent handles spanning the application EventLoops by fixed pool class.",
         "# TYPE im_v2_database_pool_event_loop_handles gauge",
     ]
+    if let actors = snapshot.roomActors {
+        lines.append(contentsOf: v2RoomActorMetricLines(actors))
+    }
     for pool in snapshot.databasePools.pools {
         lines.append(
             "im_v2_database_pool_event_loop_handles{pool=\"\(pool.poolClass.rawValue)\"} \(pool.eventLoopHandles)"

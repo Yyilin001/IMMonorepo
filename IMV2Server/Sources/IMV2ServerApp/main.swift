@@ -736,7 +736,7 @@ enum IMV2ServerApp {
                     directRoomLogFastAppendCache: directRoomLogFastAppendCache,
                     directRoomLogEventCache: directRoomLogEventCache,
                     preparedGroupEventPageCache: preparedGroupEventPageCache,
-                    connectionRegistry: connectionRegistry))
+                    connectionRegistry: connectionRegistry, roomActors: actors))
             // Foreground availability is intentionally a best-effort hint.
             // The same broker adapter also serves the durable Hybrid wake
             // outbox, but the two contracts remain distinct at the command

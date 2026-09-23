@@ -20,6 +20,8 @@ public struct V2RoomCommandBudgetSnapshot: Equatable, Sendable {
     public let byteCount: Int
     public let roomCount: Int
     public let reservationCount: Int
+    public let peakCommandCount: Int
+    public let peakByteCount: Int
 }
 
 /// Non-waiting room and host admission prevents overload from creating another
@@ -31,6 +33,8 @@ public actor V2RoomCommandBudget {
     private var rooms: [RoomID: RoomUsage] = [:]
     private var totalBytes = 0
     private var reservationCount = 0
+    private var peakCommandCount = 0
+    private var peakByteCount = 0
 
     public init(configuration: V2RoomRuntimeConfiguration) {
         self.configuration = configuration
@@ -68,6 +72,8 @@ public actor V2RoomCommandBudget {
             commandCount: usage.commandCount + 1, byteCount: usage.byteCount + byteCount
         )
         totalBytes += byteCount
+        peakCommandCount = max(peakCommandCount, permits.count)
+        peakByteCount = max(peakByteCount, totalBytes)
         if isReservation { reservationCount += 1 }
         return permit
     }
@@ -96,7 +102,8 @@ public actor V2RoomCommandBudget {
     public func snapshot() -> V2RoomCommandBudgetSnapshot {
         V2RoomCommandBudgetSnapshot(
             commandCount: permits.count, byteCount: totalBytes, roomCount: rooms.count,
-            reservationCount: reservationCount
+            reservationCount: reservationCount,
+            peakCommandCount: peakCommandCount, peakByteCount: peakByteCount
         )
     }
 

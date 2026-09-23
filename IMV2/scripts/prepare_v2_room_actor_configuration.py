@@ -45,6 +45,8 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--host", action="append", type=node, required=True, dest="hosts")
     parser.add_argument("--caller", action="append", type=node, default=[], dest="callers")
+    parser.add_argument("--worker-caller", action="append", default=[],
+                        help="Caller identity also running authorized room maintenance/safety workers")
     parser.add_argument("--shards", required=True, help="Comma separated configured shard IDs")
     parser.add_argument("--mount-root", help="Path of this node's own directory inside its container")
     args = parser.parse_args()
@@ -55,6 +57,8 @@ def main() -> None:
             or not 1 <= len(shards) <= 256 or len(set(shards)) != len(shards)
             or any(not s or s != s.strip() for s in shards)):
         parser.error("node identities/endpoints and shard IDs must be unique, nonempty and bounded")
+    if not set(args.worker_caller).issubset({n[0] for n in args.callers}):
+        parser.error("worker-caller must name an explicitly configured caller")
     # An explicit new output directory prevents accidental rotation of a live
     # host's signing identity or modification of an existing private CA.
     root = args.output_dir.resolve()
@@ -101,7 +105,7 @@ def main() -> None:
         extensions.unlink()
         shutil.copyfile(ca / "cert.pem", directory / "ca.pem")
         permissions = ["userRoomCalls", "roomCoordination"]
-        if name in host_names:
+        if name in host_names or name in args.worker_caller:
             permissions += ["roomMaintenance", "trustedSafety", "specialAccountAudit"]
         services.append(dict(id=name, publicKeyBase64=base64.b64encode(public_der[-32:]).decode(),
                              permissions=permissions, hostIDs=[host_ids[name]] if name in host_names else [],

@@ -11,11 +11,12 @@ public enum V2RoomActorApplicationError: Error, Sendable {
 
 /// Shared startup/shutdown composition for Gateway hosts and Account/Operator
 /// callers. Domain services receive RoomDirectory; Cluster ActorIDs stay here.
-public actor V2RoomActorApplication {
+public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
     public nonisolated let directory: V2RoomDirectory
     public nonisolated let reservations: V2RoomReservationCoordinator
     public nonisolated let configuration: V2RoomRuntimeConfiguration
     private let node: Node
+    private let metrics: @Sendable () async -> V2RoomRuntimeMetricsSnapshot
 
     private enum Node: Sendable {
         case host(V2RoomClusterNode)
@@ -23,11 +24,13 @@ public actor V2RoomActorApplication {
     }
 
     private init(directory: V2RoomDirectory, reservations: V2RoomReservationCoordinator,
-                 configuration: V2RoomRuntimeConfiguration, node: Node) {
+                 configuration: V2RoomRuntimeConfiguration, node: Node,
+                 metrics: @escaping @Sendable () async -> V2RoomRuntimeMetricsSnapshot) {
         self.directory = directory
         self.reservations = reservations
         self.configuration = configuration
         self.node = node
+        self.metrics = metrics
     }
 
     public static func start(configuration: V2RoomActorApplicationConfiguration,
@@ -37,15 +40,20 @@ public actor V2RoomActorApplication {
         let leases = try V2RoomServerLeaseStore(databases: roomDatabases)
         let client: V2RoomClusterClient
         let node: Node
+        let runtimeHost: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>?
+        let runtimeBudget: V2RoomCommandBudget?
         if let identity = configuration.hostIdentity {
             guard let factory,
                   configuration.allowedShards.isSubset(of: Set(roomDatabases.keys)) else {
                 throw V2RoomActorApplicationError.invalidRole
             }
             let runtime = configuration.runtime
+            let budget = V2RoomCommandBudget(configuration: runtime)
             let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: identity,
-                leaseStore: leases, configuration: runtime, budget: .init(configuration: runtime),
+                leaseStore: leases, configuration: runtime, budget: budget,
                 classify: { $0.canShareSendTurn ? .send : .barrier }, factory: factory.runtimeFactory())
+            runtimeHost = host
+            runtimeBudget = budget
             let hostNode = V2RoomClusterNode(configuration: try .init(name: configuration.name,
                 host: configuration.address, port: configuration.port, tls: configuration.tls,
                 threadPoolSize: configuration.threadPoolSize, allowedShards: configuration.allowedShards,
@@ -65,6 +73,8 @@ public actor V2RoomActorApplication {
                 throw error
             }
         } else {
+            runtimeHost = nil
+            runtimeBudget = nil
             guard factory == nil else { throw V2RoomActorApplicationError.invalidRole }
             let caller = V2RoomClusterClientNode(configuration: try .init(name: configuration.name,
                 host: configuration.address, port: configuration.port, tls: configuration.tls,
@@ -86,7 +96,16 @@ public actor V2RoomActorApplication {
         let reservations = V2RoomReservationCoordinator(operations: await directory.reservationOperations(),
             configuration: configuration.runtime)
         return .init(directory: directory, reservations: reservations,
-                     configuration: configuration.runtime, node: node)
+                     configuration: configuration.runtime, node: node, metrics: {
+                         let location = await directory.snapshot()
+                         return await .init(host: runtimeHost?.snapshot(), commands: runtimeBudget?.snapshot(),
+                             cachedLocations: location.cached, pendingResolutions: location.pending,
+                             activeResolutions: location.active, resolutionWaiters: location.waiters)
+                     })
+    }
+
+    public func roomRuntimeMetricsSnapshot() async -> V2RoomRuntimeMetricsSnapshot {
+        await metrics()
     }
 
     public func readiness() async -> Bool {
