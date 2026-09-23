@@ -1,6 +1,6 @@
 # G3 caller-only Gateway TCP verification
 
-Status: runner prepared; the full Linux run must use an `IMV2ServerApp` binary containing the caller-only Factory fix. No execution is claimed here yet.
+Status: runner prepared; the full Linux run must use an `IMV2ServerApp` binary containing the caller-only Factory fix. No end-to-end execution is claimed here yet. Static validation on the prepared branch passed Python compilation, the three-node host/caller/worker permission checks, and `docker compose config --quiet` with the generated independent `actor-host` service; no containers were started by that validation.
 
 Run the existing disposable application stack with `--remote-gateway`:
 
