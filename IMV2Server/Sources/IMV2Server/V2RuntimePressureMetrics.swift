@@ -175,7 +175,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     private let syncWakeCoalescer: V2SyncWakeCoalescer
     private let shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool?
     private let roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool?
-    private let directRoomLogAppendBatcher: (any V2SendMessageAdmission)?
+    private let directRoomLogAppendBatcher: (any V2SendMessageBatchMetricsReading)?
     private let readReceiptBatcher: V2ReadReceiptBatcher?
     private let directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics?
     private let gatewayEventLoopLagMetrics: V2EventLoopLagMetrics?
@@ -195,7 +195,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     ///   - syncWakeCoalescer: 同步可用性提示合并器。
     ///   - shardAdmissionCommandCredits: 分片命令额度池。
     ///   - roomAdmissionCommandCredits: 房间命令额度池。
-    ///   - directRoomLogAppendBatcher: 私聊追加准入组件，通过其快照接口读取批处理指标。
+    ///   - directRoomLogAppendBatcher: 私聊追加的只读批处理指标来源，可汇总多个物理归属。
     ///   - readReceiptBatcher: 已读回执批处理器。
     ///   - directRoomLogAppendStageMetrics: 私聊追加阶段耗时收集器。
     ///   - gatewayEventLoopLagMetrics: 网关事件循环延迟收集器。
@@ -210,7 +210,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         syncWakeCoalescer: V2SyncWakeCoalescer,
         shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool? = nil,
         roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool? = nil,
-        directRoomLogAppendBatcher: (any V2SendMessageAdmission)? = nil,
+        directRoomLogAppendBatcher: (any V2SendMessageBatchMetricsReading)? = nil,
         readReceiptBatcher: V2ReadReceiptBatcher? = nil,
         directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics? = nil,
         gatewayEventLoopLagMetrics: V2EventLoopLagMetrics? = nil,

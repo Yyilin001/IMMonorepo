@@ -365,10 +365,16 @@ public enum V2RoomWriteStoreError: Error, Equatable, Sendable {
     case replyTargetNotFound
 }
 
+/// Only the admission metrics surface. Consumers cannot accept a message.
+public protocol V2SendMessageBatchMetricsReading: Sendable {
+    /// 读取准入队列与处理状态的观测快照，不构成持久化提交证明。
+    func snapshot() async -> V2SendMessageAdmissionBatcher.Snapshot
+}
+
 /// 消息持久化之前的进程内准入边界。
 ///
 /// 实现可以使用单个批处理 actor 或按房间稳定分配的多个执行通道，必须保持同一房间的有序写入合同。
-public protocol V2SendMessageAdmission: Sendable {
+public protocol V2SendMessageAdmission: V2SendMessageBatchMetricsReading {
     /// 是否由准入实现围绕实际数据库工作管理前台写入许可，以避免等待批次的请求重复占用许可。
     var managesForegroundWriteAdmission: Bool { get }
     /// 是否在有序提交后、恢复请求等待者之前发布已接受的 Hybrid 群事件。
@@ -384,9 +390,6 @@ public protocol V2SendMessageAdmission: Sendable {
     func accept(
         _ request: consuming V2RoomWriteRequest
     ) async throws -> V2SendMessageOutcome
-
-    /// 读取准入队列与处理状态的观测快照，不构成持久化提交证明。
-    func snapshot() async -> V2SendMessageAdmissionBatcher.Snapshot
 }
 
 extension V2SendMessageAdmission {
