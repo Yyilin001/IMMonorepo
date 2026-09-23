@@ -10,6 +10,8 @@ import sys
 import tempfile
 import unittest
 
+from test_v2_virtual_actor_capacity_canary import capture_runtime_provenance
+
 
 HERE = Path(__file__).resolve().parent
 RUNNER = HERE / "test_v2_virtual_actor_capacity_canary.py"
@@ -17,6 +19,37 @@ PREPARE = HERE / "prepare_v2_virtual_actor_capacity_fixture.py"
 
 
 class CanaryRunnerPreflightTests(unittest.TestCase):
+    def test_runtime_provenance_reads_only_project_and_setting_whitelists(self) -> None:
+        container = "a" * 64
+        calls = []
+        def execute(command, log, timeout, record_stdout=False):
+            calls.append(command)
+            if "info" in command:
+                return '{"nCPU":4,"memTotal":17179869184,"kernelVersion":"test-kernel"}'
+            if "cat" in command:
+                return "22f741c0-6ebe-4e35-9bc3-23e3c2c3b89a\n"
+            if "ps" in command:
+                return container + "\n"
+            if "inspect" in command:
+                return "2026-09-24T00:00:00Z\n"
+            raise AssertionError(command)
+        def psql(service, database, sql, **kwargs):
+            self.assertIn("FROM pg_settings", sql)
+            return json.dumps({name: "on" for name in (
+                "max_connections", "shared_buffers", "work_mem", "synchronous_commit",
+                "fsync", "full_page_writes", "statement_timeout", "lock_timeout",
+                "track_io_timing", "shared_preload_libraries", "pg_stat_statements.track")})
+        manifest = {"users": 100, "targetsPerConnection": 2, "owners": 2,
+                    "layouts": {"mixed": {"rooms": 4, "ownerRoomCounts": [2, 2],
+                                          "ownerMembershipCounts": [100, 100]}}}
+        result = capture_runtime_provenance(docker=["docker"], compose=["docker", "compose"],
+                    services={"postgres": "control", "owner00": "owner"}, manifest=manifest,
+                    layout="mixed", execute=execute, psql=psql)
+        self.assertTrue(result["machineEnvelope"]["matchesFormal4CPU16GiB"])
+        self.assertEqual(set(result["projectContainers"]), {"postgres", "owner00", "gateway"})
+        self.assertEqual(result["fixtureCounts"]["users"], 100)
+        self.assertTrue(all("credentials" not in " ".join(call).lower() for call in calls))
+
     def test_source_binary_and_fixture_hashes_are_required_before_docker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -81,6 +114,29 @@ class CanaryRunnerPreflightTests(unittest.TestCase):
             with_corrected = command + ["--loader-products-dir", str(corrected),
                                         "--loader-build-result", str(corrected_result)]
             self.assertEqual(subprocess.run(with_corrected, capture_output=True).returncode, 0)
+            recovery_fixture = root / "recovery-fixture"
+            subprocess.run([sys.executable, str(PREPARE), "--output-dir", str(recovery_fixture),
+                            "--seed", "22f741c0-6ebe-4e35-9bc3-23e3c2c3b89a",
+                            "--users", "100", "--targets", "2", "--owners", "2",
+                            "--command-window-limit", "1000",
+                            "--expires-at", "2030-01-01T00:00:00Z"],
+                           check=True, capture_output=True)
+            corrected_binary.write_bytes(b"\x7fELFroom_sync_state_batches_per_second=" +
+                                         b"room_latest_visible_batches_per_second=")
+            corrected_document = json.loads(corrected_result.read_text())
+            corrected_document["products"]["IMV2GatewayLoadGenerator"] = hashlib.sha256(
+                corrected_binary.read_bytes()).hexdigest()
+            corrected_result.write_text(json.dumps(corrected_document))
+            recovery_command = [value if value != str(fixture) else str(recovery_fixture)
+                                for value in with_corrected]
+            recovery_command = ["mixed" if value == "hot" else value for value in recovery_command]
+            recovery_command += ["--canary-connections", "100", "--canary-recovery"]
+            recovery = subprocess.run(recovery_command, capture_output=True, text=True)
+            self.assertEqual(recovery.returncode, 0, recovery.stderr)
+            self.assertIn("VA_CAPACITY_RECOVERY_CANARY_PREFLIGHT_OK", recovery.stdout)
+            self.assertNotEqual(subprocess.run(recovery_command[:-3] +
+                                ["--canary-connections", "99", "--canary-recovery"],
+                                capture_output=True).returncode, 0)
             corrected_binary.write_bytes(b"\x7fELFstale-loader")
             self.assertNotEqual(subprocess.run(with_corrected, capture_output=True).returncode, 0)
             (fixture / "hot/credentials.jsonl").write_text("{}\n")

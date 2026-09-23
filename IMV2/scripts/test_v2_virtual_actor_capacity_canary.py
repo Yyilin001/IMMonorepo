@@ -186,6 +186,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--docker-context", required=True)
     parser.add_argument("--artifact-dir", required=True, type=Path)
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--canary-connections", type=int,
+                        help="explicit functional canary connections; default preserves the original small canary")
+    parser.add_argument("--canary-recovery", action="store_true",
+                        help="ten-second 100-connection send and two recovery-batch functional canary")
     parser.add_argument("--measurement-workload", choices=("hot", "same-owner", "mixed", "cold", "fault"),
                         help="opt-in 120/300/60 capacity run with explicit lifecycle/fault evidence")
     parser.add_argument("--measurement-connections", type=int)
@@ -221,6 +225,8 @@ def parse_args() -> argparse.Namespace:
     if not args.docker_context or args.docker_context == "default":
         parser.error("an explicit non-default Docker context is required")
     if args.measurement_workload:
+        if args.canary_recovery or args.canary_connections is not None:
+            parser.error("canary controls cannot be combined with measurement")
         if args.legacy_loader_net_admin:
             parser.error("measurement never grants legacy NET_ADMIN")
         if args.loader_build_result == args.build_result:
@@ -234,6 +240,11 @@ def parse_args() -> argparse.Namespace:
             parser.error("candidate measurement requires a main calibration freeze file")
     elif args.measurement_connections is not None or args.measurement_rate_scale != 1.0:
         parser.error("measurement controls require measurement-workload")
+    if args.canary_connections is not None and not 1 <= args.canary_connections <= 10_000:
+        parser.error("canary-connections must be 1..10000")
+    if args.canary_recovery and (args.layout != "mixed" or args.canary_connections != 100 or
+                                 args.loader_build_result == args.build_result):
+        parser.error("recovery canary requires mixed layout, 100 connections and a separate common loader")
     if args.measurement_freeze_file is not None:
         if not args.measurement_workload:
             parser.error("freeze file only applies to measurement")
@@ -246,6 +257,52 @@ def write_private(path: Path, contents: str) -> None:
     with path.open("x", encoding="utf-8") as stream:
         os.fchmod(stream.fileno(), 0o600)
         stream.write(contents)
+
+
+def capture_runtime_provenance(*, docker: list[str], compose: list[str],
+                               services: dict[str, str], manifest: dict,
+                               layout: str, execute: object, psql: object) -> dict:
+    """Read only whitelisted machine, container and PostgreSQL settings."""
+    template = '{"nCPU":{{json .NCPU}},"memTotal":{{json .MemTotal}},"kernelVersion":{{json .KernelVersion}}}'
+    machine = json.loads(execute(docker + ["info", "--format", template],
+                                 "provenance.log", 30, record_stdout=False))
+    cpus, memory = machine.get("nCPU"), machine.get("memTotal")
+    if not isinstance(cpus, int) or not isinstance(memory, int) or cpus <= 0 or memory <= 0:
+        raise CanaryFailure("Docker machine envelope is unavailable")
+    machine["memoryGiB"] = memory / (1024 ** 3)
+    machine["matchesFormal4CPU16GiB"] = cpus == 4 and 15 <= machine["memoryGiB"] <= 17
+    boot_id = execute(compose + ["exec", "-T", "gateway", "cat",
+                                 "/proc/sys/kernel/random/boot_id"],
+                      "provenance.log", 15, record_stdout=False).strip()
+    checked_uuid(boot_id, "Docker host boot ID")
+    started = {}
+    for service in (*services.keys(), "gateway"):
+        container_id = execute(compose + ["ps", "-q", service], "provenance.log", 15,
+                               record_stdout=False).strip()
+        if not re.fullmatch(r"[0-9a-f]{64}", container_id):
+            raise CanaryFailure("project container identity unavailable")
+        timestamp = execute(docker + ["inspect", "--format", "{{.State.StartedAt}}", container_id],
+                            "provenance.log", 15, record_stdout=False).strip()
+        if not timestamp or timestamp.startswith("0001-"):
+            raise CanaryFailure("project container start time unavailable")
+        started[service] = {"containerID": container_id, "startedAt": timestamp}
+    names = ("max_connections", "shared_buffers", "work_mem", "synchronous_commit",
+             "fsync", "full_page_writes", "statement_timeout", "lock_timeout",
+             "track_io_timing", "shared_preload_libraries", "pg_stat_statements.track")
+    sql = "SELECT coalesce(json_object_agg(name, setting), '{}'::json)::text FROM pg_settings WHERE name IN (" + \
+          ",".join("'" + name + "'" for name in names) + ");"
+    postgres = {}
+    for service, database in services.items():
+        selected = json.loads(psql(service, database, sql, log="provenance-pg.log", timeout=15))
+        if any(name not in selected for name in names if name != "pg_stat_statements.track"):
+            raise CanaryFailure("PostgreSQL whitelist settings are incomplete")
+        postgres[service] = {name: selected.get(name) for name in names}
+    return {"machineEnvelope": machine, "bootID": boot_id, "projectContainers": started,
+            "postgresSettings": postgres, "fixtureCounts": {
+                "users": manifest["users"], "targetsPerConnection": manifest["targetsPerConnection"],
+                "owners": manifest["owners"], "rooms": manifest["layouts"][layout]["rooms"],
+                "ownerRoomCounts": manifest["layouts"][layout]["ownerRoomCounts"],
+                "ownerMembershipCounts": manifest["layouts"][layout]["ownerMembershipCounts"]}}
 
 
 def make_tls(private: Path, execute: object) -> Path:
@@ -476,13 +533,18 @@ def main() -> int:
         "IMV2GatewayLoadGenerator": verify_product(args.loader_products_dir,
             "IMV2GatewayLoadGenerator", loader_build_result["products"]["IMV2GatewayLoadGenerator"]),
     }
-    if args.measurement_workload in ("mixed", "fault") and not supports_recovery_loader(
+    if (args.canary_recovery or args.measurement_workload in ("mixed", "fault")) and not supports_recovery_loader(
         args.loader_products_dir / "IMV2GatewayLoadGenerator",
         require_timeout=args.measurement_workload == "fault"):
         raise MeasurementFailure("common loader lacks native recovery-batch dispatch support")
     manifest, rooms, users, fixture_info = verify_fixture(args.fixture_dir, args.layout)
-    scenario = RUNNER_ROOT / "IMV2/scripts/virtual-actor-fixtures/send-one-canary.json"
-    require_regular(scenario, "single-send scenario")
+    if args.canary_recovery and (manifest["owners"] != 2 or manifest["users"] < 100 or
+                                 manifest["targetsPerConnection"] < 2 or
+                                 min(manifest["layouts"]["mixed"]["ownerRoomCounts"]) == 0):
+        raise CanaryFailure("recovery canary requires two populated owners and 100 fixture users")
+    scenario_name = "capacity-recovery-canary-v1.json" if args.canary_recovery else "send-one-canary.json"
+    scenario = RUNNER_ROOT / "IMV2/scripts/virtual-actor-fixtures" / scenario_name
+    require_regular(scenario, "functional canary scenario")
     scenario_document = None
     scenario_detail = None
     if args.measurement_workload:
@@ -503,7 +565,8 @@ def main() -> int:
                           scenario_hash=scenario_hash,
                           loader_hash=products["IMV2GatewayLoadGenerator"])
     if args.preflight_only:
-        print("VA_CAPACITY_" + ("MEASUREMENT" if scenario_document else "CANARY") +
+        kind = "MEASUREMENT" if scenario_document else "RECOVERY_CANARY" if args.canary_recovery else "CANARY"
+        print("VA_CAPACITY_" + kind +
               "_PREFLIGHT_OK source=" + args.source_sha + " layout=" + args.layout)
         return 0
     old_umask = os.umask(0o077)
@@ -533,7 +596,7 @@ def main() -> int:
         "ownerMembershipCounts": manifest["layouts"][args.layout]["ownerMembershipCounts"],
         "roomCount": manifest["layouts"][args.layout]["rooms"],
         "scenarioSHA256": sha256(scenario) if scenario_document is None else None,
-        "mode": "measurement" if scenario_document else "canary",
+        "mode": "measurement" if scenario_document else ("recovery-canary" if args.canary_recovery else "canary"),
         "swiftImage": IMAGE, "postgresImage": POSTGRES_IMAGE,
         "legacyLoaderNETADMIN": args.legacy_loader_net_admin,
         "mainCalibrationFreezeSHA256": sha256(args.measurement_freeze_file)
@@ -573,7 +636,7 @@ def main() -> int:
         shutil.copytree(args.source_checkout / "IMV2/sql", private / "sql")
         shutil.copytree(args.source_checkout / "IMV2/local", private / "local")
         if scenario_document is None:
-            shutil.copy2(scenario, private / "send-one-canary.json")
+            shutil.copy2(scenario, private / scenario_name)
         else:
             write_private(private / "measurement-scenario.json",
                           json.dumps(scenario_document, indent=2, sort_keys=True) + "\n")
@@ -660,7 +723,10 @@ def main() -> int:
                 "schema": "im_v2"} for index, shard in enumerate(shards)], separators=(",", ":")),
         })
         connections = (args.measurement_connections if scenario_document is not None else
+                       args.canary_connections if args.canary_connections is not None else
                        min(manifest["users"], max(4, manifest["targetsPerConnection"] + 1)))
+        if connections > manifest["users"]:
+            raise CanaryFailure("requested canary connections exceed fixture users")
         services["loader"] = {
             "image": IMAGE,
             "command": (["stdbuf", "-oL", "-eL"] if scenario_document is not None else []) +
@@ -677,7 +743,7 @@ def main() -> int:
                         "--max-failure-percent", "0", "--recovery-batch-timeout-seconds",
                         "45" if args.measurement_workload == "fault" else "10", "--scenario",
                         "/run/va-scenario/measurement-scenario.json" if scenario_document is not None
-                        else "/run/va-scenario/send-one-canary.json"],
+                        else "/run/va-scenario/" + scenario_name],
             "volumes": [
                 {"type": "bind", "source": str(runtime), "target": "/run/va-products", "read_only": True},
                 {"type": "bind", "source": str(tls), "target": "/run/va-tls", "read_only": True},
@@ -748,6 +814,22 @@ def main() -> int:
                     raise MeasurementFailure("pg_stat_statements not installed on disposable database")
         phase = "gateway startup"
         execute(compose + ["up", "-d", "--wait", "--wait-timeout", "120", "gateway"], "startup.log", 180)
+        phase = "runtime provenance"
+        provenance = capture_runtime_provenance(
+            docker=docker, compose=compose, services=db_names, manifest=manifest,
+            layout=args.layout, execute=execute, psql=psql)
+        write_private(run / "runtime-provenance.json", json.dumps(provenance, indent=2,
+                      sort_keys=True) + "\n")
+        result["runtimeProvenanceSHA256"] = sha256(run / "runtime-provenance.json")
+        result["machineEnvelope"] = provenance["machineEnvelope"]
+        result["formalSamplingEligible"] = (scenario_document is not None and
+            provenance["machineEnvelope"]["matchesFormal4CPU16GiB"])
+        if scenario_document is not None and not provenance["machineEnvelope"]["matchesFormal4CPU16GiB"]:
+            raise MeasurementFailure("formal capacity measurement requires a 4 CPU / 16 GiB Docker host")
+        if scenario_document is not None and any(
+            settings["pg_stat_statements.track"] != "all"
+            for settings in provenance["postgresSettings"].values()):
+            raise MeasurementFailure("formal measurement PostgreSQL tracking is not set to all")
         if scenario_document is not None:
             phase = "measurement"
             result["measurement"] = run_measurement(
@@ -773,36 +855,85 @@ def main() -> int:
             result["passed"] = True
             phase = "measurement completed"
         else:
-            phase = "native one-send canary"
+            phase = "native recovery canary" if args.canary_recovery else "native one-send canary"
             execute(compose + ["run", "--rm", "--no-deps", "loader"], "loader.log", 180)
             report_file = run / "load-report.json"
             require_regular(report_file, "load report")
             report_file.chmod(0o600)
             report = json.loads(report_file.read_text())
             result["loadReportSHA256"] = sha256(report_file)
-            if not (report.get("authenticated") == connections and report.get("messagesSent") == 1
-                    and report.get("messagesAcknowledged") == 1 and report.get("workloadFailed") == 0
+            if not (report.get("authenticated") == connections and report.get("workloadFailed") == 0
                     and report.get("directRoomAttempted") == 0 and report.get("failed") == 0):
+                raise CanaryFailure("functional canary authentication or workload failed")
+            if args.canary_recovery:
+                if (report.get("messagesSent", 0) <= 0 or
+                        report.get("messagesSent") != report.get("messagesAcknowledged") or
+                        (report.get("scenarioDrain") or {}).get("drained") is not True):
+                    raise CanaryFailure("recovery canary left messages unresolved")
+                phases = report.get("scenarioPhases") or []
+                if len(phases) != 1 or phases[0].get("name") != "recovery_canary" or not phases[0].get("completed"):
+                    raise CanaryFailure("recovery canary did not complete its ten-second phase")
+                for family in ("roomSyncStateBatch", "roomLatestVisibleBatch"):
+                    batch = report.get(family) or {}
+                    if batch.get("completed", 0) <= 0 or batch.get("successfulRooms", 0) <= 0 or batch.get("rejected", 0) or batch.get("timedOut", 0):
+                        raise CanaryFailure("recovery canary did not verify both batch families")
+            elif report.get("messagesSent") != 1 or report.get("messagesAcknowledged") != 1:
                 raise CanaryFailure("native loader did not acknowledge exactly one preset-room send")
             phase = "durable SQL effect"
-            messages: list[tuple[int, str, str, int]] = []
+            messages: list[tuple[int, str, str, str, int]] = []
+            owner_counts: list[int] = []
             for index in range(owners):
                 service = f"owner{index:02d}"
-                raw = psql(service, db_names[service], "SELECT room_id::text || '|' || sender_user_id::text || '|' || room_sequence::text FROM im_v2.messages ORDER BY room_id, room_sequence;")
+                raw = psql(service, db_names[service], "SELECT message_id::text || '|' || room_id::text || '|' || sender_user_id::text || '|' || room_sequence::text FROM im_v2.messages ORDER BY room_id, room_sequence;")
+                owner_counts.append(len(raw.splitlines()))
                 for line in raw.splitlines():
-                    room, user, sequence = line.split("|")
-                    messages.append((index, room, user, int(sequence)))
-            if len(messages) != 1 or messages[0][1] not in rooms or messages[0][2] not in users or messages[0][3] != 1:
-                raise CanaryFailure("owner databases did not persist one authorized room message")
-            owner_index, room_id, _, sequence = messages[0]
-            actual_shard = psql("postgres", db_names["postgres"],
-                f"SELECT room_shard_id FROM im_v2.room_owner_routes WHERE room_id = '{room_id}'::uuid;").strip()
-            if actual_shard != shards[owner_index]:
-                raise CanaryFailure("message owner does not match authoritative room route")
-            result["durableEffect"] = {"roomID": room_id, "ownerIndex": owner_index,
-                                       "roomSequence": sequence, "messageRows": 1}
-            result["loader"] = {"connections": connections, "messagesSent": 1,
-                                "messagesAcknowledged": 1, "directRoomAttempted": 0}
+                    message_id, room, user, sequence = line.split("|")
+                    messages.append((index, message_id, room, user, int(sequence)))
+                room_count = int(psql(service, db_names[service], "SELECT count(*) FROM im_v2.rooms;").strip())
+                if room_count != manifest["layouts"][args.layout]["ownerRoomCounts"][index]:
+                    raise CanaryFailure("functional canary created an unplanned room")
+            if args.canary_recovery:
+                if len(messages) != report["messagesAcknowledged"] or len({m[1] for m in messages}) != len(messages):
+                    raise CanaryFailure("owner SQL effects differ from acknowledged recovery-canary sends")
+                allowed: dict[str, set[str]] = {}
+                with (args.fixture_dir / args.layout / "credentials.jsonl").open() as stream:
+                    for index, line in enumerate(stream):
+                        if index >= connections:
+                            break
+                        credential = json.loads(line)
+                        allowed[credential["userID"]] = set(credential["targetRoomIDs"])
+                if len(allowed) != connections:
+                    raise CanaryFailure("recovery canary credential mapping is incomplete")
+                sequences: dict[str, list[int]] = {}
+                for owner_index, _, room, user, sequence in messages:
+                    if room not in rooms or user not in users or room not in allowed.get(user, set()):
+                        raise CanaryFailure("recovery canary persisted an unauthorized room send")
+                    actual_shard = psql("postgres", db_names["postgres"],
+                        f"SELECT room_shard_id FROM im_v2.room_owner_routes WHERE room_id = '{room}'::uuid;").strip()
+                    if actual_shard != shards[owner_index]:
+                        raise CanaryFailure("recovery canary message owner differs from authoritative route")
+                    sequences.setdefault(room, []).append(sequence)
+                if any(sorted(values) != list(range(1, len(values) + 1)) for values in sequences.values()):
+                    raise CanaryFailure("recovery canary room sequences are not unique and contiguous")
+                result["durableEffect"] = {"messageRows": len(messages), "ownerMessageCounts": owner_counts,
+                                           "roomsWritten": len(sequences), "roomCardinalityUnchanged": True}
+                result["loader"] = {"connections": connections, "messagesSent": report["messagesSent"],
+                                    "messagesAcknowledged": report["messagesAcknowledged"],
+                                    "roomSyncStateSuccessfulRooms": report["roomSyncStateBatch"]["successfulRooms"],
+                                    "roomLatestVisibleSuccessfulRooms": report["roomLatestVisibleBatch"]["successfulRooms"],
+                                    "directRoomAttempted": 0}
+            else:
+                if len(messages) != 1 or messages[0][2] not in rooms or messages[0][3] not in users or messages[0][4] != 1:
+                    raise CanaryFailure("owner databases did not persist one authorized room message")
+                owner_index, _, room_id, _, sequence = messages[0]
+                actual_shard = psql("postgres", db_names["postgres"],
+                    f"SELECT room_shard_id FROM im_v2.room_owner_routes WHERE room_id = '{room_id}'::uuid;").strip()
+                if actual_shard != shards[owner_index]:
+                    raise CanaryFailure("message owner does not match authoritative room route")
+                result["durableEffect"] = {"roomID": room_id, "ownerIndex": owner_index,
+                                           "roomSequence": sequence, "messageRows": 1}
+                result["loader"] = {"connections": connections, "messagesSent": 1,
+                                    "messagesAcknowledged": 1, "directRoomAttempted": 0}
             result["passed"] = True
     except (CanaryFailure, MeasurementFailure, subprocess.SubprocessError, OSError, ValueError,
             KeyError, json.JSONDecodeError) as error:

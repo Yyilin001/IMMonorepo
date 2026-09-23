@@ -1,0 +1,29 @@
+{
+  "name": "va-capacity-recovery-functional-canary-v1",
+  "seed": 20260926,
+  "roomWarmupTimeoutSeconds": 90,
+  "completionDrainSeconds": 20,
+  "personas": [
+    {
+      "name": "preset_group_member",
+      "share": 1.0,
+      "sendWeight": 1.0,
+      "roomLogReadWeight": 0.0,
+      "syncPullWeight": 0.0,
+      "roomSyncStateBatchWeight": 1.0,
+      "roomLatestVisibleBatchWeight": 1.0
+    }
+  ],
+  "phases": [
+    {
+      "name": "recovery_canary",
+      "durationSeconds": 10,
+      "messagesPerSecond": 1,
+      "roomLogReadsPerSecond": 0,
+      "syncPullsPerSecond": 0,
+      "roomSyncStateBatchesPerSecond": 2,
+      "roomLatestVisibleBatchesPerSecond": 2,
+      "reconnectPercentPerMinute": 0
+    }
+  ]
+}
