@@ -12,11 +12,12 @@ import json
 import math
 from pathlib import Path
 import statistics
+import subprocess
 from typing import Any
 
 
 PHASES = ("warmup", "steady", "cooldown")
-MEASUREMENT_SEMANTICS_VERSION = "single-loader-phase-counters-v1"
+MEASUREMENT_SEMANTICS_VERSION = "single-loader-phase-counters-v2"
 HARNESS_FILE_KEYS = (
     "IMV2/scripts/test_v2_virtual_actor_capacity_canary.py",
     "IMV2/scripts/virtual_actor_capacity_measurement.py",
@@ -323,6 +324,14 @@ def phase_delta(before: dict, after: dict, samples: list[dict],
         raise MeasurementFailure("unknown restarted container in phase")
     if before["postgres"].keys() != after["postgres"].keys():
         raise MeasurementFailure("PostgreSQL service set changed within phase")
+    missing_containers = before["cgroup"].keys() - after["cgroup"].keys()
+    if after["cgroup"].keys() - before["cgroup"].keys():
+        raise MeasurementFailure("container set changed within phase")
+    loader_exit = after.get("containerExitStates", {}).get("loader")
+    if missing_containers and (missing_containers != {"loader"} or
+                               not isinstance(loader_exit, dict) or
+                               loader_exit.get("exitCode") != 0):
+        raise MeasurementFailure("required container counter missing within phase")
     sql: dict[str, dict] = {}
     for service, end in after["postgres"].items():
         start = before["postgres"][service]
@@ -361,6 +370,21 @@ def phase_delta(before: dict, after: dict, samples: list[dict],
                                "lifetimeCgroupMemoryPeakBytes": None if service in restarted_services else finish["memoryPeakBytes"],
                                "sampledPeakProcessRSSBytes": max(rss +
                                    [start["processRSSBytes"], finish["processRSSBytes"]])}
+    if missing_containers:
+        start = before["cgroup"]["loader"]
+        previous = [item["cgroup"]["loader"] for item in samples
+                    if "loader" in item["cgroup"]]
+        containers["loader"] = {
+            "cpuUsageUsec": None,
+            "cpuScope": "unavailable: loader exited before end snapshot",
+            "sampledPeakCgroupMemoryCurrentBytes": max(
+                item["memoryCurrentBytes"] for item in [start, *previous]),
+            "lifetimeCgroupMemoryPeakBytes": None,
+            "sampledPeakProcessRSSBytes": max(
+                item["processRSSBytes"] for item in [start, *previous]),
+            "sampleScope": "pre-exit samples only; final loader CPU/RSS unavailable",
+            "exitState": loader_exit,
+        }
     metrics = {}
     old_metrics = before["metrics"]
     for key, value in after["metrics"].items():
@@ -378,6 +402,7 @@ def phase_delta(before: dict, after: dict, samples: list[dict],
             "metricsAtStart": old_metrics, "metricsAtEnd": after["metrics"],
             "metricsSampledMaximum": sampled_metrics,
             "sampleCount": len(samples), "restartedServices": sorted(restarted_services),
+            "unavailableEndContainers": sorted(missing_containers),
             "sqlScope": "whole disposable databases including background and observer SQL",
             "memoryScope": "cgroup memory.current includes cache; memory.peak covers container lifetime; process RSS is sampled /proc/1/status VmRSS only (PostgreSQL backend children excluded)"}
 
@@ -393,20 +418,32 @@ PG_SNAPSHOT_SQL = """SELECT json_build_object(
 
 def capture_runtime(docker: list[str], container_ids: dict[str, str],
                     metrics_url: str, execute: Any,
-                    *, excluded_services: set[str] | None = None) -> dict:
+                    *, excluded_services: set[str] | None = None,
+                    allow_stopped_loader: bool = False) -> dict:
     """Sample cgroup CPU/memory, PID 1 RSS and private Gateway metrics."""
     import time
 
     capture_started = time.monotonic_ns()
     cgroup = {}
+    exit_states = {}
     script = "awk 'BEGIN{ORS=\";\"} {print $1, $2}' /sys/fs/cgroup/cpu.stat; " \
              "printf '\\n'; cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.peak; " \
              "awk '/^VmRSS:/ {printf \"%.0f\\n\", $2 * 1024; exit}' /proc/1/status"
     for service, container_id in container_ids.items():
         if service in (excluded_services or set()):
             continue
-        raw = execute(docker + ["exec", container_id, "sh", "-c", script],
-                      "measurement-containers.log", 15, record_stdout=False)
+        try:
+            raw = execute(docker + ["exec", container_id, "sh", "-c", script],
+                          "measurement-containers.log", 15, record_stdout=False)
+        except subprocess.CalledProcessError:
+            if service != "loader" or not allow_stopped_loader:
+                raise
+            state = json.loads(execute(docker + ["inspect", "--format", "{{json .State}}", container_id],
+                                       "measurement-containers.log", 15, record_stdout=False))
+            if state.get("Running") is not False or state.get("ExitCode") != 0:
+                raise MeasurementFailure("loader cgroup unavailable without clean container exit")
+            exit_states["loader"] = {"exitCode": 0, "finishedAt": state.get("FinishedAt")}
+            continue
         cgroup[service] = parse_cgroup(raw)
     # Production configuration forbids a non-loopback metrics listener. The
     # pinned Swift image contains Python3; scrape inside the Gateway namespace.
@@ -424,13 +461,16 @@ def capture_runtime(docker: list[str], container_ids: dict[str, str],
     return {"monotonicNs": capture_finished, "captureStartedMonotonicNs": capture_started,
             "captureDurationSeconds": (capture_finished - capture_started) / 1e9,
             "wallTime": time.time(),
-            "cgroup": cgroup, "cgroupUnavailableServices": sorted(excluded_services or set()),
+            "cgroup": cgroup,
+            "cgroupUnavailableServices": sorted((excluded_services or set()) | exit_states.keys()),
+            "containerExitStates": exit_states,
             "metrics": metrics}
 
 
 def capture_snapshot(psql: Any, docker: list[str], compose: list[str],
                      services: dict[str, str], container_ids: dict[str, str],
-                     metrics_url: str, execute: Any) -> dict:
+                     metrics_url: str, execute: Any,
+                     *, allow_stopped_loader: bool = False) -> dict:
     """Read each disposable DB once at a phase boundary, without resetting it."""
     import time
 
@@ -442,7 +482,8 @@ def capture_snapshot(psql: Any, docker: list[str], compose: list[str],
             postgres[service] = json.loads(raw)
         except json.JSONDecodeError as error:
             raise MeasurementFailure("invalid pg_stat_statements snapshot") from error
-    runtime = capture_runtime(docker, container_ids, metrics_url, execute)
+    runtime = capture_runtime(docker, container_ids, metrics_url, execute,
+                              allow_stopped_loader=allow_stopped_loader)
     runtime["postgres"] = postgres
     runtime["captureStartedMonotonicNs"] = started
     runtime["captureDurationSeconds"] = (runtime["monotonicNs"] - started) / 1e9

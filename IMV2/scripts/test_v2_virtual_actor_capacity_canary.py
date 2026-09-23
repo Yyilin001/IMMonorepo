@@ -465,7 +465,8 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
                 raise MeasurementFailure("measurement loader exceeded finite deadline")
             if cooldown_deadline is not None and "end" not in boundaries and time.monotonic() >= cooldown_deadline:
                 boundaries["end"] = capture_snapshot(psql, docker, compose, services, containers,
-                                                      metrics_url, execute)
+                                                      metrics_url, execute,
+                                                      allow_stopped_loader=True)
             try:
                 item = events.get(timeout=0.5)
             except queue.Empty:
@@ -496,7 +497,8 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
             if current and time.monotonic() >= next_sample:
                 observations.append({"phase": current, **capture_runtime(
                     docker, containers, metrics_url, execute,
-                    excluded_services={"owner00"} if fault and fault.stopped else None)})
+                    excluded_services={"owner00"} if fault and fault.stopped else None,
+                    allow_stopped_loader=current == "cooldown")})
                 next_sample = time.monotonic() + 5
         if expected:
             raise MeasurementFailure("measurement ended before all three phases")

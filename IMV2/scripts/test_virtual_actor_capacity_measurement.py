@@ -4,12 +4,13 @@
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
 from virtual_actor_capacity_measurement import (
     HARNESS_FILE_KEYS, MEASUREMENT_SEMANTICS_VERSION, MeasurementFailure,
-    create_scenario, freeze_calibrations, parse_cgroup,
+    capture_runtime, create_scenario, freeze_calibrations, parse_cgroup,
     parse_prometheus, phase_delta, supports_recovery_loader, verify_freeze,
 )
 
@@ -87,6 +88,54 @@ class MeasurementTests(unittest.TestCase):
         after["postgres"]["postgres"]["statsReset"] = "changed"
         with self.assertRaises(MeasurementFailure):
             phase_delta(before, after, samples)
+
+    def test_cleanly_exited_loader_only_truncates_its_own_tail(self) -> None:
+        exit_code = [0]
+        def execute(command, log, timeout, record_stdout=False):
+            if command[1:3] == ["exec", "loader-id"]:
+                raise subprocess.CalledProcessError(1, command)
+            if command[1:3] == ["inspect", "--format"]:
+                return json.dumps({"Running": False, "ExitCode": exit_code[0],
+                                   "FinishedAt": "2026-09-24T00:00:00Z"})
+            if command[1:3] == ["exec", "gateway-id"] and "python3" in command:
+                return "gateway_requests_total 8\n"
+            return "usage_usec 300;user_usec 200;system_usec 100;\n20\n40\n15\n"
+        runtime = capture_runtime(["docker"], {"gateway": "gateway-id", "loader": "loader-id"},
+                                  "http://127.0.0.1:9464/metrics", execute,
+                                  allow_stopped_loader=True)
+        self.assertEqual(runtime["cgroupUnavailableServices"], ["loader"])
+        self.assertEqual(runtime["containerExitStates"]["loader"]["exitCode"], 0)
+        self.assertEqual(runtime["cgroup"]["gateway"]["cpuUsageUsec"], 300)
+        self.assertNotIn("loader", runtime["cgroup"])
+        before = {"postgres": {"postgres": {"statsReset": "same", "statements": []}},
+                  "cgroup": {"gateway": {"cpuUsageUsec": 100, "memoryCurrentBytes": 10,
+                                          "memoryPeakBytes": 20, "processRSSBytes": 7},
+                             "loader": {"cpuUsageUsec": 100, "memoryCurrentBytes": 20,
+                                        "memoryPeakBytes": 30, "processRSSBytes": 15}},
+                  "metrics": {"gateway_requests_total": 3}}
+        after = {"postgres": {"postgres": {"statsReset": "same", "statements": []}},
+                 **runtime}
+        sampled = [{"cgroup": {"gateway": runtime["cgroup"]["gateway"],
+                                "loader": {"cpuUsageUsec": 250, "memoryCurrentBytes": 25,
+                                           "memoryPeakBytes": 35, "processRSSBytes": 18}},
+                    "metrics": {"gateway_requests_total": 6}}]
+        delta = phase_delta(before, after, sampled)
+        self.assertEqual(delta["containers"]["gateway"]["cpuUsageUsec"], 200)
+        self.assertIsNone(delta["containers"]["loader"]["cpuUsageUsec"])
+        self.assertEqual(delta["containers"]["loader"]["sampledPeakProcessRSSBytes"], 18)
+        self.assertEqual(delta["unavailableEndContainers"], ["loader"])
+        self.assertEqual(delta["metricsCounterDeltas"]["gateway_requests_total"], 5)
+        after["containerExitStates"]["loader"]["exitCode"] = 1
+        with self.assertRaises(MeasurementFailure):
+            phase_delta(before, after, sampled)
+        with self.assertRaises(subprocess.CalledProcessError):
+            capture_runtime(["docker"], {"gateway": "gateway-id", "loader": "loader-id"},
+                            "http://127.0.0.1:9464/metrics", execute)
+        exit_code[0] = 1
+        with self.assertRaises(MeasurementFailure):
+            capture_runtime(["docker"], {"gateway": "gateway-id", "loader": "loader-id"},
+                            "http://127.0.0.1:9464/metrics", execute,
+                            allow_stopped_loader=True)
 
     def test_metrics_and_cgroup_parser(self) -> None:
         self.assertEqual(parse_prometheus("# HELP x y\nx 2\ny{kind=\"a\"} 3\n"),
