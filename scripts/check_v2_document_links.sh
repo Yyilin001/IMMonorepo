@@ -5,6 +5,12 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 status=0
 
+# Process substitution does not propagate git's failure through set -e. Keep
+# an unreadable worktree mount from passing after checking zero documents.
+markdown_manifest="$(mktemp)"
+trap 'rm -f "${markdown_manifest}"' EXIT
+git -C "${repo_root}" ls-files -z '*.md' > "${markdown_manifest}"
+
 while IFS= read -r -d '' document; do
   [[ -f "${repo_root}/${document}" ]] || continue
   while IFS= read -r target; do
@@ -28,7 +34,7 @@ while IFS= read -r -d '' document; do
       }
     ' "${repo_root}/${document}"
   )
-done < <(git -C "${repo_root}" ls-files -z '*.md')
+done < "${markdown_manifest}"
 
 retired_references=(
   implementation-review-and-roadmap.md
