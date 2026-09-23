@@ -15,6 +15,10 @@
       "owner": "V1"
     },
     {
+      "path": "IMV2/scripts/assess_v2_virtual_actor_capacity.py",
+      "owner": "V1"
+    },
+    {
       "path": "IMV2/scripts/current_v2_schema_contract.sql",
       "owner": "R1"
     },
@@ -72,6 +76,10 @@
     },
     {
       "path": "IMV2/scripts/test_v2_virtual_actor_multihost_probe.py",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/test_virtual_actor_capacity_assessment.py",
       "owner": "V1"
     },
     {
@@ -1445,6 +1453,10 @@
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomActorMetricsTests.swift",
       "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomHostPostgresCancellationMaintenanceTests.swift",
+      "owner": "V1"
     },
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomHostPostgresDrainTests.swift",
