@@ -26,6 +26,8 @@ import uuid
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE = "swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6"
 PRODUCTS = ["IMV2AccountServerApp", "IMV2ServerApp", "IMV2OperatorServerApp", "IMV2LocalGatewayProbe"]
+PRODUCT_INPUTS = ["IMV2Server/Sources", "IMV2Server/Vendor", "IMV2Server/Package.swift",
+                  "IMV2Server/Package.resolved", "IMV2Core", "IMV2Compression", "IMV2/sql"]
 
 
 def main() -> int:
@@ -40,7 +42,7 @@ def main() -> int:
     parser.add_argument("--products-dir", type=Path,
                         help="Read-only directory containing prebuilt Linux Release products")
     parser.add_argument("--products-metadata", type=Path,
-                        help="JSON with revision, packageResolvedSHA256 and per-product SHA-256")
+                        help="JSON with sourceSHA, lockfileSHA256 and per-product SHA-256")
     args = parser.parse_args()
     if (args.products_dir is None) != (args.products_metadata is None):
         parser.error("--products-dir and --products-metadata must be provided together")
@@ -94,14 +96,26 @@ def main() -> int:
             result["productSource"] = "built-in-this-run"
         else:
             metadata = json.loads(args.products_metadata.expanduser().resolve().read_text())
-            if metadata.get("revision") != result["revision"] or metadata.get("packageResolvedSHA256") != resolved_sha:
-                raise RuntimeError("prebuilt products do not match checkout revision and lockfile")
+            binary_revision = metadata.get("sourceSHA", metadata.get("revision"))
+            binary_lock = metadata.get("lockfileSHA256", metadata.get("packageResolvedSHA256"))
+            if not isinstance(binary_revision, str) or len(binary_revision) != 40 or \
+                    binary_lock != resolved_sha or metadata.get("passed") is False or \
+                    (metadata.get("image") is not None and metadata["image"] != IMAGE):
+                raise RuntimeError("prebuilt products have invalid source, lockfile or image metadata")
+            if subprocess.run(["git", "cat-file", "-e", binary_revision + "^{commit}"],
+                    cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+                raise RuntimeError("prebuilt product source commit is unavailable locally")
+            if subprocess.run(["git", "diff", "--quiet", binary_revision, "HEAD", "--", *PRODUCT_INPUTS],
+                    cwd=ROOT).returncode != 0 or subprocess.run(
+                        ["git", "diff", "--quiet", "HEAD", "--", *PRODUCT_INPUTS], cwd=ROOT).returncode != 0:
+                raise RuntimeError("prebuilt products differ from current business source")
             expected_hashes = metadata.get("products")
             if not isinstance(expected_hashes, dict) or any(
                     not isinstance(expected_hashes.get(name), str) for name in PRODUCTS):
                 raise RuntimeError("prebuilt product metadata is incomplete")
             source_dir = args.products_dir.expanduser().resolve()
             result["productSource"] = "verified-prebuilt"
+            result["productSourceRevision"] = binary_revision
         runtime = private / "runtime"
         runtime.mkdir()
         result["products"] = {}
