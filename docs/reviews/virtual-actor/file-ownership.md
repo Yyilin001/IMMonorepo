@@ -1,6 +1,6 @@
 # Room Virtual Actor file ownership, C0 preparation
 
-The [machine-readable file list](file-ownership.json) assigns one proposed edit owner to each of **172 existing paths**. It is an explicit path list against the clean business base, rather than a directory glob. The [static checker](../../../scripts/check_v2_virtual_actor_inventory.py) rejects duplicate/missing paths and cross-checks the [writer evidence claims](writer-evidence.json). This is a planning freeze for future isolated worktrees, not evidence that every path needs editing. Files not listed remain outside the Room Virtual Actor scope unless the integration owner explicitly assigns them.
+The [machine-readable file list](file-ownership.json) assigns one edit owner to each of **242 existing and implemented paths**. It is an explicit path list against the clean business base, rather than a directory glob. The [static checker](../../../scripts/check_v2_virtual_actor_inventory.py) rejects duplicate/missing paths and cross-checks the [writer evidence claims](writer-evidence.json). This is a planning freeze for future isolated worktrees, not evidence that every path needs editing. Files not listed remain outside the Room Virtual Actor scope unless the integration owner explicitly assigns them.
 
 | Owner | Existing-file boundary | New-file boundary |
 | --- | --- | --- |
@@ -30,3 +30,7 @@ The [machine-readable file list](file-ownership.json) assigns one proposed edit 
 `PostgresV2MediaStore.swift` and provider upload/session stores are media authority, outside D5's ownership; D5 owns message-locator visibility and receives the extracted room adapter from C0. `PostgresV2RoomReadWatermark.swift` belongs to D3 because it directly updates `room_read_receipts`. `V2RoutedContentReviewWorker.swift` belongs to D6 worker adapter although most routed wrappers belong to I1.
 
 New filenames above are namespace reservations. Before parallel editing, C0 must publish its compileable contract SHA and update the JSON if an extraction produces actual filenames. A file transfer is one explicit ownership edit and handoff, not two packages writing the same physical file. This inventory does not modify any manifest, schema, production code or review index.
+
+## 实施期交接
+
+已落成的 ActorContracts、Runtime、Cluster、RoomDomain、RoomCoordination、RoomMaintenance 与 RoomClients 文件现登记在 JSON。`PostgresV2RoomWriteStore.swift` 仍由 C0/main 唯一编辑，D1/D5 通过 scoped primitive 请求接线。D6 housekeeping 拆分已交付；I1/main 负责总 Request/Auth/Factory/App 组合，领域代理只编辑明确分配的新门面文件。目录范围只是说明，实际归属以逐文件 JSON 为准。

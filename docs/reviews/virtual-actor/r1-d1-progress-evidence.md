@@ -26,7 +26,7 @@ swift test --package-path IMV2Server --disable-automatic-resolution -j 2 \
 
 `/tmp/imv2-va-d1-final-tests.log`：退出 0，6 项测试通过，其中 mutation 测试包含 edit/withdraw/reaction 三个参数场景。真实 SQL 覆盖旧 token 的新发送及重放拒绝、继任 token 恢复原回执、三种 mutation 的重放栅栏、跨 epoch 房间额度隔离、重复退款不生效。三项 transaction/scope 单元测试独立覆盖 COMMIT 阶段不确定性分类与未授予 authority 拒绝。
 
-`V2RoomMessagingExecutor` 已提供 concrete send/edit/withdraw/reaction 执行接口，准备发送时保留服务器生成的 ID、时刻和 token；typed domain error 通过闭合集合传输。真实 host 共享发送 batcher、完整 RoomExecutor、special-account audit、forward/export 和 App 接线仍待完成，不能将当前标量 executor 当成性能验收结果。
+`V2RoomMessagingExecutor` 已提供 concrete send/edit/withdraw/reaction 执行接口，准备发送时保留服务器生成的 ID、时刻和 token；typed domain error 通过闭合集合传输。共享发送 batcher、具体 RoomExecutor 与 special-account audit 的后续实现/真实 SQL 结果见[组合进展](i1-composition-progress-evidence.md)；远端业务链路与 App 接线仍待完成，不能将局部 executor 测试当成性能验收结果。
 
 随后用相同真实数据库环境运行 `PostgresV2RoomActivationTests|V2RoomActivationHostTests|V2ActorMessaging|V2RoomTransactionAttemptTests` 及上述三个消息 SQL 测试，退出 0：Server 21 项、Host 19 项、Contracts 2 项通过。mutation 三个场景现经 concrete executor 执行；新增闭集错误往返与基础设施错误不降格测试。R1 新增 deferred COMMIT trigger 故障注入：事务体成功、COMMIT 报错时返回 typed lease outcomeUnknown，不发布 ready；注入本身会回滚，不能冒充“已提交但 ACK 丢失”的网络证据。日志：`/Users/yyl/.codex/virtual-actor-builds/d1/current-native-postgres-tests.log`。
 
