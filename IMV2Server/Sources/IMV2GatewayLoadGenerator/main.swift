@@ -798,7 +798,7 @@ private struct LoadRun {
         let started = NIODeadline.now()
         let connection = ClientBootstrap(group: eventLoop)
             .connectTimeout(.seconds(10))
-            .channelOption(ChannelOptions.socketOption(.tcp_nodelay), value: 1)
+            .channelOption(ChannelOptions.tcpOption(.tcp_nodelay), value: 1)
             .channelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
                     try channel.pipeline.syncOperations.addHandler(
