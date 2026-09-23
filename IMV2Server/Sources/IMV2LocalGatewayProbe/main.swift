@@ -10,6 +10,8 @@ import IMV2Server
 /// 它用于证明：通过本地 HTTPS 账号边缘签发的凭据，能够在真实的 TLS/protobuf 网关上完成认证
 /// 并交换普通私聊命令。它不暴露任何网关路由，不持久化凭据，
 /// 也不会打印身份或凭据材料。
+/// `sendRoomMediaMessage` 另要求 EXPECTED_ROOM_ID、MEDIA_ID、CLIENT_MESSAGE_ID；
+/// 它只输出接受结果的 room/message ID，供外部 smoke 在 SQL 中校验唯一消息与媒体归属。
 @main
 enum IMV2LocalGatewayProbe {
     static func main() async throws {
@@ -52,6 +54,7 @@ private struct Configuration: Sendable {
         case authenticate
         case sendDirectMessage
         case receiveDirectMessage
+        case sendRoomMediaMessage
     }
 
     let accessToken: String
@@ -60,6 +63,8 @@ private struct Configuration: Sendable {
     let targetUserID: UserID?
     let expectedRoomID: RoomID?
     let expectedMessageID: MessageID?
+    let mediaID: MediaID?
+    let clientMessageID: ClientMessageID?
     let host: String
     let port: Int
     let serverName: String
@@ -79,17 +84,27 @@ private struct Configuration: Sendable {
         targetUserID = try environment["IM_V2_GATEWAY_PROBE_TARGET_USER_ID"].map(UserID.init)
         expectedRoomID = try environment["IM_V2_GATEWAY_PROBE_EXPECTED_ROOM_ID"].map(RoomID.init)
         expectedMessageID = try environment["IM_V2_GATEWAY_PROBE_EXPECTED_MESSAGE_ID"].map(MessageID.init)
+        mediaID = try environment["IM_V2_GATEWAY_PROBE_MEDIA_ID"].map(MediaID.init)
+        clientMessageID = try environment["IM_V2_GATEWAY_PROBE_CLIENT_MESSAGE_ID"].map(ClientMessageID.init)
         switch mode {
         case .authenticate:
-            guard targetUserID == nil, expectedRoomID == nil, expectedMessageID == nil else {
+            guard targetUserID == nil, expectedRoomID == nil, expectedMessageID == nil,
+                  mediaID == nil, clientMessageID == nil else {
                 throw ProbeError.invalidConfiguration
             }
         case .sendDirectMessage:
-            guard targetUserID != nil, expectedRoomID == nil, expectedMessageID == nil else {
+            guard targetUserID != nil, expectedRoomID == nil, expectedMessageID == nil,
+                  mediaID == nil, clientMessageID == nil else {
                 throw ProbeError.invalidConfiguration
             }
         case .receiveDirectMessage:
-            guard targetUserID == nil, expectedRoomID != nil, expectedMessageID != nil else {
+            guard targetUserID == nil, expectedRoomID != nil, expectedMessageID != nil,
+                  mediaID == nil, clientMessageID == nil else {
+                throw ProbeError.invalidConfiguration
+            }
+        case .sendRoomMediaMessage:
+            guard targetUserID == nil, expectedRoomID != nil, expectedMessageID == nil,
+                  mediaID != nil, clientMessageID != nil else {
                 throw ProbeError.invalidConfiguration
             }
         }
@@ -236,6 +251,9 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
                 try sendOpenDirectRoom(context: context)
             case .receiveDirectMessage:
                 try sendRoomEventPull(context: context)
+            case .sendRoomMediaMessage:
+                guard let roomID = configuration.expectedRoomID else { throw ProbeError.invalidConfiguration }
+                try sendMessage(roomID: roomID, context: context)
             }
 
         case .awaitingDirectRoom(let requestID):
@@ -311,9 +329,12 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
         request.protocolVersion = IMV2ProtocolVersion.current
         request.sendMessage = .init()
         request.sendMessage.roomID = roomID.rawValue
-        request.sendMessage.clientMessageID = UUID().uuidString
+        request.sendMessage.clientMessageID = configuration.clientMessageID?.rawValue ?? UUID().uuidString
         request.sendMessage.content = .init()
         request.sendMessage.content.text = Configuration.messageText
+        if let mediaID = configuration.mediaID {
+            request.sendMessage.content.mediaIds = [mediaID.rawValue]
+        }
         stage = .awaitingMessageAcceptance(requestID, roomID)
         try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
     }
