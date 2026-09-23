@@ -1557,6 +1557,10 @@
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomCreditRefillFencePostgresTests.swift",
       "owner": "V1"
+    },
+    {
+      "path": "docs/reviews/virtual-actor/g5-credit-refill-fence-evidence.md",
+      "owner": "V1"
     }
   ]
 }
