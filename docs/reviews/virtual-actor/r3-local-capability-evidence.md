@@ -41,4 +41,4 @@ swift test --package-path IMV2Server \
 
 首轮 `targeted-c2214c1c.log` 保留了 25 项中的 5 个 fixture 失败：4 项 runtime 容量关系配置无效，1 项测试 byte 上限小于普通编码请求；修正的是测试夹具，不是生产限额。中间的 `targeted-cf8acccf.log`、`targeted-6b62da91.log` 保留了替换拒绝错误类型与在途断言观测方式的修正过程。以上日志均位于 `/Users/yyl/.codex/virtual-actor-builds/local-capability-native/`。
 
-本记录不代表 Linux 完整 gate 或新鲜 hot 性能候选通过；两者仍需在最终冻结源码上另行执行和记录。
+随后，冻结源码 `d56232592b05c94d6e933534a985159ec14ff673` 的[一次完整 Linux required run](g5-linux-regression-evidence.md)执行了 ActorCluster **32 tests / 5 suites**，其中本文件的 Node-minted local capability suite 六项均实际 started/passed。该 run 的 suite/cleanup 退出 0；原 metadata 的 parser 误报与原日志的独立重校验见链接记录。`c2214c1c` 的七产品 Linux Release 构建也已通过，且与 `d5623259` 的业务源码、Package/lock 与 SQL 路径零差异；构建来源和核对范围亦见链接记录。这些是正确性及构建证据，不是新鲜 hot 性能候选通过；正式相对性能仍待独立验收。
