@@ -61,3 +61,6 @@ For the remaining workload orchestration, each steady phase must sustain its pla
 
 
 The first hot candidate completed functional and measurement checks but exceeded the unchanged SQL and Gateway CPU limits. The campaign is stopped for production optimization; candidate 03 was retained only for diagnosis. See the [measured regression and SQL attribution](g5-hot-performance-regression.md). No candidate acceptance is claimed.
+
+
+After identifying the first hot candidate's production regression, the unexecuted four-workload driver was updated to require an explicit immutable candidate checkout, SHA and product build, so subsequent workloads cannot silently retain the superseded candidate. It also applies the existing assessor after every completed interleaved sample and stops immediately on an exceeded frozen threshold. These are source-selection and stop-timing changes, not new budgets. The prepared driver SHA-256 is `366f85d5a9541280ab358e7c7ccfd6a607583da03e0bb4462b79a06dcca941c8`; its proposed optimized-candidate input plan is `/Users/yyl/.codex/virtual-actor-builds/capacity-remaining-workloads-timeouts-plan-20260924.json`. The earlier `30c03f0e…` driver is retained as `run-capacity-workload-campaign-pre-optimization.py`; it and its old candidate plan were never executed.

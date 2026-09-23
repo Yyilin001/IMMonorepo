@@ -37,3 +37,6 @@ The external resumable driver had already begun interleaved candidate 03 when ca
 
 
 The narrow production correction is committed as `fdf6838e`: timeout setup is now two SQL calls per scalar Actor write path instead of nine (one at physical transaction entry, one at the activation fence). A PostgreSQL test now reads all three distinct timeout settings inside the transaction. At this entry, the new Linux Release build and native PostgreSQL regression suites are in progress; no optimized-candidate performance result exists yet.
+
+
+Native real-PostgreSQL regression completed on the identical production patch (`def0b97b` agent commit, integrated as `fdf6838e`): `V2RoomActivationTransactionDeadlineTests` **1/1**, `V2RoomCreditRefillFencePostgresTests` **2/2**, and `V2SharedRoomSendCommitAckLossTests` **1/1**, all exit 0 and run serially against a fresh task-only PostgreSQL 16. Logs are in `/Users/yyl/.codex/virtual-actor-builds/p0/timeout-query-native/`. The test schema and dedicated database container were removed. Linux Release build and unchanged-budget performance retest remain pending at this entry.
