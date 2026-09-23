@@ -87,3 +87,7 @@ Runtime 现在立即派发已排队的连续发送，物理 owner batcher 消耗
 Gateway RoomRef 入口不再占用等待 Host 的数据库许可。普通房间读写在物理 Host SQL 边界准入，send/receipt/recovery 按实际批次准入，同库 forward 在两个 reservation 获批后准入。Account 调用与 Gateway 调用使用同一 Host 约束。receipt 等待许可沿用原调用截止时间；较短策略等待超时报 overload，调用期限耗尽报 deadlineExceeded。
 
 根工作区 `/tmp/imv2-va-final-admission-wiring-verified.log` 退出 0：4 suites、76 tests，包含真实 PostgreSQL 成功 COMMIT 丢 ACK。测试代理观察 PostgreSQL 的 COMMIT CommandComplete 后截断回执，生产 scoped send 返回 V2RoomTransactionOutcomeUnknown；独立连接确认消息/completion 各一行，原操作 ID 重放返回原 messageID，事件仍一行。新 ACK-loss suite 已显式接入 CI 与隔离 Linux 数据库环境。该结果不代替多房间 shared-batch 丢回执和完整进程故障矩阵。
+
+## owner 激活身份容量
+
+`19046774` 将所有 send lanes 的 activation token 容量合并为 owner 共享硬上限。单 lane 与多 lane 都保留已完成身份，直到 Host 清理对应 credit pool 后 exact retire；未知结果和仍在执行的退役身份继续占位，旧 epoch 不释放新 token。独立 native 新容量测试 4/4、granted 回归 20/20 通过。deadline 回归分别验证 Host 合批窗口先到时执行 SQL、调用截止先到时返回 typed 拒绝且不进入 SQL；没有放宽生产截止时间。Linux 集成结果随后登记。

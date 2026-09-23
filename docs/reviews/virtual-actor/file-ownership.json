@@ -1427,6 +1427,10 @@
       "owner": "I1"
     },
     {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2ShardedSendActivationCapacityTests.swift",
+      "owner": "D1"
+    },
+    {
       "path": "IMV2Server/Tests/VirtualActorCompatibilityProbe/compose.yml",
       "owner": "I1"
     },
