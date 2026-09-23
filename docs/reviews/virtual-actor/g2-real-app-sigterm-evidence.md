@@ -79,7 +79,27 @@ patch improved that latency. The exact internal RPC stage consuming the first
 The runner now waits up to 45 seconds per probe within the same 120-second
 total window. It records each attempt's duration and outcome, and, if a probe
 times out, signals its exact container process and waits for both remote and
-local execution to settle before starting another attempt. This harness
-revision has passed static validation but has not been used for another App
-stack run. The earlier diagnostic in which Gateway was restarted before
-replay is deliberately excluded from acceptance evidence.
+local execution to settle before starting another attempt.
+
+The frozen `171b34ef59c5345709cd6260d081233d7ae89a52` build includes this
+runner and the three-second locator-only lookup bound. One complete run from
+that exact checkout and matching Linux Release products passed:
+`/Users/yyl/.codex/virtual-actor-builds/application/run-70ee9891f1594b18aa7e543deca39cc9/result.json`.
+Actor Host backend 116 at `172.20.0.5/32` was blocked by admission-lock
+holder 223 when SIGTERM was sent at Unix time `1790183747.654`; after unlock,
+the one message and completion were durable, the Host exited with code 0,
+and its epoch-1 lease holder was cleared. The restarted Host reacquired at
+epoch 2. The original Gateway process stayed running. The first same-ID
+replay probe ended nonzero after `3.258` seconds (Gateway logged a 3003 ms
+`UNAVAILABLE` send); the second returned the original message ID after
+`0.246` seconds. Both remote probe processes were observed settled without
+test signals. Total `replayWaitSeconds` was `4.009`, with one durable message
+and completion, zero `authenticatedConnectionLimit` and `Missing Member`
+log entries, all Account/Gateway/Operator and HTTP checks passed, and the
+private Compose project cleaned successfully.
+
+The `4.009` seconds is the harness's end-to-end observation, including probe
+launch, protocol exchange, retry pause, and process cleanup. It is not an
+isolated service recovery latency measurement. The earlier diagnostic in
+which Gateway was restarted before replay is excluded from acceptance
+evidence.
