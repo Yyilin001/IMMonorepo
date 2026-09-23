@@ -46,6 +46,7 @@ class AssessmentTests(unittest.TestCase):
                 "metricsCounterDeltas": {}, "metricsSampledMaximum": {}}
             phase_path = root / "measurement-steady.json"
             result = {"passed": True, "mode": "measurement", "source": {"sourceSHA": MAIN},
+                      "formalSamplingEligible": True,
                       "measurement": {"scenario": {"workload": "hot"}, "phaseFiles": {}}}
 
             def save():
@@ -56,6 +57,12 @@ class AssessmentTests(unittest.TestCase):
             save()
             self.assertEqual(read_run(root)["measurements"]["acceptedUnitsPerSecond"], 100)
             self.assertIsNone(read_run(root)["meanPhysicalSendBatchSize"])
+            result["formalSamplingEligible"] = False
+            save()
+            with self.assertRaises(MeasurementFailure):
+                read_run(root)
+            result["formalSamplingEligible"] = True
+            save()
             phase_path.write_text(phase_path.read_text() + " ")
             with self.assertRaises(MeasurementFailure):
                 read_run(root)

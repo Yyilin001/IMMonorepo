@@ -10,7 +10,7 @@ import math
 import statistics
 from pathlib import Path
 
-from virtual_actor_capacity_measurement import MeasurementFailure, freeze_calibrations
+from virtual_actor_capacity_measurement import MeasurementFailure, freeze_calibrations, verify_freeze
 
 
 MAIN = "f1cdd78d6a21bf0ae23da627c0710c65115236aa"
@@ -44,6 +44,7 @@ def read_run(directory: Path) -> dict:
     result = json.loads((directory / "result.json").read_text())
     phase_file = directory / "measurement-steady.json"
     if (result.get("passed") is not True or result.get("mode") != "measurement" or
+            result.get("formalSamplingEligible") is not True or
             result.get("measurement", {}).get("phaseFiles", {}).get("steady") != sha(phase_file)):
         raise MeasurementFailure("unverified measurement result")
     phase = json.loads(phase_file.read_text())
@@ -173,6 +174,19 @@ def main() -> None:
                 result["productSHA256"]["IMV2GatewayLoadGenerator"] != frozen["commonLoaderSHA256"] or
                 result["mainCalibrationFreezeSHA256"] != sha(args.freeze)):
                 raise MeasurementFailure("assessed run does not match frozen provenance")
+            scenario = result["measurement"]["scenario"]
+            harness = result["harness"]
+            if harness.get("trackedClean") is not True or any(
+                scenario.get(key) != frozen.get(key) for key in
+                ("loaderWorkers", "connectionsPerWorker", "latencyScope", "measurementSemanticsVersion")
+            ):
+                raise MeasurementFailure("assessed run changed harness or measurement topology")
+            verify_freeze(args.freeze, workload=row["workload"], layout=result["layout"],
+                          fixture_hash=result["fixtureManifestSHA256"],
+                          scenario_hash=result["scenarioSHA256"],
+                          loader_hash=result["productSHA256"]["IMV2GatewayLoadGenerator"],
+                          connections_per_worker=scenario["connectionsPerWorker"],
+                          harness_revision=harness["revision"], harness_files=harness["filesSHA256"])
             row["failures"] = assess(row, expected)
             del row["result"]
         output = {"freezeSHA256": sha(args.freeze), "runs": rows,
