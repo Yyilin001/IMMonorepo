@@ -1,8 +1,22 @@
 # G5 hot candidates: functional pass, remaining CPU regression
 
-Status: **performance failed; optimized candidate SQL passes but CPU still exceeds the frozen limit**. Frozen main is `f1cdd78d6a21bf0ae23da627c0710c65115236aa`; the initial measured candidate is `171b34ef59c5345709cd6260d081233d7ae89a52`, followed by optimized `fdf6838e9b0276eaf7e90acec3bed5d8fd8511fd`. The hot operating point and thresholds were frozen before candidate sampling as recorded in the [baseline protocol](v1-baseline-protocol.md). Neither load nor thresholds are changed in response to these results.
+Status: **performance failed; the latest local-capability candidate passes SQL but still exceeds the frozen CPU limit**. Frozen main is `f1cdd78d6a21bf0ae23da627c0710c65115236aa`; the measured candidates are `171b34ef59c5345709cd6260d081233d7ae89a52`, optimized `fdf6838e9b0276eaf7e90acec3bed5d8fd8511fd`, and local-capability `c2214c1c299e10e7c57ae6260ae232ef3385f7a3`. The hot operating point and thresholds were frozen before candidate sampling as recorded in the [baseline protocol](v1-baseline-protocol.md). Neither load nor thresholds are changed in response to these results.
 
-## Latest optimized-candidate result
+## Latest local-capability candidate: formal hot gate still failed
+
+The `capacity-formal-hot-local-capability-rate025-campaign` ran main 01 and candidate 02, then exited 1 at the CPU assessment; runs 03–06 were not started. Both immutable runners passed correctness and formal eligibility. Candidate 02 authenticated 100 connections, acknowledged and durably stored all 52,500 messages with zero workload errors, and completed project cleanup. The measured Gateway/container CPU includes the same-process Actor and observer work; it is not a per-function cost.
+
+| Steady metric | Main 01 | `c2214c1c` candidate 02 | Frozen limit | Candidate result |
+| --- | --- | --- | --- | --- |
+| Acknowledgements/s | 125 | 125 | ≥112.5 | Pass |
+| p95 / p99 (ms) | 8 / 10 | 10 / 12 | ≤18 / ≤35 | Pass |
+| SQL calls / acknowledgement | 18.350267 | 24.109013 | ≤24.775092 | Pass |
+| Gateway CPU ms / acknowledgement | 1.417345 | 2.318061 | ≤2.133047 | **Fail** |
+| Sampled Gateway PID-1 peak RSS (bytes) | 76,886,016 | 95,612,928 | ≤345,440,256 | Pass |
+
+The assessor lists only `serverCPUSecondsPerAcceptedUnitMaximum` as failing; Actor outstanding peaks were 5 commands / 2,060 bytes. Candidate CPU is about 16.1% lower than the earlier `fdf6838e` sample's 2.762828 ms/ACK, but this comparison does not attribute the reduction to one function or establish performance acceptance. The new CPU profile is diagnostic and has no conclusion recorded here. Immutable evidence: `/Users/yyl/.codex/virtual-actor-builds/capacity-formal-hot-local-capability-rate025-campaign/assessment-02.json` (SHA-256 `f6ce98f3aee8067c8bcc76d49d5eaa97da19c83dcbf04b344a8455d2f194a8e0`) and `/Users/yyl/.codex/virtual-actor-builds/capacity-formal-hot-local-capability-rate025-interleaved-02-candidate/result.json` (SHA-256 `449bc06fc6b78a26cadf9d357d32e696314d2f3219e918d77f3f72a5582b513f`).
+
+## Prior optimized-candidate result (`fdf6838e`)
 
 The fresh campaign's main 01 passed, then candidate 02 completed business validation and cleanup but failed its per-sample CPU gate. The driver exited 1 before creating run 03, 04, 05 or 06. Main 01 measured 125 ACK/s, SQL 18.35296 calls/ACK, CPU 1.42774747 ms/ACK and p95/p99 8/10 ms. Candidate 02 authenticated all 100 connections, acknowledged and durably stored all 52,500 full-run messages, and recorded no workload failure. Its steady phase acknowledged 37,499 messages; phase crossing is reconciled by the full-run totals.
 
