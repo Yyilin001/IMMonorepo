@@ -1,6 +1,22 @@
-# G5 first hot candidate: functional pass, performance failure
+# G5 hot candidates: functional pass, remaining CPU regression
 
-Status: **performance failed; production optimization and a new candidate comparison pending**. Frozen main is `f1cdd78d6a21bf0ae23da627c0710c65115236aa`; this measured candidate is `171b34ef59c5345709cd6260d081233d7ae89a52`. The hot operating point and thresholds were frozen before candidate sampling as recorded in the [baseline protocol](v1-baseline-protocol.md). Neither load nor thresholds are changed in response to this result.
+Status: **performance failed; optimized candidate SQL passes but CPU still exceeds the frozen limit**. Frozen main is `f1cdd78d6a21bf0ae23da627c0710c65115236aa`; the initial measured candidate is `171b34ef59c5345709cd6260d081233d7ae89a52`, followed by optimized `fdf6838e9b0276eaf7e90acec3bed5d8fd8511fd`. The hot operating point and thresholds were frozen before candidate sampling as recorded in the [baseline protocol](v1-baseline-protocol.md). Neither load nor thresholds are changed in response to these results.
+
+## Latest optimized-candidate result
+
+The fresh campaign's main 01 passed, then candidate 02 completed business validation and cleanup but failed its per-sample CPU gate. The driver exited 1 before creating run 03, 04, 05 or 06. Main 01 measured 125 ACK/s, SQL 18.35296 calls/ACK, CPU 1.42774747 ms/ACK and p95/p99 8/10 ms. Candidate 02 authenticated all 100 connections, acknowledged and durably stored all 52,500 full-run messages, and recorded no workload failure. Its steady phase acknowledged 37,499 messages; phase crossing is reconciled by the full-run totals.
+
+| Optimized candidate steady metric | Measured | Frozen limit | Result |
+| --- | --- | --- | --- |
+| Acknowledgements/s | 124.996667 | ≥112.5 | Pass |
+| p95 / p99 (ms) | 11 / 14 | ≤18 / ≤35 | Pass |
+| SQL calls / acknowledgement | 24.111950 | ≤24.775092 | Pass |
+| Gateway CPU ms / acknowledgement | 2.762828 | ≤2.133047 | **Fail** |
+| Sampled Gateway PID-1 peak RSS (bytes) | 96,911,360 | ≤345,440,256 | Pass |
+
+The fixed assessor lists only `serverCPUSecondsPerAcceptedUnitMaximum` as failing. Evidence is in `/Users/yyl/.codex/virtual-actor-builds/capacity-formal-hot-timeouts-rate025-campaign/assessment-02.json` and `/Users/yyl/.codex/virtual-actor-builds/capacity-formal-hot-timeouts-rate025-interleaved-02-candidate/`; the latter's result SHA-256 is `118364020e67511c94a4c752228717722d53b27c8eb013e78a1ba052aa80a0bf`. The task capacity context had no remaining containers or volumes after cleanup. Subsequent CPU profiling will be explicitly diagnostic, outside formal sampling; lowering SQL counts alone has not satisfied the CPU budget.
+
+## First candidate and SQL attribution
 
 The first interleaved candidate completed the immutable runner successfully: 100 authenticated connections, 52,500 total sends/acknowledgements/durable messages, no workload failures/skips/overflow, unchanged room count, no admission rejection and successful cleanup. Its artifact is `/Users/yyl/.codex/virtual-actor-builds/capacity-formal-hot-rate025-interleaved-02-candidate`. Runner validity does not constitute performance acceptance.
 
