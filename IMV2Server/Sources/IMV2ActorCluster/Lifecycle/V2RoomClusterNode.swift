@@ -4,6 +4,23 @@ import IMV2ActorContracts
 import IMV2ActorRuntime
 import NIOSSL
 
+/// Minted only by the node that owns this exact inbound actor and physical
+/// endpoint. A receptionist match or shared ClusterSystem is not authority.
+struct V2RoomLocalPort: Sendable {
+    let identity: V2ActorHostIdentity
+    let endpointID: ClusterSystem.ActorID
+    let generation: UUID
+    let inbound: V2RoomClusterInboundService
+
+    fileprivate init(identity: V2ActorHostIdentity, endpointID: ClusterSystem.ActorID,
+                     generation: UUID, inbound: V2RoomClusterInboundService) {
+        self.identity = identity
+        self.endpointID = endpointID
+        self.generation = generation
+        self.inbound = inbound
+    }
+}
+
 public struct V2RoomClusterNodeConfiguration: Sendable {
     public let name: String
     public let host: String
@@ -57,6 +74,7 @@ public actor V2RoomClusterNode {
     private var discoveryClientIDs: Set<ObjectIdentifier> = []
     private var acceptingDiscoveries = true
     private var clients: [V2RoomClusterClient] = []
+    private var localGeneration: UUID?
 
     public init(configuration: V2RoomClusterNodeConfiguration, identity: V2ActorHostIdentity,
                 host: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>,
@@ -95,14 +113,17 @@ public actor V2RoomClusterNode {
         self.system = system
         let auth = V2ActorSessionAuthenticator(host: identity, trust: trust,
                                                 limits: authenticationLimits)
+        let generation = UUID()
         let inbound = try V2RoomClusterInboundService(
             identity: identity, host: host, authenticator: auth, signer: signer,
             limits: authenticationLimits, allowedShards: configuration.allowedShards,
             serviceShardAccess: configuration.serviceShardAccess,
             maximumInboundRequests: runtimeConfiguration.maximumActivationWaitersPerHost,
+            localGeneration: generation,
             actorSystem: system
         )
         self.inbound = inbound
+        self.localGeneration = generation
         let endpoint = V2RoomHostEndpoint(actorSystem: system, service: inbound)
         self.endpoint = endpoint
         await host.start()
@@ -125,12 +146,15 @@ public actor V2RoomClusterNode {
     public func makeClient(signer: V2ActorSigningIdentity,
                            trust: V2ActorTrustStore,
                            limits: V2ActorAuthenticationLimits) throws -> V2RoomClusterClient {
-        guard let system, acceptingDiscoveries else {
+        guard let system, let inbound, let endpoint, let generation = localGeneration,
+              acceptingDiscoveries else {
             throw V2RoomCallFailure.notAccepted(.notReady)
         }
         guard clients.count < 64 else { throw V2RoomCallFailure.notAccepted(.overloaded) }
         let client = V2RoomClusterClient(system: system, signer: signer, trust: trust,
-                                         limits: limits, configuration: runtimeConfiguration)
+                                         limits: limits, configuration: runtimeConfiguration,
+                                         localPort: .init(identity: identity, endpointID: endpoint.id,
+                                                          generation: generation, inbound: inbound))
         clients.append(client)
         return client
     }
@@ -192,6 +216,7 @@ public actor V2RoomClusterNode {
         discoveryClientIDs.removeAll()
         await inbound?.stop()
         inbound = nil
+        localGeneration = nil
         endpoint = nil
         discoveryBeacon = nil
         discoveryPublisherState = nil

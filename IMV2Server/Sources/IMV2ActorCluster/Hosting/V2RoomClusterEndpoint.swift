@@ -45,9 +45,9 @@ public distributed actor V2RoomClusterActor {
     }
 }
 
-/// Authenticates native and remote exchanges identically. The signed reply is
-/// constructed only after permission, owner access, recipient, session and
-/// exact activation checks. Cluster membership is never an authorization fact.
+/// Remote packets and node-minted local capabilities share permission, replay,
+/// shard, recipient, session, deadline and exact-activation checks. Cluster
+/// membership is never an authorization fact.
 public actor V2RoomClusterInboundService {
     private let identity: V2ActorHostIdentity
     private let host: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>
@@ -57,6 +57,7 @@ public actor V2RoomClusterInboundService {
     private let allowedShards: Set<String>
     private let serviceShardAccess: [V2ActorServiceID: Set<String>]
     private let maximumInboundRequests: Int
+    private let localGeneration: UUID
     private let actorSystem: ClusterSystem
     private var roomActors: [V2RoomActivationToken: V2RoomClusterActor] = [:]
     private var watcher: Task<Void, Never>?
@@ -71,6 +72,7 @@ public actor V2RoomClusterInboundService {
                 allowedShards: Set<String>,
                 serviceShardAccess: [V2ActorServiceID: Set<String>],
                 maximumInboundRequests: Int,
+                localGeneration: UUID = UUID(),
                 actorSystem: ClusterSystem) throws {
         guard !allowedShards.isEmpty, !serviceShardAccess.isEmpty,
               maximumInboundRequests > 0,
@@ -84,6 +86,7 @@ public actor V2RoomClusterInboundService {
         self.allowedShards = allowedShards
         self.serviceShardAccess = serviceShardAccess
         self.maximumInboundRequests = maximumInboundRequests
+        self.localGeneration = localGeneration
         self.actorSystem = actorSystem
     }
 
@@ -119,11 +122,42 @@ public actor V2RoomClusterInboundService {
         return try signer.sign(grant, maximumBytes: limits.maximumReplyBytes)
     }
 
+    func openLocalSession(_ packet: V2ActorSignedPacket, generation: UUID) async throws
+        -> (V2ActorSignedPacket, V2ActorLocalCapability) {
+        try beginRequest()
+        defer { activeRequests -= 1 }
+        guard generation == localGeneration else { throw V2ActorAuthenticationError.wrongRecipient }
+        let (grant, capability) = try await authenticator.openLocalSession(packet, generation: generation)
+        guard accepting else { throw V2ActorAuthenticationError.overloaded }
+        return (try signer.sign(grant, maximumBytes: limits.maximumReplyBytes), capability)
+    }
+
     public func exchange(_ packet: V2ActorSignedPacket,
                          boundToken: V2RoomActivationToken?) async throws -> V2ActorSignedPacket {
         try beginRequest()
         defer { activeRequests -= 1 }
         let verified = try await authenticator.accept(packet)
+        let reply = try await exchangeVerified(verified, boundToken: boundToken)
+        return try signer.sign(reply, maximumBytes: limits.maximumReplyBytes)
+    }
+
+    func exchangeLocal(_ payload: V2ActorLocalPayload<V2ActorAuthenticatedCall>,
+                       capability: V2ActorLocalCapability, generation: UUID,
+                       boundToken: V2RoomActivationToken?) async throws
+        -> V2ActorLocalPayload<V2ActorAuthenticatedReply> {
+        try beginRequest()
+        defer { activeRequests -= 1 }
+        guard generation == localGeneration else { throw V2ActorAuthenticationError.wrongRecipient }
+        let verified = try await authenticator.acceptLocal(payload, capability: capability,
+                                                           generation: generation)
+        let reply = try await exchangeVerified(verified, boundToken: boundToken)
+        let encoded = try V2ActorLocalPayload(reply)
+        guard encoded.byteCount <= limits.maximumReplyBytes else { throw V2ActorAuthenticationError.oversized }
+        return encoded
+    }
+
+    private func exchangeVerified(_ verified: V2ActorVerifiedCall,
+                                  boundToken: V2RoomActivationToken?) async throws -> V2ActorAuthenticatedReply {
         guard accepting else { throw V2ActorAuthenticationError.overloaded }
         let request = verified.call.request
         let token = requestToken(request)
@@ -150,8 +184,7 @@ public actor V2RoomClusterInboundService {
             if case .lookup = request { response = .failure(.notAccepted(.unavailable)) }
             else { response = .failure(.outcomeUnknown) }
         }
-        return try signer.sign(V2ActorAuthenticatedReply(call: verified.call, response: response),
-                               maximumBytes: limits.maximumReplyBytes)
+        return V2ActorAuthenticatedReply(call: verified.call, response: response)
     }
 
     public func reconcileActors() async {

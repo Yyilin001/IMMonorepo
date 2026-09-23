@@ -236,6 +236,79 @@ struct V2ActorAuthenticationTests {
         }
     }
 
+    @Test("a local capability requires a signed hello and shares principal, replay, generation and expiry checks")
+    func localCapabilityChecks() async throws {
+        let clock = TestClock()
+        let fixture = try Fixture(limits: .init(sessionLifetimeMilliseconds: 1_000), clock: clock)
+        let generation = UUID()
+        let hello = fixture.hello()
+        let (grant, capability) = try await fixture.auth.openLocalSession(
+            fixture.client.sign(hello, maximumBytes: fixture.limits.maximumRequestBytes),
+            generation: generation)
+        let first = try fixture.call(grant: grant)
+        #expect(try await fixture.auth.acceptLocal(V2ActorLocalPayload(first), capability: capability,
+                                                   generation: generation).call == first)
+        await failure(.replay) {
+            _ = try await fixture.auth.acceptLocal(V2ActorLocalPayload(first), capability: capability,
+                                                   generation: generation)
+        }
+        await failure(.forbidden) {
+            _ = try await fixture.auth.acceptLocal(V2ActorLocalPayload(try fixture.call(grant: grant,
+                sequence: 2, principal: .user(UserID(uuid: UUID())))),
+                capability: capability, generation: generation)
+        }
+        await failure(.wrongRecipient) {
+            _ = try await fixture.auth.acceptLocal(V2ActorLocalPayload(try fixture.call(
+                grant: grant, sequence: 2)),
+                                                   capability: capability, generation: UUID())
+        }
+        _ = try await fixture.auth.acceptLocal(V2ActorLocalPayload(try fixture.call(
+            grant: grant, sequence: 2)),
+                                               capability: capability, generation: generation)
+        clock.advance(.seconds(2))
+        await failure(.sessionExpired) {
+            _ = try await fixture.auth.acceptLocal(V2ActorLocalPayload(try fixture.call(
+                grant: grant, sequence: 3)),
+                                                   capability: capability, generation: generation)
+        }
+    }
+
+    @Test("local typed admission retains the canonical signed-body byte ceiling and reply binding")
+    func localSizeAndReplyBinding() async throws {
+        let limits = try V2ActorAuthenticationLimits(maximumRequestBytes: 1_024)
+        let fixture = try Fixture(limits: limits)
+        let generation = UUID()
+        let hello = fixture.hello()
+        let (grant, capability) = try await fixture.auth.openLocalSession(
+            fixture.client.sign(hello, maximumBytes: limits.maximumRequestBytes),
+            generation: generation)
+        let large = V2RoomRequest.messaging(.send(.init(
+            roomID: fixture.token.roomID, actorUserID: fixture.user,
+            clientMessageID: .init(uuid: UUID()), text: String(repeating: "x", count: 1_024),
+            media: [], mentions: [], entities: [], replyTo: nil)))
+        await failure(.oversized) {
+            _ = try await fixture.auth.acceptLocal(V2ActorLocalPayload(try fixture.call(
+                grant: grant, request: large)),
+                                                   capability: capability, generation: generation)
+        }
+        let call = try fixture.call(grant: grant)
+        _ = try await fixture.auth.acceptLocal(V2ActorLocalPayload(call),
+                                               capability: capability, generation: generation)
+        let reply = V2ActorAuthenticatedReply(call: call, response: .acknowledged)
+        #expect(try fixture.trust.verifyLocalReply(V2ActorLocalPayload(reply), for: call,
+            from: fixture.token.host, maximumBytes: limits.maximumReplyBytes) == .acknowledged)
+        let measuredReply = try V2ActorLocalPayload(reply)
+        #expect(throws: V2ActorAuthenticationError.oversized) {
+            try fixture.trust.verifyLocalReply(measuredReply, for: call,
+                from: fixture.token.host, maximumBytes: measuredReply.byteCount - 1)
+        }
+        #expect(throws: V2ActorAuthenticationError.wrongRecipient) {
+            try fixture.trust.verifyLocalReply(V2ActorLocalPayload(reply), for: try fixture.call(
+                grant: grant, attempt: UUID()), from: fixture.token.host,
+                maximumBytes: limits.maximumReplyBytes)
+        }
+    }
+
     private func failure(_ expected: V2ActorAuthenticationError, _ action: () async throws -> Void) async {
         do { try await action(); Issue.record("untrusted call unexpectedly passed") }
         catch { #expect(error as? V2ActorAuthenticationError == expected) }

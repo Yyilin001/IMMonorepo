@@ -9,6 +9,48 @@ import Testing
 
 @Suite("Room Cluster bridge authenticates native distributed exchanges", .serialized)
 struct V2RoomClusterBridgeTests {
+    @Test("node-local exchange uses the signed hello then the same replay, shard and bound-token gate")
+    func localExchangeChecks() async throws {
+        let fixture = try await Fixture()
+        let hello = V2ActorSessionHello(serviceID: fixture.client.serviceID,
+            callerIncarnation: UUID(), recipient: fixture.identity, handshakeID: UUID())
+        let (signedGrant, capability) = try await fixture.inbound.openLocalSession(
+            fixture.client.sign(hello, maximumBytes: 10_000), generation: fixture.generation)
+        let grant = try fixture.trust.verifySessionGrant(signedGrant, for: hello, maximumBytes: 10_000)
+        let first = fixture.call(grant: grant, sequence: 1,
+            request: .activate(roomID: fixture.room, owner: fixture.owner))
+        let ready = try await fixture.inbound.exchangeLocal(V2ActorLocalPayload(first),
+            capability: capability, generation: fixture.generation, boundToken: nil)
+        guard case .ready(let token, _) = try fixture.trust.verifyLocalReply(ready, for: first,
+            from: fixture.identity, maximumBytes: 10_000) else {
+            Issue.record("local activation did not return its exact token"); return
+        }
+        await expectAuthentication(.replay) {
+            _ = try await fixture.inbound.exchangeLocal(V2ActorLocalPayload(first),
+                capability: capability, generation: fixture.generation, boundToken: nil)
+        }
+        await expectAuthentication(.wrongRecipient) {
+            _ = try await fixture.inbound.exchangeLocal(V2ActorLocalPayload(fixture.call(
+                grant: grant, sequence: 2, request: .lookup(token))),
+                capability: capability, generation: UUID(), boundToken: nil)
+        }
+        let wrongShard = try V2RoomDataOwner(shardID: "forbidden", epoch: 0)
+        await expectAuthentication(.forbidden) {
+            _ = try await fixture.inbound.exchangeLocal(V2ActorLocalPayload(fixture.call(
+                grant: grant, sequence: 2,
+                request: .activate(roomID: .init(uuid: UUID()), owner: wrongShard))),
+                capability: capability, generation: fixture.generation, boundToken: nil)
+        }
+        await expectAuthentication(.wrongRecipient) {
+            _ = try await fixture.inbound.exchangeLocal(V2ActorLocalPayload(fixture.call(
+                grant: grant, sequence: 3, request: .lookup(token))),
+                capability: capability, generation: fixture.generation, boundToken: token)
+        }
+        #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+        await fixture.inbound.stop()
+        try await fixture.system.shutdown().wait()
+    }
+
     @Test("signed local activation publishes a physical actor and denies other shards")
     func signedActivationAndShardAccess() async throws {
         let fixture = try await Fixture()
@@ -321,6 +363,7 @@ struct V2RoomClusterBridgeTests {
         let client: V2ActorSigningIdentity
         let coordinator: V2ActorSigningIdentity
         let trust: V2ActorTrustStore
+        let generation = UUID()
 
         init(restoreGate: RestoreGate? = nil, executeGate: RestoreGate? = nil,
              invalidationGate: RestoreGate? = nil,
@@ -381,7 +424,8 @@ struct V2RoomClusterBridgeTests {
                 limits: limits, allowedShards: ["allowed"],
                 serviceShardAccess: [client.serviceID: ["allowed"],
                                      coordinator.serviceID: ["allowed"]],
-                maximumInboundRequests: maximumInboundRequests, actorSystem: system
+                maximumInboundRequests: maximumInboundRequests,
+                localGeneration: generation, actorSystem: system
             )
             endpoint = V2RoomHostEndpoint(actorSystem: system, service: inbound)
             await host.start()

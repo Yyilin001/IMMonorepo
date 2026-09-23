@@ -34,6 +34,30 @@ public struct V2ActorVerifiedCall: Sendable {
     public let deadline: ContinuousClock.Instant
 }
 
+/// A host-issued, process-local proof of the same signed hello used by remote
+/// sessions. It cannot be serialized or constructed by a caller.
+final class V2ActorLocalCapability: Sendable {
+    let issuer: UUID
+    let generation: UUID
+    let sessionID: UUID
+    let serviceID: V2ActorServiceID
+    let callerIncarnation: UUID
+    let host: V2ActorHostIdentity
+    let peer: V2ActorTrustedService
+
+    fileprivate init(issuer: UUID, generation: UUID, sessionID: UUID,
+                     serviceID: V2ActorServiceID, callerIncarnation: UUID,
+                     host: V2ActorHostIdentity, peer: V2ActorTrustedService) {
+        self.issuer = issuer
+        self.generation = generation
+        self.sessionID = sessionID
+        self.serviceID = serviceID
+        self.callerIncarnation = callerIncarnation
+        self.host = host
+        self.peer = peer
+    }
+}
+
 /// Host-issued session nonces give replay protection without trusting remote
 /// wall clocks or retaining every historical attempt. Once expired, a nonce is
 /// no longer valid even after its replay window has been removed from memory.
@@ -42,6 +66,7 @@ public actor V2ActorSessionAuthenticator {
     private let trust: V2ActorTrustStore
     private let limits: V2ActorAuthenticationLimits
     private let now: @Sendable () -> ContinuousClock.Instant
+    private let localIssuer = UUID()
     private var sessions: [UUID: Session] = [:]
     private var helloSessions: [HelloKey: UUID] = [:]
     private var serviceCounts: [V2ActorServiceID: Int] = [:]
@@ -59,6 +84,21 @@ public actor V2ActorSessionAuthenticator {
     public func openSession(_ packet: V2ActorSignedPacket) throws -> V2ActorSessionGrant {
         let (hello, peer) = try trust.verify(packet, as: V2ActorSessionHello.self,
                                             maximumBytes: min(16_384, limits.maximumRequestBytes))
+        return try openVerifiedSession(hello, peer: peer)
+    }
+
+    func openLocalSession(_ packet: V2ActorSignedPacket, generation: UUID) throws
+        -> (V2ActorSessionGrant, V2ActorLocalCapability) {
+        let (hello, peer) = try trust.verify(packet, as: V2ActorSessionHello.self,
+                                            maximumBytes: min(16_384, limits.maximumRequestBytes))
+        let grant = try openVerifiedSession(hello, peer: peer)
+        return (grant, V2ActorLocalCapability(issuer: localIssuer, generation: generation,
+            sessionID: grant.sessionID, serviceID: peer.serviceID,
+            callerIncarnation: hello.callerIncarnation, host: host, peer: peer))
+    }
+
+    private func openVerifiedSession(_ hello: V2ActorSessionHello,
+                                     peer: V2ActorTrustedService) throws -> V2ActorSessionGrant {
         guard hello.version == V2ActorSessionHello.protocolVersion else { throw V2ActorAuthenticationError.unsupportedVersion }
         guard hello.serviceID == peer.serviceID else { throw V2ActorAuthenticationError.forbidden }
         guard hello.recipient == host else { throw V2ActorAuthenticationError.wrongRecipient }
@@ -85,6 +125,27 @@ public actor V2ActorSessionAuthenticator {
         let receivedAt = now()
         let (call, peer) = try trust.verify(packet, as: V2ActorAuthenticatedCall.self,
                                            maximumBytes: limits.maximumRequestBytes)
+        return try acceptVerified(call, peer: peer, receivedAt: receivedAt)
+    }
+
+    func acceptLocal(_ payload: V2ActorLocalPayload<V2ActorAuthenticatedCall>,
+                     capability: V2ActorLocalCapability, generation: UUID) throws -> V2ActorVerifiedCall {
+        let receivedAt = now()
+        let call = payload.body
+        guard capability.issuer == localIssuer, capability.generation == generation,
+              capability.host == host, capability.sessionID == call.sessionID,
+              capability.serviceID == call.serviceID,
+              capability.callerIncarnation == call.callerIncarnation else {
+            throw V2ActorAuthenticationError.wrongRecipient
+        }
+        guard payload.byteCount > 0, payload.byteCount <= limits.maximumRequestBytes else {
+            throw V2ActorAuthenticationError.oversized
+        }
+        return try acceptVerified(call, peer: capability.peer, receivedAt: receivedAt)
+    }
+
+    private func acceptVerified(_ call: V2ActorAuthenticatedCall, peer: V2ActorTrustedService,
+                                receivedAt: ContinuousClock.Instant) throws -> V2ActorVerifiedCall {
         guard call.version == V2ActorSessionHello.protocolVersion else { throw V2ActorAuthenticationError.unsupportedVersion }
         guard call.serviceID == peer.serviceID else { throw V2ActorAuthenticationError.forbidden }
         guard call.recipient == host else { throw V2ActorAuthenticationError.wrongRecipient }

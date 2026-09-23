@@ -80,8 +80,25 @@ public struct V2ActorTrustStore: Sendable {
     public func verifyReply(_ packet: V2ActorSignedPacket, for call: V2ActorAuthenticatedCall,
                             maximumBytes: Int) throws -> V2ActorRPCResponse {
         let (reply, peer) = try verify(packet, as: V2ActorAuthenticatedReply.self, maximumBytes: maximumBytes)
-        guard peer.hostedIDs.contains(call.recipient.hostID),
-              reply.host == call.recipient, reply.version == V2ActorSessionHello.protocolVersion,
+        guard peer.hostedIDs.contains(call.recipient.hostID) else {
+            throw V2ActorAuthenticationError.wrongRecipient
+        }
+        return try verifyReplyBinding(reply, for: call)
+    }
+
+    func verifyLocalReply(_ payload: V2ActorLocalPayload<V2ActorAuthenticatedReply>,
+                          for call: V2ActorAuthenticatedCall, from host: V2ActorHostIdentity,
+                          maximumBytes: Int) throws -> V2ActorRPCResponse {
+        guard maximumBytes > 0, payload.byteCount > 0, payload.byteCount <= maximumBytes else {
+            throw V2ActorAuthenticationError.oversized
+        }
+        guard host == call.recipient else { throw V2ActorAuthenticationError.wrongRecipient }
+        return try verifyReplyBinding(payload.body, for: call)
+    }
+
+    private func verifyReplyBinding(_ reply: V2ActorAuthenticatedReply,
+                                    for call: V2ActorAuthenticatedCall) throws -> V2ActorRPCResponse {
+        guard reply.host == call.recipient, reply.version == V2ActorSessionHello.protocolVersion,
               reply.sessionID == call.sessionID, reply.sequence == call.sequence,
               reply.attemptID == call.attemptID
         else { throw V2ActorAuthenticationError.wrongRecipient }

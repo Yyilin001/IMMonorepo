@@ -29,8 +29,9 @@ public struct V2RoomClusterHostDescriptor: Sendable {
     }
 }
 
-/// Calls a real Cluster distributed actor for both same-process and remote
-/// traffic. No native shortcut bypasses signed session admission.
+/// Remote calls use signed Cluster packets. A node-minted local port may skip
+/// per-call signatures only after the same signed session admission and while
+/// the exact local endpoint and host incarnation remain current.
 public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
     private let system: ClusterSystem
     private let signer: V2ActorSigningIdentity
@@ -38,6 +39,7 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
     private let limits: V2ActorAuthenticationLimits
     private let configuration: V2RoomRuntimeConfiguration
     private let callerIncarnation: UUID
+    private let localPort: V2RoomLocalPort?
     private var descriptors: [V2ActorHostIdentity: V2RoomClusterHostDescriptor] = [:]
     private var retiredDescriptors: [V2ActorHostIdentity: V2RoomClusterHostDescriptor] = [:]
     private var suspendedHosts: Set<V2ActorHostIdentity> = []
@@ -68,6 +70,20 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         self.limits = limits
         self.configuration = configuration
         self.callerIncarnation = callerIncarnation
+        self.localPort = nil
+    }
+
+    init(system: ClusterSystem, signer: V2ActorSigningIdentity,
+         trust: V2ActorTrustStore, limits: V2ActorAuthenticationLimits,
+         configuration: V2RoomRuntimeConfiguration,
+         callerIncarnation: UUID = UUID(), localPort: V2RoomLocalPort) {
+        self.system = system
+        self.signer = signer
+        self.trust = trust
+        self.limits = limits
+        self.configuration = configuration
+        self.callerIncarnation = callerIncarnation
+        self.localPort = localPort
     }
 
     /// A restart publishes a new incarnation and ActorID. Existing dispatched
@@ -359,25 +375,51 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
             attemptID: UUID(), traceID: UUID(), remainingBudget: budget,
             principal: principal, request: request
         )
-        let packet: V2ActorSignedPacket
-        do { packet = try signer.sign(call, maximumBytes: limits.maximumRequestBytes) }
-        catch { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
-        let responsePacket: V2ActorSignedPacket
+        let isLocal = localPort.map { descriptor.identity == $0.identity &&
+                                      descriptor.endpointID == $0.endpointID } == true &&
+                      live.localCapability != nil
+        let remotePacket: V2ActorSignedPacket?
+        if isLocal {
+            remotePacket = nil
+        } else {
+            do { remotePacket = try signer.sign(call, maximumBytes: limits.maximumRequestBytes) }
+            catch { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+        }
+        let transportReply: TransportReply
         do {
             let timeout = boundedTimeout(deadline)
-            if let roomToken {
+            if let port = localPort, descriptor.identity == port.identity,
+               descriptor.endpointID == port.endpointID,
+               let capability = live.localCapability {
+                if let roomToken, roomActors[roomToken] == nil {
+                    throw V2RoomCallFailure.notAccepted(.notReady)
+                }
+                let payload: V2ActorLocalPayload<V2ActorAuthenticatedCall>
+                do { payload = try .init(call) }
+                catch { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+                guard payload.byteCount > 0, payload.byteCount <= limits.maximumRequestBytes else {
+                    throw V2RoomCallFailure.notAccepted(.invalidRequest)
+                }
+                transportReply = try await boundedDispatch(deadline: deadline, request: request,
+                                                           host: host) {
+                    .local(try await port.inbound.exchangeLocal(payload, capability: capability,
+                        generation: port.generation, boundToken: roomToken))
+                }
+            } else if let roomToken {
+                guard let packet = remotePacket else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
                 guard let actor = roomActors[roomToken] else {
                     throw V2RoomCallFailure.notAccepted(.notReady)
                 }
-                responsePacket = try await boundedDispatch(deadline: deadline, request: request,
-                                                            host: host) {
-                    try await RemoteCall.with(timeout: timeout) { try await actor.exchange(packet) }
+                transportReply = try await boundedDispatch(deadline: deadline, request: request,
+                                                           host: host) {
+                    .signed(try await RemoteCall.with(timeout: timeout) { try await actor.exchange(packet) })
                 }
             } else {
+                guard let packet = remotePacket else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
                 let endpoint = try V2RoomHostEndpoint.resolve(id: descriptor.endpointID, using: system)
-                responsePacket = try await boundedDispatch(deadline: deadline, request: request,
-                                                            host: host) {
-                    try await RemoteCall.with(timeout: timeout) { try await endpoint.exchange(packet) }
+                transportReply = try await boundedDispatch(deadline: deadline, request: request,
+                                                           host: host) {
+                    .signed(try await RemoteCall.with(timeout: timeout) { try await endpoint.exchange(packet) })
                 }
             }
         } catch let failure as V2RoomCallFailure { throw failure }
@@ -387,8 +429,16 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
             throw transportFailure(for: request)
         }
         do {
-            let response = try trust.verifyReply(responsePacket, for: call,
+            let response: V2ActorRPCResponse
+            switch transportReply {
+            case .signed(let packet):
+                response = try trust.verifyReply(packet, for: call,
                                                  maximumBytes: limits.maximumReplyBytes)
+            case .local(let reply):
+                guard let port = localPort else { throw V2ActorAuthenticationError.wrongRecipient }
+                response = try trust.verifyLocalReply(reply, for: call, from: port.identity,
+                                                      maximumBytes: limits.maximumReplyBytes)
+            }
             // A replacement does not invalidate an already dispatched call's
             // correctly signed reply. Its old token cannot authorise a new
             // activation, but the caller must receive its actual outcome.
@@ -408,8 +458,8 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
     private func boundedDispatch(
         deadline: ContinuousClock.Instant, request: V2ActorRPCRequest,
         host: V2ActorHostIdentity,
-        operation: @escaping @Sendable () async throws -> V2ActorSignedPacket
-    ) async throws -> V2ActorSignedPacket {
+        operation: @escaping @Sendable () async throws -> TransportReply
+    ) async throws -> TransportReply {
         guard accepting, ContinuousClock.now < deadline else {
             throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
         }
@@ -452,7 +502,7 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         continuation.resume(throwing: call.timeoutFailure)
     }
 
-    private func completeDispatch(id: UUID, result: Result<V2ActorSignedPacket, any Error>) {
+    private func completeDispatch(id: UUID, result: Result<TransportReply, any Error>) {
         guard let call = dispatchedCalls.removeValue(forKey: id) else { return }
         call.timer.cancel()
         call.continuation?.resume(with: result)
@@ -532,9 +582,18 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
             guard ContinuousClock.now < deadline else { break }
             let callStarted = ContinuousClock.now
             do {
-                let endpoint = try V2RoomHostEndpoint.resolve(id: descriptor.endpointID, using: system)
-                let reply = try await RemoteCall.with(timeout: boundedTimeout(deadline)) {
-                    try await endpoint.openSession(packet)
+                let reply: V2ActorSignedPacket
+                let capability: V2ActorLocalCapability?
+                if let port = localPort, descriptor.identity == port.identity,
+                   descriptor.endpointID == port.endpointID {
+                    (reply, capability) = try await port.inbound.openLocalSession(
+                        packet, generation: port.generation)
+                } else {
+                    let endpoint = try V2RoomHostEndpoint.resolve(id: descriptor.endpointID, using: system)
+                    reply = try await RemoteCall.with(timeout: boundedTimeout(deadline)) {
+                        try await endpoint.openSession(packet)
+                    }
+                    capability = nil
                 }
                 let grant = try trust.verifySessionGrant(reply, for: hello,
                                                          maximumBytes: limits.maximumReplyBytes)
@@ -543,7 +602,7 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
                 }
                 return Session(grant: grant,
                                expires: callStarted + grant.remainingLifetime.duration - .milliseconds(100),
-                               nextSequence: 0)
+                               nextSequence: 0, localCapability: capability)
             } catch {
                 last = error
                 if attempt + 1 < configuration.maximumResolveAttempts {
@@ -697,6 +756,12 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         let grant: V2ActorSessionGrant
         let expires: ContinuousClock.Instant
         var nextSequence: UInt64
+        let localCapability: V2ActorLocalCapability?
+    }
+
+    private enum TransportReply: Sendable {
+        case signed(V2ActorSignedPacket)
+        case local(V2ActorLocalPayload<V2ActorAuthenticatedReply>)
     }
 
     private struct HandshakeWaiter {
@@ -706,7 +771,7 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
 
     private struct DispatchedCall {
         let host: V2ActorHostIdentity
-        var continuation: CheckedContinuation<V2ActorSignedPacket, any Error>?
+        var continuation: CheckedContinuation<TransportReply, any Error>?
         let timer: Task<Void, Never>
         let timeoutFailure: V2RoomCallFailure
     }
