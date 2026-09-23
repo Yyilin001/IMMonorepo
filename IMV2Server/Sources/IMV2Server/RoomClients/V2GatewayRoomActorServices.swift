@@ -14,6 +14,7 @@ public struct V2GatewayRoomActorServices: Sendable {
 
     public init(directory: V2RoomDirectory, callTimeout: V2ActorMilliseconds,
                 readReceiptControlStore: any V2ReadReceiptControlStore,
+                databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
                 directRoomLogEventCache: V2DirectRoomLogEventCache? = nil,
                 maximumConcurrentRecoveryRooms: Int = 8,
                 now: @escaping @Sendable () -> Date = Date.init) {
@@ -23,7 +24,8 @@ public struct V2GatewayRoomActorServices: Sendable {
             callTimeout: callTimeout.duration,
             maximumConcurrentRooms: maximumConcurrentRecoveryRooms)
         self.queries = queries
-        receipts = .init(rooms: queries, control: readReceiptControlStore, now: now)
+        receipts = .init(rooms: queries, control: readReceiptControlStore,
+            databaseWorkAdmission: databaseWorkAdmission, now: now)
         eventLog = .init(rooms: queries, directRoomLogEventCache: directRoomLogEventCache)
     }
 }

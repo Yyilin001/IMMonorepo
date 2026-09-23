@@ -142,6 +142,7 @@ func makeGatewayDomainCommandHandler(
     sync: V2SyncService,
     telemetry: any V2TelemetrySink = V2DiscardingTelemetrySink(),
     databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
+    roomCommandsHostAdmitted: Bool = false,
     maximumGroupEventPagePayloadBytes: Int = 48 * 1_024,
     now: @escaping @Sendable () -> Date = Date.init,
     monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
@@ -171,6 +172,7 @@ func makeGatewayDomainCommandHandler(
         sync: sync,
         telemetry: telemetry,
         databaseWorkAdmission: databaseWorkAdmission,
+        roomCommandsHostAdmitted: roomCommandsHostAdmitted,
         maximumGroupEventPagePayloadBytes: maximumGroupEventPagePayloadBytes,
         now: now,
         monotonicNow: monotonicNow

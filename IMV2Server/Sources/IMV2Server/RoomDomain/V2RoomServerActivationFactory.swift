@@ -23,6 +23,7 @@ public struct V2RoomServerOwnerResources: Sendable {
     let capacity: V2CapacityProfile
     let messageLimits: V2MessageCommandLimits
     let maximumEditBytes: Int
+    let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
 
     public init(database: any Database, writes: PostgresV2RoomWriteStore,
                 sendBatcher: any V2ActorGrantedSendBatching,
@@ -54,11 +55,13 @@ public struct V2RoomServerOwnerResources: Sendable {
             databaseWorkAdmission: databaseWorkAdmission)
         let queries = V2ActorRoomQueryExecutor(database: database)
         self.queries = queries
-        self.recovery = .init(executor: queries, configuration: queryBatchConfiguration)
+        self.recovery = .init(executor: queries, configuration: queryBatchConfiguration,
+            databaseWorkAdmission: databaseWorkAdmission)
         self.sends = .init(batcher: sendBatcher)
         self.capacity = capacityProfile
         self.messageLimits = messageLimits
         self.maximumEditBytes = maximumEditBytes
+        self.databaseWorkAdmission = databaseWorkAdmission
     }
 }
 
@@ -160,8 +163,19 @@ private actor V2RoomServerActivation {
                     return .committed(results.map(V2RoomResponse.messaging))
                 }
                 let item = turn.items[0]
-                let response = try await dispatch(item.request, handlers: handlers, resources: resources,
-                    batchDeadline: turn.context.batchDeadline, callDeadline: item.deadline)
+                let response: V2RoomResponse
+                if let workClass = item.request.hostDatabaseWorkClass {
+                    response = try await v2WithAdmittedRoomDatabaseWork(resources.databaseWorkAdmission,
+                        workClass: workClass, callerDeadline: item.deadline) {
+                        try await dispatch(item.request, handlers: handlers, resources: resources,
+                            batchDeadline: turn.context.batchDeadline, callDeadline: item.deadline)
+                    }
+                } else {
+                    // Send, receipt and recovery each acquire once per actual SQL
+                    // batch, possibly shared by multiple granted room turns.
+                    response = try await dispatch(item.request, handlers: handlers, resources: resources,
+                        batchDeadline: turn.context.batchDeadline, callDeadline: item.deadline)
+                }
                 return .committed([response])
             }
         } catch {
@@ -278,6 +292,18 @@ private actor V2RoomServerActivation {
             audit = try .init(token: token, store: .init(database: resources.database), now: now)
             invitations = try .init(database: resources.database, token: token,
                 identities: resources.invitationIdentities, capacityProfile: resources.capacity, now: now)
+        }
+    }
+}
+
+private extension V2RoomRequest {
+    var hostDatabaseWorkClass: V2DatabaseWorkClass? {
+        switch self {
+        case .messaging(.send), .receipt, .recovery: return nil
+        case .administrationQuery, .receiptQuery, .roomLog, .directory,
+             .invitationQuery, .mediaAuthorization: return .interactiveRead
+        case .forward, .maintenance, .messaging, .administration,
+             .specialAccountAudit, .invitation: return .foregroundWrite
         }
     }
 }

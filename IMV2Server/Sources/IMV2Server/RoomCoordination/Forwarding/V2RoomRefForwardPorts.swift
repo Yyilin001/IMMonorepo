@@ -28,7 +28,8 @@ public extension V2ActorForwardPairPort {
                 guard let shard = grants.first?.token.owner.shardID,
                       let executor = executorsByShard[shard] else { return .rolledBack(.unavailable) }
                 do {
-                    return .committed(try await executor.execute(pair, activationTokens: grants.map(\.token)))
+                    return .committed(try await executor.execute(pair,
+                        activationTokens: grants.map(\.token), deadline: deadline))
                 } catch {
                     // Known pair business rejections are independent results;
                     // an unrelated target can still complete its own pair.

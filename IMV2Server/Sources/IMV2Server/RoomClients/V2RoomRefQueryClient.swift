@@ -205,11 +205,14 @@ public struct V2RoomRefReadReceiptClient: V2GatewayReadReceiptHandling {
     private let rooms: V2RoomRefQueryClient
     private let preferences: V2ReadReceiptService
     private let control: any V2ReadReceiptControlStore
+    private let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
 
     public init(rooms: V2RoomRefQueryClient, control: any V2ReadReceiptControlStore,
+                databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
                 now: @escaping @Sendable () -> Date = Date.init) {
         self.rooms = rooms
         self.control = control
+        self.databaseWorkAdmission = databaseWorkAdmission
         self.preferences = .init(store: control, now: now)
     }
 
@@ -234,8 +237,12 @@ public struct V2RoomRefReadReceiptClient: V2GatewayReadReceiptHandling {
             scanned += page.candidates.count
             try Task.checkCancellation()
             guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-            let identities = try await control.visibleReaderIdentities(actorUserID: actorUserID,
-                candidateUserIDs: page.candidates.map(\.userID))
+            let candidateUserIDs = page.candidates.map(\.userID)
+            let identities = try await v2WithAdmittedRoomDatabaseWork(databaseWorkAdmission,
+                workClass: .interactiveRead, callerDeadline: deadline) {
+                try await control.visibleReaderIdentities(actorUserID: actorUserID,
+                    candidateUserIDs: candidateUserIDs)
+            }
             try Task.checkCancellation()
             guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
             for candidate in page.candidates {

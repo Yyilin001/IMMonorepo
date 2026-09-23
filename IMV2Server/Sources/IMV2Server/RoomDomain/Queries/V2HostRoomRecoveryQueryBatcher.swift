@@ -74,6 +74,7 @@ public actor V2HostRoomRecoveryQueryBatcher {
 
     private let execute: @Sendable (V2RoomRecoveryQuery, [V2RoomActivationToken]) async throws -> V2RoomRecoveryResult
     private let configuration: Configuration
+    private let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
     private var pending: [Key: [Pending]] = [:]
     private var scheduled: [Key: Task<Void, Never>] = [:]
     private var generations: [Key: UUID] = [:]
@@ -81,17 +82,21 @@ public actor V2HostRoomRecoveryQueryBatcher {
     internal private(set) var pendingCount = 0
     private var inFlightCount = 0
 
-    public init(executor: V2ActorRoomQueryExecutor, configuration: Configuration) {
+    public init(executor: V2ActorRoomQueryExecutor, configuration: Configuration,
+                databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil) {
         self.execute = { query, tokens in try await executor.recovery(query, tokens: tokens) }
         self.configuration = configuration
+        self.databaseWorkAdmission = databaseWorkAdmission
     }
 
     // Deterministic phase barriers for admission/capacity tests; production
     // construction always supplies the activation-fenced executor above.
     init(configuration: Configuration,
+         databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
          execute: @escaping @Sendable (V2RoomRecoveryQuery, [V2RoomActivationToken]) async throws -> V2RoomRecoveryResult) {
         self.execute = execute
         self.configuration = configuration
+        self.databaseWorkAdmission = databaseWorkAdmission
     }
 
     public func state(_ turn: V2GrantedRoomReadTurn) async throws -> V2RoomStateReadResult {
@@ -234,7 +239,12 @@ public actor V2HostRoomRecoveryQueryBatcher {
                 return token
             }
             let wire = try V2ActorRoomRecoveryBatchQueryWire(roomIDs: roomIDs, actorUserID: key.userID)
-            let result = try await execute(key.kind == .state ? .states(wire) : .latestVisible(wire), tokens)
+            let deadline = items.map(\.turn.callDeadline).min()!
+            let query: V2RoomRecoveryQuery = key.kind == .state ? .states(wire) : .latestVisible(wire)
+            let result = try await v2WithAdmittedRoomDatabaseWork(databaseWorkAdmission,
+                workClass: .interactiveRead, callerDeadline: deadline) {
+                try await execute(query, tokens)
+            }
             guard let resultBytes = try? JSONEncoder().encode(result).count else {
                 throw V2HostRoomRecoveryBatchError.corruptResult
             }

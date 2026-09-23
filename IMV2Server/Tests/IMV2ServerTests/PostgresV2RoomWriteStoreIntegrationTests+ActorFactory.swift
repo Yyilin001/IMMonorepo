@@ -20,13 +20,19 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let batcher = V2SendMessageAdmissionBatcher(store: writes,
                 configuration: .init(maximumBatchSize: 16, maximumDelay: .milliseconds(2)),
                 actorGrantedStore: writes)
+            let admission = V2DatabaseWorkAdmissionController(policy: .init(
+                maximumForegroundWriteInFlight: 1, maximumInteractiveReadInFlight: 1,
+                maximumSyncInFlight: 1, maximumForegroundWriteQueued: 2,
+                maximumInteractiveReadQueued: 2, maximumSyncQueued: 1,
+                timeout: .seconds(1)))
             let ownerResources = try V2RoomServerOwnerResources(database: database, writes: writes,
                 sendBatcher: batcher,
                 membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
                 receiptShadowForwarder: ActorFactoryShadow(), capacityProfile: forwardImportTestProfile(),
                 messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
-                contentReviewMode: .disabled, queryBatchConfiguration: .init())
+                contentReviewMode: .disabled, queryBatchConfiguration: .init(),
+                databaseWorkAdmission: admission)
             let factory = try V2RoomServerActivationFactory(owners: ["room-a": ownerResources],
                 safetyActorUserID: senderID, now: { now }).runtimeFactory()
             let configuration = try V2RoomRuntimeConfiguration()
@@ -74,6 +80,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let denial = try await first.invoke(token: token, encodedRequest: JSONEncoder().encode(denied),
                     deadline: .now + .seconds(10))
                 #expect(denial == .roomLog(.failure(.actorNotMember)))
+                // An Account-style direct invoke has no Gateway permit. The
+                // physical Host still admits its recovery and room-log SQL.
+                let admissionSnapshot = await admission.snapshot()
+                #expect(admissionSnapshot.foregroundWrite.admittedRequests == 1)
+                #expect(admissionSnapshot.interactiveRead.admittedRequests == 2)
+                #expect(admissionSnapshot.interactiveRead.inFlight == 0)
                 #expect(await first.stop(deadline: .now + .seconds(10)).completed)
                 guard case .ready(let replacement) = try await next.activate(roomID: roomID, owner: owner,
                     deadline: .now + .seconds(10)) else { throw V2RoomCallFailure.notAccepted(.notReady) }

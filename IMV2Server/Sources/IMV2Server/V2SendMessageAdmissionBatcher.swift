@@ -1257,12 +1257,19 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     private func withForegroundWriteAdmission<Result: Sendable>(
         _ operation: @Sendable () async throws -> Result
     ) async throws -> Result {
+        let callerDeadline = V2RoomSQLDeadline.current
+        if let callerDeadline, callerDeadline <= .now {
+            throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
+        }
         guard let databaseWorkAdmission else {
             return try await operation()
         }
-        switch await databaseWorkAdmission.acquire(.foregroundWrite) {
+        switch await databaseWorkAdmission.acquire(.foregroundWrite, callerDeadline: callerDeadline) {
         case .admitted:
             do {
+                if let callerDeadline, callerDeadline <= .now {
+                    throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
+                }
                 let result = try await operation()
                 await databaseWorkAdmission.release(.foregroundWrite)
                 return result
@@ -1270,7 +1277,12 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 await databaseWorkAdmission.release(.foregroundWrite)
                 throw error
             }
-        case .rejected:
+        case .rejected(.queueFull):
+            throw V2SendMessageAdmissionBatcherError.serverBusy
+        case .rejected(.timeout):
+            if let callerDeadline, callerDeadline <= .now {
+                throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
+            }
             throw V2SendMessageAdmissionBatcherError.serverBusy
         case .cancelled:
             throw CancellationError()

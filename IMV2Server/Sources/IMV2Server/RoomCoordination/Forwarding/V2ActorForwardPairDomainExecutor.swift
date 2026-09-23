@@ -13,21 +13,29 @@ public struct V2ActorForwardPairDomainExecutor: Sendable {
     private let capacityProfile: V2CapacityProfile
     private let limits: V2MessageCommandLimits
     private let acceptanceIDs: V2AcceptanceIDFactory
+    private let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
     private let now: @Sendable () -> Date
 
     public init(database: any Database, write: PostgresV2RoomWriteStore,
                 capacityProfile: V2CapacityProfile, limits: V2MessageCommandLimits,
+                databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
                 acceptanceIDs: V2AcceptanceIDFactory = .init(),
                 now: @escaping @Sendable () -> Date = Date.init) {
         self.database = database; self.write = write
         self.capacityProfile = capacityProfile; self.limits = limits
         self.acceptanceIDs = acceptanceIDs; self.now = now
+        self.databaseWorkAdmission = databaseWorkAdmission
     }
 
     public func execute(_ pair: V2ActorForwardPairWire,
-                        activationTokens: [V2RoomActivationToken]) async throws -> V2ActorForwardMessageResultWire {
-        try await V2RoomSQLDeadline.withDeadline(V2RoomSQLDeadline.boundedTransactionDeadline()) {
-            try await executeBounded(pair, activationTokens: activationTokens)
+                        activationTokens: [V2RoomActivationToken],
+                        deadline: ContinuousClock.Instant? = nil) async throws -> V2ActorForwardMessageResultWire {
+        let deadline = deadline ?? V2RoomSQLDeadline.boundedTransactionDeadline()
+        return try await v2WithAdmittedRoomDatabaseWork(databaseWorkAdmission,
+            workClass: .foregroundWrite, callerDeadline: deadline) {
+            try await V2RoomSQLDeadline.withDeadline(deadline) {
+                try await executeBounded(pair, activationTokens: activationTokens)
+            }
         }
     }
 

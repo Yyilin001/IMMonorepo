@@ -2537,6 +2537,60 @@ private struct GatewayPendingForward: V2ForwardMessagesHandling {
 }
 
 extension V2GatewayDomainCommandHandlerTests {
+    @Test("RoomRef Gateway call leaves the sole read permit for Host SQL")
+    func roomRefGatewayAndHostShareControllerWithoutDeadlock() async throws {
+        let fixture = try GatewayDomainFixture()
+        let admission = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundWriteInFlight: 1,
+            maximumInteractiveReadInFlight: 1,
+            maximumSyncInFlight: 1,
+            maximumForegroundWriteQueued: 1,
+            maximumInteractiveReadQueued: 1,
+            maximumSyncQueued: 1,
+            timeout: .milliseconds(40)))
+        // Fill the other foreground reservation: a Gateway read permit would
+        // consume the sole remaining slot and strand its own Host SQL call.
+        #expect(await admission.acquire(.foregroundWrite) == .admitted)
+        let reader = GatewayHostAdmittedPolicyReader(admission: admission)
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(
+                seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
+            groupRolePolicyBaseline: reader, sync: fixture.syncService(),
+            databaseWorkAdmission: admission, roomCommandsHostAdmitted: true)
+        var request = IMV2Envelope()
+        request.getGroupRolePolicyBaseline.roomID = fixture.roomID.rawValue
+        let response = try await handler.handle(envelope: request, identity: fixture.identity)
+        #expect(response.groupRolePolicyBaseline.roomID == fixture.roomID.rawValue)
+        #expect(await reader.calls == 1)
+        let snapshot = await admission.snapshot()
+        #expect(snapshot.interactiveRead.admittedRequests == 1)
+        #expect(snapshot.interactiveRead.inFlight == 0)
+        await admission.release(.foregroundWrite)
+    }
+
+    @Test("production Gateway still admits local user-directory control reads")
+    func hostAdmittedRoomModeKeepsControlAdmission() async throws {
+        let fixture = try GatewayDomainFixture()
+        let admission = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundWriteInFlight: 1, maximumInteractiveReadInFlight: 1,
+            maximumSyncInFlight: 1, maximumForegroundWriteQueued: 1,
+            maximumInteractiveReadQueued: 1, maximumSyncQueued: 1,
+            timeout: .milliseconds(20)))
+        #expect(await admission.acquire(.foregroundWrite) == .admitted)
+        #expect(await admission.acquire(.interactiveRead) == .admitted)
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(
+                seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
+            sync: fixture.syncService(), databaseWorkAdmission: admission,
+            roomCommandsHostAdmitted: true)
+        var request = IMV2Envelope()
+        request.userRoomDirectoryList.pageSize = 10
+        let response = try await handler.handle(envelope: request, identity: fixture.identity)
+        #expect(response.error.code == "SERVER_BUSY")
+        await admission.release(.interactiveRead)
+        await admission.release(.foregroundWrite)
+    }
+
     @Test("policy baseline uses authenticated identity and emits both roles including empty")
     func groupRolePolicyBaselineWire() async throws {
         let fixture = try GatewayDomainFixture()
@@ -2567,6 +2621,24 @@ extension V2GatewayDomainCommandHandlerTests {
         #expect(response.error.retryable == ["ownerChanged", "unavailable", "wrongRoom"].contains(scenario))
         if scenario == "invalid" { #expect(await reader.calls().isEmpty) }
     }
+}
+
+private actor GatewayHostAdmittedPolicyReader: V2GroupRolePolicyBaselineReading {
+    let admission: V2DatabaseWorkAdmissionController
+    private(set) var calls = 0
+    init(admission: V2DatabaseWorkAdmissionController) { self.admission = admission }
+
+    func readRolePolicyBaseline(roomID: RoomID, actorUserID: UserID) async throws -> V2GroupRolePolicyBaseline {
+        try await v2WithAdmittedRoomDatabaseWork(admission, workClass: .interactiveRead,
+            callerDeadline: .now + .milliseconds(200)) {
+            await self.recordCall()
+            return try V2GroupRolePolicyBaseline(roomID: roomID, permissionRevision: 4,
+                membershipRevision: 0, roomSequence: 9,
+                adminPermissions: [.inviteMembers], memberPermissions: [])
+        }
+    }
+
+    private func recordCall() { calls += 1 }
 }
 
 private actor GatewayPolicyBaselineReader: V2GroupRolePolicyBaselineReading {

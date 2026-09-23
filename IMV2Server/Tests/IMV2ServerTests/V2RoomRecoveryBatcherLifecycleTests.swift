@@ -7,6 +7,39 @@ import Testing
 
 @Suite("Room recovery batcher timer lifecycle")
 struct V2RoomRecoveryBatcherLifecycleTests {
+    @Test("two granted room turns share one Host SQL read permit")
+    func onePermitPerRecoveryBatch() async throws {
+        let admission = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundWriteInFlight: 1, maximumInteractiveReadInFlight: 1,
+            maximumSyncInFlight: 1, maximumForegroundWriteQueued: 1,
+            maximumInteractiveReadQueued: 1, maximumSyncQueued: 1,
+            timeout: .seconds(1)))
+        let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
+        let host = V2ActorHostIdentity(hostID: try .init("batch-host"), incarnationID: UUID())
+        let tokens = (0..<2).map { _ in V2RoomActivationToken(roomID: .init(uuid: UUID()),
+            owner: owner, activationEpoch: try! .init(1), host: host) }
+        let observed = Mutex<Int>(0)
+        let batcher = V2HostRoomRecoveryQueryBatcher(configuration: try .init(maximumItems: 2),
+            databaseWorkAdmission: admission) { _, actual in
+            #expect(actual.count == 2)
+            observed.withLock { $0 += 1 }
+            throw V2RoomRecoveryReadError.corruptPersistence
+        }
+        let actor = UserID(uuid: UUID())
+        let deadline = ContinuousClock.now + .seconds(2)
+        let first = Task { try await batcher.state(.init(token: tokens[0], actorUserID: actor,
+            batchDeadline: deadline, callDeadline: deadline)) }
+        while await batcher.pendingCount != 1 { await Task.yield() }
+        let second = Task { try await batcher.state(.init(token: tokens[1], actorUserID: actor,
+            batchDeadline: deadline, callDeadline: deadline)) }
+        await #expect(throws: V2RoomRecoveryReadError.corruptPersistence) { try await first.value }
+        await #expect(throws: V2RoomRecoveryReadError.corruptPersistence) { try await second.value }
+        #expect(observed.withLock { $0 } == 1)
+        let snapshot = await admission.snapshot()
+        #expect(snapshot.interactiveRead.admittedRequests == 1)
+        #expect(snapshot.interactiveRead.inFlight == 0)
+    }
+
     @Test("a recovery batch uses its earliest call deadline, not its timer cutoff")
     func earliestSelectedSQLDeadline() async throws {
         let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)

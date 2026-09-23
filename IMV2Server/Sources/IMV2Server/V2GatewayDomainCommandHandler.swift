@@ -244,6 +244,7 @@ public struct V2GatewayDomainCommandHandler:
     private let sync: V2SyncService
     private let telemetry: any V2TelemetrySink
     private let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
+    private let roomCommandsHostAdmitted: Bool
     private let controlWriteAdmissionEnabled: Bool
     /// 房间日志分页与其信封头共享普通网关帧的载荷预算。
     ///
@@ -294,6 +295,7 @@ public struct V2GatewayDomainCommandHandler:
                   forwardMessagesHandler: forwardMessages,
                   sync: sync, telemetry: telemetry,
                   databaseWorkAdmission: databaseWorkAdmission,
+                  roomCommandsHostAdmitted: true,
                   controlWriteAdmissionEnabled: controlWriteAdmissionEnabled,
                   maximumGroupEventPagePayloadBytes: maximumGroupEventPagePayloadBytes,
                   now: now, monotonicNow: monotonicNow)
@@ -324,6 +326,7 @@ public struct V2GatewayDomainCommandHandler:
         self.sync = sync
         self.telemetry = telemetry
         self.databaseWorkAdmission = databaseWorkAdmission
+        self.roomCommandsHostAdmitted = false
         self.controlWriteAdmissionEnabled = controlWriteAdmissionEnabled
         self.maximumGroupEventPagePayloadBytes = maximumGroupEventPagePayloadBytes
         self.now = now
@@ -354,6 +357,7 @@ public struct V2GatewayDomainCommandHandler:
         sync: V2SyncService,
         telemetry: any V2TelemetrySink,
         databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
+        roomCommandsHostAdmitted: Bool = false,
         controlWriteAdmissionEnabled: Bool = false,
         maximumGroupEventPagePayloadBytes: Int = 48 * 1_024,
         now: @escaping @Sendable () -> Date = Date.init,
@@ -383,6 +387,7 @@ public struct V2GatewayDomainCommandHandler:
         self.sync = sync
         self.telemetry = telemetry
         self.databaseWorkAdmission = databaseWorkAdmission
+        self.roomCommandsHostAdmitted = roomCommandsHostAdmitted
         self.controlWriteAdmissionEnabled = controlWriteAdmissionEnabled
         self.maximumGroupEventPagePayloadBytes = maximumGroupEventPagePayloadBytes
         self.now = now
@@ -471,7 +476,7 @@ public struct V2GatewayDomainCommandHandler:
         let startedAt = monotonicNow()
         do {
             let result: V2PreparedGroupEventPullResult
-            if let databaseWorkAdmission {
+            if let databaseWorkAdmission, !roomCommandsHostAdmitted {
                 switch await databaseWorkAdmission.acquire(.interactiveRead) {
                 case .admitted:
                     break
@@ -677,6 +682,21 @@ public struct V2GatewayDomainCommandHandler:
     }
 
     private func commandManagesDatabaseAdmission(for envelope: IMV2Envelope) -> Bool {
+        if roomCommandsHostAdmitted {
+            switch envelope.body {
+            case .sendMessage, .changeRoomMembership, .withdrawMessage,
+                 .changeMessageReaction, .editMessage, .recordReadReceipt,
+                 .getGroupRolePolicyBaseline, .listRoomMembers,
+                 .roomSyncStateBatch, .roomLatestVisibleBatch,
+                 .groupEventPull, .groupEventSubscribe, .listReadReceiptReaders,
+                 .moderateMessage, .muteMember, .moderateMemberRemoval,
+                 .setPinnedMessage, .setGroupAnnouncement,
+                 .setGroupRolePermissions, .changeGroupMemberRole,
+                 .forwardMessages:
+                return true
+            default: break
+            }
+        }
         switch envelope.body {
         case .sendMessage:
             return sendMessage.managesForegroundWriteAdmission
