@@ -1,4 +1,6 @@
 import Foundation
+import IMV2ActorContracts
+import IMV2Core
 
 /// 受信的目标归属边界。
 ///
@@ -46,6 +48,7 @@ public struct V2ForwardDeliveryReport: Equatable, Sendable {
 public struct V2ForwardDeliveryWorker: Sendable {
     private let store: PostgresV2ForwardDeliveryStore
     private let receipts: PostgresV2ForwardReceiptStore
+    private var recordReceipt: @Sendable (V2ForwardTerminalReceipt, V2ForwardExport, Date) async throws -> Void
     private let target: any V2ForwardExportDelivering
     private let leaseDuration: TimeInterval
     private let deliveryTimeout: TimeInterval
@@ -78,9 +81,36 @@ public struct V2ForwardDeliveryWorker: Sendable {
               pendingDelay.isFinite, pendingDelay > 0, (1...1_024).contains(maximumConcurrency)
         else { throw V2ForwardDeliveryError.invalidConfiguration }
         self.store = store; self.receipts = receipts; self.target = target
+        self.recordReceipt = { receipt, _, at in try await receipts.record(receipt, now: at) }
         self.leaseDuration = leaseDuration; self.pendingDelay = pendingDelay
         self.deliveryTimeout = timeout
         self.maximumConcurrency = maximumConcurrency; self.retryPolicy = retryPolicy; self.now = now
+    }
+
+    /// The actor composition routes source receipt commits through RoomRef.
+    /// Legacy direct-store construction remains available during cutover.
+    public init(store: PostgresV2ForwardDeliveryStore, receipts: PostgresV2ForwardReceiptStore,
+                target: any V2ForwardExportDelivering,
+                sourceCommand: @escaping @Sendable (V2RoomForwardCommand, ContinuousClock.Instant) async throws -> V2RoomForwardResult,
+                deadline: @escaping @Sendable () -> ContinuousClock.Instant,
+                leaseDuration: TimeInterval = 300, deliveryTimeout: TimeInterval? = nil,
+                pendingDelay: TimeInterval = 1, maximumConcurrency: Int = 4,
+                retryPolicy: V2DurableRetryPolicy = .standard,
+                now: @escaping @Sendable () -> Date = Date.init) throws {
+        try self.init(store: store, receipts: receipts, target: target,
+                      leaseDuration: leaseDuration, deliveryTimeout: deliveryTimeout,
+                      pendingDelay: pendingDelay, maximumConcurrency: maximumConcurrency,
+                      retryPolicy: retryPolicy, now: now)
+        self.recordReceipt = { receipt, export, _ in
+            let input = V2ActorRecordForwardReceiptWire(
+                sourceRoomID: .init(uuid: export.intent.sourceRoomID),
+                actorUserID: .init(uuid: export.intent.actorUserID),
+                exportID: receipt.exportID, payloadDigest: receipt.payloadDigest,
+                outcome: .init(domain: receipt.outcome))
+            guard case .receiptRecorded = try await sourceCommand(.recordReceipt(input), deadline()) else {
+                throw V2ForwardDeliveryError.receiptMismatch
+            }
+        }
     }
 
     /// 认领并投递一批任务。
@@ -168,7 +198,7 @@ public struct V2ForwardDeliveryWorker: Sendable {
             guard receipt.matches(lease.export) else { throw V2ForwardDeliveryError.receiptMismatch }
             try Task.checkCancellation()
             guard try await store.isCurrent(lease, now: now()) else { return .superseded }
-            try await receipts.record(receipt, now: now())
+            try await recordReceipt(receipt, lease.export, now())
             return try await store.complete(lease, now: now()) ? .completed : .superseded
         } catch is CancellationError {
             _ = try? await store.reschedule(lease, disposition: .retry(at: now()), resetAttempts: true, now: now())

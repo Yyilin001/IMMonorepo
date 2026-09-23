@@ -1,5 +1,6 @@
 import FluentKit
 import Foundation
+import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
@@ -11,6 +12,7 @@ public struct PostgresV2ForwardExportStore: Sendable {
     private let database: any Database
     private let maximumExportsPerRoom: Int
     private let makeUUID: @Sendable () -> UUID
+    private var activationScope: V2RoomActivationWriteScope?
 
     /// 组合数据库、单房间导出上限与标识生成方式。
     ///
@@ -25,6 +27,14 @@ public struct PostgresV2ForwardExportStore: Sendable {
         self.database = database
         self.maximumExportsPerRoom = maximumExportsPerRoom
         self.makeUUID = makeUUID
+        self.activationScope = nil
+    }
+
+    /// Bind both new exports and immutable replay to the granted source turn.
+    public func usingActivationToken(_ token: V2RoomActivationToken) throws -> Self {
+        var scoped = self
+        scoped.activationScope = try .init(tokens: [token])
+        return scoped
     }
 
     /// 准备一次转发导出，或在重试时返回既有导出。
@@ -85,13 +95,23 @@ public struct PostgresV2ForwardExportStore: Sendable {
               let sourceRoom = source.roomID.uuidValue, let message = source.messageID.uuidValue,
               let target = targetRoomID.uuidValue
         else { throw V2ForwardExportError.invalidRequest }
-        return try await database.transaction { transaction in
+        if let activationScope {
+            let token = try activationScope.token(for: sourceRoom)
+            guard token.owner.shardID == sourceRoute.shardID,
+                  token.owner.epoch == sourceRoute.epoch else {
+                throw V2RoomActivationLeaseError.activationChanged
+            }
+        }
+        return try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,
+            classifyCommitFailure: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ForwardExportError.corruptPersistenceState }
+            if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             // One pair mutex, then one source room. Never lock a remote target.
             // Competing retries with a different claimed source room cannot
             // create two copies or bypass the original source binding.
             let key = "v2-forward-export:\(actor):\(operation):\(message):\(target)"
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
+            try await activationScope?.require([sourceRoom], sql: sql)
             if let prior = try await sql.raw("""
                 SELECT export.source_room_id, export.source_content_revision,
                        CASE WHEN \(bind: replayTerminal) AND receipt.export_id IS NOT NULL

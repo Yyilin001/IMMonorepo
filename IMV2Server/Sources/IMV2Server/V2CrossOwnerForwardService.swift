@@ -1,4 +1,5 @@
 import Foundation
+import IMV2ActorContracts
 import IMV2Core
 
 /// 跨归属转发在源端等待结果时出现的瞬时错误。
@@ -27,6 +28,21 @@ public protocol V2CrossOwnerForwarding: Sendable {
     /// - Throws: 源归属未配置或持久化失败时抛出。
     func forward(actor: UserID, operation: MessageForwardOperationID, source: V2ForwardMessageReference,
                  sourceRoute: V2RoomShardRoute, target: RoomID, targetRoute: V2RoomShardRoute) async throws -> V2CrossOwnerForwardOutcome
+    func forward(actor: UserID, operation: MessageForwardOperationID, source: V2ForwardMessageReference,
+                 sourceRoute: V2RoomShardRoute, target: RoomID, targetRoute: V2RoomShardRoute,
+                 deadline: ContinuousClock.Instant) async throws -> V2CrossOwnerForwardOutcome
+}
+
+extension V2CrossOwnerForwarding {
+    public func forward(actor: UserID, operation: MessageForwardOperationID, source: V2ForwardMessageReference,
+                        sourceRoute: V2RoomShardRoute, target: RoomID, targetRoute: V2RoomShardRoute,
+                        deadline: ContinuousClock.Instant) async throws -> V2CrossOwnerForwardOutcome {
+        guard ContinuousClock().now < deadline else {
+            throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
+        }
+        return try await forward(actor: actor, operation: operation, source: source,
+            sourceRoute: sourceRoute, target: target, targetRoute: targetRoute)
+    }
 }
 
 /// 单个源归属所需的转发存储组合。
