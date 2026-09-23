@@ -1,4 +1,4 @@
-# Bounded transport patches
+# Local DistributedCluster patches
 
 Base: `apple/swift-distributed-actors` revision
 `50e789fbb6db9a9869a60b1915e659bd752e1d42` (see `UPSTREAM.json`).
@@ -19,6 +19,12 @@ The copied production source differs from upstream only in:
   closed/timeout failure reasons and remove an outbound handshake from the
   in-flight state after failure or rejection. Discovery's next bounded join
   can then reach a new process incarnation after a peer dies mid-handshake.
+- `Cluster/MembershipGossip/Cluster+MembershipGossip+Serialization.swift`:
+  omit seen-table rows whose node incarnation is no longer in the encoded
+  membership, and tolerate those rows from older peers on decode. The owner
+  must still be in membership and have a seen row; current-member versions
+  remain intact. The Server package's `V2MembershipGossipRestartTests` covers
+  this patch in its regular test target.
 
 `Package.swift` retains the upstream production target dependency products,
 Swift language mode, platform runtime requirements (including Linux's nil

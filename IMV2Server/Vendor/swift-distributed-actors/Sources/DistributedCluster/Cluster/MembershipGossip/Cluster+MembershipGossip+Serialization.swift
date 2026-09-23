@@ -18,6 +18,9 @@ extension Cluster.MembershipGossip: _ProtobufRepresentable {
     typealias ProtobufRepresentation = _ProtoClusterMembershipGossip
 
     public func toProto(context: Serialization.Context) throws -> ProtobufRepresentation {
+        guard self.membership.member(self.owner) != nil, self.seen.underlying[self.owner] != nil else {
+            throw SerializationError(.unableToSerialize(hint: "Membership gossip owner must have a member and seen row"))
+        }
         var proto = _ProtoClusterMembershipGossip()
         proto.ownerClusterNodeID = self.owner.nid.value
         proto.membership = try self.membership.toProto(context: context)
@@ -26,6 +29,10 @@ extension Cluster.MembershipGossip: _ProtobufRepresentable {
         var protoSeenTable = _ProtoClusterMembershipSeenTable()
         protoSeenTable.rows.reserveCapacity(self.seen.underlying.count)
         for (node, seenVersion) in self.seen.underlying {
+            // A removed incarnation can remain in the local seen table after a
+            // merge. Its node ID is absent from the encoded membership, so a
+            // receiver cannot resolve it as the owner of a seen row.
+            guard self.membership.member(node) != nil else { continue }
             var row = _ProtoClusterMembershipSeenTableRow()
             row.nodeID = node.nid.value
             row.version = try seenVersion.toCompactReplicaNodeIDProto(context: context)
@@ -53,6 +60,9 @@ extension Cluster.MembershipGossip: _ProtobufRepresentable {
         guard let ownerNode = membership.member(byUniqueNodeID: ownerID)?.node else {
             throw SerializationError(.unableToDeserialize(hint: "Missing member for ownerNodeID, members: \(membership)"))
         }
+        guard proto.seenTable.rows.contains(where: { $0.nodeID == ownerID.value }) else {
+            throw SerializationError(.unableToDeserialize(hint: "Missing seen row for ownerNodeID: \(ownerID)"))
+        }
 
         var gossip = Cluster.MembershipGossip(ownerNode: ownerNode)
         gossip.membership = membership
@@ -60,7 +70,9 @@ extension Cluster.MembershipGossip: _ProtobufRepresentable {
         for row in proto.seenTable.rows {
             let nodeID: Cluster.Node.ID = .init(row.nodeID)
             guard let member = membership.member(byUniqueNodeID: nodeID) else {
-                throw SerializationError(.unableToDeserialize(hint: "Missing Member for unique node id: \(nodeID), members: \(membership)"))
+                // Older peers can send a row for a removed incarnation. The
+                // membership is authoritative for which row owners remain.
+                continue
             }
 
             var replicaVersions: [VersionVector.ReplicaVersion] = []
