@@ -558,7 +558,7 @@ enum IMV2ServerApp {
                 )
             }
             let actorConfiguration = try V2RoomActorApplicationConfiguration(
-                environment: ProcessRuntimeEnvironment(), hostsRooms: true,
+                environment: ProcessRuntimeEnvironment(), hostsRooms: nil,
                 configuredShardIDs: Set(configuration.roomShardStorage.map(\.shardID)),
                 batchWaitMilliseconds: Int64(max(
                     configuration.directRoomLogAppendBatchMaximumDelayMilliseconds,
@@ -667,7 +667,8 @@ enum IMV2ServerApp {
                 safetyActorUserID: configuration.contentReviewSafetyActorUserID)
             let actors = try await V2RoomActorApplication.start(configuration: actorConfiguration,
                 ownerRouter: V2PostgresRoomShardRouter(database: database),
-                roomDatabases: roomShardDatabases, factory: actorFactory)
+                roomDatabases: roomShardDatabases,
+                factory: actorConfiguration.hostIdentity == nil ? nil : actorFactory)
             roomActorApplication = actors
             let actorDirectory = actors.directory
             let callTimeout = actorConfiguration.runtime.callTimeout

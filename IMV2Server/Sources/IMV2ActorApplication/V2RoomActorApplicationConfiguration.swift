@@ -31,7 +31,9 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
     /// file. Secret material and the deployment document are never logged.
     /// The host's collection window covers its configured send/receipt delays;
     /// individual batchers still use their own shorter or adaptive delay.
-    public init(environment: any V2RuntimeEnvironment, hostsRooms: Bool,
+    /// A nil role lets a Gateway use the validated deployment document to
+    /// select host or caller mode. Caller-only applications pass false.
+    public init(environment: any V2RuntimeEnvironment, hostsRooms: Bool?,
                 configuredShardIDs: Set<String>, batchWaitMilliseconds: Int64 = 2) throws {
         guard let path = environment.value(for: "IMV2_ROOM_ACTOR_CONFIGURATION_FILE"),
               !path.isEmpty else { throw V2RoomActorApplicationConfigurationError.missingConfiguration }
@@ -41,14 +43,14 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
                       batchWaitMilliseconds: batchWaitMilliseconds)
     }
 
-    init(document: Document, hostsRooms: Bool, configuredShardIDs: Set<String>,
+    init(document: Document, hostsRooms: Bool?, configuredShardIDs: Set<String>,
          batchWaitMilliseconds: Int64 = 2) throws {
         guard !document.name.isEmpty, document.name.utf8.count <= 128,
               Self.isDNSName(document.address),
               (1...65_535).contains(document.port), (1...64).contains(document.threadPoolSize),
               !configuredShardIDs.isEmpty, configuredShardIDs.count <= 256,
               (1...256).contains(document.services.count), (1...256).contains(document.peers.count),
-              hostsRooms == (document.hostID != nil), (1...25).contains(batchWaitMilliseconds) else {
+              (hostsRooms == nil || hostsRooms == (document.hostID != nil)), (1...25).contains(batchWaitMilliseconds) else {
             throw V2RoomActorApplicationConfigurationError.invalidConfiguration
         }
         let signingID = try V2ActorServiceID(document.serviceID)
@@ -132,7 +134,7 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         self.trust = try .init(services: trusted); self.tls = tls
         self.discovery = try .init(peers: peers)
         self.allowedShards = allowed
-        self.serviceShardAccess = hostsRooms ? access.compactMapValues {
+        self.serviceShardAccess = identity != nil ? access.compactMapValues {
             let shared = $0.intersection(allowed)
             return shared.isEmpty ? nil : shared
         } : [:]
