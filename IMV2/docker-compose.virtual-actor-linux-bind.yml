@@ -1,0 +1,11 @@
+# Optional host-backed cache for a Docker VM with insufficient volume space.
+# Apply after docker-compose.isolated-tests.yml. The source mount remains :ro.
+services:
+  swift-tests:
+    volumes:
+      - type: bind
+        source: ${IMV2_VA_LINUX_CACHE_DIR:?set an absolute host cache path}
+        target: /tmp/cache
+      - type: bind
+        source: ${IMV2_VA_LINUX_SCRATCH_DIR:?set an absolute host scratch path}
+        target: /tmp/swiftpm
