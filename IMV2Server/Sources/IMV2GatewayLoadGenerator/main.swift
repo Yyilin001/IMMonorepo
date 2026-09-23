@@ -1061,8 +1061,10 @@ private struct LoadRun {
                         try await Task.sleep(nanoseconds: UInt64(remaining.nanoseconds))
                     }
                     completedTicks = tick + 1
-                    if completedTicks.isMultiple(of: ticksPerSecond * 10) {
-                        try enforceGuards(statistics: statistics)
+                    if completedTicks.isMultiple(of: ticksPerSecond) {
+                        if completedTicks.isMultiple(of: ticksPerSecond * 10) {
+                            try enforceGuards(statistics: statistics)
+                        }
                         printScenarioProgress(
                             phase: phase.name,
                             second: completedTicks / ticksPerSecond,
@@ -1210,7 +1212,7 @@ private struct LoadRun {
 
     private func printScenarioProgress(phase: String, second: Int, statistics: LoadStatistics) {
         let snapshot = statistics.snapshot()
-        print("scenario phase=\(phase) second=\(second) active=\(snapshot.active) heartbeat_ack=\(snapshot.heartbeatAcknowledged) missed=\(snapshot.heartbeatMissed) messages_ack=\(snapshot.messagesAcknowledged) room_event_local_echoes=\(snapshot.roomEventLocalEchoesApplied) room_event_local_echo_gaps=\(snapshot.roomEventLocalEchoGapsDetected) room_event_pulls=\(snapshot.roomEventPullsSent) room_event_records=\(snapshot.roomEventRecordsReceived) read_receipts_ack=\(snapshot.readReceiptsAcknowledged) read_receipts_coalesced=\(snapshot.readReceiptsCoalesced) sync_records=\(snapshot.syncRecordsReceived) workload_failed=\(snapshot.workloadFailed) rss_mb=\(snapshot.maximumRSSBytes / 1_048_576)")
+        print("scenario phase=\(phase) second=\(second) active=\(snapshot.active) heartbeat_ack=\(snapshot.heartbeatAcknowledged) missed=\(snapshot.heartbeatMissed) messages_ack=\(snapshot.messagesAcknowledged) room_event_local_echoes=\(snapshot.roomEventLocalEchoesApplied) room_event_local_echo_gaps=\(snapshot.roomEventLocalEchoGapsDetected) room_event_pulls=\(snapshot.roomEventPullsSent) room_event_records=\(snapshot.roomEventRecordsReceived) read_receipts_ack=\(snapshot.readReceiptsAcknowledged) read_receipts_coalesced=\(snapshot.readReceiptsCoalesced) sync_records=\(snapshot.syncRecordsReceived) room_sync_state_success_rooms=\(snapshot.roomSyncStateBatch.successfulRooms) room_sync_state_retry_rooms=\(snapshot.roomSyncStateBatch.retryRooms) room_sync_state_unavailable_rooms=\(snapshot.roomSyncStateBatch.unavailableRooms) room_latest_visible_success_rooms=\(snapshot.roomLatestVisibleBatch.successfulRooms) room_latest_visible_retry_rooms=\(snapshot.roomLatestVisibleBatch.retryRooms) room_latest_visible_unavailable_rooms=\(snapshot.roomLatestVisibleBatch.unavailableRooms) workload_failed=\(snapshot.workloadFailed) rss_mb=\(snapshot.maximumRSSBytes / 1_048_576)")
     }
 
     private func startWorkloads(channels: [Channel]) async throws {
