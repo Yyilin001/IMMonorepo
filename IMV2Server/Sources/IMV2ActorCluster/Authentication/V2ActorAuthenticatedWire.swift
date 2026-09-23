@@ -7,6 +7,7 @@ public typealias V2ActorServiceID = V2Identifier<V2ActorServiceIDTag>
 
 /// Permissions come from the local trust map. No request can declare its role.
 public enum V2ActorServicePermission: String, Codable, Hashable, Sendable {
+    case roomMaintenance
     case userRoomCalls
     case trustedSafety
     case specialAccountAudit

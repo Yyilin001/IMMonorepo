@@ -159,6 +159,8 @@ private actor V2RoomServerActivation {
                           batchDeadline: ContinuousClock.Instant,
                           callDeadline: ContinuousClock.Instant) async throws -> V2RoomResponse {
         switch request {
+        case .maintenance(let command):
+            return .maintenance(try await handlers.maintenance.execute(command, token: token))
         case .messaging(let command):
             return .messaging(try await handlers.messages.execute(command))
         case .administration(let command):
@@ -229,9 +231,11 @@ private actor V2RoomServerActivation {
         let administration: V2RoomAdministrationDomainExecutor
         let audit: V2RoomSpecialAccountAuditExecutor
         let invitations: V2RoomInvitationDomainExecutor
+        let maintenance: V2ActorRoomMaintenanceExecutor
 
         init(token: V2RoomActivationToken, resources: V2RoomServerOwnerResources,
              now: @escaping @Sendable () -> Date) throws {
+            maintenance = .init(database: resources.database, now: now)
             messages = try .init(token: token, writes: resources.writes, edits: resources.edits,
                 withdrawals: resources.withdrawals, reactions: resources.reactions,
                 capacityProfile: resources.capacity, limits: resources.messageLimits,

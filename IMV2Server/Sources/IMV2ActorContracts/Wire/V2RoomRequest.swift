@@ -36,6 +36,7 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
     case invitation(V2RoomInvitationCommand)
     case invitationQuery(V2RoomInvitationQuery)
     case specialAccountAudit(V2ActorSpecialAccountAuditWire)
+    case maintenance(V2RoomMaintenanceCommand)
 
     public var roomID: RoomID {
         switch self {
@@ -50,6 +51,7 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
         case .invitation(let value): value.roomID
         case .invitationQuery(let value): value.roomID
         case .specialAccountAudit(let value): value.roomID
+        case .maintenance(let value): value.roomID
         }
     }
 
@@ -67,7 +69,7 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
         case .recovery(let value): value.actorUserID
         case .invitation(let value): value.actorUserID
         case .invitationQuery(let value): value.actorUserID
-        case .specialAccountAudit: nil
+        case .specialAccountAudit, .maintenance: nil
         }
     }
 
@@ -77,6 +79,7 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
         case .administrationQuery, .receiptQuery, .roomLog, .directory, .recovery: .readOnly
         case .invitation(let value): value.retryPolicy
         case .invitationQuery: .readOnly
+        case .maintenance: .noAutomaticRetry
         }
     }
 
@@ -85,7 +88,7 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
         case .messaging, .administration, .receipt, .specialAccountAudit: true
         case .administrationQuery, .receiptQuery, .roomLog, .directory, .recovery: false
         case .invitation(let value): value.stableOperationIdentity != nil
-        case .invitationQuery: false
+        case .invitationQuery, .maintenance: false
         }
     }
 
@@ -104,4 +107,5 @@ public enum V2RoomResponse: Codable, Equatable, Sendable {
     case recovery(V2ActorRoomRecoveryItemResult)
     case invitation(V2RoomInvitationResult)
     case specialAccountAudit(V2ActorSpecialAccountAuditResultWire)
+    case maintenance(V2RoomMaintenanceResult)
 }

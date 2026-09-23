@@ -93,6 +93,28 @@ struct V2ActorAuthenticationTests {
         _ = try await fixture.auth.accept(fixture.worker.sign(accepted, maximumBytes: 10_000))
     }
 
+    @Test("maintenance requires its own service permission and never a user principal")
+    func maintenancePermission() async throws {
+        let fixture = try Fixture(workerPermissions: [.roomMaintenance])
+        let request = V2RoomRequest.maintenance(.trimLog(.init(roomID: fixture.token.roomID,
+            mode: .window, windowSeconds: 86_400)))
+        #expect(request.replayPolicy == .noAutomaticRetry)
+        #expect(!request.hasStableOperationID)
+        let userGrant = try await fixture.open()
+        await failure(.forbidden) {
+            _ = try await fixture.auth.accept(fixture.client.sign(
+                fixture.call(grant: userGrant, principal: .service, request: request), maximumBytes: 10_000))
+        }
+        let workerGrant = try await fixture.auth.openSession(fixture.worker.sign(
+            fixture.hello(serviceID: fixture.worker.serviceID), maximumBytes: 10_000))
+        await failure(.forbidden) {
+            _ = try await fixture.auth.accept(fixture.worker.sign(
+                fixture.call(grant: workerGrant, principal: .user(fixture.user), request: request), maximumBytes: 10_000))
+        }
+        _ = try await fixture.auth.accept(fixture.worker.sign(
+            fixture.call(grant: workerGrant, sequence: 2, principal: .service, request: request), maximumBytes: 10_000))
+    }
+
     @Test("the host signing key, incarnation and attempt bind every reply")
     func replyBinding() async throws {
         let fixture = try Fixture()
