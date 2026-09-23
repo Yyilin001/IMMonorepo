@@ -23,6 +23,27 @@ struct V2RoomActorApplicationConfigurationTests {
         }
     }
 
+    @Test("generated local deployment loads both host and caller identities",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_ROOM_ACTOR_TEST_DEPLOYMENT_DIRECTORY"] != nil))
+    func generatedDeployment() throws {
+        let root = try #require(ProcessInfo.processInfo.environment["IMV2_ROOM_ACTOR_TEST_DEPLOYMENT_DIRECTORY"])
+        for (name, isHost) in [("gateway", true), ("account", false)] {
+            let configuration = try V2RoomActorApplicationConfiguration(
+                environment: FileEnvironment(path: root + "/" + name + "/configuration.json"),
+                hostsRooms: isHost, configuredShardIDs: ["rooms-primary"])
+            #expect((configuration.hostIdentity != nil) == isHost)
+            #expect(configuration.signer.serviceID.rawValue == name)
+            #expect(configuration.discovery.peers.count == 1)
+        }
+    }
+
+    private struct FileEnvironment: V2RuntimeEnvironment {
+        let path: String
+        func value(for key: String) -> String? {
+            key == "IMV2_ROOM_ACTOR_CONFIGURATION_FILE" ? path : nil
+        }
+    }
+
     private struct EmptyEnvironment: V2RuntimeEnvironment {
         func value(for key: String) -> String? { nil }
     }

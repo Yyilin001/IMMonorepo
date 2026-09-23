@@ -40,7 +40,7 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
 
     init(document: Document, hostsRooms: Bool, configuredShardIDs: Set<String>) throws {
         guard !document.name.isEmpty, document.name.utf8.count <= 128,
-              !document.address.isEmpty, document.address.utf8.count <= 253,
+              Self.isDNSName(document.address),
               (1...65_535).contains(document.port), (1...64).contains(document.threadPoolSize),
               !configuredShardIDs.isEmpty, configuredShardIDs.count <= 256,
               (1...256).contains(document.services.count), (1...256).contains(document.peers.count),
@@ -94,7 +94,7 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
             let host = V2ActorHostID(uuid: peer.hostID)
             let service = try V2ActorServiceID(peer.serviceID)
             let shards = Set(peer.shardIDs)
-            guard seenHosts.insert(host).inserted, pinnedHosts[host] == service,
+            guard Self.isDNSName(peer.address), seenHosts.insert(host).inserted, pinnedHosts[host] == service,
                   !shards.isEmpty, shards.count == peer.shardIDs.count,
                   shards.isSubset(of: configuredShardIDs) else {
                 throw V2RoomActorApplicationConfigurationError.invalidConfiguration
@@ -134,6 +134,18 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         } : [:]
         self.runtime = runtime
         self.authentication = try .init(maximumRequestBytes: runtime.maximumRequestBytes)
+    }
+
+    /// DistributedCluster sends the peer address as SNI. NIOSSL rejects IP
+    /// literals in that field; reject them before creating a live transport.
+    private static func isDNSName(_ address: String) -> Bool {
+        guard (1...253).contains(address.utf8.count),
+              address.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) ||
+                  (48...57).contains($0) || $0 == 45 || $0 == 46 }) else { return false }
+        let labels = address.split(separator: ".", omittingEmptySubsequences: false)
+        return !labels.allSatisfy { Int($0) != nil } && labels.allSatisfy {
+            (1...63).contains($0.utf8.count) && $0.first != "-" && $0.last != "-"
+        }
     }
 
     private static func readFile(_ path: String, maximumBytes: Int) throws -> Data {

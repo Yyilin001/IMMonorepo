@@ -161,7 +161,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         _ operation: @escaping @Sendable (any Database) async throws -> Result
     ) async throws -> Result {
         try await v2WithPostgresTransactionRetry(database: database,
-            classifyCommitFailure: activationScope != nil) { transaction in
+            classifyCommitFailure: activationScope != nil,
+            useRoomDeadline: activationScope != nil) { transaction in
             if activationScope != nil {
                 try await v2SetRoomActivationSQLTimeouts(.default, sql: sqlDatabase(from: transaction))
             }
