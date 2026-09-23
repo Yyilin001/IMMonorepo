@@ -555,7 +555,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
        AND table_name = 'schema_contract'
        AND column_name = 'schema_id'
        AND is_nullable = 'NO'
-       AND column_default = '''im-v2-current-52''::text'
+       AND column_default = '''im-v2-current-53''::text'
    )
    AND EXISTS (
      SELECT 1
@@ -565,7 +565,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
      WHERE namespace.nspname = 'im_v2'
        AND relation.relname = 'schema_contract'
        AND constraint_record.contype = 'c'
-       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-52%'
+       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-53%'
    )
    AND EXISTS (
      SELECT 1 FROM information_schema.columns
@@ -742,5 +742,12 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
    AND EXISTS (SELECT 1 FROM pg_index
        WHERE indexrelid = to_regclass('im_v2.room_activation_leases_pkey')
          AND indisunique AND indisvalid AND indisready)
+   AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conrelid = to_regclass('im_v2.group_room_creation_drafts')
+         AND contype = 'f' AND confrelid = to_regclass('im_v2.rooms'))
+   AND EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conrelid = to_regclass('im_v2.group_room_creation_drafts')
+         AND convalidated AND conname = 'group_room_creation_drafts_check'
+         AND pg_get_constraintdef(oid) = 'CHECK (((state = ''completed''::text) = (room_id IS NOT NULL)))')
    AND to_regclass('im_v2.local_schema_migrations') IS NULL)))
 FROM schema_visibility WHERE active_path = '';

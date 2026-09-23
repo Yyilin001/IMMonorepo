@@ -139,6 +139,11 @@ psql -c 'ALTER TABLE im_v2.control_housekeeping_cursor ADD CONSTRAINT control_ho
 test "$(current_schema_contract)" = 't'
 
 
+psql -c 'ALTER TABLE im_v2.group_room_creation_drafts ADD CONSTRAINT group_room_creation_drafts_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id)' >/dev/null
+test "$(current_schema_contract)" = 'f'
+psql -c 'ALTER TABLE im_v2.group_room_creation_drafts DROP CONSTRAINT group_room_creation_drafts_room_id_fkey' >/dev/null
+test "$(current_schema_contract)" = 't'
+
 psql -c 'ALTER TABLE im_v2.room_activation_leases DROP CONSTRAINT room_activation_leases_holder_check' >/dev/null
 test "$(current_schema_contract)" = 'f'
 psql -c "ALTER TABLE im_v2.room_activation_leases ADD CONSTRAINT room_activation_leases_holder_check CHECK ((host_id IS NULL AND host_incarnation_id IS NULL AND expires_at IS NULL) OR (host_id IS NOT NULL AND length(btrim(host_id)) > 0 AND host_incarnation_id IS NOT NULL AND expires_at IS NOT NULL AND isfinite(expires_at)))" >/dev/null

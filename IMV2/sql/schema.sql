@@ -717,6 +717,10 @@ CREATE TABLE im_v2.group_room_creation_drafts (
     CONSTRAINT group_room_creation_drafts_title_check CHECK (((octet_length(title) >= 1) AND (octet_length(title) <= 120)))
 );
 
+-- This is a control-plane draft. Its completed room belongs to the selected
+-- owner database; fixed creation intents and owner receipts establish identity.
+-- A local rooms foreign key would reject every remote-owner completion.
+
 CREATE TABLE im_v2.group_room_operations (
     actor_user_id uuid NOT NULL,
     operation_id uuid NOT NULL,
@@ -2179,14 +2183,14 @@ CREATE TABLE im_v2.control_housekeeping_cursor (
 INSERT INTO im_v2.control_housekeeping_cursor (singleton, rotation) VALUES (true, 0);
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-52'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-52'::text))
+    schema_id text DEFAULT 'im-v2-current-53'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-53'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-52');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-53');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
@@ -3448,9 +3452,6 @@ ALTER TABLE ONLY im_v2.group_role_permissions
 
 ALTER TABLE ONLY im_v2.group_room_creation_draft_members
     ADD CONSTRAINT group_room_creation_draft_membe_actor_user_id_operation_id_fkey FOREIGN KEY (actor_user_id, operation_id) REFERENCES im_v2.group_room_creation_drafts(actor_user_id, operation_id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY im_v2.group_room_creation_drafts
-    ADD CONSTRAINT group_room_creation_drafts_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY im_v2.group_room_operations
     ADD CONSTRAINT group_room_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
