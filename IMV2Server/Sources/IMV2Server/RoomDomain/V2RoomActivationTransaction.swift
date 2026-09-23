@@ -25,6 +25,37 @@ func v2WithRoomActivationTransaction<Value: Sendable>(
     timeouts: V2RoomActivationSQLTimeouts = .default,
     _ body: @escaping @Sendable (any Database) async throws -> Value
 ) async throws -> Value {
+    try await v2WithRoomActivationTransactionCore(
+        database: database, deadline: deadline, timeouts: timeouts, needsContext: false
+    ) { borrowed, _ in
+        try await body(borrowed)
+    }
+}
+
+/// The context is minted only after BEGIN and the first LOCAL timeout setting.
+/// It owns the exact borrowed SQL handle; callers cannot substitute a pooled
+/// connection when using its combined room fence.
+func v2WithRoomActivationTransactionWithContext<Value: Sendable>(
+    database: any Database,
+    deadline: ContinuousClock.Instant,
+    timeouts: V2RoomActivationSQLTimeouts = .default,
+    _ body: @escaping @Sendable (any Database, V2ConfiguredRoomFenceContext) async throws -> Value
+) async throws -> Value {
+    try await v2WithRoomActivationTransactionCore(
+        database: database, deadline: deadline, timeouts: timeouts, needsContext: true
+    ) { borrowed, context in
+        guard let context else { throw V2RoomActivationLeaseError.activationChanged }
+        return try await body(borrowed, context)
+    }
+}
+
+private func v2WithRoomActivationTransactionCore<Value: Sendable>(
+    database: any Database,
+    deadline: ContinuousClock.Instant,
+    timeouts: V2RoomActivationSQLTimeouts,
+    needsContext: Bool,
+    _ body: @escaping @Sendable (any Database, V2ConfiguredRoomFenceContext?) async throws -> Value
+) async throws -> Value {
     guard ContinuousClock().now < deadline else {
         throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
     }
@@ -55,7 +86,7 @@ func v2WithRoomActivationTransaction<Value: Sendable>(
                 if ContinuousClock().now >= deadline { state.stop(.deadline) }
                 return try await v2ExecuteBorrowedRoomTransaction(borrowed: borrowed,
                     control: control, sql: sql, state: state,
-                    timeouts: timeouts, body)
+                    timeouts: timeouts, needsContext: needsContext, body)
             }
         }
     }
@@ -87,7 +118,8 @@ private func v2ExecuteBorrowedRoomTransaction<Value: Sendable>(
     sql: any SQLDatabase,
     state: V2RoomPhysicalTransactionState,
     timeouts: V2RoomActivationSQLTimeouts,
-    _ body: @escaping @Sendable (any Database) async throws -> Value
+    needsContext: Bool,
+    _ body: @escaping @Sendable (any Database, V2ConfiguredRoomFenceContext?) async throws -> Value
 ) async throws -> Value {
     guard state.beginTransaction() else {
         try await state.settleClose()
@@ -97,7 +129,15 @@ private func v2ExecuteBorrowedRoomTransaction<Value: Sendable>(
         try await control.beginTransaction().get()
         // No operation advisory or room lock precedes these LOCAL limits.
         try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
-        let value = try await body(borrowed)
+        let context = needsContext
+            ? V2ConfiguredRoomFenceContext(sql: sql, timeouts: timeouts, state: state) : nil
+        let value: Value
+        do { value = try await body(borrowed, context) }
+        catch {
+            context?.invalidate()
+            throw error
+        }
+        context?.invalidate()
         guard state.beginCommit() else {
             try await state.settleClose()
             throw state.rollbackFailure
@@ -141,6 +181,146 @@ private func v2ExecuteBorrowedRoomTransaction<Value: Sendable>(
             throw V2RoomCallFailure.rolledBack(.unavailable)
         }
         throw error
+    }
+}
+
+/// Internal transaction-bound authority for the combined room lock and fence.
+/// Only the physical transaction can construct it. The active-use guard makes
+/// an escaped or concurrently used context fail closed rather than borrowing a
+/// connection after its enclosing transaction has returned.
+final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
+    private struct Lifecycle: Sendable {
+        var active = true
+        var inUse = false
+        var used = false
+    }
+
+    private let sql: any SQLDatabase
+    private let configuredTimeouts: V2RoomActivationSQLTimeouts
+    private let transactionState: V2RoomPhysicalTransactionState
+    private let lifecycle: Mutex<Lifecycle>
+
+    fileprivate init(sql: any SQLDatabase, timeouts: V2RoomActivationSQLTimeouts,
+                     state: V2RoomPhysicalTransactionState) {
+        self.sql = sql
+        configuredTimeouts = timeouts
+        transactionState = state
+        lifecycle = Mutex(Lifecycle())
+    }
+
+    /// This one-shot operation uses only the SQL handle that the enclosing
+    /// physical transaction supplied. The transaction body must await all
+    /// its SQL before returning; invalidate closes an improperly outstanding
+    /// operation instead of allowing COMMIT and later reuse.
+    func requireSelectedOwnersAndActivations(
+        roomIDs: [UUID],
+        expectedRoutes: [UUID: V2RoomShardRoute]?,
+        expectedKinds: [UUID: String]?,
+        scope: V2RoomActivationWriteScope,
+        timeouts: V2RoomActivationSQLTimeouts = .default
+    ) async throws {
+        try lifecycle.withLock { lifecycle in
+            guard lifecycle.active, !lifecycle.inUse, !lifecycle.used else {
+                throw V2RoomActivationLeaseError.activationChanged
+            }
+            lifecycle.inUse = true
+            lifecycle.used = true
+        }
+        defer { lifecycle.withLock { $0.inUse = false } }
+        let orderedRooms = Set(roomIDs).sorted { $0.uuidString < $1.uuidString }
+        guard !orderedRooms.isEmpty else { throw V2RoomActivationLeaseError.activationChanged }
+        if let expectedRoutes,
+           !orderedRooms.allSatisfy({ expectedRoutes[$0] != nil }) {
+            throw V2RoomOwnerFenceError.ownerChanged
+        }
+        if timeouts != configuredTimeouts {
+            // The optimization is valid only for the exact LOCAL policy the
+            // transaction installed. A different policy takes the complete
+            // original fence after setting its limits before the first lock.
+            try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
+        }
+        let roomIDsJSON = String(decoding: try JSONEncoder().encode(
+            orderedRooms.map(\.uuidString)), as: UTF8.self)
+        let rows = try await sql.raw("""
+            SELECT room_id, room_shard_id, owner_epoch, room_kind FROM im_v2.rooms
+            WHERE room_id IN (SELECT value::uuid FROM jsonb_array_elements_text(\(bind: roomIDsJSON)::jsonb))
+            ORDER BY room_id FOR NO KEY UPDATE
+            """).all(decoding: V2ConfiguredRoomOwnerRow.self)
+        // Preserve the ordinary writer's error priority: kind before route
+        // row-count/owner, then the exact activation token and lease.
+        if let expectedKinds,
+           rows.contains(where: { row in
+               expectedKinds[row.roomID].map { $0 != row.kind } ?? false
+           }) {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        guard rows.count == orderedRooms.count,
+              Set(rows.map(\.roomID)) == Set(orderedRooms) else {
+            if expectedRoutes != nil { throw V2RoomOwnerFenceError.ownerChanged }
+            throw V2RoomActivationLeaseError.roomNotFound
+        }
+        if let expectedRoutes,
+           rows.contains(where: { row in
+               guard let route = expectedRoutes[row.roomID] else { return true }
+               return route.shardID != row.shardID || route.epoch != row.epoch
+           }) {
+            throw V2RoomOwnerFenceError.ownerChanged
+        }
+        let rowsByRoom = Dictionary(uniqueKeysWithValues: rows.map { ($0.roomID, $0) })
+        let orderedTokens = try orderedRooms.map { room -> (UUID, V2RoomActivationToken) in
+            let token = try scope.token(for: room)
+            guard let row = rowsByRoom[room],
+                  row.shardID == token.owner.shardID,
+                  row.epoch == token.owner.epoch else {
+                throw V2RoomActivationLeaseError.ownerChanged
+            }
+            return (room, token)
+        }
+        if timeouts != configuredTimeouts {
+            // Full default path: it re-applies LOCAL limits and independently
+            // locks/verifies room rows, then leases and DB clock.
+            try await v2RequireRoomActivations(tokens: orderedTokens.map { $0.1 },
+                                               sql: sql, timeouts: timeouts)
+            return
+        }
+        var leases: [(V2RoomActivationToken, V2RoomActivationPersistenceRow?)] = []
+        for (room, token) in orderedTokens {
+            let row = try await sql.raw("""
+                SELECT activation_epoch, owner_shard_id, owner_epoch, host_id, host_incarnation_id, expires_at
+                FROM im_v2.room_activation_leases WHERE room_id = \(bind: room) FOR UPDATE
+                """).first(decoding: V2RoomActivationPersistenceRow.self)
+            leases.append((token, row))
+        }
+        // clock_timestamp must run after every room and lease lock; a wait
+        // can cross expiry, whereas now() is fixed at transaction start.
+        let observed = try await v2RoomActivationDatabaseClock(sql: sql)
+        for (token, row) in leases {
+            guard let row, row.matches(token) else {
+                throw V2RoomActivationLeaseError.activationChanged
+            }
+            guard let expiresAt = row.expiresAt, expiresAt > observed else {
+                throw V2RoomActivationLeaseError.leaseExpired
+            }
+        }
+    }
+
+    fileprivate func invalidate() {
+        let wasInUse = lifecycle.withLock { lifecycle -> Bool in
+            lifecycle.active = false
+            return lifecycle.inUse
+        }
+        if wasInUse { transactionState.stop(.cancelled) }
+    }
+}
+
+private struct V2ConfiguredRoomOwnerRow: Decodable {
+    let roomID: UUID
+    let shardID: String
+    let epoch: Int64
+    let kind: String
+    enum CodingKeys: String, CodingKey {
+        case roomID = "room_id", shardID = "room_shard_id"
+        case epoch = "owner_epoch", kind = "room_kind"
     }
 }
 

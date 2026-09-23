@@ -179,6 +179,31 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
     }
 
+    /// Ordinary scalar acceptance and conditional group batches use this
+    /// transaction-bound fence; all other writers retain the general API.
+    private func withRoomWriteTransactionWithFenceContext<Result: Sendable>(
+        _ operation: @escaping @Sendable (any Database, V2ConfiguredRoomFenceContext?) async throws -> Result
+    ) async throws -> Result {
+        try await v2WithPostgresTransactionRetryWithRoomContext(database: database,
+            classifyCommitFailure: activationScope != nil,
+            useRoomDeadline: activationScope != nil) { transaction, context in
+            let result = try await operation(transaction, context)
+            if let grants = authorizationGrants {
+                guard let recordedAt = authorizationRecordedAt else {
+                    throw V2DirectAuthorizationIntentError.corruptPersistence
+                }
+                for key in grants.keys.sorted() {
+                    guard let grant = grants[key] else {
+                        throw V2DirectAuthorizationIntentError.corruptPersistence
+                    }
+                    _ = try await PostgresV2DirectAuthorizationReceiptStore().finishIfPresent(
+                        grant.attempt, now: recordedAt, transaction: transaction)
+                }
+            }
+            return result
+        }
+    }
+
     private func prepareAuthorization(roomID: UUID, senderID: UUID, clientMessageID: UUID, sql: any SQLDatabase) async throws {
         guard let grants = authorizationGrants else { return }
         if controlScopeRoomKinds?[roomID] == "group" { return }
@@ -878,7 +903,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         cachedDirectPolicy: V2DirectSendPolicyCache.Entry?
     ) async throws -> RoomWriteCommit {
         do {
-            return try await withRoomWriteTransaction { transaction in
+            return try await withRoomWriteTransactionWithFenceContext { transaction, fenceContext in
                 try await acceptInTransaction(
                     command: command,
                     capacityProfile: capacityProfile,
@@ -887,6 +912,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                     roomID: roomID,
                     senderID: senderID,
                     cachedDirectPolicy: cachedDirectPolicy,
+                    fenceContext: fenceContext,
                     transaction: transaction
                 )
             }
@@ -1111,7 +1137,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
 
         let committed: [OrderedRoomWriteCommit]
         do {
-            committed = try await withRoomWriteTransaction { transaction in
+            committed = try await withRoomWriteTransactionWithFenceContext { transaction, fenceContext in
                 let sql = try sqlDatabase(from: transaction)
                 // PostgreSQL can evaluate the complete ordinary-group
                 // contract and append the canonical rows in one conditional
@@ -1124,7 +1150,16 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                 if sql is any PostgresDatabase {
                     if ownerRoutes != nil || activationScope != nil {
                         try await acquireMessageOperationLocks(orderedRequests, sql: sql)
-                        try await requireSelectedOwners(orderedRequests.map(\.roomID), sql: sql)
+                        if let fenceContext, let activationScope,
+                           authorizationGrants == nil {
+                            try await fenceContext.requireSelectedOwnersAndActivations(
+                                roomIDs: orderedRequests.map(\.roomID),
+                                expectedRoutes: ownerRoutes,
+                                expectedKinds: controlScopeRoomKinds,
+                                scope: activationScope)
+                        } else {
+                            try await requireSelectedOwners(orderedRequests.map(\.roomID), sql: sql)
+                        }
                     }
                     return try await persistConditionalPlainHybridGroupMessages(
                         orderedRequests,
@@ -2631,6 +2666,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         senderID: UUID,
         cachedDirectPolicy: V2DirectSendPolicyCache.Entry?,
         importedForward: ForwardInboxAuthorization? = nil,
+        fenceContext: V2ConfiguredRoomFenceContext? = nil,
         transaction: any Database
     ) async throws -> RoomWriteCommit {
             do {
@@ -2657,7 +2693,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             } else {
                 forwardSourceRoomID = nil
             }
-            if forwardOwnerSourceRoomID == nil || authorizationGrants != nil { try await requireSelectedOwners([roomID], sql: sql) }
+            if forwardOwnerSourceRoomID == nil || authorizationGrants != nil {
+                if let fenceContext, let activationScope,
+                   command.forwardedFrom == nil, importedForward == nil,
+                   forwardOwnerSourceRoomID == nil, authorizationGrants == nil {
+                    try await fenceContext.requireSelectedOwnersAndActivations(
+                        roomIDs: [roomID], expectedRoutes: ownerRoutes,
+                        expectedKinds: controlScopeRoomKinds, scope: activationScope)
+                } else {
+                    try await requireSelectedOwners([roomID], sql: sql)
+                }
+            }
             let loadedContext = try await loadMessageAcceptanceContext(
                 roomID: roomID,
                 senderID: senderID,

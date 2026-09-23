@@ -127,6 +127,7 @@ func v2RoomActivationDatabaseClock(sql: any SQLDatabase) async throws -> Date {
 }
 
 func v2PreconditionSQLSchema(_ schema: String) {
+    if schema == "im_v2" { return }
     precondition(schema.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil)
 }
 

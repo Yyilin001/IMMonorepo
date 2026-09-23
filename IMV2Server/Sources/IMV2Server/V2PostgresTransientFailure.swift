@@ -92,6 +92,39 @@ func v2WithPostgresTransactionRetry<Result: Sendable>(
     useRoomDeadline: Bool = false,
     _ operation: @escaping @Sendable (any Database) async throws -> Result
 ) async throws -> Result {
+    try await v2WithPostgresTransactionRetryCore(
+        database: database, maximumRetryCount: maximumRetryCount,
+        classifyCommitFailure: classifyCommitFailure, useRoomDeadline: useRoomDeadline,
+        needsFenceContext: false
+    ) { transaction, _ in
+        try await operation(transaction)
+    }
+}
+
+/// The optional context exists only for a room-deadline transaction after
+/// BEGIN and LOCAL timeout setup. Legacy transactions keep their old path.
+func v2WithPostgresTransactionRetryWithRoomContext<Result: Sendable>(
+    database: any Database,
+    maximumRetryCount: Int = 2,
+    classifyCommitFailure: Bool = false,
+    useRoomDeadline: Bool = false,
+    _ operation: @escaping @Sendable (any Database, V2ConfiguredRoomFenceContext?) async throws -> Result
+) async throws -> Result {
+    try await v2WithPostgresTransactionRetryCore(
+        database: database, maximumRetryCount: maximumRetryCount,
+        classifyCommitFailure: classifyCommitFailure, useRoomDeadline: useRoomDeadline,
+        needsFenceContext: true, operation
+    )
+}
+
+private func v2WithPostgresTransactionRetryCore<Result: Sendable>(
+    database: any Database,
+    maximumRetryCount: Int,
+    classifyCommitFailure: Bool,
+    useRoomDeadline: Bool,
+    needsFenceContext: Bool,
+    _ operation: @escaping @Sendable (any Database, V2ConfiguredRoomFenceContext?) async throws -> Result
+) async throws -> Result {
     precondition(maximumRetryCount >= 0)
     var retryCount = 0
     // Fix one absolute budget before the first attempt; retries borrow a new
@@ -101,14 +134,23 @@ func v2WithPostgresTransactionRetry<Result: Sendable>(
         try Task.checkCancellation()
         let attempt = V2RoomTransactionAttempt()
         do {
-            let body: @Sendable (any Database) async throws -> Result = { transaction in
-                try await attempt.body { try await operation(transaction) }
-            }
             if let deadline = roomDeadline {
+                if needsFenceContext {
+                    return try await v2WithRoomActivationTransactionWithContext(
+                        database: database, deadline: deadline
+                    ) { transaction, context in
+                        try await attempt.body { try await operation(transaction, context) }
+                    }
+                }
                 return try await v2WithRoomActivationTransaction(
-                    database: database, deadline: deadline, body)
+                    database: database, deadline: deadline
+                ) { transaction in
+                    try await attempt.body { try await operation(transaction, nil) }
+                }
             }
-            return try await database.transaction(body)
+            return try await database.transaction { transaction in
+                try await attempt.body { try await operation(transaction, nil) }
+            }
         } catch {
             // The physical-deadline primitive already proved rollback versus
             // missing COMMIT ACK. The legacy Fluent path still needs the
