@@ -261,8 +261,15 @@ class Probe:
         if self.query("owner-a", "SELECT count(*) FROM im_v2.message_edit_operations "
                       f"WHERE operation_id = '{identifier(301)}'") != "1":
             raise RuntimeError("control recovery was not exactly once")
-        if self.query("owner-a", lease_query).split("|") != lease_before:
-            raise RuntimeError("control recovery unexpectedly replaced the live activation")
+        lease_recovered = self.query("owner-a", lease_query).split("|")
+        self.save("control-recovered-lease.json", {"before": lease_before, "after": lease_recovered})
+        # A driver failure is conservatively outcomeUnknown in the production
+        # executor and can retire its epoch once the blocked call settles. The
+        # independence assertion is the sustained lease DURING the cut above;
+        # recovery must retain the physical Host and persist one edit.
+        if len(lease_recovered) != 4 or lease_recovered[:2] != lease_before[:2] or \
+                int(lease_recovered[2]) < int(lease_before[2]) or lease_recovered[3] != "true":
+            raise RuntimeError("control recovery did not retain a valid lease on the original Host")
 
         self.cut("owner-a", "owner-cut")
         self.wait(lambda: self.query("owner-a", "SELECT (expires_at <= clock_timestamp())::text "
@@ -270,8 +277,10 @@ class Probe:
             "owner lease expiry by PostgreSQL clock", seconds=50)
         self.mark("owner-cut-expired")
         self.wait_file("owner-cut-result.json")
-        self.hold_without_effect("owner-a", "SELECT count(*) FROM im_v2.messages "
-            f"WHERE client_message_id = '{identifier(401)}'")
+        self.hold_without_effect("owner-a", "SELECT (SELECT count(*) FROM im_v2.messages "
+            f"WHERE client_message_id = '{identifier(401)}') + "
+            "(SELECT count(*) FROM im_v2.message_send_completions "
+            f"WHERE client_message_id = '{identifier(401)}')")
         self.restore("owner-a")
         self.mark("owner-restored")
         self.wait_file("client-result.json", watched=("host-a", "host-b"))

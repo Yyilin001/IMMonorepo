@@ -220,6 +220,12 @@ enum DatabaseEdgeProbe {
         try await wait("control-restored")
         try edited(await eventually(application, faultEdit), revision: 3)
         try edited(await call(application, faultEdit), revision: 3)
+        // A failed control read may finish after its caller deadline. The
+        // production domain completion deliberately retires driver failures as
+        // uncertain, so recovery can replace this epoch even though no edit
+        // committed. Use the recovered token as the next fault's baseline.
+        let controlRecovered = try await application.directory.resolve(room(1), deadline: .now + .seconds(10))
+        try marker("control-recovered-token.json", controlRecovered)
         try marker("control-recovered.json", true)
 
         let faultSend = send(1, operation: 401)
@@ -233,7 +239,7 @@ enum DatabaseEdgeProbe {
             throw Failure.invalid("replay identity changed")
         }
         let replacement = try await application.directory.resolve(room(1), deadline: .now + .seconds(10))
-        guard replacement.activationEpoch.rawValue > token.activationEpoch.rawValue else {
+        guard replacement.activationEpoch.rawValue > controlRecovered.activationEpoch.rawValue else {
             throw Failure.invalid("expired lease did not get a new epoch")
         }
         try marker("replacement-token.json", replacement)
