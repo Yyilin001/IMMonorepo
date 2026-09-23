@@ -46,17 +46,26 @@ public struct V2RoomRefQueryClient: Sendable,
         }
     }
 
-    public func readers(roomID: RoomID, messageID: MessageID, actorUserID: UserID,
-                        cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
+    var callTimeout: Duration { caller.timeout }
+
+    func readerCandidates(roomID: RoomID, messageID: MessageID, actorUserID: UserID,
+                          cursor: String?, pageSize: Int,
+                          deadline: ContinuousClock.Instant) async throws -> V2GroupReadReceiptReaderCandidatePage {
         let query = try V2ActorReadReceiptReadersQueryWire(roomID: roomID, messageID: messageID,
             actorUserID: actorUserID, cursor: cursor, pageSize: pageSize)
-        guard case .receipt(let result) = try await caller.call(.receiptQuery(.readers(query)), actor: actorUserID) else {
-            throw V2RoomCallFailure.outcomeUnknown
+        guard case .receipt(let result) = try await caller.call(
+            .receiptQuery(.readerCandidates(query)), actor: actorUserID, deadline: deadline) else {
+            throw V2ActorRoomReceiptWireError.invalidResult
         }
         switch result {
-        case .readers(let value):
+        case .readerCandidates(let value):
             guard value.roomID == roomID, value.messageID == messageID else { throw V2ActorRoomReceiptWireError.invalidResult }
-            return try value.domainValue()
+            let page = try value.domainValue()
+            guard page.candidates.count <= pageSize,
+                  page.nextCursor == nil || (page.nextCursor != cursor && !page.candidates.isEmpty) else {
+                throw V2ActorRoomReceiptWireError.invalidResult
+            }
+            return page
         case .readersFailure(let failure): throw failure.domainValue()
         default: throw V2ActorRoomReceiptWireError.invalidResult
         }
@@ -195,10 +204,13 @@ public struct V2RoomRefQueryClient: Sendable,
 public struct V2RoomRefReadReceiptClient: V2GatewayReadReceiptHandling {
     private let rooms: V2RoomRefQueryClient
     private let preferences: V2ReadReceiptService
+    private let control: any V2ReadReceiptControlStore
 
-    public init(rooms: V2RoomRefQueryClient, preferences: V2ReadReceiptService) {
+    public init(rooms: V2RoomRefQueryClient, control: any V2ReadReceiptControlStore,
+                now: @escaping @Sendable () -> Date = Date.init) {
         self.rooms = rooms
-        self.preferences = preferences
+        self.control = control
+        self.preferences = .init(store: control, now: now)
     }
 
     public func record(_ request: V2AuthenticatedReadReceipt) async throws -> V2ReadReceiptOutcome {
@@ -206,8 +218,38 @@ public struct V2RoomRefReadReceiptClient: V2GatewayReadReceiptHandling {
     }
     public func readers(roomID: RoomID, messageID: MessageID, actorUserID: UserID,
                  cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
-        try await rooms.readers(roomID: roomID, messageID: messageID,
-            actorUserID: actorUserID, cursor: cursor, pageSize: pageSize)
+        guard (1...100).contains(pageSize) else { throw V2ReadReceiptStoreError.invalidRequest }
+        let deadline = ContinuousClock.now.advanced(by: rooms.callTimeout)
+        var scanCursor = cursor
+        var readers: [V2ReadReceiptReader] = []
+        var scanned = 0
+        let maximumCandidates = max(100, pageSize * 10)
+        repeat {
+            try Task.checkCancellation()
+            guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+            let batchSize = min(100, pageSize - readers.count, maximumCandidates - scanned)
+            let page = try await rooms.readerCandidates(roomID: roomID, messageID: messageID,
+                actorUserID: actorUserID, cursor: scanCursor,
+                pageSize: batchSize, deadline: deadline)
+            scanned += page.candidates.count
+            try Task.checkCancellation()
+            guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+            let identities = try await control.visibleReaderIdentities(actorUserID: actorUserID,
+                candidateUserIDs: page.candidates.map(\.userID))
+            try Task.checkCancellation()
+            guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+            for candidate in page.candidates {
+                if let identity = identities[candidate.userID] {
+                    guard identity.userID == candidate.userID else {
+                        throw V2ReadReceiptStoreError.corruptPersistenceState
+                    }
+                    readers.append(.init(userID: candidate.userID, publicIdentity: identity))
+                }
+            }
+            scanCursor = page.nextCursor
+        } while readers.count < pageSize && scanCursor != nil && scanned < maximumCandidates
+        return try .init(roomID: roomID, messageID: messageID,
+            readers: readers, nextCursor: scanCursor)
     }
     public func setPreferences(actorUserID: UserID, operationID: ReadReceiptPreferenceOperationID,
                         allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2SetReadReceiptPreferencesOutcome {

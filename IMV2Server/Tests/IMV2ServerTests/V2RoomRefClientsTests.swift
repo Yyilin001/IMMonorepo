@@ -65,6 +65,58 @@ struct V2RoomRefClientsTests {
         }
     }
 
+    @Test("reader candidates are filtered by current control privacy and refill is bounded")
+    func readerPrivacy() async throws {
+        let room = RoomID(uuid: UUID()), message = MessageID(uuid: UUID())
+        let actor = UserID(uuid: UUID()), hidden = UserID(uuid: UUID()), visible = UserID(uuid: UUID())
+        let identity = try V2PublicIdentity(userID: visible, handle: .init("visible_reader"),
+            displayName: "Visible Reader", accountKind: .regular)
+        let control = ReaderPrivacyControl(visible: [visible: identity])
+        let calls = CandidateCalls()
+        let caller = V2RoomRefUserCaller(timeout: .seconds(5)) { request, principal, deadline in
+            #expect(principal == actor && deadline > .now)
+            guard case .receiptQuery(.readerCandidates(let query)) = request else {
+                Issue.record("non-candidate receipt query"); throw V2ActorRoomReceiptWireError.invalidResult
+            }
+            await calls.add(query.cursor)
+            let user = query.cursor == nil ? hidden : visible
+            let next = query.cursor == nil ? "next-page" : nil
+            return .receipt(.readerCandidates(.init(roomID: room, messageID: message,
+                candidates: [.init(userID: user, readThroughRoomSequence: 2)], nextCursor: next)))
+        }
+        let client = V2RoomRefReadReceiptClient(rooms: .init(caller: caller), control: control)
+        let page = try await client.readers(roomID: room, messageID: message,
+            actorUserID: actor, cursor: nil, pageSize: 1)
+        #expect(page.readers == [.init(userID: visible, publicIdentity: identity)])
+        #expect(page.nextCursor == nil)
+        #expect(await calls.values() == [nil, "next-page"])
+        #expect(await control.visibilityCallCount() == 2)
+        #expect(await control.ownerReadersCalled() == false)
+    }
+
+    @Test("reader refill stops at its candidate scan bound")
+    func readerScanBound() async throws {
+        let room = RoomID(uuid: UUID()), message = MessageID(uuid: UUID())
+        let actor = UserID(uuid: UUID()), hidden = UserID(uuid: UUID())
+        let calls = CandidateCalls()
+        let caller = V2RoomRefUserCaller(timeout: .seconds(5)) { request, _, _ in
+            guard case .receiptQuery(.readerCandidates(let query)) = request else {
+                throw V2ActorRoomReceiptWireError.invalidResult
+            }
+            await calls.add(query.cursor)
+            let index = (query.cursor.flatMap(Int.init) ?? 0) + 1
+            return .receipt(.readerCandidates(.init(roomID: room, messageID: message,
+                candidates: [.init(userID: hidden, readThroughRoomSequence: 2)],
+                nextCursor: String(index))))
+        }
+        let client = V2RoomRefReadReceiptClient(rooms: .init(caller: caller),
+            control: ReaderPrivacyControl(visible: [:]))
+        let page = try await client.readers(roomID: room, messageID: message,
+            actorUserID: actor, cursor: nil, pageSize: 1)
+        #expect(page.readers.isEmpty && page.nextCursor == "100")
+        #expect(await calls.values().count == 100)
+    }
+
     @Test("recovery starts independent room turns concurrently and retains partial results")
     func recoveryPartialFailure() async throws {
         let first = RoomID(uuid: UUID()), second = RoomID(uuid: UUID())
@@ -151,6 +203,44 @@ private actor ClientReadBarrier {
     }
     private func release() { waiter?.resume(); waiter = nil }
     func peak() -> Int { maximum }
+}
+
+private actor CandidateCalls {
+    private var cursors: [String?] = []
+    func add(_ cursor: String?) { cursors.append(cursor) }
+    func values() -> [String?] { cursors }
+}
+
+private actor ReaderPrivacyControl: V2ReadReceiptControlStore {
+    private let visible: [UserID: V2PublicIdentity]
+    private var visibilityCalls = 0
+    private var ownerReadersCalls = 0
+
+    init(visible: [UserID: V2PublicIdentity]) { self.visible = visible }
+
+    func record(command: V2RecordReadReceiptCommand, now: Date) throws -> V2ReadReceiptOutcome {
+        throw V2ReadReceiptStoreError.corruptPersistenceState
+    }
+
+    func setPreferences(command: V2SetReadReceiptPreferencesCommand,
+                        now: Date) throws -> V2SetReadReceiptPreferencesOutcome {
+        throw V2ReadReceiptStoreError.corruptPersistenceState
+    }
+
+    func readers(roomID: RoomID, messageID: MessageID, actorUserID: UserID,
+                 cursor: String?, pageSize: Int) throws -> V2ReadReceiptReadersPage {
+        ownerReadersCalls += 1
+        throw V2ReadReceiptStoreError.corruptPersistenceState
+    }
+
+    func visibleReaderIdentities(actorUserID: UserID,
+                                 candidateUserIDs: [UserID]) -> [UserID: V2PublicIdentity] {
+        visibilityCalls += 1
+        return visible.filter { candidateUserIDs.contains($0.key) }
+    }
+
+    func visibilityCallCount() -> Int { visibilityCalls }
+    func ownerReadersCalled() -> Bool { ownerReadersCalls > 0 }
 }
 
 private struct UnusedAliases: V2ProfilePresentationManaging {
