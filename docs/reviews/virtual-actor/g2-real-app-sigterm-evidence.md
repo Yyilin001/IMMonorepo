@@ -38,17 +38,16 @@ Execution evidence from the unmodified production binaries at source
   completion at `.526`, then observed Actor Host exit code 0 at `.595` and a
   released lease with epoch 1 at `.660`. The Host restart reacquired the room
   at epoch 2. The original Gateway container and process start time were
-  unchanged. Its eighteenth request using the same client message ID returned
-  the original message ID after `33.28` seconds; the durable counts remained
-  one each.
+  unchanged. The runner's eighteenth attempt using the same client message ID
+  returned the original message ID after `33.28` seconds; the durable counts
+  remained one each.
 - An earlier 25-second replay window failed after Host restart, with the
   original Gateway returning `UNAVAILABLE` and repeated `Missing Member`
   gossip deserialization warnings. A 120-second window subsequently succeeded
   on the nineteenth attempt in
   `/Users/yyl/.codex/virtual-actor-builds/application/run-190be8b17d934593a72ae84007cf1437/result.json`.
-  Thus these runs establish eventual recovery, while exposing a roughly
-  30-second recovery tail. They do not establish that gossip decoding alone
-  caused that tail.
+  These runs establish eventual recovery. They do not establish that gossip
+  decoding alone caused the runner's roughly 30-second observation.
 
 The frozen build with the gossip fix was rerun from checkout and binary source
 `fb7ffdf1c56ff7f3247b0e71c553ef22344a8cf6`. The disposable run
@@ -64,7 +63,23 @@ with one durable message and completion and a new live lease at epoch 2.
 two in the comparable prior passing run and 270 in an earlier passing run.
 
 The gossip patch eliminated the observed decode errors in this run. The
-original caller still took about 30 seconds to recover, compared with
-`33.28` seconds before the patch. This single-run comparison does not prove a
-latency improvement. The earlier diagnostic in which Gateway was restarted
-before replay is deliberately excluded from acceptance evidence.
+runner's original-caller replay still took about 30 seconds, compared with
+`33.28` seconds before the patch. At the time, each probe was cut off after
+10 seconds by the Python runner, shorter than the Gateway's 30-second room
+call deadline. The Gateway log shows two requests ending together at about
+30 and 19 seconds, followed by repeated per-device authenticated-connection
+limit rejections (the disposable Compose policy permits two connections per
+device). An already started room resolution has its own 30-second deadline
+and continues after a waiter leaves. Thus the old `replayWaitSeconds` values
+include runner-induced overlapping requests and cannot be read as a single
+continuous client's service recovery latency, nor as evidence that the gossip
+patch improved that latency. The exact internal RPC stage consuming the first
+30 seconds is not recorded in these runs.
+
+The runner now waits up to 45 seconds per probe within the same 120-second
+total window. It records each attempt's duration and outcome, and, if a probe
+times out, signals its exact container process and waits for both remote and
+local execution to settle before starting another attempt. This harness
+revision has passed static validation but has not been used for another App
+stack run. The earlier diagnostic in which Gateway was restarted before
+replay is deliberately excluded from acceptance evidence.

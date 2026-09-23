@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import secrets
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -232,25 +233,101 @@ def busy_sigterm_smoke(*, root: Path, run: Path, private: Path, docker: list[str
         # operation until an accepted response, bounded by one total window.
         replay_deadline = time.monotonic() + 120
         replay_started_at = time.time()
-        replay_failures = 0
+        replay_attempts: list[dict[str, object]] = []
         replay_ids: list[str] = []
-        while time.monotonic() < replay_deadline:
-            remaining = max(1, replay_deadline - time.monotonic())
+
+        def remote_probe_status(pid_file: str, action: str) -> str:
+            # The file contains only the disposable exec process's PID. Check
+            # /proc/cmdline before signalling so a recycled PID cannot target
+            # the Gateway server or another test process.
+            script = ('path=$1; action=$2; '
+                'if [ ! -f "$path" ]; then echo missing; exit 0; fi; '
+                'pid=$(cat "$path"); '
+                'case "$pid" in ""|*[!0-9]*) exit 2;; esac; '
+                'if [ ! -r "/proc/$pid/cmdline" ] || '
+                '! grep -aq IMV2LocalGatewayProbe "/proc/$pid/cmdline"; '
+                'then echo absent; exit 0; fi; '
+                'if [ "$action" != CHECK ]; then kill -s "$action" "$pid"; fi; '
+                'echo active')
+            return subprocess.check_output(compose + ["exec", "-T", "gateway", "sh", "-c",
+                script, "va-replay-status", pid_file, action], cwd=root, env=environment,
+                text=True, stderr=subprocess.DEVNULL, timeout=5).strip()
+
+        def settle_remote_probe(pid_file: str, process: subprocess.Popen[str],
+                                timed_out: bool) -> tuple[bool, str]:
+            status = "unknown"
+            action = "none"
             try:
-                attempt = subprocess.run(compose + ["exec", "-T", *probe_flags, "gateway",
-                    "/workspace/IMV2Server/.build/release/IMV2LocalGatewayProbe"],
-                    cwd=root, env=probe_environment, text=True, stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL, timeout=min(10, remaining))
+                status = remote_probe_status(pid_file, "CHECK")
+                if status == "active":
+                    remote_probe_status(pid_file, "TERM")
+                    action = "TERM"
+                    try:
+                        process.communicate(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    status = remote_probe_status(pid_file, "CHECK")
+                if status == "active":
+                    remote_probe_status(pid_file, "KILL")
+                    action = "KILL"
+                    status = remote_probe_status(pid_file, "CHECK")
+                return ((status == "absent" or
+                         (status == "missing" and not timed_out and process.poll() is not None)), action)
+            except (subprocess.SubprocessError, OSError):
+                # An uncertain cleanup ends this test run. Still try to stop
+                # the exact probe before Compose tears its private stack down.
+                try:
+                    remote_probe_status(pid_file, "KILL")
+                except (subprocess.SubprocessError, OSError):
+                    pass
+                raise
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    try:
+                        process.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate(timeout=2)
+                subprocess.run(compose + ["exec", "-T", "gateway", "rm", "-f", pid_file],
+                    cwd=root, env=environment, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=5, check=True)
+
+        # A new attempt needs at least the complete 30-second business budget
+        # plus finite TLS/teardown allowance. The global recovery window never
+        # resets, and no attempt begins while an earlier remote exec is alive.
+        while replay_deadline - time.monotonic() >= 35:
+            remaining = replay_deadline - time.monotonic()
+            pid_file = "/tmp/va-busy-replay-" + uuid.uuid4().hex + ".pid"
+            launch = ('printf "%s\\n" "$$" > "$1"; '
+                'exec /workspace/IMV2Server/.build/release/IMV2LocalGatewayProbe')
+            started = time.monotonic()
+            wait_limit = min(45, remaining)
+            process = subprocess.Popen(compose + ["exec", "-T", *probe_flags, "gateway",
+                "sh", "-c", launch, "va-replay-probe", pid_file],
+                cwd=root, env=probe_environment, text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, start_new_session=True)
+            timed_out = False
+            output = ""
+            try:
+                output, _ = process.communicate(timeout=wait_limit)
             except subprocess.TimeoutExpired:
-                replay_failures += 1
-            else:
-                if attempt.returncode == 0:
-                    replay_ids = attempt.stdout.strip().split()
-                    (run / "busy-replay-probe.log").write_text(attempt.stdout)
-                    break
-                replay_failures += 1
+                timed_out = True
+            settled, stop_action = settle_remote_probe(pid_file, process, timed_out)
+            replay_attempts.append({"durationSeconds": round(time.monotonic() - started, 3),
+                "waitLimitSeconds": round(wait_limit, 3),
+                "outcome": "probeTimeout" if timed_out else
+                    ("accepted" if process.returncode == 0 else "probeExitNonzero"),
+                "remoteStopAction": stop_action, "remoteProcessSettled": settled})
+            evidence["replayAttemptTimings"] = replay_attempts
+            if not settled:
+                raise RuntimeError("remote replay probe did not settle before the next attempt")
+            if not timed_out and process.returncode == 0:
+                replay_ids = output.strip().split()
+                (run / "busy-replay-probe.log").write_text(output)
+                break
             time.sleep(0.5)
-        evidence["replayAttempts"] = replay_failures + (1 if replay_ids else 0)
+        evidence["replayAttempts"] = len(replay_attempts)
         evidence["replayWaitSeconds"] = round(time.time() - replay_started_at, 3)
         if len(replay_ids) != 2 or replay_ids[0].lower() != room_id.lower() or \
                 replay_ids[1].lower() != message_id.lower() or \
