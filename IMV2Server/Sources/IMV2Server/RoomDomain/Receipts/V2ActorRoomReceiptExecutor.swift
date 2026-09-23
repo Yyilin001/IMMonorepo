@@ -26,6 +26,11 @@ public struct V2ActorRoomReceiptExecutor: Sendable {
                 let outcome = try await store(database).recordActivationValidated(
                     command: wire.commandValue(), token: token, now: ingressAt, timeouts: timeouts)
                 return .record(.init(outcome))
+            } catch V2ReadReceiptStoreError.ownerChanged {
+                // The optimized receipt store reports a per-item owner error.
+                // At this scalar room boundary it is stale activation authority,
+                // so the directory must invalidate and resolve the location.
+                throw V2RoomActivationLeaseError.activationChanged
             } catch let error as V2ReadReceiptStoreError {
                 return .recordFailure(.init(error))
             }

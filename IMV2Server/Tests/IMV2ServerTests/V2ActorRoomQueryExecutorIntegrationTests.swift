@@ -39,8 +39,9 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
             #expect(missing == .readersFailure(.messageNotFound))
             #expect(try await activation.release(token: old))
             let successor = try await acquire(activation, room: room, owner: owner, host: "host-b")
-            let stale = try await receipt.command(.record(request), token: old, ingressAt: now)
-            #expect(stale == .recordFailure(.store(.ownerChanged)))
+            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+                _ = try await receipt.command(.record(request), token: old, ingressAt: now)
+            }
             let retry = try await receipt.command(.record(request), token: successor, ingressAt: now)
             guard case .record(.idempotent) = retry else { Issue.record("successor did not recover replay"); return }
             let row = try #require(try await sql.raw("SELECT count(*) AS value FROM im_v2.read_receipt_operations")

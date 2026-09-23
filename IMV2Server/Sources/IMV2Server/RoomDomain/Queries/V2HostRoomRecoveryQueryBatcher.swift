@@ -76,7 +76,8 @@ public actor V2HostRoomRecoveryQueryBatcher {
     private let configuration: Configuration
     private var pending: [Key: [Pending]] = [:]
     private var scheduled: [Key: Task<Void, Never>] = [:]
-    private var generations: [Key: UInt64] = [:]
+    private var generations: [Key: UUID] = [:]
+    internal var scheduledKeyCount: Int { generations.count }
     internal private(set) var pendingCount = 0
     private var inFlightCount = 0
 
@@ -164,7 +165,7 @@ public actor V2HostRoomRecoveryQueryBatcher {
     private func schedule(_ key: Key) {
         guard pending[key]?.isEmpty == false else { return }
         scheduled[key]?.cancel()
-        let generation = generations[key, default: 0] &+ 1
+        let generation = UUID()
         generations[key] = generation
         let deadline = pending[key]!.map { min($0.turn.batchDeadline, $0.turn.callDeadline) }.min()!
         scheduled[key] = Task {
@@ -179,7 +180,7 @@ public actor V2HostRoomRecoveryQueryBatcher {
     private func scheduleCallDeadline(_ key: Key) {
         guard let queue = pending[key], let deadline = queue.map(\.turn.callDeadline).min() else { return }
         scheduled[key]?.cancel()
-        let generation = generations[key, default: 0] &+ 1
+        let generation = UUID()
         generations[key] = generation
         scheduled[key] = Task {
             do { try await ContinuousClock().sleep(until: deadline) }
@@ -188,13 +189,14 @@ public actor V2HostRoomRecoveryQueryBatcher {
         }
     }
 
-    private func flushIfCurrent(_ key: Key, generation: UInt64) {
+    private func flushIfCurrent(_ key: Key, generation: UUID) {
         guard generations[key] == generation else { return }
         flush(key)
     }
 
     private func flush(_ key: Key) {
         scheduled.removeValue(forKey: key)?.cancel()
+        generations.removeValue(forKey: key)
         guard let queue = pending[key], !queue.isEmpty else { return }
         let now = ContinuousClock.now
         let live = queue.filter { item in
@@ -280,7 +282,10 @@ public actor V2HostRoomRecoveryQueryBatcher {
             pendingCount -= 1
             item.continuation.resume(throwing: CancellationError())
             pending[key] = queue.isEmpty ? nil : queue
-            if queue.isEmpty { scheduled.removeValue(forKey: key)?.cancel() }
+            if queue.isEmpty {
+                scheduled.removeValue(forKey: key)?.cancel()
+                generations.removeValue(forKey: key)
+            }
             else { schedule(key) }
             return
         }
