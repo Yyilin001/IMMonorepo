@@ -1,6 +1,6 @@
 # #20 Account disable across live Gateway and Room Actor entries
 
-Status: test harness prepared; the disposable Linux application run is pending a scheduled execution window. No pass claim is made from static checks.
+Status: passed on a disposable Linux application stack. This is a functional cross-entry check, not a capacity sample.
 
 `test_v2_virtual_actor_application_stack.py --remote-gateway --cross-entry-disable` keeps the real Actor Host, caller-only Gateway, Account HTTP, and Operator HTTP in separate containers. The existing local account smoke first accepts a direct message and reads it from the peer through the TLS/protobuf Gateway. It then pauses with a private `0600` fixture. The runner verifies that the warmed room has a live lease owned by the separate Actor Host and starts exactly two sessions using the original user's device credential. The held read session retrieves the baseline message before it declares readiness; the held send session authenticates. Both sessions must remain alive at the pre-disable barrier.
 
@@ -8,4 +8,18 @@ The ordinary account smoke then performs its existing assertion and Push HTTP ch
 
 This is a cross-entry account-disable test, not a membership-revision test. It uses one disposable PostgreSQL instance for this application-stack scenario and therefore does not claim a separate owner/control database network partition. The `--cross-entry-disable` and `--busy-sigterm` options are mutually exclusive. Default smoke behavior remains unchanged.
 
-Static preparation on the test-only branch: `python3 -m py_compile IMV2/scripts/test_v2_virtual_actor_application_stack.py`, `bash -n IMV2/scripts/verify_v2_local_account_stack.sh`, and `git diff --check` passed. No Swift build or container run was started. Runtime evidence and exact product source SHA must be appended after the scheduled run.
+The completed run used test source `2c8bcfc5aae7e461af9a4edf7e5c0740e07a2fa0` and `colima-imv2-vapor5`. The exact command was:
+
+```sh
+python3 IMV2/scripts/test_v2_virtual_actor_application_stack.py \
+  --remote-gateway --cross-entry-disable \
+  --context colima-imv2-vapor5 \
+  --scratch-dir /Users/yyl/.codex/virtual-actor-builds/p0 \
+  --run-root /Users/yyl/.codex/virtual-actor-builds/cross-entry-disable-runs
+```
+
+The runner reported `ACTOR_APPLICATION_STACK_OK` in [result.json](/Users/yyl/.codex/virtual-actor-builds/cross-entry-disable-runs/run-bc2d344d25cb4953b1e2a27745f4008c/result.json). The random Compose project `imv2-va-app-9685bc22eb6f` had separate Gateway and Actor Host containers; `gatewayHostID` was null, the room lease was held by Actor Host `B16B2A72-D752-4A86-AFA7-57625DAE470E` at activation epoch 1, and both original containers were retained. Both held sessions were live at the pre-Operator barrier. Following Operator HTTP 200 and a committed `account_disables` row, the Gateway proactively closed both old sockets, reported as `denied-closed-held` for send and read. The new fixed send operation had zero message rows and zero send-completion rows, while the room still had its one baseline message. The ordinary Account HTTPS checks also passed: old access and refresh credentials returned 401 and the prior assertion returned 403. The subsequent application HTTP path checks passed, and the runner removed its containers, network, and volumes.
+
+Because this run observed proactive closure, neither held probe actually dispatched a new post-disable room command. It proves that these two previously authenticated Gateway sessions cannot continue to use the warmed room after the Account disable; it does not independently exercise a still-open socket's domain-level rejection branch. The test's other branches will fail on a successful post-disable `messageAccepted` or `groupEventPage` if a future implementation keeps the sockets open.
+
+Static checks on the test-only changes: `python3 -m py_compile IMV2/scripts/test_v2_virtual_actor_application_stack.py`, `bash -n IMV2/scripts/verify_v2_local_account_stack.sh`, and `git diff --check` passed. The first Linux attempt reached the committed disable but exposed a test-probe cleanup bug: an already-closed NIO channel erased the denial result. Commit `2c8bcfc5` limits cleanup tolerance to `ChannelError.alreadyClosed`; the completed run above uses that fix. The runner's private fixture and barriers were deleted with the disposable stack.
