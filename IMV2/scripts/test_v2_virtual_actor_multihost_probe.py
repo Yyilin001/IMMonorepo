@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Disposable two-Host Virtual Actor probe. Requires DOCKER_CONTEXT and native Swift.
+"""Disposable two-Host Virtual Actor probe. Requires an explicit DOCKER_CONTEXT.
 
 All waits use file, process, or PostgreSQL state barriers with explicit deadlines.
 No shared PostgreSQL, SwiftPM scratch, or Docker resource is modified.
@@ -42,6 +42,9 @@ EVIDENCE = Path(os.environ.get("VA_G6_EVIDENCE_DIR", str(default_evidence))).res
 EVIDENCE.mkdir(parents=True, exist_ok=False)
 PG = RUN + "-pg"
 NETWORK = RUN + "-net"
+ACTOR_NETWORK = RUN + "-actor-net"
+DB_NETWORKS = {name: RUN + f"-db-{name}-net"
+               for name in ("host-a", "host-b", "client-a", "client-b")}
 PROCESSES = {}
 CONTAINERS = {}
 ROOM_SQL = "'" + ROOM + "'"
@@ -150,17 +153,28 @@ def setup_certs_and_configs(ports):
         "client-b": {"host-a": 1, "host-b": 10000}}, indent=2))
 
 def start_pg():
-    docker("network", "create", NETWORK)
-    args = ["run", "-d", "--name", PG, "--network", NETWORK, "--network-alias", "va-pg"]
+    if MODE == "native":
+        docker("network", "create", NETWORK)
+    else:
+        docker("network", "create", ACTOR_NETWORK)
+        for db_network in DB_NETWORKS.values():
+            docker("network", "create", db_network)
+    args = ["run", "-d", "--name", PG, "--network",
+            NETWORK if MODE == "native" else DB_NETWORKS["host-a"], "--network-alias", "va-pg"]
     if MODE == "native":
         args += ["-p", "127.0.0.1::5432"]
     args += ["-e", "POSTGRES_USER=probe", "-e", "POSTGRES_PASSWORD=probe",
              "-e", "POSTGRES_DB=probe", "postgres:16-alpine"]
     docker(*args)
+    if MODE == "linux":
+        for name, db_network in DB_NETWORKS.items():
+            if name != "host-a":
+                docker("network", "connect", "--alias", "va-pg", db_network, PG)
     wait(lambda: pg_ready(), seconds=45, description="isolated PostgreSQL ready")
+    if MODE == "linux":
+        return "postgres://probe:probe@va-pg:5432/probe"
     port = docker("port", PG, "5432/tcp").stdout.strip().split(":")[-1]
-    return ("postgres://probe:probe@127.0.0.1:" + port + "/probe") if MODE == "native" else \
-           "postgres://probe:probe@va-pg:5432/probe"
+    return "postgres://probe:probe@127.0.0.1:" + port + "/probe"
 
 def pg_ready():
     try:
@@ -178,14 +192,23 @@ INSERT INTO im_v2.rooms
 INSERT INTO im_v2.rooms
  (room_id, room_shard_id, capacity_profile_id, capacity_class, membership_revision)
  VALUES ('{LEASE_RACE_ROOM}', 'room-a', 'standard', 'standard', 0);
+INSERT INTO im_v2.rooms
+ (room_id, room_shard_id, capacity_profile_id, capacity_class, membership_revision)
+ VALUES ('00000000-0000-0000-0000-000000000031', 'room-a', 'standard', 'standard', 1);
 INSERT INTO im_v2.room_owner_routes
  (room_id, room_shard_id, route_epoch, created_at, updated_at)
  VALUES ({ROOM_SQL}, 'room-a', 0, clock_timestamp(), clock_timestamp());
 INSERT INTO im_v2.room_owner_routes
  (room_id, room_shard_id, route_epoch, created_at, updated_at)
  VALUES ('{LEASE_RACE_ROOM}', 'room-a', 0, clock_timestamp(), clock_timestamp());
+INSERT INTO im_v2.room_owner_routes
+ (room_id, room_shard_id, route_epoch, created_at, updated_at)
+ VALUES ('00000000-0000-0000-0000-000000000031', 'room-a', 0, clock_timestamp(), clock_timestamp());
 INSERT INTO im_v2.group_rooms (room_id, owner_user_id, title, created_at)
  VALUES ({ROOM_SQL}, '00000000-0000-0000-0000-000000000012', 'G6 room', clock_timestamp());
+INSERT INTO im_v2.group_rooms (room_id, owner_user_id, title, created_at)
+ VALUES ('00000000-0000-0000-0000-000000000031',
+         '00000000-0000-0000-0000-000000000012', 'G6 healthy peer room', clock_timestamp());
 INSERT INTO im_v2.shard_admission_pools
  (room_shard_id, capacity_profile_id, lease_id, generation, valid_until, command_window_limit)
  VALUES ('room-a', 'standard', '00000000-0000-0000-0000-000000000014', 1,
@@ -193,8 +216,15 @@ INSERT INTO im_v2.shard_admission_pools
 INSERT INTO im_v2.room_admission
  (room_id, eligible_member_count, command_window_limit, shard_lease_id, shard_lease_generation)
  VALUES ({ROOM_SQL}, 1, 10, '00000000-0000-0000-0000-000000000014', 1);
+INSERT INTO im_v2.room_admission
+ (room_id, eligible_member_count, command_window_limit, shard_lease_id, shard_lease_generation)
+ VALUES ('00000000-0000-0000-0000-000000000031', 1, 10,
+         '00000000-0000-0000-0000-000000000014', 1);
 INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision)
  VALUES ({ROOM_SQL}, '00000000-0000-0000-0000-000000000012', 'owner', 1);
+INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision)
+ VALUES ('00000000-0000-0000-0000-000000000031',
+         '00000000-0000-0000-0000-000000000012', 'owner', 1);
 INSERT INTO im_v2.user_shard_router_configuration
  (configuration_key, router_epoch, default_write_bucket, updated_at)
  VALUES (TRUE, 1, 'g6-users', clock_timestamp());
@@ -229,6 +259,8 @@ def build():
                "--scratch-path", "/build", "-c", "debug", "--product",
                "VirtualActorBusinessProbe", "-j", "2", timeout=2450,
                output=EVIDENCE / "build.log")
+        if not (scratch / "debug/VirtualActorBusinessProbe").is_file():
+            raise RuntimeError("Linux business probe binary missing from task scratch")
         binary = Path("/build/debug/VirtualActorBusinessProbe")
     if MODE == "native" and not binary.is_file():
         raise RuntimeError("probe binary missing")
@@ -250,13 +282,18 @@ def start(name, mode, database_url, binary):
     else:
         image = os.environ.get("VA_G6_SWIFT_IMAGE", "swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6")
         container = RUN + "-" + name
-        docker("run", "-d", "--name", container, "--network", NETWORK,
+        docker("create", "--name", container, "--network", ACTOR_NETWORK,
                "--network-alias", f"va-{name}", "-v", f"{os.environ['VA_G6_LINUX_SCRATCH_DIR']}:/build:ro",
                "-v", f"{SECRETS}:/secrets:ro", "-v", f"{EVIDENCE}:/evidence",
                "-e", f"IMV2_ROOM_ACTOR_CONFIGURATION_FILE=/secrets/{name}.json",
                "-e", f"VA_G6_DATABASE_URL={database_url}", "-e", "VA_G6_EVIDENCE_DIR=/evidence",
                "-e", f"VA_G6_SLOT={slot}", image, str(binary), mode)
         CONTAINERS[name] = container
+        # Each Actor gets a private DB link to the same multi-homed PG. Only
+        # ACTOR_NETWORK is shared between Actors, so removing it cuts every
+        # peer path while keeping this process's owner-DB connection alive.
+        docker("network", "connect", "--alias", f"va-db-{name}", DB_NETWORKS[name], container)
+        docker("start", container)
     (EVIDENCE / "processes.txt").open("a").write(
         f"{name}=" + (str(PROCESSES[name].pid) if MODE == "native" else CONTAINERS[name]) + "\n")
 
@@ -272,6 +309,132 @@ def save_lease(name):
     value = lease()
     (EVIDENCE / name).write_text("|".join(value) + "\n")
     return value
+
+def network_attachments(name):
+    container = CONTAINERS[name]
+    raw = docker("inspect", "-f", "{{json .NetworkSettings.Networks}}", container).stdout
+    return json.loads(raw)
+
+def peer_tls(owner_name, other_slot):
+    port = 19081 if other_slot == "a" else 19082
+    owner_slot = owner_name[-1]
+    script = (f"timeout 4 openssl s_client -tls1_3 -brief "
+              f"-connect va-host-{other_slot}:{port} -servername va-host-{other_slot} "
+              f"-verify_hostname va-host-{other_slot} -verify_return_error "
+              f"-CAfile /secrets/ca.pem -cert /secrets/host-{owner_slot}.pem "
+              f"-key /secrets/host-{owner_slot}.key </dev/null")
+    result = docker("exec", CONTAINERS[owner_name], "bash", "-c", script, check=False)
+    details = result.stdout + result.stderr
+    return result.returncode, details, "Protocol version: TLSv1.3" in details
+
+def partition_peer_only(first, old_slot, database_url, binary):
+    if MODE != "linux":
+        return
+    owner_name = f"host-{old_slot}"
+    other_slot = "b" if old_slot == "a" else "a"
+    other_name = f"host-{other_slot}"
+    owner_db_network = DB_NETWORKS[owner_name]
+    other_db_network = DB_NETWORKS[other_name]
+    original = network_attachments(owner_name)
+    if set(original) != {ACTOR_NETWORK, owner_db_network}:
+        raise RuntimeError(f"owner missing Actor/DB attachments before partition: {original}")
+    original_ip = original[ACTOR_NETWORK]["IPAddress"]
+    if not original_ip:
+        raise RuntimeError("owner Actor IP missing before partition")
+    (EVIDENCE / "partition-networks-before.json").write_text(json.dumps(original, indent=2))
+    before_code, before_tls, before_ok = peer_tls(owner_name, other_slot)
+    (EVIDENCE / "partition-peer-tls-before.txt").write_text(
+        f"exit={before_code}\n{before_tls}")
+    if before_code != 0 or not before_ok or "Verification: OK" not in before_tls:
+        raise RuntimeError("peer TLS baseline was unavailable before network partition")
+    (EVIDENCE / "partition-token.json").write_text((EVIDENCE / "old-token.json").read_text())
+    docker("network", "disconnect", ACTOR_NETWORK, CONTAINERS[owner_name])
+    isolated = wait(lambda: network_attachments(owner_name)
+                    if set(network_attachments(owner_name)) == {owner_db_network} else None,
+                    seconds=10, description="owner detached only from Actor network",
+                    watched=(owner_name, other_name))
+    (EVIDENCE / "partition-networks-isolated.json").write_text(json.dumps(isolated, indent=2))
+    if set(network_attachments(other_name)) != {ACTOR_NETWORK, other_db_network}:
+        raise RuntimeError("survivor lost an attachment during peer partition")
+    peer_dns = docker("exec", CONTAINERS[owner_name], "getent", "hosts",
+                      f"va-host-{other_slot}", check=False)
+    db_dns = docker("exec", CONTAINERS[owner_name], "getent", "hosts", "va-pg", check=False)
+    peer_ip = network_attachments(other_name)[ACTOR_NETWORK]["IPAddress"]
+    pg_networks = json.loads(docker("inspect", "-f", "{{json .NetworkSettings.Networks}}", PG).stdout)
+    db_ip = pg_networks[owner_db_network]["IPAddress"]
+    peer_addresses = {line.split()[0] for line in peer_dns.stdout.splitlines() if line.split()}
+    db_addresses = {line.split()[0] for line in db_dns.stdout.splitlines() if line.split()}
+    after_code, after_tls, after_ok = peer_tls(owner_name, other_slot)
+    (EVIDENCE / "partition-peer-tls-isolated.txt").write_text(
+        f"exit={after_code}\n{after_tls}")
+    (EVIDENCE / "partition-dns.txt").write_text(
+        f"peer_lookup_exit={peer_dns.returncode}\n"
+        f"peer_lookup={peer_dns.stdout.strip()}\n"
+        f"peer_expected_actor_ip={peer_ip}\n"
+        f"peer_tls_before={before_ok}\npeer_tls_isolated={after_ok}\n"
+        f"db_lookup_exit={db_dns.returncode}\n"
+        f"db_lookup={db_dns.stdout.strip()}\n"
+        f"db_expected_ip={db_ip}\n")
+    # Colima's external DNS may synthesize a 198.18.x address for an unknown
+    # short name. Compare against the peer's actual Actor IP and verify the
+    # transport port is unreachable instead of trusting getent's exit code.
+    if peer_ip in peer_addresses or after_ok or db_ip not in db_addresses:
+        raise RuntimeError("partition retained peer transport or lost DB DNS")
+    (EVIDENCE / f"host-{old_slot}-check-partition").write_text("Actor link absent; DB retained\n")
+    wait(lambda: file_ready(f"host-{old_slot}-partition.json"), seconds=20,
+         description="partitioned owner PG reachability and token renew",
+         watched=(owner_name,))
+    owner_check = json.loads((EVIDENCE / f"host-{old_slot}-partition.json").read_text())
+    if not owner_check["databaseReachable"] or not owner_check["originalTokenRenewed"] or \
+            owner_check["activationEpoch"] != int(first[2]):
+        raise RuntimeError(f"owner lost DB renewal while Actor peer link severed: {owner_check}")
+    live_before = lease()
+    if live_before[:3] != first[:3] or live_before[3] != "f":
+        raise RuntimeError(f"old lease no longer live at partition start: {live_before}")
+    (EVIDENCE / "partition-db-before.txt").write_text("|".join(live_before) + "\n")
+    # The survivor's fresh client must still serve another room. Resolving the
+    # isolated owner's room must fail without creating a replacement lease.
+    client_name = f"client-{other_slot}"
+    start(client_name, "multi-partition-client", database_url, binary)
+    wait(lambda: file_ready("partition-client-result.json"), seconds=55,
+         description="survivor healthy-room send and isolated-room refusal",
+         watched=(client_name, owner_name, other_name))
+    exit_success(client_name)
+    partition_result = json.loads((EVIDENCE / "partition-client-result.json").read_text())
+    if partition_result["healthyRoomToken"]["host"]["hostID"]["rawValue"].lower() != \
+            HOST_IDS[other_slot].lower() or not partition_result["isolatedRoomRejected"]:
+        raise RuntimeError(f"survivor failed independent room or isolation: {partition_result}")
+    live_after = lease()
+    if live_after[:3] != first[:3] or live_after[3] != "f":
+        raise RuntimeError(f"partition created second writer or expired lease: {live_after}")
+    (EVIDENCE / "partition-db-after.txt").write_text("|".join(live_after) + "\n")
+    if pg_query("SELECT count(*) FROM im_v2.room_activation_leases WHERE room_id = " + ROOM_SQL) != "1":
+        raise RuntimeError("partition produced duplicate lease rows")
+    if pg_query("SELECT count(*) FROM im_v2.messages WHERE room_id = " + ROOM_SQL) != "1" or \
+            pg_query("SELECT count(*) FROM im_v2.messages WHERE room_id = '00000000-0000-0000-0000-000000000031'") != "1":
+        raise RuntimeError("partition message rows were not one per room")
+    docker("network", "connect", "--ip", original_ip,
+           "--alias", f"va-host-{old_slot}", ACTOR_NETWORK, CONTAINERS[owner_name])
+    restored = wait(lambda: network_attachments(owner_name)
+                    if set(network_attachments(owner_name)) == {ACTOR_NETWORK, owner_db_network} else None,
+                    seconds=10, description="owner Actor network reattached",
+                    watched=(owner_name, other_name))
+    if restored[ACTOR_NETWORK]["IPAddress"] != original_ip:
+        raise RuntimeError("owner Actor IP changed on rejoin")
+    (EVIDENCE / "partition-networks-restored.json").write_text(json.dumps(restored, indent=2))
+    start(f"client-{old_slot}", "multi-partition-rejoin", database_url, binary)
+    wait(lambda: file_ready("partition-rejoin-result.json"), seconds=65,
+         description="restored owner idempotent replay", watched=(f"client-{old_slot}",))
+    exit_success(f"client-{old_slot}")
+    rejoin = json.loads((EVIDENCE / "partition-rejoin-result.json").read_text())
+    race = json.loads((EVIDENCE / f"race-{old_slot}-result.json").read_text())
+    if rejoin["token"] != race["token"] or rejoin["messageID"] != race["messageID"] or \
+            rejoin["primaryMessageRows"] != 1 or lease()[:3] != first[:3]:
+        raise RuntimeError(f"network rejoin changed durable operation or owner: {rejoin}")
+    (EVIDENCE / "partition-result.json").write_text(json.dumps({
+        "ownerSlot": old_slot, "survivorSlot": other_slot,
+        "ownerCheck": owner_check, "survivorClient": partition_result,
+        "rejoin": rejoin, "before": live_before, "after": live_after}, indent=2))
 
 def competing_host_acquires():
     # The task-owned SQL session holds the second room's row lock. Both real
@@ -377,7 +540,7 @@ def verify(first, second, owner, old_host):
                ("renewRejected", "releaseRejected", "businessWriteRejected"))
     final = save_lease("final-lease.txt")
     assert final[:3] == second[:3]
-    assert pg_query("SELECT COUNT(*) FROM im_v2.messages") == "1"
+    assert pg_query("SELECT COUNT(*) FROM im_v2.messages") == ("2" if MODE == "linux" else "1")
     assert pg_query(f"SELECT COUNT(DISTINCT message_id) FROM im_v2.messages WHERE room_id = {ROOM_SQL}") == "1"
     (EVIDENCE / "result.json").write_text(json.dumps({
         "firstLease": first, "replacementLease": second, "finalLease": final,
@@ -423,6 +586,7 @@ def main():
         raise RuntimeError(f"unexpected owner {owner}")
     old_race = json.loads((EVIDENCE / f"race-{old_slot}-result.json").read_text())
     (EVIDENCE / "old-token.json").write_text(json.dumps(old_race["token"]))
+    partition_peer_only(first, old_slot, database_url, binary)
     pause(f"host-{old_slot}")
     (EVIDENCE / "owner-paused.txt").write_text(f"slot={old_slot} host_id={owner}\n")
     wait(lambda: (current := lease()) and current[:3] == first[:3] and current[3] == "t",
@@ -463,7 +627,8 @@ def cleanup():
         docker("logs", container, output=EVIDENCE / f"{name}.log", check=False)
         docker("rm", "-f", container, check=False)
     docker("rm", "-f", PG, check=False)
-    docker("network", "rm", NETWORK, check=False)
+    for network in (NETWORK, ACTOR_NETWORK, *DB_NETWORKS.values()):
+        docker("network", "rm", network, check=False)
     import shutil
     shutil.rmtree(SECRETS, ignore_errors=True)
 
