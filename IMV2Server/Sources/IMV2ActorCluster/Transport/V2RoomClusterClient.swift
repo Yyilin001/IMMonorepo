@@ -51,6 +51,7 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
     private var pendingReservationSlots: Set<UUID> = []
     private var uncertainReservationSlots: [UUID: ContinuousClock.Instant] = [:]
     private var dispatchedCalls: [UUID: DispatchedCall] = [:]
+    private var activeExchanges = 0
     private var accepting = true
 
     public init(system: ClusterSystem, signer: V2ActorSigningIdentity,
@@ -104,7 +105,7 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         for host in Array(handshakeWaiters.keys) {
             failHandshakeWaiters(host: host, reason: .retired)
         }
-        if handshakes.isEmpty && dispatchedCalls.isEmpty { clearStoppedState() }
+        finishStopIfIdle()
     }
 
     /// A timed-out caller stops waiting; its already dispatched RPC remains
@@ -112,11 +113,11 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
     /// incomplete result keeps Cluster resources alive for a later stop retry.
     public func quiesce(deadline: ContinuousClock.Instant) async -> Bool {
         stop()
-        while (!handshakes.isEmpty || !dispatchedCalls.isEmpty) && ContinuousClock.now < deadline {
+        while !isQuiescent && ContinuousClock.now < deadline {
             do { try await Task.sleep(for: .milliseconds(5)) }
             catch { break }
         }
-        if handshakes.isEmpty && dispatchedCalls.isEmpty {
+        if isQuiescent {
             clearStoppedState()
             return true
         }
@@ -130,6 +131,15 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         pinnedReservations.removeAll()
         pendingReservationSlots.removeAll()
         uncertainReservationSlots.removeAll()
+    }
+
+    private var isQuiescent: Bool {
+        handshakes.isEmpty && dispatchedCalls.isEmpty && activeExchanges == 0 &&
+            pendingReservationSlots.isEmpty
+    }
+
+    private func finishStopIfIdle() {
+        if !accepting && isQuiescent { clearStoppedState() }
     }
 
     public func sessionCount() -> Int { sessions.count }
@@ -210,7 +220,10 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         }
         let slot = UUID()
         pendingReservationSlots.insert(slot)
-        defer { pendingReservationSlots.remove(slot) }
+        defer {
+            pendingReservationSlots.remove(slot)
+            finishStopIfIdle()
+        }
         let response: V2ActorRPCResponse
         do {
             response = try await exchange(.reserve(token: token, requestID: requestID), on: token.host,
@@ -284,6 +297,14 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
                           roomToken: V2RoomActivationToken?) async throws -> V2ActorRPCResponse {
         guard accepting, let descriptor = descriptors[host] else {
             throw V2RoomCallFailure.notAccepted(.unavailable)
+        }
+        guard activeExchanges < configuration.maximumActivationWaitersPerHost else {
+            throw V2RoomCallFailure.notAccepted(.overloaded)
+        }
+        activeExchanges += 1
+        defer {
+            activeExchanges -= 1
+            finishStopIfIdle()
         }
         let generation = descriptorGenerations[host, default: 0]
         let session = try await session(for: descriptor, deadline: deadline)
@@ -397,7 +418,7 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         guard let call = dispatchedCalls.removeValue(forKey: id) else { return }
         call.timer.cancel()
         call.continuation?.resume(with: result)
-        if !accepting && handshakes.isEmpty && dispatchedCalls.isEmpty { clearStoppedState() }
+        finishStopIfIdle()
     }
 
     private func session(for descriptor: V2RoomClusterHostDescriptor,
@@ -558,7 +579,7 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
             waiter.timer.cancel()
             waiter.continuation.resume(with: delivered)
         }
-        if !accepting && handshakes.isEmpty && dispatchedCalls.isEmpty { clearStoppedState() }
+        finishStopIfIdle()
     }
 
     private func removeHandshakeWaiter(host: V2ActorHostIdentity, id: UUID,
