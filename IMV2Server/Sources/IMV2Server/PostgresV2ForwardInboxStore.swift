@@ -1,5 +1,6 @@
 import FluentKit
 import Foundation
+import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
@@ -44,6 +45,7 @@ public enum V2ForwardInboxError: Error, Equatable, Sendable {
 public struct PostgresV2ForwardInboxStore: Sendable {
     private let database: any Database
     private let maximumPendingPerRoom: Int
+    private var activationScope: V2RoomActivationWriteScope?
 
     /// 组合数据库与单房间未完成导入上限。
     ///
@@ -56,6 +58,14 @@ public struct PostgresV2ForwardInboxStore: Sendable {
         precondition(maximumPendingPerRoom > 0)
         self.database = database
         self.maximumPendingPerRoom = maximumPendingPerRoom
+        self.activationScope = nil
+    }
+
+    /// Bind receive, including an existing-export replay, to the exact target turn.
+    public func usingActivationToken(_ token: V2RoomActivationToken) throws -> Self {
+        var scoped = self
+        scoped.activationScope = try .init(tokens: [token])
+        return scoped
     }
 
     /// 持久化接收一次转发导出。
@@ -72,15 +82,25 @@ public struct PostgresV2ForwardInboxStore: Sendable {
     ///   持久化异常时抛出 ``V2ForwardInboxError/corruptPersistenceState``。
     public func receive(_ export: V2ForwardExport, now: Date) async throws {
         let intent = export.intent
-        try await database.transaction { transaction in
+        let selected = try activationScope?.token(for: intent.targetRoomID)
+        if let selected {
+            guard selected.owner.shardID == intent.targetShardID,
+                  selected.owner.epoch == intent.targetEpoch else {
+                throw V2RoomActivationLeaseError.activationChanged
+            }
+        }
+        try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,
+            classifyCommitFailure: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ForwardInboxError.corruptPersistenceState }
-            if try await matchesExisting(export, sql: sql) { return }
+            if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
+            if activationScope == nil, try await matchesExisting(export, sql: sql) { return }
             // Check existing immutable bindings before taking any room lock.
             // The quota mutex serializes new receipts for this target. Only a
             // new binding takes SHARE through insertion, fencing epoch changes
             // without waiting on an existing inbox held by acceptance.
             let key = "v2-forward-inbox-room:\(intent.targetRoomID)"
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
+            try await activationScope?.require([intent.targetRoomID], sql: sql)
             if try await matchesExisting(export, sql: sql) { return }
             guard let room = try await sql.raw("""
                 SELECT room_shard_id, owner_epoch FROM im_v2.rooms WHERE room_id = \(bind: intent.targetRoomID) FOR SHARE
