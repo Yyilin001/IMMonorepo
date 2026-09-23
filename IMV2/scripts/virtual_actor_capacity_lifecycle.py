@@ -7,6 +7,7 @@ one of exactly two physical owner databases is unavailable.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from typing import Any
@@ -82,7 +83,17 @@ class OwnerFailureWindow:
                          "owner-fault.log", 30)
             self.stopped = True
             self.stopped_at = self.now()
-            self.events.append({"event": "owner00-stopped", "monotonic": self.stopped_at})
+            container = self.execute(self.compose + ["ps", "--all", "--quiet", "owner00"],
+                                     "owner-fault.log", 10).strip()
+            if not re.fullmatch(r"[a-f0-9]{64}", container):
+                raise MeasurementFailure("stopped owner identity missing")
+            docker = self.compose[:self.compose.index("compose")]
+            state = json.loads(self.execute(docker + ["inspect", "--format", "{{json .State}}", container],
+                                            "owner-fault.log", 10))
+            if state.get("Running") is not False or state.get("OOMKilled") is not False or state.get("ExitCode") != 0:
+                raise MeasurementFailure("owner did not exit cleanly; SQL counter continuity is unproven")
+            self.events.append({"event": "owner00-stopped", "monotonic": self.stopped_at,
+                                "containerID": container, "exitCode": state["ExitCode"]})
         elif self.stopped and self.now() - self.stopped_at >= self.DOWN_SECONDS:
             self.execute(self.compose + ["start", "owner00"], "owner-fault.log", 30)
             self.stopped = False

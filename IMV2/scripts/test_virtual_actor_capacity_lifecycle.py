@@ -52,6 +52,10 @@ class LifecycleTests(unittest.TestCase):
         commands = []
         def execute(command, log, timeout):
             commands.append((command, timeout))
+            if "--quiet" in command:
+                return "a" * 64
+            if "inspect" in command:
+                return json.dumps({"Running": False, "OOMKilled": False, "ExitCode": 0})
             return ""
         window = OwnerFailureWindow(["docker", "compose"], execute, now=lambda: clock[0])
         window.begin_steady()
@@ -63,7 +67,7 @@ class LifecycleTests(unittest.TestCase):
             window.observe(self._progress(second, second - 60, second - 60), at=clock[0])
         clock[0] = 80.0
         window.tick()
-        self.assertEqual(commands[1][0][-2:], ["start", "owner00"])
+        self.assertEqual(commands[-1][0][-2:], ["start", "owner00"])
         for second in range(81, 85):
             clock[0] = float(second)
             window.observe(self._progress(second, second - 60, 19), at=clock[0])
@@ -72,7 +76,22 @@ class LifecycleTests(unittest.TestCase):
         self.assertGreater(result["outageRoomResultDeltas"]["room_latest_visible"]["retry"], 0)
         self.assertEqual(result["recoveryMilliseconds"], 4000)
         window.cleanup()
-        self.assertEqual(len(commands), 2)
+        self.assertEqual(len(commands), 4)
+
+    def test_forced_postgres_exit_cannot_claim_preserved_counters(self) -> None:
+        clock = [0.0]
+        def execute(command, log, timeout):
+            if "--quiet" in command:
+                return "a" * 64
+            if "inspect" in command:
+                return json.dumps({"Running": False, "OOMKilled": False, "ExitCode": 137})
+            return ""
+        window = OwnerFailureWindow(["docker", "compose"], execute, now=lambda: clock[0])
+        window.begin_steady()
+        clock[0] = 60
+        with self.assertRaises(MeasurementFailure):
+            window.tick()
+        window.cleanup()
 
     def test_failed_stop_is_tracked_for_cleanup(self) -> None:
         clock = [0.0]
