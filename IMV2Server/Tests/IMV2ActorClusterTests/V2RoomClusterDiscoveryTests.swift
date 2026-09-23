@@ -39,6 +39,12 @@ struct V2RoomClusterDiscoveryTests {
         let accepted = Mutex(0)
         let disconnected = Mutex(false)
         let dropper = try await ServerBootstrap(group: group)
+            // The real Cluster listener and its accepted sockets use SO_REUSEADDR.
+            // Match both here: on Linux an accepted fake-peer socket can remain
+            // in TIME_WAIT after the handshake watchdog closes it, otherwise
+            // the replacement ClusterSystem cannot bind this same port.
+            .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
+            .childChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
                 accepted.withLock { $0 += 1 }
                 channel.closeFuture.whenComplete { _ in disconnected.withLock { $0 = true } }
