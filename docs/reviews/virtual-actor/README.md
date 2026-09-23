@@ -17,6 +17,8 @@
 
 最新[事务上下文 SQL 复用](g5-sql-context-evidence.md)已集成并通过 10 项原生真实 PostgreSQL 聚焦测试，覆盖 hot 的实际单条发送路径。冻结候选 `812af24a` 的七产品 Linux Release 构建通过；正式 hot 复测 SQL 降至 22.109 calls/ACK，但 CPU 2.218297 ms/ACK 仍超过冻结 2.133047，门禁在第 2 轮后停止。上述完整 Linux 成功记录属于 `d5623259`；新生产源码的最终完整 Linux 验证仍待执行。
 
+随后[仅限本机的缓存调用](r3-local-capability-evidence.md#仅限本机的缓存调用)已集成：可重试的 `RoomRef.call` 在 exact local capability 有效时省略重复 lookup，保持每次共享寻址的 owner 读取、严格等待者及远端确认。原生 Runtime 58/58、Cluster 35/35 通过，描述符替换、过期和逐出都不能让本机 hint 静默转成远端派发。这是新的未测性能候选，仍需七产品 Linux Release、原 hot 阈值复测及最终全量 Linux 验证；未改前述失败结论。
+
 ## 核对出的基线差异
 
 - 数据 ownerEpoch 在 canonical schema 和 V2RoomShardRoute 中允许零，不能复用从一开始的 activationEpoch 类型。公共契约保持该区别。

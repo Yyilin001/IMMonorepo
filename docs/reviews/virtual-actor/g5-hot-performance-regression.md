@@ -2,6 +2,8 @@
 
 Status: **performance failed; the latest SQL-context candidate passes SQL but still exceeds the frozen CPU limit**. Frozen main is `f1cdd78d6a21bf0ae23da627c0710c65115236aa`; the latest measured candidate is `812af24a319dbaaabcb66f0bd96d0c43bf95d2cc`. Earlier candidate results remain below. The hot operating point and thresholds were frozen before candidate sampling as recorded in the [baseline protocol](v1-baseline-protocol.md). Neither load nor thresholds are changed in response to these results.
 
+A later [same-process cached invocation change](r3-local-capability-evidence.md#仅限本机的缓存调用) has passed its native Runtime and Cluster suites. Its Linux Release build and fresh formal hot comparison are pending; it does not change the measured failure below.
+
 ## Latest SQL-context candidate: two fewer SQL calls, CPU still over budget
 
 The [transaction-bound SQL reuse implementation](g5-sql-context-evidence.md) passed ten focused PostgreSQL tests and its seven-product Linux Release build. Its `capacity-formal-hot-sql-context-rate025-campaign` then completed main 01 and candidate 02. Both runners passed correctness, formal eligibility and cleanup: 100 authenticated connections, 52,500 acknowledged and durable messages, zero workload errors, unchanged room count. The outer assessor exited 1 on candidate CPU and stopped before runs 03–06, whose artifact directories do not exist.

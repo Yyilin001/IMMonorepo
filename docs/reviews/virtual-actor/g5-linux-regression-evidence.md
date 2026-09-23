@@ -2,7 +2,7 @@
 
 这些记录来自固定 checkout、只读源码挂载、Swift 6.4 Jammy 与三个独立 PostgreSQL 16 实例。使用本任务专属 `colima-imv2-va-capacity` 的随机隔离资源，未使用或重建用户原有服务。客户端 Apple 平台代码未改，不把其他线程的原生测试日志纳入本记录。
 
-后续[事务上下文 SQL 复用](g5-sql-context-evidence.md)已改变生产源码，并有 10 项原生真实 PostgreSQL 聚焦测试通过；该改动仍须在最终候选上取得完整 Linux required run。下面 `d5623259` 的成功记录保留，不把它当成新 SQL 改动已通过全量验证。
+后续[事务上下文 SQL 复用](g5-sql-context-evidence.md)已改变生产源码，并有 10 项原生真实 PostgreSQL 聚焦测试通过；再后的[仅限本机缓存调用](r3-local-capability-evidence.md#仅限本机的缓存调用)也通过原生 Runtime 58/58、Cluster 35/35。两项改动仍须在最终候选上取得完整 Linux required run。下面 `d5623259` 的成功记录保留，不把它当成新 SQL 或缓存调用改动已通过全量验证。
 
 ## 既有冻结源码的完整 required run
 
