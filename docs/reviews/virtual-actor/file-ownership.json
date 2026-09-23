@@ -651,6 +651,10 @@
       "owner": "D3"
     },
     {
+      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Receipts/V2HostRoomReceiptBatcher.swift",
+      "owner": "D3"
+    },
+    {
       "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Shared/V2ActorAdmissionUnavailableMapping.swift",
       "owner": "C0"
     },
@@ -929,6 +933,10 @@
     {
       "path": "IMV2Server/Sources/IMV2Server/V2NIOGatewayChannelHandler.swift",
       "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2Server/V2OwnerModerationAuditRetentionStore.swift",
+      "owner": "D6"
     },
     {
       "path": "IMV2Server/Sources/IMV2Server/V2OwnerValidatedForwardMessages.swift",
@@ -1251,6 +1259,10 @@
       "owner": "I1"
     },
     {
+      "path": "IMV2Server/Tests/IMV2ServerTests/PostgresV2RoomWriteStoreIntegrationTests+HostReceipts.swift",
+      "owner": "D3"
+    },
+    {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2ActorAdministrationExecutorTests.swift",
       "owner": "I1"
     },
@@ -1265,6 +1277,10 @@
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2ActorCreationWireTests.swift",
       "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2ActorGrantedMultiLaneBatchTests.swift",
+      "owner": "D1"
     },
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2ActorGrantedSendBatchTests.swift",
@@ -1309,6 +1325,14 @@
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2GatewayRoomActorCompositionTests.swift",
       "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2HostRoomReceiptBatcherTests.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2ModerationAuditRetentionWorkerTests.swift",
+      "owner": "D6"
     },
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomActivationTransactionDeadlineTests.swift",

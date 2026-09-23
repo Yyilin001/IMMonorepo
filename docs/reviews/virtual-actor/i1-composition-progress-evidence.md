@@ -75,3 +75,9 @@ D6 的独立维护与压缩竞态证据见 [后台维护验证](d6-maintenance-e
 `a53fb2f5` 在媒体控制 SQL/owner route await 的成功及抛错之后复查取消和原截止时间，并在最终 URL 返回前复查；子代理真实双库媒体 5 情景通过，包括 provider 跨越调用期限。`9bdd36cc`/`888fed4b` 将所有物理 owner 的发送指标作为只读快照聚合，最多并发采样 8 个 owner，不提供虚假的消息准入入口。
 
 Runtime 现在立即派发已排队的连续发送，物理 owner batcher 消耗唯一合批窗口，仍以第一次入队时刻为上限。原实现先在 lane 睡满窗口，导致 host 收到的 deadline 已过；这会使跨房间和 adaptive 合批失效。App 的窗口从现有发送/高活跃/回执配置取最大值，各 batcher 继续使用自己的较短延迟。`/tmp/imv2-va-single-batch-window.log` 退出 0：Runtime lane/预约 19 项与读取实际生成配置的 Application 3 项通过，包括 FIFO 屏障、执行中取消/unknown、预约超时，以及新请求把剩余窗口交给 host。
+
+`c1ae992d`/`a76252a9`/`2315618` 恢复 Host 回执合批和发送多 lane/adaptive 配置。关闭 append batch 的原配置 0 映射为单条 scoped SQL，不再被静默转成大小 2。回执在真实批次处获取一次数据库许可，各项保留自己的 ingress 时间、token 和调用截止；组/私聊的多事务处理中若发生无法归属的失败，全批保持 unknown。`/tmp/imv2-va-host-batching-integration.log` 退出 0：Server 15 项、Runtime 13 项通过，Gateway/Account 产品也参与构建。`/tmp/imv2-va-owner-batching-postgres.log` 退出 0：实际 PG 多 lane 同库原子批、回执 stale/有效 sibling、Factory send→receipt→recovery、昵称旧 token/接管共 4 项通过。
+
+`/tmp/imv2-va-candidate-mutation-fences.log` 实际运行特殊账号审计与编辑/撤回/表态 3 参数场景。该次昵称因缺少其专用环境变量被跳过；随后上述 owner-batching PG 日志正确设置 D2 变量并运行通过。CI 的既有串行 PostgreSQL step 已显式启用 D2/D4/D5/事务期限专用 URL 与 disposable 开关，不能把默认跳过当作验收。
+
+入口审查新增 W30：审核审计副本原来只在控制库清理，遗漏其他 owner。新的 OwnerModerationAuditRetentionStore 使用所有 physical owner 的维护数据库、每轮共享行数预算与轮换起点。该副本不用于 Actor 恢复/幂等，过期清理保留为明确的外部例外。`/tmp/imv2-va-owner-audit-retention.log` 退出 0：既有维护时钟/参数委托及新多 owner 预算/失败公平性共 5 项通过；没有把这些内存 store 测试写成 PostgreSQL 验证。

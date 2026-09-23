@@ -222,6 +222,12 @@
       "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomReadWatermark.swift",
       "symbol": "v2InitializeNewRoomReadWatermarks",
       "table_or_marker": "im_v2.room_read_receipts"
+    },
+    {
+      "id": "W30",
+      "path": "IMV2Server/Sources/IMV2Server/V2ModerationAuditRetentionWorker.swift",
+      "symbol": "func deleteExpiredAuditEntries",
+      "table_or_marker": "im_v2.moderation_audit_entries"
     }
   ]
 }

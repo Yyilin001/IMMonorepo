@@ -960,7 +960,9 @@ enum IMV2ServerApp {
                 )
             )
             let moderationAuditRetentionWorker = V2ModerationAuditRetentionWorker(
-                store: PostgresV2ModerationAuditRetentionStore(database: maintenanceDatabase)
+                store: V2OwnerModerationAuditRetentionStore(owners: roomOwnerMaintenanceDatabases.map {
+                    PostgresV2ModerationAuditRetentionStore(database: $0)
+                })
             )
             let mediaRetentionWorker = try V2MediaRetentionWorker(
                 store: PostgresV2MediaRetentionStore(database: maintenanceDatabase),

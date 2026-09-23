@@ -48,6 +48,36 @@ struct V2ModerationAuditRetentionWorkerTests {
         #expect(try await worker.runOnce(limit: 3) == 2)
         #expect(await store.requests() == [.init(now: now, limit: 3)])
     }
+
+    @Test("physical owners share a row budget and rotate past a busy owner")
+    func ownerBudgetAndRotation() async throws {
+        let first = RecordingModerationRetentionStore(deleted: 2)
+        let second = RecordingModerationRetentionStore(deleted: 1)
+        let store = V2OwnerModerationAuditRetentionStore(owners: [first, second])
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        #expect(try await store.deleteExpiredAuditEntries(now: now, limit: 2) == 2)
+        #expect(await second.requests().isEmpty)
+        #expect(try await store.deleteExpiredAuditEntries(now: now, limit: 3) == 3)
+        #expect(await first.requests().map(\.limit) == [2, 2])
+        #expect(await second.requests().map(\.limit) == [3])
+    }
+
+    @Test("a failed owner's next pass begins at a healthy physical database")
+    func failingOwnerDoesNotStarveNextPass() async throws {
+        let healthy = RecordingModerationRetentionStore(deleted: 1)
+        let store = V2OwnerModerationAuditRetentionStore(owners: [FailingModerationRetentionStore(), healthy])
+        await #expect(throws: V2ModerationStoreError.corruptPersistenceState) {
+            try await store.deleteExpiredAuditEntries(now: Date(), limit: 1)
+        }
+        #expect(try await store.deleteExpiredAuditEntries(now: Date(), limit: 1) == 1)
+        #expect(await healthy.requests().count == 1)
+    }
+}
+
+private struct FailingModerationRetentionStore: V2ModerationAuditRetentionStore {
+    func deleteExpiredAuditEntries(now: Date, limit: Int) async throws -> Int {
+        throw V2ModerationStoreError.corruptPersistenceState
+    }
 }
 
 private actor RecordingModerationRetentionStore: V2ModerationAuditRetentionStore {
