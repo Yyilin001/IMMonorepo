@@ -49,7 +49,7 @@ struct V2ActorAdministrationExecutorTests {
         let failures: [V2ActorAdministrationFailureWire] = [
             .membership(.targetUnavailable), .groupCapability(.messageWithdrawn),
             .moderation(.actorNotAuthorized), .profile(.revisionConflict(current: 3)),
-            .activation(.leaseExpired), .outcomeUnknown, .input(.invalidReasonCode)
+            .input(.invalidReasonCode)
         ]
         for failure in failures {
             let decoded = try JSONDecoder().decode(V2ActorAdministrationFailureWire.self,
@@ -59,6 +59,10 @@ struct V2ActorAdministrationExecutorTests {
             #expect(V2ActorAdministrationFailureWire(domainError: domain) == failure)
         }
         #expect(V2ActorAdministrationFailureWire(domainError: CancellationError()) == nil)
+        #expect(V2ActorAdministrationFailureWire(domainError: V2RoomTransactionOutcomeUnknown()) == nil)
+        #expect(V2ActorAdministrationFailureWire(domainError: V2RoomActivationLeaseError.outcomeUnknown) == nil)
+        #expect(V2ActorAdministrationFailureWire(domainError: V2RoomActivationLeaseError.leaseExpired) == nil)
+        #expect(V2ActorAdministrationFailureWire(domainError: V2RoomOwnerFenceError.ownerChanged) == nil)
         #expect(throws: V2RevisionValidationError.outOfRange) {
             _ = try V2ActorAdministrationFailureWire.profile(.revisionConflict(current: UInt64.max)).domainError()
         }

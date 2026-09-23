@@ -40,18 +40,6 @@ extension V2ActorAdministrationFailureWire {
             case .invalidPresentation: self = .profile(.invalidPresentation)
             case .corruptPersistenceState: self = .profile(.corruptPersistenceState)
             }
-        } else if let value = error as? V2RoomActivationLeaseError {
-            switch value {
-            case .roomNotFound: self = .activation(.roomNotFound)
-            case .ownerChanged: self = .activation(.ownerChanged)
-            case .activationChanged: self = .activation(.activationChanged)
-            case .leaseExpired: self = .activation(.leaseExpired)
-            case .epochExhausted: self = .activation(.epochExhausted)
-            }
-        } else if error is V2RoomOwnerFenceError {
-            self = .ownerChanged
-        } else if error is V2RoomTransactionOutcomeUnknown {
-            self = .outcomeUnknown
         } else if let value = error as? V2ActorAdministrationWireError {
             switch value {
             case .invalidPermissionList: self = .input(.invalidPermissionList)
@@ -142,16 +130,6 @@ extension V2ActorAdministrationFailureWire {
             case .invalidPresentation: return V2ProfilePresentationError.invalidPresentation
             case .corruptPersistenceState: return V2ProfilePresentationError.corruptPersistenceState
             }
-        case .activation(let value):
-            switch value {
-            case .roomNotFound: return V2RoomActivationLeaseError.roomNotFound
-            case .ownerChanged: return V2RoomActivationLeaseError.ownerChanged
-            case .activationChanged: return V2RoomActivationLeaseError.activationChanged
-            case .leaseExpired: return V2RoomActivationLeaseError.leaseExpired
-            case .epochExhausted: return V2RoomActivationLeaseError.epochExhausted
-            }
-        case .ownerChanged: return V2RoomOwnerFenceError.ownerChanged
-        case .outcomeUnknown: return V2RoomTransactionOutcomeUnknown()
         case .input(let value):
             switch value {
             case .invalidIdentifier: return V2CoreError.invalidIdentifier

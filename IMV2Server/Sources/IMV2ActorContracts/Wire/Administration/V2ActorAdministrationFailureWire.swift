@@ -16,9 +16,6 @@ public enum V2ActorProfileFailureWire: Codable, Equatable, Sendable {
     case revisionConflict(current: UInt64?)
     case operationPayloadMismatch, invalidPresentation, corruptPersistenceState
 }
-public enum V2ActorActivationFailureWire: String, Codable, Equatable, Sendable {
-    case roomNotFound, ownerChanged, activationChanged, leaseExpired, epochExhausted
-}
 public enum V2ActorAdministrationInputFailureWire: String, Codable, Equatable, Sendable {
     case invalidIdentifier, invalidNonNegativeValue, invalidPositiveValue, invalidGeneration
     case revisionOutOfRange, selfTargetingNotAllowed
@@ -33,8 +30,5 @@ public enum V2ActorAdministrationFailureWire: Codable, Equatable, Sendable, Erro
     case groupCapability(V2ActorGroupCapabilityFailureWire)
     case moderation(V2ActorModerationFailureWire)
     case profile(V2ActorProfileFailureWire)
-    case activation(V2ActorActivationFailureWire)
-    case ownerChanged
-    case outcomeUnknown
     case input(V2ActorAdministrationInputFailureWire)
 }
