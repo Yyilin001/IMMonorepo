@@ -27,10 +27,10 @@
 
 后一用例已观察到签名 endpoint 和准确的旧 NodeID。`up` promotion 另需 leader election 与 gossip convergence，不是发现服务的 5 秒合同。后续修改保留签名 endpoint 对应的精确 NodeID、`joining/up` membership 和原有 incarnation 替换断言，移除这项无关前提；未延长超时或改变生产 membership。
 
-## 剩余验证
+## 最新聚焦与合同检查
 
-`4739cfff44709eaf345ffa9f0f83ac2f50b9d7d9` 的 discovery / bridge / Directory / gossip 聚焦 Linux 运行正在进行，输出目录为 `/Users/yyl/.codex/virtual-actor-builds/final-discovery-linux-20260924`。Directory 另包含只读定位单跳 3 秒上界的回归；激活和业务写仍使用原期限，旧在途 RPC 不会因调用者停止等待而提前释放。
+`4739cfff44709eaf345ffa9f0f83ac2f50b9d7d9` 的 discovery / bridge / Directory / gossip 聚焦 Linux 运行整体退出 0、清理退出 0，证据在 `/Users/yyl/.codex/virtual-actor-builds/final-discovery-linux-20260924`。Directory 10/10、Cluster 12/12 通过，包含只读定位单跳 3 秒上界、真实重启发现、旧物理 RPC 追踪与 gossip 回归。激活和业务写仍使用原期限，旧在途 RPC 不会因调用者停止等待而提前释放。
 
-Linux 协议生成、schema 表关系、Prometheus 20 条规则及配置、运行环境样例、文档结构已另行通过；Ubuntu Jammy 的 `protoc` 显式启用 proto3 optional 后，生成文件与仓库内容一致。文档链接脚本现对 Git 文件枚举失败直接报错；挂载 worktree 对应的 Git 元数据后重新运行通过。完整 required checks 的最后一次统一执行结果将在本节更新。
+同一次最新 Linux 运行的协议生成、local environment 合同、schema 表关系、Prometheus 20 条规则及配置、运行环境样例、文档链接与结构均通过；Ubuntu Jammy 的 `protoc` 显式启用 proto3 optional 后，生成文件与仓库内容一致。文档链接脚本现对 Git 文件枚举失败直接报错；挂载 worktree 对应的 Git 元数据后重新运行通过。初始全量运行与针对实际失败及后续变更的聚焦复验共同构成本记录；没有将它们描述为同一提交上的一次全量全绿运行。
 
 真实应用与故障证据另见 [busy SIGTERM](g2-real-app-sigterm-evidence.md)、[caller-only Gateway](g3-caller-only-gateway-evidence.md)与[多 Host 故障](g6-multihost-evidence.md)。这些正确性记录不替代[容量对照](v1-baseline-protocol.md)。

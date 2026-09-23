@@ -13,7 +13,7 @@
 | G2：真实双 host + PostgreSQL 激活/接管/排空 | [真实 SQL activation fence 与 Host 单元测试](r1-d1-progress-evidence.md)，以及[独立进程被杀后接管探针](g4-business-probe-evidence.md)通过；[双 Host 原生进程竞争与旧实例恢复](g6-multihost-evidence.md)也通过；Linux 双 Host、仅 Actor 网络分区及旧 token 拒绝也已通过；[真实 Host/PG 生命周期](g2-host-pg-lifecycle-evidence.md)与[慢事务排空](g5-host-pg-drain-evidence.md)通过；[真实 Linux 应用 busy SIGTERM](g2-real-app-sigterm-evidence.md)已通过；vendor 修复后的解码错误归零，但原 Gateway 恢复仍约 30 秒，继续定位 | 未完成 |
 | G3：真实远端 send/read 与领域合同 | [实际 Factory 与共享合批的 PostgreSQL 局部验证](i1-composition-progress-evidence.md)，以及[真实远端发送、日志、订阅与恢复](g4-business-probe-evidence.md)通过；[caller-only Gateway → 独立 Host 的 Linux TCP/HTTP 闭环](g3-caller-only-gateway-evidence.md)已通过；相对性能仍待验收 | 未完成 |
 | G4：全部房间写者、查询和后台迁移 | Gateway 与 Account 生产入口已接入；[维护与投影压缩竞态验证](d6-maintenance-evidence.md)通过；[完整 Linux 应用协议及 Account 房间 HTTP 闭环](i1-application-smoke-harness.md)已通过；[Host 取消与后台 retention 接管](g2-pg-cancellation-maintenance-evidence.md)通过；单 owner 故障仍在验证 | 未完成 |
-| G5：故障矩阵、Linux checks、相对性能 | [Linux 客户端先启动与 Host 重启恢复](g5-linux-functional-evidence.md)通过；完整[故障矩阵](v1-fault-harness.md)、[Linux 回归与 required checks](g5-linux-regression-evidence.md)及[相对性能](v1-baseline-protocol.md)仍在收口 | 未完成 |
+| G5：故障矩阵、Linux checks、相对性能 | [Linux 客户端先启动与 Host 重启恢复](g5-linux-functional-evidence.md)通过；[Linux 回归问题与后续变更已聚焦复验，合同检查通过](g5-linux-regression-evidence.md)；完整[故障矩阵](v1-fault-harness.md)及[相对性能](v1-baseline-protocol.md)仍在收口 | 未完成 |
 
 ## 核对出的基线差异
 
