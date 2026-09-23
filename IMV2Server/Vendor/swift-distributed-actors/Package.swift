@@ -3,8 +3,18 @@
 // revision 50e789fbb6db9a9869a60b1915e659bd752e1d42. See UPSTREAM.json.
 import PackageDescription
 
+// Preserve upstream runtime availability, including its unrestricted Linux
+// platform declaration. Distributed actors require these Apple runtimes.
+let platforms: [SupportedPlatform]?
+#if os(Linux)
+platforms = nil
+#else
+platforms = [.iOS(.v18), .macOS(.v15), .tvOS(.v18), .watchOS(.v11)]
+#endif
+
 let package = Package(
     name: "swift-distributed-actors",
+    platforms: platforms,
     products: [
         .library(name: "DistributedCluster", targets: ["DistributedCluster"]),
     ],
