@@ -95,6 +95,7 @@ class MeasurementTests(unittest.TestCase):
             binary.write_bytes(binary.read_bytes() + b"x" * (1024 * 1024) +
                                b"room_latest_visible_batches_per_second=")
             self.assertTrue(supports_recovery_loader(binary))
+            self.assertFalse(supports_recovery_loader(binary, require_timeout=True))
 
     def test_main_calibration_freeze_precedes_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

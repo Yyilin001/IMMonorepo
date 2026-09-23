@@ -22,8 +22,9 @@ WORKLOADS = {
                    "ab74cd0d64d73040b7aba935cb2e0f33da32928fcdc806e3e55bf19d7e6bbfbe"),
     "mixed": ("mixed", "IMV2/load-scenarios/high-active-10000.json",
               "64c11814d90effe550f55f1affa496a8ca710c2d6a2d7fb432a844c647ce7909"),
-    "cold": ("cold", None, None),
-    "fault": ("cold", None, None),
+    "cold": ("cold", "IMV2/scripts/virtual-actor-fixtures/capacity-hot-write-v1.json", None),
+    "fault": ("mixed", "IMV2/load-scenarios/high-active-10000.json",
+              "64c11814d90effe550f55f1affa496a8ca710c2d6a2d7fb432a844c647ce7909"),
 }
 
 
@@ -35,10 +36,14 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def supports_recovery_loader(binary: Path) -> bool:
+def supports_recovery_loader(binary: Path, *, require_timeout: bool = False) -> bool:
     """Refuse a binary that can parse but silently ignores the new rates."""
     needles = {b"room_sync_state_batches_per_second=",
                b"room_latest_visible_batches_per_second="}
+    if require_timeout:
+        needles.add(b"--recovery-batch-timeout-seconds")
+        needles.add(b"room_sync_state_success_rooms=")
+        needles.add(b"room_latest_visible_retry_rooms=")
     overlap = max(map(len, needles)) - 1
     tail = b""
     with binary.open("rb") as stream:
@@ -72,7 +77,17 @@ def freeze_calibrations(runs: list[Path], thresholds: dict[str, float]) -> dict:
             raise MeasurementFailure("main calibration evidence is incomplete")
         loader = steady.get("nativeLoader", {})
         duration = loader.get("observedDurationSeconds")
-        acknowledged = loader.get("messagesAcknowledged")
+        workload = result.get("measurement", {}).get("scenario", {}).get("workload")
+        if workload == "fault":
+            if loader.get("messagesSent") != 0 or loader.get("messagesAcknowledged") != 0:
+                raise MeasurementFailure("fault calibration must be query-only")
+            acknowledged = sum((loader.get(family) or {}).get("successfulRooms", 0)
+                               for family in ("roomSyncStateBatch", "roomLatestVisibleBatch"))
+            if any((loader.get(family) or {}).get("successfulRooms", 0) <= 0
+                   for family in ("roomSyncStateBatch", "roomLatestVisibleBatch")):
+                raise MeasurementFailure("fault calibration lacks a recovery query family")
+        else:
+            acknowledged = loader.get("messagesAcknowledged")
         if (loader.get("completed") is not True or loader.get("workloadFailed") != 0 or
                 not isinstance(duration, (int, float)) or not 290 <= duration <= 310 or
                 not isinstance(acknowledged, int) or acknowledged <= 0):
@@ -90,11 +105,12 @@ def freeze_calibrations(runs: list[Path], thresholds: dict[str, float]) -> dict:
     if cv > 0.10:
         raise MeasurementFailure("main calibration throughput coefficient of variation exceeds 10%")
     layout, fixture_hash, scenario_hash, loader_hash, workload = identities[0]
+    unit = "successfulRecoveryRoomItemsPerSecond" if workload == "fault" else "messagesAcknowledgedPerSecond"
     return {"schemaVersion": 1, "mainRevision": "f1cdd78d6a21bf0ae23da627c0710c65115236aa",
             "workload": workload, "layout": layout, "fixtureManifestSHA256": fixture_hash,
             "scenarioSHA256": scenario_hash, "commonLoaderSHA256": loader_hash,
             "mainCalibrationResultSHA256": hashes,
-            "mainSteadyMessagesAcknowledgedPerSecond": rates,
+            "acceptedUnit": unit, "mainSteadyAcceptedPerSecond": rates,
             "mainSteadyCoefficientOfVariation": cv,
             "thresholds": thresholds}
 
@@ -108,9 +124,11 @@ def verify_freeze(path: Path, *, workload: str, layout: str, fixture_hash: str,
     if any(freeze.get(key) != value for key, value in expected.items()):
         raise MeasurementFailure("freeze does not match workload, fixture, scenario or loader")
     hashes = freeze.get("mainCalibrationResultSHA256")
-    rates = freeze.get("mainSteadyMessagesAcknowledgedPerSecond")
+    rates = freeze.get("mainSteadyAcceptedPerSecond")
+    expected_unit = "successfulRecoveryRoomItemsPerSecond" if workload == "fault" else "messagesAcknowledgedPerSecond"
     thresholds = freeze.get("thresholds")
-    if (not isinstance(hashes, list) or len(hashes) != 3 or len(set(hashes)) != 3 or
+    if (freeze.get("acceptedUnit") != expected_unit or
+            not isinstance(hashes, list) or len(hashes) != 3 or len(set(hashes)) != 3 or
             any(not isinstance(value, str) or len(value) != 64 for value in hashes) or
             not isinstance(rates, list) or len(rates) != 3 or
             any(not isinstance(value, (int, float)) or value <= 0 or not math.isfinite(value)
@@ -130,17 +148,23 @@ def create_scenario(source: Path, protocol: dict[str, Any], fixture: dict[str, A
     if workload not in WORKLOADS:
         raise MeasurementFailure("unknown workload")
     layout, relative, expected_digest = WORKLOADS[workload]
-    if relative is None:
-        raise MeasurementFailure("cold/fault workload has no implemented driver")
     if fixture["layouts"].get(layout) is None:
         raise MeasurementFailure("fixture lacks workload layout")
     if not 1 <= connections <= fixture["users"] or not 0 < rate_scale <= 100:
         raise MeasurementFailure("invalid connections or rate scale")
+    if workload in ("cold", "fault") and rate_scale != 1.0:
+        raise MeasurementFailure("cold and fault rates are fixed for cross-revision evidence")
     rooms = fixture["layouts"][layout]["rooms"]
     if workload == "hot" and rooms != 1:
         raise MeasurementFailure("hot workload requires exactly one fixture room")
     if workload == "same-owner" and fixture["owners"] != 1:
         raise MeasurementFailure("same-owner workload requires one physical owner")
+    if workload == "cold" and (rooms < 7_500 or connections != fixture["users"]):
+        raise MeasurementFailure("cold requires at least 7500 reachable rooms and all fixture users")
+    if workload == "fault" and (fixture["owners"] != 2 or
+                                 fixture["targetsPerConnection"] < 2 or
+                                 min(fixture["layouts"]["mixed"]["ownerRoomCounts"]) <= 0):
+        raise MeasurementFailure("fault requires both physical owners in each target batch")
     # Actor-specific hot template belongs to the measurement harness; frozen
     # historical scenarios must come from the verified source checkout.
     template_path = (source if expected_digest else Path(__file__).resolve().parents[2]) / relative
@@ -163,6 +187,25 @@ def create_scenario(source: Path, protocol: dict[str, Any], fixture: dict[str, A
         template["phases"][0]["readReceiptsPerSecond"] = 20
         template["phases"][0]["roomSyncStateBatchesPerSecond"] = 20
         template["phases"][0]["roomLatestVisibleBatchesPerSecond"] = 20
+    elif workload == "cold":
+        template["seed"] = 20260924
+        template["phases"][0]["messagesPerSecond"] = 20
+        template["schedulerTicksPerSecond"] = 10
+    elif workload == "fault":
+        template["seed"] = 20260925
+        for persona in template["personas"]:
+            persona["sendWeight"] = 0
+            persona["roomLogReadWeight"] = 0
+            persona["syncPullWeight"] = 0
+            persona["roomSyncStateBatchWeight"] = 1
+            persona["roomLatestVisibleBatchWeight"] = 1
+        first = template["phases"][0]
+        first["messagesPerSecond"] = 0
+        first["roomLogReadsPerSecond"] = 0
+        first["syncPullsPerSecond"] = 0
+        first["reconnectPercentPerMinute"] = 0
+        first["roomSyncStateBatchesPerSecond"] = 20
+        first["roomLatestVisibleBatchesPerSecond"] = 20
     measurement = protocol["measurement"]
     durations = (measurement["warmupSeconds"], measurement["steadySeconds"],
                  measurement["cooldownSeconds"])
@@ -189,9 +232,9 @@ def create_scenario(source: Path, protocol: dict[str, Any], fixture: dict[str, A
     detail = {"workload": workload, "layout": layout, "connections": connections,
               "rateScale": rate_scale, "templatePath": relative,
               "templateSHA256": template_digest, "phaseDurationsSeconds": list(durations),
-              "batchRecoveryQueriesRequired": workload == "mixed",
+              "batchRecoveryQueriesRequired": workload in ("mixed", "fault"),
               "batchRecoveryQueriesCovered": False,
-              "status": "runtime-proof-required" if workload == "mixed" else "supported"}
+              "status": "runtime-proof-required" if workload in ("cold", "mixed", "fault") else "supported"}
     return result, detail
 
 
@@ -225,7 +268,11 @@ def parse_cgroup(body: str) -> dict[str, int]:
         raise MeasurementFailure("invalid cgroup v2 sample") from error
 
 
-def phase_delta(before: dict, after: dict, samples: list[dict]) -> dict:
+def phase_delta(before: dict, after: dict, samples: list[dict],
+                *, restarted_services: set[str] | None = None) -> dict:
+    restarted_services = restarted_services or set()
+    if not restarted_services <= before["cgroup"].keys():
+        raise MeasurementFailure("unknown restarted container in phase")
     if before["postgres"].keys() != after["postgres"].keys():
         raise MeasurementFailure("PostgreSQL service set changed within phase")
     sql: dict[str, dict] = {}
@@ -234,6 +281,9 @@ def phase_delta(before: dict, after: dict, samples: list[dict]) -> dict:
         if end["statsReset"] != start["statsReset"]:
             raise MeasurementFailure("pg_stat_statements reset within phase")
         old = {row["key"]: row for row in start["statements"]}
+        observed_keys = {row["key"] for row in end["statements"]}
+        if old.keys() - observed_keys:
+            raise MeasurementFailure("PostgreSQL statement identity disappeared within phase")
         deltas = []
         for row in end["statements"]:
             previous = old.get(row["key"], {})
@@ -250,16 +300,17 @@ def phase_delta(before: dict, after: dict, samples: list[dict]) -> dict:
         if start is None:
             raise MeasurementFailure("container set changed within phase")
         cpu = finish["cpuUsageUsec"] - start["cpuUsageUsec"]
-        if cpu < 0:
+        if cpu < 0 and service not in restarted_services:
             raise MeasurementFailure("container CPU counter decreased")
         memory = [item["cgroup"][service]["memoryCurrentBytes"] for item in samples
                   if service in item["cgroup"]]
         rss = [item["cgroup"][service]["processRSSBytes"] for item in samples
                if service in item["cgroup"]]
-        containers[service] = {"cpuUsageUsec": cpu,
+        containers[service] = {"cpuUsageUsec": None if service in restarted_services else cpu,
+                               "cpuScope": "not comparable across graceful restart" if service in restarted_services else "whole phase",
                                "sampledPeakCgroupMemoryCurrentBytes": max(memory +
                                    [start["memoryCurrentBytes"], finish["memoryCurrentBytes"]]),
-                               "lifetimeCgroupMemoryPeakBytes": finish["memoryPeakBytes"],
+                               "lifetimeCgroupMemoryPeakBytes": None if service in restarted_services else finish["memoryPeakBytes"],
                                "sampledPeakProcessRSSBytes": max(rss +
                                    [start["processRSSBytes"], finish["processRSSBytes"]])}
     metrics = {}
@@ -278,7 +329,8 @@ def phase_delta(before: dict, after: dict, samples: list[dict]) -> dict:
     return {"sql": sql, "containers": containers, "metricsCounterDeltas": metrics,
             "metricsAtStart": old_metrics, "metricsAtEnd": after["metrics"],
             "metricsSampledMaximum": sampled_metrics,
-            "sampleCount": len(samples), "sqlScope": "whole disposable databases including background and observer SQL",
+            "sampleCount": len(samples), "restartedServices": sorted(restarted_services),
+            "sqlScope": "whole disposable databases including background and observer SQL",
             "memoryScope": "cgroup memory.current includes cache; memory.peak covers container lifetime; process RSS is sampled /proc/1/status VmRSS only (PostgreSQL backend children excluded)"}
 
 
@@ -292,7 +344,8 @@ PG_SNAPSHOT_SQL = """SELECT json_build_object(
 
 
 def capture_runtime(docker: list[str], container_ids: dict[str, str],
-                    metrics_url: str, execute: Any) -> dict:
+                    metrics_url: str, execute: Any,
+                    *, excluded_services: set[str] | None = None) -> dict:
     """Sample cgroup CPU/memory, PID 1 RSS and private Gateway metrics."""
     import time
 
@@ -302,6 +355,8 @@ def capture_runtime(docker: list[str], container_ids: dict[str, str],
              "printf '\\n'; cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.peak; " \
              "awk '/^VmRSS:/ {printf \"%.0f\\n\", $2 * 1024; exit}' /proc/1/status"
     for service, container_id in container_ids.items():
+        if service in (excluded_services or set()):
+            continue
         raw = execute(docker + ["exec", container_id, "sh", "-c", script],
                       "measurement-containers.log", 15, record_stdout=False)
         cgroup[service] = parse_cgroup(raw)
@@ -321,7 +376,8 @@ def capture_runtime(docker: list[str], container_ids: dict[str, str],
     return {"monotonicNs": capture_finished, "captureStartedMonotonicNs": capture_started,
             "captureDurationSeconds": (capture_finished - capture_started) / 1e9,
             "wallTime": time.time(),
-            "cgroup": cgroup, "metrics": metrics}
+            "cgroup": cgroup, "cgroupUnavailableServices": sorted(excluded_services or set()),
+            "metrics": metrics}
 
 
 def capture_snapshot(psql: Any, docker: list[str], compose: list[str],

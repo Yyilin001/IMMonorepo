@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Run one real Gateway send against a disposable main/candidate capacity fixture.
+"""Run a functional Gateway canary or explicit disposable capacity scenario.
 
-This is a functional canary, not a throughput measurement. It never builds or
-modifies a source checkout and never uses the developer's default Compose stack.
+The default one-send mode is not a throughput measurement. Measurement mode
+needs separate calibration and does not build or modify a source checkout.
 """
 
 from __future__ import annotations
@@ -28,6 +28,9 @@ import uuid
 from virtual_actor_capacity_measurement import (
     MeasurementFailure, capture_runtime, capture_snapshot, create_scenario, phase_delta,
     supports_recovery_loader, verify_freeze,
+)
+from virtual_actor_capacity_lifecycle import (
+    LEASE_COUNTS_SQL, OwnerFailureWindow, validate_cold_retirement,
 )
 
 
@@ -184,7 +187,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifact-dir", required=True, type=Path)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--measurement-workload", choices=("hot", "same-owner", "mixed", "cold", "fault"),
-                        help="opt-in 120/300/60 capacity run; cold/fault deliberately reject until implemented")
+                        help="opt-in 120/300/60 capacity run with explicit lifecycle/fault evidence")
     parser.add_argument("--measurement-connections", type=int)
     parser.add_argument("--measurement-rate-scale", type=float, default=1.0)
     parser.add_argument("--measurement-freeze-file", type=Path,
@@ -224,7 +227,8 @@ def parse_args() -> argparse.Namespace:
             parser.error("measurement requires the separately verified common corrected loader")
         if args.measurement_connections is None:
             parser.error("measurement-connections is required")
-        if args.measurement_workload != args.layout:
+        required_layout = "mixed" if args.measurement_workload == "fault" else args.measurement_workload
+        if required_layout != args.layout:
             parser.error("measurement workload must match fixture layout")
         if args.source_sha != "f1cdd78d6a21bf0ae23da627c0710c65115236aa" and args.measurement_freeze_file is None:
             parser.error("candidate measurement requires a main calibration freeze file")
@@ -284,6 +288,14 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
                     "active_resolutions", "resolution_waiters"}
         if not all("im_v2_room_actor_" + name in initial_metrics for name in required):
             raise MeasurementFailure("candidate room actor metrics are missing")
+    fault = OwnerFailureWindow(compose, execute) if args.measurement_workload == "fault" else None
+    if fault and set(services) != {"postgres", "owner00", "owner01"}:
+        raise MeasurementFailure("fault requires exactly two owner databases")
+    cold_before = None
+    if args.measurement_workload == "cold" and args.source_sha != "f1cdd78d6a21bf0ae23da627c0710c65115236aa":
+        cold_before = {service: json.loads(psql(service, database, LEASE_COUNTS_SQL,
+                            log="measurement-cold-leases.log", timeout=15))
+                       for service, database in services.items() if service.startswith("owner")}
     loader_id = execute(compose + ["run", "-d", "--no-deps", "loader"],
                         "measurement-loader-start.log", 60).strip()
     if not re.fullmatch(r"[a-f0-9]{64}", loader_id):
@@ -297,7 +309,7 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
     current: str | None = None
     expected = ["warmup", "steady", "cooldown"]
     cooldown_deadline: float | None = None
-    events: queue.Queue[str | None] = queue.Queue(maxsize=1024)
+    events: queue.Queue[tuple[str, float] | None] = queue.Queue(maxsize=1024)
     stderr_stream = (run / "loader.log").open("a", encoding="utf-8")
     follow = subprocess.Popen(docker + ["logs", "-f", loader_id], env=environment,
                               stdout=subprocess.PIPE, stderr=stderr_stream,
@@ -310,7 +322,7 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
                 with (run / "loader.log").open("a", encoding="utf-8") as log:
                     log.write(line)
                 try:
-                    events.put(line, timeout=1)
+                    events.put((line, time.monotonic()), timeout=1)
                 except queue.Full:
                     events.put(None)
                     return
@@ -329,11 +341,14 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
                 boundaries["end"] = capture_snapshot(psql, docker, compose, services, containers,
                                                       metrics_url, execute)
             try:
-                line = events.get(timeout=0.5)
+                item = events.get(timeout=0.5)
             except queue.Empty:
-                line = ""
-            if line is None:
+                item = ("", time.monotonic())
+            if item is None:
                 break
+            line, observed_at = item
+            if fault:
+                fault.observe(line, at=observed_at)
             marker = re.search(r"^scenario phase=(warmup|steady|cooldown) seconds=(\d+)", line)
             if marker:
                 name = marker.group(1)
@@ -345,12 +360,17 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
                 snapshot["markerMonotonicNs"] = marker_ns
                 boundaries[name] = snapshot
                 current = name
+                if name == "steady" and fault:
+                    fault.begin_steady(at=observed_at)
                 if name == "cooldown":
                     cooldown_deadline = marker_ns / 1e9 + 60
                 next_sample = time.monotonic() + 5
-            elif current and time.monotonic() >= next_sample:
+            if fault and current == "steady":
+                fault.tick()
+            if current and time.monotonic() >= next_sample:
                 observations.append({"phase": current, **capture_runtime(
-                    docker, containers, metrics_url, execute)})
+                    docker, containers, metrics_url, execute,
+                    excluded_services={"owner00"} if fault and fault.stopped else None)})
                 next_sample = time.monotonic() + 5
         if expected:
             raise MeasurementFailure("measurement ended before all three phases")
@@ -372,11 +392,15 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
         if ((report.get("scenarioDrain") or {}).get("drained") is not True or
                 report.get("messagesSent") != report.get("messagesAcknowledged")):
             raise MeasurementFailure("measurement left native message outcomes unresolved")
+        if args.measurement_workload == "fault" and (
+            report.get("messagesSent") != 0 or report.get("messagesAcknowledged") != 0):
+            raise MeasurementFailure("fault workload must contain only recovery queries")
         phase_results = {}
         order = (("warmup", "steady"), ("steady", "cooldown"), ("cooldown", "end"))
         for phase, next_phase in order:
             samples = [item for item in observations if item["phase"] == phase]
-            delta = phase_delta(boundaries[phase], boundaries[next_phase], samples)
+            delta = phase_delta(boundaries[phase], boundaries[next_phase], samples,
+                                restarted_services={"owner00"} if fault and phase == "steady" else None)
             delta["nativeLoader"] = next(item for item in phases if item["name"] == phase)
             delta["observedWindowSeconds"] = (boundaries[next_phase]["monotonicNs"] -
                                                boundaries[phase]["monotonicNs"]) / 1e9
@@ -388,15 +412,34 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
             phase_results[phase] = delta
             write_private(run / f"measurement-{phase}.json", json.dumps(delta, indent=2, sort_keys=True) + "\n")
         batch_covered = False
-        if scenario_detail["workload"] == "mixed":
+        if scenario_detail["workload"] in ("mixed", "fault"):
             steady = phase_results["steady"]["nativeLoader"]
             for family in ("roomSyncStateBatch", "roomLatestVisibleBatch"):
                 value = steady.get(family) or {}
                 if value.get("completed", 0) <= 0 or value.get("successfulRooms", 0) <= 0:
                     raise MeasurementFailure("mixed workload did not complete both recovery batch families")
             batch_covered = True
+        cold_evidence = None
+        if args.measurement_workload == "cold":
+            if cold_before is None:
+                cold_evidence = {"scope": "not-applicable-frozen-main-without-actor-leases"}
+            else:
+                cold_after = {service: json.loads(psql(service, database, LEASE_COUNTS_SQL,
+                                   log="measurement-cold-leases.log", timeout=15))
+                              for service, database in services.items() if service.startswith("owner")}
+                cold_evidence = validate_cold_retirement(cold_before, cold_after)
+                active_metric = "im_v2_room_actor_active_rooms"
+                active_at_cooldown = boundaries["cooldown"]["metrics"].get(active_metric)
+                active_at_end = boundaries["end"]["metrics"].get(active_metric)
+                if (active_at_cooldown is None or active_at_end is None or
+                        active_at_end >= active_at_cooldown):
+                    raise MeasurementFailure("cold workload did not reduce active room gauge during cooldown")
+                cold_evidence["activeRoomsAtCooldownStart"] = active_at_cooldown
+                cold_evidence["activeRoomsAtEnd"] = active_at_end
+        fault_evidence = fault.finish() if fault else None
         write_private(run / "measurement-snapshots.json", json.dumps({
-            "boundaries": boundaries, "periodic": observations, "scenario": scenario_detail},
+            "boundaries": boundaries, "periodic": observations, "scenario": scenario_detail,
+            "coldRetirement": cold_evidence, "ownerFailure": fault_evidence},
             indent=2, sort_keys=True) + "\n")
         return {"scenario": scenario_detail, "loadReportSHA256": sha256(report_path),
                 "phaseFiles": {name: sha256(run / f"measurement-{name}.json") for name in phase_results},
@@ -404,8 +447,11 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
                 "nativeConnectionsAuthenticated": report.get("authenticated"),
                 "nativeMessagesAcknowledged": report.get("messagesAcknowledged"),
                 "batchRecoveryQueriesCovered": batch_covered,
+                "coldRetirement": cold_evidence, "ownerFailure": fault_evidence,
                 "nativeFailed": report.get("failed"), "nativeDirectRoomAttempted": report.get("directRoomAttempted")}
     finally:
+        if fault:
+            fault.cleanup()
         if follow.poll() is None:
             follow.terminate()
         stderr_stream.close()
@@ -430,8 +476,9 @@ def main() -> int:
         "IMV2GatewayLoadGenerator": verify_product(args.loader_products_dir,
             "IMV2GatewayLoadGenerator", loader_build_result["products"]["IMV2GatewayLoadGenerator"]),
     }
-    if args.measurement_workload == "mixed" and not supports_recovery_loader(
-        args.loader_products_dir / "IMV2GatewayLoadGenerator"):
+    if args.measurement_workload in ("mixed", "fault") and not supports_recovery_loader(
+        args.loader_products_dir / "IMV2GatewayLoadGenerator",
+        require_timeout=args.measurement_workload == "fault"):
         raise MeasurementFailure("common loader lacks native recovery-batch dispatch support")
     manifest, rooms, users, fixture_info = verify_fixture(args.fixture_dir, args.layout)
     scenario = RUNNER_ROOT / "IMV2/scripts/virtual-actor-fixtures/send-one-canary.json"
@@ -627,7 +674,8 @@ def main() -> int:
                         "--workload-ramp-per-second", str(min(connections, 1000)),
                         "--sync-reads", "1" if args.measurement_workload == "mixed" else "0",
                         "--room-log-reads", "1" if args.measurement_workload == "mixed" else "0",
-                        "--max-failure-percent", "0", "--scenario",
+                        "--max-failure-percent", "0", "--recovery-batch-timeout-seconds",
+                        "45" if args.measurement_workload == "fault" else "10", "--scenario",
                         "/run/va-scenario/measurement-scenario.json" if scenario_document is not None
                         else "/run/va-scenario/send-one-canary.json"],
             "volumes": [
@@ -718,6 +766,8 @@ def main() -> int:
                     raise MeasurementFailure("measurement changed fixture room cardinality")
             if durable_messages != result["measurement"]["nativeMessagesAcknowledged"]:
                 raise MeasurementFailure("durable message count differs from native acknowledged count")
+            if args.measurement_workload == "fault" and durable_messages != 0:
+                raise MeasurementFailure("fault query-only workload wrote durable messages")
             result["measurement"]["durableMessages"] = durable_messages
             result["measurement"]["roomCardinalityUnchanged"] = True
             result["passed"] = True
