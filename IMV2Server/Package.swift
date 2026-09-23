@@ -14,6 +14,7 @@ let package = Package(
         .executable(name: "IMV2OperatorServerApp", targets: ["IMV2OperatorServerApp"]),
         .executable(name: "IMV2LocalGatewayProbe", targets: ["IMV2LocalGatewayProbe"]),
         .executable(name: "IMV2GatewayLoadGenerator", targets: ["IMV2GatewayLoadGenerator"]),
+        .executable(name: "VirtualActorCompatibilityProbe", targets: ["VirtualActorCompatibilityProbe"]),
     ],
     dependencies: [
         .package(url: "https://github.com/vapor/routing-kit.git", from: "5.0.0-beta"),
@@ -33,6 +34,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.34.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
+        .package(url: "https://github.com/apple/swift-distributed-actors.git", revision: "50e789fbb6db9a9869a60b1915e659bd752e1d42"),
     ],
     targets: [
         .target(
@@ -165,6 +167,23 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
+            ]
+        ),
+        .executableTarget(
+            name: "VirtualActorCompatibilityProbe",
+            dependencies: [
+                "IMV2Core",
+                "IMV2Server",
+                "IMV2ServerHTTP",
+                .product(name: "DistributedCluster", package: "swift-distributed-actors"),
+                .product(name: "Vapor", package: "vapor"),
+                .product(name: "FluentKit", package: "fluent-kit"),
+                .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
+                .product(name: "SQLKit", package: "sql-kit"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "Crypto", package: "swift-crypto"),
             ]
         ),
         .testTarget(

@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: probe
+      POSTGRES_PASSWORD: probe
+      POSTGRES_DB: probe
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U probe -d probe"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
+  host:
+    image: ${VA_SWIFT_IMAGE:?set VA_SWIFT_IMAGE to the project's pinned Swift 6.4 image}
+    container_name: imv2-va-p0-host
+    working_dir: /repo/IMV2Server
+    volumes:
+      - ${VA_WORKTREE:?set VA_WORKTREE}:/repo:ro
+      - ${VA_BUILD_DIR:?set VA_BUILD_DIR}:/build:ro
+      - ${VA_EVIDENCE_DIR:?set VA_EVIDENCE_DIR}:/evidence
+    environment:
+      VA_HOST_NAME: imv2-va-p0-host
+      VA_DATABASE_URL: ${VA_DATABASE_URL:-postgres://probe:probe@postgres:5432/probe}
+      VA_EVIDENCE_DIR: /evidence
+      VA_ACTOR_ID_FILE: ${VA_ACTOR_ID_FILE:-actor-old.json}
+      VA_HOST_INCARNATION_FILE: ${VA_HOST_INCARNATION_FILE:-host-old-incarnation.txt}
+      VA_CERT_NAME: host
+    command: ["/build/release/VirtualActorCompatibilityProbe", "host"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  client:
+    image: ${VA_SWIFT_IMAGE:?set VA_SWIFT_IMAGE to the project's pinned Swift 6.4 image}
+    container_name: imv2-va-p0-client
+    working_dir: /repo/IMV2Server
+    volumes:
+      - ${VA_WORKTREE:?set VA_WORKTREE}:/repo:ro
+      - ${VA_BUILD_DIR:?set VA_BUILD_DIR}:/build:ro
+      - ${VA_EVIDENCE_DIR:?set VA_EVIDENCE_DIR}:/evidence
+    environment:
+      VA_CLIENT_NAME: imv2-va-p0-client
+      VA_HOST_NAME: imv2-va-p0-host
+      VA_EVIDENCE_DIR: /evidence
+      VA_CERT_NAME: client
+    command: ["/build/release/VirtualActorCompatibilityProbe", "client"]
+    depends_on:
+      host:
+        condition: service_started
