@@ -76,6 +76,53 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("sharded granted turns use one fenced PostgreSQL transaction on their stable lane")
+    func actorGrantedShardedTwoRoomBatch() async throws {
+        try await withForwardOwnerDatabases(mode: .large) { database, _, sql, _, _ in
+            let firstLane = V2ShardedSendMessageAdmissionBatcher.laneIndex(
+                for: roomID, laneCount: 2)
+            var secondRoom = RoomID(uuid: UUID())
+            while V2ShardedSendMessageAdmissionBatcher.laneIndex(
+                for: secondRoom, laneCount: 2) != firstLane {
+                secondRoom = RoomID(uuid: UUID())
+            }
+            try await actorBatchSeedPeerRoom(secondRoom, on: sql)
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let leases = PostgresV2RoomActivationStore(database: database)
+            let firstToken = try await actorBatchLease(leases, room: roomID)
+            let secondToken = try await actorBatchLease(leases, room: secondRoom)
+            let writer = try actorBatchWriter(database: database)
+            let batcher = V2ShardedSendMessageAdmissionBatcher(store: writer,
+                configuration: .init(maximumBatchSize: 2, maximumDelay: .milliseconds(500),
+                                     maximumInFlightBatches: 2, maximumPendingRequests: 4),
+                laneCount: 2, actorGrantedStore: writer)
+            let adapter = V2ActorGrantedSendBatchAdapter(batcher: batcher)
+            let first = try actorBatchExecutor(token: firstToken, writer: writer, database: database,
+                now: now).prepareSend(actorBatchWires(room: roomID, texts: ["first"])[0])
+            let second = try actorBatchExecutor(token: secondToken, writer: writer, database: database,
+                now: now).prepareSend(actorBatchWires(room: secondRoom, texts: ["second"])[0])
+            let deadline = ContinuousClock.now + .seconds(2)
+            let firstTask = Task { try await adapter.execute([first],
+                batchDeadline: deadline, callDeadline: deadline) }
+            let enqueueLimit = ContinuousClock.now + .seconds(1)
+            while await batcher.snapshot().pendingRequests == 0 {
+                try #require(ContinuousClock.now < enqueueLimit)
+                await Task.yield()
+            }
+            let secondTask = Task { try await adapter.execute([second],
+                batchDeadline: deadline, callDeadline: deadline) }
+            #expect(try await firstTask.value.count == 1)
+            #expect(try await secondTask.value.count == 1)
+            #expect(try await count("im_v2.messages", on: sql) == 2)
+            #expect(await batcher.snapshot().atomicBatchCommitted == 1)
+            #expect(await batcher.snapshot().atomicBatchCommittedRequests == 2)
+            #expect(try await leases.release(token: firstToken))
+            #expect(try await leases.release(token: secondToken))
+            await adapter.retire(firstToken)
+            await adapter.retire(secondToken)
+        }
+    }
+
     @Test("stale token in a shared send batch leaves both rooms unchanged")
     func actorGrantedStaleMixedBatch() async throws {
         try await withForwardOwnerDatabases(mode: .large) { database, _, sql, _, _ in

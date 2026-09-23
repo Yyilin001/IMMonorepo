@@ -2,13 +2,33 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
+/// Already-granted send turns only. The gateway cannot use this contract to
+/// admit a new room command or manufacture a successful receipt.
+public protocol V2ActorGrantedSendBatching: Sendable {
+    func acceptGrantedTurn(_ sends: [V2PreparedActorSend],
+                           batchDeadline: ContinuousClock.Instant,
+                           callDeadline: ContinuousClock.Instant) async throws
+        -> [Result<V2SendMessageOutcome, any Error>]
+    func retireActivation(_ token: V2RoomActivationToken) async
+}
+
+extension V2SendMessageAdmissionBatcher: V2ActorGrantedSendBatching {
+    public func acceptGrantedTurn(_ sends: [V2PreparedActorSend],
+                                  batchDeadline: ContinuousClock.Instant,
+                                  callDeadline: ContinuousClock.Instant) async throws
+        -> [Result<V2SendMessageOutcome, any Error>] {
+        try await acceptGrantedTurn(sends, batchDeadline: batchDeadline,
+                                    callDeadline: Optional(callDeadline))
+    }
+}
+
 /// Maps a complete admitted room turn to one bounded batcher admission and
 /// back to ordered typed results. A SQL partition can commit before another
 /// rolls back, so mixed durable outcomes stop the whole turn as unknown.
 public struct V2ActorGrantedSendBatchAdapter: Sendable {
-    private let batcher: V2SendMessageAdmissionBatcher
+    private let batcher: any V2ActorGrantedSendBatching
 
-    public init(batcher: V2SendMessageAdmissionBatcher) {
+    public init(batcher: any V2ActorGrantedSendBatching) {
         self.batcher = batcher
     }
 

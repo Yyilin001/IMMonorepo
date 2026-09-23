@@ -214,7 +214,9 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             maximumPendingRequests: Int = 1_024,
             maximumTrackedActivations: Int = 16_384
         ) {
-            precondition((2 ... 128).contains(maximumBatchSize))
+            // One preserves deployments with append batching disabled: the
+            // granted path still fences each write, but never merges requests.
+            precondition((1 ... 128).contains(maximumBatchSize))
             precondition(maximumDelay > .zero)
             precondition((1 ... 128).contains(maximumInFlightBatches))
             precondition(maximumPendingRequests > 0)
@@ -389,10 +391,11 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         configuration: Configuration,
         databaseWorkAdmission: V2DatabaseWorkAdmissionController?,
         sharedPendingCapacity: V2SharedSendMessagePendingCapacity,
-        committedMessageObserver: (any V2CommittedMessageBatchObserving)?
+        committedMessageObserver: (any V2CommittedMessageBatchObserving)?,
+        actorGrantedStoreFactory: (@Sendable ([V2RoomActivationToken]) throws -> any V2AtomicRoomWriteBatchStore)?
     ) {
         self.store = store
-        actorGrantedStoreFactory = nil
+        self.actorGrantedStoreFactory = actorGrantedStoreFactory
         self.configuration = configuration
         self.databaseWorkAdmission = databaseWorkAdmission
         self.committedMessageObserver = committedMessageObserver
@@ -571,13 +574,23 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 ))
                 recordArrival()
             }
-            let flushBy = min(batchDeadline, effectiveCallDeadline)
-            if pendingCount >= configuration.maximumBatchSize || flushBy <= clock.now {
+            let hardDeadline = min(batchDeadline, effectiveCallDeadline)
+            if pendingCount >= configuration.maximumBatchSize || hardDeadline <= clock.now {
                 cancelDelayedFlush()
                 startAvailableBatchesIfPossible()
-            } else if flushDeadline == nil || flushBy < flushDeadline! {
-                cancelDelayedFlush()
-                installDelayedFlush(.granted, until: flushBy)
+            } else {
+                let highActivity = isHighActivity()
+                let localDelay = highActivity
+                    ? configuration.adaptiveDelayPolicy!.highActivityMaximumDelay
+                    : configuration.maximumDelay
+                let localDeadline = clock.now + localDelay
+                let selectedDeadline = min(localDeadline, hardDeadline)
+                if flushDeadline == nil || selectedDeadline < flushDeadline! {
+                    cancelDelayedFlush()
+                    let reason: ScheduledDelay = selectedDeadline == hardDeadline
+                        ? .granted : highActivity ? .highActivity : .base
+                    installDelayedFlush(reason, until: selectedDeadline)
+                }
             }
         }
     }
@@ -655,10 +668,12 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     private func shortenHighActivitySuccessorFlushIfNeeded() {
         guard pendingCount > 0,
               scheduledDelay == .highActivity,
-              flushTask != nil
+              flushTask != nil,
+              let existingDeadline = flushDeadline
         else { return }
         cancelDelayedFlush()
-        installDelayedFlush(.highActivity, after: configuration.maximumDelay)
+        installDelayedFlush(.highActivity,
+            until: min(existingDeadline, clock.now + configuration.maximumDelay))
     }
 
     private func delayedFlushFired(generation: UInt64) {

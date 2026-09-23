@@ -341,7 +341,7 @@ struct V2ActorGrantedSendBatchTests {
     }
 }
 
-private actor GrantedBatchStore: V2AtomicRoomWriteBatchStore {
+actor GrantedBatchStore: V2AtomicRoomWriteBatchStore {
     let partitionLast: Bool
     let rejectLast: Bool
     let unknown: Bool

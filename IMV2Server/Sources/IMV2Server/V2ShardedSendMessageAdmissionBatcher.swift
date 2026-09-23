@@ -1,4 +1,5 @@
 import Foundation
+import IMV2ActorContracts
 import IMV2Core
 
 /// 消息准入的稳定进程内分片。
@@ -7,7 +8,8 @@ import IMV2Core
 /// 先进先出与不可超越语义；相互独立的房间则可以在不同 actor 执行器上并行推进。
 /// 数据库并发被拆分到各通道，而待处理请求改用进程级统一限流器，
 /// 使哈希偏斜的房间可以借用空闲容量，又不会悄悄抬高 PostgreSQL 压力或驻留内存。
-public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission, Sendable {
+public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
+    V2ActorGrantedSendBatching, Sendable {
     private let lanes: [V2SendMessageAdmissionBatcher]
 
     /// 是否接管前台写入准入。
@@ -27,12 +29,49 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
     ///   - laneCount: 通道数量，需大于 1 且不超过在途批量与待处理请求上限。
     ///   - databaseWorkAdmission: 可选的数据库工作准入控制器。
     ///   - committedMessageObserver: 可选的已提交消息观察者。
-    public init(
+    public convenience init(
         store: any V2AtomicRoomWriteBatchStore,
         configuration: V2SendMessageAdmissionBatcher.Configuration,
         laneCount: Int,
         databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
-        committedMessageObserver: (any V2CommittedMessageBatchObserving)? = nil
+        committedMessageObserver: (any V2CommittedMessageBatchObserving)? = nil,
+        actorGrantedStore: PostgresV2RoomWriteStore? = nil
+    ) {
+        let factory: (@Sendable ([V2RoomActivationToken]) throws -> any V2AtomicRoomWriteBatchStore)?
+        if let actorGrantedStore {
+            factory = { tokens in
+                let scope = try V2RoomActivationWriteScope(tokens: tokens)
+                return actorGrantedStore.usingActivationScope(scope)
+            }
+        } else {
+            factory = nil
+        }
+        self.init(store: store, configuration: configuration, laneCount: laneCount,
+                  databaseWorkAdmission: databaseWorkAdmission,
+                  committedMessageObserver: committedMessageObserver,
+                  actorGrantedStoreFactory: factory)
+    }
+
+    /// Test injection exercises the same shared-capacity and lane routing as
+    /// production without requiring a PostgreSQL connection for every case.
+    convenience init(
+        store: any V2AtomicRoomWriteBatchStore,
+        configuration: V2SendMessageAdmissionBatcher.Configuration,
+        laneCount: Int,
+        actorGrantedStoreFactory: @escaping @Sendable ([V2RoomActivationToken]) throws -> any V2AtomicRoomWriteBatchStore
+    ) {
+        self.init(store: store, configuration: configuration, laneCount: laneCount,
+                  databaseWorkAdmission: nil, committedMessageObserver: nil,
+                  actorGrantedStoreFactory: actorGrantedStoreFactory)
+    }
+
+    private init(
+        store: any V2AtomicRoomWriteBatchStore,
+        configuration: V2SendMessageAdmissionBatcher.Configuration,
+        laneCount: Int,
+        databaseWorkAdmission: V2DatabaseWorkAdmissionController?,
+        committedMessageObserver: (any V2CommittedMessageBatchObserving)?,
+        actorGrantedStoreFactory: (@Sendable ([V2RoomActivationToken]) throws -> any V2AtomicRoomWriteBatchStore)?
     ) {
         precondition(laneCount > 1)
         precondition(laneCount <= configuration.maximumInFlightBatches)
@@ -69,11 +108,13 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
                     // The shared capacity below owns the process-wide bound.
                     // Retain the same value here for configuration invariants
                     // and diagnostics; a lane no longer gets a hard slice.
-                    maximumPendingRequests: configuration.maximumPendingRequests
+                    maximumPendingRequests: configuration.maximumPendingRequests,
+                    maximumTrackedActivations: configuration.maximumTrackedActivations
                 ),
                 databaseWorkAdmission: databaseWorkAdmission,
                 sharedPendingCapacity: sharedPendingCapacity,
-                committedMessageObserver: committedMessageObserver
+                committedMessageObserver: committedMessageObserver,
+                actorGrantedStoreFactory: actorGrantedStoreFactory
             )
         }
     }
@@ -93,6 +134,28 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
             for: ownedRequest.command.roomID,
             laneCount: lanes.count
         )].accept(ownedRequest)
+    }
+
+    /// An entire granted turn stays on the room's stable lane. The source
+    /// actor validates the token and preserves each result's original index.
+    public func acceptGrantedTurn(
+        _ sends: [V2PreparedActorSend],
+        batchDeadline: ContinuousClock.Instant,
+        callDeadline: ContinuousClock.Instant
+    ) async throws -> [Result<V2SendMessageOutcome, any Error>] {
+        guard let first = sends.first,
+              sends.allSatisfy({ $0.token == first.token &&
+                                 $0.request.command.roomID == first.token.roomID }) else {
+            throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        }
+        return try await lanes[Self.laneIndex(for: first.token.roomID,
+                                              laneCount: lanes.count)].acceptGrantedTurn(
+            sends, batchDeadline: batchDeadline, callDeadline: callDeadline)
+    }
+
+    public func retireActivation(_ token: V2RoomActivationToken) async {
+        await lanes[Self.laneIndex(for: token.roomID,
+                                   laneCount: lanes.count)].retireActivation(token)
     }
 
     /// 汇总各通道的运行快照。
