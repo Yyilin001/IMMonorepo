@@ -203,6 +203,10 @@
       "owner": "R3"
     },
     {
+      "path": "IMV2Server/Sources/IMV2ActorCluster/Authentication/V2ActorLocalPayload.swift",
+      "owner": "R3"
+    },
+    {
       "path": "IMV2Server/Sources/IMV2ActorCluster/Authentication/V2ActorSessionAuthenticator.swift",
       "owner": "R3"
     },
@@ -1272,6 +1276,10 @@
     },
     {
       "path": "IMV2Server/Tests/IMV2ActorClusterTests/V2RoomClusterDiscoveryTests.swift",
+      "owner": "R3"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ActorClusterTests/V2RoomLocalCapabilityIntegrationTests.swift",
       "owner": "R3"
     },
     {

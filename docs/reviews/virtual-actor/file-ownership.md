@@ -1,6 +1,6 @@
 # Room Virtual Actor file ownership, C0 preparation
 
-The [machine-readable file list](file-ownership.json) assigns one edit owner to each of **393 existing and implemented paths**. It is an explicit path list against the clean business base, rather than a directory glob. The [static checker](../../../scripts/check_v2_virtual_actor_inventory.py) rejects duplicate/missing paths and cross-checks the [writer evidence claims](writer-evidence.json). This is a planning freeze for future isolated worktrees, not evidence that every path needs editing. Files not listed remain outside the Room Virtual Actor scope unless the integration owner explicitly assigns them.
+The [machine-readable file list](file-ownership.json) assigns one edit owner to each of **395 existing and implemented paths**. It is an explicit path list against the clean business base, rather than a directory glob. The [static checker](../../../scripts/check_v2_virtual_actor_inventory.py) rejects duplicate/missing paths and cross-checks the [writer evidence claims](writer-evidence.json). This is a planning freeze for future isolated worktrees, not evidence that every path needs editing. Files not listed remain outside the Room Virtual Actor scope unless the integration owner explicitly assigns them.
 
 | Owner | Existing-file boundary | New-file boundary |
 | --- | --- | --- |
