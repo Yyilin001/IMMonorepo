@@ -20,4 +20,4 @@ python3 IMV2/scripts/test_v2_virtual_actor_application_stack.py \
 
 `62046f6cba29d4fee8fab41ef1c0e59716a03dcd` 在固定 Linux Swift 6.4 镜像的四个 Release 产品构建与基础协议冒烟退出 0。证据目录：`/Users/yyl/.codex/virtual-actor-builds/application/run-a5c3d875a8944f90aff928da7e770708`。`result.json` 保存源码、锁文件与四个二进制摘要；`smoke.log` 确认注册/凭据、Gateway 私聊发送与接收方日志、禁用账号、TLS 1.3 和私有指标全部通过；本任务 Compose 资源与临时密钥已清理。
 
-后续脚本还会调用独立 `verify_v2_virtual_actor_http_paths.py`，覆盖 HTTP 昵称、邀请审批、媒体上传、Gateway 群消息媒体关联和 HTTP 授权下载。群本身由可丢弃 SQL fixture 创建，不能将其声称为 TCP 群创建验收。新增路径尚需下一轮实际运行；首次成功只证明上段基础协议范围。
+后续脚本还会调用独立 `verify_v2_virtual_actor_http_paths.py`，覆盖 HTTP 昵称、邀请审批、媒体上传、Gateway 群消息媒体关联和 HTTP 授权下载。群本身由可丢弃 SQL fixture 创建，不能将其声称为 TCP 群创建验收。新增路径随后已在 `3cfe62bb297a83f9cd7dd8ed4e59b2fa23747d70` 的完整 Linux Release 栈退出 0：`/Users/yyl/.codex/virtual-actor-builds/application/run-ad5c673efe8a4cb08c70467449810053`，`actor-http-smoke.log` 为 `ACTOR_HTTP_SMOKE_OK nickname invitation media_send_download`。此轮也重跑通过基础协议，临时资源全部清理；没有替代完整群创建与多 Host 故障验收。
