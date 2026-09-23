@@ -60,13 +60,17 @@ def remote_batch_smoke(*, root: Path, run: Path, private: Path,
         raise RuntimeError("remote-batch stage timed out: " + stage)
 
     def metrics() -> dict[str, int]:
-        # Metrics are intentionally loopback-only in the Actor Host. Bash's
-        # TCP redirection avoids assuming curl/python in the release image.
-        response = subprocess.check_output(compose + ["exec", "-T", "actor-host", "bash", "-c",
-            'exec 3<>/dev/tcp/127.0.0.1/9464; printf "GET /metrics HTTP/1.0\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n" >&3; cat <&3'],
+        # Metrics are loopback-only in the Actor Host. urllib reads the HTTP
+        # body by its framing instead of waiting for a keep-alive socket EOF.
+        response = subprocess.check_output(compose + ["exec", "-T", "actor-host", "python3", "-c",
+            'import urllib.request\n'
+            'r = urllib.request.urlopen("http://127.0.0.1:9464/metrics", timeout=5)\n'
+            'if r.status != 200: raise RuntimeError("metrics status was not 200")\n'
+            'body = r.read(2000001)\n'
+            'r.close()\n'
+            'if len(body) > 2000000: raise RuntimeError("metrics response exceeded bound")\n'
+            'print(body.decode(), end="")'],
             cwd=root, env=environment, text=True, stderr=subprocess.DEVNULL, timeout=10)
-        if "200 OK" not in response.splitlines()[0]:
-            raise RuntimeError("Actor Host loopback metrics response was not OK")
         names = {
             "batches": 'im_v2_direct_room_log_append_atomic_batches_total{outcome="committed"}',
             "requests": 'im_v2_direct_room_log_append_atomic_requests_total{outcome="committed"}',
