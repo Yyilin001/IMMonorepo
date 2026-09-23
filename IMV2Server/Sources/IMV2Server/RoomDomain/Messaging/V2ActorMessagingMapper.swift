@@ -63,22 +63,6 @@ public extension V2ActorMentionTargetWire {
     }
 }
 
-public extension V2ActorAdmissionUnavailableWire {
-    init(_ value: V2CommandAdmissionUnavailableReason) {
-        switch value {
-        case .missingShardLease: self = .missingShardLease
-        case .expiredShardLease: self = .expiredShardLease
-        }
-    }
-
-    func toDomain() -> V2CommandAdmissionUnavailableReason {
-        switch self {
-        case .missingShardLease: .missingShardLease
-        case .expiredShardLease: .expiredShardLease
-        }
-    }
-}
-
 public extension V2ActorSendMessageWire {
     init(_ value: V2AuthenticatedSendMessage) {
         self.init(roomID: value.roomID, actorUserID: value.actorUserID,

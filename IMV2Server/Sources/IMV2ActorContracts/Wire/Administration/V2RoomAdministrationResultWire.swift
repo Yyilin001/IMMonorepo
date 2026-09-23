@@ -1,11 +1,6 @@
 import Foundation
 import IMV2Core
 
-public enum V2ActorAdmissionUnavailableWire: String, Codable, Equatable, Sendable {
-    case missingShardLease
-    case expiredShardLease
-}
-
 public struct V2ActorMembershipChangeResultWire: Codable, Equatable, Sendable {
     public let roomID: RoomID
     public let targetUserID: UserID

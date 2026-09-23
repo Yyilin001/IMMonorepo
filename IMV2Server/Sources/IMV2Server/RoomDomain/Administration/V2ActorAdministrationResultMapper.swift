@@ -2,21 +2,6 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-extension V2ActorAdmissionUnavailableWire {
-    public init(_ reason: V2CommandAdmissionUnavailableReason) {
-        switch reason {
-        case .missingShardLease: self = .missingShardLease
-        case .expiredShardLease: self = .expiredShardLease
-        }
-    }
-    public func domain() -> V2CommandAdmissionUnavailableReason {
-        switch self {
-        case .missingShardLease: .missingShardLease
-        case .expiredShardLease: .expiredShardLease
-        }
-    }
-}
-
 extension V2ActorMembershipChangeResultWire {
     public init(_ value: V2RoomMembershipChange) {
         self.init(roomID: value.roomID, targetUserID: value.targetUserID,
@@ -60,7 +45,7 @@ extension V2ActorMembershipOutcomeWire {
         case .rateLimited(let seconds):
             guard seconds >= 0 else { throw V2ActorAdministrationWireError.invalidRetryAfter }
             return .rateLimited(retryAfterSeconds: seconds)
-        case .unavailable(let reason): return .unavailable(reason.domain())
+        case .unavailable(let reason): return .unavailable(reason.toDomain())
         }
     }
 }
@@ -147,7 +132,7 @@ private func v2ActorCapabilityDomain<Wire: Codable & Equatable & Sendable,
     case .rateLimited(let seconds):
         guard seconds >= 0 else { throw V2ActorAdministrationWireError.invalidRetryAfter }
         return .rateLimited(retryAfterSeconds: seconds)
-    case .unavailable(let reason): return .unavailable(reason.domain())
+    case .unavailable(let reason): return .unavailable(reason.toDomain())
     }
 }
 
@@ -230,7 +215,7 @@ extension V2ActorModerationOutcomeWire {
         case .rateLimited(let seconds):
             guard seconds >= 0 else { throw V2ActorAdministrationWireError.invalidRetryAfter }
             return .rateLimited(retryAfterSeconds: seconds)
-        case .unavailable(let reason): return .unavailable(reason.domain())
+        case .unavailable(let reason): return .unavailable(reason.toDomain())
         }
     }
 }
