@@ -15,7 +15,7 @@
 | G4：全部房间写者、查询和后台迁移 | Gateway 与 Account 生产入口已接入；[维护与投影压缩竞态验证](d6-maintenance-evidence.md)通过；[完整 Linux 应用协议及 Account 房间 HTTP 闭环](i1-application-smoke-harness.md)已通过；[Host 取消与 retention/review/import 临界接管](g2-pg-cancellation-maintenance-evidence.md)原生真实 PG 4/4、[冻结源码 Linux required run](g5-linux-regression-evidence.md)同 suite 4/4 通过；单 owner 故障另按 #19 验收 | 未完成 |
 | G5：故障矩阵、Linux checks、相对性能 | [Linux 客户端先启动与 Host 重启恢复](g5-linux-functional-evidence.md)通过；[冻结源码一次完整 Linux required run](g5-linux-regression-evidence.md)的 suite/cleanup 退出 0、离线重校验 1515 tests / 264 suites 通过，原 metadata 的解析失败仍保留；完整[故障矩阵](v1-fault-harness.md)仍在收口；[真实 Host 共享提交 ACK 丢失](g5-host-shared-ack-loss-evidence.md)原生和同次 Linux 各 1/1 通过；[独立数据库链路故障与真实 PG 重启恢复](g5-database-edge-evidence.md)已通过 Linux 探针；[最新 `c221` hot 正式候选](g5-hot-performance-regression.md)业务零失败、SQL 已过，但 CPU 2.318061 ms/ACK 仍超过冻结 2.133047 ms/ACK，门禁在第 2 轮后停止；[CPU 诊断](g5-hot-cpu-profile-evidence.md)保留先前 main/fdf 对照与最新 c221 候选独立采样；c221 的 JSON、SQL/NIO 和少量正则栈不足以完整归因 CPU 超额，[同进程 capability 实现及边界测试](r3-local-capability-evidence.md)已有原生与同次 Linux 证据 | Linux required checks 已通过；#19 与五类相对性能未完成 |
 
-最新[事务上下文 SQL 复用](g5-sql-context-evidence.md)已集成并通过 10 项原生真实 PostgreSQL 聚焦测试，覆盖 hot 的实际单条发送路径。上述完整 Linux 成功记录属于 `d5623259`；新生产源码的 Release、正式性能与最终完整 Linux 验证仍待执行。
+最新[事务上下文 SQL 复用](g5-sql-context-evidence.md)已集成并通过 10 项原生真实 PostgreSQL 聚焦测试，覆盖 hot 的实际单条发送路径。冻结候选 `812af24a` 的七产品 Linux Release 构建通过，正式 hot 复测进行中。上述完整 Linux 成功记录属于 `d5623259`；新生产源码的最终完整 Linux 验证仍待执行。
 
 ## 核对出的基线差异
 
