@@ -1,6 +1,7 @@
 import Crypto
 import FluentKit
 import Foundation
+import IMV2ActorContracts
 import IMV2Core
 import PostgresNIO
 import SQLKit
@@ -23,93 +24,129 @@ public struct PostgresV2ReadReceiptStore:
         self.shadowForwarder = shadowForwarder
     }
     public func record(command: V2RecordReadReceiptCommand, now: Date) async throws -> V2ReadReceiptOutcome {
-        try await record(command: command, ownerRoute: nil, now: now)
+        try await record(command: command, ownerRoute: nil, activationScope: nil, timeouts: .default, now: now)
     }
 
     public func recordOwnerValidated(command: V2RecordReadReceiptCommand, ownerRoute: V2RoomShardRoute,
                                      now: Date) async throws -> V2ReadReceiptOutcome {
-        try await record(command: command, ownerRoute: Optional(ownerRoute), now: now)
+        try await record(command: command, ownerRoute: Optional(ownerRoute), activationScope: nil, timeouts: .default, now: now)
+    }
+
+    /// The virtual-actor path. Every transaction, including an idempotent
+    /// replay, checks the exact activation after taking the canonical room
+    /// lock and before inspecting an operation record.
+    public func recordActivationValidated(
+        command: V2RecordReadReceiptCommand, token: V2RoomActivationToken,
+        now: Date, timeouts: V2RoomActivationSQLTimeouts = .default
+    ) async throws -> V2ReadReceiptOutcome {
+        guard token.roomID == command.roomID else { throw V2RoomActivationLeaseError.activationChanged }
+        return try await record(command: command, ownerRoute: nil,
+            activationScope: try .init(tokens: [token]), timeouts: timeouts, now: now)
     }
 
     private func record(command: V2RecordReadReceiptCommand, ownerRoute: V2RoomShardRoute?,
-                        now: Date) async throws -> V2ReadReceiptOutcome {
+                        activationScope: V2RoomActivationWriteScope?,
+                        timeouts: V2RoomActivationSQLTimeouts, now: Date) async throws -> V2ReadReceiptOutcome {
         guard v2PostgresTimestampCanEncode(now) else { throw V2ReadReceiptStoreError.corruptPersistenceState }
-        let groupAttempt = if let ownerRoute {
-            try await recordGroupOwnerValidated(command: command, ownerRoute: ownerRoute, now: now)
+        let groupAttempt: V2GroupReadReceiptRecordingAttempt
+        if let activationScope {
+            let results = try await recordGroups([.init(command: command, now: now)], ownerRoutes: nil,
+                activationScope: activationScope, timeouts: timeouts)
+            guard let first = results.first, results.count == 1 else {
+                throw V2ReadReceiptStoreError.corruptPersistenceState
+            }
+            switch first {
+            case .success(let value): groupAttempt = value
+            case .failure(let error): throw error
+            }
+        } else if let ownerRoute {
+            groupAttempt = try await recordGroupOwnerValidated(command: command, ownerRoute: ownerRoute, now: now)
         } else {
-            try await recordGroup(command: command, now: now)
+            groupAttempt = try await recordGroup(command: command, now: now)
         }
         switch groupAttempt {
         case .handled(let outcome): return outcome
         case .notGroup: break
         }
+        let attempt = V2RoomTransactionAttempt()
         let result: (
             outcome: V2ReadReceiptOutcome,
             projectionRecipient: UserID?,
             advancedWatermark: (sequence: Int64, recordedAt: Date)?
-        ) = try await database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase else { throw V2ReadReceiptStoreError.corruptPersistenceState }
-            let roomID = try receiptUUID(command.roomID), userID = try receiptUUID(command.actorUserID), operationID = try receiptUUID(command.operationID)
-            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "v2-read-receipt-operation:" + userID.uuidString.lowercased() + ":" + operationID.uuidString.lowercased()), 0))").run()
-            if let ownerRoute {
-                let actual = try await sql.raw("SELECT room_id, room_shard_id, owner_epoch FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReceiptSharedOwnerRow.self)
-                guard actual?.shardID == ownerRoute.shardID, actual?.epoch == ownerRoute.epoch else {
-                    throw V2ReadReceiptStoreError.ownerChanged
+        )
+        do {
+            result = try await database.transaction { transaction in
+                try await attempt.body {
+                    guard let sql = transaction as? any SQLDatabase else { throw V2ReadReceiptStoreError.corruptPersistenceState }
+                    let roomID = try receiptUUID(command.roomID), userID = try receiptUUID(command.actorUserID), operationID = try receiptUUID(command.operationID)
+                    if let activationScope {
+                        try await v2RequireRoomActivations(tokens: [try activationScope.token(for: roomID)],
+                            sql: sql, timeouts: timeouts)
+                    } else {
+                        try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
+                    }
+                    if let ownerRoute {
+                        let actual = try await sql.raw("SELECT room_id, room_shard_id, owner_epoch FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReceiptSharedOwnerRow.self)
+                        guard actual?.shardID == ownerRoute.shardID, actual?.epoch == ownerRoute.epoch else {
+                            throw V2ReadReceiptStoreError.ownerChanged
+                        }
+                    }
+                    try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "v2-read-receipt-operation:" + userID.uuidString.lowercased() + ":" + operationID.uuidString.lowercased()), 0))").run()
+                    let requested = try receiptSigned(command.readThroughRoomSequence)
+                    if let prior = try await sql.raw("""
+                        SELECT room_id, requested_room_sequence, resulting_room_sequence, recorded_at
+                        FROM im_v2.read_receipt_operations
+                        WHERE user_id = \(bind: userID) AND operation_id = \(bind: operationID)
+                        """).first(decoding: ReceiptOperationReplayRow.self) {
+                        guard prior.roomID == roomID, prior.requestedSequence == requested else {
+                            return (.idempotencyConflict, nil, nil)
+                        }
+                        guard v2PostgresTimestampCanEncode(prior.recordedAt) else {
+                            throw V2ReadReceiptStoreError.corruptPersistenceState
+                        }
+                        return (.idempotent(try V2ReadReceipt(roomID: command.roomID, userID: command.actorUserID,
+                            readThroughRoomSequence: receiptUnsigned(prior.resultingSequence),
+                            recordedAt: prior.recordedAt)), nil, nil)
+                    }
+                    // Match the operation write's timestamp precision even when the read cursor does not advance.
+                    guard let room = try await sql.raw("SELECT room_sequence, membership_revision, \(bind: now)::timestamptz AS recorded_at FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReceiptRoomRow.self) else { throw V2ReadReceiptStoreError.roomNotFound }
+                    guard room.roomSequence >= 0, Int64(command.readThroughRoomSequence) <= room.roomSequence else { throw V2ReadReceiptStoreError.roomSequenceNotFound }
+                    let member = try await sql.raw("SELECT 1 AS exists FROM im_v2.room_memberships WHERE room_id = \(bind: roomID) AND user_id = \(bind: userID) AND joined_revision <= \(bind: room.membershipRevision) AND (left_revision IS NULL OR left_revision > \(bind: room.membershipRevision))").first(decoding: ReceiptExistsRow.self)
+                    guard member != nil else { throw V2ReadReceiptStoreError.actorNotMember }
+                    let current = try await sql.raw("SELECT read_through_room_sequence FROM im_v2.room_read_receipts WHERE room_id = \(bind: roomID) AND user_id = \(bind: userID) FOR UPDATE").first(decoding: ReceiptStateRow.self)?.sequence ?? 0
+                    let resulting = max(current, requested)
+                    if current == 0 {
+                        try await sql.raw("INSERT INTO im_v2.room_read_receipts (room_id, user_id, read_through_room_sequence, updated_at) VALUES (\(bind: roomID), \(bind: userID), \(bind: resulting), \(bind: now))").run()
+                    } else if resulting > current {
+                        try await sql.raw("UPDATE im_v2.room_read_receipts SET read_through_room_sequence = \(bind: resulting), updated_at = \(bind: now) WHERE room_id = \(bind: roomID) AND user_id = \(bind: userID)").run()
+                    }
+                    let receipt = try V2ReadReceipt(roomID: command.roomID, userID: command.actorUserID, readThroughRoomSequence: receiptUnsigned(resulting), recordedAt: room.recordedAt)
+                    let recipient = resulting > current
+                        ? try await enqueueDirectReceiptCandidate(
+                            roomID: roomID, readerID: userID, command: command, receipt: receipt, sourceEventID: operationID, now: now, sql: sql
+                        )
+                        : nil
+                    // 读者自己的其他设备必须立刻知道已读到哪，才能在不拉取内容的
+                    // 情况下清零未读。这是用户级状态，与对端可见性和已读回执偏好
+                    // 无关，因此只要水位前进就写，不依赖上面是否产生对端投影。
+                    let advancedWatermark: (sequence: Int64, recordedAt: Date)? =
+                        resulting > current ? (resulting, room.recordedAt) : nil
+                    if let advanced = advancedWatermark {
+                        try await appendOwnReadWatermarkProjection(
+                            recipientID: userID,
+                            roomID: roomID,
+                            sequence: advanced.sequence,
+                            recordedAt: advanced.recordedAt,
+                            sourceEventID: operationID,
+                            now: now,
+                            sql: sql
+                        )
+                    }
+                    try await sql.raw("INSERT INTO im_v2.read_receipt_operations (user_id, operation_id, room_id, requested_room_sequence, resulting_room_sequence, recorded_at, projection_recipient_user_id) VALUES (\(bind: userID), \(bind: operationID), \(bind: roomID), \(bind: requested), \(bind: resulting), \(bind: now), \(bind: recipient.flatMap { UUID(uuidString: $0.rawValue) }))").run()
+                    return (.recorded(receipt), recipient, advancedWatermark)
                 }
             }
-            let requested = try receiptSigned(command.readThroughRoomSequence)
-            if let prior = try await sql.raw("""
-                SELECT room_id, requested_room_sequence, resulting_room_sequence, recorded_at
-                FROM im_v2.read_receipt_operations
-                WHERE user_id = \(bind: userID) AND operation_id = \(bind: operationID)
-                """).first(decoding: ReceiptOperationReplayRow.self) {
-                guard prior.roomID == roomID, prior.requestedSequence == requested else {
-                    return (.idempotencyConflict, nil, nil)
-                }
-                guard v2PostgresTimestampCanEncode(prior.recordedAt) else {
-                    throw V2ReadReceiptStoreError.corruptPersistenceState
-                }
-                return (.idempotent(try V2ReadReceipt(roomID: command.roomID, userID: command.actorUserID,
-                    readThroughRoomSequence: receiptUnsigned(prior.resultingSequence),
-                    recordedAt: prior.recordedAt)), nil, nil)
-            }
-            // Match the operation write's timestamp precision even when the read cursor does not advance.
-            guard let room = try await sql.raw("SELECT room_sequence, membership_revision, \(bind: now)::timestamptz AS recorded_at FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReceiptRoomRow.self) else { throw V2ReadReceiptStoreError.roomNotFound }
-            guard room.roomSequence >= 0, Int64(command.readThroughRoomSequence) <= room.roomSequence else { throw V2ReadReceiptStoreError.roomSequenceNotFound }
-            let member = try await sql.raw("SELECT 1 AS exists FROM im_v2.room_memberships WHERE room_id = \(bind: roomID) AND user_id = \(bind: userID) AND joined_revision <= \(bind: room.membershipRevision) AND (left_revision IS NULL OR left_revision > \(bind: room.membershipRevision))").first(decoding: ReceiptExistsRow.self)
-            guard member != nil else { throw V2ReadReceiptStoreError.actorNotMember }
-            let current = try await sql.raw("SELECT read_through_room_sequence FROM im_v2.room_read_receipts WHERE room_id = \(bind: roomID) AND user_id = \(bind: userID) FOR UPDATE").first(decoding: ReceiptStateRow.self)?.sequence ?? 0
-            let resulting = max(current, requested)
-            if current == 0 {
-                try await sql.raw("INSERT INTO im_v2.room_read_receipts (room_id, user_id, read_through_room_sequence, updated_at) VALUES (\(bind: roomID), \(bind: userID), \(bind: resulting), \(bind: now))").run()
-            } else if resulting > current {
-                try await sql.raw("UPDATE im_v2.room_read_receipts SET read_through_room_sequence = \(bind: resulting), updated_at = \(bind: now) WHERE room_id = \(bind: roomID) AND user_id = \(bind: userID)").run()
-            }
-            let receipt = try V2ReadReceipt(roomID: command.roomID, userID: command.actorUserID, readThroughRoomSequence: receiptUnsigned(resulting), recordedAt: room.recordedAt)
-            let recipient = resulting > current
-                ? try await enqueueDirectReceiptCandidate(
-                    roomID: roomID, readerID: userID, command: command, receipt: receipt, sourceEventID: operationID, now: now, sql: sql
-                )
-                : nil
-            // 读者自己的其他设备必须立刻知道已读到哪，才能在不拉取内容的
-            // 情况下清零未读。这是用户级状态，与对端可见性和已读回执偏好
-            // 无关，因此只要水位前进就写，不依赖上面是否产生对端投影。
-            let advancedWatermark: (sequence: Int64, recordedAt: Date)? =
-                resulting > current ? (resulting, room.recordedAt) : nil
-            if let advanced = advancedWatermark {
-                try await appendOwnReadWatermarkProjection(
-                    recipientID: userID,
-                    roomID: roomID,
-                    sequence: advanced.sequence,
-                    recordedAt: advanced.recordedAt,
-                    sourceEventID: operationID,
-                    now: now,
-                    sql: sql
-                )
-            }
-            try await sql.raw("INSERT INTO im_v2.read_receipt_operations (user_id, operation_id, room_id, requested_room_sequence, resulting_room_sequence, recorded_at, projection_recipient_user_id) VALUES (\(bind: userID), \(bind: operationID), \(bind: roomID), \(bind: requested), \(bind: resulting), \(bind: now), \(bind: recipient.flatMap { UUID(uuidString: $0.rawValue) }))").run()
-            return (.recorded(receipt), recipient, advancedWatermark)
-        }
+        } catch { throw attempt.classify(error) }
         return result.outcome
     }
 
@@ -140,7 +177,22 @@ public struct PostgresV2ReadReceiptStore:
     public func recordBatch(
         _ requests: [V2ReadReceiptRecordRequest]
     ) async throws -> [V2ReadReceiptRecordResult] {
-        let groupResults = try await recordGroups(requests)
+        try await recordBatch(requests, activationScope: nil, timeouts: .default)
+    }
+
+    public func recordBatchActivationValidated(
+        _ requests: [V2ReadReceiptRecordRequest], scope: V2RoomActivationWriteScope,
+        timeouts: V2RoomActivationSQLTimeouts = .default
+    ) async throws -> [V2ReadReceiptRecordResult] {
+        try await recordBatch(requests, activationScope: scope, timeouts: timeouts)
+    }
+
+    private func recordBatch(
+        _ requests: [V2ReadReceiptRecordRequest], activationScope: V2RoomActivationWriteScope?,
+        timeouts: V2RoomActivationSQLTimeouts
+    ) async throws -> [V2ReadReceiptRecordResult] {
+        let groupResults = try await recordGroups(requests, ownerRoutes: nil,
+            activationScope: activationScope, timeouts: timeouts)
         var results: [V2ReadReceiptRecordResult] = []
         results.reserveCapacity(requests.count)
         for (index, result) in groupResults.enumerated() {
@@ -149,10 +201,9 @@ public struct PostgresV2ReadReceiptStore:
                 results.append(.success(outcome))
             case .success(.notGroup):
                 do {
-                    results.append(.success(try await record(
-                        command: requests[index].command,
-                        now: requests[index].now
-                    )))
+                    results.append(.success(try await record(command: requests[index].command,
+                        ownerRoute: nil, activationScope: activationScope,
+                        timeouts: timeouts, now: requests[index].now)))
                 } catch let error as V2ReadReceiptStoreError {
                     results.append(.failure(error))
                 }
@@ -191,7 +242,11 @@ public struct PostgresV2ReadReceiptStore:
         try await recordGroups(requests, ownerRoutes: nil)
     }
 
-    private func recordGroups(_ requests: [V2ReadReceiptRecordRequest], ownerRoutes: [V2RoomShardRoute]?) async throws -> [V2GroupReadReceiptBatchResult] {
+    private func recordGroups(
+        _ requests: [V2ReadReceiptRecordRequest], ownerRoutes: [V2RoomShardRoute]?,
+        activationScope: V2RoomActivationWriteScope? = nil,
+        timeouts: V2RoomActivationSQLTimeouts = .default
+    ) async throws -> [V2GroupReadReceiptBatchResult] {
         guard !requests.isEmpty, requests.count <= 128 else {
             throw V2ReadReceiptStoreError.invalidRequest
         }
@@ -210,7 +265,8 @@ public struct PostgresV2ReadReceiptStore:
             var results = [V2GroupReadReceiptBatchResult](repeating: .failure(.corruptPersistenceState), count: requests.count)
             if !validIndices.isEmpty {
                 let validResults = try await recordGroups(validIndices.map { requests[$0] },
-                    ownerRoutes: ownerRoutes.map { routes in validIndices.map { routes[$0] } })
+                    ownerRoutes: ownerRoutes.map { routes in validIndices.map { routes[$0] } },
+                    activationScope: activationScope, timeouts: timeouts)
                 for (index, result) in zip(validIndices, validResults) { results[index] = result }
             }
             return results
@@ -228,48 +284,77 @@ public struct PostgresV2ReadReceiptStore:
             // primary-key rows and preserves scalar replay semantics.
             throw V2ReadReceiptStoreError.invalidRequest
         }
-        let rows = try await database.transaction { transaction in
-            guard let postgres = transaction as? any PostgresDatabase else {
-                throw V2ReadReceiptStoreError.corruptPersistenceState
-            }
-            return try await postgres.withConnection { connection in
-                connection.eventLoop.makeFutureWithTask {
-                    let lockRows = try await connection.execute(
-                        GroupReceiptBatchLockStatement(inputs: inputs),
-                        logger: connection.logger
-                    )
-                    var acquiredLockCount: Int64?
-                    for try await row in lockRows { acquiredLockCount = row }
-                    guard let acquiredLockCount, acquiredLockCount > 0 else {
+        let attempt = V2RoomTransactionAttempt()
+        let rows: [GroupReceiptBatchRow]
+        do {
+            rows = try await database.transaction { transaction in
+                try await attempt.body {
+                    var activationValidity: [UUID: Bool]?
+                    if let activationScope {
+                        guard let sql = transaction as? any SQLDatabase else {
+                            throw V2ReadReceiptStoreError.corruptPersistenceState
+                        }
+                        let tokens = try Set(inputs.map(\.roomID)).map { try activationScope.token(for: $0) }
+                        // Preserve per-item ownerChanged without weakening successful
+                        // rows: the exact tokens are checked after all canonical locks
+                        // and before any advisory lock or replay read.
+                        activationValidity = try await receiptActivationValidities(tokens: tokens,
+                            sql: sql, timeouts: timeouts)
+                    } else {
+                        guard let sql = transaction as? any SQLDatabase else {
+                            throw V2ReadReceiptStoreError.corruptPersistenceState
+                        }
+                        try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
+                    }
+                    guard let postgres = transaction as? any PostgresDatabase else {
                         throw V2ReadReceiptStoreError.corruptPersistenceState
                     }
-                    var validatedInputs = inputs
-                    // Shared room locks fence migration for direct callers too.
-                    let roomRows = try await connection.execute(GroupReceiptBatchRoomLockStatement(roomIDs: inputs.map(\.roomID)), logger: connection.logger)
-                    var owners: [UUID: ReceiptSharedOwnerRow] = [:]
-                    for try await room in roomRows { owners[room.roomID] = room }
-                    for index in validatedInputs.indices {
-                        let actual = owners[validatedInputs[index].roomID]
-                        if let ownerRoutes {
-                            let route = ownerRoutes[index]
-                            validatedInputs[index].ownerIsValid = actual?.shardID == route.shardID && actual?.epoch == route.epoch
-                        } else {
-                            // Missing rooms retain the established per-item domain result.
-                            validatedInputs[index].ownerIsValid = true
+                    let validatedActivation = activationValidity
+                    return try await postgres.withConnection { connection in
+                        connection.eventLoop.makeFutureWithTask {
+                            var owners: [UUID: ReceiptSharedOwnerRow] = [:]
+                            if validatedActivation == nil {
+                                // Legacy owner-route callers also lock rooms first, in
+                                // canonical order, before touching operation locks.
+                                let roomRows = try await connection.execute(GroupReceiptBatchRoomLockStatement(roomIDs: inputs.map(\.roomID)), logger: connection.logger)
+                                for try await room in roomRows { owners[room.roomID] = room }
+                            }
+                            let lockRows = try await connection.execute(
+                                GroupReceiptBatchLockStatement(inputs: inputs),
+                                logger: connection.logger
+                            )
+                            var acquiredLockCount: Int64?
+                            for try await row in lockRows { acquiredLockCount = row }
+                            guard let acquiredLockCount, acquiredLockCount > 0 else {
+                                throw V2ReadReceiptStoreError.corruptPersistenceState
+                            }
+                            var validatedInputs = inputs
+                            for index in validatedInputs.indices {
+                                let actual = owners[validatedInputs[index].roomID]
+                                if let validatedActivation {
+                                    validatedInputs[index].ownerIsValid = validatedActivation[validatedInputs[index].roomID] == true
+                                } else if let ownerRoutes {
+                                    let route = ownerRoutes[index]
+                                    validatedInputs[index].ownerIsValid = actual?.shardID == route.shardID && actual?.epoch == route.epoch
+                                } else {
+                                    // Missing rooms retain the established per-item domain result.
+                                    validatedInputs[index].ownerIsValid = true
+                                }
+                            }
+                            let statement = try GroupReceiptBatchStatement(inputs: validatedInputs)
+                            var decoded: [GroupReceiptBatchRow] = []
+                            decoded.reserveCapacity(inputs.count)
+                            let stream = try await connection.execute(
+                                statement,
+                                logger: connection.logger
+                            )
+                            for try await row in stream { decoded.append(row) }
+                            return decoded
                         }
-                    }
-                    let statement = try GroupReceiptBatchStatement(inputs: validatedInputs)
-                    var decoded: [GroupReceiptBatchRow] = []
-                    decoded.reserveCapacity(inputs.count)
-                    let stream = try await connection.execute(
-                        statement,
-                        logger: connection.logger
-                    )
-                    for try await row in stream { decoded.append(row) }
-                    return decoded
+                    }.get()
                 }
-            }.get()
-        }
+            }
+        } catch { throw attempt.classify(error) }
         guard rows.count == inputs.count,
               rows.enumerated().allSatisfy({ $0.offset == $0.element.ordinal })
         else { throw V2ReadReceiptStoreError.corruptPersistenceState }
@@ -882,6 +967,55 @@ public struct PostgresV2ReadReceiptStore:
 
 }
 
+/// Per-row activation validity for receipt microbatches. Unlike the scalar
+/// fence, an authority mismatch must not roll back another valid row. SQL and
+/// lock failures still throw for the whole transaction. No replay read or
+/// materialization occurs until every canonical room/lease lock is acquired
+/// and the database clock has been sampled once.
+private func receiptActivationValidities(
+    tokens: [V2RoomActivationToken], sql: any SQLDatabase,
+    timeouts: V2RoomActivationSQLTimeouts
+) async throws -> [UUID: Bool] {
+    try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
+    let ordered = try tokens.map { token -> (UUID, V2RoomActivationToken) in
+        guard let room = token.roomID.uuidValue else { throw V2ReadReceiptStoreError.invalidRequest }
+        return (room, token)
+    }.sorted { $0.0.uuidString < $1.0.uuidString }
+    guard !ordered.isEmpty, Set(ordered.map { $0.0 }).count == ordered.count else {
+        throw V2ReadReceiptStoreError.invalidRequest
+    }
+    var ownerMatched: [(UUID, V2RoomActivationToken)] = []
+    for (room, token) in ordered {
+        do {
+            try await v2LockRoomActivationOwner(roomID: room, owner: token.owner, sql: sql, schema: "im_v2")
+            ownerMatched.append((room, token))
+        } catch let error as V2RoomActivationLeaseError {
+            switch error {
+            case .roomNotFound, .ownerChanged: break
+            default: throw error
+            }
+        }
+    }
+    var leaseRows: [UUID: V2RoomActivationPersistenceRow] = [:]
+    for (room, _) in ownerMatched {
+        if let row = try await sql.raw("""
+            SELECT activation_epoch, owner_shard_id, owner_epoch, host_id, host_incarnation_id, expires_at
+            FROM im_v2.room_activation_leases WHERE room_id = \(bind: room) FOR UPDATE
+            """).first(decoding: V2RoomActivationPersistenceRow.self) {
+            leaseRows[room] = row
+        }
+    }
+    let observed = try await v2RoomActivationDatabaseClock(sql: sql)
+    var validities = Dictionary(uniqueKeysWithValues: ordered.map { ($0.0, false) })
+    for (room, token) in ownerMatched {
+        if let row = leaseRows[room], row.matches(token),
+           let expiresAt = row.expiresAt, expiresAt > observed {
+            validities[room] = true
+        }
+    }
+    return validities
+}
+
 private struct GroupReceiptOperationKey: Hashable {
     let userID: UUID
     let operationID: UUID
@@ -1012,7 +1146,7 @@ private struct GroupReceiptBatchRoomLockStatement: PostgresPreparedStatement {
 }
 
 private struct GroupReceiptBatchStatement: PostgresPreparedStatement {
-    static let name = "im_v2_group_read_receipt_batch_record_v5"
+    static let name = "im_v2_group_read_receipt_batch_record_v6"
     static let sql = """
         WITH input AS MATERIALIZED (
             SELECT source.ordinal, source.room_id, source.user_id,
@@ -1036,6 +1170,7 @@ private struct GroupReceiptBatchStatement: PostgresPreparedStatement {
              AND operation.operation_id = input.operation_id
             JOIN im_v2.rooms AS prior_room
               ON prior_room.room_id = operation.room_id
+            WHERE input.owner_is_valid
         ), room_context AS MATERIALIZED (
             SELECT input.ordinal, room.room_kind, room.room_sequence,
                    CASE WHEN room.room_id IS NULL THEN NULL
