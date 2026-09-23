@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -29,16 +30,27 @@ PRODUCTS = ["IMV2AccountServerApp", "IMV2ServerApp", "IMV2OperatorServerApp", "I
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scratch-dir", required=True, type=Path,
-                        help="Exclusive Linux SwiftPM scratch outside the checkout")
+    parser.add_argument("--scratch-dir", type=Path,
+                        help="Exclusive Linux SwiftPM scratch outside the checkout (required for building)")
     parser.add_argument("--run-root", type=Path,
                         default=Path.home() / ".codex/virtual-actor-builds/application")
     parser.add_argument("--context", default=os.environ.get("DOCKER_CONTEXT", "default"))
+    parser.add_argument("--remote-gateway", action="store_true",
+                        help="Run Gateway as a caller of a separate Room Actor Host process")
+    parser.add_argument("--products-dir", type=Path,
+                        help="Read-only directory containing prebuilt Linux Release products")
+    parser.add_argument("--products-metadata", type=Path,
+                        help="JSON with revision, packageResolvedSHA256 and per-product SHA-256")
     args = parser.parse_args()
-    scratch = args.scratch_dir.expanduser().resolve()
-    if scratch.is_relative_to(ROOT):
-        parser.error("scratch must be outside the checkout")
-    scratch.mkdir(parents=True, exist_ok=True)
+    if (args.products_dir is None) != (args.products_metadata is None):
+        parser.error("--products-dir and --products-metadata must be provided together")
+    if args.products_dir is None and args.scratch_dir is None:
+        parser.error("--scratch-dir is required unless verified prebuilt products are provided")
+    scratch = args.scratch_dir.expanduser().resolve() if args.scratch_dir is not None else None
+    if scratch is not None:
+        if scratch.is_relative_to(ROOT):
+            parser.error("scratch must be outside the checkout")
+        scratch.mkdir(parents=True, exist_ok=True)
     run = args.run_root.expanduser().resolve() / ("run-" + uuid.uuid4().hex)
     run.mkdir(parents=True, mode=0o700)
     os.chmod(run, 0o700)
@@ -57,7 +69,8 @@ def main() -> int:
     environment["DOCKER_CONTEXT"] = args.context
     started = False
     result = {"revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-              "project": project, "swiftImage": IMAGE, "startedAt": time.time(), "passed": False}
+              "project": project, "swiftImage": IMAGE, "startedAt": time.time(), "passed": False,
+              "mode": "remote-gateway" if args.remote_gateway else "local-gateway-host"}
 
     def execute(command: list[str], log: str, *, timeout: int = 180,
                 input_text: str | None = None) -> None:
@@ -66,22 +79,43 @@ def main() -> int:
                            stdout=output, stderr=subprocess.STDOUT, timeout=timeout, check=True)
 
     try:
-        # Rebuild from this exact read-only checkout. Never trust a stale binary
-        # merely because it exists in a shared compiler cache.
-        execute(docker + ["run", "--name", builder, "--init", "--cpus", "2", "--memory", "6g",
-                          "--mount", f"type=bind,source={ROOT},target=/workspace,readonly",
-                          "--mount", f"type=bind,source={scratch},target=/build", IMAGE,
-                          "bash", "-c", 'set -eu; for product in "$@"; do timeout --signal=TERM --kill-after=20s 7200s swift build --disable-automatic-resolution --jobs 2 -c release --package-path /workspace/IMV2Server --scratch-path /build --product "$product"; done',
-                          "actor-app-build", *PRODUCTS], "build.log", timeout=28_900)
+        resolved_sha = hashlib.sha256((ROOT / "IMV2Server/Package.resolved").read_bytes()).hexdigest()
+        if args.products_dir is None:
+            assert scratch is not None
+            # Rebuild from this exact read-only checkout. Never trust a stale
+            # binary merely because it exists in a shared compiler cache.
+            execute(docker + ["run", "--name", builder, "--init", "--cpus", "2", "--memory", "6g",
+                              "--mount", f"type=bind,source={ROOT},target=/workspace,readonly",
+                              "--mount", f"type=bind,source={scratch},target=/build", IMAGE,
+                              "bash", "-c", 'set -eu; for product in "$@"; do timeout --signal=TERM --kill-after=20s 7200s swift build --disable-automatic-resolution --jobs 2 -c release --package-path /workspace/IMV2Server --scratch-path /build --product "$product"; done',
+                              "actor-app-build", *PRODUCTS], "build.log", timeout=28_900)
+            source_dir = scratch / "release"
+            expected_hashes = None
+            result["productSource"] = "built-in-this-run"
+        else:
+            metadata = json.loads(args.products_metadata.expanduser().resolve().read_text())
+            if metadata.get("revision") != result["revision"] or metadata.get("packageResolvedSHA256") != resolved_sha:
+                raise RuntimeError("prebuilt products do not match checkout revision and lockfile")
+            expected_hashes = metadata.get("products")
+            if not isinstance(expected_hashes, dict) or any(
+                    not isinstance(expected_hashes.get(name), str) for name in PRODUCTS):
+                raise RuntimeError("prebuilt product metadata is incomplete")
+            source_dir = args.products_dir.expanduser().resolve()
+            result["productSource"] = "verified-prebuilt"
         runtime = private / "runtime"
         runtime.mkdir()
         result["products"] = {}
         for product in PRODUCTS:
-            source = scratch / "release" / product
+            source = source_dir / product
+            if not source.is_file():
+                raise RuntimeError("prebuilt product is missing")
             target = runtime / product
             shutil.copy2(source, target)
-            result["products"][product] = hashlib.sha256(target.read_bytes()).hexdigest()
-        result["packageResolvedSHA256"] = hashlib.sha256((ROOT / "IMV2Server/Package.resolved").read_bytes()).hexdigest()
+            digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            if expected_hashes is not None and digest != expected_hashes[product]:
+                raise RuntimeError("prebuilt product digest mismatch")
+            result["products"][product] = digest
+        result["packageResolvedSHA256"] = resolved_sha
 
         names = ["ACCESS_TOKEN_HMAC_KEY", "CREDENTIAL_REPLAY_ENVELOPE_KEY", "PUSH_ENDPOINT_ENVELOPE_KEY",
                  "ACCOUNT_EDGE_AUTHORIZATION_SECRET", "ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY",
@@ -93,10 +127,15 @@ def main() -> int:
         os.chmod(env_file, 0o600)
         shutil.copytree(ROOT / "IMV2/sql", private / "sql")
         shutil.copytree(ROOT / "IMV2/local", private / "local")
-        execute([sys.executable, str(ROOT / "IMV2/scripts/prepare_v2_room_actor_configuration.py"),
-                 "--output-dir", str(private / "local-room-actors"), "--host", "gateway=gateway:7337",
-                 "--caller", "account=account:7338", "--shards", "rooms-primary",
-                 "--mount-root", "/run/im-v2-room-actor"], "configuration.log")
+        actor_configuration = [sys.executable, str(ROOT / "IMV2/scripts/prepare_v2_room_actor_configuration.py"),
+            "--output-dir", str(private / "local-room-actors"),
+            "--host", "actor-host=actor-host:7337" if args.remote_gateway else "gateway=gateway:7337",
+            "--caller", "account=account:7338", "--shards", "rooms-primary",
+            "--mount-root", "/run/im-v2-room-actor"]
+        if args.remote_gateway:
+            actor_configuration.extend(["--caller", "gateway=gateway:7337",
+                                        "--worker-caller", "gateway"])
+        execute(actor_configuration, "configuration.log")
         # Normalize YAML using Compose itself; the resulting document contains
         # disposable secrets and stays in the private directory until cleanup.
         with compose_file.open("w") as output:
@@ -116,6 +155,15 @@ def main() -> int:
             for port in service.get("ports", []):
                 port["published"] = "0"
                 port["host_ip"] = "127.0.0.1"
+        if args.remote_gateway:
+            actor_host = copy.deepcopy(document["services"]["gateway"])
+            actor_host["ports"] = []
+            actor_host["environment"]["IM_V2_GATEWAY_NODE_ID"] = "local-actor-host-1"
+            actor_host["volumes"] = [
+                {**volume, "source": str(private / "local-room-actors" / "actor-host")}
+                if volume.get("target") == "/run/im-v2-room-actor" else volume
+                for volume in actor_host["volumes"]]
+            document["services"]["actor-host"] = actor_host
         # Compose's normalized volume names otherwise retain the first config's
         # project name. Bind every named resource to this unique test project.
         for key, volume in document.get("volumes", {}).items():
@@ -149,7 +197,34 @@ def main() -> int:
             if time.monotonic() >= expires:
                 raise RuntimeError("Caddy did not initialize its private CA")
             time.sleep(1)
+        if args.remote_gateway:
+            execute(compose + ["up", "-d", "--wait", "--wait-timeout", "120", "actor-host"], "startup.log")
         execute(compose + ["up", "-d", "--wait", "--wait-timeout", "120", "gateway"], "startup.log")
+        if args.remote_gateway:
+            topology = json.loads((private / "local-room-actors" / "topology.json").read_text())
+            expected_host = topology["hostIDs"]["actor-host"]
+            gateway_actor_config = json.loads((private / "local-room-actors" / "gateway" /
+                "configuration.json").read_text())
+            actor_host_config = json.loads((private / "local-room-actors" / "actor-host" /
+                "configuration.json").read_text())
+            if gateway_actor_config.get("hostID") is not None or actor_host_config.get("hostID") != expected_host:
+                raise RuntimeError("Gateway caller and Actor Host identities are not separated")
+            containers = {}
+            for service in ("actor-host", "gateway"):
+                container_id = subprocess.check_output(compose + ["ps", "-q", service],
+                    env=environment, text=True, timeout=15).strip()
+                if not container_id:
+                    raise RuntimeError("remote Actor topology has a missing process")
+                inspected = json.loads(subprocess.check_output(docker + ["inspect", container_id],
+                    env=environment, text=True, timeout=15))[0]
+                if not inspected["State"]["Running"]:
+                    raise RuntimeError("remote Actor topology has a stopped process")
+                containers[service] = {"containerID": inspected["Id"],
+                                       "startedAt": inspected["State"]["StartedAt"]}
+            if containers["actor-host"]["containerID"] == containers["gateway"]["containerID"]:
+                raise RuntimeError("remote Actor and Gateway share a container")
+            result["remoteTopology"] = {"hostID": expected_host, "gatewayHostID": None,
+                                        "containers": containers}
         def port(service: str, internal: int) -> str:
             address = subprocess.check_output(compose + ["port", service, str(internal)], env=environment,
                                                text=True, timeout=15).strip()
@@ -162,6 +237,29 @@ def main() -> int:
                             "V2_LOCAL_GATEWAY_TLS_ADDRESS": "localhost:" + port("gateway", 7443),
                             "V2_LOCAL_REGISTRATION_RECOVERY_DIRECTORY": str(private / "registration-recovery")})
         execute(["bash", str(ROOT / "IMV2/scripts/verify_v2_local_account_stack.sh")], "smoke.log", timeout=300)
+        if args.remote_gateway:
+            if "local V2 gateway direct chat: auth, open, accept, recipient room-log delivery verified" not in (
+                    run / "smoke.log").read_text():
+                raise RuntimeError("Gateway send/read black-box phase did not complete")
+            # The black-box smoke has sent a direct message and read it through
+            # Gateway TCP. Every persisted message room must still have a live
+            # lease held by the separate Actor Host, never this caller.
+            query = ("SELECT m.room_id::text, COALESCE(l.host_id, ''), "
+                     "COALESCE(l.activation_epoch::text, ''), "
+                     "COALESCE((l.expires_at > clock_timestamp())::text, 'false') "
+                     "FROM (SELECT DISTINCT room_id FROM im_v2.messages) AS m "
+                     "LEFT JOIN im_v2.room_activation_leases AS l ON l.room_id = m.room_id "
+                     "ORDER BY m.room_id")
+            rows = subprocess.check_output(compose + ["exec", "-T", "postgres", "psql",
+                "-v", "ON_ERROR_STOP=1", "-U", "im_v2", "-d", "im_v2", "-tA", "-F", "|", "-c", query],
+                env=environment, text=True, timeout=15).strip().splitlines()
+            leases = [row.split("|") for row in rows if row]
+            if not leases or any(len(row) != 4 or row[1] != expected_host or row[3] != "true"
+                                 for row in leases):
+                raise RuntimeError("message room lease was not held by the remote Actor Host")
+            result["remoteTopology"]["messageRoomLeases"] = [
+                {"roomID": room, "hostID": host, "activationEpoch": int(epoch)}
+                for room, host, epoch, _ in leases]
         execute([sys.executable, str(ROOT / "IMV2/scripts/verify_v2_virtual_actor_http_paths.py"),
                  "--account-url", environment["V2_LOCAL_HTTP_BASE_URL"],
                  "--ca", str(ca), "--compose-file", str(compose_file), "--env-file", str(env_file),
@@ -170,7 +268,7 @@ def main() -> int:
                  "--gateway-probe-path", "/workspace/IMV2Server/.build/release/IMV2LocalGatewayProbe"],
                 "actor-http-smoke.log", timeout=300)
         result["passed"] = True
-    except (subprocess.SubprocessError, OSError, RuntimeError) as error:
+    except (subprocess.SubprocessError, OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
         # Exception messages can include command arguments. Record only class
         # and failing phase logs; never print the normalized Compose document.
         result["failureType"] = type(error).__name__
