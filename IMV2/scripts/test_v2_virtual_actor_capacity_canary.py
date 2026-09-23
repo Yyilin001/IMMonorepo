@@ -15,13 +15,19 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import queue
 import re
 import secrets
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
+
+from virtual_actor_capacity_measurement import (
+    MeasurementFailure, capture_runtime, capture_snapshot, create_scenario, phase_delta, verify_freeze,
+)
 
 
 RUNNER_ROOT = Path(__file__).resolve().parents[2]
@@ -176,6 +182,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--docker-context", required=True)
     parser.add_argument("--artifact-dir", required=True, type=Path)
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--measurement-workload", choices=("hot", "same-owner", "mixed", "cold", "fault"),
+                        help="opt-in 120/300/60 capacity run; cold/fault deliberately reject until implemented")
+    parser.add_argument("--measurement-connections", type=int)
+    parser.add_argument("--measurement-rate-scale", type=float, default=1.0)
+    parser.add_argument("--measurement-freeze-file", type=Path,
+                        help="required for candidate runs; created from three stable frozen-main calibrations")
     args = parser.parse_args()
     for name in ("source_checkout", "release_dir", "fixture_dir"):
         path = getattr(args, name).expanduser().resolve()
@@ -204,6 +216,24 @@ def parse_args() -> argparse.Namespace:
         parser.error("release-dir must be an independently built directory outside source checkout")
     if not args.docker_context or args.docker_context == "default":
         parser.error("an explicit non-default Docker context is required")
+    if args.measurement_workload:
+        if args.legacy_loader_net_admin:
+            parser.error("measurement never grants legacy NET_ADMIN")
+        if args.loader_build_result == args.build_result:
+            parser.error("measurement requires the separately verified common corrected loader")
+        if args.measurement_connections is None:
+            parser.error("measurement-connections is required")
+        if args.measurement_workload != args.layout:
+            parser.error("measurement workload must match fixture layout")
+        if args.source_sha != "f1cdd78d6a21bf0ae23da627c0710c65115236aa" and args.measurement_freeze_file is None:
+            parser.error("candidate measurement requires a main calibration freeze file")
+    elif args.measurement_connections is not None or args.measurement_rate_scale != 1.0:
+        parser.error("measurement controls require measurement-workload")
+    if args.measurement_freeze_file is not None:
+        if not args.measurement_workload:
+            parser.error("freeze file only applies to measurement")
+        args.measurement_freeze_file = args.measurement_freeze_file.expanduser().resolve()
+        require_regular(args.measurement_freeze_file, "measurement freeze file")
     return args
 
 
@@ -232,6 +262,149 @@ def make_tls(private: Path, execute: object) -> Path:
     return tls
 
 
+def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], docker: list[str],
+                    environment: dict[str, str], services: dict[str, str],
+                    execute: object, psql: object, scenario_detail: dict) -> dict:
+    """Run one detached native loader and observe exact phase markers.
+
+    All snapshots remain within this private project. A missed marker, scrape,
+    counter reset, timeout or failed loader makes the whole run fail closed.
+    """
+    gateway_id = execute(compose + ["ps", "-q", "gateway"], "measurement.log", 10).strip()
+    if not gateway_id:
+        raise MeasurementFailure("Gateway container ID unavailable")
+    metrics_url = "http://127.0.0.1:9464/metrics"
+    initial_metrics = capture_runtime(docker, {"gateway": gateway_id}, metrics_url, execute)["metrics"]
+    if args.source_sha != "f1cdd78d6a21bf0ae23da627c0710c65115236aa":
+        required = {"active_rooms", "pending_rooms", "restoring_rooms", "retiring_rooms",
+                    "activation_waiters", "outstanding_commands", "outstanding_bytes",
+                    "peak_outstanding_commands", "peak_outstanding_bytes", "reservations",
+                    "command_rooms", "cached_locations", "pending_resolutions",
+                    "active_resolutions", "resolution_waiters"}
+        if not all("im_v2_room_actor_" + name in initial_metrics for name in required):
+            raise MeasurementFailure("candidate room actor metrics are missing")
+    loader_id = execute(compose + ["run", "-d", "--no-deps", "loader"],
+                        "measurement-loader-start.log", 60).strip()
+    if not re.fullmatch(r"[a-f0-9]{64}", loader_id):
+        raise MeasurementFailure("detached loader ID unavailable")
+    containers = {**{name: execute(compose + ["ps", "-q", name], "measurement.log", 10).strip()
+                     for name in services}, "gateway": gateway_id, "loader": loader_id}
+    if any(not re.fullmatch(r"[a-f0-9]{64}", container) for container in containers.values()):
+        raise MeasurementFailure("measurement container identity missing")
+    observations: list[dict] = []
+    boundaries: dict[str, dict] = {}
+    current: str | None = None
+    expected = ["warmup", "steady", "cooldown"]
+    cooldown_deadline: float | None = None
+    events: queue.Queue[str | None] = queue.Queue(maxsize=1024)
+    stderr_stream = (run / "loader.log").open("a", encoding="utf-8")
+    follow = subprocess.Popen(docker + ["logs", "-f", loader_id], env=environment,
+                              stdout=subprocess.PIPE, stderr=stderr_stream,
+                              text=True, bufsize=1)
+
+    def read_logs() -> None:
+        assert follow.stdout is not None
+        try:
+            for line in follow.stdout:
+                with (run / "loader.log").open("a", encoding="utf-8") as log:
+                    log.write(line)
+                try:
+                    events.put(line, timeout=1)
+                except queue.Full:
+                    events.put(None)
+                    return
+        finally:
+            events.put(None)
+
+    reader = threading.Thread(target=read_logs, daemon=True)
+    reader.start()
+    deadline = time.monotonic() + 30 * 60
+    next_sample = time.monotonic()
+    try:
+        while True:
+            if time.monotonic() >= deadline:
+                raise MeasurementFailure("measurement loader exceeded finite deadline")
+            if cooldown_deadline is not None and "end" not in boundaries and time.monotonic() >= cooldown_deadline:
+                boundaries["end"] = capture_snapshot(psql, docker, compose, services, containers,
+                                                      metrics_url, execute)
+            try:
+                line = events.get(timeout=0.5)
+            except queue.Empty:
+                line = ""
+            if line is None:
+                break
+            marker = re.search(r"^scenario phase=(warmup|steady|cooldown) seconds=(\d+)", line)
+            if marker:
+                name = marker.group(1)
+                if not expected or expected.pop(0) != name:
+                    raise MeasurementFailure("measurement phase markers missing or out of order")
+                marker_ns = time.monotonic_ns()
+                snapshot = capture_snapshot(psql, docker, compose, services, containers,
+                                            metrics_url, execute)
+                snapshot["markerMonotonicNs"] = marker_ns
+                boundaries[name] = snapshot
+                current = name
+                if name == "cooldown":
+                    cooldown_deadline = marker_ns / 1e9 + 60
+                next_sample = time.monotonic() + 5
+            elif current and time.monotonic() >= next_sample:
+                observations.append({"phase": current, **capture_runtime(
+                    docker, containers, metrics_url, execute)})
+                next_sample = time.monotonic() + 5
+        if expected:
+            raise MeasurementFailure("measurement ended before all three phases")
+        if "end" not in boundaries:
+            raise MeasurementFailure("cooldown counter boundary was not observed")
+        exit_code = int(execute(docker + ["wait", loader_id], "measurement.log", 30).strip())
+        if exit_code != 0 or follow.wait(timeout=10) != 0:
+            raise MeasurementFailure("native measurement loader failed")
+        report_path = run / "load-report.json"
+        require_regular(report_path, "measurement load report")
+        report = json.loads(report_path.read_text())
+        phases = report.get("scenarioPhases")
+        if not isinstance(phases, list) or [phase.get("name") for phase in phases] != ["warmup", "steady", "cooldown"]:
+            raise MeasurementFailure("loader did not report three measurement phases")
+        if any(not phase.get("completed") or phase.get("workloadFailed") for phase in phases):
+            raise MeasurementFailure("native loader reports incomplete or failed phase")
+        if report.get("directRoomAttempted") != 0 or report.get("failed") != 0:
+            raise MeasurementFailure("measurement opened a new room or failed a connection")
+        if ((report.get("scenarioDrain") or {}).get("drained") is not True or
+                report.get("messagesSent") != report.get("messagesAcknowledged")):
+            raise MeasurementFailure("measurement left native message outcomes unresolved")
+        phase_results = {}
+        order = (("warmup", "steady"), ("steady", "cooldown"), ("cooldown", "end"))
+        for phase, next_phase in order:
+            samples = [item for item in observations if item["phase"] == phase]
+            delta = phase_delta(boundaries[phase], boundaries[next_phase], samples)
+            delta["nativeLoader"] = next(item for item in phases if item["name"] == phase)
+            delta["observedWindowSeconds"] = (boundaries[next_phase]["monotonicNs"] -
+                                               boundaries[phase]["monotonicNs"]) / 1e9
+            expected_seconds = {"warmup": 120, "steady": 300, "cooldown": 60}[phase]
+            if abs(delta["observedWindowSeconds"] - expected_seconds) > 10:
+                raise MeasurementFailure("counter window missed the native phase boundary")
+            delta["boundaryCaptureSeconds"] = [boundaries[phase]["captureDurationSeconds"],
+                                               boundaries[next_phase]["captureDurationSeconds"]]
+            phase_results[phase] = delta
+            write_private(run / f"measurement-{phase}.json", json.dumps(delta, indent=2, sort_keys=True) + "\n")
+        write_private(run / "measurement-snapshots.json", json.dumps({
+            "boundaries": boundaries, "periodic": observations, "scenario": scenario_detail},
+            indent=2, sort_keys=True) + "\n")
+        return {"scenario": scenario_detail, "loadReportSHA256": sha256(report_path),
+                "phaseFiles": {name: sha256(run / f"measurement-{name}.json") for name in phase_results},
+                "snapshotSHA256": sha256(run / "measurement-snapshots.json"),
+                "nativeConnectionsAuthenticated": report.get("authenticated"),
+                "nativeMessagesAcknowledged": report.get("messagesAcknowledged"),
+                "nativeFailed": report.get("failed"), "nativeDirectRoomAttempted": report.get("directRoomAttempted")}
+    finally:
+        if follow.poll() is None:
+            follow.terminate()
+        stderr_stream.close()
+        try:
+            execute(docker + ["rm", "-f", loader_id], "measurement-cleanup.log", 30)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
 def main() -> int:
     args = parse_args()
     phase = "preflight"
@@ -250,8 +423,28 @@ def main() -> int:
     manifest, rooms, users, fixture_info = verify_fixture(args.fixture_dir, args.layout)
     scenario = RUNNER_ROOT / "IMV2/scripts/virtual-actor-fixtures/send-one-canary.json"
     require_regular(scenario, "single-send scenario")
+    scenario_document = None
+    scenario_detail = None
+    if args.measurement_workload:
+        protocol_file = RUNNER_ROOT / "IMV2/scripts/virtual-actor-fixtures/capacity-main-v1.json"
+        require_regular(protocol_file, "frozen capacity protocol")
+        protocol = json.loads(protocol_file.read_text())
+        if protocol.get("mainRevision") != "f1cdd78d6a21bf0ae23da627c0710c65115236aa":
+            raise MeasurementFailure("frozen main revision changed")
+        scenario_document, scenario_detail = create_scenario(
+            args.source_checkout, protocol, manifest, args.measurement_workload,
+            args.measurement_connections, args.measurement_rate_scale)
+        scenario_detail["protocolSHA256"] = sha256(protocol_file)
+        scenario_bytes = (json.dumps(scenario_document, indent=2, sort_keys=True) + "\n").encode()
+        scenario_hash = hashlib.sha256(scenario_bytes).hexdigest()
+        if args.measurement_freeze_file:
+            verify_freeze(args.measurement_freeze_file, workload=args.measurement_workload,
+                          layout=args.layout, fixture_hash=fixture_info["manifestSHA256"],
+                          scenario_hash=scenario_hash,
+                          loader_hash=products["IMV2GatewayLoadGenerator"])
     if args.preflight_only:
-        print("VA_CAPACITY_CANARY_PREFLIGHT_OK source=" + args.source_sha + " layout=" + args.layout)
+        print("VA_CAPACITY_" + ("MEASUREMENT" if scenario_document else "CANARY") +
+              "_PREFLIGHT_OK source=" + args.source_sha + " layout=" + args.layout)
         return 0
     old_umask = os.umask(0o077)
     args.artifact_dir.mkdir(mode=0o700, parents=False)
@@ -274,12 +467,17 @@ def main() -> int:
         "loaderLockfileSHA256": loader_build_result["lockfileSHA256"],
         "fixtureManifestSHA256": fixture_info["manifestSHA256"],
         "fixtureID": fixture_info["fixtureID"],
+        "dockerContext": args.docker_context,
         "credentialMappingSHA256": manifest["layouts"][args.layout]["credentialMappingSHA256"],
         "ownerRoomCounts": manifest["layouts"][args.layout]["ownerRoomCounts"],
         "ownerMembershipCounts": manifest["layouts"][args.layout]["ownerMembershipCounts"],
         "roomCount": manifest["layouts"][args.layout]["rooms"],
-        "scenarioSHA256": sha256(scenario), "swiftImage": IMAGE, "postgresImage": POSTGRES_IMAGE,
+        "scenarioSHA256": sha256(scenario) if scenario_document is None else None,
+        "mode": "measurement" if scenario_document else "canary",
+        "swiftImage": IMAGE, "postgresImage": POSTGRES_IMAGE,
         "legacyLoaderNETADMIN": args.legacy_loader_net_admin,
+        "mainCalibrationFreezeSHA256": sha256(args.measurement_freeze_file)
+        if args.measurement_freeze_file else None,
         "startedAt": time.time(),
     }
     started = False
@@ -294,9 +492,10 @@ def main() -> int:
                 output.write(completed.stdout)
         return completed.stdout
 
-    def psql(service: str, database: str, sql: str, *, log: str = "database.log") -> str:
+    def psql(service: str, database: str, sql: str, *, log: str = "database.log",
+             timeout: int = 180) -> str:
         return execute(compose + ["exec", "-T", service, "psql", "-X", "-At", "-v", "ON_ERROR_STOP=1",
-                                  "-U", "im_v2", "-d", database], log, 180, sql, False)
+                                  "-U", "im_v2", "-d", database], log, timeout, sql, False)
 
     try:
         phase = "image inspection"
@@ -313,7 +512,14 @@ def main() -> int:
                 raise CanaryFailure("copied product hash changed")
         shutil.copytree(args.source_checkout / "IMV2/sql", private / "sql")
         shutil.copytree(args.source_checkout / "IMV2/local", private / "local")
-        shutil.copy2(scenario, private / "send-one-canary.json")
+        if scenario_document is None:
+            shutil.copy2(scenario, private / "send-one-canary.json")
+        else:
+            write_private(private / "measurement-scenario.json",
+                          json.dumps(scenario_document, indent=2, sort_keys=True) + "\n")
+            result["scenarioSHA256"] = sha256(private / "measurement-scenario.json")
+            result["measurementPlan"] = scenario_detail
+            result["measurementScenarioSHA256"] = result["scenarioSHA256"]
         password = secrets.token_urlsafe(24)
         secret_names = ["CREDENTIAL_REPLAY_ENVELOPE_KEY", "PUSH_ENDPOINT_ENVELOPE_KEY",
                         "ACCOUNT_EDGE_AUTHORIZATION_SECRET", "ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY",
@@ -358,6 +564,10 @@ def main() -> int:
             service["image"] = POSTGRES_IMAGE
             service["environment"]["POSTGRES_DB"] = db_names[service_name]
             service["healthcheck"]["test"] = ["CMD-SHELL", f"pg_isready -U im_v2 -d {db_names[service_name]}"]
+            if scenario_document is not None:
+                service["command"] = ["postgres", "-c", "shared_preload_libraries=pg_stat_statements",
+                                      "-c", "compute_query_id=on", "-c", "pg_stat_statements.max=10000",
+                                      "-c", "pg_stat_statements.track=all", "-c", "track_io_timing=on"]
         gateway["image"] = IMAGE
         gateway["command"] = ["/run/va-products/IMV2ServerApp"]
         gateway.pop("restart", None)
@@ -389,18 +599,24 @@ def main() -> int:
                 "database_url": f"postgres://im_v2:{password}@owner{index:02d}:5432/{db_names[f'owner{index:02d}']}",
                 "schema": "im_v2"} for index, shard in enumerate(shards)], separators=(",", ":")),
         })
-        connections = min(manifest["users"], max(4, manifest["targetsPerConnection"] + 1))
+        connections = (args.measurement_connections if scenario_document is not None else
+                       min(manifest["users"], max(4, manifest["targetsPerConnection"] + 1)))
         services["loader"] = {
             "image": IMAGE,
-            "command": ["/run/va-products/IMV2GatewayLoadGenerator", "--host", "gateway", "--port", "7443",
+            "command": (["stdbuf", "-oL", "-eL"] if scenario_document is not None else []) +
+                       ["/run/va-products/IMV2GatewayLoadGenerator", "--host", "gateway", "--port", "7443",
                         "--server-name", "localhost", "--ca-path", "/run/va-tls/ca.pem",
                         "--credentials", f"/run/va-fixture/{args.layout}/credentials.jsonl",
                         "--report", "/run/va-artifacts/load-report.json", "--revision", args.source_sha,
                         "--connections", str(connections), "--targets-per-connection", str(manifest["targetsPerConnection"]),
-                        "--peer-topology", "ring", "--ramp-per-second", str(connections),
-                        "--ramp-batch-size", str(connections), "--workload-ramp-per-second", str(connections),
-                        "--sync-reads", "0", "--room-log-reads", "0", "--max-failure-percent", "0",
-                        "--scenario", "/run/va-scenario/send-one-canary.json"],
+                        "--peer-topology", "ring", "--ramp-per-second", str(min(connections, 1000)),
+                        "--ramp-batch-size", str(min(connections, 1000)),
+                        "--workload-ramp-per-second", str(min(connections, 1000)),
+                        "--sync-reads", "1" if args.measurement_workload == "mixed" else "0",
+                        "--room-log-reads", "1" if args.measurement_workload == "mixed" else "0",
+                        "--max-failure-percent", "0", "--scenario",
+                        "/run/va-scenario/measurement-scenario.json" if scenario_document is not None
+                        else "/run/va-scenario/send-one-canary.json"],
             "volumes": [
                 {"type": "bind", "source": str(runtime), "target": "/run/va-products", "read_only": True},
                 {"type": "bind", "source": str(tls), "target": "/run/va-tls", "read_only": True},
@@ -421,6 +637,23 @@ def main() -> int:
         for key, network in document.get("networks", {}).items():
             network["name"] = project + "-" + key
         write_private(compose_file, json.dumps(document, separators=(",", ":")))
+        result["composeRuntimeSHA256"] = sha256(compose_file)
+        if scenario_document is not None:
+            safe_environment = {name: value for name, value in gateway_env.items()
+                                if name in {"IM_V2_CAPACITY_PROFILE_ID", "IM_V2_MAX_ELIGIBLE_MEMBERS",
+                                            "IM_V2_MAX_COMMANDS_PER_WINDOW", "IM_V2_USER_SHARD_BUCKET",
+                                            "IM_V2_DIRECT_ROOM_SHARD_ID", "IM_V2_GROUP_ROOM_SHARD_ID",
+                                            "IM_V2_METRICS_HOST", "IM_V2_METRICS_PORT",
+                                            "IM_V2_DATABASE_EVENT_LOOP_THREADS",
+                                            "IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"}}
+            write_private(run / "measurement-compose-settings.json", json.dumps({
+                "project": project, "databaseNames": db_names, "gatewayEnvironment": safe_environment,
+                "services": {name: {"image": value.get("image"), "command": value.get("command"),
+                                    "memLimit": value.get("mem_limit"), "pidsLimit": value.get("pids_limit")}
+                             for name, value in services.items()},
+                "swiftImageID": result["swiftImageID"], "postgresImageID": result["postgresImageID"]},
+                indent=2, sort_keys=True) + "\n")
+            result["measurementComposeSettingsSHA256"] = sha256(run / "measurement-compose-settings.json")
         phase = "database startup"
         started = True
         execute(compose + ["up", "-d", "--wait", "--wait-timeout", "120", *db_names], "startup.log", 180)
@@ -447,40 +680,69 @@ def main() -> int:
                 pieces = [f"{args.layout}/{service.replace('owner', 'owner-')}.sql"]
             for piece in pieces:
                 psql(service, database, (args.fixture_dir / piece).read_text())
+            if scenario_document is not None:
+                installed = psql(service, database,
+                                 "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements';")
+                if installed.strip() != "1":
+                    raise MeasurementFailure("pg_stat_statements not installed on disposable database")
         phase = "gateway startup"
         execute(compose + ["up", "-d", "--wait", "--wait-timeout", "120", "gateway"], "startup.log", 180)
-        phase = "native one-send canary"
-        execute(compose + ["run", "--rm", "--no-deps", "loader"], "loader.log", 180)
-        report_file = run / "load-report.json"
-        require_regular(report_file, "load report")
-        report_file.chmod(0o600)
-        report = json.loads(report_file.read_text())
-        result["loadReportSHA256"] = sha256(report_file)
-        if not (report.get("authenticated") == connections and report.get("messagesSent") == 1
-                and report.get("messagesAcknowledged") == 1 and report.get("workloadFailed") == 0
-                and report.get("directRoomAttempted") == 0 and report.get("failed") == 0):
-            raise CanaryFailure("native loader did not acknowledge exactly one preset-room send")
-        phase = "durable SQL effect"
-        messages: list[tuple[int, str, str, int]] = []
-        for index in range(owners):
-            service = f"owner{index:02d}"
-            raw = psql(service, db_names[service], "SELECT room_id::text || '|' || sender_user_id::text || '|' || room_sequence::text FROM im_v2.messages ORDER BY room_id, room_sequence;")
-            for line in raw.splitlines():
-                room, user, sequence = line.split("|")
-                messages.append((index, room, user, int(sequence)))
-        if len(messages) != 1 or messages[0][1] not in rooms or messages[0][2] not in users or messages[0][3] != 1:
-            raise CanaryFailure("owner databases did not persist one authorized room message")
-        owner_index, room_id, _, sequence = messages[0]
-        actual_shard = psql("postgres", db_names["postgres"],
-            f"SELECT room_shard_id FROM im_v2.room_owner_routes WHERE room_id = '{room_id}'::uuid;").strip()
-        if actual_shard != shards[owner_index]:
-            raise CanaryFailure("message owner does not match authoritative room route")
-        result["durableEffect"] = {"roomID": room_id, "ownerIndex": owner_index,
-                                   "roomSequence": sequence, "messageRows": 1}
-        result["loader"] = {"connections": connections, "messagesSent": 1,
-                            "messagesAcknowledged": 1, "directRoomAttempted": 0}
-        result["passed"] = True
-    except (CanaryFailure, subprocess.SubprocessError, OSError, ValueError, KeyError, json.JSONDecodeError) as error:
+        if scenario_document is not None:
+            phase = "measurement"
+            result["measurement"] = run_measurement(
+                args=args, run=run, compose=compose, docker=docker, environment=environment,
+                services=db_names, execute=execute, psql=psql, scenario_detail=scenario_detail)
+            if result["measurement"]["nativeConnectionsAuthenticated"] != connections:
+                raise MeasurementFailure("measurement did not authenticate all requested connections")
+            durable_messages = 0
+            for index in range(owners):
+                actual = psql(f"owner{index:02d}", db_names[f"owner{index:02d}"],
+                              "SELECT count(*)::text || '|' || (SELECT count(*)::text FROM im_v2.rooms) "
+                              "FROM im_v2.messages;", log="measurement-effect.log", timeout=15).strip()
+                count, room_count = map(int, actual.split("|"))
+                durable_messages += count
+                if room_count != manifest["layouts"][args.layout]["ownerRoomCounts"][index]:
+                    raise MeasurementFailure("measurement changed fixture room cardinality")
+            if durable_messages != result["measurement"]["nativeMessagesAcknowledged"]:
+                raise MeasurementFailure("durable message count differs from native acknowledged count")
+            result["measurement"]["durableMessages"] = durable_messages
+            result["measurement"]["roomCardinalityUnchanged"] = True
+            result["passed"] = True
+            phase = "measurement completed"
+        else:
+            phase = "native one-send canary"
+            execute(compose + ["run", "--rm", "--no-deps", "loader"], "loader.log", 180)
+            report_file = run / "load-report.json"
+            require_regular(report_file, "load report")
+            report_file.chmod(0o600)
+            report = json.loads(report_file.read_text())
+            result["loadReportSHA256"] = sha256(report_file)
+            if not (report.get("authenticated") == connections and report.get("messagesSent") == 1
+                    and report.get("messagesAcknowledged") == 1 and report.get("workloadFailed") == 0
+                    and report.get("directRoomAttempted") == 0 and report.get("failed") == 0):
+                raise CanaryFailure("native loader did not acknowledge exactly one preset-room send")
+            phase = "durable SQL effect"
+            messages: list[tuple[int, str, str, int]] = []
+            for index in range(owners):
+                service = f"owner{index:02d}"
+                raw = psql(service, db_names[service], "SELECT room_id::text || '|' || sender_user_id::text || '|' || room_sequence::text FROM im_v2.messages ORDER BY room_id, room_sequence;")
+                for line in raw.splitlines():
+                    room, user, sequence = line.split("|")
+                    messages.append((index, room, user, int(sequence)))
+            if len(messages) != 1 or messages[0][1] not in rooms or messages[0][2] not in users or messages[0][3] != 1:
+                raise CanaryFailure("owner databases did not persist one authorized room message")
+            owner_index, room_id, _, sequence = messages[0]
+            actual_shard = psql("postgres", db_names["postgres"],
+                f"SELECT room_shard_id FROM im_v2.room_owner_routes WHERE room_id = '{room_id}'::uuid;").strip()
+            if actual_shard != shards[owner_index]:
+                raise CanaryFailure("message owner does not match authoritative room route")
+            result["durableEffect"] = {"roomID": room_id, "ownerIndex": owner_index,
+                                       "roomSequence": sequence, "messageRows": 1}
+            result["loader"] = {"connections": connections, "messagesSent": 1,
+                                "messagesAcknowledged": 1, "directRoomAttempted": 0}
+            result["passed"] = True
+    except (CanaryFailure, MeasurementFailure, subprocess.SubprocessError, OSError, ValueError,
+            KeyError, json.JSONDecodeError) as error:
         result["failureType"] = type(error).__name__
         result["failurePhase"] = phase
     finally:
@@ -494,13 +756,15 @@ def main() -> int:
             shutil.rmtree(private)
         result["finishedAt"] = time.time()
         write_private(run / "result.json", json.dumps(result, indent=2, sort_keys=True) + "\n")
-        print("VA_CAPACITY_CANARY_" + ("OK" if result["passed"] else "FAILED") + " evidence=" + str(run))
+        print("VA_CAPACITY_" + ("MEASUREMENT" if scenario_document else "CANARY") +
+              "_" + ("OK" if result["passed"] else "FAILED") + " evidence=" + str(run))
     return 0 if result["passed"] else 1
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (CanaryFailure, subprocess.SubprocessError, OSError, ValueError, KeyError, json.JSONDecodeError) as error:
+    except (CanaryFailure, MeasurementFailure, subprocess.SubprocessError, OSError, ValueError,
+            KeyError, json.JSONDecodeError) as error:
         print("VA_CAPACITY_CANARY_PREFLIGHT_FAILED type=" + type(error).__name__, file=sys.stderr)
         raise SystemExit(1)
