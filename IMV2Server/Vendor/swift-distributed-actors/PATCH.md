@@ -15,7 +15,8 @@ The copied production source differs from upstream only in:
   and closes the channel on framing errors.
 
 `Package.swift` retains the upstream production target dependency products,
-Swift language mode, and remote dependency version ranges. It omits upstream
+Swift language mode, platform runtime requirements (including Linux's nil
+platform list), and remote dependency version ranges. It omits upstream
 non-shipping tests, tools, plugins, docs, and their `swift-argument-parser`
 dependency. This vendor includes license, notice, and contributor attribution.
 `Tests/DistributedClusterBoundedFramingTests` are local regression tests.
