@@ -8,7 +8,7 @@
 
 | Gate | 当前证据 | 状态 |
 | --- | --- | --- |
-| G0：Swift 6.4 / Vapor 5 / DistributedCluster 兼容 | beta.3 实际解析与当前 ServiceLifecycle 的 async-algorithms 要求冲突；P0 的上游固定提交解析通过，Release 双进程验证仍进行中 | 未完成 |
+| G0：Swift 6.4 / Vapor 5 / DistributedCluster 兼容 | [固定 revision 的 Linux Release 双进程探针及 ServerApp 构建通过](p0-evidence.md)，既有依赖 pin 不变 | 已通过兼容性探针 |
 | G1：可编译完整公共契约与文件所有权 | 新 ActorContracts/ActorRuntime 基础类型与两级容量限制已加入；[11 项基础测试通过](c0-foundation-evidence.md)，完整业务 DTO、executor/transport 端口与所有权仍在整理 | 未完成 |
 | G2：真实双 host + PostgreSQL 激活/接管/排空 | 尚无证据 | 未完成 |
 | G3：真实远端 send/read 与领域合同 | 尚无证据 | 未完成 |

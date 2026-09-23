@@ -1,0 +1,242 @@
+import Foundation
+import IMV2ActorContracts
+import IMV2Core
+import Testing
+@testable import IMV2ActorRuntime
+
+@Suite("Room turns serialize across suspension and preserve cancellation evidence")
+struct V2RoomTurnLaneTests {
+    @Test("send batches stop at a barrier and never overlap an awaited turn")
+    func fifoAndBatching() async throws {
+        let fixture = try Fixture()
+        let first = fixture.submit(.init(id: 0, send: false, hold: true))
+        await fixture.executor.waitForStarts(1)
+        let send1 = fixture.submit(.init(id: 1, send: true))
+        try await fixture.waitForQueue(1)
+        let send2 = fixture.submit(.init(id: 2, send: true))
+        try await fixture.waitForQueue(2)
+        let barrier = fixture.submit(.init(id: 3, send: false))
+        try await fixture.waitForQueue(3)
+        let send3 = fixture.submit(.init(id: 4, send: true))
+        try await fixture.waitForQueue(4)
+        #expect(await fixture.executor.starts == [[0]])
+        await fixture.executor.release()
+        #expect(try await first.value == 0)
+        #expect(try await send1.value == 1)
+        #expect(try await send2.value == 2)
+        #expect(try await barrier.value == 3)
+        #expect(try await send3.value == 4)
+        let observed = await fixture.executor.observations()
+        #expect(observed.starts == [[0], [1, 2], [3], [4]])
+        #expect(observed.maximumConcurrentTurns == 1)
+        #expect(observed.ordinals == [1, 2, 3, 4, 5])
+        #expect(observed.expiredBatchDeadlines.allSatisfy { $0 })
+        try await fixture.waitForBudget(0)
+    }
+
+    @Test("queued cancellation is definitely unaccepted and frees only its permit")
+    func queuedCancellation() async throws {
+        let fixture = try Fixture()
+        let first = fixture.submit(.init(id: 0, send: false, hold: true))
+        await fixture.executor.waitForStarts(1)
+        let cancelled = fixture.submit(.init(id: 1, send: false))
+        try await fixture.waitForQueue(1)
+        cancelled.cancel()
+        await expectFailure(.notAccepted(.cancelled), from: cancelled)
+        try await fixture.waitForBudget(1)
+        #expect(await fixture.executor.starts == [[0]])
+        await fixture.executor.release()
+        #expect(try await first.value == 0)
+        try await fixture.waitForBudget(0)
+    }
+
+    @Test("in-flight cancellation detaches the caller without releasing the turn")
+    func inFlightCancellation() async throws {
+        let fixture = try Fixture()
+        let first = fixture.submit(.init(id: 0, send: false, hold: true))
+        await fixture.executor.waitForStarts(1)
+        first.cancel()
+        await expectFailure(.outcomeUnknown, from: first)
+        #expect(await fixture.budget.snapshot().commandCount == 1)
+        let next = fixture.submit(.init(id: 1, send: false))
+        try await fixture.waitForQueue(1)
+        #expect(await fixture.executor.starts == [[0]])
+        await fixture.executor.release()
+        #expect(try await next.value == 1)
+        #expect(await fixture.executor.observations().maximumConcurrentTurns == 1)
+        try await fixture.waitForBudget(0)
+    }
+
+    @Test("unknown transaction stops successors and holds capacity until fenced retirement")
+    func unknownCompletion() async throws {
+        let fixture = try Fixture()
+        let first = fixture.submit(.init(id: 0, send: false, hold: true, unknown: true))
+        await fixture.executor.waitForStarts(1)
+        let next = fixture.submit(.init(id: 1, send: false))
+        try await fixture.waitForQueue(1)
+        await fixture.executor.release()
+        await expectFailure(.outcomeUnknown, from: first)
+        await expectFailure(.notAccepted(.leaseLost), from: next)
+        try await fixture.waitForBudget(1)
+        #expect(await fixture.lane.snapshot().phase == .uncertain)
+        #expect(await fixture.lane.snapshot().unresolvedCount == 1)
+        #expect(await fixture.executor.starts == [[0]])
+        // A host invokes this only after database fencing and executor shutdown.
+        #expect(await fixture.lane.completeRetirement())
+        #expect(await fixture.budget.snapshot().commandCount == 0)
+        #expect(await fixture.lane.completeRetirement())
+        #expect(await fixture.budget.snapshot().commandCount == 0)
+    }
+
+    @Test("drain rejects new calls but completes already admitted work")
+    func drainRace() async throws {
+        let fixture = try Fixture()
+        let first = fixture.submit(.init(id: 0, send: false, hold: true))
+        await fixture.executor.waitForStarts(1)
+        let queued = fixture.submit(.init(id: 1, send: false))
+        try await fixture.waitForQueue(1)
+        await fixture.lane.beginDrain()
+        await expectFailure(.notAccepted(.retired), from: fixture.submit(.init(id: 2, send: false)))
+        #expect(!(await fixture.lane.completeRetirement()))
+        await fixture.executor.release()
+        #expect(try await first.value == 0)
+        #expect(try await queued.value == 1)
+        try await fixture.waitForBudget(0)
+        #expect(await fixture.lane.snapshot().isIdle)
+    }
+
+    @Test("deadline before dispatch differs from timeout while SQL is running")
+    func deadlines() async throws {
+        let fixture = try Fixture()
+        let expired = fixture.submit(.init(id: 0, send: false), deadline: .now - .seconds(1))
+        await expectFailure(.notAccepted(.deadlineExceeded), from: expired)
+        let executing = fixture.submit(.init(id: 1, send: false, hold: true), deadline: .now + .milliseconds(100))
+        await fixture.executor.waitForStarts(1)
+        await expectFailure(.outcomeUnknown, from: executing)
+        #expect(await fixture.budget.snapshot().commandCount == 1)
+        #expect(!(await fixture.lane.completeRetirement()))
+        await fixture.executor.release()
+        try await fixture.waitForBudget(0)
+    }
+
+    @Test("invalid encoded request is rejected without consuming capacity")
+    func invalidWire() async throws {
+        let fixture = try Fixture()
+        do {
+            _ = try await fixture.lane.submit(encodedRequest: Data("{}".utf8), deadline: .now + .seconds(1))
+            Issue.record("invalid request unexpectedly succeeded")
+        } catch {
+            #expect(error as? V2RoomCallFailure == .notAccepted(.invalidRequest))
+        }
+        #expect(await fixture.budget.snapshot().commandCount == 0)
+        #expect(await fixture.executor.starts.isEmpty)
+    }
+
+    private func expectFailure(_ expected: V2RoomCallFailure, from task: Task<Int, any Error>) async {
+        do {
+            _ = try await task.value
+            Issue.record("request unexpectedly succeeded")
+        } catch { #expect(error as? V2RoomCallFailure == expected) }
+    }
+
+    private struct Command: Codable, Sendable {
+        let id: Int
+        let send: Bool
+        var hold = false
+        var unknown = false
+    }
+
+    private struct Fixture {
+        let budget: V2RoomCommandBudget
+        let lane: V2RoomTurnLane<Command, Int>
+        let executor: Executor
+
+        init() throws {
+            let config = try V2RoomRuntimeConfiguration()
+            budget = .init(configuration: config)
+            executor = Executor()
+            let executor = executor
+            lane = .init(
+                token: .init(
+                    roomID: RoomID(uuid: UUID()), owner: try .init(shardID: "test", epoch: 0),
+                    activationEpoch: try .init(1),
+                    host: .init(hostID: V2ActorHostID(uuid: UUID()), incarnationID: UUID())
+                ),
+                configuration: config, budget: budget,
+                classify: { $0.send ? .send : .barrier },
+                execute: { await executor.run($0) }, onUncertain: { _ in }
+            )
+        }
+
+        func submit(_ command: Command, deadline: ContinuousClock.Instant = .now + .seconds(5)) -> Task<Int, any Error> {
+            Task { try await lane.submit(encodedRequest: JSONEncoder().encode(command), deadline: deadline) }
+        }
+
+        func waitForQueue(_ count: Int) async throws {
+            let deadline = ContinuousClock.now + .seconds(3)
+            while await lane.snapshot().queuedCount != count {
+                guard ContinuousClock.now < deadline else { throw WaitFailure.phaseNotReached }
+                await Task.yield()
+            }
+        }
+
+        func waitForBudget(_ count: Int) async throws {
+            let deadline = ContinuousClock.now + .seconds(3)
+            while await budget.snapshot().commandCount != count {
+                guard ContinuousClock.now < deadline else { throw WaitFailure.phaseNotReached }
+                await Task.yield()
+            }
+        }
+    }
+
+    private enum WaitFailure: Error { case phaseNotReached }
+
+    private actor Executor {
+        var starts: [[Int]] = []
+        private var concurrentTurns = 0
+        private var maximumConcurrentTurns = 0
+        private var ordinals: [UInt64] = []
+        private var expiredBatchDeadlines: [Bool] = []
+        private var gate: CheckedContinuation<Void, Never>?
+        private var startWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+
+        func run(_ turn: V2RoomTurn<Command>) async -> V2RoomTransactionCompletion<[Int]> {
+            concurrentTurns += 1
+            maximumConcurrentTurns = max(maximumConcurrentTurns, concurrentTurns)
+            starts.append(turn.items.map(\.request.id))
+            ordinals.append(contentsOf: turn.items.map(\.ordinal))
+            if turn.items.first?.request.send == true {
+                expiredBatchDeadlines.append(turn.context.batchDeadline <= ContinuousClock.now)
+            }
+            let ready = startWaiters.filter { $0.0 <= starts.count }
+            startWaiters.removeAll { $0.0 <= starts.count }
+            // Install the hold before waking phase observers.
+            if turn.items.contains(where: { $0.request.hold }) {
+                await withCheckedContinuation { continuation in
+                    gate = continuation
+                    for (_, waiter) in ready { waiter.resume() }
+                }
+            } else {
+                for (_, waiter) in ready { waiter.resume() }
+            }
+            concurrentTurns -= 1
+            return turn.items.contains(where: { $0.request.unknown })
+                ? .outcomeUnknown : .committed(turn.items.map(\.request.id))
+        }
+
+        func waitForStarts(_ count: Int) async {
+            if starts.count >= count { return }
+            await withCheckedContinuation { startWaiters.append((count, $0)) }
+        }
+
+        func release() {
+            let held = gate
+            gate = nil
+            held?.resume()
+        }
+
+        func observations() -> (starts: [[Int]], maximumConcurrentTurns: Int, ordinals: [UInt64], expiredBatchDeadlines: [Bool]) {
+            (starts, maximumConcurrentTurns, ordinals, expiredBatchDeadlines)
+        }
+    }
+}
