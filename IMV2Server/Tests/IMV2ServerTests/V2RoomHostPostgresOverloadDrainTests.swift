@@ -143,15 +143,11 @@ struct V2RoomHostPostgresOverloadDrainTests {
     @Test("drain retains both leases while two granted room sends wait in the real shared batcher",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_HOST_OVERLOAD_DATABASE_IS_DISPOSABLE"] == "1"))
     func pendingSharedBatchDrainsBeforeLeaseRelease() async throws {
-        try await withOverloadDatabase { database, sql, fixture in
+        try await withOverloadDatabase(capacityClass: .large) { database, sql, fixture in
             let secondRoom = RoomID(uuid: UUID())
-            try await overloadSeedRoom(secondRoom, sql: sql)
+            try await overloadSeedRoom(secondRoom, capacityClass: .large, sql: sql)
             // Production atomic group append is the large-room partition.
             // Standard group rooms intentionally take the scalar path.
-            try await sql.raw("""
-                UPDATE im_v2.rooms SET capacity_class = 'large'
-                WHERE room_id IN (\(bind: roomUUID), \(bind: secondRoom.uuidValue!))
-                """).run()
             let leases = PostgresV2RoomActivationStore(database: database)
             let hosted = try overloadHost(database: database, fixture: fixture, leases: leases,
                 configuration: overloadConfiguration(batchWaitMilliseconds: 800),
@@ -322,12 +318,14 @@ private func overloadAssertReleased(_ hosted: OverloadHosted,
     for room in rooms { #expect(try await leases.locate(roomID: room, owner: owner) == nil) }
 }
 
-private func overloadSeedRoom(_ room: RoomID, sql: any SQLDatabase) async throws {
+private func overloadSeedRoom(_ room: RoomID,
+    capacityClass: V2GroupCapacityClass = .standard,
+    sql: any SQLDatabase) async throws {
     let uuid = try #require(room.uuidValue)
     let at = Date(timeIntervalSince1970: 1_750_000_000)
     try await sql.raw("""
         INSERT INTO im_v2.rooms (room_id, room_shard_id, capacity_profile_id, capacity_class)
-        VALUES (\(bind: uuid), 'room-a', 'standard', 'standard')
+        VALUES (\(bind: uuid), 'room-a', 'standard', \(bind: capacityClass.rawValue))
         """).run()
     try await sql.raw("""
         INSERT INTO im_v2.room_owner_routes
@@ -383,7 +381,8 @@ private struct OverloadBoolRow: Decodable { let value: Bool }
 private struct OverloadCountRow: Decodable { let value: Int64 }
 private enum OverloadFailure: Error { case phaseTimeout, unexpectedResult, schemaAlreadyExists }
 
-private func withOverloadDatabase(_ operation: (any Database, any SQLDatabase,
+private func withOverloadDatabase(capacityClass: V2GroupCapacityClass = .standard,
+    _ operation: (any Database, any SQLDatabase,
     PostgresV2RoomWriteStoreIntegrationTests) async throws -> Void) async throws {
     let url = try #require(ProcessInfo.processInfo.environment["IMV2_ACTOR_HOST_OVERLOAD_DATABASE_URL"])
     let resources = makeV2DatabaseTestResources()
@@ -400,7 +399,7 @@ private func withOverloadDatabase(_ operation: (any Database, any SQLDatabase,
         let fixture = PostgresV2RoomWriteStoreIntegrationTests()
         installed = true
         try await fixture.installSchema(on: sql)
-        try await fixture.seedRoom(on: sql)
+        try await fixture.seedRoom(capacityClass: capacityClass, on: sql)
         try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 1").run()
         try await sql.raw("UPDATE im_v2.room_memberships SET joined_revision = 1").run()
         try await sql.raw("""
