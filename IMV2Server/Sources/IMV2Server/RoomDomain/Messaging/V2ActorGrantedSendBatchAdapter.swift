@@ -12,6 +12,12 @@ public struct V2ActorGrantedSendBatchAdapter: Sendable {
         self.batcher = batcher
     }
 
+    /// Hosting calls this only after the executor is closed or fenced. It
+    /// releases the exact token's bounded quarantine slot.
+    public func retire(_ token: V2RoomActivationToken) async {
+        await batcher.retireActivation(token)
+    }
+
     public func execute(
         _ sends: [V2PreparedActorSend],
         batchDeadline: ContinuousClock.Instant

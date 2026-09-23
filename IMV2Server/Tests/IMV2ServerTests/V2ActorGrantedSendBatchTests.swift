@@ -31,10 +31,10 @@ struct V2ActorGrantedSendBatchTests {
 
     @Test("partitioned known results retain committed items and typed business rejection")
     func partitionedKnownResults() async throws {
-        let store = GrantedBatchStore(partitionLast: true, rejectLast: true)
+        let store = GrantedBatchStore(rejectLast: true)
         let batcher = V2SendMessageAdmissionBatcher(
             store: store,
-            configuration: .init(maximumBatchSize: 3, maximumDelay: .seconds(5)),
+            configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5)),
             actorGrantedStoreFactory: { _ in store }
         )
         let sends = try makeSends(token: makeToken(), texts: ["one", "two", "three"])
@@ -46,6 +46,33 @@ struct V2ActorGrantedSendBatchTests {
         #expect(results[1] == .send(.rateLimited(retryAfterSeconds: 2)))
         #expect(results[2] == .failure(.sendStore(.actorNotEligible)))
         #expect(await store.recordedTexts() == [["one", "two"]])
+    }
+
+    @Test("mixed advisory partitions never move a later same-room send ahead")
+    func mixedPartitionOrder() async throws {
+        let store = GrantedBatchStore(partitionLast: true)
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 3, maximumDelay: .seconds(5)),
+            actorGrantedStoreFactory: { _ in store }
+        )
+        let sends = try makeSends(token: makeToken(), texts: ["one", "two", "three"])
+        _ = try await batcher.acceptGrantedTurn(sends, batchDeadline: ContinuousClock().now)
+        #expect(await store.recordedTexts().isEmpty)
+        #expect(await store.scalarCompletionOrder() == ["one", "two", "three"])
+    }
+
+    @Test("isolated middle retry does not advance a later same-room send first")
+    func isolatedMiddleOrder() async throws {
+        let store = GrantedBatchStore(isolateMiddle: true)
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 3, maximumDelay: .seconds(5)),
+            actorGrantedStoreFactory: { _ in store }
+        )
+        let sends = try makeSends(token: makeToken(), texts: ["one", "two", "three"])
+        _ = try await batcher.acceptGrantedTurn(sends, batchDeadline: ContinuousClock().now)
+        #expect(await store.scalarCompletionOrder() == ["one", "two", "three"])
     }
 
     @Test("an unknown SQL batch propagates to every item of the turn")
@@ -97,6 +124,15 @@ struct V2ActorGrantedSendBatchTests {
         await #expect(throws: V2RoomCallFailure.outcomeUnknown) { try await second.value }
         #expect(scopes.withLock { $0 }.count == 1)
         #expect(Set(scopes.withLock { $0 }[0]) == Set([firstToken, secondToken]))
+        for token in [firstToken, secondToken] {
+            let late = try makeSends(token: token, texts: ["late"])
+            await #expect(throws: V2RoomCallFailure.outcomeUnknown) {
+                try await adapter.execute(late, batchDeadline: ContinuousClock().now)
+            }
+        }
+        #expect(await batcher.snapshot().completedBatches == 1)
+        await adapter.retire(firstToken)
+        await adapter.retire(secondToken)
     }
 
     @Test("over-capacity turn does not leave partially enqueued requests")
@@ -143,6 +179,59 @@ struct V2ActorGrantedSendBatchTests {
         #expect(await store.recordedTexts() == [["one", "two"]])
     }
 
+    @Test("scalar fallback keeps same-room granted sends in original order")
+    func scalarFallbackOrder() async throws {
+        let store = GrantedBatchStore(fallback: true)
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 3, maximumDelay: .seconds(5)),
+            actorGrantedStoreFactory: { _ in store }
+        )
+        let sends = try makeSends(token: makeToken(), texts: ["one", "two", "three"])
+        let results = try await batcher.acceptGrantedTurn(sends, batchDeadline: ContinuousClock().now)
+        #expect(results.count == 3)
+        #expect(await store.scalarCompletionOrder() == ["one", "two", "three"])
+        #expect(await batcher.snapshot().atomicBatchFallbacks == 1)
+    }
+
+    @Test("unknown first partition purges queued successor and holds a bounded token slot")
+    func unknownQuarantine() async throws {
+        let store = GrantedBatchStore(unknown: true)
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5),
+                maximumTrackedActivations: 1),
+            actorGrantedStoreFactory: { _ in store }
+        )
+        let adapter = V2ActorGrantedSendBatchAdapter(batcher: batcher)
+        let token = try makeToken()
+        let sends = try makeSends(token: token, texts: ["one", "two", "three"])
+        await #expect(throws: V2RoomCallFailure.outcomeUnknown) {
+            try await adapter.execute(sends, batchDeadline: ContinuousClock().now)
+        }
+        #expect(await store.recordedTexts() == [["one", "two"]])
+        #expect(await batcher.snapshot().completedBatches == 1)
+        #expect(await batcher.snapshot().pendingRequests == 0)
+        let late = try makeSends(token: token, texts: ["late"])
+        await #expect(throws: V2RoomCallFailure.outcomeUnknown) {
+            try await adapter.execute(late, batchDeadline: ContinuousClock().now)
+        }
+        let other = V2RoomActivationToken(
+            roomID: try RoomID("54000000-0000-0000-0000-000000000010"),
+            owner: token.owner, activationEpoch: token.activationEpoch, host: token.host
+        )
+        let otherSends = try makeSends(token: other, texts: ["other", "another"])
+        await #expect(throws: V2RoomCallFailure.notAccepted(.overloaded)) {
+            try await adapter.execute(otherSends, batchDeadline: ContinuousClock().now)
+        }
+        await adapter.retire(token)
+        await #expect(throws: V2RoomCallFailure.outcomeUnknown) {
+            try await adapter.execute(otherSends, batchDeadline: ContinuousClock().now)
+        }
+        #expect(await batcher.snapshot().completedBatches == 2)
+        await adapter.retire(other)
+    }
+
     private func makeToken() throws -> V2RoomActivationToken {
         .init(
             roomID: try RoomID("54000000-0000-0000-0000-000000000001"),
@@ -183,12 +272,18 @@ private actor GrantedBatchStore: V2AtomicRoomWriteBatchStore {
     let partitionLast: Bool
     let rejectLast: Bool
     let unknown: Bool
+    let fallback: Bool
+    let isolateMiddle: Bool
     var texts: [[String]] = []
+    var scalarOrder: [String] = []
 
-    init(partitionLast: Bool = false, rejectLast: Bool = false, unknown: Bool = false) {
+    init(partitionLast: Bool = false, rejectLast: Bool = false,
+         unknown: Bool = false, fallback: Bool = false, isolateMiddle: Bool = false) {
         self.partitionLast = partitionLast
         self.rejectLast = rejectLast
         self.unknown = unknown
+        self.fallback = fallback
+        self.isolateMiddle = isolateMiddle
     }
 
     func atomicBatchPartitions(requests: [V2RoomWriteRequest]) -> [V2AtomicRoomWriteBatchPartition?] {
@@ -204,16 +299,22 @@ private actor GrantedBatchStore: V2AtomicRoomWriteBatchStore {
         capacityProfile: V2CapacityProfile,
         identifiers: V2AcceptanceIdentifiers,
         now: Date
-    ) throws -> V2SendMessageOutcome {
+    ) async throws -> V2SendMessageOutcome {
+        if fallback && command.text == "one" { try await Task.sleep(for: .milliseconds(30)) }
+        scalarOrder.append(command.text)
         if rejectLast && command.text == "three" { throw V2RoomWriteStoreError.actorNotEligible }
         return .rateLimited(retryAfterSeconds: 3)
     }
 
     func acceptAtomically(requests: [V2RoomWriteRequest]) throws -> [V2SendMessageOutcome] {
         texts.append(requests.map(\.command.text))
+        if isolateMiddle { throw V2AtomicRoomWriteBatchError(
+            reason: .requestShape, isolatedRequestIndices: [1]) }
+        if fallback { throw V2AtomicRoomWriteBatchError(reason: .requestShape) }
         if unknown { throw V2RoomTransactionOutcomeUnknown() }
         return requests.enumerated().map { .rateLimited(retryAfterSeconds: $0.offset + 1) }
     }
 
     func recordedTexts() -> [[String]] { texts }
+    func scalarCompletionOrder() -> [String] { scalarOrder }
 }
