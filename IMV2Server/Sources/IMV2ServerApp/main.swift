@@ -685,8 +685,8 @@ enum IMV2ServerApp {
                     sourceCommand: { try await forwardPort.execute($0, deadline: $1) },
                     deadline: { .now + callTimeout.duration }),
                 deadline: { .now + callTimeout.duration })
-            let directRoomLogAppendBatcher: (any V2SendMessageAdmission)? =
-                ownerBatchers.count == 1 ? ownerBatchers.values.first : nil
+            let directRoomLogAppendBatcher = V2AggregatedSendMessageBatchMetrics(
+                owners: ownerBatchers.values.map { $0 as any V2SendMessageBatchMetricsReading })
             V2VaporMetricsRoutes.register(on: app, telemetry: prometheusTelemetry,
                 connectionMetrics: connectionRegistry, transportMetrics: transportMetrics,
                 durableWorkMetrics: durableWorkMetrics,
