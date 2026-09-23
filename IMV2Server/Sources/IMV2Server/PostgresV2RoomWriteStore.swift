@@ -1073,7 +1073,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                 // writes and the batcher retries the immutable commands via
                 // the established complete path.
                 if sql is any PostgresDatabase {
-                    if ownerRoutes != nil {
+                    if ownerRoutes != nil || activationScope != nil {
                         try await acquireMessageOperationLocks(orderedRequests, sql: sql)
                         try await requireSelectedOwners(orderedRequests.map(\.roomID), sql: sql)
                     }
