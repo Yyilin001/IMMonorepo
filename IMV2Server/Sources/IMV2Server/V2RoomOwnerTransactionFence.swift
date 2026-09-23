@@ -29,9 +29,13 @@ public struct V2RoomActivationSQLTimeouts: Sendable, Equatable {
 
 /// Set inside the same transaction that acquires the room fence.
 func v2SetRoomActivationSQLTimeouts(_ timeouts: V2RoomActivationSQLTimeouts, sql: any SQLDatabase) async throws {
-    try await sql.raw("SELECT set_config('lock_timeout', \(bind: "\(timeouts.lockMilliseconds)ms"), true)").run()
-    try await sql.raw("SELECT set_config('statement_timeout', \(bind: "\(timeouts.statementMilliseconds)ms"), true)").run()
-    try await sql.raw("SELECT set_config('idle_in_transaction_session_timeout', \(bind: "\(timeouts.idleTransactionMilliseconds)ms"), true)").run()
+    // All three LOCAL settings take effect before the next lock or business
+    // statement. One round trip preserves the same transaction-scoped limits.
+    try await sql.raw("""
+        SELECT set_config('lock_timeout', \(bind: "\(timeouts.lockMilliseconds)ms"), true),
+               set_config('statement_timeout', \(bind: "\(timeouts.statementMilliseconds)ms"), true),
+               set_config('idle_in_transaction_session_timeout', \(bind: "\(timeouts.idleTransactionMilliseconds)ms"), true)
+        """).run()
 }
 
 /// Existing owner-only path remains for V1 callers until every business writer

@@ -42,6 +42,20 @@ struct V2RoomActivationTransactionDeadlineTests {
             #expect(committed == 17)
             #expect(try await count(id: 1, sql: sql) == 1)
 
+            let distinctTimeouts = try V2RoomActivationSQLTimeouts(lockMilliseconds: 75,
+                statementMilliseconds: 250, idleTransactionMilliseconds: 400)
+            let settings: DeadlineTimeoutSettings = try await v2WithRoomActivationTransaction(
+                database: database, deadline: .now + .seconds(2), timeouts: distinctTimeouts) { borrowed in
+                try #require(try await deadlineSQL(borrowed).raw("""
+                    SELECT current_setting('lock_timeout') AS lock_timeout,
+                           current_setting('statement_timeout') AS statement_timeout,
+                           current_setting('idle_in_transaction_session_timeout') AS idle_timeout
+                    """).first(decoding: DeadlineTimeoutSettings.self))
+            }
+            #expect(settings.lockTimeout == "75ms")
+            #expect(settings.statementTimeout == "250ms")
+            #expect(settings.idleTimeout == "400ms")
+
             await #expect(throws: V2RoomCallFailure.rolledBack(.deadlineExceeded)) {
                 try await V2RoomSQLDeadline.withDeadline(.now + .milliseconds(270)) {
                     _ = try await v2WithRoomScopedTransaction(database: database,
@@ -325,3 +339,14 @@ private func count(id: Int, sql: any SQLDatabase) async throws -> Int64 {
 private struct DeadlineBool: Decodable { let value: Bool }
 private struct DeadlineCount: Decodable { let value: Int64 }
 private struct DeadlinePID: Decodable { let value: Int32 }
+private struct DeadlineTimeoutSettings: Decodable, Sendable {
+    let lockTimeout: String
+    let statementTimeout: String
+    let idleTimeout: String
+
+    enum CodingKeys: String, CodingKey {
+        case lockTimeout = "lock_timeout"
+        case statementTimeout = "statement_timeout"
+        case idleTimeout = "idle_timeout"
+    }
+}

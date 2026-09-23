@@ -163,9 +163,9 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         try await v2WithPostgresTransactionRetry(database: database,
             classifyCommitFailure: activationScope != nil,
             useRoomDeadline: activationScope != nil) { transaction in
-            if activationScope != nil {
-                try await v2SetRoomActivationSQLTimeouts(.default, sql: sqlDatabase(from: transaction))
-            }
+            // The room-deadline transaction sets the same LOCAL limits before
+            // this body starts. The activation fence below still reapplies
+            // them before locking; this middle call added no protection.
             let result = try await operation(transaction)
             if let grants = authorizationGrants {
                 guard let recordedAt = authorizationRecordedAt else { throw V2DirectAuthorizationIntentError.corruptPersistence }
