@@ -2,6 +2,8 @@
 
 Audited against clean business commit `f1cdd78d6a21bf0ae23da627c0710c65115236aa`. This is an **entry and table inventory**, not evidence that an Actor or activation fence currently exists. `owner route` below means the existing `room_owner_routes`/ownerEpoch check; R1 must add activation token validation in the **same transaction**, with room lock held until commit. A table containing `room_id` is not automatically room authority; the last section records control/projection exceptions. All rows need integration and fault evidence before G4.
 
+The table preserves the original baseline findings. Current implementation routing and remaining verification are recorded below; a baseline description such as “no activation token” does not describe the integrated candidate.
+
 | ID / current production entry | Actual writer file and symbol → tables/effect | Existing guard; required lane/fence; owner |
 | --- | --- | --- |
 | W01 Gateway `handleSend`, send admission batch | `PostgresV2RoomWriteStore.accept`, `acceptAtomically`, `acceptInTransaction`, `persist*` → `rooms`, `room_admission`, `messages`, `room_events`, `message_media_references`, `message_mentions`, `content_review_jobs`, `shard_admission_pools`; direct also `direct_room_pairs`, `stranger_message_windows`, `direct_message_denials`, `room_timeline_activities`, `support_conversation_sessions`, `user_state_event_outbox`. | Existing owner route in `V2OwnerValidatedRoomWriteStore`/`requireSelectedOwners`; D1 command lane and every batched room token transaction fence; D1 owns residual 9,410-line store after C0 extraction. |
@@ -48,3 +50,39 @@ Audited against clean business commit `f1cdd78d6a21bf0ae23da627c0710c65115236aa`
 | `V2ControlPlaneHousekeepingWorker` control categories `media_scan_outbox`, `media_purge_outbox`, `public_profile_update_outbox`, `read_receipt_preference_propagation_outbox`, `push_wake_outbox`, `device_credential_operations`, `device_refresh_token_history`, `user_live_presence_leases`, user preference/relationship/session operation rows | These do not alter room authority. Its `roomOwned: true` classes **do**: `direct_room_operations`, `room_membership_operations`, `message_withdrawal_operations`, `moderation_operations`, `message_edit_operations`, `read_receipt_operations`, `message_reaction_operations`, `group_room_operations`, `room_pinned_message_operations`, `group_announcement_operations`, `group_permission_operations`, `group_role_operations`, `special_account_message_operations`, `room_member_nickname_operations`, plus `content_review_jobs`. Creation bootstrap operation cleanup needs a closed coordinator rule if no activation exists. |
 
 `V2GatewayDomainCommandHandler.handleWithoutTelemetry` is the current Gateway switch, `V2VaporProfilePresentationRoutes`, `V2VaporGroupInvitationRoutes`, and `V2VaporMediaEdgeRoutes` are the relevant HTTP entries. ServerApp and AccountApp construct the workers; see [file ownership](file-ownership.md). This ledger lists real writer symbols/tables from source inspection; it does not treat absence of a `V2Routed*` name as a coverage test.
+
+## 集成候选实际路径（a4eae3d，尚未关闭 G4）
+
+下表记录入口与事务边界的实际接线；“局部测试”不能替代最终进程故障矩阵。[组合证据](i1-composition-progress-evidence.md)、[查询与回执](d3-query-receipt-evidence.md)、[维护](d6-maintenance-evidence.md)、[真实进程恢复](g4-business-probe-evidence.md)分别说明已执行验证及限制。
+
+| Writer | 实际入口 → 房间能力 / handler → 事务资格 | 当前验证与待办 |
+| --- | --- | --- |
+| W01 | Gateway 新组合 → RoomRef messaging/send → Factory/GrantedSendBatchAdapter → scoped RoomWriteStore；最终业务事务验证完整 token | Factory、同/跨房间原子批、旧 token 与真实进程幂等恢复通过；多 lane 接线进行中 |
+| W02 | 同一 physical owner 共享信用池；Factory close/invalidate 清除 exact token 的 hints，业务事务仍验证 scope | 信用只代表容量；完整 refill/接管故障矩阵待收口 |
+| W03 | RoomRef messaging/edit → RoomMessagingExecutor → scoped MessageEditStore | mutation fence/replay 用例存在；最终候选 PG 回归待统一登记 |
+| W04 | RoomRef messaging/withdraw → RoomMessagingExecutor → scoped MessageWithdrawalStore | 同上 |
+| W05 | RoomRef messaging/reaction → RoomMessagingExecutor → scoped MessageReactionStore | 同上 |
+| W06 | 服务权限限定的 specialAccountAudit → Factory → RoomSpecialAccountAuditExecutor → scoped SpecialAccountMessagingStore.record | PG 旧 token 重放拒绝、继任审计去重通过。纠正最初入口假设：当前三个 App 均未构造旧 TrustedSpecialAccountMessagingService，调用者只在测试中；不存在已上线的特殊账号 Gateway/worker 入口 |
+| W07 | RoomRef administration/membership → AdministrationDomainExecutor → scoped RoomMembershipStore | 局部领域/fence 回归；多入口权限变化矩阵待统一登记 |
+| W08 | RoomRef administration/pinned → AdministrationDomainExecutor → scoped GroupCapabilitiesStore | 同上 |
+| W09 | RoomRef administration/announcement → 同一 scoped GroupCapabilitiesStore | 同上 |
+| W10 | RoomRef administration/role permissions/member role → 同一 scoped GroupCapabilitiesStore | 同上 |
+| W11 | 用户 moderation 或独立 trustedSafety 服务能力 → AdministrationDomainExecutor → scoped ModerationStore | 两类 principal 分开鉴权；可信内容版本检查保留 |
+| W12 | Account profile route → RoomRefAdministrationClient → scoped GroupNicknameStore | Account target 与 nickname PG 回归通过；实际跨进程 HTTP 待验收 |
+| W13 | Gateway RoomRefReadReceiptClient → Factory receipt → activation-validated ReadReceiptStore | 逐项旧 token/有效 sibling 合同已验证；恢复 Host 合批/admission 进行中 |
+| W14 | Gateway RoomCreationServices → ActorRoomCreationCoordinator → 固定 owner 的 BootstrapDomainExecutor | 封闭创建例外；普通 resolve 不创建未知房间 |
+| W15 | 同一 coordinator 的持久 group intent → 固定 roomID/manifest 的 bootstrap | schema 53 支持控制库 draft 指向另一 owner；双库恢复用例通过 |
+| W16 | Account invitation routes → ActorGroupInvitationClient/coordinator → RoomRef invitation | 控制面签发/目录意图与房间提交分离；邀请 PG 与 HTTP route 回归通过 |
+| W17 | 同一 Account adapter → RoomRef invitation submit/approve/reject/cancel → scoped invitation store | 保留 quota intent 与 approve/cancel 原子竞态；局部双库回归通过 |
+| W18 | Account invite/quota recovery 复用 ActorGroupInvitationClient；Gateway creation recovery 复用 creation coordinator | 后台恢复没有第二条普通房间写入口 |
+| W19 | Gateway ActorForwardingCoordinator → 两房间 reservation → ForwardPairDomainExecutor | pair 的操作 ID、接受及结果修复均验证两 token；局部同 owner PG 回归通过 |
+| W20 | pair replay 修复仍走相同 reservation/domain executor，纯观察与逐 pair 写分开 | 原先跨全部 source×target 的多房间修复不再由入口直接执行 |
+| W21 | ActorCrossOwnerForwardService → RoomRef source prepare → scoped export/source authorization | source 事实在房间 turn 内读取/写入；工作流重试保留原 ID |
+| W22 | DeliveryWorker → ActorForwardImportEndpoint → RoomRef target import → scoped inbox/RoomWriteStore | 认领租约属于工作流；目标接受与导入状态使用 target token；实际跨 owner PG 回归通过 |
+| W23 | media import/replay/terminal compaction 保留独立工作流租约；目标接受走 W22 | 媒体复制不长期占用 room turn；最终故障矩阵待收口 |
+| W24 | Account RoomRefMediaDownloadClient → fresh mediaAuthorization query；grant/session 仍是媒体工作流 | 实际双库正常/撤销/owner 变化/provider 跨期限 5 情景通过；完整 HTTP 待验收 |
+| W25 | ContentReviewWorker → RoomContentReviewSafetyApplicator → 服务授权的 RoomRef trustedSafety | 成功 apply 后才完成 job，内容版本在 room handler 检查 |
+| W26 | RoomActorMaintenanceWorker 候选扫描 → 每房间 maintenance/trim → fenced retention 事务 | PG floor/删除/热写竞态局部验证通过 |
+| W27 | 同 worker → maintenance/bookkeeping；ControlPlaneHousekeepingStore 使用 actorOwned 模式排除 room 类别 | 既有保留期与删除谓词保留；PG 维护回归通过 |
+| W28 | 投影压缩/GC 仍在派生投影域；Actor 不从投影恢复永久内容权限或 body 指针 | PG 压缩竞态通过；不把派生投影清理强行变成房间资格 |
+| W29 | watermark helper 仅在已 fenced membership 事务或封闭 creation 事务内调用 | 无独立裸初始化入口；最终候选与上述 W07/W14/W15 一并验收 |
