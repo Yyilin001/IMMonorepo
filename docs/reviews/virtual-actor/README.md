@@ -10,9 +10,9 @@
 | --- | --- | --- |
 | G0：Swift 6.4 / Vapor 5 / DistributedCluster 兼容 | [固定 revision 的 Linux Release 双进程探针及 ServerApp 构建通过](p0-evidence.md)；[vendor 帧上限与真实 mTLS 超限头重跑通过](p0-bounded-transport-evidence.md)，其他依赖 pin 不变 | 已通过兼容性探针 |
 | G1：可编译完整公共契约与文件所有权 | 新 ActorContracts/ActorRuntime 基础类型与两级容量限制已加入；[11 项基础测试通过](c0-foundation-evidence.md)，完整业务 DTO、executor/transport 端口与所有权仍在整理 | 未完成 |
-| G2：真实双 host + PostgreSQL 激活/接管/排空 | [真实 SQL activation fence 与 Host 单元测试](r1-d1-progress-evidence.md)通过；尚无完整双 host 业务组合证据 | 未完成 |
-| G3：真实远端 send/read 与领域合同 | [实际 Factory 与共享合批的 PostgreSQL 局部验证](i1-composition-progress-evidence.md)通过；远端业务组合尚未验收 | 未完成 |
-| G4：全部房间写者、查询和后台迁移 | [维护与投影压缩竞态验证](d6-maintenance-evidence.md)通过；App 生产入口及全部 writer 覆盖尚未完成 | 未完成 |
+| G2：真实双 host + PostgreSQL 激活/接管/排空 | [真实 SQL activation fence 与 Host 单元测试](r1-d1-progress-evidence.md)，以及[独立进程被杀后接管探针](g4-business-probe-evidence.md)通过；双 host 竞争及完整排空矩阵尚未验收 | 未完成 |
+| G3：真实远端 send/read 与领域合同 | [实际 Factory 与共享合批的 PostgreSQL 局部验证](i1-composition-progress-evidence.md)，以及[真实远端发送、日志、订阅与恢复](g4-business-probe-evidence.md)通过；完整领域合同尚未验收 | 未完成 |
+| G4：全部房间写者、查询和后台迁移 | Gateway 与 Account 生产入口已接入；[维护与投影压缩竞态验证](d6-maintenance-evidence.md)通过；全部 writer 覆盖及完整应用协议闭环仍在检查 | 未完成 |
 | G5：故障矩阵、Linux checks、相对性能 | [隔离工具/故障拓扑](v1-fault-harness.md)与[基线协议](v1-baseline-protocol.md)已合入，静态检查通过；尚未执行候选验收 | 未完成 |
 
 ## 核对出的基线差异

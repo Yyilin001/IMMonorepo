@@ -1,6 +1,6 @@
 # Room Actor 组合与真实数据库阶段证据
 
-本页记录已经执行的局部验证。Gateway App 已切换并编译，Account 接线、真实远端业务调用和 G2–G5 尚未验收。基线是 `f1cdd78d6a21bf0ae23da627c0710c65115236aa`，不使用原工作目录的 Distributed Actor 实验。
+本页记录已经执行的局部验证。Gateway 与 Account App 已切换并编译，真实远端业务探针已通过；G2–G5 的完整验收仍在进行。基线是 `f1cdd78d6a21bf0ae23da627c0710c65115236aa`，不使用原工作目录的 Distributed Actor 实验。
 
 ## 具体执行器与恢复
 
@@ -59,3 +59,11 @@ D6 的独立维护与压缩竞态证据见 [后台维护验证](d6-maintenance-e
 
 - 巨型消息存储唯一事务 wrapper 已传入 `useRoomDeadline: activationScope != nil`，因此标量发送、同库转发、跨库 import 各阶段与原子批次进入独立的有界事务。`/tmp/imv2-va-giant-sql-deadline-postgres.log` 退出 0：5 项真实 PG 写入/Factory 用例通过；同次 primitive suite 缺少其专用变量而跳过，不计入。随后用 `IMV2_ACTOR_TRANSACTION_DATABASE_URL` 与 `IMV2_ACTOR_TRANSACTION_TEST_DATABASE_IS_DISPOSABLE=1` 重跑，`/tmp/imv2-va-deployment-transaction.log` 的 primitive 1 项（内部 8 场景）实际通过。
 - [本地配置生成器与应用启动配置](i1-deployment-configuration.md)生成私有 CA、每节点独立密钥与固定拓扑。OpenSSL 校验两份叶证书通过；设置 `IMV2_ROOM_ACTOR_TEST_DEPLOYMENT_DIRECTORY` 后 Application 3/3 测试实际读取生成文件通过。没有运行或重建用户的本地 Compose 服务。
+
+## Account 与独立进程业务验证
+
+`31f03b3a` 将 Account 的邀请、昵称更新和消息媒体可见性检查接到 caller-only Actor node。邀请创建仍经过控制面意图；媒体下载在捕获、签发、认领、完成及返回 provider URL 前重新检查房间可见性、控制面设备状态与当前 owner route。非消息下载继续使用原有媒体服务。Operator 只处理独立工作流队列与控制面操作，因此没有创建空置的房间 Host。
+
+子代理独立 PostgreSQL 双库用例验证正常下载、provider 执行期间可见性撤销、设备撤销及 owner route 变化，4/4 通过；邀请恢复/审批竞态及 Vapor 路由用例通过。Account 与 Operator target build 均通过。日志保留在 `/Users/yyl/.codex/virtual-actor-builds/p0/i1-account-build-final.log`、`i1-operator-build.log`、`i1-invitation-test.log`、`i1-actor-invitation-test.log`、`i1-account-test-final.log`。这些结果没有包含真实 Account HTTP 进程的启动测试。
+
+`92f782c1` 的[真实业务进程探针](g4-business-probe-evidence.md)使用实际 Application/Factory、签名发现、私有 CA mTLS 和 PostgreSQL。调用进程保持存活，Host 被 SIGKILL 后等待数据库租约到期，再以新 incarnation/epoch 启动；同一 clientMessageID 重放得到同一 messageID，数据库仅一条消息，旧 token 新写被拒，订阅资格与日志水位恢复。原生执行退出 0；Linux 版本正在独立验证。
