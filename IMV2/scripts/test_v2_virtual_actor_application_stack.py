@@ -107,7 +107,9 @@ def main() -> int:
                 raise RuntimeError("prebuilt product source commit is unavailable locally")
             if subprocess.run(["git", "diff", "--quiet", binary_revision, "HEAD", "--", *PRODUCT_INPUTS],
                     cwd=ROOT).returncode != 0 or subprocess.run(
-                        ["git", "diff", "--quiet", "HEAD", "--", *PRODUCT_INPUTS], cwd=ROOT).returncode != 0:
+                        ["git", "diff", "--quiet", "HEAD", "--", *PRODUCT_INPUTS], cwd=ROOT).returncode != 0 or \
+                    subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "--",
+                        *PRODUCT_INPUTS], cwd=ROOT):
                 raise RuntimeError("prebuilt products differ from current business source")
             expected_hashes = metadata.get("products")
             if not isinstance(expected_hashes, dict) or any(
