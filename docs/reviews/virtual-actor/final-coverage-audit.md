@@ -9,7 +9,7 @@
 | 原差距 | 新证据与当前边界 |
 | --- | --- |
 | 当前合同/状态未登记 | [当前 Room Actor 合同](../room-virtual-actor-contract.md)已进入正式合同索引；系统地图、schema 53 与三个 App 的组合已登记。G1 的性能预算仍待实测冻结。 |
-| G3 Gateway 自身也是 Host | [caller-only Gateway Linux 应用栈](g3-caller-only-gateway-evidence.md)通过：Gateway 无 Host 身份，真正 TCP/TLS send/read 经过独立 Host，数据库 live lease 与独立 Host UUID 一致。Account 房间 HTTP 与 Operator 流程同时通过。性能单独验收。 |
+| G3 Gateway 自身也是 Host | [caller-only Gateway Linux 应用栈](g3-caller-only-gateway-evidence.md)通过：Gateway 无 Host 身份，真正 TCP/TLS send/read 经过独立 Host，数据库 live lease 与独立 Host UUID 一致。随后[真实远程合批](g3-remote-batch-evidence.md)也通过：两 TLS 连接、两房间的 8 请求合为 4 原子批，PG 连续序号、唯一消息/completion、原 ID 重放及非成员拒绝均验证；25 ms 为功能专用配置，非默认延迟性能结论。Account 房间 HTTP 与 Operator 流程同时通过。性能单独验收。 |
 | #1/#2/#8/#9/#11 的 Host 恢复/回收层次 | [实际 Host/Factory/PG 生命周期](g2-host-pg-lifecycle-evidence.md)覆盖 acquire 后恢复中失租、共享恢复只取消一方、恢复/激活限额及 idle 关闭竞争；不是两个 OS 进程全组合。 |
 | #18 只有 fake drain | [真实 Host/PG 慢事务 drain](g5-host-pg-drain-evidence.md)已通过：超时不早释 lease，SQL 完成后关闭与释放，旧清理不影响继任 token。[真实 Linux App busy SIGTERM](g2-real-app-sigterm-evidence.md)也已通过：Actor Host 的房间事务被 PG 行锁阻塞时接收 TERM，解锁后仅一次持久消息/完成记录，Host 正常退出并释放旧 lease，原 Gateway 保持在线且重启 Host 后原操作幂等重放。该 App 运行不是满队列、慢 SQL、待处理 batch 三者同场注入。 |
 | #15/#16 查询与 pair 交错 | [真实 Host/Factory/PG reservation](g2-pg-query-reservation-evidence.md)已通过：获准 B 恢复独立 flush、A 等待、对向 pair 统一次序、等待取消归还许可；实际 SQL 后注入 unknown 使两实例退役并以新 epoch 重放原消息。这里的 unknown 明确是测试注入，真正成功 COMMIT 丢 ACK 由原 #7/#13 的 wire proxy 独立验证。 |
