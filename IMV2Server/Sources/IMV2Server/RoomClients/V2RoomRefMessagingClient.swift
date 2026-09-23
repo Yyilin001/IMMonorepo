@@ -1,0 +1,63 @@
+import IMV2ActorContracts
+import IMV2ActorRuntime
+import IMV2Core
+
+/// The transport edge preserves client operation identities. Acceptance IDs,
+/// server time, capacity policy and all SQL are owned by the room executor.
+public struct V2RoomRefMessagingClient: Sendable {
+    typealias Invoke = @Sendable (V2RoomRequest, UserID, ContinuousClock.Instant) async throws -> V2RoomResponse
+    private let invoke: Invoke
+    private let callTimeout: V2ActorMilliseconds
+
+    public init(directory: V2RoomDirectory, callTimeout: V2ActorMilliseconds) {
+        self.init(callTimeout: callTimeout) { request, user, deadline in
+            try await directory.room(request.roomID).call(request, principal: .user(user), deadline: deadline)
+        }
+    }
+
+    init(callTimeout: V2ActorMilliseconds, invoke: @escaping Invoke) {
+        self.callTimeout = callTimeout
+        self.invoke = invoke
+    }
+
+    // Database admission belongs to the physical host, not the waiting gateway.
+    public var managesForegroundWriteAdmission: Bool { true }
+    // Gateway may publish its post-commit foreground hint. The durable outbox
+    // remains authoritative even when this hint or the reply is lost.
+    public var publishesCommittedGroupEvents: Bool { false }
+
+    public func send(_ request: V2AuthenticatedSendMessage) async throws -> V2SendMessageOutcome {
+        let response = try await call(.send(.init(request)), actor: request.actorUserID)
+        guard case .send(let value) = response else { throw V2RoomCallFailure.outcomeUnknown }
+        return try value.toDomain()
+    }
+
+    public func edit(_ request: V2AuthenticatedMessageEdit) async throws -> V2MessageEditOutcome {
+        let response = try await call(.edit(.init(request)), actor: request.actorUserID)
+        guard case .edit(let value) = response else { throw V2RoomCallFailure.outcomeUnknown }
+        return try value.toDomain()
+    }
+
+    public func withdraw(_ request: V2AuthenticatedMessageWithdrawal) async throws -> V2MessageWithdrawalOutcome {
+        let response = try await call(.withdraw(.init(request)), actor: request.actorUserID)
+        guard case .withdraw(let value) = response else { throw V2RoomCallFailure.outcomeUnknown }
+        return try value.toDomain()
+    }
+
+    public func change(_ request: V2AuthenticatedMessageReaction) async throws -> V2MessageReactionOutcome {
+        let response = try await call(.reaction(.init(request)), actor: request.actorUserID)
+        guard case .reaction(let value) = response else { throw V2RoomCallFailure.outcomeUnknown }
+        return try value.toDomain()
+    }
+
+    private func call(_ command: V2RoomMessagingCommand, actor: UserID) async throws -> V2RoomMessagingResult {
+        guard !Task.isCancelled else { throw V2RoomCallFailure.notAccepted(.cancelled) }
+        let response = try await invoke(.messaging(command), actor, .now + callTimeout.duration)
+        guard case .messaging(let result) = response else { throw V2RoomCallFailure.outcomeUnknown }
+        if case .failure(let failure) = result { throw failure.domainError() }
+        return result
+    }
+}
+
+extension V2RoomRefMessagingClient: V2GatewaySendMessageHandling,
+    V2GatewayMessageEditHandling, V2GatewayMessageWithdrawalHandling, V2GatewayMessageReactionHandling {}

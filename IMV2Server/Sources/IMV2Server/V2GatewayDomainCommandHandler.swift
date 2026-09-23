@@ -83,6 +83,14 @@ private func v2ProtobufVarintByteCount(_ value: UInt64) -> Int {
     return count
 }
 
+protocol V2GatewaySendMessageHandling: Sendable {
+    var managesForegroundWriteAdmission: Bool { get }
+    var publishesCommittedGroupEvents: Bool { get }
+    func send(_ request: V2AuthenticatedSendMessage) async throws -> V2SendMessageOutcome
+}
+
+extension V2SendMessageService: V2GatewaySendMessageHandling {}
+
 protocol V2GatewayRoomMembershipHandling: Sendable {
     func change(_ request: V2AuthenticatedMembershipChange) async throws -> V2RoomMembershipChangeOutcome
 }
@@ -212,7 +220,7 @@ extension V2GroupCapabilitiesService: V2GatewayGroupCapabilitiesHandling {}
 public struct V2GatewayDomainCommandHandler:
     V2GatewayCommandHandler,
     V2PreparedGroupEventCommandHandling {
-    private let sendMessage: V2SendMessageService
+    private let sendMessage: any V2GatewaySendMessageHandling
     private let membership: any V2GatewayRoomMembershipHandling
     private let withdrawal: any V2GatewayMessageWithdrawalHandling
     private let reaction: any V2GatewayMessageReactionHandling
@@ -276,7 +284,7 @@ public struct V2GatewayDomainCommandHandler:
     }
 
     init(
-        sendMessage: V2SendMessageService,
+        sendMessage: any V2GatewaySendMessageHandling,
         membershipHandler: any V2GatewayRoomMembershipHandling,
         withdrawalHandler: any V2GatewayMessageWithdrawalHandling,
         reactionHandler: any V2GatewayMessageReactionHandling,
