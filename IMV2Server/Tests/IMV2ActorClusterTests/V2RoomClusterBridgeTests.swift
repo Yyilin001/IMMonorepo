@@ -255,6 +255,44 @@ struct V2RoomClusterBridgeTests {
         try await fixture.system.shutdown().wait()
     }
 
+    @Test("replacement preserves a dispatched old-incarnation signed reply until completion")
+    func replacementDrainsOldRPC() async throws {
+        let gate = RestoreGate()
+        let fixture = try await Fixture(restoreGate: gate)
+        let caller = V2RoomClusterClient(system: fixture.system, signer: fixture.client,
+                                         trust: fixture.trust, limits: fixture.limits,
+                                         configuration: fixture.configuration)
+        try await caller.register(.init(
+            identity: fixture.identity, endpointID: fixture.endpoint.id,
+            address: "127.0.0.1", port: fixture.port,
+            accessibleShardIDs: ["allowed"], availableRooms: 2, isHealthy: true
+        ))
+        let inFlight = Task {
+            try await caller.activate(on: fixture.identity, roomID: fixture.room,
+                                      owner: fixture.owner, deadline: .now + .seconds(3))
+        }
+        try await gate.waitForEntry()
+        let replacement = V2ActorHostIdentity(hostID: fixture.identity.hostID,
+                                               incarnationID: UUID())
+        try await caller.installDiscovered(.init(
+            identity: replacement, endpointID: fixture.endpoint.id,
+            address: "127.0.0.1", port: fixture.port,
+            accessibleShardIDs: ["allowed"], availableRooms: 2, isHealthy: true
+        ))
+        #expect(await caller.retiredDescriptorCount() == 1)
+        await gate.open()
+        guard case .ready(let token) = try await inFlight.value else {
+            Issue.record("the old signed reply was discarded"); return
+        }
+        #expect(token.host == fixture.identity)
+        try await waitUntil { await caller.retiredDescriptorCount() == 0 }
+        await caller.stop()
+        #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)
+        await fixture.inbound.stop()
+        #expect(await caller.quiesce(deadline: .now + .seconds(3)))
+        try await fixture.system.shutdown().wait()
+    }
+
     private func waitUntil(_ condition: @escaping @Sendable () async -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(2)
         while !(await condition()) {

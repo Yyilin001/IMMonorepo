@@ -51,6 +51,11 @@ public actor V2RoomClusterNode {
     private var system: ClusterSystem?
     private var inbound: V2RoomClusterInboundService?
     private var endpoint: V2RoomHostEndpoint?
+    private var discoveryBeacon: V2RoomDiscoveryBeacon?
+    private var discoveryPublisherState: V2RoomDiscoveryPublisherState?
+    private var discoveries: [V2RoomClusterDiscovery] = []
+    private var discoveryClientIDs: Set<ObjectIdentifier> = []
+    private var acceptingDiscoveries = true
     private var clients: [V2RoomClusterClient] = []
 
     public init(configuration: V2RoomClusterNodeConfiguration, identity: V2ActorHostIdentity,
@@ -69,9 +74,14 @@ public actor V2RoomClusterNode {
 
     public func start() async throws -> V2RoomClusterHostDescriptor {
         guard system == nil else { throw V2ActorAuthenticationError.invalidConfiguration }
+        acceptingDiscoveries = true
         var settings = ClusterSystemSettings(name: configuration.name, host: configuration.host,
                                              port: configuration.port, tls: configuration.tls)
         settings.threadPoolSize = configuration.threadPoolSize
+        // Membership is discovery only. A peer timeout must not make this
+        // process relinquish (or claim) a DB-fenced room activation.
+        settings.downingStrategy = .none
+        settings.onDownAction = .none
         // The distributed Codable serializer base64-encodes SignedPacket.body
         // again. Twice the signed-body ceiling leaves bounded room for that
         // expansion, ActorID/call metadata and protobuf framing.
@@ -97,30 +107,63 @@ public actor V2RoomClusterNode {
         self.endpoint = endpoint
         await host.start()
         await inbound.startWatching()
-        return try V2RoomClusterHostDescriptor(
+        let descriptor = try V2RoomClusterHostDescriptor(
             identity: identity, endpointID: endpoint.id,
             address: configuration.host, port: configuration.port,
             accessibleShardIDs: configuration.allowedShards,
             availableRooms: runtimeConfiguration.maximumActiveRooms, isHealthy: true
         )
+        let publisherState = V2RoomDiscoveryPublisherState()
+        discoveryPublisherState = publisherState
+        let beacon = V2RoomDiscoveryBeacon(actorSystem: system, descriptor: descriptor,
+                                            signer: signer, state: publisherState)
+        discoveryBeacon = beacon
+        await system.receptionist.checkIn(beacon, with: V2RoomDiscoveryBeacon.key(for: identity.hostID))
+        return descriptor
     }
 
     public func makeClient(signer: V2ActorSigningIdentity,
                            trust: V2ActorTrustStore,
                            limits: V2ActorAuthenticationLimits) throws -> V2RoomClusterClient {
-        guard let system else { throw V2RoomCallFailure.notAccepted(.notReady) }
+        guard let system, acceptingDiscoveries else {
+            throw V2RoomCallFailure.notAccepted(.notReady)
+        }
+        guard clients.count < 64 else { throw V2RoomCallFailure.notAccepted(.overloaded) }
         let client = V2RoomClusterClient(system: system, signer: signer, trust: trust,
                                          limits: limits, configuration: runtimeConfiguration)
         clients.append(client)
         return client
     }
 
+    /// Starts a bounded, signed watcher for the configured physical hosts.
+    /// The caller passes a client made by this node and retains its logical
+    /// RoomDirectory separately from discovery state.
+    public func startDiscovery(client: V2RoomClusterClient,
+                               configuration: V2RoomDiscoveryConfiguration) async throws -> V2RoomClusterDiscovery {
+        let clientID = ObjectIdentifier(client)
+        guard let system, discoveryBeacon != nil, acceptingDiscoveries,
+              clients.contains(where: { $0 === client }),
+              !discoveryClientIDs.contains(clientID), discoveries.count < 64 else {
+            throw V2RoomCallFailure.notAccepted(.notReady)
+        }
+        let discovery = V2RoomClusterDiscovery(system: system, client: client,
+                                                trust: trust, configuration: configuration)
+        discoveries.append(discovery)
+        discoveryClientIDs.insert(clientID)
+        await discovery.start()
+        if !acceptingDiscoveries { await discovery.stop() }
+        return discovery
+    }
+
     public func readiness() async -> Bool {
-        guard system != nil, inbound != nil, endpoint != nil else { return false }
+        guard system != nil, inbound != nil, endpoint != nil, discoveryBeacon != nil else { return false }
         return await host.snapshot().accepting
     }
 
     public func drain(deadline: ContinuousClock.Instant) async -> V2RoomActivationDrainResult {
+        acceptingDiscoveries = false
+        for discovery in discoveries { await discovery.stop() }
+        await discoveryPublisherState?.beginDrain()
         await host.beginDrain()
         for client in clients { await client.stop() }
         return await host.drain(deadline: deadline)
@@ -131,6 +174,11 @@ public actor V2RoomClusterNode {
     public func stop(deadline: ContinuousClock.Instant) async throws -> V2RoomActivationDrainResult {
         let result = await drain(deadline: deadline)
         guard result.completed else { return result }
+        for discovery in discoveries {
+            guard await discovery.quiesce(deadline: deadline) else {
+                throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
+            }
+        }
         guard await inbound?.quiesce(deadline: deadline) ?? true else {
             throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
         }
@@ -140,9 +188,13 @@ public actor V2RoomClusterNode {
             }
         }
         clients.removeAll()
+        discoveries.removeAll()
+        discoveryClientIDs.removeAll()
         await inbound?.stop()
         inbound = nil
         endpoint = nil
+        discoveryBeacon = nil
+        discoveryPublisherState = nil
         if let system { try await system.shutdown().wait() }
         system = nil
         return result

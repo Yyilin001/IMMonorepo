@@ -39,6 +39,9 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
     private let configuration: V2RoomRuntimeConfiguration
     private let callerIncarnation: UUID
     private var descriptors: [V2ActorHostIdentity: V2RoomClusterHostDescriptor] = [:]
+    private var retiredDescriptors: [V2ActorHostIdentity: V2RoomClusterHostDescriptor] = [:]
+    private var suspendedHosts: Set<V2ActorHostIdentity> = []
+    private var activeExchangesByHost: [V2ActorHostIdentity: Int] = [:]
     private var sessions: [V2ActorHostIdentity: Session] = [:]
     private var handshakes: [V2ActorHostIdentity: Task<Session, any Error>] = [:]
     private var handshakeIDs: [V2ActorHostIdentity: UUID] = [:]
@@ -49,6 +52,7 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
     private var roomOrder: [V2RoomActivationToken] = []
     private var pinnedReservations: [V2RoomActivationToken: [UUID: ContinuousClock.Instant]] = [:]
     private var pendingReservationSlots: Set<UUID> = []
+    private var pendingReservationHosts: [UUID: V2ActorHostIdentity] = [:]
     private var uncertainReservationSlots: [UUID: ContinuousClock.Instant] = [:]
     private var dispatchedCalls: [UUID: DispatchedCall] = [:]
     private var activeExchanges = 0
@@ -66,29 +70,44 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         self.callerIncarnation = callerIncarnation
     }
 
-    /// A restart publishes a new incarnation and ActorID. Old sessions and
-    /// physical refs are removed, then Cluster is explicitly joined again.
+    /// A restart publishes a new incarnation and ActorID. Existing dispatched
+    /// calls and granted reservations keep their old identity until settled.
     public func register(_ descriptor: V2RoomClusterHostDescriptor) throws {
+        try installDiscovered(descriptor)
+        system.cluster.join(host: descriptor.address, port: descriptor.port)
+    }
+
+    public func installDiscovered(_ descriptor: V2RoomClusterHostDescriptor) throws {
+        guard accepting else { throw V2RoomCallFailure.notAccepted(.retired) }
+        pruneReservations()
+        if let current = descriptors[descriptor.identity] {
+            guard current.endpointID == descriptor.endpointID else {
+                // A new physical ActorID requires a new host incarnation.
+                throw V2RoomCallFailure.notAccepted(.staleActivation)
+            }
+            descriptors[descriptor.identity] = descriptor
+            if descriptor.isHealthy { suspendedHosts.remove(descriptor.identity) }
+            return
+        }
         let previous = descriptors.keys.filter { $0.hostID == descriptor.identity.hostID }
         guard descriptors.count - previous.count < limits.maximumSessions else {
             throw V2RoomCallFailure.notAccepted(.overloaded)
         }
         for old in previous {
-            descriptors.removeValue(forKey: old)
-            sessions.removeValue(forKey: old)
-            handshakes.removeValue(forKey: old)?.cancel()
-            handshakeIDs.removeValue(forKey: old)
+            let oldDescriptor = descriptors.removeValue(forKey: old)
+            suspendedHosts.remove(old)
+            // Cancellation need not stop a native hello. Keep its Task in
+            // `handshakes` until finishHandshake observes the real result.
+            handshakes[old]?.cancel()
             failHandshakeWaiters(host: old, reason: .staleActivation)
-            for token in roomActors.keys.filter({ $0.host == old }) {
-                roomActors.removeValue(forKey: token)
-                pinnedReservations.removeValue(forKey: token)
+            if let oldDescriptor, hasRetiredWork(old) {
+                retiredDescriptors[old] = oldDescriptor
             }
-            roomOrder.removeAll { $0.host == old }
-            if old != descriptor.identity { descriptorGenerations.removeValue(forKey: old) }
+            descriptorGenerations[old, default: 0] &+= 1
+            pruneRetiredDescriptor(old)
         }
         descriptorGenerations[descriptor.identity, default: 0] &+= 1
         descriptors[descriptor.identity] = descriptor
-        system.cluster.join(host: descriptor.address, port: descriptor.port)
     }
 
     public func candidates(for owner: V2RoomDataOwner) async throws -> [V2RoomHostCandidate] {
@@ -126,10 +145,14 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
 
     private func clearStoppedState() {
         sessions.removeAll()
+        retiredDescriptors.removeAll()
+        descriptors.removeAll()
+        suspendedHosts.removeAll()
         roomActors.removeAll()
         roomOrder.removeAll()
         pinnedReservations.removeAll()
         pendingReservationSlots.removeAll()
+        pendingReservationHosts.removeAll()
         uncertainReservationSlots.removeAll()
     }
 
@@ -145,6 +168,7 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
     public func sessionCount() -> Int { sessions.count }
     public func handshakeWaiterSnapshot() -> Int { handshakeWaiterCount }
     public func physicalReferenceCount() -> Int { roomActors.count }
+    public func retiredDescriptorCount() -> Int { retiredDescriptors.count }
     public func dispatchedCallCount() -> Int { dispatchedCalls.count }
     func reservationSlotSnapshot() -> Int {
         pruneReservations()
@@ -220,8 +244,11 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         }
         let slot = UUID()
         pendingReservationSlots.insert(slot)
+        pendingReservationHosts[slot] = token.host
         defer {
             pendingReservationSlots.remove(slot)
+            pendingReservationHosts.removeValue(forKey: slot)
+            pruneRetiredDescriptor(token.host)
             finishStopIfIdle()
         }
         let response: V2ActorRPCResponse
@@ -295,15 +322,23 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
     private func exchange(_ request: V2ActorRPCRequest, on host: V2ActorHostIdentity,
                           principal: V2ActorCallPrincipal, deadline: ContinuousClock.Instant,
                           roomToken: V2RoomActivationToken?) async throws -> V2ActorRPCResponse {
-        guard accepting, let descriptor = descriptors[host] else {
+        guard accepting, !suspendedHosts.contains(host),
+              let descriptor = descriptors[host] ?? retiredDescriptor(for: request, host: host) else {
             throw V2RoomCallFailure.notAccepted(.unavailable)
         }
         guard activeExchanges < configuration.maximumActivationWaitersPerHost else {
             throw V2RoomCallFailure.notAccepted(.overloaded)
         }
         activeExchanges += 1
+        activeExchangesByHost[host, default: 0] += 1
         defer {
             activeExchanges -= 1
+            if activeExchangesByHost[host] == 1 {
+                activeExchangesByHost.removeValue(forKey: host)
+            } else {
+                activeExchangesByHost[host, default: 1] -= 1
+            }
+            pruneRetiredDescriptor(host)
             finishStopIfIdle()
         }
         let generation = descriptorGenerations[host, default: 0]
@@ -334,12 +369,14 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
                 guard let actor = roomActors[roomToken] else {
                     throw V2RoomCallFailure.notAccepted(.notReady)
                 }
-                responsePacket = try await boundedDispatch(deadline: deadline, request: request) {
+                responsePacket = try await boundedDispatch(deadline: deadline, request: request,
+                                                            host: host) {
                     try await RemoteCall.with(timeout: timeout) { try await actor.exchange(packet) }
                 }
             } else {
                 let endpoint = try V2RoomHostEndpoint.resolve(id: descriptor.endpointID, using: system)
-                responsePacket = try await boundedDispatch(deadline: deadline, request: request) {
+                responsePacket = try await boundedDispatch(deadline: deadline, request: request,
+                                                            host: host) {
                     try await RemoteCall.with(timeout: timeout) { try await endpoint.exchange(packet) }
                 }
             }
@@ -352,9 +389,9 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         do {
             let response = try trust.verifyReply(responsePacket, for: call,
                                                  maximumBytes: limits.maximumReplyBytes)
-            guard accepting, descriptorGenerations[host] == generation else {
-                throw V2RoomCallFailure.outcomeUnknown
-            }
+            // A replacement does not invalidate an already dispatched call's
+            // correctly signed reply. Its old token cannot authorise a new
+            // activation, but the caller must receive its actual outcome.
             return response
         }
         catch let failure as V2RoomCallFailure { throw failure }
@@ -370,6 +407,7 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
 
     private func boundedDispatch(
         deadline: ContinuousClock.Instant, request: V2ActorRPCRequest,
+        host: V2ActorHostIdentity,
         operation: @escaping @Sendable () async throws -> V2ActorSignedPacket
     ) async throws -> V2ActorSignedPacket {
         guard accepting, ContinuousClock.now < deadline else {
@@ -395,7 +433,7 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
                     catch { return }
                     await self?.timeoutDispatch(id: id)
                 }
-                dispatchedCalls[id] = .init(continuation: continuation, timer: timer,
+                dispatchedCalls[id] = .init(host: host, continuation: continuation, timer: timer,
                                              timeoutFailure: failure)
                 Task { [weak self] in
                     let result = await operationTask.result
@@ -418,6 +456,7 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         guard let call = dispatchedCalls.removeValue(forKey: id) else { return }
         call.timer.cancel()
         call.continuation?.resume(with: result)
+        pruneRetiredDescriptor(call.host)
         finishStopIfIdle()
     }
 
@@ -550,6 +589,7 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         if pinnedReservations[grant.token]?.isEmpty == true {
             pinnedReservations.removeValue(forKey: grant.token)
         }
+        pruneRetiredDescriptor(grant.token.host)
     }
 
     private func pruneReservations() {
@@ -559,6 +599,57 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
             let live = reservations.filter { $0.value > now }
             return live.isEmpty ? nil : live
         }
+        for host in Array(retiredDescriptors.keys) { pruneRetiredDescriptor(host) }
+    }
+
+    private func retiredDescriptor(for request: V2ActorRPCRequest,
+                                   host: V2ActorHostIdentity) -> V2RoomClusterHostDescriptor? {
+        guard let descriptor = retiredDescriptors[host] else { return nil }
+        let token: V2RoomActivationToken
+        switch request {
+        case .invoke(let requested, _): token = requested
+        case .markDispatched(let grant), .abortReservation(let grant),
+             .finishReservation(let grant, _): token = grant.token
+        default: return nil
+        }
+        guard pinnedReservations[token]?.isEmpty == false else { return nil }
+        return descriptor
+    }
+
+    private func hasRetiredWork(_ host: V2ActorHostIdentity) -> Bool {
+        activeExchangesByHost[host, default: 0] > 0 ||
+        handshakes[host] != nil ||
+        dispatchedCalls.values.contains(where: { $0.host == host }) ||
+        pendingReservationHosts.values.contains(host) ||
+        pinnedReservations.keys.contains(where: { $0.host == host })
+    }
+
+    /// The discovery owner may down an old exact Cluster.Node only after its
+    /// native/remote calls, hello, and reservation grants have settled.
+    public func retiredIdentityIsDrained(_ host: V2ActorHostIdentity) -> Bool {
+        pruneReservations()
+        return descriptors[host] == nil && !hasRetiredWork(host)
+    }
+
+    /// Atomically prevents a new RPC from racing the discovery owner's exact
+    /// old-Node retirement. A later authenticated advertisement can reopen it.
+    public func suspendUnreachableHost(_ host: V2ActorHostIdentity) -> Bool {
+        pruneReservations()
+        guard descriptors[host] != nil, !hasRetiredWork(host) else { return false }
+        suspendedHosts.insert(host)
+        return true
+    }
+
+    private func pruneRetiredDescriptor(_ host: V2ActorHostIdentity) {
+        guard retiredDescriptors[host] != nil, !hasRetiredWork(host) else { return }
+        retiredDescriptors.removeValue(forKey: host)
+        suspendedHosts.remove(host)
+        sessions.removeValue(forKey: host)
+        descriptorGenerations.removeValue(forKey: host)
+        for token in Array(roomActors.keys) where token.host == host {
+            roomActors.removeValue(forKey: token)
+        }
+        roomOrder.removeAll { $0.host == host }
     }
 
     private func finishHandshake(host: V2ActorHostIdentity, id: UUID,
@@ -579,6 +670,7 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
             waiter.timer.cancel()
             waiter.continuation.resume(with: delivered)
         }
+        pruneRetiredDescriptor(host)
         finishStopIfIdle()
     }
 
@@ -613,6 +705,7 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
     }
 
     private struct DispatchedCall {
+        let host: V2ActorHostIdentity
         var continuation: CheckedContinuation<V2ActorSignedPacket, any Error>?
         let timer: Task<Void, Never>
         let timeoutFailure: V2RoomCallFailure
