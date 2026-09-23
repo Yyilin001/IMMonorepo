@@ -87,17 +87,20 @@ private func v2PostgresFailureDisposition(sqlState: String) -> V2PostgresFailure
 func v2WithPostgresTransactionRetry<Result: Sendable>(
     database: any Database,
     maximumRetryCount: Int = 2,
+    classifyCommitFailure: Bool = false,
     _ operation: @escaping @Sendable (any Database) async throws -> Result
 ) async throws -> Result {
     precondition(maximumRetryCount >= 0)
     var retryCount = 0
     while true {
         try Task.checkCancellation()
+        let attempt = V2RoomTransactionAttempt()
         do {
-            return try await database.transaction(operation)
-        } catch is CancellationError {
-            throw CancellationError()
+            return try await database.transaction { transaction in
+                try await attempt.body { try await operation(transaction) }
+            }
         } catch {
+            let error = classifyCommitFailure ? attempt.classify(error) : error
             guard v2PostgresFailureDisposition(error) == .retryTransaction,
                   retryCount < maximumRetryCount
             else { throw error }
