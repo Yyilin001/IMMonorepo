@@ -176,6 +176,9 @@ enum VirtualActorCompatibilityProbe {
         tls.certificateVerification = .fullVerification
         tls.trustRoots = .certificates([ca])
         var settings = ClusterSystemSettings(name: "imv2-va-p0", host: host, port: port, tls: tls)
+        // Keep the transport envelope larger than the 64 KiB application
+        // request while making the real TLS header-only rejection observable.
+        settings.maximumInboundFrameBytes = try .init(bytes: 1_048_576)
         settings.threadPoolSize = 2
         settings.serialization.registerInbound(ProbeDomainError.self)
         settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [ProbeDomainError.self])

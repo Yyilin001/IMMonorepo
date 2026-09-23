@@ -66,6 +66,13 @@ export VA_ACTOR_ID_FILE=actor-old.json
 "${compose[@]}" up -d host
 wait_file "$VA_EVIDENCE_DIR/actor-old.json"
 docker exec imv2-va-p0-host python3 -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:19080/health", timeout=5).read().decode())'
+docker run --rm --name imv2-va-p0-oversized-header --network imv2-va-p0_default \
+  -v "$VA_WORKTREE:/repo:ro" -v "$VA_EVIDENCE_DIR:/evidence:ro" \
+  "$VA_SWIFT_IMAGE" python3 /repo/IMV2Server/Tests/VirtualActorCompatibilityProbe/oversized-tls-header.py \
+  --host imv2-va-p0-host --port 19081 --evidence /evidence --maximum-frame-bytes 1048576 \
+  > "$VA_EVIDENCE_DIR/oversized-tls-header.log" 2>&1
+rg -q 'TLS_ESTABLISHED' "$VA_EVIDENCE_DIR/oversized-tls-header.log"
+rg -q 'OVERSIZED_HEADER_CLOSED' "$VA_EVIDENCE_DIR/oversized-tls-header.log"
 docker run --rm --name imv2-va-p0-badclient --network imv2-va-p0_default \
   -v "$VA_BUILD_DIR:/build:ro" -v "$VA_EVIDENCE_DIR:/evidence:ro" \
   -e VA_CERT_NAME=client -e VA_CA_FILE=rogue-ca.pem -e VA_EVIDENCE_DIR=/evidence \
