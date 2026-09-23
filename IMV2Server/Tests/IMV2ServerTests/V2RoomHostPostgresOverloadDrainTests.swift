@@ -146,6 +146,12 @@ struct V2RoomHostPostgresOverloadDrainTests {
         try await withOverloadDatabase { database, sql, fixture in
             let secondRoom = RoomID(uuid: UUID())
             try await overloadSeedRoom(secondRoom, sql: sql)
+            // Production atomic group append is the large-room partition.
+            // Standard group rooms intentionally take the scalar path.
+            try await sql.raw("""
+                UPDATE im_v2.rooms SET capacity_class = 'large'
+                WHERE room_id IN (\(bind: roomUUID), \(bind: secondRoom.uuidValue!))
+                """).run()
             let leases = PostgresV2RoomActivationStore(database: database)
             let hosted = try overloadHost(database: database, fixture: fixture, leases: leases,
                 configuration: overloadConfiguration(batchWaitMilliseconds: 800),
@@ -211,7 +217,10 @@ private func overloadHost(database: any Database,
     leases: PostgresV2RoomActivationStore,
     configuration: V2RoomRuntimeConfiguration,
     batchDelay: Duration) throws -> OverloadHosted {
-    let writes = PostgresV2RoomWriteStore(database: database)
+    let writes = PostgresV2RoomWriteStore(database: database,
+        strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
+        contentReviewMode: .disabled,
+        shardAdmissionCommandCreditPool: .init(database: database, batchSize: 4))
     let batcher = V2SendMessageAdmissionBatcher(store: writes,
         configuration: .init(maximumBatchSize: 8, maximumDelay: batchDelay),
         actorGrantedStore: writes)
