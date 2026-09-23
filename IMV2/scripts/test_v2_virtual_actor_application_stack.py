@@ -32,6 +32,286 @@ PRODUCT_INPUTS = ["IMV2Server/Sources", "IMV2Server/Vendor", "IMV2Server/Package
                   "IMV2Server/Package.resolved", "IMV2Core", "IMV2Compression", "IMV2/sql"]
 
 
+def remote_batch_smoke(*, root: Path, run: Path, private: Path,
+                       compose: list[str], environment: dict[str, str],
+                       barrier: Path, actor_host_id: str,
+                       evidence: dict[str, object]) -> None:
+    """Prove atomic direct append through two real TLS Gateway connections."""
+    fixture = private / "remote-batch-fixture"
+    release = private / "remote-batch-release"
+    smoke_environment = dict(environment)
+    smoke_environment.update({"V2_LOCAL_REMOTE_BATCH_FIXTURE_PATH": str(fixture),
+                              "V2_LOCAL_REMOTE_BATCH_RELEASE_PATH": str(release)})
+    smoke: subprocess.Popen[str] | None = None
+    active: dict[str, subprocess.Popen[str]] = {}
+
+    def psql(query: str) -> str:
+        return subprocess.check_output(compose + ["exec", "-T", "postgres", "psql", "-X",
+            "-v", "ON_ERROR_STOP=1", "-U", "im_v2", "-d", "im_v2", "-tA", "-F", "|", "-c", query],
+            cwd=root, env=environment, text=True, stderr=subprocess.DEVNULL, timeout=15).strip()
+
+    def await_stage(check, *, seconds: float, stage: str):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            value = check()
+            if value:
+                return value
+            time.sleep(0.01)
+        raise RuntimeError("remote-batch stage timed out: " + stage)
+
+    def metrics() -> dict[str, int]:
+        # Metrics are intentionally loopback-only in the Actor Host. Bash's
+        # TCP redirection avoids assuming curl/python in the release image.
+        response = subprocess.check_output(compose + ["exec", "-T", "actor-host", "bash", "-c",
+            'exec 3<>/dev/tcp/127.0.0.1/9464; printf "GET /metrics HTTP/1.0\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n" >&3; cat <&3'],
+            cwd=root, env=environment, text=True, stderr=subprocess.DEVNULL, timeout=10)
+        if "200 OK" not in response.splitlines()[0]:
+            raise RuntimeError("Actor Host loopback metrics response was not OK")
+        names = {
+            "batches": 'im_v2_direct_room_log_append_atomic_batches_total{outcome="committed"}',
+            "requests": 'im_v2_direct_room_log_append_atomic_requests_total{outcome="committed"}',
+        }
+        result = {}
+        for key, name in names.items():
+            values = [line.split() for line in response.splitlines() if line.startswith(name + " ")]
+            if len(values) != 1 or len(values[0]) != 2:
+                raise RuntimeError("Actor Host committed batch metric is missing or ambiguous")
+            result[key] = int(values[0][1])
+        return result
+
+    def stop_remote(name: str) -> None:
+        pid_file = "/run/im-v2-remote-batch/" + name + ".pid"
+        script = ('path=$1; if [ -r "$path" ]; then pid=$(cat "$path"); '
+            'case "$pid" in ""|*[!0-9]*) exit 2;; esac; '
+            'if [ -r "/proc/$pid/cmdline" ] && '
+            'grep -aq IMV2LocalGatewayProbe "/proc/$pid/cmdline"; '
+            'then kill -TERM "$pid" 2>/dev/null || true; fi; fi; rm -f "$path"')
+        subprocess.run(compose + ["exec", "-T", "gateway", "sh", "-c", script,
+            "remote-batch-stop", pid_file], cwd=root, env=environment,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=True)
+
+    def run_probe(name: str, mode: str, token: str, device: str,
+                  room: str, operation: str, *, ready: str | None = None,
+                  gate: str | None = None) -> subprocess.Popen[str]:
+        values = {"IM_V2_GATEWAY_PROBE_MODE": mode,
+            "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN": token,
+            "IM_V2_GATEWAY_PROBE_DEVICE_ID": device,
+            "IM_V2_GATEWAY_PROBE_EXPECTED_ROOM_ID": room,
+            "IM_V2_GATEWAY_PROBE_CLIENT_MESSAGE_ID": operation}
+        if ready is not None and gate is not None:
+            values.update({"IM_V2_GATEWAY_PROBE_BATCH_READY_PATH": ready,
+                           "IM_V2_GATEWAY_PROBE_BATCH_RELEASE_PATH": gate})
+        flags = [item for key, value in values.items() for item in ("--env", key + "=" + value)]
+        command = ('printf "%s\\n" "$$" > "$1"; '
+                   'exec /workspace/IMV2Server/.build/release/IMV2LocalGatewayProbe')
+        with (run / ("remote-batch-" + name + ".log")).open("a") as output:
+            process = subprocess.Popen(compose + ["exec", "-T", *flags, "gateway", "sh", "-c",
+                command, "remote-batch-probe", "/run/im-v2-remote-batch/" + name + ".pid"],
+                cwd=root, env=environment, stdout=output, stderr=subprocess.STDOUT,
+                text=True, start_new_session=True)
+        active[name] = process
+        return process
+
+    def finish_probe(name: str, *, seconds: float = 40) -> str:
+        process = active[name]
+        if process.wait(timeout=seconds) != 0:
+            raise RuntimeError("remote-batch Gateway probe failed: " + name)
+        active.pop(name)
+        output = (run / ("remote-batch-" + name + ".log")).read_text().strip().splitlines()
+        if len(output) != 1:
+            raise RuntimeError("remote-batch Gateway probe returned ambiguous output: " + name)
+        return output[0]
+
+    try:
+        with (run / "smoke.log").open("a") as output:
+            smoke = subprocess.Popen(["bash", str(root / "IMV2/scripts/verify_v2_local_account_stack.sh")],
+                cwd=root, env=smoke_environment, stdout=output, stderr=subprocess.STDOUT, text=True)
+
+        def fixture_ready() -> list[str] | None:
+            if smoke is not None and smoke.poll() is not None:
+                raise RuntimeError("Account smoke exited before remote-batch fixture")
+            if not fixture.is_file():
+                return None
+            parts = fixture.read_text().splitlines()
+            return parts if len(parts) == 9 else None
+
+        room_ab, room_bc, token_b, device_b, user_b, token_c, device_c, user_c, user_a = await_stage(
+            fixture_ready, seconds=180, stage="two warm rooms and private credentials")
+        if stat.S_IMODE(fixture.stat().st_mode) != 0o600:
+            raise RuntimeError("remote-batch credential fixture is not private")
+        for value in (room_ab, room_bc, device_b, user_b, device_c, user_c, user_a):
+            uuid.UUID(value)
+        if room_ab.lower() == room_bc.lower():
+            raise RuntimeError("remote-batch rooms were not distinct")
+        rooms = (room_ab, room_bc)
+        for member_room, first, second in ((room_ab, user_a, user_b), (room_bc, user_b, user_c)):
+            members = psql("SELECT count(*) FROM im_v2.room_memberships WHERE "
+                f"room_id = '{member_room}' AND user_id IN ('{first}', '{second}') "
+                "AND left_revision IS NULL")
+            friends = psql("SELECT count(*) FROM im_v2.user_relationships WHERE "
+                f"lower_user_id = LEAST('{first}'::uuid, '{second}'::uuid) AND "
+                f"higher_user_id = GREATEST('{first}'::uuid, '{second}'::uuid) AND state = 'accepted'")
+            if members != "2" or friends != "1":
+                raise RuntimeError("remote-batch warm room membership or accepted relationship is absent")
+        if psql("SELECT count(*) FROM im_v2.room_memberships WHERE "
+                f"room_id = '{room_ab}' AND user_id = '{user_c}' AND left_revision IS NULL") != "0":
+            raise RuntimeError("remote-batch negative account unexpectedly belongs to A-B")
+        before = {}
+        for room in rooms:
+            lease = psql("SELECT host_id, activation_epoch, "
+                f"(expires_at > clock_timestamp()) FROM im_v2.room_activation_leases WHERE room_id = '{room}'")
+            parts = lease.split("|")
+            if len(parts) != 3 or parts[0].lower() != actor_host_id.lower() or parts[2] != "t":
+                raise RuntimeError("warm room lease is not held by the separate Actor Host")
+            before[room] = {"epoch": int(parts[1]),
+                "sequence": int(psql(f"SELECT COALESCE(max(room_sequence), 0) FROM im_v2.messages WHERE room_id = '{room}'"))}
+            if before[room]["sequence"] < 1:
+                raise RuntimeError("remote-batch room was not warmed")
+        metric_before = metrics()
+        accepted: list[dict[str, str]] = []
+        # A single NIO connection processes frames serially. These are two
+        # independent, already-authenticated TLS connections, each targeting
+        # one of the two distinct rooms; four bounded waves tolerate scheduling
+        # variance without relaxing the required atomic metric inequality.
+        for wave in range(4):
+            gate = barrier / ("wave-" + str(wave) + ".release")
+            wave_probes = []
+            for index, room in enumerate(rooms):
+                name = f"wave-{wave}-{index}"
+                operation = str(uuid.uuid4())
+                ready = barrier / (name + ".ready")
+                run_probe(name, "barrierRoomSend", token_b, device_b, room, operation,
+                    ready="/run/im-v2-remote-batch/" + ready.name,
+                    gate="/run/im-v2-remote-batch/" + gate.name)
+                wave_probes.append((name, room, operation, ready))
+
+            def both_ready() -> bool:
+                if any(active[name].poll() is not None for name, _, _, _ in wave_probes):
+                    raise RuntimeError("remote-batch TLS session exited before simultaneous release")
+                return all(ready.is_file() and ready.read_text() == "authenticated\n"
+                           for _, _, _, ready in wave_probes)
+
+            await_stage(both_ready, seconds=30, stage="two authenticated TLS sessions")
+            gate.touch(mode=0o600)
+            for name, room, operation, _ in wave_probes:
+                result = finish_probe(name)
+                fields = result.split()
+                if len(fields) != 2 or fields[0].lower() != room.lower():
+                    raise RuntimeError("remote-batch acceptance room did not match")
+                uuid.UUID(fields[1])
+                accepted.append({"roomID": room, "clientMessageID": operation,
+                                 "messageID": fields[1].lower()})
+        metric_after = metrics()
+        delta = {key: metric_after[key] - metric_before[key] for key in metric_before}
+        if not (len(accepted) >= delta["requests"] > delta["batches"] > 0):
+            raise RuntimeError("remote Gateway did not produce a committed multi-request atomic batch")
+
+        for room in rooms:
+            items = [item for item in accepted if item["roomID"] == room]
+            operations = ",".join("'" + item["clientMessageID"] + "'" for item in items)
+            rows = psql("SELECT m.client_message_id::text, m.message_id::text, m.room_sequence, "
+                "(SELECT count(*) FROM im_v2.message_send_completions AS c WHERE "
+                "c.room_id = m.room_id AND c.sender_user_id = m.sender_user_id AND "
+                "c.client_message_id = m.client_message_id AND c.message_id = m.message_id) "
+                f"FROM im_v2.messages AS m WHERE m.room_id = '{room}' AND "
+                f"m.sender_user_id = '{user_b}' AND m.client_message_id IN ({operations}) "
+                "ORDER BY m.room_sequence").splitlines()
+            if len(rows) != len(items):
+                raise RuntimeError("remote-batch message count did not match accepted operations")
+            expected = {item["clientMessageID"].lower(): item["messageID"] for item in items}
+            sequences = []
+            for row in rows:
+                operation, message, sequence, completion = row.split("|")
+                if expected.pop(operation.lower(), None) != message.lower() or completion != "1":
+                    raise RuntimeError("remote-batch message or completion was not unique")
+                sequences.append(int(sequence))
+            if expected or sequences != list(range(before[room]["sequence"] + 1,
+                                                   before[room]["sequence"] + len(items) + 1)):
+                raise RuntimeError("remote-batch room sequences were not contiguous")
+            before[room]["acceptedSequences"] = sequences
+
+        # Replay every exact operation and compare the immutable acceptance;
+        # the committed batch metrics above were captured before these replays.
+        for index, item in enumerate(accepted):
+            name = f"replay-{index}"
+            run_probe(name, "sendKnownRoomMessage", token_b, device_b,
+                      item["roomID"], item["clientMessageID"])
+            if [field.lower() for field in finish_probe(name).split()] != \
+                    [item["roomID"].lower(), item["messageID"]]:
+                raise RuntimeError("remote-batch idempotent replay changed its acceptance")
+            replay_state = psql("SELECT (SELECT count(*) FROM im_v2.messages WHERE "
+                f"room_id = '{item['roomID']}' AND sender_user_id = '{user_b}' AND "
+                f"client_message_id = '{item['clientMessageID']}' AND "
+                f"message_id = '{item['messageID']}'), "
+                "(SELECT count(*) FROM im_v2.message_send_completions WHERE "
+                f"room_id = '{item['roomID']}' AND sender_user_id = '{user_b}' AND "
+                f"client_message_id = '{item['clientMessageID']}' AND "
+                f"message_id = '{item['messageID']}')")
+            if replay_state != "1|1":
+                raise RuntimeError("remote-batch replay duplicated a durable message or completion")
+
+        denied_operation = str(uuid.uuid4())
+        run_probe("nonmember", "sendKnownRoomExpectDenied", token_c, device_c,
+                  room_ab, denied_operation)
+        denial = finish_probe("nonmember")
+        if denial not in ("denied-FORBIDDEN", "denied-DIRECT_MESSAGE_RESTRICTED"):
+            raise RuntimeError("remote-batch non-member did not receive a non-retryable denial")
+        denied_state = psql("SELECT (SELECT count(*) FROM im_v2.messages WHERE "
+            f"room_id = '{room_ab}' AND sender_user_id = '{user_c}' AND "
+            f"client_message_id = '{denied_operation}'), "
+            "(SELECT count(*) FROM im_v2.message_send_completions WHERE "
+            f"room_id = '{room_ab}' AND sender_user_id = '{user_c}' AND "
+            f"client_message_id = '{denied_operation}')")
+        if denied_state != "0|0":
+            raise RuntimeError("remote-batch non-member send had a durable effect")
+        for room in rooms:
+            lease = psql("SELECT host_id, activation_epoch, "
+                f"(expires_at > clock_timestamp()) FROM im_v2.room_activation_leases WHERE room_id = '{room}'")
+            parts = lease.split("|")
+            if len(parts) != 3 or parts[0].lower() != actor_host_id.lower() or \
+                    int(parts[1]) != before[room]["epoch"] or parts[2] != "t":
+                raise RuntimeError("remote-batch room lease owner or epoch changed")
+        release.touch(mode=0o600)
+        if smoke is None or smoke.wait(timeout=90) != 0:
+            raise RuntimeError("Account/Gateway/Operator smoke failed after remote batch")
+        smoke = None
+        evidence.update({"stage": "remote-atomic-batch-verified", "rooms": before,
+            "accepted": accepted, "metricsBefore": metric_before,
+            "metricsAfter": metric_after, "metricsDelta": delta,
+            "nonmemberDenial": denial, "nonmemberDurableState": denied_state,
+            "separateActorHostID": actor_host_id, "maxBatchDelayMilliseconds": 25})
+    finally:
+        release.touch(mode=0o600, exist_ok=True)
+        cleanup_failed = False
+        for name, process in active.items():
+            try:
+                stop_remote(name)
+            except (subprocess.SubprocessError, OSError):
+                cleanup_failed = True
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait(timeout=2)
+        if smoke is not None and smoke.poll() is None:
+            try:
+                smoke.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                smoke.terminate()
+                try:
+                    smoke.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    smoke.kill()
+                    smoke.wait(timeout=2)
+        if cleanup_failed:
+            raise RuntimeError("remote-batch Gateway probe cleanup was not confirmed")
+
+
 def cross_entry_disable_smoke(*, root: Path, run: Path, private: Path,
                               compose: list[str], environment: dict[str, str],
                               barrier: Path, actor_host_id: str,
@@ -619,6 +899,8 @@ def main() -> int:
                         help="Signal the remote Actor Host while a real room SQL send is blocked")
     parser.add_argument("--cross-entry-disable", action="store_true",
                         help="Hold two authenticated Gateway sessions across Account HTTP disable")
+    parser.add_argument("--remote-batch", action="store_true",
+                        help="Prove cross-room atomic direct append through a caller-only Gateway")
     parser.add_argument("--products-dir", type=Path,
                         help="Read-only directory containing prebuilt Linux Release products")
     parser.add_argument("--products-metadata", type=Path,
@@ -628,8 +910,10 @@ def main() -> int:
         parser.error("--busy-sigterm requires --remote-gateway")
     if args.cross_entry_disable and not args.remote_gateway:
         parser.error("--cross-entry-disable requires --remote-gateway")
-    if args.cross_entry_disable and args.busy_sigterm:
-        parser.error("--cross-entry-disable and --busy-sigterm are separate opt-in scenarios")
+    if args.remote_batch and not args.remote_gateway:
+        parser.error("--remote-batch requires --remote-gateway")
+    if sum((args.cross_entry_disable, args.busy_sigterm, args.remote_batch)) > 1:
+        parser.error("busy SIGTERM, cross-entry disable and remote batch are separate opt-in scenarios")
     if (args.products_dir is None) != (args.products_metadata is None):
         parser.error("--products-dir and --products-metadata must be provided together")
     if args.products_dir is None and args.scratch_dir is None:
@@ -650,6 +934,9 @@ def main() -> int:
     cross_entry_barrier = private / "cross-entry-barrier"
     if args.cross_entry_disable:
         cross_entry_barrier.mkdir(mode=0o700)
+    remote_batch_barrier = private / "remote-batch-barrier"
+    if args.remote_batch:
+        remote_batch_barrier.mkdir(mode=0o700)
     env_file = private / ".env.local"
     compose_file = private / "compose.json"
     compose = docker + ["compose", "--project-name", project, "--env-file", str(env_file),
@@ -768,11 +1055,23 @@ def main() -> int:
                 {**volume, "source": str(private / "local-room-actors" / "actor-host")}
                 if volume.get("target") == "/run/im-v2-room-actor" else volume
                 for volume in actor_host["volumes"]]
+            if args.remote_batch:
+                # This bounded opt-in profile demonstrates functionality, not
+                # default-delay throughput. The caller remains unbatched.
+                actor_host["environment"].update({
+                    "IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE": "32",
+                    "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE": "8",
+                    "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS": "25",
+                    "IM_V2_DIRECT_ROOM_LOG_APPEND_LANES": "1"})
             document["services"]["actor-host"] = actor_host
         if args.cross_entry_disable:
             document["services"]["gateway"].setdefault("volumes", []).append({
                 "type": "bind", "source": str(cross_entry_barrier),
                 "target": "/run/im-v2-cross-entry", "read_only": False})
+        if args.remote_batch:
+            document["services"]["gateway"].setdefault("volumes", []).append({
+                "type": "bind", "source": str(remote_batch_barrier),
+                "target": "/run/im-v2-remote-batch", "read_only": False})
         # Compose's normalized volume names otherwise retain the first config's
         # project name. Bind every named resource to this unique test project.
         for key, volume in document.get("volumes", {}).items():
@@ -860,6 +1159,11 @@ def main() -> int:
                 gateway_container=containers["gateway"]["containerID"],
                 actor_container=containers["actor-host"]["containerID"],
                 evidence=result["crossEntryDisable"])
+        elif args.remote_batch:
+            result["remoteBatch"] = {}
+            remote_batch_smoke(root=ROOT, run=run, private=private,
+                compose=compose, environment=environment, barrier=remote_batch_barrier,
+                actor_host_id=expected_host, evidence=result["remoteBatch"])
         else:
             execute(["bash", str(ROOT / "IMV2/scripts/verify_v2_local_account_stack.sh")], "smoke.log", timeout=300)
         if args.remote_gateway:

@@ -66,6 +66,11 @@ private struct Configuration: Sendable {
         case sendDirectMessage
         case receiveDirectMessage
         case sendRoomMediaMessage
+        case sendKnownRoomMessage
+        case sendKnownRoomExpectDenied
+        case barrierRoomSend
+        case relationshipRequest
+        case relationshipAccept
         case heldRoomSend
         case heldRoomRead
     }
@@ -81,6 +86,8 @@ private struct Configuration: Sendable {
     let heldReadyPath: String?
     let heldReleasePath: String?
     let heldDisableStartedPath: String?
+    let batchReadyPath: String?
+    let batchReleasePath: String?
     let host: String
     let port: Int
     let serverName: String
@@ -105,6 +112,8 @@ private struct Configuration: Sendable {
         heldReadyPath = environment["IM_V2_GATEWAY_PROBE_HELD_READY_PATH"]
         heldReleasePath = environment["IM_V2_GATEWAY_PROBE_HELD_RELEASE_PATH"]
         heldDisableStartedPath = environment["IM_V2_GATEWAY_PROBE_HELD_DISABLE_STARTED_PATH"]
+        batchReadyPath = environment["IM_V2_GATEWAY_PROBE_BATCH_READY_PATH"]
+        batchReleasePath = environment["IM_V2_GATEWAY_PROBE_BATCH_RELEASE_PATH"]
         switch mode {
         case .authenticate:
             guard targetUserID == nil, expectedRoomID == nil, expectedMessageID == nil,
@@ -116,6 +125,11 @@ private struct Configuration: Sendable {
                   mediaID == nil else {
                 throw ProbeError.invalidConfiguration
             }
+        case .relationshipRequest, .relationshipAccept:
+            guard targetUserID != nil, expectedRoomID == nil, expectedMessageID == nil,
+                  mediaID == nil, clientMessageID == nil else {
+                throw ProbeError.invalidConfiguration
+            }
         case .receiveDirectMessage:
             guard targetUserID == nil, expectedRoomID != nil, expectedMessageID != nil,
                   mediaID == nil, clientMessageID == nil else {
@@ -124,6 +138,11 @@ private struct Configuration: Sendable {
         case .sendRoomMediaMessage:
             guard targetUserID == nil, expectedRoomID != nil, expectedMessageID == nil,
                   mediaID != nil, clientMessageID != nil else {
+                throw ProbeError.invalidConfiguration
+            }
+        case .sendKnownRoomMessage, .sendKnownRoomExpectDenied, .barrierRoomSend:
+            guard targetUserID == nil, expectedRoomID != nil, expectedMessageID == nil,
+                  mediaID == nil, clientMessageID != nil else {
                 throw ProbeError.invalidConfiguration
             }
         case .heldRoomSend:
@@ -145,6 +164,16 @@ private struct Configuration: Sendable {
         default:
             guard heldReadyPath == nil, heldReleasePath == nil, heldDisableStartedPath == nil
             else { throw ProbeError.invalidConfiguration }
+        }
+        if mode == .barrierRoomSend {
+            guard let batchReadyPath, let batchReleasePath,
+                  batchReadyPath.hasPrefix("/run/im-v2-remote-batch/"),
+                  batchReleasePath.hasPrefix("/run/im-v2-remote-batch/"),
+                  batchReadyPath != batchReleasePath else { throw ProbeError.invalidConfiguration }
+        } else {
+            guard batchReadyPath == nil, batchReleasePath == nil else {
+                throw ProbeError.invalidConfiguration
+            }
         }
         host = environment["IM_V2_GATEWAY_PROBE_HOST"] ?? "127.0.0.1"
         serverName = environment["IM_V2_GATEWAY_PROBE_SERVER_NAME"] ?? "localhost"
@@ -170,6 +199,8 @@ private enum ProbeResult: Sendable {
     case messageAccepted(roomID: RoomID, messageID: MessageID)
     case messageDelivered
     case heldRequestDenied(reason: String)
+    case knownRoomDenied(reason: String)
+    case relationshipChanged
 
     var standardOutput: String {
         switch self {
@@ -184,6 +215,10 @@ private enum ProbeResult: Sendable {
             return "local V2 gateway direct room-log delivery: verified"
         case .heldRequestDenied(let reason):
             return "denied-\(reason)"
+        case .knownRoomDenied(let reason):
+            return "denied-\(reason)"
+        case .relationshipChanged:
+            return "local V2 relationship accepted or requested"
         }
     }
 }
@@ -309,11 +344,18 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
                 finish(context: context, result: .success(.authenticated), closeChannel: false)
             case .sendDirectMessage:
                 try sendOpenDirectRoom(context: context)
+            case .relationshipRequest, .relationshipAccept:
+                try sendRelationshipChange(context: context)
             case .receiveDirectMessage:
                 try sendRoomEventPull(context: context)
             case .sendRoomMediaMessage:
                 guard let roomID = configuration.expectedRoomID else { throw ProbeError.invalidConfiguration }
                 try sendMessage(roomID: roomID, context: context)
+            case .sendKnownRoomMessage, .sendKnownRoomExpectDenied:
+                guard let roomID = configuration.expectedRoomID else { throw ProbeError.invalidConfiguration }
+                try sendMessage(roomID: roomID, context: context)
+            case .barrierRoomSend:
+                try holdBatchSend(context: context)
             case .heldRoomSend, .heldRoomRead:
                 heldAuthenticated = true
                 if configuration.mode == .heldRoomRead {
@@ -340,6 +382,9 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
             }
             throw ProbeError.unexpectedResponse
 
+        case .holdingBatchSend:
+            throw ProbeError.unexpectedResponse
+
         case .awaitingDirectRoom(let requestID):
             guard frame.requestID == requestID,
                   case .directRoomOpened(let response)? = envelope.body,
@@ -348,10 +393,27 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
             else { throw ProbeError.unexpectedResponse }
             try sendMessage(roomID: roomID, context: context)
 
+        case .awaitingRelationshipChange(let requestID):
+            guard frame.requestID == requestID,
+                  case .relationshipChanged(let response)? = envelope.body,
+                  response.targetUserID == configuration.targetUserID?.rawValue,
+                  ((configuration.mode == .relationshipRequest && response.resultingState == .pending) ||
+                   (configuration.mode == .relationshipAccept && response.resultingState == .accepted))
+            else { throw ProbeError.unexpectedResponse }
+            finish(context: context, result: .success(.relationshipChanged))
+
         case .awaitingMessageAcceptance(let requestID, let roomID):
             if configuration.mode == .heldRoomSend {
                 try finishHeldRejection(frame: frame, envelope: envelope,
                     expectedRequestID: requestID, context: context)
+                return
+            }
+            if configuration.mode == .sendKnownRoomExpectDenied {
+                guard frame.requestID == requestID,
+                      case .error(let error)? = envelope.body,
+                      (error.code == "FORBIDDEN" || error.code == "DIRECT_MESSAGE_RESTRICTED"),
+                      !error.retryable else { throw ProbeError.unexpectedResponse }
+                finish(context: context, result: .success(.knownRoomDenied(reason: error.code)))
                 return
             }
             guard frame.requestID == requestID,
@@ -440,6 +502,38 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
         pollHeldRelease(context: context)
     }
 
+    private func holdBatchSend(context: ChannelHandlerContext) throws {
+        guard let path = configuration.batchReadyPath else { throw ProbeError.invalidConfiguration }
+        stage = .holdingBatchSend
+        heldStartedAt = Date()
+        try Data("authenticated\n".utf8).write(to: URL(fileURLWithPath: path), options: .atomic)
+        pollBatchRelease(context: context)
+    }
+
+    private func pollBatchRelease(context: ChannelHandlerContext) {
+        guard !finished, case .holdingBatchSend = stage,
+              let path = configuration.batchReleasePath,
+              let startedAt = heldStartedAt else { return }
+        if FileManager.default.fileExists(atPath: path) {
+            do {
+                guard let roomID = configuration.expectedRoomID else { throw ProbeError.invalidConfiguration }
+                try sendMessage(roomID: roomID, context: context)
+            } catch {
+                finish(context: context, result: .failure(error))
+            }
+            return
+        }
+        guard Date().timeIntervalSince(startedAt) < 60 else {
+            finish(context: context, result: .failure(ProbeError.heldBarrierTimedOut))
+            return
+        }
+        let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
+        let boundContext = context.loopBound
+        context.eventLoop.scheduleTask(in: .milliseconds(5)) {
+            handler.value.pollBatchRelease(context: boundContext.value)
+        }
+    }
+
     private func finishHeldRejection(
         frame: V2Frame, envelope: IMV2Envelope, expectedRequestID: UInt64,
         context: ChannelHandlerContext
@@ -495,6 +589,20 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
         request.openDirectRoom.operationID = UUID().uuidString
         request.openDirectRoom.targetUserID = targetUserID.rawValue
         stage = .awaitingDirectRoom(requestID)
+        try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
+    }
+
+    private func sendRelationshipChange(context: ChannelHandlerContext) throws {
+        guard let targetUserID = configuration.targetUserID else { throw ProbeError.invalidConfiguration }
+        let requestID = takeRequestID()
+        var request = IMV2Envelope()
+        request.requestID = requestID
+        request.protocolVersion = IMV2ProtocolVersion.current
+        request.changeRelationship = .init()
+        request.changeRelationship.operationID = UUID().uuidString
+        request.changeRelationship.targetUserID = targetUserID.rawValue
+        request.changeRelationship.action = configuration.mode == .relationshipRequest ? .request : .accept
+        stage = .awaitingRelationshipChange(requestID)
         try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
     }
 
@@ -580,7 +688,9 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
         case awaitingAuthentication
         case awaitingHeldWarmPage(UInt64)
         case holdingAuthenticated
+        case holdingBatchSend
         case awaitingDirectRoom(UInt64)
+        case awaitingRelationshipChange(UInt64)
         case awaitingMessageAcceptance(UInt64, RoomID)
         case awaitingRoomEventPage(UInt64, UInt64)
     }

@@ -22,6 +22,8 @@ cross_entry_warm_release="${V2_LOCAL_CROSS_ENTRY_WARM_RELEASE_PATH:-}"
 cross_entry_disable_ready="${V2_LOCAL_CROSS_ENTRY_DISABLE_READY_PATH:-}"
 cross_entry_disable_release="${V2_LOCAL_CROSS_ENTRY_DISABLE_RELEASE_PATH:-}"
 cross_entry_disabled="${V2_LOCAL_CROSS_ENTRY_DISABLED_PATH:-}"
+remote_batch_fixture="${V2_LOCAL_REMOTE_BATCH_FIXTURE_PATH:-}"
+remote_batch_release="${V2_LOCAL_REMOTE_BATCH_RELEASE_PATH:-}"
 phase="preflight"
 
 source "${script_dir}/local_compose.sh"
@@ -264,6 +266,95 @@ test "${gateway_receive_output}" = 'local V2 gateway direct room-log delivery: v
   printf 'local V2 gateway recipient room-log probe returned an unexpected result\n' >&2
   exit 1
 }
+
+# Opt-in G3 fixture: B belongs to both warmed direct rooms A-B and B-C, while
+# C is a genuine non-member of A-B. Distinct direct rooms are required because
+# the direct atomic append advances each room cursor once per batch wave.
+if [[ -n "${remote_batch_fixture}" || -n "${remote_batch_release}" ]]; then
+  phase="remote-batch private fixture paths"
+  [[ "${remote_batch_fixture}" == /* && "${remote_batch_release}" == /* &&
+     "${remote_batch_fixture}" != "${remote_batch_release}" &&
+     -d "$(dirname "${remote_batch_fixture}")" &&
+     -d "$(dirname "${remote_batch_release}")" &&
+     ! -e "${remote_batch_fixture}" && ! -e "${remote_batch_release}" ]] || {
+    printf 'invalid private remote-batch fixture/barrier paths\n' >&2
+    exit 1
+  }
+  batch_account_handle="batch-${suffix:0:20}"
+  batch_public_handle="batch${suffix:0:20}"
+  batch_device_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  batch_operation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  phase="remote-batch third account registration"
+  batch_assertion="$(curl --silent --show-error --fail --cacert "${ca_path}" \
+    --request POST --header 'Content-Type: application/json' \
+    --data "{\"accountHandle\":\"${batch_account_handle}\",\"password\":\"v2-local-batch-password\",\"deviceID\":\"${batch_device_id}\",\"publicHandle\":\"${batch_public_handle}\",\"displayName\":\"Local Batch\"}" \
+    "${account_base_url}/v2/account-auth/password/register" | jq -er '.accountAssertion')"
+  phase="remote-batch third device credential issuance"
+  batch_cancellation="$(python3 "${script_dir}/prepare_v2_registration_cancellation.py" \
+    "${batch_device_id}" "${batch_operation_id}" "${registration_recovery_directory}")"
+  batch_credentials="$(curl --silent --show-error --fail --cacert "${ca_path}" \
+    --request POST --header 'Content-Type: application/json' \
+    --data "{\"accountAssertion\":\"${batch_assertion}\",\"deviceID\":\"${batch_device_id}\",\"operationID\":\"${batch_operation_id}\",\"cancellation\":${batch_cancellation}}" \
+    "${account_base_url}/v2/device-credentials")"
+  batch_access_token="$(printf '%s' "${batch_credentials}" | jq -er '.accessToken')"
+  batch_user_id="$(printf '%s' "${batch_credentials}" | jq -er '.userID')"
+
+  remote_batch_warm_send() {
+    compose exec -T \
+      --env 'IM_V2_GATEWAY_PROBE_MODE=sendDirectMessage' \
+      --env "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN=$1" \
+      --env "IM_V2_GATEWAY_PROBE_DEVICE_ID=$2" \
+      --env "IM_V2_GATEWAY_PROBE_TARGET_USER_ID=$3" \
+      gateway /workspace/IMV2Server/.build/release/IMV2LocalGatewayProbe
+  }
+  remote_batch_relationship() {
+    compose exec -T \
+      --env "IM_V2_GATEWAY_PROBE_MODE=$1" \
+      --env "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN=$2" \
+      --env "IM_V2_GATEWAY_PROBE_DEVICE_ID=$3" \
+      --env "IM_V2_GATEWAY_PROBE_TARGET_USER_ID=$4" \
+      gateway /workspace/IMV2Server/.build/release/IMV2LocalGatewayProbe
+  }
+  phase="remote-batch accepted relationships"
+  test "$(remote_batch_relationship relationshipRequest "${peer_access_token}" "${peer_device_id}" "${user_id}")" = \
+    'local V2 relationship accepted or requested'
+  test "$(remote_batch_relationship relationshipAccept "${access_token}" "${device_id}" "${peer_user_id}")" = \
+    'local V2 relationship accepted or requested'
+  test "$(remote_batch_relationship relationshipRequest "${peer_access_token}" "${peer_device_id}" "${batch_user_id}")" = \
+    'local V2 relationship accepted or requested'
+  test "$(remote_batch_relationship relationshipAccept "${batch_access_token}" "${batch_device_id}" "${peer_user_id}")" = \
+    'local V2 relationship accepted or requested'
+  phase="remote-batch A-B and B-C room warmup"
+  for _ in {1..4}; do
+    read -r warm_ab_room _ <<<"$(remote_batch_warm_send "${peer_access_token}" "${peer_device_id}" "${user_id}")"
+    test "${warm_ab_room}" = "${gateway_room_id}" || {
+      printf 'remote-batch A-B warmup changed room identity\n' >&2; exit 1;
+    }
+  done
+  read -r warm_bc_room _ <<<"$(remote_batch_warm_send "${peer_access_token}" "${peer_device_id}" "${batch_user_id}")"
+  read -r warm_bc_reply_room _ <<<"$(remote_batch_warm_send "${batch_access_token}" "${batch_device_id}" "${peer_user_id}")"
+  test "${warm_bc_room}" = "${warm_bc_reply_room}" && test "${warm_bc_room}" != "${gateway_room_id}" || {
+    printf 'remote-batch B-C warmup changed room identity\n' >&2; exit 1;
+  }
+  for _ in {1..3}; do
+    read -r warm_bc_final_room _ <<<"$(remote_batch_warm_send "${peer_access_token}" "${peer_device_id}" "${batch_user_id}")"
+    test "${warm_bc_final_room}" = "${warm_bc_room}" || {
+      printf 'remote-batch B-C final warmup changed room identity\n' >&2; exit 1;
+    }
+  done
+  ( umask 077; set -C; printf '%s\n' "${gateway_room_id}" "${warm_bc_room}" \
+      "${peer_access_token}" "${peer_device_id}" "${peer_user_id}" \
+      "${batch_access_token}" "${batch_device_id}" "${batch_user_id}" \
+      "${user_id}" > "${remote_batch_fixture}" )
+  phase="remote-batch runner handoff"
+  batch_deadline=$(( $(date +%s) + 150 ))
+  while [[ ! -f "${remote_batch_release}" ]]; do
+    (( $(date +%s) < batch_deadline )) || {
+      printf 'remote-batch runner barrier was not released\n' >&2; exit 1;
+    }
+    sleep 0.05
+  done
+fi
 
 # Opt-in test-only handoff. The recipient is still active here; the operator
 # disable below applies to the original sender. Keep the access credential in
