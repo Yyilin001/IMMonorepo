@@ -176,7 +176,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     private let shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool?
     private let roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool?
     private let directRoomLogAppendBatcher: (any V2SendMessageBatchMetricsReading)?
-    private let readReceiptBatcher: V2ReadReceiptBatcher?
+    private let readReceiptBatcher: (any V2ReadReceiptBatchMetricsReading)?
     private let directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics?
     private let gatewayEventLoopLagMetrics: V2EventLoopLagMetrics?
     private let directSendPolicyCache: V2DirectSendPolicyCache?
@@ -196,7 +196,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     ///   - shardAdmissionCommandCredits: 分片命令额度池。
     ///   - roomAdmissionCommandCredits: 房间命令额度池。
     ///   - directRoomLogAppendBatcher: 私聊追加的只读批处理指标来源，可汇总多个物理归属。
-    ///   - readReceiptBatcher: 已读回执批处理器。
+    ///   - readReceiptBatcher: 已读回执批处理只读指标来源，可汇总多个物理归属。
     ///   - directRoomLogAppendStageMetrics: 私聊追加阶段耗时收集器。
     ///   - gatewayEventLoopLagMetrics: 网关事件循环延迟收集器。
     ///   - directSendPolicyCache: 私聊发送策略提示缓存。
@@ -211,7 +211,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool? = nil,
         roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool? = nil,
         directRoomLogAppendBatcher: (any V2SendMessageBatchMetricsReading)? = nil,
-        readReceiptBatcher: V2ReadReceiptBatcher? = nil,
+        readReceiptBatcher: (any V2ReadReceiptBatchMetricsReading)? = nil,
         directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics? = nil,
         gatewayEventLoopLagMetrics: V2EventLoopLagMetrics? = nil,
         directSendPolicyCache: V2DirectSendPolicyCache? = nil,

@@ -30,6 +30,10 @@ struct V2HostRoomReceiptBatcherTests {
         #expect(observed.withLock { $0 }[0].2 == Array(repeating: Date(timeIntervalSince1970: 1_750_000_000), count: 2))
         #expect(await batcher.pendingCount == 0)
         #expect(await batcher.inFlightBatchCount == 0)
+        let metrics = await batcher.snapshot()
+        #expect(metrics.completedBatches == 1)
+        #expect(metrics.completedRequests == 2)
+        #expect(metrics.maximumObservedBatchSize == 2)
     }
 
     @Test("owner change fails only its stale item; a sibling domain error stays typed")
@@ -56,8 +60,9 @@ struct V2HostRoomReceiptBatcherTests {
         let pendingTask = Task { try await cancelled.record(try makeTurn(firstToken)) }
         try await waitPending(cancelled, count: 1)
         pendingTask.cancel()
-        await #expect(throws: V2RoomCallFailure.notAccepted(.deadlineExceeded)) { try await pendingTask.value }
+        await #expect(throws: V2RoomCallFailure.notAccepted(.cancelled)) { try await pendingTask.value }
         #expect(await cancelled.pendingCount == 0)
+        #expect((await cancelled.snapshot()).cancelledPendingRequests == 1)
 
         let gate = ReceiptBatchGate()
         let admission = V2DatabaseWorkAdmissionController(policy: .init(
@@ -84,6 +89,7 @@ struct V2HostRoomReceiptBatcherTests {
         #expect(try await second.value == .record(.idempotencyConflict))
         #expect((await admission.snapshot()).foregroundWrite.inFlight == 0)
         #expect(await batcher.inFlightBatchCount == 0)
+        #expect((await batcher.snapshot()).completedBatches == 1)
     }
 
     @Test("expired pending turns do not reach the executor")
@@ -99,6 +105,45 @@ struct V2HostRoomReceiptBatcherTests {
         }
         #expect(await batcher.pendingCount == 0)
         #expect(await batcher.inFlightBatchCount == 0)
+    }
+
+    @Test("queue-full rejection and completed work have distinct metrics")
+    func queueFullMetrics() async throws {
+        let gate = ReceiptBatchGate()
+        let batcher = V2HostRoomReceiptBatcher(configuration: .init(
+            maximumBatchSize: 2, maximumDelay: .milliseconds(20),
+            maximumInFlightBatches: 1, maximumPendingRequests: 2)) { batch, _, _ in
+            await gate.enter()
+            return .init(results: batch.requests.map { _ in .success(.idempotencyConflict) })
+        }
+        let tokens = try (0..<5).map { _ in try makeToken() }
+        let first = Task { try await batcher.record(try makeTurn(tokens[0])) }
+        try await waitPending(batcher, count: 1)
+        let second = Task { try await batcher.record(try makeTurn(tokens[1])) }
+        try await gate.waitForEntry()
+        let third = Task { try await batcher.record(try makeTurn(tokens[2])) }
+        try await waitPending(batcher, count: 1)
+        let fourth = Task { try await batcher.record(try makeTurn(tokens[3])) }
+        try await waitPending(batcher, count: 2)
+        await #expect(throws: V2RoomCallFailure.notAccepted(.overloaded)) {
+            try await batcher.record(try makeTurn(tokens[4]))
+        }
+        let active = await batcher.snapshot()
+        #expect(active.pendingRequests == 2)
+        #expect(active.inFlightBatches == 1)
+        #expect(active.queueFullRejections == 1)
+        #expect(active.completedBatches == 0)
+        await gate.release()
+        _ = try await first.value
+        _ = try await second.value
+        _ = try await third.value
+        _ = try await fourth.value
+        let done = await batcher.snapshot()
+        #expect(done.pendingRequests == 0)
+        #expect(done.inFlightBatches == 0)
+        #expect(done.completedBatches == 2)
+        #expect(done.completedRequests == 4)
+        #expect(done.queueFullRejections == 1)
     }
 
     @Test("a batch execution error cannot claim every item rolled back")
@@ -169,10 +214,12 @@ struct V2HostRoomReceiptBatcherTests {
 
 private actor ReceiptBatchGate {
     private var entered = false
+    private var released = false
     private var held: CheckedContinuation<Void, Never>?
 
     func enter() async {
         entered = true
+        if released { return }
         await withCheckedContinuation { held = $0 }
     }
 
@@ -184,5 +231,5 @@ private actor ReceiptBatchGate {
         Issue.record("batch did not enter execution")
     }
 
-    func release() { held?.resume(); held = nil }
+    func release() { released = true; held?.resume(); held = nil }
 }

@@ -14,7 +14,7 @@ struct V2GrantedRoomReceiptTurn: Sendable {
 
 /// One batcher belongs to one physical owner. It groups independently granted
 /// turns without acquiring a second RoomRef while holding a SQL transaction.
-public actor V2HostRoomReceiptBatcher {
+public actor V2HostRoomReceiptBatcher: V2ReadReceiptBatchMetricsReading {
     private struct OperationKey: Hashable, Sendable {
         let actorUserID: UserID
         let operationID: ReadReceiptOperationID
@@ -40,9 +40,22 @@ public actor V2HostRoomReceiptBatcher {
     private var flushTask: Task<Void, Never>?
     private var flushGeneration: UInt64 = 0
     private var inFlight: [UUID: InFlight] = [:]
+    private var completedBatches: UInt64 = 0
+    private var completedRequests: UInt64 = 0
+    private var maximumObservedBatchSize = 0
+    private var queueFullRejections: UInt64 = 0
+    private var cancelledPendingRequests: UInt64 = 0
 
     var pendingCount: Int { pending.count }
     var inFlightBatchCount: Int { inFlight.count }
+
+    public func snapshot() -> V2ReadReceiptBatcher.Snapshot {
+        .init(pendingRequests: pending.count, inFlightBatches: inFlight.count,
+              completedBatches: completedBatches, completedRequests: completedRequests,
+              maximumObservedBatchSize: maximumObservedBatchSize,
+              queueFullRejections: queueFullRejections,
+              cancelledPendingRequests: cancelledPendingRequests)
+    }
 
     public init(executor: V2ActorRoomReceiptExecutor,
                 configuration: V2ReadReceiptBatcher.Configuration,
@@ -80,7 +93,7 @@ public actor V2HostRoomReceiptBatcher {
 
     private func enqueue(_ item: Pending) {
         guard !Task.isCancelled else {
-            item.continuation.resume(throwing: V2RoomCallFailure.notAccepted(.deadlineExceeded))
+            item.continuation.resume(throwing: V2RoomCallFailure.notAccepted(.cancelled))
             return
         }
         guard item.turn.callDeadline > .now else {
@@ -88,6 +101,7 @@ public actor V2HostRoomReceiptBatcher {
             return
         }
         guard pending.count < configuration.maximumPendingRequests else {
+            queueFullRejections = Self.saturatingIncrement(queueFullRejections)
             item.continuation.resume(throwing: V2RoomCallFailure.notAccepted(.overloaded))
             return
         }
@@ -103,7 +117,8 @@ public actor V2HostRoomReceiptBatcher {
             // cancelled caller still receives the known result or uncertainty.
             return
         }
-        item.continuation.resume(throwing: V2RoomCallFailure.notAccepted(.deadlineExceeded))
+        cancelledPendingRequests = Self.saturatingIncrement(cancelledPendingRequests)
+        item.continuation.resume(throwing: V2RoomCallFailure.notAccepted(.cancelled))
         compactQueue()
         scheduleFlush()
     }
@@ -145,6 +160,7 @@ public actor V2HostRoomReceiptBatcher {
             allowUnderfilled = false
             let selected = takeBatch()
             guard !selected.isEmpty else { break }
+            maximumObservedBatchSize = max(maximumObservedBatchSize, selected.count)
             flushTask?.cancel()
             flushTask = nil
             flushGeneration &+= 1
@@ -255,6 +271,8 @@ public actor V2HostRoomReceiptBatcher {
     private func complete(batchID: UUID, selected: [Pending],
                           result: Result<[V2RoomReceiptResult], any Error>) {
         inFlight.removeValue(forKey: batchID)?.deadlineTimer.cancel()
+        completedBatches = Self.saturatingIncrement(completedBatches)
+        completedRequests = Self.saturatingAdd(completedRequests, UInt64(selected.count))
         switch result {
         case .success(let values) where values.count == selected.count:
             for (item, value) in zip(selected, values) {
@@ -276,5 +294,14 @@ public actor V2HostRoomReceiptBatcher {
     private func compactQueue() {
         guard queue.count > pending.count * 2 + 64 else { return }
         queue.removeAll { pending[$0] == nil }
+    }
+
+    private static func saturatingIncrement(_ value: UInt64) -> UInt64 {
+        value == .max ? .max : value + 1
+    }
+
+    private static func saturatingAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
+        let sum = lhs.addingReportingOverflow(rhs)
+        return sum.overflow ? .max : sum.partialValue
     }
 }
