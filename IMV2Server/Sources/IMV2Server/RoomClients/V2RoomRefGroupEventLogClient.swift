@@ -22,6 +22,10 @@ public struct V2RoomRefGroupEventLogClient: Sendable, V2GatewayGroupEventLogHand
         try await service.subscribe(roomID: roomID, actorUserID: actorUserID)
     }
 
+    public func recordRelayedForegroundEvents(_ events: [V2DirectRoomLiveEvent]) {
+        service.recordRelayedForegroundEvents(events)
+    }
+
     public func recordCommittedDirectRoomLogMessage(_ message: V2AcceptedMessage) async {
         await service.recordCommittedDirectRoomLogMessage(message)
     }
