@@ -26,7 +26,7 @@ import time
 import uuid
 
 from virtual_actor_capacity_measurement import (
-    MeasurementFailure, capture_runtime, capture_snapshot, create_scenario, phase_delta,
+    HARNESS_FILE_KEYS, MeasurementFailure, capture_runtime, capture_snapshot, create_scenario, phase_delta,
     supports_recovery_loader, verify_freeze,
 )
 from virtual_actor_capacity_lifecycle import (
@@ -52,6 +52,20 @@ def sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def capture_harness_provenance(*, require_clean: bool) -> dict:
+    """Identify the runner checkout independently of the measured product."""
+    revision = subprocess.run(["git", "-C", str(RUNNER_ROOT), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+    tracked_status = subprocess.run(
+        ["git", "-C", str(RUNNER_ROOT), "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True, text=True, timeout=10, check=True).stdout
+    clean = not tracked_status.strip()
+    if not HEX40.fullmatch(revision) or (require_clean and not clean):
+        raise MeasurementFailure("formal measurement requires a clean, committed harness checkout")
+    return {"revision": revision, "trackedClean": clean,
+            "filesSHA256": {key: sha256(RUNNER_ROOT / key) for key in HARNESS_FILE_KEYS}}
 
 
 def require_regular(path: Path, label: str) -> None:
@@ -439,6 +453,11 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
         report_path = run / "load-report.json"
         require_regular(report_path, "measurement load report")
         report = json.loads(report_path.read_text())
+        expected_connections = args.measurement_connections
+        if (report.get("requestedConnections") != expected_connections or
+                report.get("authenticated") != expected_connections or
+                report.get("peakActive") != expected_connections):
+            raise MeasurementFailure("single loader did not reach the frozen connection topology")
         phases = report.get("scenarioPhases")
         if not isinstance(phases, list) or [phase.get("name") for phase in phases] != ["warmup", "steady", "cooldown"]:
             raise MeasurementFailure("loader did not report three measurement phases")
@@ -538,6 +557,7 @@ def main() -> int:
         require_timeout=args.measurement_workload == "fault"):
         raise MeasurementFailure("common loader lacks native recovery-batch dispatch support")
     manifest, rooms, users, fixture_info = verify_fixture(args.fixture_dir, args.layout)
+    harness = capture_harness_provenance(require_clean=bool(args.measurement_workload))
     if args.canary_recovery and (manifest["owners"] != 2 or manifest["users"] < 100 or
                                  manifest["targetsPerConnection"] < 2 or
                                  min(manifest["layouts"]["mixed"]["ownerRoomCounts"]) == 0):
@@ -563,7 +583,9 @@ def main() -> int:
             verify_freeze(args.measurement_freeze_file, workload=args.measurement_workload,
                           layout=args.layout, fixture_hash=fixture_info["manifestSHA256"],
                           scenario_hash=scenario_hash,
-                          loader_hash=products["IMV2GatewayLoadGenerator"])
+                          loader_hash=products["IMV2GatewayLoadGenerator"],
+                          connections_per_worker=args.measurement_connections,
+                          harness_revision=harness["revision"], harness_files=harness["filesSHA256"])
     if args.preflight_only:
         kind = "MEASUREMENT" if scenario_document else "RECOVERY_CANARY" if args.canary_recovery else "CANARY"
         print("VA_CAPACITY_" + kind +
@@ -588,6 +610,7 @@ def main() -> int:
         "loaderBuildResultSHA256": sha256(args.loader_build_result),
         "loaderSourceSHA": loader_build_result["sourceSHA"],
         "loaderLockfileSHA256": loader_build_result["lockfileSHA256"],
+        "harness": harness,
         "fixtureManifestSHA256": fixture_info["manifestSHA256"],
         "fixtureID": fixture_info["fixtureID"],
         "dockerContext": args.docker_context,

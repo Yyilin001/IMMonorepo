@@ -7,6 +7,8 @@
   "projectPrefix": "imv2-va-v1-capacity",
   "machineEnvelope": {"cpus": 4, "memoryGiB": 16, "exclusiveSampling": true},
   "measurement": {
+    "loaderWorkers": 1,
+    "latencyScope": "single-process-phase-samples",
     "warmupSeconds": 120,
     "steadySeconds": 300,
     "cooldownSeconds": 60,

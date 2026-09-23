@@ -16,6 +16,13 @@ from typing import Any
 
 
 PHASES = ("warmup", "steady", "cooldown")
+MEASUREMENT_SEMANTICS_VERSION = "single-loader-phase-counters-v1"
+HARNESS_FILE_KEYS = (
+    "IMV2/scripts/test_v2_virtual_actor_capacity_canary.py",
+    "IMV2/scripts/virtual_actor_capacity_measurement.py",
+    "IMV2/scripts/virtual_actor_capacity_lifecycle.py",
+    "IMV2/scripts/virtual-actor-fixtures/capacity-main-v1.json",
+)
 WORKLOADS = {
     "hot": ("hot", "IMV2/scripts/virtual-actor-fixtures/capacity-hot-write-v1.json", None),
     "same-owner": ("same-owner", "IMV2/load-scenarios/direct-1500-message-only-900-server-saturation.json",
@@ -92,10 +99,32 @@ def freeze_calibrations(runs: list[Path], thresholds: dict[str, float]) -> dict:
                 not isinstance(duration, (int, float)) or not 290 <= duration <= 310 or
                 not isinstance(acknowledged, int) or acknowledged <= 0):
             raise MeasurementFailure("main calibration steady phase is invalid")
+        scenario = result.get("measurement", {}).get("scenario", {})
+        workers = scenario.get("loaderWorkers")
+        per_worker = scenario.get("connectionsPerWorker")
+        latency_scope = scenario.get("latencyScope")
+        if (workers != 1 or not isinstance(per_worker, int) or isinstance(per_worker, bool) or
+                not 1 <= per_worker <= 10_000 or latency_scope != "single-process-phase-samples" or
+                scenario.get("measurementSemanticsVersion") != MEASUREMENT_SEMANTICS_VERSION):
+            raise MeasurementFailure("main calibration loader topology is missing or invalid")
+        if scenario.get("workload") == "mixed" and per_worker != 10_000:
+            raise MeasurementFailure("mixed calibration requires one 10000-connection loader")
+        if result.get("measurement", {}).get("nativeConnectionsAuthenticated") != per_worker:
+            raise MeasurementFailure("main calibration did not authenticate the frozen connection count")
+        harness = result.get("harness", {})
+        revision = harness.get("revision")
+        files = harness.get("filesSHA256")
+        if (harness.get("trackedClean") is not True or not isinstance(revision, str) or
+                len(revision) != 40 or not isinstance(files, dict) or
+                set(files) != set(HARNESS_FILE_KEYS) or
+                any(not isinstance(value, str) or len(value) != 64 for value in files.values())):
+            raise MeasurementFailure("main calibration harness provenance is incomplete")
+        harness_identity = (revision, tuple(files[key] for key in HARNESS_FILE_KEYS))
         identity = (result.get("layout"), result.get("fixtureManifestSHA256"),
                     result.get("scenarioSHA256"),
                     result.get("productSHA256", {}).get("IMV2GatewayLoadGenerator"),
-                    result.get("measurement", {}).get("scenario", {}).get("workload"))
+                    scenario.get("workload"), workers, per_worker, latency_scope,
+                    scenario.get("measurementSemanticsVersion"), harness_identity)
         identities.append(identity)
         rates.append(acknowledged / duration)
         hashes.append(digest(result_file))
@@ -104,11 +133,17 @@ def freeze_calibrations(runs: list[Path], thresholds: dict[str, float]) -> dict:
     cv = statistics.pstdev(rates) / statistics.mean(rates)
     if cv > 0.10:
         raise MeasurementFailure("main calibration throughput coefficient of variation exceeds 10%")
-    layout, fixture_hash, scenario_hash, loader_hash, workload = identities[0]
+    (layout, fixture_hash, scenario_hash, loader_hash, workload, workers, per_worker,
+     latency_scope, semantics_version, harness_identity) = identities[0]
     unit = "successfulRecoveryRoomItemsPerSecond" if workload == "fault" else "messagesAcknowledgedPerSecond"
     return {"schemaVersion": 1, "mainRevision": "f1cdd78d6a21bf0ae23da627c0710c65115236aa",
             "workload": workload, "layout": layout, "fixtureManifestSHA256": fixture_hash,
             "scenarioSHA256": scenario_hash, "commonLoaderSHA256": loader_hash,
+            "loaderWorkers": workers, "connectionsPerWorker": per_worker,
+            "latencyScope": latency_scope,
+            "measurementSemanticsVersion": semantics_version,
+            "harnessRevision": harness_identity[0],
+            "harnessFilesSHA256": dict(zip(HARNESS_FILE_KEYS, harness_identity[1])),
             "mainCalibrationResultSHA256": hashes,
             "acceptedUnit": unit, "mainSteadyAcceptedPerSecond": rates,
             "mainSteadyCoefficientOfVariation": cv,
@@ -116,11 +151,16 @@ def freeze_calibrations(runs: list[Path], thresholds: dict[str, float]) -> dict:
 
 
 def verify_freeze(path: Path, *, workload: str, layout: str, fixture_hash: str,
-                  scenario_hash: str, loader_hash: str) -> dict:
+                  scenario_hash: str, loader_hash: str, connections_per_worker: int,
+                  harness_revision: str, harness_files: dict[str, str]) -> dict:
     freeze = json.loads(path.read_text())
     expected = {"schemaVersion": 1, "mainRevision": "f1cdd78d6a21bf0ae23da627c0710c65115236aa",
                 "workload": workload, "layout": layout, "fixtureManifestSHA256": fixture_hash,
-                "scenarioSHA256": scenario_hash, "commonLoaderSHA256": loader_hash}
+                "scenarioSHA256": scenario_hash, "commonLoaderSHA256": loader_hash,
+                "loaderWorkers": 1, "connectionsPerWorker": connections_per_worker,
+                "latencyScope": "single-process-phase-samples",
+                "measurementSemanticsVersion": MEASUREMENT_SEMANTICS_VERSION,
+                "harnessRevision": harness_revision, "harnessFilesSHA256": harness_files}
     if any(freeze.get(key) != value for key, value in expected.items()):
         raise MeasurementFailure("freeze does not match workload, fixture, scenario or loader")
     hashes = freeze.get("mainCalibrationResultSHA256")
@@ -152,6 +192,12 @@ def create_scenario(source: Path, protocol: dict[str, Any], fixture: dict[str, A
         raise MeasurementFailure("fixture lacks workload layout")
     if not 1 <= connections <= fixture["users"] or not 0 < rate_scale <= 100:
         raise MeasurementFailure("invalid connections or rate scale")
+    measurement = protocol["measurement"]
+    if (measurement.get("loaderWorkers") != 1 or
+            measurement.get("latencyScope") != "single-process-phase-samples"):
+        raise MeasurementFailure("single-loader measurement protocol is not frozen")
+    if workload == "mixed" and connections != 10_000:
+        raise MeasurementFailure("mixed measurement requires one 10000-connection loader")
     if workload in ("cold", "fault") and rate_scale != 1.0:
         raise MeasurementFailure("cold and fault rates are fixed for cross-revision evidence")
     rooms = fixture["layouts"][layout]["rooms"]
@@ -206,7 +252,6 @@ def create_scenario(source: Path, protocol: dict[str, Any], fixture: dict[str, A
         first["reconnectPercentPerMinute"] = 0
         first["roomSyncStateBatchesPerSecond"] = 20
         first["roomLatestVisibleBatchesPerSecond"] = 20
-    measurement = protocol["measurement"]
     durations = (measurement["warmupSeconds"], measurement["steadySeconds"],
                  measurement["cooldownSeconds"])
     if durations != (120, 300, 60):
@@ -230,6 +275,9 @@ def create_scenario(source: Path, protocol: dict[str, Any], fixture: dict[str, A
     # Keep the original seed/personas/queue bounds. The scenario is a new
     # measured artifact with its own digest; the frozen source is unchanged.
     detail = {"workload": workload, "layout": layout, "connections": connections,
+              "loaderWorkers": 1, "connectionsPerWorker": connections,
+              "latencyScope": "single-process-phase-samples",
+              "measurementSemanticsVersion": MEASUREMENT_SEMANTICS_VERSION,
               "rateScale": rate_scale, "templatePath": relative,
               "templateSHA256": template_digest, "phaseDurationsSeconds": list(durations),
               "batchRecoveryQueriesRequired": workload in ("mixed", "fault"),

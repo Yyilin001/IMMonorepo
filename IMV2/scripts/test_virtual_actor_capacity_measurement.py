@@ -8,7 +8,8 @@ import tempfile
 import unittest
 
 from virtual_actor_capacity_measurement import (
-    MeasurementFailure, create_scenario, freeze_calibrations, parse_cgroup,
+    HARNESS_FILE_KEYS, MEASUREMENT_SEMANTICS_VERSION, MeasurementFailure,
+    create_scenario, freeze_calibrations, parse_cgroup,
     parse_prometheus, phase_delta, supports_recovery_loader, verify_freeze,
 )
 
@@ -19,14 +20,19 @@ PROTOCOL = json.loads((ROOT / "IMV2/scripts/virtual-actor-fixtures/capacity-main
 
 class MeasurementTests(unittest.TestCase):
     def test_three_fixed_phases_and_unsupported_workloads(self) -> None:
-        fixture = {"users": 1500, "owners": 1, "layouts": {
+        fixture = {"users": 10_000, "owners": 1, "layouts": {
             "hot": {"rooms": 1}, "same-owner": {"rooms": 800},
             "mixed": {"rooms": 800}, "cold": {"rooms": 100}}}
         for workload in ("hot", "same-owner", "mixed"):
-            scenario, detail = create_scenario(ROOT, PROTOCOL, fixture, workload, 100, 1.0)
+            scenario, detail = create_scenario(ROOT, PROTOCOL, fixture, workload,
+                                               10_000 if workload == "mixed" else 100, 1.0)
             self.assertEqual([(p["name"], p["durationSeconds"]) for p in scenario["phases"]],
                              [("warmup", 120), ("steady", 300), ("cooldown", 60)])
             self.assertEqual(detail["batchRecoveryQueriesCovered"], False)
+            self.assertEqual(detail["loaderWorkers"], 1)
+            self.assertEqual(detail["connectionsPerWorker"], 10_000 if workload == "mixed" else 100)
+            self.assertEqual(detail["latencyScope"], "single-process-phase-samples")
+            self.assertEqual(detail["measurementSemanticsVersion"], MEASUREMENT_SEMANTICS_VERSION)
             self.assertEqual(scenario["phases"][0]["messagesPerSecond"],
                              scenario["phases"][1]["messagesPerSecond"])
             self.assertTrue(all(scenario["phases"][2].get(name, 0) == 0 for name in
@@ -46,6 +52,8 @@ class MeasurementTests(unittest.TestCase):
                          "IMV2/scripts/virtual-actor-fixtures/capacity-hot-write-v1.json")
         with self.assertRaises(MeasurementFailure):
             create_scenario(ROOT, PROTOCOL, fixture, "cold", 100, 1)
+        with self.assertRaises(MeasurementFailure):
+            create_scenario(ROOT, PROTOCOL, fixture, "mixed", 5_000, 1)
         with self.assertRaises(MeasurementFailure):
             create_scenario(ROOT, PROTOCOL, fixture, "fault", 100, 1)
         fixture["layouts"]["hot"]["rooms"] = 2
@@ -101,6 +109,7 @@ class MeasurementTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             paths = []
+            harness_files = {key: "d" * 64 for key in HARNESS_FILE_KEYS}
             for index, messages in enumerate((3000, 3050, 2950)):
                 run = root / f"main-{index}"
                 run.mkdir()
@@ -111,9 +120,15 @@ class MeasurementTests(unittest.TestCase):
                 (run / "measurement-steady.json").write_text(content)
                 result = {"passed": True, "mode": "measurement", "layout": "hot",
                           "source": {"sourceSHA": PROTOCOL["mainRevision"]},
+                          "harness": {"revision": "e" * 40, "trackedClean": True,
+                                      "filesSHA256": harness_files},
                           "fixtureManifestSHA256": "a" * 64, "scenarioSHA256": "b" * 64,
                           "productSHA256": {"IMV2GatewayLoadGenerator": "c" * 64},
-                          "measurement": {"scenario": {"workload": "hot"},
+                          "measurement": {"nativeConnectionsAuthenticated": 100,
+                                          "scenario": {"workload": "hot", "loaderWorkers": 1,
+                                                       "connectionsPerWorker": 100,
+                                                       "latencyScope": "single-process-phase-samples",
+                                                       "measurementSemanticsVersion": MEASUREMENT_SEMANTICS_VERSION},
                                           "phaseFiles": {"steady": hashlib.sha256(content.encode()).hexdigest()}}}
                 (run / "result.json").write_text(json.dumps(result))
                 paths.append(run)
@@ -121,10 +136,33 @@ class MeasurementTests(unittest.TestCase):
             output = root / "freeze.json"
             output.write_text(json.dumps(freeze))
             verify_freeze(output, workload="hot", layout="hot", fixture_hash="a" * 64,
-                          scenario_hash="b" * 64, loader_hash="c" * 64)
+                          scenario_hash="b" * 64, loader_hash="c" * 64,
+                          connections_per_worker=100, harness_revision="e" * 40,
+                          harness_files=harness_files)
+            self.assertEqual(freeze["loaderWorkers"], 1)
+            self.assertEqual(freeze["connectionsPerWorker"], 100)
             with self.assertRaises(MeasurementFailure):
                 verify_freeze(output, workload="mixed", layout="hot", fixture_hash="a" * 64,
-                              scenario_hash="b" * 64, loader_hash="c" * 64)
+                              scenario_hash="b" * 64, loader_hash="c" * 64,
+                              connections_per_worker=100, harness_revision="e" * 40,
+                              harness_files=harness_files)
+            with self.assertRaises(MeasurementFailure):
+                verify_freeze(output, workload="hot", layout="hot", fixture_hash="a" * 64,
+                              scenario_hash="b" * 64, loader_hash="c" * 64,
+                              connections_per_worker=5_000, harness_revision="e" * 40,
+                              harness_files=harness_files)
+            with self.assertRaises(MeasurementFailure):
+                verify_freeze(output, workload="hot", layout="hot", fixture_hash="a" * 64,
+                              scenario_hash="b" * 64, loader_hash="c" * 64,
+                              connections_per_worker=100, harness_revision="f" * 40,
+                              harness_files=harness_files)
+            wrong_topology = json.loads((paths[2] / "result.json").read_text())
+            wrong_topology["measurement"]["scenario"]["loaderWorkers"] = 2
+            (paths[2] / "result.json").write_text(json.dumps(wrong_topology))
+            with self.assertRaises(MeasurementFailure):
+                freeze_calibrations(paths, {"messagesAcknowledgedPerSecondMinimum": 9.0})
+            wrong_topology["measurement"]["scenario"]["loaderWorkers"] = 1
+            (paths[2] / "result.json").write_text(json.dumps(wrong_topology))
             revised = json.loads((paths[2] / "measurement-steady.json").read_text())
             revised["nativeLoader"]["messagesAcknowledged"] = 2000
             content = json.dumps(revised)

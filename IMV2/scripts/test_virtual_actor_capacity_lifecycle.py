@@ -9,7 +9,8 @@ import unittest
 
 from virtual_actor_capacity_lifecycle import OwnerFailureWindow, validate_cold_retirement
 from virtual_actor_capacity_measurement import (
-    MeasurementFailure, create_scenario, freeze_calibrations, phase_delta, verify_freeze,
+    HARNESS_FILE_KEYS, MEASUREMENT_SEMANTICS_VERSION, MeasurementFailure,
+    create_scenario, freeze_calibrations, phase_delta, verify_freeze,
 )
 
 
@@ -142,6 +143,7 @@ class LifecycleTests(unittest.TestCase):
     def test_fault_freeze_uses_successful_query_items(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             paths = []
+            harness_files = {key: "d" * 64 for key in HARNESS_FILE_KEYS}
             for index, items in enumerate((3000, 3050, 2950)):
                 directory = Path(temporary) / f"main-{index}"
                 directory.mkdir()
@@ -154,9 +156,15 @@ class LifecycleTests(unittest.TestCase):
                 (directory / "measurement-steady.json").write_text(content)
                 result = {"passed": True, "mode": "measurement", "layout": "mixed",
                           "source": {"sourceSHA": PROTOCOL["mainRevision"]},
+                          "harness": {"revision": "e" * 40, "trackedClean": True,
+                                      "filesSHA256": harness_files},
                           "fixtureManifestSHA256": "a" * 64, "scenarioSHA256": "b" * 64,
                           "productSHA256": {"IMV2GatewayLoadGenerator": "c" * 64},
-                          "measurement": {"scenario": {"workload": "fault"},
+                          "measurement": {"nativeConnectionsAuthenticated": 1500,
+                                          "scenario": {"workload": "fault", "loaderWorkers": 1,
+                                                       "connectionsPerWorker": 1500,
+                                                       "latencyScope": "single-process-phase-samples",
+                                                       "measurementSemanticsVersion": MEASUREMENT_SEMANTICS_VERSION},
                              "phaseFiles": {"steady": hashlib.sha256(content.encode()).hexdigest()}}}
                 (directory / "result.json").write_text(json.dumps(result))
                 paths.append(directory)
@@ -166,7 +174,9 @@ class LifecycleTests(unittest.TestCase):
             output = Path(temporary) / "freeze.json"
             output.write_text(json.dumps(freeze))
             verify_freeze(output, workload="fault", layout="mixed", fixture_hash="a" * 64,
-                          scenario_hash="b" * 64, loader_hash="c" * 64)
+                          scenario_hash="b" * 64, loader_hash="c" * 64,
+                          connections_per_worker=1500, harness_revision="e" * 40,
+                          harness_files=harness_files)
 
 
 if __name__ == "__main__":
