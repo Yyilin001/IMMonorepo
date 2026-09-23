@@ -31,6 +31,7 @@ from virtual_actor_capacity_measurement import (
 )
 from virtual_actor_capacity_lifecycle import (
     LEASE_COUNTS_SQL, OwnerFailureWindow, validate_cold_retirement,
+    validate_fault_unavailable_results,
 )
 
 
@@ -520,6 +521,8 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
             raise MeasurementFailure("loader did not report three measurement phases")
         if any(not phase.get("completed") or phase.get("workloadFailed") for phase in phases):
             raise MeasurementFailure("native loader reports incomplete or failed phase")
+        if fault:
+            validate_fault_unavailable_results(phases)
         if report.get("directRoomAttempted") != 0 or report.get("failed") != 0:
             raise MeasurementFailure("measurement opened a new room or failed a connection")
         if ((report.get("scenarioDrain") or {}).get("drained") is not True or

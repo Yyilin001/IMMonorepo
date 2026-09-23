@@ -45,6 +45,25 @@ def validate_cold_retirement(before: dict[str, dict], after: dict[str, dict]) ->
             "before": before, "after": after}
 
 
+def validate_fault_unavailable_results(phases: list[dict]) -> None:
+    """Seeded rooms are all visible; a failed owner must never look absent."""
+    names = ("warmup", "steady", "cooldown")
+    families = ("roomSyncStateBatch", "roomLatestVisibleBatch")
+    if not isinstance(phases, list) or len(phases) != len(names) or any(
+        not isinstance(phase, dict) or phase.get("name") != name
+        for phase, name in zip(phases, names)
+    ):
+        raise MeasurementFailure("fault recovery phase results are missing")
+    for phase in phases:
+        for family in families:
+            result = phase.get(family)
+            unavailable = result.get("unavailableRooms") if isinstance(result, dict) else None
+            if type(unavailable) is not int or unavailable != 0:
+                raise MeasurementFailure(
+                    f"fault recovery {phase['name']} {family} has missing or nonzero unavailable rooms"
+                )
+
+
 class OwnerFailureWindow:
     """Stop one owner at steady +60s, restart at +80s, and require recovery.
 

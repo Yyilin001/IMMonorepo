@@ -7,7 +7,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from virtual_actor_capacity_lifecycle import OwnerFailureWindow, validate_cold_retirement
+from virtual_actor_capacity_lifecycle import (
+    OwnerFailureWindow, validate_cold_retirement, validate_fault_unavailable_results,
+)
 from virtual_actor_capacity_measurement import (
     HARNESS_FILE_KEYS, MEASUREMENT_SEMANTICS_VERSION, MeasurementFailure,
     create_scenario, freeze_calibrations, phase_delta, verify_freeze,
@@ -47,6 +49,27 @@ class LifecycleTests(unittest.TestCase):
         after["owner00"]["released"] = 0
         with self.assertRaises(MeasurementFailure):
             validate_cold_retirement(before, after)
+
+    def test_fault_unavailable_results_are_zero_in_every_phase_and_family(self) -> None:
+        phases = [{"name": name,
+                   "roomSyncStateBatch": {"unavailableRooms": 0},
+                   "roomLatestVisibleBatch": {"unavailableRooms": 0}}
+                  for name in ("warmup", "steady", "cooldown")]
+        validate_fault_unavailable_results(phases)
+        for phase in phases:
+            for family in ("roomSyncStateBatch", "roomLatestVisibleBatch"):
+                with self.subTest(phase=phase["name"], family=family):
+                    phase[family]["unavailableRooms"] = 1
+                    with self.assertRaises(MeasurementFailure):
+                        validate_fault_unavailable_results(phases)
+                    phase[family]["unavailableRooms"] = 0
+                    del phase[family]["unavailableRooms"]
+                    with self.assertRaises(MeasurementFailure):
+                        validate_fault_unavailable_results(phases)
+                    phase[family]["unavailableRooms"] = 0
+        phases[0]["roomSyncStateBatch"]["unavailableRooms"] = False
+        with self.assertRaises(MeasurementFailure):
+            validate_fault_unavailable_results(phases)
 
     def test_fault_requires_owner_progress_and_three_clean_seconds(self) -> None:
         clock = [0.0]
