@@ -11,7 +11,8 @@ import NIOPosix
 import SQLKit
 
 /// Test-only executable composition. The Python driver cuts one private DB
-/// network at a time; these processes retain their real Cluster connections.
+/// network at a time and optionally restarts owner-a PostgreSQL; these
+/// processes retain their real Cluster connections throughout each fault.
 enum DatabaseEdgeProbe {
     private enum Failure: Error { case invalid(String) }
     private struct Environment: V2RuntimeEnvironment {
@@ -243,6 +244,27 @@ enum DatabaseEdgeProbe {
             throw Failure.invalid("expired lease did not get a new epoch")
         }
         try marker("replacement-token.json", replacement)
-        try marker("client-result.json", ["controlRecoveredExactlyOnce": true, "ownerRecoveredExactlyOnce": true])
+        try marker("owner-recovered.json", true)
+        let restartDatabase = ProcessInfo.processInfo.environment["VA_DB_EDGE_RESTART"] == "1"
+        if restartDatabase {
+            try await wait("owner-restart-down")
+            let restartSend = send(1, operation: 501)
+            let restartFailure = try await rejected(application, restartSend)
+            _ = try message(await call(application, send(2, operation: 502)))
+            try marker("owner-restart-down-result.json", [
+                "affectedFailure": restartFailure, "healthySend": "accepted",
+            ])
+            try await wait("owner-restart-ready")
+            let restarted = try message(await eventually(application, restartSend))
+            guard try message(await call(application, restartSend)) == restarted else {
+                throw Failure.invalid("database restart replay identity changed")
+            }
+            try marker("owner-restart-token.json",
+                await application.directory.resolve(room(1), deadline: .now + .seconds(10)))
+            try marker("owner-restart-recovered.json", ["messageID": restarted.rawValue])
+            try await wait("owner-restart-verified")
+        }
+        try marker("client-result.json", ["controlRecoveredExactlyOnce": true,
+            "ownerRecoveredExactlyOnce": true, "databaseRestartTested": restartDatabase])
     }
 }

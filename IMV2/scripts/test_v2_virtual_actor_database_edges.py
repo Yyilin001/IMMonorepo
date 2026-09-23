@@ -4,7 +4,8 @@
 Each node/DB pair gets a private bridge. Disconnecting Host A from one bridge
 cannot disconnect Host B or the caller. Only the affected SQL sessions are
 terminated to make the severed link observable without waiting for TCP keepalive.
-No database or Actor process is stopped during either fault.
+The optional restart phase stops and starts only owner-a PostgreSQL, retaining
+its data and all three Actor processes. Every phase has an explicit handshake.
 """
 from __future__ import annotations
 
@@ -175,7 +176,8 @@ class Probe:
                 "-v", f"{self.args.release_dir.resolve()}:/products:ro",
                 "-v", f"{self.secrets / name}:/secrets:ro", "-v", f"{self.evidence}:/evidence",
                 "-e", "IMV2_ROOM_ACTOR_CONFIGURATION_FILE=/secrets/configuration.json",
-                "-e", "VA_DB_EDGE_EVIDENCE=/evidence", "-e", f"VA_DB_EDGE_NODE={name}"]
+                "-e", "VA_DB_EDGE_EVIDENCE=/evidence", "-e", f"VA_DB_EDGE_NODE={name}",
+                "-e", f"VA_DB_EDGE_RESTART={int(self.args.database_restart)}"]
         for database in LINKS[name]:
             key = "VA_DB_EDGE_" + database.upper().replace("-", "_") + "_URL"
             args += ["-e", f"{key}=postgres://probe:probe@db-{database}:5432/probe?sslmode=disable"]
@@ -231,6 +233,73 @@ class Probe:
                 return
             time.sleep(1)
 
+    def restart_owner(self):
+        """Observe actual PG shutdown/startup while caller and Hosts remain live."""
+        self.same_processes()
+        before = self.inspect("owner-a")
+        started_sql = self.query("owner-a", "SELECT pg_postmaster_start_time()::text")
+        lease_before = self.query("owner-a", "SELECT host_id, host_incarnation_id, activation_epoch "
+            f"FROM im_v2.room_activation_leases WHERE room_id = '{identifier(11)}'").split("|")
+        self.docker("stop", "--time", "10", self.containers["owner-a"], timeout=20)
+        stopped = self.inspect("owner-a")["State"]
+        if stopped["Running"] or stopped["ExitCode"] != 0 or stopped["OOMKilled"]:
+            raise RuntimeError("owner database did not stop normally")
+        self.mark("owner-restart-down")
+        self.wait_file("owner-restart-down-result.json", seconds=40)
+        self.same_processes()
+        if self.inspect("owner-a")["State"]["Running"]:
+            raise RuntimeError("owner database restarted before outage assertions")
+        if self.query("owner-b", "SELECT count(*) FROM im_v2.messages "
+                      f"WHERE client_message_id = '{identifier(502)}'") != "1":
+            raise RuntimeError("healthy owner did not persist during peer database outage")
+        self.docker("start", self.containers["owner-a"])
+        self.wait(lambda: self.docker("exec", self.containers["owner-a"], "pg_isready", "-U", "probe",
+                                      check=False).returncode == 0,
+                  "restarted owner PostgreSQL ready", seconds=45)
+        after = self.inspect("owner-a")
+        restarted_sql = self.query("owner-a", "SELECT pg_postmaster_start_time()::text")
+        if after["Id"] != before["Id"] or after["State"]["StartedAt"] == before["State"]["StartedAt"] \
+                or restarted_sql == started_sql:
+            raise RuntimeError("owner database was not actually restarted in place")
+        # A caller may have received outcomeUnknown while a Host call was still
+        # settling. Its result may become durable after connectivity returns;
+        # require an atomic zero-or-one effect, then reconcile by replay.
+        outage_effect = self.query("owner-a", "SELECT (SELECT count(*) FROM im_v2.messages "
+                      f"WHERE client_message_id = '{identifier(501)}'), "
+                      "(SELECT count(*) FROM im_v2.message_send_completions "
+                      f"WHERE client_message_id = '{identifier(501)}')")
+        if outage_effect not in ("0|0", "1|1"):
+            raise RuntimeError("database-outage request left partial or duplicate effects")
+        if self.query("owner-a", "SELECT count(*) FROM im_v2.messages "
+                      f"WHERE client_message_id IN ('{identifier(101)}', '{identifier(401)}')") != "2" or \
+                self.query("owner-a", "SELECT content_revision FROM im_v2.messages "
+                           f"WHERE client_message_id = '{identifier(101)}'") != "3":
+            raise RuntimeError("database restart lost earlier durable business state")
+        self.mark("owner-restart-ready")
+        self.wait_file("owner-restart-recovered.json", seconds=90, watched=("host-a", "host-b"))
+        for database, operation in (("owner-a", 501), ("owner-b", 502)):
+            counts = self.query(database, "SELECT (SELECT count(*) FROM im_v2.messages "
+                f"WHERE client_message_id = '{identifier(operation)}'), "
+                "(SELECT count(*) FROM im_v2.message_send_completions "
+                f"WHERE client_message_id = '{identifier(operation)}')")
+            if counts != "1|1" or self.query(database, "SELECT count(*) FROM im_v2.messages") != "3":
+                raise RuntimeError("database restart recovery was not exactly once")
+        lease_after = self.query("owner-a", "SELECT host_id, host_incarnation_id, activation_epoch, "
+            "(expires_at > clock_timestamp())::text FROM im_v2.room_activation_leases "
+            f"WHERE room_id = '{identifier(11)}'").split("|")
+        if len(lease_before) != 3 or len(lease_after) != 4 or lease_after[:2] != lease_before[:2] \
+                or int(lease_after[2]) < int(lease_before[2]) or lease_after[3] != "true":
+            raise RuntimeError("database restart recovery did not retain a valid lease")
+        self.same_processes()
+        self.result["faults"].append({"phase": "owner-database-restart", "database": "owner-a",
+            "containerID": before["Id"], "beforeStartedAt": before["State"]["StartedAt"],
+            "afterStartedAt": after["State"]["StartedAt"], "beforePostmasterStart": started_sql,
+            "afterPostmasterStart": restarted_sql, "shutdownExitCode": stopped["ExitCode"],
+            "leaseBefore": lease_before, "leaseAfter": lease_after,
+            "outageEffectBeforeCallerReplay": outage_effect,
+            "healthyOwnerProgressDuringOutage": True, "recoveredExactlyOnce": True})
+        self.mark("owner-restart-verified")
+
     def execute(self):
         self.prepare()
         for name in ("host-a", "host-b"):
@@ -283,7 +352,7 @@ class Probe:
             f"WHERE client_message_id = '{identifier(401)}')")
         self.restore("owner-a")
         self.mark("owner-restored")
-        self.wait_file("client-result.json", watched=("host-a", "host-b"))
+        self.wait_file("owner-recovered.json", watched=("host-a", "host-b"))
         for database, operation in (("owner-a", 401), ("owner-b", 402)):
             counts = self.query(database, "SELECT (SELECT count(*) FROM im_v2.messages "
                 f"WHERE client_message_id = '{identifier(operation)}'), "
@@ -294,6 +363,9 @@ class Probe:
         for database in ("owner-a", "owner-b"):
             if self.query(database, "SELECT count(*) FROM im_v2.messages") != "2":
                 raise RuntimeError("unexpected final message count")
+        if self.args.database_restart:
+            self.restart_owner()
+        self.wait_file("client-result.json", watched=("host-a", "host-b"))
         self.mark("stop-hosts")
         for name in NODES:
             self.wait_file(name + "-stopped.json", seconds=70, watched=())
@@ -325,6 +397,8 @@ def main():
     parser.add_argument("--release-dir", type=Path, required=True)
     parser.add_argument("--build-result", type=Path, required=True)
     parser.add_argument("--artifact-dir", type=Path, required=True)
+    parser.add_argument("--database-restart", action="store_true",
+                        help="also restart owner-a PostgreSQL and verify unaffected owner/replay")
     args = parser.parse_args()
     os.umask(0o077)
     probe = Probe(args)

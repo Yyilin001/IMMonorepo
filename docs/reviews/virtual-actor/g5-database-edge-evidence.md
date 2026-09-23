@@ -27,4 +27,4 @@ python3 IMV2/scripts/test_v2_virtual_actor_database_edges.py \
   --artifact-dir /absolute/path/to/new-evidence-directory
 ```
 
-这是完整 Actor 组合下的 **Host 到特定数据库链路隔离**。它不重启 PostgreSQL、不注入 COMMIT ACK 丢失，也不宣称 Host B 接管 Host A 的 shard（本探针故意按 shard 固定放置）。数据库重启/批量查询部分 owner 失败由容量 fault 场景另验；锁等待和真实成功 COMMIT 丢 ACK 保留[原事务证据](i1-composition-progress-evidence.md)，Actor 网络分区及另一 Host 接管保留 [G6 证据](g6-multihost-evidence.md)。
+这是完整 Actor 组合下的 **Host 到特定数据库链路隔离**。它不重启 PostgreSQL、不注入 COMMIT ACK 丢失，也不宣称 Host B 接管 Host A 的 shard（本探针故意按 shard 固定放置）。数据库重启将由同拓扑的 `--database-restart` 独立阶段补验（尚未执行）；批量查询部分 owner 失败由容量 fault 场景另验；锁等待和真实成功 COMMIT 丢 ACK 保留[原事务证据](i1-composition-progress-evidence.md)，Actor 网络分区及另一 Host 接管保留 [G6 证据](g6-multihost-evidence.md)。

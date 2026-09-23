@@ -6,9 +6,11 @@
 
 下表是对本次审查的后续处置；后文保留审查时的原始判断，以便核对当时证据，不能再把已关闭的条目当成当前缺陷。
 
+再次按原方案逐句核对 `5c2d5509` 后，除五类相对性能和 #19 单 owner 查询故障之外，尚须取得以下直接证据：#11 生产 Host 的热房间及节点队列饱和、健康房间前进与资源回落；#17 真实 PostgreSQL 重启；#18 生产 Host 在满队列和待处理 shared batch 下排空；#21 review/import 各自临界点接管；最终源码的一次完整 Linux required checks 全绿记录。这些项目已分工准备，尚未运行，不能由现有代表路径提前标记完成。原 #7 的真实成功 COMMIT ACK 截断已处于“DB 提交与 RPC 返回之间”，不额外要求 Actor 网络帧丢失；#13 的真实 PG 双房间 unknown 与 Host 退役分层证据保留，不增加无原文要求的同场组合。已有真实 OS SIGTERM→App drain 的证据，与待补的生产 Host 队列/batch 状态验证分别证明信号接线与排空行为。
+
 | 原差距 | 新证据与当前边界 |
 | --- | --- |
-| 当前合同/状态未登记 | [当前 Room Actor 合同](../room-virtual-actor-contract.md)已进入正式合同索引；系统地图、schema 53 与三个 App 的组合已登记。G1 的性能预算仍待实测冻结。 |
+| 当前合同/状态未登记 | [当前 Room Actor 合同](../room-virtual-actor-contract.md)已进入正式合同索引；系统地图、schema 53 与三个 App 的组合已登记。G1 的 hot 性能预算已由三轮 main 冻结，其他四类仍待实测冻结。 |
 | G3 Gateway 自身也是 Host | [caller-only Gateway Linux 应用栈](g3-caller-only-gateway-evidence.md)通过：Gateway 无 Host 身份，真正 TCP/TLS send/read 经过独立 Host，数据库 live lease 与独立 Host UUID 一致。随后[真实远程合批](g3-remote-batch-evidence.md)也通过：两 TLS 连接、两房间的 8 请求合为 4 原子批，PG 连续序号、唯一消息/completion、原 ID 重放及非成员拒绝均验证；25 ms 为功能专用配置，非默认延迟性能结论。Account 房间 HTTP 与 Operator 流程同时通过。性能单独验收。 |
 | #1/#2/#8/#9/#11 的 Host 恢复/回收层次 | [实际 Host/Factory/PG 生命周期](g2-host-pg-lifecycle-evidence.md)覆盖 acquire 后恢复中失租、共享恢复只取消一方、恢复/激活限额及 idle 关闭竞争；不是两个 OS 进程全组合。 |
 | #18 只有 fake drain | [真实 Host/PG 慢事务 drain](g5-host-pg-drain-evidence.md)已通过：超时不早释 lease，SQL 完成后关闭与释放，旧清理不影响继任 token。[真实 Linux App busy SIGTERM](g2-real-app-sigterm-evidence.md)也已通过：Actor Host 的房间事务被 PG 行锁阻塞时接收 TERM，解锁后仅一次持久消息/完成记录，Host 正常退出并释放旧 lease，原 Gateway 保持在线且重启 Host 后原操作幂等重放。该 App 运行不是满队列、慢 SQL、待处理 batch 三者同场注入。 |
@@ -17,7 +19,7 @@
 | 无效 V1 总入口 | 已删除未实现探针的旧 scaffold，当前[故障入口](v1-fault-harness.md)逐项指向真实可运行脚本；没有宣称覆盖全部 21 项。G6 已接入 Linux 进程恢复 CI。 |
 | #10/#21 取消和后台 writer 接管 | [真实 Host/Factory/PG 取消与 retention](g2-pg-cancellation-maintenance-evidence.md)通过：执行中的取消不早释 lease/许可，排队取消无持久写；后台 trimLog 持 fence 时第二 Host 不能接管，旧 token 在新 epoch 下被拒绝。这是生产 retention 代表路径，import/review 的既有 PG 专项测试仍是分层证据。 |
 | #20 跨入口禁用账号 | [真实 Linux 三入口应用栈](g5-cross-entry-disable-evidence.md)已通过：独立 Actor Host、caller-only Gateway、Account/Operator HTTP；两条旧 Gateway 会话在暖房间及 Operator 请求前仍活，禁用提交后被主动关闭，固定新操作无消息/完成记录，Host epoch 未变。此轮因主动关闭而未在禁用后实际派发房间命令；不等同于成员 revision 或媒体授权的同场实测。 |
-| #17 独立 owner/control DB 链路 | [真实双 Host、caller 与三个 PostgreSQL](g5-database-edge-evidence.md)通过：单独断开 Host A 到 control 或 owner-a，B 继续业务服务，A 在 control 故障期间持续续租、owner 失租后无持久写；恢复按原操作 ID 仅一次效果。数据库重启和部分 owner 查询仍由容量 fault 场景另验。 |
+| #17 独立 owner/control DB 链路 | [真实双 Host、caller 与三个 PostgreSQL](g5-database-edge-evidence.md)通过：单独断开 Host A 到 control 或 owner-a，B 继续业务服务，A 在 control 故障期间持续续租、owner 失租后无持久写；恢复按原操作 ID 仅一次效果。真实 DB 重启将使用该拓扑的独立阶段；容量 fault 只承担 #19 的部分 owner 查询，不能把它当作尚未运行的数据库重启证据。 |
 | #19、容量与 Linux required checks | #19 部分 owner 查询仍按下方历史矩阵的验收边界核对。容量功能 canary 不等于性能结论。[G5 Linux 回归记录](g5-linux-regression-evidence.md)列出初始完整运行的实际失败、针对性修正后的聚焦通过和最新 discovery/合同检查通过；不能把它们合称为同一提交的一次全量全绿 required run。 |
 
 ## G1–G4 可完成范围
