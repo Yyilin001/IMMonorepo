@@ -66,7 +66,7 @@ public struct PostgresV2MessageReactionStore: V2MessageReactionStore, V2OwnerVal
     ///   房间与分片租约不一致或持久化失败时抛出。
     private func change(command: V2ChangeMessageReactionCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageReactionOutcome {
         return try await v2WithPostgresTransactionRetry(database: database,
-            maximumRetryCount: 0, classifyCommitFailure: activationScope != nil) { transaction in
+            maximumRetryCount: 0, classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2MessageReactionStoreError.corruptPersistenceState }
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             let roomID = try reactionUUID(command.roomID), actorID = try reactionUUID(command.actorUserID)

@@ -31,8 +31,9 @@ enum V2RoomSQLDeadline {
     }
 }
 
-/// Only room-scoped call sites use this. Legacy direct store callers keep
-/// Fluent's transaction until a granted deadline is supplied by the host.
+/// Only room-scoped call sites opt in. A direct token-scoped store call gets a
+/// fixed ten-second budget; an admitted call uses the earlier host deadline.
+/// Legacy control calls retain Fluent's transaction implementation.
 func v2WithRoomScopedTransaction<Value: Sendable>(
     database: any Database,
     timeouts: V2RoomActivationSQLTimeouts = .default,

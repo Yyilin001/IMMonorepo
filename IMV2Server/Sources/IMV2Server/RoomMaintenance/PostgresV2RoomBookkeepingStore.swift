@@ -31,7 +31,7 @@ public struct PostgresV2RoomBookkeepingStore: Sendable {
         }
         let attempt = V2RoomTransactionAttempt()
         do {
-            return try await database.transaction { transaction in
+            return try await v2WithRoomScopedTransaction(database: database, timeouts: timeouts) { transaction in
                 try await attempt.body {
                     guard let sql = transaction as? any SQLDatabase else {
                         throw V2ControlPlaneHousekeepingError.corruptPersistenceState
@@ -76,7 +76,7 @@ public struct PostgresV2RoomBookkeepingStore: Sendable {
                     return .init(deletedReviewJobs: reviews, deletedOperationRows: operations)
                 }
             }
-        } catch { throw attempt.classify(error) }
+        } catch { throw error }
     }
 }
 

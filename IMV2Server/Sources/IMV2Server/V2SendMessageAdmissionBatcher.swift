@@ -280,6 +280,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         let turnID: UUID
         let index: Int
         let token: V2RoomActivationToken
+        let callDeadline: ContinuousClock.Instant
     }
 
     private struct GrantedTurn {
@@ -502,9 +503,14 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     /// cannot revoke a write that may already be executing.
     public func acceptGrantedTurn(
         _ sends: [V2PreparedActorSend],
-        batchDeadline: ContinuousClock.Instant
+        batchDeadline: ContinuousClock.Instant,
+        callDeadline: ContinuousClock.Instant? = nil
     ) async throws -> [Result<V2SendMessageOutcome, any Error>] {
         try Task.checkCancellation()
+        let effectiveCallDeadline = callDeadline ?? clock.now + .seconds(10)
+        guard effectiveCallDeadline > clock.now else {
+            throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
+        }
         guard actorGrantedStoreFactory != nil,
               !sends.isEmpty,
               sends.count <= 128,
@@ -557,19 +563,21 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                     id: nextPendingID,
                     request: send.request,
                     continuation: nil,
-                    granted: .init(turnID: turnID, index: index, token: send.token),
+                    granted: .init(turnID: turnID, index: index, token: send.token,
+                        callDeadline: effectiveCallDeadline),
                     enqueuedAt: enqueuedAt,
                     previousID: nil,
                     nextID: nil
                 ))
                 recordArrival()
             }
-            if pendingCount >= configuration.maximumBatchSize || batchDeadline <= clock.now {
+            let flushBy = min(batchDeadline, effectiveCallDeadline)
+            if pendingCount >= configuration.maximumBatchSize || flushBy <= clock.now {
                 cancelDelayedFlush()
                 startAvailableBatchesIfPossible()
-            } else if flushDeadline == nil || batchDeadline < flushDeadline! {
+            } else if flushDeadline == nil || flushBy < flushDeadline! {
                 cancelDelayedFlush()
-                installDelayedFlush(.granted, until: batchDeadline)
+                installDelayedFlush(.granted, until: flushBy)
             }
         }
     }
@@ -849,7 +857,9 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     private func start(batch: [Pending], roomIDs: Set<RoomID>) {
         sameRoomDeferredRequests &+= UInt64(batch.count - roomIDs.count)
         let executionStartedAt = clock.now
+        let sqlDeadline = batch.compactMap { $0.granted?.callDeadline }.min()
         Task {
+          await V2RoomSQLDeadline.withSelectedDeadline(sqlDeadline) {
             let results: [Result<V2SendMessageOutcome, any Error>]
             let disposition: BatchDisposition
             let batchStore: any V2AtomicRoomWriteBatchStore
@@ -905,6 +915,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 disposition: disposition,
                 executionStartedAt: executionStartedAt
             )
+          }
         }
     }
 
@@ -1264,12 +1275,32 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 V2RoomWriteStoreError.corruptPersistenceState),
             count: batch.count
         )
-        let uncertainTokens = Set(zip(batch, resolvedResults).compactMap { pending, result in
+        var uncertainTokens = Set(zip(batch, resolvedResults).compactMap { pending, result in
             guard let token = pending.granted?.token,
                   case .failure(let error) = result,
                   Self.requiresRetirement(error) else { return nil as V2RoomActivationToken? }
             return token
         })
+        // A proved rollback is safe only when the entire granted turn has the
+        // same proof. Earlier partitions may have committed, and later queued
+        // items must not start after a mixed turn becomes outcome-unknown.
+        for (pending, result) in zip(batch, resolvedResults) {
+            guard let granted = pending.granted,
+                  case .failure(let error) = result,
+                  Self.isProvedRollback(error),
+                  let turn = grantedTurns[granted.turnID] else { continue }
+            let current = zip(batch, resolvedResults).compactMap { item, value in
+                item.granted?.turnID == granted.turnID ? value : nil
+            }
+            let previous = turn.results.compactMap { $0 }
+            if turn.remaining > current.count ||
+                (previous + current).contains(where: { result in
+                    guard case .failure(let error) = result else { return true }
+                    return !Self.isProvedRollback(error)
+                }) {
+                uncertainTokens.insert(granted.token)
+            }
+        }
         quarantinedActivations.formUnion(uncertainTokens)
         purgeQueuedRequests(for: uncertainTokens)
         let executionMilliseconds = elapsedMilliseconds(since: executionStartedAt)
@@ -1330,11 +1361,21 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     }
 
     private nonisolated static func requiresRetirement(_ error: any Error) -> Bool {
-        error is V2RoomTransactionOutcomeUnknown ||
-        error is V2RoomActivationLeaseError ||
-        (error as? V2RoomWriteStoreError) == .corruptPersistenceState ||
-        (error as? V2RoomCallFailure) == .outcomeUnknown ||
-        V2ActorMessagingErrorWire(domainError: error) == nil
+        if let failure = error as? V2RoomCallFailure {
+            return failure == .outcomeUnknown
+        }
+        return error is V2RoomTransactionOutcomeUnknown ||
+            error is V2RoomActivationLeaseError ||
+            (error as? V2RoomWriteStoreError) == .corruptPersistenceState ||
+            V2ActorMessagingErrorWire(domainError: error) == nil
+    }
+
+    private nonisolated static func isProvedRollback(_ error: any Error) -> Bool {
+        guard let failure = error as? V2RoomCallFailure else { return false }
+        switch failure {
+        case .notAccepted, .rolledBack: return true
+        case .outcomeUnknown: return false
+        }
     }
 
     private func purgeQueuedRequests(for tokens: Set<V2RoomActivationToken>) {

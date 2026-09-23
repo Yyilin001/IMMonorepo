@@ -62,7 +62,7 @@ public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore, V2Owne
     /// - Throws: 房间或消息不存在、发起者非作者、状态冲突或持久化失败时抛出。
     private func withdraw(command: V2WithdrawMessageCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageWithdrawalOutcome {
         return try await v2WithPostgresTransactionRetry(database: database,
-            maximumRetryCount: 0, classifyCommitFailure: activationScope != nil) { transaction in
+            maximumRetryCount: 0, classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2MessageWithdrawalStoreError.corruptPersistenceState }
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             let roomID = try withdrawalUUID(command.roomID)

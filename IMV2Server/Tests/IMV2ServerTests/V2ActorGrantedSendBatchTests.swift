@@ -7,6 +7,43 @@ import Testing
 
 @Suite("Granted actor send batching")
 struct V2ActorGrantedSendBatchTests {
+    @Test("selected cross-room SQL batch uses its earliest call deadline")
+    func earliestGrantedSQLDeadline() async throws {
+        let store = GrantedBatchStore()
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5)),
+            actorGrantedStoreFactory: { _ in store }
+        )
+        let firstToken = try makeToken()
+        let secondToken = V2RoomActivationToken(
+            roomID: try RoomID("54000000-0000-0000-0000-000000000010"),
+            owner: firstToken.owner, activationEpoch: firstToken.activationEpoch,
+            host: firstToken.host)
+        let earlier = ContinuousClock.now + .seconds(2)
+        let later = earlier + .seconds(2)
+        let firstSends = try makeSends(token: firstToken, texts: ["first"])
+        let secondSends = try makeSends(token: secondToken, texts: ["second"])
+        let first = Task {
+            try await batcher.acceptGrantedTurn(firstSends,
+                batchDeadline: later, callDeadline: earlier)
+        }
+        for _ in 0..<100 {
+            if await batcher.snapshot().pendingRequests == 1 { break }
+            await Task.yield()
+        }
+        #expect(await batcher.snapshot().pendingRequests == 1)
+        let second = Task {
+            try await V2RoomSQLDeadline.withSelectedDeadline(later + .seconds(5)) {
+                try await batcher.acceptGrantedTurn(secondSends,
+                    batchDeadline: later, callDeadline: later)
+            }
+        }
+        #expect(try await first.value.count == 1)
+        #expect(try await second.value.count == 1)
+        #expect(await store.recordedSQLDeadlines() == [earlier])
+    }
+
     @Test("one granted turn enters contiguously and retains its original deadline")
     func contiguousTurnAndDeadline() async throws {
         let store = GrantedBatchStore()
@@ -88,6 +125,42 @@ struct V2ActorGrantedSendBatchTests {
             try await V2ActorGrantedSendBatchAdapter(batcher: batcher).execute(
                 sends, batchDeadline: ContinuousClock().now
             )
+        }
+    }
+
+    @Test("proved SQL rollback does not quarantine a granted activation")
+    func rolledBackBatchDoesNotQuarantine() async throws {
+        let store = GrantedBatchStore(rolledBack: true)
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5)),
+            actorGrantedStoreFactory: { _ in store })
+        let adapter = V2ActorGrantedSendBatchAdapter(batcher: batcher)
+        let token = try makeToken()
+        for _ in 0..<2 {
+            let sends = try makeSends(token: token, texts: ["one", "two"])
+            await #expect(throws: V2RoomCallFailure.rolledBack(.unavailable)) {
+                _ = try await adapter.execute(sends, batchDeadline: ContinuousClock.now)
+            }
+        }
+    }
+
+    @Test("a mixed committed and rolled-back turn quarantines its activation")
+    func mixedRollbackQuarantines() async throws {
+        let store = GrantedBatchStore(partitionLast: true, rollbackLastScalar: true)
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 3, maximumDelay: .seconds(5)),
+            actorGrantedStoreFactory: { _ in store })
+        let adapter = V2ActorGrantedSendBatchAdapter(batcher: batcher)
+        let token = try makeToken()
+        await #expect(throws: V2RoomCallFailure.outcomeUnknown) {
+            _ = try await adapter.execute(try makeSends(token: token,
+                texts: ["one", "two", "three"]), batchDeadline: ContinuousClock.now)
+        }
+        await #expect(throws: V2RoomCallFailure.outcomeUnknown) {
+            _ = try await adapter.execute(try makeSends(token: token,
+                texts: ["late"]), batchDeadline: ContinuousClock.now)
         }
     }
 
@@ -272,16 +345,23 @@ private actor GrantedBatchStore: V2AtomicRoomWriteBatchStore {
     let partitionLast: Bool
     let rejectLast: Bool
     let unknown: Bool
+    let rolledBack: Bool
+    let rollbackLastScalar: Bool
     let fallback: Bool
     let isolateMiddle: Bool
     var texts: [[String]] = []
     var scalarOrder: [String] = []
+    var sqlDeadlines: [ContinuousClock.Instant?] = []
 
     init(partitionLast: Bool = false, rejectLast: Bool = false,
-         unknown: Bool = false, fallback: Bool = false, isolateMiddle: Bool = false) {
+         unknown: Bool = false, rolledBack: Bool = false,
+         rollbackLastScalar: Bool = false,
+         fallback: Bool = false, isolateMiddle: Bool = false) {
         self.partitionLast = partitionLast
         self.rejectLast = rejectLast
         self.unknown = unknown
+        self.rolledBack = rolledBack
+        self.rollbackLastScalar = rollbackLastScalar
         self.fallback = fallback
         self.isolateMiddle = isolateMiddle
     }
@@ -300,21 +380,28 @@ private actor GrantedBatchStore: V2AtomicRoomWriteBatchStore {
         identifiers: V2AcceptanceIdentifiers,
         now: Date
     ) async throws -> V2SendMessageOutcome {
+        sqlDeadlines.append(V2RoomSQLDeadline.current)
         if fallback && command.text == "one" { try await Task.sleep(for: .milliseconds(30)) }
         scalarOrder.append(command.text)
+        if rollbackLastScalar && command.text == "three" {
+            throw V2RoomCallFailure.rolledBack(.unavailable)
+        }
         if rejectLast && command.text == "three" { throw V2RoomWriteStoreError.actorNotEligible }
         return .rateLimited(retryAfterSeconds: 3)
     }
 
     func acceptAtomically(requests: [V2RoomWriteRequest]) throws -> [V2SendMessageOutcome] {
+        sqlDeadlines.append(V2RoomSQLDeadline.current)
         texts.append(requests.map(\.command.text))
         if isolateMiddle { throw V2AtomicRoomWriteBatchError(
             reason: .requestShape, isolatedRequestIndices: [1]) }
         if fallback { throw V2AtomicRoomWriteBatchError(reason: .requestShape) }
         if unknown { throw V2RoomTransactionOutcomeUnknown() }
+        if rolledBack { throw V2RoomCallFailure.rolledBack(.unavailable) }
         return requests.enumerated().map { .rateLimited(retryAfterSeconds: $0.offset + 1) }
     }
 
     func recordedTexts() -> [[String]] { texts }
     func scalarCompletionOrder() -> [String] { scalarOrder }
+    func recordedSQLDeadlines() -> [ContinuousClock.Instant?] { sqlDeadlines }
 }

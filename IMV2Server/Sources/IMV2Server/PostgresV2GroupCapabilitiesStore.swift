@@ -302,7 +302,8 @@ private func groupTransaction<Value: Equatable & Sendable>(
     do {
         return try await v2WithPostgresTransactionRetry(
             database: database, maximumRetryCount: 0,
-            classifyCommitFailure: classifyCommitFailure, body
+            classifyCommitFailure: classifyCommitFailure,
+            useRoomDeadline: classifyCommitFailure, body
         )
     }
     catch let signal as GroupAdmissionSignal { switch signal { case .rateLimited(let seconds): return .rateLimited(retryAfterSeconds: seconds); case .unavailable(let reason): return .unavailable(reason) } }

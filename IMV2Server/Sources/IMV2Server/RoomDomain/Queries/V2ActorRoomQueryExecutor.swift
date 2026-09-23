@@ -90,7 +90,7 @@ public struct V2ActorRoomQueryExecutor: Sendable {
         }
         let attempt = V2RoomTransactionAttempt()
         do {
-            return try await database.transaction { transaction in
+            return try await v2WithRoomScopedTransaction(database: database, timeouts: timeouts) { transaction in
                 try await attempt.body {
                     guard let sql = transaction as? any SQLDatabase else {
                         throw V2RoomRecoveryReadError.corruptPersistence
@@ -100,7 +100,7 @@ public struct V2ActorRoomQueryExecutor: Sendable {
                 }
             }
         } catch {
-            throw attempt.classify(error)
+            throw error
         }
     }
 }

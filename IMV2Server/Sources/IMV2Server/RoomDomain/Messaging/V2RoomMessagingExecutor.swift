@@ -108,6 +108,7 @@ public struct V2RoomMessagingExecutor: Sendable {
     public func executeGrantedSendTurn(
         _ sends: [V2ActorSendMessageWire],
         batchDeadline: ContinuousClock.Instant,
+        callDeadline: ContinuousClock.Instant = .now + .seconds(10),
         using adapter: V2ActorGrantedSendBatchAdapter
     ) async throws -> [V2RoomMessagingResult] {
         guard !sends.isEmpty else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
@@ -124,7 +125,8 @@ public struct V2RoomMessagingExecutor: Sendable {
             }
         }
         if !prepared.isEmpty {
-            let accepted = try await adapter.execute(prepared, batchDeadline: batchDeadline)
+            let accepted = try await adapter.execute(prepared,
+                batchDeadline: batchDeadline, callDeadline: callDeadline)
             guard accepted.count == preparedIndices.count else { throw V2RoomCallFailure.outcomeUnknown }
             for (index, result) in zip(preparedIndices, accepted) {
                 results[index] = result

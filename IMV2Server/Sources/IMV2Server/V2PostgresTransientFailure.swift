@@ -1,6 +1,7 @@
 import AsyncKit
 import FluentKit
 import Foundation
+import IMV2ActorContracts
 import PostgresNIO
 
 /// 数据库失败的处置分类。
@@ -115,9 +116,15 @@ func v2WithPostgresTransactionRetry<Result: Sendable>(
             // just before COMMIT as unknown.
             let error = roomDeadline == nil && classifyCommitFailure
                 ? attempt.classify(error) : error
-            guard v2PostgresFailureDisposition(error) == .retryTransaction,
+            let disposition = v2PostgresFailureDisposition(error)
+            guard disposition == .retryTransaction,
                   retryCount < maximumRetryCount
-            else { throw error }
+            else {
+                if roomDeadline != nil, disposition == .retryTransaction {
+                    throw V2RoomCallFailure.rolledBack(.unavailable)
+                }
+                throw error
+            }
             retryCount += 1
             // Short randomized backoff prevents opposing requests from
             // immediately rebuilding the same wait-for graph.

@@ -90,7 +90,7 @@ public struct PostgresV2RoomMembershipStore:
     ) async throws -> V2RoomMembershipChangeOutcome {
         return try await v2WithPostgresTransactionRetry(
             database: database, maximumRetryCount: 0,
-            classifyCommitFailure: activationScope != nil
+            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil
         ) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomMembershipStoreError.corruptPersistenceState }
             return try await Self.change(

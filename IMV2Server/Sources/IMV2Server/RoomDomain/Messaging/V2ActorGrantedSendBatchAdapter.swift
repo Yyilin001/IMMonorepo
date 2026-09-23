@@ -4,7 +4,7 @@ import IMV2Core
 
 /// Maps a complete admitted room turn to one bounded batcher admission and
 /// back to ordered typed results. A SQL partition can commit before another
-/// partition fails, so only truly unknown completion stops the whole turn.
+/// rolls back, so mixed durable outcomes stop the whole turn as unknown.
 public struct V2ActorGrantedSendBatchAdapter: Sendable {
     private let batcher: V2SendMessageAdmissionBatcher
 
@@ -20,15 +20,30 @@ public struct V2ActorGrantedSendBatchAdapter: Sendable {
 
     public func execute(
         _ sends: [V2PreparedActorSend],
-        batchDeadline: ContinuousClock.Instant
+        batchDeadline: ContinuousClock.Instant,
+        callDeadline: ContinuousClock.Instant = .now + .seconds(10)
     ) async throws -> [V2RoomMessagingResult] {
         let results: [Result<V2SendMessageOutcome, any Error>]
         do {
-            results = try await batcher.acceptGrantedTurn(sends, batchDeadline: batchDeadline)
+            results = try await batcher.acceptGrantedTurn(sends,
+                batchDeadline: batchDeadline, callDeadline: callDeadline)
         } catch V2SendMessageAdmissionBatcherError.serverBusy {
             throw V2RoomCallFailure.notAccepted(.overloaded)
         } catch is CancellationError {
             throw V2RoomCallFailure.notAccepted(.cancelled)
+        }
+        // If every selected SQL attempt has a proved rollback, the whole
+        // granted turn can report that fact without retiring its activation.
+        let rollbackFailures = results.compactMap { result -> V2RoomCallFailure? in
+            guard case .failure(let error) = result,
+                  let failure = error as? V2RoomCallFailure else { return nil }
+            switch failure {
+            case .notAccepted, .rolledBack: return failure
+            case .outcomeUnknown: return nil
+            }
+        }
+        if rollbackFailures.count == results.count, let first = rollbackFailures.first {
+            throw first
         }
         // A driver failure or unknown SQL commit is not a typed business
         // rejection. Do not return partial successes as a committed turn when

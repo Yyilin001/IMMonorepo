@@ -216,7 +216,12 @@ public actor V2HostRoomRecoveryQueryBatcher {
         pending[key] = nil
         pendingCount -= live.count
         inFlightCount += 1
-        Task { await run(live, key: key) }
+        let sqlDeadline = live.map(\.turn.callDeadline).min()!
+        Task {
+            await V2RoomSQLDeadline.withSelectedDeadline(sqlDeadline) {
+                await run(live, key: key)
+            }
+        }
     }
 
     private func run(_ items: [Pending], key: Key) async {

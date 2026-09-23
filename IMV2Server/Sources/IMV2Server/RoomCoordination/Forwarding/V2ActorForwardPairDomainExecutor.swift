@@ -26,6 +26,13 @@ public struct V2ActorForwardPairDomainExecutor: Sendable {
 
     public func execute(_ pair: V2ActorForwardPairWire,
                         activationTokens: [V2RoomActivationToken]) async throws -> V2ActorForwardMessageResultWire {
+        try await V2RoomSQLDeadline.withDeadline(V2RoomSQLDeadline.boundedTransactionDeadline()) {
+            try await executeBounded(pair, activationTokens: activationTokens)
+        }
+    }
+
+    private func executeBounded(_ pair: V2ActorForwardPairWire,
+                                activationTokens: [V2RoomActivationToken]) async throws -> V2ActorForwardMessageResultWire {
         let selected = Set([pair.source.roomID, pair.targetRoomID])
         guard activationTokens.count == selected.count,
               Set(activationTokens.map(\.roomID)) == selected else {
@@ -34,13 +41,13 @@ public struct V2ActorForwardPairDomainExecutor: Sendable {
         let scope = try V2RoomActivationWriteScope(tokens: activationTokens)
         let key = try ForwardPairIdentity(pair)
         if let replay = try await replay(key, scope: scope) { return .init(domain: replay) }
-        guard let content = try await sourceContent(key: key) else {
+        guard let content = try await sourceContent(key: key, scope: scope) else {
             return try failure(pair, code: "NOT_FOUND")
         }
         guard content.revision == pair.source.revision.signedValue else {
             return try failure(pair, code: "SOURCE_CHANGED")
         }
-        let clientID = try await existingClientID(key) ?? deterministicClientID(key)
+        let clientID = try await existingClientID(key, scope: scope) ?? deterministicClientID(key)
         let command = try V2SendMessageCommand(roomID: pair.targetRoomID,
             senderUserID: pair.actorUserID, clientMessageID: .init(uuid: clientID),
             text: content.text,
@@ -83,20 +90,24 @@ public struct V2ActorForwardPairDomainExecutor: Sendable {
 
     /// Read-only observation may race; prepareLedger is the authoritative
     /// fenced check. Existing legacy random IDs are retained on replay.
-    private func existingClientID(_ key: ForwardPairIdentity) async throws -> UUID? {
-        let sql = try forwardSQL(database)
-        return try await sql.raw("""
+    private func existingClientID(_ key: ForwardPairIdentity,
+                                  scope: V2RoomActivationWriteScope) async throws -> UUID? {
+        try await v2WithRoomScopedTransaction(database: database) { transaction in
+            let sql = try forwardSQL(transaction)
+            try await scope.require([key.sourceRoom, key.target], sql: sql)
+            return try await sql.raw("""
             SELECT target_client_message_id
             FROM im_v2.message_forward_operations
             WHERE actor_user_id = \(bind: key.actor) AND operation_id = \(bind: key.operation)
               AND source_message_id = \(bind: key.source) AND target_room_id = \(bind: key.target)
             """).first(decoding: ForwardPairLedgerRow.self)?.clientMessageID
+        }
     }
 
     private func replay(_ key: ForwardPairIdentity,
                         scope: V2RoomActivationWriteScope) async throws -> V2ForwardMessageResult? {
         try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,
-            classifyCommitFailure: true) { transaction in
+            classifyCommitFailure: true, useRoomDeadline: true) { transaction in
             let sql = try forwardSQL(transaction)
             try await v2SetRoomActivationSQLTimeouts(.default, sql: sql)
             try await scope.require([key.sourceRoom, key.target], sql: sql)
@@ -145,9 +156,12 @@ public struct V2ActorForwardPairDomainExecutor: Sendable {
         }
     }
 
-    private func sourceContent(key: ForwardPairIdentity) async throws -> ForwardPairContent? {
-        let sql = try forwardSQL(database)
-        guard let row = try await sql.raw("""
+    private func sourceContent(key: ForwardPairIdentity,
+                               scope: V2RoomActivationWriteScope) async throws -> ForwardPairContent? {
+        try await v2WithRoomScopedTransaction(database: database) { transaction in
+            let sql = try forwardSQL(transaction)
+            try await scope.require([key.sourceRoom], sql: sql)
+            guard let row = try await sql.raw("""
             SELECT message.sender_user_id, message.text_body,
                    message.content_revision,
                    message.rich_entities::text AS entities_json,
@@ -167,9 +181,10 @@ public struct V2ActorForwardPairDomainExecutor: Sendable {
             GROUP BY message.sender_user_id, message.text_body,
                      message.content_revision, message.rich_entities
             """).first(decoding: ForwardPairSourceRow.self) else { return nil }
-        return try .init(sender: row.sender, text: row.text, revision: row.revision,
-            entities: JSONDecoder().decode([V2MessageEntity].self, from: Data(row.entitiesJSON.utf8)),
-            media: JSONDecoder().decode([UUID].self, from: Data(row.mediaJSON.utf8)))
+            return try .init(sender: row.sender, text: row.text, revision: row.revision,
+                entities: JSONDecoder().decode([V2MessageEntity].self, from: Data(row.entitiesJSON.utf8)),
+                media: JSONDecoder().decode([UUID].self, from: Data(row.mediaJSON.utf8)))
+        }
     }
 }
 

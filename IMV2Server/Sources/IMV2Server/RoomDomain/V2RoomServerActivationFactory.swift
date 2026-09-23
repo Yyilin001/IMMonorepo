@@ -107,11 +107,13 @@ private actor V2RoomServerActivation {
         guard ContinuousClock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
         let created = try Handlers(token: token, resources: resources, now: now)
         let token = self.token
-        try await resources.database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase else {
-                throw V2SchemaReadinessError.unsupportedDatabase
+        try await V2RoomSQLDeadline.withDeadline(deadline) {
+            try await v2WithRoomScopedTransaction(database: resources.database) { transaction in
+                guard let sql = transaction as? any SQLDatabase else {
+                    throw V2SchemaReadinessError.unsupportedDatabase
+                }
+                try await v2RequireRoomActivation(token: token, sql: sql)
             }
-            try await v2RequireRoomActivation(token: token, sql: sql)
         }
         guard !closed, ContinuousClock.now < deadline else {
             throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
@@ -134,21 +136,25 @@ private actor V2RoomServerActivation {
         guard turn.items.allSatisfy({ ContinuousClock.now < $0.deadline }) else {
             return .rolledBack(.deadlineExceeded)
         }
+        let callDeadline = turn.items.map(\.deadline).min()!
         do {
-            if turn.items.allSatisfy({ $0.request.canShareSendTurn }) {
-                let sends = turn.items.compactMap { item -> V2ActorSendMessageWire? in
-                    if case .messaging(.send(let send)) = item.request { return send }
-                    return nil
+            return try await V2RoomSQLDeadline.withDeadline(callDeadline) {
+                if turn.items.allSatisfy({ $0.request.canShareSendTurn }) {
+                    let sends = turn.items.compactMap { item -> V2ActorSendMessageWire? in
+                        if case .messaging(.send(let send)) = item.request { return send }
+                        return nil
+                    }
+                    let results = try await handlers.messages.executeGrantedSendTurn(sends,
+                        batchDeadline: turn.context.batchDeadline,
+                        callDeadline: callDeadline, using: resources.sends)
+                    guard results.count == turn.items.count else { return .outcomeUnknown }
+                    return .committed(results.map(V2RoomResponse.messaging))
                 }
-                let results = try await handlers.messages.executeGrantedSendTurn(sends,
-                    batchDeadline: turn.context.batchDeadline, using: resources.sends)
-                guard results.count == turn.items.count else { return .outcomeUnknown }
-                return .committed(results.map(V2RoomResponse.messaging))
+                let item = turn.items[0]
+                let response = try await dispatch(item.request, handlers: handlers, resources: resources,
+                    batchDeadline: turn.context.batchDeadline, callDeadline: item.deadline)
+                return .committed([response])
             }
-            let item = turn.items[0]
-            let response = try await dispatch(item.request, handlers: handlers, resources: resources,
-                batchDeadline: turn.context.batchDeadline, callDeadline: item.deadline)
-            return .committed([response])
         } catch {
             return v2RoomDomainCompletion(error)
         }

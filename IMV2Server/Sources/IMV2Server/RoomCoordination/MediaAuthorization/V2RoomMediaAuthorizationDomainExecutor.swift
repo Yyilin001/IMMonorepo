@@ -30,7 +30,7 @@ public struct V2RoomMediaAuthorizationDomainExecutor: Sendable {
                   let actor = request.actorUserID.uuidValue else {
                 throw V2MediaStoreError.downloadNotAuthorized
             }
-            return try await database.transaction { transaction in
+            return try await v2WithRoomScopedTransaction(database: database) { transaction in
                 guard let sql = transaction as? any SQLDatabase else {
                     throw V2RoomWriteStoreError.corruptPersistenceState
                 }

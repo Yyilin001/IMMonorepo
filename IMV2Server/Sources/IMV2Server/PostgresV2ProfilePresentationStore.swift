@@ -123,7 +123,7 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
         if activationScope != nil || nicknameScope != nil {
             return try await v2WithPostgresTransactionRetry(
                 database: database, maximumRetryCount: 0,
-                classifyCommitFailure: false
+                classifyCommitFailure: false, useRoomDeadline: activationScope != nil
             ) { transaction in
                 guard let sql = transaction as? any SQLDatabase else { throw V2ProfilePresentationError.corruptPersistenceState }
                 let room = try uuid(roomID)
@@ -212,7 +212,7 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
         let actor = try uuid(actorUserID), room = try uuid(roomID), operation = try uuid(operationID)
         return try await v2WithPostgresTransactionRetry(
             database: database, maximumRetryCount: 0,
-            classifyCommitFailure: activationScope != nil
+            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil
         ) { transaction -> V2GroupMemberPresentation in
             guard let sql = transaction as? any SQLDatabase else { throw V2ProfilePresentationError.corruptPersistenceState }
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }

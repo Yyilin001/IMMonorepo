@@ -21,7 +21,7 @@ public struct PostgresV2RoomActivationStore: V2RoomActivationLeaseStore {
 
     public func locate(roomID: RoomID, owner: V2RoomDataOwner) async throws -> V2RoomActivationLease? {
         let roomUUID = try uuid(roomID)
-        return try await database.transaction { transaction in
+        return try await v2WithRoomScopedTransaction(database: database, timeouts: timeouts) { transaction in
             let sql = try activationSQL(transaction)
             try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
             try await v2LockRoomActivationOwner(roomID: roomUUID, owner: owner, sql: sql, schema: schema)
@@ -129,7 +129,8 @@ public struct PostgresV2RoomActivationStore: V2RoomActivationLeaseStore {
     ) async throws -> Value {
         do {
             return try await v2WithPostgresTransactionRetry(database: database,
-                maximumRetryCount: 0, classifyCommitFailure: true, operation)
+                maximumRetryCount: 0, classifyCommitFailure: true,
+                useRoomDeadline: true, operation)
         } catch is V2RoomTransactionOutcomeUnknown {
             throw V2RoomActivationLeaseError.outcomeUnknown
         }

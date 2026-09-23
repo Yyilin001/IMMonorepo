@@ -75,7 +75,8 @@ public struct PostgresV2ReadReceiptStore:
             advancedWatermark: (sequence: Int64, recordedAt: Date)?
         )
         do {
-            result = try await database.transaction { transaction in
+            result = try await v2WithRoomScopedTransaction(database: database,
+                timeouts: timeouts, useRoomDeadline: activationScope != nil) { transaction in
                 try await attempt.body {
                     guard let sql = transaction as? any SQLDatabase else { throw V2ReadReceiptStoreError.corruptPersistenceState }
                     let roomID = try receiptUUID(command.roomID), userID = try receiptUUID(command.actorUserID), operationID = try receiptUUID(command.operationID)
@@ -146,7 +147,7 @@ public struct PostgresV2ReadReceiptStore:
                     return (.recorded(receipt), recipient, advancedWatermark)
                 }
             }
-        } catch { throw attempt.classify(error) }
+        } catch { throw activationScope == nil ? attempt.classify(error) : error }
         return result.outcome
     }
 
@@ -287,7 +288,8 @@ public struct PostgresV2ReadReceiptStore:
         let attempt = V2RoomTransactionAttempt()
         let rows: [GroupReceiptBatchRow]
         do {
-            rows = try await database.transaction { transaction in
+            rows = try await v2WithRoomScopedTransaction(database: database,
+                timeouts: timeouts, useRoomDeadline: activationScope != nil) { transaction in
                 try await attempt.body {
                     var activationValidity: [UUID: Bool]?
                     if let activationScope {
@@ -354,7 +356,7 @@ public struct PostgresV2ReadReceiptStore:
                     }.get()
                 }
             }
-        } catch { throw attempt.classify(error) }
+        } catch { throw activationScope == nil ? attempt.classify(error) : error }
         guard rows.count == inputs.count,
               rows.enumerated().allSatisfy({ $0.offset == $0.element.ordinal })
         else { throw V2ReadReceiptStoreError.corruptPersistenceState }

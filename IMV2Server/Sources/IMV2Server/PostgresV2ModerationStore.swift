@@ -71,7 +71,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
     private func controlRoom(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
         return try await v2WithPostgresTransactionRetry(
             database: database, maximumRetryCount: 0,
-            classifyCommitFailure: activationScope != nil
+            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil
         ) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ModerationStoreError.corruptPersistenceState }
             let roomID = try moderationUUID(command.roomID)
@@ -163,7 +163,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
     private func redact(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date, isTrustedSafety: Bool = false) async throws -> V2ModerationOutcome {
         return try await v2WithPostgresTransactionRetry(
             database: database, maximumRetryCount: 0,
-            classifyCommitFailure: activationScope != nil
+            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil
         ) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ModerationStoreError.corruptPersistenceState }
             let roomID = try moderationUUID(command.roomID)
@@ -295,7 +295,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
     private func removeMember(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
         return try await v2WithPostgresTransactionRetry(
             database: database, maximumRetryCount: 0,
-            classifyCommitFailure: activationScope != nil
+            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil
         ) { transaction in
             guard let sql = transaction as? any SQLDatabase,
                   let commandTargetID = command.targetUserID
@@ -420,7 +420,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
         }
         return try await v2WithPostgresTransactionRetry(
             database: database, maximumRetryCount: 0,
-            classifyCommitFailure: activationScope != nil
+            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil
         ) { transaction in
             guard let sql = transaction as? any SQLDatabase,
                   let commandTargetID = command.targetUserID,

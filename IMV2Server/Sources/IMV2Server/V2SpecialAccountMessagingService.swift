@@ -319,7 +319,7 @@ public struct PostgresV2SpecialAccountMessagingStore: V2SpecialAccountMessagingS
               message.clientMessageID.uuidValue == operationUUID
         else { throw V2SpecialAccountMessagingError.corruptPersistenceState }
         try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,
-                                               classifyCommitFailure: activationScope != nil) { transaction in
+                                               classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2SpecialAccountMessagingError.corruptPersistenceState }
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             // Serialize retries even when the operation row does not exist yet.

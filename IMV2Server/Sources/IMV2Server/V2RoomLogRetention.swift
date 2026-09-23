@@ -120,7 +120,7 @@ public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
         }
         let attempt = V2RoomTransactionAttempt()
         do {
-            return try await database.transaction { transaction in
+            return try await v2WithRoomScopedTransaction(database: database, timeouts: timeouts) { transaction in
                 try await attempt.body {
                     guard let sql = transaction as? any SQLDatabase else {
                         throw V2RoomWriteStoreError.corruptPersistenceState
@@ -136,7 +136,7 @@ public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
                         deletedEvents: outcome.deletedEvents)
                 }
             }
-        } catch { throw attempt.classify(error) }
+        } catch { throw error }
     }
 
     /// 按保留模式推进一批房间的裁剪下界并删除其下的历史事件。

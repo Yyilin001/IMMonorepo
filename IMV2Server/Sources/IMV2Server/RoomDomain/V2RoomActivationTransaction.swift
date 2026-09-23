@@ -123,6 +123,7 @@ private func v2ExecuteBorrowedRoomTransaction<Value: Sendable>(
         }
         do {
             try await control.rollbackTransaction().get()
+            state.confirmRollback()
         } catch {
             // COMMIT was never sent. Only a settled physical close proves
             // this transaction cannot subsequently be committed.
@@ -132,6 +133,12 @@ private func v2ExecuteBorrowedRoomTransaction<Value: Sendable>(
         if state.wasStopped {
             try await state.settleClose()
             throw state.rollbackFailure
+        }
+        if v2PostgresFailureDisposition(error) == .unavailable {
+            // A SQL lock/statement timeout happened before COMMIT and this
+            // transaction's ROLLBACK was acknowledged. Preserve that proof
+            // for the room turn instead of reporting an unknown outcome.
+            throw V2RoomCallFailure.rolledBack(.unavailable)
         }
         throw error
     }

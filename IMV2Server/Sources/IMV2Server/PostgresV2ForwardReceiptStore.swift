@@ -38,7 +38,7 @@ public struct PostgresV2ForwardReceiptStore: Sendable {
     ///   ``V2ForwardExportError/corruptPersistenceState``。
     public func record(_ receipt: V2ForwardTerminalReceipt, now: Date) async throws {
         try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,
-            classifyCommitFailure: activationScope != nil) { transaction in
+            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ForwardExportError.corruptPersistenceState }
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             guard let original = try await sql.raw("""

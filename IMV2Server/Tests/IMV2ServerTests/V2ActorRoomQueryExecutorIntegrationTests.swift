@@ -117,17 +117,9 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
             let request = try V2ActorRecordReadReceiptWire(roomID: .init(uuid: room),
                 actorUserID: .init(uuid: actor), operationID: .init(uuid: UUID()),
                 readThroughRoomSequence: 1)
-            do {
+            await #expect(throws: V2RoomCallFailure.rolledBack(.unavailable)) {
                 _ = try await executor.command(.record(request), token: token,
                     ingressAt: Date(timeIntervalSince1970: 1_750_000_000))
-                Issue.record("lock timeout was hidden as success or owner denial")
-            } catch is V2ReadReceiptStoreError {
-                Issue.record("lock timeout was converted to a domain denial")
-            } catch is V2RoomActivationLeaseError {
-                Issue.record("lock timeout was converted to an authority denial")
-            } catch {
-                // PostgreSQL lock_timeout is a transaction failure, not an
-                // activation mismatch; the caller must retry or fail the turn.
             }
             try await blocker.value
             let rows = try #require(try await sql.raw("SELECT count(*) AS value FROM im_v2.read_receipt_operations")

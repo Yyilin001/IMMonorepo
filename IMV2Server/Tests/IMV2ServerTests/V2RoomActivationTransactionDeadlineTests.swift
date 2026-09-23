@@ -95,6 +95,14 @@ struct V2RoomActivationTransactionDeadlineTests {
             #expect(try await count(id: 9, sql: sql) == 0)
             #expect(try await sql.raw("SELECT last_value AS value FROM public.v2_actor_deadline_retry_counter")
                 .first(decoding: DeadlineCount.self)?.value == 2)
+            await #expect(throws: V2RoomCallFailure.rolledBack(.unavailable)) {
+                _ = try await v2WithPostgresTransactionRetry(database: database,
+                    maximumRetryCount: 0, useRoomDeadline: true) { borrowed in
+                    try await deadlineSQL(borrowed).raw("""
+                        DO $$ BEGIN RAISE EXCEPTION 'retry exhausted' USING ERRCODE = '40001'; END $$
+                        """).run()
+                }
+            }
 
             let borrowedReady = AsyncStream<Void>.makeStream()
             let poolHolder = Task {
@@ -153,6 +161,31 @@ struct V2RoomActivationTransactionDeadlineTests {
             }
             try await holder.value
             #expect(try await count(id: 3, sql: sql) == 0)
+
+            let sqlTimeoutKey: Int64 = Int64.random(in: 100_000...Int64.max)
+            let sqlTimeoutReady = AsyncStream<Void>.makeStream()
+            let sqlTimeoutHolder = Task {
+                try await database.withConnection { borrowed in
+                    let connection = try deadlineSQL(borrowed)
+                    try await connection.raw("SELECT pg_advisory_lock(\(bind: sqlTimeoutKey))").run()
+                    sqlTimeoutReady.continuation.yield(())
+                    try await Task.sleep(for: .milliseconds(300))
+                    try await connection.raw("SELECT pg_advisory_unlock(\(bind: sqlTimeoutKey))").run()
+                }
+            }
+            for await _ in sqlTimeoutReady.stream { break }
+            let shortLockTimeout = try V2RoomActivationSQLTimeouts(lockMilliseconds: 75,
+                statementMilliseconds: 1_000, idleTransactionMilliseconds: 1_000)
+            await #expect(throws: V2RoomCallFailure.rolledBack(.unavailable)) {
+                _ = try await v2WithRoomActivationTransaction(database: database,
+                    deadline: .now + .seconds(1), timeouts: shortLockTimeout) { borrowed in
+                    let connection = try deadlineSQL(borrowed)
+                    try await connection.raw("INSERT INTO public.v2_actor_deadline_probe VALUES (11)").run()
+                    try await connection.raw("SELECT pg_advisory_xact_lock(\(bind: sqlTimeoutKey))").run()
+                }
+            }
+            try await sqlTimeoutHolder.value
+            #expect(try await count(id: 11, sql: sql) == 0)
 
             let cancellation = Task {
                 try await v2WithRoomActivationTransaction(database: database,

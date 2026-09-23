@@ -81,7 +81,7 @@ public struct PostgresV2MessageEditStore: V2MessageEditStore, V2OwnerValidatedMe
               identity.targetUserID == command.actorUserID
         else { throw V2MessageEditStoreError.corruptPersistenceState }
         return try await v2WithPostgresTransactionRetry(database: database,
-            maximumRetryCount: 0, classifyCommitFailure: activationScope != nil) { transaction in
+            maximumRetryCount: 0, classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2MessageEditStoreError.corruptPersistenceState }
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             let roomID = try editUUID(command.roomID), actorID = try editUUID(command.actorUserID)

@@ -90,7 +90,7 @@ public struct PostgresV2ForwardInboxStore: Sendable {
             }
         }
         try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,
-            classifyCommitFailure: activationScope != nil) { transaction in
+            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ForwardInboxError.corruptPersistenceState }
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             if activationScope == nil, try await matchesExisting(export, sql: sql) { return }
