@@ -1,0 +1,23 @@
+{
+  "upstream": "https://github.com/apple/swift-distributed-actors.git",
+  "revision": "50e789fbb6db9a9869a60b1915e659bd752e1d42",
+  "license": "Apache-2.0",
+  "source": "SwiftPM checkout originally pinned by IMV2Server/Package.resolved",
+  "originalPackageSwiftSHA256": "881535e1277550e7791c89578a92c3bf378395d0215bcbd03307dd22e4a63bba",
+  "copiedProductionTargets": [
+    "Sources/DistributedCluster (164 Swift files; Docs.docc excluded)",
+    "Sources/DistributedActorsConcurrencyHelpers (1 Swift file; README excluded)",
+    "Sources/CDistributedActorsMailbox (6 C/header files)"
+  ],
+  "upstreamSourceTreeSHA256": {
+    "DistributedCluster": "3fc93686a03f50fad8386827808f84d0ca8c5c70a19c32d3c5760c2bd397b8f1",
+    "DistributedActorsConcurrencyHelpers": "5c5c7a204042cd752a32d184ae396d20aedde3b9c4aa767a4a6b9cacf1b84ed7",
+    "CDistributedActorsMailbox": "c16859cb6c27a4c004d3a2e0f4c0615e072da169e29253be42ed71bf2defdf0e"
+  },
+  "hashMethod": "For each production target, sort included files by relative path from Sources; SHA-256 over (4-byte big-endian UTF-8 path length, path, 8-byte big-endian content length, content) concatenated for each file.",
+  "originalFileSHA256": {
+    "Sources/DistributedCluster/ClusterSystemSettings.swift": "13c37e133d5623b2f5859ccc444996c3ea891b5b73d5618ec2809f45d7351224",
+    "Sources/DistributedCluster/Cluster/Transport/TransportPipelines.swift": "b711b6495b196f8a114ca656f4a4c622965dfec01f87a753100b5cbcc2760a23"
+  },
+  "localChanges": "See PATCH.md. Package.swift retains the upstream production target dependencies and version ranges; non-shipping upstream test, plugin, executable, documentation, and argument-parser target/dependency were omitted."
+}

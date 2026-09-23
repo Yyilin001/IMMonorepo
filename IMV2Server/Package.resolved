@@ -173,14 +173,6 @@
       }
     },
     {
-      "identity" : "swift-distributed-actors",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/swift-distributed-actors.git",
-      "state" : {
-        "revision" : "50e789fbb6db9a9869a60b1915e659bd752e1d42"
-      }
-    },
-    {
       "identity" : "swift-distributed-tracing",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-distributed-tracing.git",

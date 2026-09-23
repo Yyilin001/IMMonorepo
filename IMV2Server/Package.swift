@@ -35,7 +35,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.34.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
-        .package(url: "https://github.com/apple/swift-distributed-actors.git", revision: "50e789fbb6db9a9869a60b1915e659bd752e1d42"),
+        .package(path: "Vendor/swift-distributed-actors"),
     ],
     targets: [
         .target(
