@@ -1,5 +1,6 @@
 import FluentKit
 import Foundation
+import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
@@ -10,6 +11,7 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
     private let database: any Database
     private let now: @Sendable () -> Date
     private let nicknameScope: (roomID: RoomID, route: V2RoomShardRoute)?
+    private let activationScope: V2RoomActivationWriteScope?
 
     /// 创建资料展示存储。
     ///
@@ -20,12 +22,23 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
         self.database = database
         self.now = now
         self.nicknameScope = nil
+        self.activationScope = nil
+    }
+
+    /// Used only for the fixed room actor turn; all nickname reads and writes recheck the full token.
+    public init(database: any Database, activationScope: V2RoomActivationWriteScope,
+                now: @escaping @Sendable () -> Date = Date.init) {
+        self.database = database
+        self.now = now
+        self.nicknameScope = nil
+        self.activationScope = activationScope
     }
 
     init(database: any Database, roomID: RoomID, ownerRoute: V2RoomShardRoute, now: @escaping @Sendable () -> Date) {
         self.database = database
         self.now = now
         self.nicknameScope = (roomID, ownerRoute)
+        self.activationScope = nil
     }
 
     /// 按目标用户游标分页读取联系人备注。
@@ -107,12 +120,22 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
     /// - Returns: 群昵称分页，含下一页游标。
     /// - Throws: 无权限、条数越界或持久化状态损坏时抛出。
     public func groupNicknames(actorUserID: UserID, roomID: RoomID, afterUserID: UserID?, limit: Int) async throws -> V2GroupNicknamePage {
-        if let scope = nicknameScope {
-            guard scope.roomID == roomID else { throw V2RoomOwnerFenceError.ownerChanged }
-            return try await database.transaction { transaction in
+        if activationScope != nil || nicknameScope != nil {
+            return try await v2WithPostgresTransactionRetry(
+                database: database, maximumRetryCount: 0,
+                classifyCommitFailure: false
+            ) { transaction in
                 guard let sql = transaction as? any SQLDatabase else { throw V2ProfilePresentationError.corruptPersistenceState }
-                try await v2RequireRoomOwner(roomID: uuid(roomID), route: scope.route, sql: sql)
-                return try await readGroupNicknames(actorUserID: actorUserID, roomID: roomID, afterUserID: afterUserID, limit: limit, sql: sql)
+                let room = try uuid(roomID)
+                if let activationScope {
+                    try await v2SetRoomActivationSQLTimeouts(.default, sql: sql)
+                    try await activationScope.require([room], sql: sql)
+                } else if let scope = nicknameScope {
+                    guard scope.roomID == roomID else { throw V2RoomOwnerFenceError.ownerChanged }
+                    try await v2RequireRoomOwner(roomID: room, route: scope.route, sql: sql)
+                }
+                return try await readGroupNicknames(actorUserID: actorUserID, roomID: roomID,
+                                                    afterUserID: afterUserID, limit: limit, sql: sql)
             }
         }
         guard let sql = database as? any SQLDatabase else { throw V2ProfilePresentationError.corruptPersistenceState }
@@ -187,10 +210,15 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
         let normalizedNickname = validated.groupNickname
         let expectedSignedRevision = try signed(expectedRevision)
         let actor = try uuid(actorUserID), room = try uuid(roomID), operation = try uuid(operationID)
-        return try await database.transaction { transaction -> V2GroupMemberPresentation in
+        return try await v2WithPostgresTransactionRetry(
+            database: database, maximumRetryCount: 0,
+            classifyCommitFailure: activationScope != nil
+        ) { transaction -> V2GroupMemberPresentation in
             guard let sql = transaction as? any SQLDatabase else { throw V2ProfilePresentationError.corruptPersistenceState }
+            if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             try await presentationLock(scope: actor.uuidString + ":nickname-operation:" + operation.uuidString, sql: sql)
             try await presentationLock(scope: room.uuidString + ":nickname:" + actor.uuidString, sql: sql)
+            if let activationScope { try await activationScope.require([room], sql: sql) }
             if let scope = nicknameScope {
                 guard scope.roomID == roomID else { throw V2RoomOwnerFenceError.ownerChanged }
                 try await v2RequireRoomOwner(roomID: room, route: scope.route, sql: sql)
