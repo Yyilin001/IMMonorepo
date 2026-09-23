@@ -130,7 +130,12 @@ class Probe:
             for network in links[1:]:
                 self.docker("network", "connect", "--alias", "db-" + database, network, container)
             self.docker("start", container)
-            self.wait(lambda: self.docker("exec", container, "pg_isready", "-U", "probe", check=False).returncode == 0,
+            # The image's initdb server accepts Unix-socket probes before the
+            # probe database exists, then shuts down. TCP opens only on the
+            # final postmaster used by the Actor processes.
+            self.wait(lambda: (ready := self.docker("exec", container, "psql", "-XAt", "-h", "127.0.0.1",
+                                                 "-U", "probe", "-d", "probe", "-c", "SELECT 1",
+                                                 check=False)).returncode == 0 and ready.stdout.strip() == b"1",
                       database + " ready", seconds=45, watched=())
             install = self.docker("exec", "-i", container, "psql", "-X", "-v", "ON_ERROR_STOP=1", "-U", "probe",
                                  "-d", "probe", data=(ROOT / "IMV2/sql/schema.sql").read_bytes(), timeout=90)
@@ -253,8 +258,10 @@ class Probe:
                       f"WHERE client_message_id = '{identifier(502)}'") != "1":
             raise RuntimeError("healthy owner did not persist during peer database outage")
         self.docker("start", self.containers["owner-a"])
-        self.wait(lambda: self.docker("exec", self.containers["owner-a"], "pg_isready", "-U", "probe",
-                                      check=False).returncode == 0,
+        self.wait(lambda: (ready := self.docker("exec", self.containers["owner-a"], "psql", "-XAt",
+                                                 "-h", "127.0.0.1", "-U", "probe", "-d", "probe",
+                                                 "-c", "SELECT 1", check=False)).returncode == 0
+                  and ready.stdout.strip() == b"1",
                   "restarted owner PostgreSQL ready", seconds=45)
         after = self.inspect("owner-a")
         restarted_sql = self.query("owner-a", "SELECT pg_postmaster_start_time()::text")
