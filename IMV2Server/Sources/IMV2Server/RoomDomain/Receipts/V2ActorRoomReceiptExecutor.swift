@@ -38,11 +38,23 @@ public struct V2ActorRoomReceiptExecutor: Sendable {
     }
 
     public func recordBatch(_ batch: V2ActorReadReceiptRecordBatchWire,
-                            scope: V2RoomActivationWriteScope, ingressAt: Date) async throws -> V2ActorReadReceiptRecordBatchResultWire {
-        let requests = try batch.recordRequests(now: ingressAt)
+                            scope: V2RoomActivationWriteScope, ingressTimes: [Date]) async throws -> V2ActorReadReceiptRecordBatchResultWire {
+        guard ingressTimes.count == batch.requests.count,
+              ingressTimes.allSatisfy({ $0.timeIntervalSince1970.isFinite }) else {
+            throw V2ActorRoomReceiptWireError.invalidRequest
+        }
+        let requests = try zip(batch.requests, ingressTimes).map { wire, ingressAt in
+            try V2ReadReceiptRecordRequest(command: wire.commandValue(), now: ingressAt)
+        }
         let results = try await store(database).recordBatchActivationValidated(requests,
             scope: scope, timeouts: timeouts)
         return try .init(results, expectedCount: requests.count)
+    }
+
+    public func recordBatch(_ batch: V2ActorReadReceiptRecordBatchWire,
+                            scope: V2RoomActivationWriteScope, ingressAt: Date) async throws -> V2ActorReadReceiptRecordBatchResultWire {
+        try await recordBatch(batch, scope: scope,
+            ingressTimes: Array(repeating: ingressAt, count: batch.requests.count))
     }
 
     public func query(_ query: V2RoomReceiptQuery, token: V2RoomActivationToken) async throws -> V2RoomReceiptResult {

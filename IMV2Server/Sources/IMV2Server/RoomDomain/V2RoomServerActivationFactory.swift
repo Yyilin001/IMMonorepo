@@ -16,6 +16,7 @@ public struct V2RoomServerOwnerResources: Sendable {
     let identities: any V2MembershipIdentitySnapshotValidating
     let invitationIdentities: any V2GroupInvitationIdentityReading
     let receipts: V2ActorRoomReceiptExecutor
+    let receiptBatcher: V2HostRoomReceiptBatcher
     let queries: V2ActorRoomQueryExecutor
     let recovery: V2HostRoomRecoveryQueryBatcher
     let sends: V2ActorGrantedSendBatchAdapter
@@ -30,7 +31,11 @@ public struct V2RoomServerOwnerResources: Sendable {
                 receiptShadowForwarder: any V2UserShardProjectionShadowing,
                 capacityProfile: V2CapacityProfile, messageLimits: V2MessageCommandLimits,
                 maximumEditBytes: Int, contentReviewMode: V2ContentReviewMode,
-                queryBatchConfiguration: V2HostRoomRecoveryQueryBatcher.Configuration) throws {
+                queryBatchConfiguration: V2HostRoomRecoveryQueryBatcher.Configuration,
+                receiptBatchConfiguration: V2ReadReceiptBatcher.Configuration = .init(
+                    maximumBatchSize: 64, maximumDelay: .milliseconds(2),
+                    maximumInFlightBatches: 4, maximumPendingRequests: 256),
+                databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil) throws {
         guard maximumEditBytes > 0 else {
             throw V2ActorContractError.invalidConfiguration("room edit bytes")
         }
@@ -42,7 +47,11 @@ public struct V2RoomServerOwnerResources: Sendable {
         self.reactions = .init(database: database)
         self.identities = membershipIdentities
         self.invitationIdentities = invitationIdentities
-        self.receipts = .init(database: database, shadowForwarder: receiptShadowForwarder)
+        let receipts = V2ActorRoomReceiptExecutor(database: database, shadowForwarder: receiptShadowForwarder)
+        self.receipts = receipts
+        self.receiptBatcher = .init(executor: receipts,
+            configuration: receiptBatchConfiguration,
+            databaseWorkAdmission: databaseWorkAdmission)
         let queries = V2ActorRoomQueryExecutor(database: database)
         self.queries = queries
         self.recovery = .init(executor: queries, configuration: queryBatchConfiguration)
@@ -203,7 +212,8 @@ private actor V2RoomServerActivation {
                 throw error
             }
         case .receipt(let command):
-            return .receipt(try await resources.receipts.command(command, token: token, ingressAt: now()))
+            return .receipt(try await resources.receiptBatcher.record(.init(command: command, token: token,
+                batchDeadline: batchDeadline, callDeadline: callDeadline, ingressAt: now())))
         case .receiptQuery(let query):
             return .receipt(try await resources.receipts.query(query, token: token))
         case .roomLog(let query):

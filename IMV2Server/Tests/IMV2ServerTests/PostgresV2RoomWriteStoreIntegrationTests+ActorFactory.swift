@@ -53,6 +53,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                       let receipt = try sent.toDomain().acceptanceReceipt else {
                     throw V2RoomWriteStoreError.corruptPersistenceState
                 }
+                let read = try V2ActorRecordReadReceiptWire(roomID: roomID, actorUserID: senderID,
+                    operationID: .init(uuid: UUID()), readThroughRoomSequence: receipt.roomSequence)
+                let recorded = try await first.invoke(token: token,
+                    encodedRequest: JSONEncoder().encode(V2RoomRequest.receipt(.record(read))),
+                    deadline: .now + .seconds(10))
+                guard case .receipt(.record(.recorded(let readReceipt))) = recorded else {
+                    throw V2ReadReceiptStoreError.corruptPersistenceState
+                }
+                #expect(readReceipt.readThroughRoomSequence == receipt.roomSequence)
                 let query = V2RoomRequest.recovery(.init(roomID: roomID, actorUserID: senderID, kind: .state))
                 let state = try await first.invoke(token: token, encodedRequest: JSONEncoder().encode(query),
                     deadline: .now + .seconds(10))
