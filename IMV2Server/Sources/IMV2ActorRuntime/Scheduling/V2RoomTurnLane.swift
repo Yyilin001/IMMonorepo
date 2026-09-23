@@ -33,8 +33,9 @@ public struct V2RoomTurnLaneSnapshot: Sendable {
     public let queuedCount: Int
     public let executingCount: Int
     public let unresolvedCount: Int
+    public let hasReservation: Bool
     public let lastActivity: ContinuousClock.Instant
-    public var isIdle: Bool { queuedCount == 0 && executingCount == 0 && unresolvedCount == 0 }
+    public var isIdle: Bool { queuedCount == 0 && executingCount == 0 && unresolvedCount == 0 && !hasReservation }
 }
 
 /// This scheduler is generic over a closed, typed request family; it does not
@@ -55,6 +56,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
     private var queue: [Entry] = []
     private var executing: [Entry] = []
     private var unresolved: [V2RoomCommandPermit] = []
+    private var reservation: HeldReservation?
     private var consumer: Task<Void, Never>?
     private var lastActivity: ContinuousClock.Instant
 
@@ -114,7 +116,8 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
                 }
                 queue.append(Entry(
                     id: requestID, permit: permit, request: request, ordinal: ordinal,
-                    admittedAt: admittedAt, deadline: deadline, continuation: continuation, timer: timer
+                    admittedAt: admittedAt, deadline: deadline, continuation: continuation,
+                    reservationGrant: nil, reservationContinuation: nil, timer: timer
                 ))
                 lastActivity = admittedAt
                 startConsumerIfNeeded()
@@ -130,10 +133,99 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         if phase == .ready { phase = .draining }
     }
 
+    /// Enqueues a barrier from a coordinator running outside ordinary turns.
+    /// The deadline covers both waiting and holding; a granted expiry never
+    /// silently unlocks the same activation for subsequent commands.
+    public func reserve(requestID: UUID, deadline: ContinuousClock.Instant) async throws -> V2RoomReservation {
+        let grant = V2RoomReservation(token: token, requestID: requestID, reservationID: UUID())
+        return try await withTaskCancellationHandler {
+            guard phase == .ready else { throw rejection() }
+            guard !Task.isCancelled else { throw V2RoomCallFailure.notAccepted(.cancelled) }
+            let boundedDeadline = min(deadline, clock.now + configuration.reservationTimeout.duration)
+            guard clock.now < boundedDeadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+            let bytes = try JSONEncoder().encode(grant)
+            let permit = try await budget.acquireReservation(roomID: token.roomID, encodedRequest: bytes)
+            guard phase == .ready, !Task.isCancelled, clock.now < boundedDeadline, nextOrdinal < UInt64.max else {
+                let failure = phase != .ready ? rejection() : V2RoomCallFailure.notAccepted(
+                    Task.isCancelled ? .cancelled : .deadlineExceeded
+                )
+                await budget.release(permit)
+                throw failure
+            }
+            nextOrdinal += 1
+            let admittedAt = clock.now
+            return try await withCheckedThrowingContinuation { continuation in
+                let timer = Task { [weak self] in
+                    do { try await ContinuousClock().sleep(until: boundedDeadline) }
+                    catch { return }
+                    await self?.withdraw(grant.reservationID, reason: .deadlineExceeded)
+                }
+                queue.append(Entry(
+                    id: grant.reservationID, permit: permit, request: nil, ordinal: nextOrdinal,
+                    admittedAt: admittedAt, deadline: boundedDeadline, continuation: nil,
+                    reservationGrant: grant, reservationContinuation: continuation, timer: timer
+                ))
+                lastActivity = admittedAt
+                startConsumerIfNeeded()
+            }
+        } onCancel: {
+            Task { await self.withdraw(grant.reservationID, reason: .cancelled) }
+        }
+    }
+
+    /// Required acknowledgement before dispatch. Late or forged grants fail;
+    /// a caller cannot start SQL after a reservation expired or was retired.
+    public func markReservationDispatched(_ grant: V2RoomReservation) throws {
+        guard phase == .ready || phase == .draining,
+              reservation?.entry.reservationGrant == grant,
+              let held = reservation, held.entry.deadline > clock.now,
+              !held.dispatched
+        else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
+        reservation?.dispatched = true
+    }
+
+    /// A coordinator can safely abandon a grant only before dispatch. Once
+    /// acknowledged, it must report a durable completion or retire both rooms.
+    @discardableResult
+    public func abortReservation(_ grant: V2RoomReservation) async -> Bool {
+        guard let held = reservation, held.entry.reservationGrant == grant,
+              !held.dispatched, phase == .ready || phase == .draining
+        else { return false }
+        reservation = nil
+        held.entry.timer.cancel()
+        lastActivity = clock.now
+        await budget.release(held.entry.permit)
+        startConsumerIfNeeded()
+        return true
+    }
+
+    /// Hosting first updates/invalidates executor state while this barrier is
+    /// still held, then completes it. External callers cannot skip that step.
+    @discardableResult
+    func finishReservation(_ grant: V2RoomReservation, completion: V2RoomReservationCompletion) async -> Bool {
+        guard let held = reservation, held.entry.reservationGrant == grant,
+              held.dispatched, phase == .ready || phase == .draining
+        else { return false }
+        held.entry.timer.cancel()
+        reservation = nil
+        lastActivity = clock.now
+        if completion == .outcomeUnknown {
+            phase = .uncertain
+            unresolved.append(held.entry.permit)
+            await rejectQueued(reason: .leaseLost)
+            await onUncertain(token)
+        } else {
+            await budget.release(held.entry.permit)
+            startConsumerIfNeeded()
+        }
+        return true
+    }
+
     public func snapshot() -> V2RoomTurnLaneSnapshot {
         .init(
             phase: phase, queuedCount: queue.count, executingCount: executing.count,
-            unresolvedCount: unresolved.count, lastActivity: lastActivity
+            unresolvedCount: unresolved.count, hasReservation: reservation != nil,
+            lastActivity: lastActivity
         )
     }
 
@@ -142,6 +234,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
     public func loseLease() async {
         guard phase != .stopped, phase != .uncertain else { return }
         phase = .uncertain
+        quarantineReservation()
         await rejectQueued(reason: .leaseLost)
         await onUncertain(token)
     }
@@ -152,6 +245,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         guard executing.isEmpty else { return false }
         phase = .stopped
         consumer?.cancel()
+        quarantineReservation()
         await rejectQueued(reason: .retired)
         let permits = unresolved
         unresolved.removeAll()
@@ -164,7 +258,8 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
     }
 
     private func startConsumerIfNeeded() {
-        guard consumer == nil else { return }
+        guard consumer == nil, reservation == nil, !queue.isEmpty,
+              phase == .ready || phase == .draining else { return }
         consumer = Task { await self.consume() }
     }
 
@@ -172,7 +267,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         while phase == .ready || phase == .draining {
             guard let first = queue.first else { break }
             let batchDeadline = min(first.admittedAt + configuration.batchWait.duration, first.deadline)
-            if classify(first.request) == .send, clock.now < batchDeadline {
+            if isSend(first), clock.now < batchDeadline {
                 // Exactly one batching window is shared with the DB batcher.
                 do { try await clock.sleep(until: batchDeadline) }
                 catch { break }
@@ -184,12 +279,20 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
                 await withdraw(entry.id, reason: .deadlineExceeded)
             }
             guard let head = queue.first else { continue }
-            let isSend = classify(head.request) == .send
+            if let grant = head.reservationGrant {
+                var entry = queue.removeFirst()
+                let continuation = entry.reservationContinuation
+                entry.reservationContinuation = nil
+                reservation = HeldReservation(entry: entry, dispatched: false)
+                continuation?.resume(returning: grant)
+                break
+            }
+            let canBatch = isSend(head)
             var count = 1
             var bytes = head.permit.byteCount
-            if isSend {
+            if canBatch {
                 for entry in queue.dropFirst() {
-                    guard classify(entry.request) == .send,
+                    guard isSend(entry),
                           entry.deadline > clock.now,
                           count < configuration.maximumCommandsPerTurn,
                           entry.permit.byteCount <= configuration.maximumBytesPerTurn - bytes
@@ -205,8 +308,8 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
                     token: token, turnID: UUID(),
                     batchDeadline: min(head.admittedAt + configuration.batchWait.duration, head.deadline)
                 ),
-                items: executing.map {
-                    .init(ordinal: $0.ordinal, request: $0.request, deadline: $0.deadline)
+                items: executing.compactMap { entry in
+                    entry.request.map { .init(ordinal: entry.ordinal, request: $0, deadline: entry.deadline) }
                 }
             )
             let completion = await execute(turn)
@@ -255,6 +358,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             let entry = queue.remove(at: index)
             entry.timer.cancel()
             entry.continuation?.resume(throwing: V2RoomCallFailure.notAccepted(reason))
+            entry.reservationContinuation?.resume(throwing: V2RoomCallFailure.notAccepted(reason))
             await budget.release(entry.permit)
         } else if let index = executing.firstIndex(where: { $0.id == id }) {
             // Detach the caller, not the SQL. Keep the permit and the exclusive
@@ -263,6 +367,13 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             executing[index].continuation = nil
             executing[index].timer.cancel()
             continuation?.resume(throwing: V2RoomCallFailure.outcomeUnknown)
+        } else if reservation?.entry.id == id {
+            // After a grant was returned, coordinator loss is conservative:
+            // retire this epoch even if its dispatch acknowledgement was lost.
+            phase = .uncertain
+            quarantineReservation()
+            await rejectQueued(reason: .leaseLost)
+            await onUncertain(token)
         }
     }
 
@@ -272,18 +383,37 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         for entry in rejected {
             entry.timer.cancel()
             entry.continuation?.resume(throwing: V2RoomCallFailure.notAccepted(reason))
+            entry.reservationContinuation?.resume(throwing: V2RoomCallFailure.notAccepted(reason))
             await budget.release(entry.permit)
         }
+    }
+
+    private func isSend(_ entry: Entry) -> Bool {
+        entry.request.map { classify($0) == .send } ?? false
+    }
+
+    private func quarantineReservation() {
+        guard let held = reservation else { return }
+        reservation = nil
+        held.entry.timer.cancel()
+        unresolved.append(held.entry.permit)
+    }
+
+    private struct HeldReservation: Sendable {
+        let entry: Entry
+        var dispatched: Bool
     }
 
     private struct Entry: Sendable {
         let id: UUID
         let permit: V2RoomCommandPermit
-        let request: Request
+        let request: Request?
         let ordinal: UInt64
         let admittedAt: ContinuousClock.Instant
         let deadline: ContinuousClock.Instant
         var continuation: CheckedContinuation<Response, any Error>?
+        let reservationGrant: V2RoomReservation?
+        var reservationContinuation: CheckedContinuation<V2RoomReservation, any Error>?
         let timer: Task<Void, Never>
     }
 }

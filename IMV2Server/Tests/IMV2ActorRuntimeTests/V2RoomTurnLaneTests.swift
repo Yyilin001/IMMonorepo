@@ -132,7 +132,99 @@ struct V2RoomTurnLaneTests {
         #expect(await fixture.executor.starts.isEmpty)
     }
 
-    private func expectFailure(_ expected: V2RoomCallFailure, from task: Task<Int, any Error>) async {
+    @Test("a reservation is a FIFO barrier and late completion cannot unlock another grant")
+    func reservationBarrier() async throws {
+        let fixture = try Fixture()
+        let first = fixture.submit(.init(id: 0, send: false, hold: true))
+        await fixture.executor.waitForStarts(1)
+        let reserved = Task { try await fixture.lane.reserve(requestID: UUID(), deadline: .now + .seconds(3)) }
+        try await fixture.waitForQueue(1)
+        let next = fixture.submit(.init(id: 1, send: true))
+        try await fixture.waitForQueue(2)
+        await fixture.executor.release()
+        #expect(try await first.value == 0)
+        let grant = try await reserved.value
+        #expect(await fixture.lane.snapshot().hasReservation)
+        #expect(await fixture.executor.starts == [[0]])
+        try await fixture.lane.markReservationDispatched(grant)
+        #expect(!(await fixture.lane.abortReservation(grant)))
+        #expect(await fixture.lane.finishReservation(grant, completion: .committed))
+        #expect(try await next.value == 1)
+        try await fixture.waitForBudget(0)
+        let successor = try await fixture.lane.reserve(requestID: UUID(), deadline: .now + .seconds(3))
+        #expect(!(await fixture.lane.finishReservation(grant, completion: .committed)))
+        #expect(await fixture.lane.snapshot().hasReservation)
+        #expect(await fixture.lane.abortReservation(successor))
+        try await fixture.waitForBudget(0)
+    }
+
+    @Test("queued reservation cancellation releases its host capacity without cancelling a turn")
+    func reservationCancellation() async throws {
+        let fixture = try Fixture()
+        let first = fixture.submit(.init(id: 0, send: false, hold: true))
+        await fixture.executor.waitForStarts(1)
+        let reserved = Task { try await fixture.lane.reserve(requestID: UUID(), deadline: .now + .seconds(3)) }
+        try await fixture.waitForQueue(1)
+        #expect(await fixture.budget.snapshot().reservationCount == 1)
+        reserved.cancel()
+        await expectFailure(.notAccepted(.cancelled), from: reserved)
+        try await fixture.waitForBudget(1)
+        #expect(await fixture.budget.snapshot().reservationCount == 0)
+        await fixture.executor.release()
+        #expect(try await first.value == 0)
+        try await fixture.waitForBudget(0)
+    }
+
+    @Test("reservation expiry retires the epoch rather than releasing the next command")
+    func reservationExpiry() async throws {
+        let fixture = try Fixture()
+        let grant = try await fixture.lane.reserve(requestID: UUID(), deadline: .now + .milliseconds(100))
+        try await fixture.lane.markReservationDispatched(grant)
+        let next = fixture.submit(.init(id: 1, send: false))
+        await expectFailure(.notAccepted(.leaseLost), from: next)
+        #expect(await fixture.lane.snapshot().phase == .uncertain)
+        #expect(await fixture.lane.snapshot().unresolvedCount == 1)
+        #expect(await fixture.budget.snapshot().reservationCount == 1)
+        #expect(await fixture.executor.starts.isEmpty)
+        #expect(!(await fixture.lane.finishReservation(grant, completion: .committed)))
+        #expect(await fixture.lane.completeRetirement())
+        #expect(await fixture.budget.snapshot().reservationCount == 0)
+    }
+
+    @Test("unknown reservation completion stops queued work and rejects stale dispatch")
+    func reservationUnknown() async throws {
+        let fixture = try Fixture()
+        let grant = try await fixture.lane.reserve(requestID: UUID(), deadline: .now + .seconds(3))
+        try await fixture.lane.markReservationDispatched(grant)
+        let next = fixture.submit(.init(id: 1, send: false))
+        try await fixture.waitForQueue(1)
+        #expect(await fixture.lane.finishReservation(grant, completion: .outcomeUnknown))
+        await expectFailure(.notAccepted(.leaseLost), from: next)
+        do {
+            try await fixture.lane.markReservationDispatched(grant)
+            Issue.record("stale grant was acknowledged")
+        } catch { #expect(error as? V2RoomCallFailure == .notAccepted(.staleActivation)) }
+        #expect(await fixture.lane.completeRetirement())
+        #expect(await fixture.budget.snapshot().commandCount == 0)
+    }
+
+    @Test("reservation capacity is shared across every room on the host")
+    func reservationCapacity() async throws {
+        let config = try V2RoomRuntimeConfiguration(maximumConcurrentReservations: 1)
+        let budget = V2RoomCommandBudget(configuration: config)
+        let first = try Fixture(configuration: config, sharedBudget: budget)
+        let second = try Fixture(configuration: config, sharedBudget: budget)
+        let grant = try await first.lane.reserve(requestID: UUID(), deadline: .now + .seconds(3))
+        let rejected = Task { try await second.lane.reserve(requestID: UUID(), deadline: .now + .seconds(3)) }
+        await expectFailure(.notAccepted(.overloaded), from: rejected)
+        #expect(await budget.snapshot().reservationCount == 1)
+        #expect(await first.lane.abortReservation(grant))
+        let next = try await second.lane.reserve(requestID: UUID(), deadline: .now + .seconds(3))
+        #expect(await second.lane.abortReservation(next))
+        #expect(await budget.snapshot().commandCount == 0)
+    }
+
+    private func expectFailure<Value: Sendable>(_ expected: V2RoomCallFailure, from task: Task<Value, any Error>) async {
         do {
             _ = try await task.value
             Issue.record("request unexpectedly succeeded")
@@ -151,9 +243,9 @@ struct V2RoomTurnLaneTests {
         let lane: V2RoomTurnLane<Command, Int>
         let executor: Executor
 
-        init() throws {
-            let config = try V2RoomRuntimeConfiguration()
-            budget = .init(configuration: config)
+        init(configuration: V2RoomRuntimeConfiguration? = nil, sharedBudget: V2RoomCommandBudget? = nil) throws {
+            let config = try configuration ?? V2RoomRuntimeConfiguration()
+            budget = sharedBudget ?? .init(configuration: config)
             executor = Executor()
             let executor = executor
             lane = .init(
