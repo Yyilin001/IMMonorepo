@@ -263,14 +263,13 @@ struct V2RoomLocalCapabilityIntegrationTests {
         }
 
         func expectReplacementRejected(_ replacement: V2ActorHostIdentity) async throws {
-            var rejected = false
             do {
                 _ = try await client.activate(on: replacement, roomID: .init(uuid: UUID()),
                     owner: owner, deadline: .now + .milliseconds(500))
+                Issue.record("old local capability accepted a replacement host incarnation")
             } catch {
-                rejected = true
+                #expect(error as? V2ActorAuthenticationError == .wrongRecipient)
             }
-            #expect(rejected, "old local capability accepted a replacement host incarnation")
         }
     }
 
