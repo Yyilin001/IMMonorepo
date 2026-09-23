@@ -228,6 +228,276 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
             }
         }
     }
+
+    @Test("trusted review holds its room fence through commit; a successor only replays the terminal decision",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_CANCEL_MAINT_DATABASE_IS_DISPOSABLE"] == "1"))
+    func reviewCannotOverlapSuccessor() async throws {
+        try await withCancelMaintenanceDatabase { database, sql, fixture in
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let sender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
+                capacityProfile: fixture.forwardImportTestProfile(),
+                limits: .init(maxUTF8Bytes: 64), now: { now })
+            guard case .accepted(let message) = try await sender.send(.init(roomID: roomID,
+                actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "blocked review")) else {
+                throw CancelMaintenanceFailure.unexpectedResult
+            }
+            // The production write store enqueues this job with the accepted
+            // message; no test-side review row is synthesized.
+            #expect(try await cancelMaintenanceCount(sql: sql,
+                table: "im_v2.content_review_jobs WHERE state = 'pending'") == 1)
+            let key: Int64 = 9_240_031
+            try await sql.raw("""
+                CREATE FUNCTION im_v2.test_block_trusted_review() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN PERFORM pg_advisory_xact_lock(9240031); RETURN NEW; END $$
+                """).run()
+            try await sql.raw("""
+                CREATE TRIGGER test_block_trusted_review BEFORE INSERT ON im_v2.moderation_operations
+                FOR EACH ROW WHEN (NEW.action = 'redact_message')
+                EXECUTE FUNCTION im_v2.test_block_trusted_review()
+                """).run()
+            let gate = CancelMaintenanceGate()
+            let locker = Task {
+                try await database.transaction { transaction in
+                    let tx = try #require(transaction as? any SQLDatabase)
+                    try await tx.raw("SELECT pg_advisory_xact_lock(\(bind: key))").run()
+                    await gate.hold()
+                }
+            }
+            let leases = PostgresV2RoomActivationStore(database: database)
+            let first = try cancelMaintenanceHost(database: database, fixture: fixture,
+                leases: leases, name: "review-first", admission: cancelMaintenanceAdmission(), now: { now })
+            let next = try cancelMaintenanceHost(database: database, fixture: fixture,
+                leases: leases, name: "review-next", admission: cancelMaintenanceAdmission(), now: { now })
+            await first.host.start()
+            await next.host.start()
+            do {
+                try await gate.waitUntilHeld()
+                let old = try await cancelMaintenanceActivate(host: first.host)
+                let applicator = V2RoomContentReviewSafetyApplicator(callTimeout: .seconds(15)) {
+                    request, deadline in
+                    try await first.host.invoke(token: old,
+                        encodedRequest: JSONEncoder().encode(request), deadline: deadline)
+                }
+                let worker = try V2ContentReviewWorker(
+                    store: PostgresV2ContentReviewStore(database: database),
+                    reviewer: V2ConfiguredContentReviewer(violatingTerms: ["blocked"]),
+                    moderation: applicator, now: { now })
+                let review = Task { try await worker.runOnce(limit: 1) }
+                try await cancelMaintenanceWaitUntil { try await cancelMaintenanceAdvisoryWait(sql: sql) }
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.moderation_operations") == 0)
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.content_review_jobs WHERE completed_at IS NOT NULL") == 0)
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.content_review_decisions") == 0)
+                let takeover = Task { try await next.host.activate(roomID: roomID,
+                    owner: try .init(shardID: "room-a", epoch: 0), deadline: .now + .seconds(15)) }
+                try await cancelMaintenanceWaitUntil { try await cancelMaintenanceRoomLockWait(sql: sql) }
+                #expect(try await cancelMaintenanceLeaseEpoch(sql: sql) == old.activationEpoch.rawValue)
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.content_review_jobs WHERE completed_at IS NOT NULL") == 0)
+
+                await gate.open()
+                try await locker.value
+                let report = try await review.value
+                #expect(report.claimedCount == 1 && report.resolvedCount == 1 && report.redactedCount == 1)
+                guard case .occupied(let occupied) = try await takeover.value else {
+                    throw CancelMaintenanceFailure.unexpectedResult
+                }
+                #expect(occupied.token == old)
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.content_review_jobs WHERE state = 'completed' AND decision = 'violation'") == 1)
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.moderation_operations") == 1)
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.room_events WHERE event_type = 'message.redacted'") == 1)
+                #expect((await first.host.stop(deadline: .now + .seconds(5))).completed)
+                let fresh = try await cancelMaintenanceActivate(host: next.host)
+                #expect(fresh.activationEpoch.rawValue == old.activationEpoch.rawValue + 1)
+                let safety = V2RoomRequest.administration(.trustedSafety(.init(roomID: roomID,
+                    operationID: try .init(message.messageID.rawValue), action: .redactMessage,
+                    messageID: message.messageID, expectedMessageRevision: 1,
+                    reasonCode: "content_policy_violation")))
+                let encoded = try JSONEncoder().encode(safety)
+                await cancelMaintenanceExpectFailure(.notAccepted(.staleActivation), Task {
+                    try await first.host.invoke(token: old, encodedRequest: encoded,
+                        deadline: .now + .seconds(5))
+                })
+                guard case .administration(.trustedSafety(.idempotent(let replay))) =
+                    try await next.host.invoke(token: fresh, encodedRequest: encoded,
+                        deadline: .now + .seconds(5)) else {
+                    throw CancelMaintenanceFailure.unexpectedResult
+                }
+                #expect(replay.messageID == message.messageID)
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.moderation_operations") == 1)
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.room_events WHERE event_type = 'message.redacted'") == 1)
+                #expect(try await worker.runOnce(limit: 1).claimedCount == 0)
+
+                // A separately claimed review that reaches the retired Host
+                // must remain retryable; an old turn cannot complete the job.
+                guard case .accepted(let lateMessage) = try await sender.send(.init(
+                    roomID: roomID, actorUserID: senderID,
+                    clientMessageID: .init(uuid: UUID()), text: "blocked after takeover")),
+                    let lateUUID = lateMessage.messageID.uuidValue else {
+                    throw CancelMaintenanceFailure.unexpectedResult
+                }
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.content_review_jobs WHERE state = 'pending'") == 1)
+                let staleReport = try await worker.runOnce(limit: 1)
+                #expect(staleReport.claimedCount == 1 && staleReport.resolvedCount == 0
+                    && staleReport.releasedCount == 1)
+                #expect(try await cancelMaintenanceReviewRetryable(sql: sql, message: lateUUID))
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.moderation_operations") == 1)
+                let freshApplicator = V2RoomContentReviewSafetyApplicator {
+                    request, deadline in
+                    try await next.host.invoke(token: fresh,
+                        encodedRequest: JSONEncoder().encode(request), deadline: deadline)
+                }
+                let retryAt = now.addingTimeInterval(61)
+                let freshWorker = try V2ContentReviewWorker(
+                    store: PostgresV2ContentReviewStore(database: database),
+                    reviewer: V2ConfiguredContentReviewer(violatingTerms: ["blocked"]),
+                    moderation: freshApplicator, now: { retryAt })
+                let recovered = try await freshWorker.runOnce(limit: 1)
+                #expect(recovered.claimedCount == 1 && recovered.resolvedCount == 1
+                    && recovered.redactedCount == 1)
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.content_review_jobs WHERE state = 'completed'") == 2)
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.moderation_operations") == 2)
+                #expect((await next.host.stop(deadline: .now + .seconds(5))).completed)
+            } catch {
+                await gate.open()
+                _ = try? await locker.value
+                _ = await first.host.stop(deadline: .now + .seconds(5))
+                _ = await next.host.stop(deadline: .now + .seconds(5))
+                throw error
+            }
+        }
+    }
+
+    @Test("target import holds its room fence through receive and completion before takeover",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_CANCEL_MAINT_DATABASE_IS_DISPOSABLE"] == "1"))
+    func importCannotOverlapSuccessor() async throws {
+        try await withCancelMaintenanceDatabase { database, sql, fixture in
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let sourceUUID = UUID(), sourceRoom = RoomID(uuid: sourceUUID)
+            try await cancelMaintenanceSeedImportSource(sql: sql, room: sourceUUID, now: now)
+            let profile = try fixture.forwardImportTestProfile()
+            let sourceSender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
+                capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), now: { now })
+            guard case .accepted(let sourceMessage) = try await sourceSender.send(.init(
+                roomID: sourceRoom, actorUserID: senderID,
+                clientMessageID: .init(uuid: UUID()), text: "forward source")) else {
+                throw CancelMaintenanceFailure.unexpectedResult
+            }
+            let leases = PostgresV2RoomActivationStore(database: database)
+            let sourceIdentity = V2ActorHostIdentity(hostID: try .init("import-source"),
+                incarnationID: UUID())
+            guard case .acquired(let sourceLease) = try await leases.acquire(roomID: sourceRoom,
+                owner: .init(shardID: "room-b", epoch: 0), host: sourceIdentity,
+                duration: .init(30_000)) else {
+                throw CancelMaintenanceFailure.unexpectedResult
+            }
+            let exporter = try PostgresV2ForwardExportStore(database: database)
+                .usingActivationToken(sourceLease.token)
+            let sourceReference = try V2ForwardMessageReference(roomID: sourceRoom,
+                messageID: sourceMessage.messageID, revision: .init(1))
+            guard case .export(let export) = try await exporter.prepareForDelivery(
+                actorUserID: senderID, operationID: .init(uuid: UUID()), source: sourceReference,
+                sourceRoute: .init(shardID: "room-b", epoch: 0), targetRoomID: roomID,
+                targetRoute: .init(shardID: "room-a", epoch: 0), now: now) else {
+                throw CancelMaintenanceFailure.unexpectedResult
+            }
+            let key: Int64 = 9_240_032
+            try await sql.raw("""
+                CREATE FUNCTION im_v2.test_block_forward_receive() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN PERFORM pg_advisory_xact_lock(9240032); RETURN NEW; END $$
+                """).run()
+            try await sql.raw("""
+                CREATE TRIGGER test_block_forward_receive BEFORE INSERT ON im_v2.message_forward_inbox
+                FOR EACH ROW EXECUTE FUNCTION im_v2.test_block_forward_receive()
+                """).run()
+            let gate = CancelMaintenanceGate()
+            let locker = Task {
+                try await database.transaction { transaction in
+                    let tx = try #require(transaction as? any SQLDatabase)
+                    try await tx.raw("SELECT pg_advisory_xact_lock(\(bind: key))").run()
+                    await gate.hold()
+                }
+            }
+            let first = try cancelMaintenanceHost(database: database, fixture: fixture,
+                leases: leases, name: "import-first", admission: cancelMaintenanceAdmission(), now: { now })
+            let next = try cancelMaintenanceHost(database: database, fixture: fixture,
+                leases: leases, name: "import-next", admission: cancelMaintenanceAdmission(), now: { now })
+            await first.host.start()
+            await next.host.start()
+            do {
+                try await gate.waitUntilHeld()
+                let old = try await cancelMaintenanceActivate(host: first.host)
+                let command = V2RoomRequest.forward(.importExport(.init(domain: export)))
+                let request = try JSONEncoder().encode(command)
+                let importing = Task { try await first.host.invoke(token: old,
+                    encodedRequest: request, deadline: .now + .seconds(15)) }
+                try await cancelMaintenanceWaitUntil { try await cancelMaintenanceAdvisoryWait(sql: sql) }
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.message_forward_inbox") == 0)
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.messages") == 1)
+                let takeover = Task { try await next.host.activate(roomID: roomID,
+                    owner: try .init(shardID: "room-a", epoch: 0), deadline: .now + .seconds(15)) }
+                try await cancelMaintenanceWaitUntil { try await cancelMaintenanceRoomLockWait(sql: sql) }
+                #expect(try await cancelMaintenanceLeaseEpoch(sql: sql) == old.activationEpoch.rawValue)
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.message_forward_inbox") == 0)
+
+                await gate.open()
+                try await locker.value
+                guard case .forward(.imported(.accepted(let messageID, let sequence))) =
+                    try await importing.value else {
+                    throw CancelMaintenanceFailure.unexpectedResult
+                }
+                guard case .occupied(let occupied) = try await takeover.value else {
+                    throw CancelMaintenanceFailure.unexpectedResult
+                }
+                #expect(occupied.token == old)
+                #expect(try await cancelMaintenanceImportRow(sql: sql, export: export.intent.exportID,
+                    message: try #require(messageID.uuidValue), sequence: Int64(sequence)))
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.message_forward_inbox") == 1)
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.messages") == 2)
+                #expect((await first.host.stop(deadline: .now + .seconds(5))).completed)
+                let fresh = try await cancelMaintenanceActivate(host: next.host)
+                #expect(fresh.activationEpoch.rawValue == old.activationEpoch.rawValue + 1)
+                await cancelMaintenanceExpectFailure(.notAccepted(.staleActivation), Task {
+                    try await first.host.invoke(token: old, encodedRequest: request,
+                        deadline: .now + .seconds(5))
+                })
+                let replay = try await next.host.invoke(token: fresh,
+                    encodedRequest: request, deadline: .now + .seconds(5))
+                #expect(replay == .forward(.imported(.accepted(messageID: messageID,
+                    roomSequence: sequence))))
+                #expect(try await cancelMaintenanceImportRow(sql: sql, export: export.intent.exportID,
+                    message: try #require(messageID.uuidValue), sequence: Int64(sequence)))
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.message_forward_inbox") == 1)
+                #expect(try await cancelMaintenanceCount(sql: sql,
+                    table: "im_v2.messages") == 2)
+                #expect((await next.host.stop(deadline: .now + .seconds(5))).completed)
+                #expect(try await leases.release(token: sourceLease.token))
+            } catch {
+                await gate.open()
+                _ = try? await locker.value
+                _ = await first.host.stop(deadline: .now + .seconds(5))
+                _ = await next.host.stop(deadline: .now + .seconds(5))
+                throw error
+            }
+        }
+    }
 }
 
 private struct CancelMaintenanceHosted: Sendable {
@@ -331,10 +601,77 @@ private struct CancelMaintenanceCountRow: Decodable { let value: Int64 }
 private struct CancelMaintenanceUUIDRow: Decodable { let value: UUID }
 private enum CancelMaintenanceFailure: Error { case phaseTimeout, unexpectedResult, schemaAlreadyExists }
 
+private func cancelMaintenanceCount(sql: any SQLDatabase, table: String) async throws -> Int64 {
+    try #require(try await sql.raw("SELECT COUNT(*)::bigint AS value FROM \(unsafeRaw: table)")
+        .first(decoding: CancelMaintenanceCountRow.self)).value
+}
+
+private func cancelMaintenanceReviewRetryable(sql: any SQLDatabase, message: UUID) async throws -> Bool {
+    try #require(try await sql.raw("""
+        SELECT COUNT(*)::bigint AS value FROM im_v2.content_review_jobs
+        WHERE message_id = \(bind: message) AND state = 'pending'
+          AND decision = 'violation' AND completed_at IS NULL
+          AND claim_token IS NULL AND next_attempt_at IS NOT NULL
+        """).first(decoding: CancelMaintenanceCountRow.self)).value == 1
+}
+
+private func cancelMaintenanceImportRow(sql: any SQLDatabase, export: UUID,
+    message: UUID, sequence: Int64) async throws -> Bool {
+    try #require(try await sql.raw("""
+        SELECT COUNT(*)::bigint AS value
+        FROM im_v2.message_forward_inbox AS inbox
+        JOIN im_v2.messages AS saved ON saved.message_id = inbox.result_message_id
+        JOIN im_v2.message_send_completions AS completion
+          ON completion.room_id = inbox.target_room_id
+         AND completion.sender_user_id = inbox.actor_user_id
+         AND completion.client_message_id = inbox.target_client_message_id
+        WHERE inbox.export_id = \(bind: export) AND inbox.target_room_id = \(bind: roomUUID)
+          AND inbox.state = 'completed' AND inbox.result_message_id = \(bind: message)
+          AND inbox.result_room_sequence = \(bind: sequence)
+          AND saved.room_id = \(bind: roomUUID) AND saved.room_sequence = \(bind: sequence)
+          AND completion.message_id = \(bind: message)
+        """).first(decoding: CancelMaintenanceCountRow.self)).value == 1
+}
+
+private func cancelMaintenanceSeedImportSource(sql: any SQLDatabase, room: UUID,
+    now: Date) async throws {
+    let lease = UUID()
+    try await sql.raw("""
+        INSERT INTO im_v2.rooms (room_id, room_shard_id, capacity_profile_id, capacity_class)
+        VALUES (\(bind: room), 'room-b', 'standard', 'standard')
+        """).run()
+    try await sql.raw("""
+        INSERT INTO im_v2.room_owner_routes
+            (room_id, room_shard_id, route_epoch, created_at, updated_at)
+        VALUES (\(bind: room), 'room-b', 0, \(bind: now), \(bind: now))
+        """).run()
+    try await sql.raw("""
+        INSERT INTO im_v2.group_rooms (room_id, owner_user_id, title, created_at)
+        VALUES (\(bind: room), \(bind: senderUUID), 'Import source', \(bind: now))
+        """).run()
+    try await sql.raw("""
+        INSERT INTO im_v2.shard_admission_pools
+            (room_shard_id, capacity_profile_id, lease_id, generation, valid_until, command_window_limit)
+        VALUES ('room-b', 'standard', \(bind: lease), 1, clock_timestamp() + INTERVAL '1 hour', 10)
+        """).run()
+    try await sql.raw("""
+        INSERT INTO im_v2.room_admission
+            (room_id, eligible_member_count, command_window_limit, shard_lease_id, shard_lease_generation)
+        VALUES (\(bind: room), 3, 10, \(bind: lease), 1)
+        """).run()
+    for user in [senderUUID, memberTwoUUID, memberThreeUUID] {
+        try await sql.raw("""
+            INSERT INTO im_v2.room_memberships (room_id, user_id, joined_revision)
+            VALUES (\(bind: room), \(bind: user), 0)
+            """).run()
+    }
+}
+
 private func cancelMaintenanceAdvisoryWait(sql: any SQLDatabase) async throws -> Bool {
     try await sql.raw("""
         SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid()
-            AND wait_event_type = 'Lock' AND wait_event = 'advisory') AS value
+            AND wait_event_type = 'Lock' AND wait_event = 'advisory'
+            AND cardinality(pg_blocking_pids(pid)) > 0) AS value
         """).first(decoding: CancelMaintenanceBoolRow.self)?.value == true
 }
 
@@ -342,7 +679,8 @@ private func cancelMaintenanceRoomLockWait(sql: any SQLDatabase) async throws ->
     try await sql.raw("""
         SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid()
             AND wait_event_type = 'Lock' AND query LIKE '%FROM im_v2.rooms%'
-            AND query LIKE '%FOR NO KEY UPDATE%') AS value
+            AND query LIKE '%FOR NO KEY UPDATE%'
+            AND cardinality(pg_blocking_pids(pid)) > 0) AS value
         """).first(decoding: CancelMaintenanceBoolRow.self)?.value == true
 }
 
