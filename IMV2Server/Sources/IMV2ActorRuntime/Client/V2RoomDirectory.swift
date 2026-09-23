@@ -63,6 +63,11 @@ public struct V2RoomRef: Sendable {
 }
 
 public actor V2RoomDirectory {
+    // A location check is a read-only hop. If an old physical reference does
+    // not answer, return to the owner DB within the resolution budget to
+    // locate the current lease. Write-capable calls keep their full
+    // deadline and outcome-unknown handling.
+    private static let locationLookupTimeout: Duration = .seconds(3)
     private let owners: any V2RoomDataOwnerResolving
     private let leases: any V2RoomActivationLeaseStore
     private let hosts: any V2RoomHostDiscovering
@@ -289,7 +294,9 @@ public actor V2RoomDirectory {
         try checkDeadline(deadline)
         if let cached = cache[roomID], cached.owner == owner {
             do {
-                if try await transport.lookup(cached.token, deadline: deadline) { return cached.token }
+                if try await transport.lookup(cached.token, deadline: locationLookupDeadline(deadline)) {
+                    return cached.token
+                }
             } catch { /* DB locate below is authoritative; never steal a valid lease. */ }
             invalidate(cached.token)
         }
@@ -340,7 +347,7 @@ public actor V2RoomDirectory {
         guard token.roomID == roomID, token.owner == owner else {
             throw V2RoomCallFailure.notAccepted(.staleActivation)
         }
-        guard try await transport.lookup(token, deadline: deadline) else {
+        guard try await transport.lookup(token, deadline: locationLookupDeadline(deadline)) else {
             throw V2RoomCallFailure.notAccepted(.notReady)
         }
         guard accepting else { throw V2RoomCallFailure.notAccepted(.retired) }
@@ -350,6 +357,10 @@ public actor V2RoomDirectory {
         }
         remember(token)
         return token
+    }
+
+    private func locationLookupDeadline(_ deadline: ContinuousClock.Instant) -> ContinuousClock.Instant {
+        min(deadline, clock.now + Self.locationLookupTimeout)
     }
 
     func remember(_ token: V2RoomActivationToken) {

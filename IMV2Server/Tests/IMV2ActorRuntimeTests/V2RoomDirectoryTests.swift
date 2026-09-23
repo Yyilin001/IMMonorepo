@@ -80,6 +80,38 @@ struct V2RoomDirectoryTests {
         #expect(await fixture.transport.activations == 0)
     }
 
+    @Test("a stale cached lookup has a short locator budget and returns to the owner lease")
+    func staleLookupUsesAuthoritativeLease() async throws {
+        let fixture = try Fixture(existingLease: true, failFirstLookup: true)
+        let replacement = V2RoomActivationToken(
+            roomID: fixture.room, owner: fixture.owner,
+            activationEpoch: try .init(2), host: fixture.host
+        )
+        await fixture.directory.remember(fixture.token)
+        await fixture.leases.setLease(try .init(
+            token: replacement, databaseObservedAt: Date(timeIntervalSince1970: 1_001),
+            expiresAt: Date(timeIntervalSince1970: 1_031)
+        ))
+
+        #expect(try await fixture.directory.resolve(fixture.room, deadline: .now + .seconds(12))
+                == replacement)
+        #expect(await fixture.leases.locates == 1)
+        #expect(await fixture.transport.activations == 0)
+        let lookups = await fixture.transport.lookups
+        #expect(lookups.map(\.token) == [fixture.token, replacement])
+        #expect(lookups.allSatisfy { $0.budget > .zero && $0.budget <= .seconds(3) })
+    }
+
+    @Test("a shorter configured call timeout also bounds the locator hop")
+    func shorterCallTimeout() async throws {
+        let fixture = try Fixture(existingLease: true, callTimeoutMilliseconds: 2_000)
+        #expect(try await fixture.directory.resolve(fixture.room, deadline: .now + .seconds(5))
+                == fixture.token)
+        let lookups = await fixture.transport.lookups
+        #expect(lookups.count == 1)
+        #expect(lookups.allSatisfy { $0.budget > .zero && $0.budget <= .seconds(2) })
+    }
+
     @Test("unknown durable result retries the same typed operation within its bound")
     func stableRetry() async throws {
         let fixture = try Fixture(existingLease: true, invokeFailures: [.outcomeUnknown])
@@ -139,9 +171,11 @@ struct V2RoomDirectoryTests {
 
         init(ownerGate: Gate? = nil, existingLease: Bool = false,
              unreachable: Bool = false, missingOwner: Bool = false,
+             failFirstLookup: Bool = false,
              activationFailure: V2RoomCallFailure? = nil,
              invokeFailures: [V2RoomCallFailure] = [],
-             maximumCachedLocations: Int = 2) throws {
+             maximumCachedLocations: Int = 2,
+             callTimeoutMilliseconds: Int64 = 30_000) throws {
             owner = try .init(shardID: "shard-a", epoch: 0)
             host = .init(hostID: V2ActorHostID(uuid: UUID()), incarnationID: UUID())
             token = .init(roomID: room, owner: owner, activationEpoch: try .init(1), host: host)
@@ -152,13 +186,17 @@ struct V2RoomDirectoryTests {
             )
             leases = Leases(lease: existingLease ? lease : nil)
             transport = Transport(token: token, unreachable: unreachable,
-                                  activationFailure: activationFailure, failures: invokeFailures)
+                                  activationFailure: activationFailure, failures: invokeFailures,
+                                  failFirstLookup: failFirstLookup)
             let provider = Hosts(host: host)
             let configuration = try V2RoomRuntimeConfiguration(
                 maximumActiveRooms: 2, maximumConcurrentRestores: 1,
                 maximumActivationWaitersPerRoom: 3, maximumPendingActivations: 2,
                 maximumActivationWaitersPerHost: 3, maximumConcurrentResolutions: 2,
-                maximumCachedLocations: maximumCachedLocations, maximumConcurrentReservations: 1
+                maximumCachedLocations: maximumCachedLocations, maximumConcurrentReservations: 1,
+                transactionTimeoutMilliseconds: min(10_000, callTimeoutMilliseconds),
+                callTimeoutMilliseconds: callTimeoutMilliseconds,
+                reservationTimeoutMilliseconds: min(15_000, callTimeoutMilliseconds)
             )
             directory = .init(owners: owners, leases: leases, hosts: provider,
                               transport: transport, configuration: configuration)
@@ -182,9 +220,10 @@ struct V2RoomDirectoryTests {
     }
 
     private actor Leases: V2RoomActivationLeaseStore {
-        let lease: V2RoomActivationLease?
+        var lease: V2RoomActivationLease?
         var locates = 0
         init(lease: V2RoomActivationLease?) { self.lease = lease }
+        func setLease(_ value: V2RoomActivationLease) { lease = value }
         func locate(roomID: RoomID, owner: V2RoomDataOwner) async throws -> V2RoomActivationLease? {
             locates += 1
             return lease
@@ -211,12 +250,16 @@ struct V2RoomDirectoryTests {
         let unreachable: Bool
         let activationFailure: V2RoomCallFailure?
         var failures: [V2RoomCallFailure]
+        var failFirstLookup: Bool
         var activations = 0
         var invoked: [V2RoomRequest] = []
+        var lookups: [(token: V2RoomActivationToken, budget: Duration)] = []
         init(token: V2RoomActivationToken, unreachable: Bool,
-             activationFailure: V2RoomCallFailure?, failures: [V2RoomCallFailure]) {
+             activationFailure: V2RoomCallFailure?, failures: [V2RoomCallFailure],
+             failFirstLookup: Bool) {
             self.token = token; self.unreachable = unreachable
             self.activationFailure = activationFailure; self.failures = failures
+            self.failFirstLookup = failFirstLookup
         }
         func activate(on host: V2ActorHostIdentity, roomID: RoomID, owner: V2RoomDataOwner,
                       deadline: ContinuousClock.Instant) async throws -> V2RoomActivationResolution {
@@ -225,6 +268,11 @@ struct V2RoomDirectoryTests {
             return .ready(token)
         }
         func lookup(_ token: V2RoomActivationToken, deadline: ContinuousClock.Instant) async throws -> Bool {
+            lookups.append((token, ContinuousClock.now.duration(to: deadline)))
+            if failFirstLookup {
+                failFirstLookup = false
+                throw V2RoomCallFailure.notAccepted(.unavailable)
+            }
             if unreachable { throw V2RoomCallFailure.notAccepted(.unavailable) }
             return true
         }
