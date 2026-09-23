@@ -106,6 +106,19 @@ public actor V2RoomDirectory {
         cacheOrder.removeAll()
     }
 
+    /// Rejecting waiters does not finish an owner/lease database operation.
+    /// Applications must await this and the transport's quiesce before closing
+    /// shared database pools during shutdown.
+    public func quiesce(deadline: ContinuousClock.Instant) async -> Bool {
+        drain()
+        while activeResolutions > 0 {
+            guard clock.now < deadline, !Task.isCancelled else { return false }
+            do { try await clock.sleep(until: min(deadline, clock.now + .milliseconds(10))) }
+            catch { return false }
+        }
+        return true
+    }
+
     public func resolve(_ roomID: RoomID, deadline: ContinuousClock.Instant) async throws -> V2RoomActivationToken {
         guard accepting else { throw V2RoomCallFailure.notAccepted(.retired) }
         guard !Task.isCancelled else { throw V2RoomCallFailure.notAccepted(.cancelled) }

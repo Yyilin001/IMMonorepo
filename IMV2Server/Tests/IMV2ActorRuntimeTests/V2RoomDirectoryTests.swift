@@ -22,6 +22,20 @@ struct V2RoomDirectoryTests {
         #expect(await fixture.transport.activations == 1)
     }
 
+    @Test("drain rejects waiters while quiesce retains the actual owner lookup")
+    func drainTracksResolution() async throws {
+        let gate = Gate()
+        let fixture = try Fixture(ownerGate: gate)
+        let call = Task { try await fixture.directory.resolve(fixture.room, deadline: .now + .seconds(2)) }
+        try await gate.waitForEntries(1)
+        #expect(await fixture.directory.quiesce(deadline: .now + .milliseconds(20)) == false)
+        await failure(.notAccepted(.retired)) { _ = try await call.value }
+        #expect(await fixture.directory.snapshot().active == 1)
+        await gate.open()
+        #expect(await fixture.directory.quiesce(deadline: .now + .seconds(1)))
+        #expect(await fixture.directory.snapshot().active == 0)
+    }
+
     @Test("a valid but unreachable lease never causes another acquire")
     func unreachableLease() async throws {
         let fixture = try Fixture(existingLease: true, unreachable: true)

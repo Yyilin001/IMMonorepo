@@ -57,10 +57,10 @@ public struct V2RoomServerOwnerResources: Sendable {
 /// lifecycle, and Cluster owns authentication/transport; neither imports Server.
 public struct V2RoomServerActivationFactory: Sendable {
     private let owners: [String: V2RoomServerOwnerResources]
-    private let safetyActorUserID: UserID
+    private let safetyActorUserID: UserID?
     private let now: @Sendable () -> Date
 
-    public init(owners: [String: V2RoomServerOwnerResources], safetyActorUserID: UserID,
+    public init(owners: [String: V2RoomServerOwnerResources], safetyActorUserID: UserID?,
                 now: @escaping @Sendable () -> Date = Date.init) throws {
         guard !owners.isEmpty else { throw V2ActorContractError.invalidConfiguration("room owner resources") }
         for key in owners.keys { _ = try V2RoomDataOwner(shardID: key, epoch: 0) }
@@ -87,13 +87,13 @@ public struct V2RoomServerActivationFactory: Sendable {
 private actor V2RoomServerActivation {
     private let token: V2RoomActivationToken
     private let resources: V2RoomServerOwnerResources?
-    private let safetyActorUserID: UserID
+    private let safetyActorUserID: UserID?
     private let now: @Sendable () -> Date
     private var handlers: Handlers?
     private var closed = false
 
     init(token: V2RoomActivationToken, resources: V2RoomServerOwnerResources?,
-         safetyActorUserID: UserID, now: @escaping @Sendable () -> Date) {
+         safetyActorUserID: UserID?, now: @escaping @Sendable () -> Date) {
         self.token = token
         self.resources = resources
         self.safetyActorUserID = safetyActorUserID
@@ -177,6 +177,7 @@ private actor V2RoomServerActivation {
         case .administration(let command):
             do {
                 if case .trustedSafety(let value) = command {
+                    guard let safetyActorUserID else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
                     return .administration(try await handlers.administration.executeTrustedSafety(value,
                         authority: .init(safetyActorUserID: safetyActorUserID)))
                 }

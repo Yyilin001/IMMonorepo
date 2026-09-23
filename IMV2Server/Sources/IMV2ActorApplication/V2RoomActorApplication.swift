@@ -1,0 +1,117 @@
+import FluentKit
+import IMV2ActorCluster
+import IMV2ActorContracts
+import IMV2ActorRuntime
+import IMV2Server
+
+public enum V2RoomActorApplicationError: Error, Sendable {
+    case invalidRole
+    case incompleteShutdown
+}
+
+/// Shared startup/shutdown composition for Gateway hosts and Account/Operator
+/// callers. Domain services receive RoomDirectory; Cluster ActorIDs stay here.
+public actor V2RoomActorApplication {
+    public nonisolated let directory: V2RoomDirectory
+    public nonisolated let reservations: V2RoomReservationCoordinator
+    public nonisolated let configuration: V2RoomRuntimeConfiguration
+    private let node: Node
+
+    private enum Node: Sendable {
+        case host(V2RoomClusterNode)
+        case caller(V2RoomClusterClientNode)
+    }
+
+    private init(directory: V2RoomDirectory, reservations: V2RoomReservationCoordinator,
+                 configuration: V2RoomRuntimeConfiguration, node: Node) {
+        self.directory = directory
+        self.reservations = reservations
+        self.configuration = configuration
+        self.node = node
+    }
+
+    public static func start(configuration: V2RoomActorApplicationConfiguration,
+                             ownerRouter: any V2RoomShardRouting,
+                             roomDatabases: [String: any Database],
+                             factory: V2RoomServerActivationFactory? = nil) async throws -> V2RoomActorApplication {
+        let leases = try V2RoomServerLeaseStore(databases: roomDatabases)
+        let client: V2RoomClusterClient
+        let node: Node
+        if let identity = configuration.hostIdentity {
+            guard let factory,
+                  configuration.allowedShards.isSubset(of: Set(roomDatabases.keys)) else {
+                throw V2RoomActorApplicationError.invalidRole
+            }
+            let runtime = configuration.runtime
+            let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: identity,
+                leaseStore: leases, configuration: runtime, budget: .init(configuration: runtime),
+                classify: { $0.canShareSendTurn ? .send : .barrier }, factory: factory.runtimeFactory())
+            let hostNode = V2RoomClusterNode(configuration: try .init(name: configuration.name,
+                host: configuration.address, port: configuration.port, tls: configuration.tls,
+                threadPoolSize: configuration.threadPoolSize, allowedShards: configuration.allowedShards,
+                serviceShardAccess: configuration.serviceShardAccess), identity: identity, host: host,
+                signer: configuration.signer, trust: configuration.trust,
+                authenticationLimits: configuration.authentication, runtimeConfiguration: runtime)
+            do {
+                _ = try await hostNode.start()
+                client = try await hostNode.makeClient(signer: configuration.signer,
+                    trust: configuration.trust, limits: configuration.authentication)
+                _ = try await hostNode.startDiscovery(client: client, configuration: configuration.discovery)
+                node = .host(hostNode)
+            } catch {
+                guard try await hostNode.stop(deadline: .now + runtime.drainTimeout.duration).completed else {
+                    throw V2RoomActorApplicationError.incompleteShutdown
+                }
+                throw error
+            }
+        } else {
+            guard factory == nil else { throw V2RoomActorApplicationError.invalidRole }
+            let caller = V2RoomClusterClientNode(configuration: try .init(name: configuration.name,
+                host: configuration.address, port: configuration.port, tls: configuration.tls,
+                threadPoolSize: configuration.threadPoolSize), signer: configuration.signer,
+                trust: configuration.trust, authenticationLimits: configuration.authentication,
+                runtimeConfiguration: configuration.runtime)
+            do {
+                client = try await caller.start(discovery: configuration.discovery)
+                node = .caller(caller)
+            } catch {
+                guard try await caller.stop(deadline: .now + configuration.runtime.drainTimeout.duration) else {
+                    throw V2RoomActorApplicationError.incompleteShutdown
+                }
+                throw error
+            }
+        }
+        let directory = V2RoomDirectory(owners: V2RoomServerOwnerResolver(router: ownerRouter),
+            leases: leases, hosts: client, transport: client, configuration: configuration.runtime)
+        let reservations = V2RoomReservationCoordinator(operations: await directory.reservationOperations(),
+            configuration: configuration.runtime)
+        return .init(directory: directory, reservations: reservations,
+                     configuration: configuration.runtime, node: node)
+    }
+
+    public func readiness() async -> Bool {
+        switch node {
+        case .host(let host): await host.readiness()
+        case .caller(let caller): await caller.readiness()
+        }
+    }
+
+    /// False means shared DB and transport resources must remain alive. The
+    /// caller can retry with a later deadline after the real operations settle.
+    public func stop(deadline: ContinuousClock.Instant) async throws -> Bool {
+        await directory.drain()
+        async let directoryStopped = directory.quiesce(deadline: deadline)
+        let nodeStopped: Bool
+        do {
+            switch node {
+            case .host(let host): nodeStopped = try await host.stop(deadline: deadline).completed
+            case .caller(let caller): nodeStopped = try await caller.stop(deadline: deadline)
+            }
+        } catch {
+            _ = await directoryStopped
+            throw error
+        }
+        let resolutionsStopped = await directoryStopped
+        return nodeStopped && resolutionsStopped
+    }
+}

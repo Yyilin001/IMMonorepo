@@ -8,6 +8,7 @@ let package = Package(
         .library(name: "IMV2ActorContracts", targets: ["IMV2ActorContracts"]),
         .library(name: "IMV2ActorRuntime", targets: ["IMV2ActorRuntime"]),
         .library(name: "IMV2ActorCluster", targets: ["IMV2ActorCluster"]),
+        .library(name: "IMV2ActorApplication", targets: ["IMV2ActorApplication"]),
         .library(name: "IMV2Server", targets: ["IMV2Server"]),
         .library(name: "IMV2ServerHTTP", targets: ["IMV2ServerHTTP"]),
         .executable(name: "IMV2ServerApp", targets: ["IMV2ServerApp"]),
@@ -16,6 +17,7 @@ let package = Package(
         .executable(name: "IMV2LocalGatewayProbe", targets: ["IMV2LocalGatewayProbe"]),
         .executable(name: "IMV2GatewayLoadGenerator", targets: ["IMV2GatewayLoadGenerator"]),
         .executable(name: "VirtualActorCompatibilityProbe", targets: ["VirtualActorCompatibilityProbe"]),
+        .executable(name: "VirtualActorBusinessProbe", targets: ["VirtualActorBusinessProbe"]),
     ],
     dependencies: [
         .package(url: "https://github.com/vapor/routing-kit.git", from: "5.0.0-beta"),
@@ -95,6 +97,29 @@ let package = Package(
                 .product(name: "Crypto", package: "swift-crypto"),
             ]
         ),
+        .executableTarget(
+            name: "VirtualActorBusinessProbe",
+            dependencies: ["IMV2ActorApplication", "IMV2Server", "IMV2ActorCluster", "IMV2ActorRuntime", "IMV2ActorContracts", "IMV2Core",
+                .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
+                .product(name: "FluentKit", package: "fluent-kit"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "SQLKit", package: "sql-kit")]
+        ),
+        .target(
+            name: "IMV2ActorApplication",
+            dependencies: ["IMV2Server", "IMV2ActorCluster", "IMV2ActorRuntime", "IMV2ActorContracts", "IMV2Core",
+                .product(name: "FluentKit", package: "fluent-kit"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "Crypto", package: "swift-crypto")]
+        ),
+        .testTarget(
+            name: "IMV2ActorApplicationTests",
+            dependencies: ["IMV2ActorApplication", "IMV2Server", "IMV2ActorCluster", "IMV2ActorContracts",
+                .product(name: "Crypto", package: "swift-crypto")]
+        ),
         .target(
             name: "IMV2ServerHTTP",
             dependencies: [
@@ -112,6 +137,7 @@ let package = Package(
         .executableTarget(
             name: "IMV2ServerApp",
             dependencies: [
+                "IMV2ActorApplication",
                 "IMV2Server",
                 "IMV2ServerHTTP",
                 .product(name: "Vapor", package: "vapor"),
@@ -128,6 +154,7 @@ let package = Package(
         .executableTarget(
             name: "IMV2AccountServerApp",
             dependencies: [
+                "IMV2ActorApplication",
                 "IMV2Server",
                 "IMV2ServerHTTP",
                 .product(name: "Vapor", package: "vapor"),
@@ -144,6 +171,7 @@ let package = Package(
         .executableTarget(
             name: "IMV2OperatorServerApp",
             dependencies: [
+                "IMV2ActorApplication",
                 "IMV2Server",
                 "IMV2ServerHTTP",
                 .product(name: "Vapor", package: "vapor"),
