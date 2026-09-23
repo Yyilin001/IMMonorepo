@@ -2,6 +2,20 @@
 
 审查代码基线 `fd979e68`，并核对集成分支 `8231a079` 新增的 `a13d246d` 双房间 COMMIT ACK 丢失证据。此文是只读审查，不把测试源码的存在等同于执行通过，也不把计划文档的旧状态等同于当前代码缺口。验收条件以[并行方案 G1–G5](../../../IMV2/docs/00-foundation/virtual-actor-parallel-plan.md)及[任务卡的 21 项故障矩阵](../../../IMV2/docs/00-foundation/virtual-actor-task-cards.md)为准。等级：**fake** 指进程内替身；**PG** 指真实 PostgreSQL 与生产 store/批处理器；**进程** 指多个实际 OS 进程；**Linux 栈** 指 Linux Release 应用或多 Host 容器。下表未特别说明的测试名称表示源码中的测试，执行结果只从所引证据文件取得。
 
+## 2026-09-24 集成后的差距处置
+
+下表是对本次审查的后续处置；后文保留审查时的原始判断，以便核对当时证据，不能再把已关闭的条目当成当前缺陷。
+
+| 原差距 | 新证据与当前边界 |
+| --- | --- |
+| 当前合同/状态未登记 | [当前 Room Actor 合同](../room-virtual-actor-contract.md)已进入正式合同索引；系统地图、schema 53 与三个 App 的组合已登记。G1 的性能预算仍待实测冻结。 |
+| G3 Gateway 自身也是 Host | [caller-only Gateway Linux 应用栈](g3-caller-only-gateway-evidence.md)通过：Gateway 无 Host 身份，真正 TCP/TLS send/read 经过独立 Host，数据库 live lease 与独立 Host UUID 一致。Account 房间 HTTP 与 Operator 流程同时通过。性能单独验收。 |
+| #1/#2/#8/#9/#11 的 Host 恢复/回收层次 | [实际 Host/Factory/PG 生命周期](g2-host-pg-lifecycle-evidence.md)覆盖 acquire 后恢复中失租、共享恢复只取消一方、恢复/激活限额及 idle 关闭竞争；不是两个 OS 进程全组合。 |
+| #18 只有 fake drain | [真实 Host/PG 慢事务 drain](g5-host-pg-drain-evidence.md)已通过：超时不早释 lease，SQL 完成后关闭与释放，旧清理不影响继任 token；OS SIGTERM 栈仍在验证。 |
+| #15/#16 查询与 pair 交错 | [真实 Host/Factory/PG reservation](g2-pg-query-reservation-evidence.md)已通过：获准 B 恢复独立 flush、A 等待、对向 pair 统一次序、等待取消归还许可；实际 SQL 后注入 unknown 使两实例退役并以新 epoch 重放原消息。这里的 unknown 明确是测试注入，真正成功 COMMIT 丢 ACK 由原 #7/#13 的 wire proxy 独立验证。 |
+| 无效 V1 总入口 | 已删除未实现探针的旧 scaffold，当前[故障入口](v1-fault-harness.md)逐项指向真实可运行脚本；没有宣称覆盖全部 21 项。G6 已接入 Linux 进程恢复 CI。 |
+| #10/#17/#19/#20/#21、容量和完整 Linux required checks | 仍按下面矩阵检查。已有分层证据不等于这些组合边界全部通过，容量功能 canary 也不等于性能结论。 |
+
 ## G1–G4 可完成范围
 
 | Gate | 已有可核对证据 | 仍缺的验收证据 |

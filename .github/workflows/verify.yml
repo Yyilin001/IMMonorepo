@@ -76,6 +76,8 @@ jobs:
           IMV2_ACTOR_HOST_DRAIN_DATABASE_IS_DISPOSABLE: "1"
           IMV2_ACTOR_HOST_G2_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
           IMV2_ACTOR_HOST_G2_DATABASE_IS_DISPOSABLE: "1"
+          IMV2_ACTOR_PAIR_INTERLEAVE_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+          IMV2_ACTOR_PAIR_INTERLEAVE_DATABASE_IS_DISPOSABLE: "1"
           IMV2_ACTOR_D2_TEST_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
           IMV2_ACTOR_D2_TEST_DATABASE_IS_DISPOSABLE: "1"
           IMV2_ACTOR_D4_CONTROL_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres-control:5432/im_v2_test

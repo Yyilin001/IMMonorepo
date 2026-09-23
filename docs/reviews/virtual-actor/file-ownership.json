@@ -19,6 +19,10 @@
       "owner": "R1"
     },
     {
+      "path": "IMV2/scripts/freeze_v2_virtual_actor_capacity_calibration.py",
+      "owner": "V1"
+    },
+    {
       "path": "IMV2/scripts/prepare_v2_room_actor_configuration.py",
       "owner": "I1"
     },
@@ -71,6 +75,10 @@
       "owner": "V1"
     },
     {
+      "path": "IMV2/scripts/test_virtual_actor_capacity_measurement.py",
+      "owner": "V1"
+    },
+    {
       "path": "IMV2/scripts/v2_virtual_actor_bind_paths.py",
       "owner": "V1"
     },
@@ -91,6 +99,10 @@
       "owner": "V1"
     },
     {
+      "path": "IMV2/scripts/virtual-actor-fixtures/capacity-hot-write-v1.json",
+      "owner": "V1"
+    },
+    {
       "path": "IMV2/scripts/virtual-actor-fixtures/capacity-main-v1.json",
       "owner": "V1"
     },
@@ -100,6 +112,10 @@
     },
     {
       "path": "IMV2/scripts/virtual-actor-fixtures/send-one-canary.json",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/virtual_actor_capacity_measurement.py",
       "owner": "V1"
     },
     {
@@ -1436,6 +1452,10 @@
     },
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomHostPostgresLifecycleTests.swift",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomHostPostgresReservationTests.swift",
       "owner": "V1"
     },
     {
