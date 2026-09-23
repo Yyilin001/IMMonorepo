@@ -88,7 +88,9 @@ public actor V2RoomClusterNode {
         let inbound = try V2RoomClusterInboundService(
             identity: identity, host: host, authenticator: auth, signer: signer,
             limits: authenticationLimits, allowedShards: configuration.allowedShards,
-            serviceShardAccess: configuration.serviceShardAccess, actorSystem: system
+            serviceShardAccess: configuration.serviceShardAccess,
+            maximumInboundRequests: runtimeConfiguration.maximumActivationWaitersPerHost,
+            actorSystem: system
         )
         self.inbound = inbound
         let endpoint = V2RoomHostEndpoint(actorSystem: system, service: inbound)
@@ -127,10 +129,15 @@ public actor V2RoomClusterNode {
     public func stop(deadline: ContinuousClock.Instant) async throws -> V2RoomActivationDrainResult {
         let result = await host.drain(deadline: deadline)
         guard result.completed else { return result }
+        for client in clients { await client.stop() }
         guard await inbound?.quiesce(deadline: deadline) ?? true else {
             throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
         }
-        for client in clients { await client.stop() }
+        for client in clients {
+            guard await client.quiesce(deadline: deadline) else {
+                throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
+            }
+        }
         clients.removeAll()
         await inbound?.stop()
         inbound = nil

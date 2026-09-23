@@ -56,11 +56,12 @@ public actor V2RoomClusterInboundService {
     private let limits: V2ActorAuthenticationLimits
     private let allowedShards: Set<String>
     private let serviceShardAccess: [V2ActorServiceID: Set<String>]
+    private let maximumInboundRequests: Int
     private let actorSystem: ClusterSystem
     private var roomActors: [V2RoomActivationToken: V2RoomClusterActor] = [:]
     private var watcher: Task<Void, Never>?
     private var accepting = true
-    private var activeExchanges = 0
+    private var activeRequests = 0
 
     public init(identity: V2ActorHostIdentity,
                 host: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>,
@@ -69,8 +70,10 @@ public actor V2RoomClusterInboundService {
                 limits: V2ActorAuthenticationLimits,
                 allowedShards: Set<String>,
                 serviceShardAccess: [V2ActorServiceID: Set<String>],
+                maximumInboundRequests: Int,
                 actorSystem: ClusterSystem) throws {
         guard !allowedShards.isEmpty, !serviceShardAccess.isEmpty,
+              maximumInboundRequests > 0,
               serviceShardAccess.values.allSatisfy({ !$0.isEmpty && $0.isSubset(of: allowedShards) })
         else { throw V2ActorAuthenticationError.invalidConfiguration }
         self.identity = identity
@@ -80,6 +83,7 @@ public actor V2RoomClusterInboundService {
         self.limits = limits
         self.allowedShards = allowedShards
         self.serviceShardAccess = serviceShardAccess
+        self.maximumInboundRequests = maximumInboundRequests
         self.actorSystem = actorSystem
     }
 
@@ -100,26 +104,27 @@ public actor V2RoomClusterInboundService {
 
     public func quiesce(deadline: ContinuousClock.Instant) async -> Bool {
         accepting = false
-        while activeExchanges > 0 && ContinuousClock.now < deadline {
+        while activeRequests > 0 && ContinuousClock.now < deadline {
             do { try await Task.sleep(for: .milliseconds(5)) }
             catch { break }
         }
-        return activeExchanges == 0
+        return activeRequests == 0
     }
 
     public func openSession(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
-        guard accepting else { throw V2ActorAuthenticationError.overloaded }
+        try beginRequest()
+        defer { activeRequests -= 1 }
         let grant = try await authenticator.openSession(packet)
+        guard accepting else { throw V2ActorAuthenticationError.overloaded }
         return try signer.sign(grant, maximumBytes: limits.maximumReplyBytes)
     }
 
     public func exchange(_ packet: V2ActorSignedPacket,
                          boundToken: V2RoomActivationToken?) async throws -> V2ActorSignedPacket {
-        guard accepting else { throw V2ActorAuthenticationError.overloaded }
+        try beginRequest()
+        defer { activeRequests -= 1 }
         let verified = try await authenticator.accept(packet)
         guard accepting else { throw V2ActorAuthenticationError.overloaded }
-        activeExchanges += 1
-        defer { activeExchanges -= 1 }
         let request = verified.call.request
         let token = requestToken(request)
         if let boundToken {
@@ -142,7 +147,8 @@ public actor V2RoomClusterInboundService {
         } catch {
             // An invocation might already have entered SQL. Never invent a
             // rollback or a definitely-not-accepted result from this catch.
-            response = .failure(isHostOnly(request) ? .notAccepted(.unavailable) : .outcomeUnknown)
+            if case .lookup = request { response = .failure(.notAccepted(.unavailable)) }
+            else { response = .failure(.outcomeUnknown) }
         }
         return try signer.sign(V2ActorAuthenticatedReply(call: verified.call, response: response),
                                maximumBytes: limits.maximumReplyBytes)
@@ -161,6 +167,15 @@ public actor V2RoomClusterInboundService {
     }
 
     public func actorCount() -> Int { roomActors.count }
+
+    public func inFlightRequestCount() -> Int { activeRequests }
+
+    private func beginRequest() throws {
+        guard accepting, activeRequests < maximumInboundRequests else {
+            throw V2ActorAuthenticationError.overloaded
+        }
+        activeRequests += 1
+    }
 
     private func physicalReference(for token: V2RoomActivationToken) async throws -> Data {
         guard accepting, token.host == identity, (await host.readyTokens()).contains(token) else {

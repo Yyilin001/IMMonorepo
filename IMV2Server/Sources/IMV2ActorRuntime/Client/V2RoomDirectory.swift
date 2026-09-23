@@ -205,7 +205,7 @@ public actor V2RoomDirectory {
     public func groupedRead(
         _ requests: [V2RoomRequest], principal: V2RoomClientPrincipal,
         deadline: ContinuousClock.Instant,
-        batch: @Sendable (V2ActorHostIdentity, V2RoomDataOwner, [(V2RoomActivationToken, V2RoomRequest)],
+        batch: @escaping @Sendable (V2ActorHostIdentity, V2RoomDataOwner, [(V2RoomActivationToken, V2RoomRequest)],
                           V2RoomClientPrincipal, ContinuousClock.Instant) async throws -> [V2RoomResponse]
     ) async throws -> [V2RoomResponse] {
         guard requests.allSatisfy({ $0.replayPolicy == .readOnly }) else {
@@ -225,10 +225,20 @@ public actor V2RoomDirectory {
             GroupKey(host: item.1.host, owner: item.1.owner)
         }
         var answers = Array<V2RoomResponse?>(repeating: nil, count: requests.count)
-        for (key, items) in groups {
-            let results = try await batch(key.host, key.owner, items.map { ($0.1, $0.2) }, principal, deadline)
-            guard results.count == items.count else { throw V2RoomCallFailure.notAccepted(.unavailable) }
-            for (item, result) in zip(items, results) { answers[item.0] = result }
+        try await withThrowingTaskGroup(of: [(Int, V2RoomResponse)].self) { group in
+            for (key, items) in groups {
+                group.addTask {
+                    let results = try await batch(key.host, key.owner,
+                                                  items.map { ($0.1, $0.2) }, principal, deadline)
+                    guard results.count == items.count else {
+                        throw V2RoomCallFailure.notAccepted(.unavailable)
+                    }
+                    return zip(items, results).map { ($0.0.0, $0.1) }
+                }
+            }
+            for try await groupResults in group {
+                for (index, result) in groupResults { answers[index] = result }
+            }
         }
         guard answers.allSatisfy({ $0 != nil }) else { throw V2RoomCallFailure.notAccepted(.unavailable) }
         return answers.map { $0! }
@@ -387,7 +397,7 @@ public actor V2RoomDirectory {
         let token: V2RoomActivationToken
     }
 
-    private struct GroupKey: Hashable {
+    private struct GroupKey: Hashable, Sendable {
         let host: V2ActorHostIdentity
         let owner: V2RoomDataOwner
     }
