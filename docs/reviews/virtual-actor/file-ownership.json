@@ -75,6 +75,10 @@
       "owner": "V1"
     },
     {
+      "path": "IMV2/scripts/verify_v2_virtual_actor_http_paths.py",
+      "owner": "V1"
+    },
+    {
       "path": "IMV2/scripts/virtual-actor-fixtures/capacity-main-v1.json",
       "owner": "V1"
     },

@@ -15,3 +15,9 @@ python3 IMV2/scripts/test_v2_virtual_actor_application_stack.py \
 验证范围是 HTTP 账号注册、限流、设备凭据签发、Gateway 真实 TCP/TLS 打开私聊和发送、接收方日志拉取、Operator 禁用账号及旧凭据拒绝、TLS 和指标。该脚本不能单独证明群邀请/昵称/媒体全部 HTTP 路径、多 Host 故障矩阵或容量预算。
 
 产物位于 `~/.codex/virtual-actor-builds/application/run-*`：构建、启动、schema/seed、smoke、服务和清理日志，以及记录 revision、lockfile 摘要、各二进制 SHA-256、镜像和运行时间的 `result.json`。临时密钥/配置在容器和卷清理后删除；清理失败会使测试失败并保留权限受限的 private 目录供清理，不会报告成功。
+
+## 首次完整 App 运行证据
+
+`62046f6cba29d4fee8fab41ef1c0e59716a03dcd` 在固定 Linux Swift 6.4 镜像的四个 Release 产品构建与基础协议冒烟退出 0。证据目录：`/Users/yyl/.codex/virtual-actor-builds/application/run-a5c3d875a8944f90aff928da7e770708`。`result.json` 保存源码、锁文件与四个二进制摘要；`smoke.log` 确认注册/凭据、Gateway 私聊发送与接收方日志、禁用账号、TLS 1.3 和私有指标全部通过；本任务 Compose 资源与临时密钥已清理。
+
+后续脚本还会调用独立 `verify_v2_virtual_actor_http_paths.py`，覆盖 HTTP 昵称、邀请审批、媒体上传、Gateway 群消息媒体关联和 HTTP 授权下载。群本身由可丢弃 SQL fixture 创建，不能将其声称为 TCP 群创建验收。新增路径尚需下一轮实际运行；首次成功只证明上段基础协议范围。

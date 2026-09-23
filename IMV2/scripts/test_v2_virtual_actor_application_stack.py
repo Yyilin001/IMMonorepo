@@ -162,6 +162,13 @@ def main() -> int:
                             "V2_LOCAL_GATEWAY_TLS_ADDRESS": "localhost:" + port("gateway", 7443),
                             "V2_LOCAL_REGISTRATION_RECOVERY_DIRECTORY": str(private / "registration-recovery")})
         execute(["bash", str(ROOT / "IMV2/scripts/verify_v2_local_account_stack.sh")], "smoke.log", timeout=300)
+        execute([sys.executable, str(ROOT / "IMV2/scripts/verify_v2_virtual_actor_http_paths.py"),
+                 "--account-url", environment["V2_LOCAL_HTTP_BASE_URL"],
+                 "--ca", str(ca), "--compose-file", str(compose_file), "--env-file", str(env_file),
+                 "--project", project, "--context", args.context,
+                 "--recovery-directory", environment["V2_LOCAL_REGISTRATION_RECOVERY_DIRECTORY"],
+                 "--gateway-probe-path", "/workspace/IMV2Server/.build/release/IMV2LocalGatewayProbe"],
+                "actor-http-smoke.log", timeout=300)
         result["passed"] = True
     except (subprocess.SubprocessError, OSError, RuntimeError) as error:
         # Exception messages can include command arguments. Record only class
