@@ -67,6 +67,12 @@ public struct V2ActorSpecialAccountAuditWire: Codable, Equatable, Sendable {
     public var retryPolicy: V2RoomReplayPolicy { .durableIdempotent }
 }
 
-public enum V2ActorSpecialAccountAuditResultWire: String, Codable, Equatable, Sendable {
+public enum V2ActorSpecialAccountAuditResultWire: Codable, Equatable, Sendable {
     case recorded
+    case failure(V2ActorSpecialAccountFailureWire)
+}
+
+public enum V2ActorSpecialAccountFailureWire: String, Codable, Equatable, Sendable {
+    case invalidRequest, accountUnavailable, deliveryDenied, idempotencyConflict
+    case unavailable, corruptPersistenceState
 }

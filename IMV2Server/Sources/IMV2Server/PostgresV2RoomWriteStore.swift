@@ -96,6 +96,22 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return copy
     }
 
+    /// A reservation may change facts outside this executor's ordinary turn.
+    /// Clear hints before releasing its barrier; SQL remains authoritative.
+    func invalidateActorHints(token: V2RoomActivationToken) async {
+        guard let room = token.roomID.uuidValue else { return }
+        await directSendPolicyCache.invalidate(roomID: room)
+        await directRoomLogFastAppendCache.invalidate(roomID: room)
+        await hybridGroupShardCreditSnapshotCache.invalidate([room])
+    }
+
+    /// Hosting calls this only after the executor's SQL and batches settle.
+    /// Unspent credit belongs to this exact epoch and cannot reach a successor.
+    func closeActorState(token: V2RoomActivationToken) async {
+        await invalidateActorHints(token: token)
+        await roomAdmissionCommandCreditPool?.retire(activation: token)
+    }
+
     /// Bind the authoritative control pool. It must be independent of the owner
     /// pool even when both connect to the same physical database. Runtime must
     /// also pass an independent resolution pool: policy writers must not wait

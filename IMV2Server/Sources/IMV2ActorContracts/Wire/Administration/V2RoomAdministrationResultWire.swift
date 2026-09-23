@@ -155,6 +155,7 @@ public struct V2ActorGroupNicknamePageWire: Codable, Equatable, Sendable {
 }
 
 public enum V2RoomAdministrationResult: Codable, Equatable, Sendable {
+    case failure(V2ActorAdministrationFailureWire)
     case membership(V2ActorMembershipOutcomeWire)
     case pinned(V2ActorGroupCapabilityOutcomeWire<V2ActorPinnedMessageResultWire>)
     case announcement(V2ActorGroupCapabilityOutcomeWire<V2ActorGroupAnnouncementResultWire>)
