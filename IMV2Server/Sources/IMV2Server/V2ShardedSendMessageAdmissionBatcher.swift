@@ -6,7 +6,7 @@ import IMV2Core
 ///
 /// 每个房间在本值存活期间只会落入固定的一条通道，因此该房间的命令仍保持既有的
 /// 先进先出与不可超越语义；相互独立的房间则可以在不同 actor 执行器上并行推进。
-/// 数据库并发被拆分到各通道，而待处理请求改用进程级统一限流器，
+/// 数据库并发被拆分到各通道，而待处理请求和激活身份共用 owner 级限流器，
 /// 使哈希偏斜的房间可以借用空闲容量，又不会悄悄抬高 PostgreSQL 压力或驻留内存。
 public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
     V2ActorGrantedSendBatching, Sendable {
@@ -20,8 +20,8 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
     /// 构造分片准入器。
     ///
     /// 各通道的在途批量额度按商与余数精确分配；自适应策略中的最小窗口请求数按通道数向上取整，
-    /// 但至少为 2，保证单通道仍能观察到足够样本。进程级待处理上限由共享容量统一持有，
-    /// 通道内保留同值仅用于配置校验与诊断。
+    /// 但至少为 2，保证单通道仍能观察到足够样本。owner 级待处理和激活身份上限
+    /// 均由共享容量统一持有；通道内保留同值仅用于配置校验与诊断。
     ///
     /// - Parameters:
     ///   - store: 执行原子批量写入的存储。
@@ -82,6 +82,9 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
         let sharedPendingCapacity = V2SharedSendMessagePendingCapacity(
             maximum: configuration.maximumPendingRequests
         )
+        let sharedActivationCapacity = V2SharedSendMessageActivationCapacity(
+            maximum: configuration.maximumTrackedActivations
+        )
         lanes = (0 ..< laneCount).map { laneIndex in
             let inFlight = Self.portion(
                 total: configuration.maximumInFlightBatches,
@@ -113,6 +116,7 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
                 ),
                 databaseWorkAdmission: databaseWorkAdmission,
                 sharedPendingCapacity: sharedPendingCapacity,
+                sharedActivationCapacity: sharedActivationCapacity,
                 committedMessageObserver: committedMessageObserver,
                 actorGrantedStoreFactory: actorGrantedStoreFactory
             )

@@ -125,25 +125,37 @@ struct V2ActorGrantedMultiLaneBatchTests {
         #expect(await store.recordedTexts() == [["a", "b"]])
     }
 
-    @Test("adaptive delay cannot extend host or call deadline")
-    func adaptiveDeadline() async throws {
+    @Test("host batch window flushes before a later call deadline")
+    func adaptiveHostWindowDeadline() async throws {
         let store = GrantedBatchStore()
-        let batcher = V2SendMessageAdmissionBatcher(
-            store: store,
-            configuration: .init(maximumBatchSize: 8, maximumDelay: .milliseconds(25),
-                adaptiveDelayPolicy: .init(highActivityMaximumDelay: .milliseconds(200),
-                    minimumRequestsInWindow: 2, observationWindow: .seconds(5))),
-            actorGrantedStoreFactory: { _ in store })
+        let batcher = makeAdaptiveBatcher(store: store)
         let token = try makeToken(30)
         _ = try await batcher.acceptGrantedTurn(makeSends(token, ["warmup"]),
             batchDeadline: .now + .seconds(1), callDeadline: .now + .seconds(1))
         let started = ContinuousClock.now
-        let result = try await batcher.acceptGrantedTurn(makeSends(token, ["bounded"]),
-            batchDeadline: started + .milliseconds(90),
-            callDeadline: started + .milliseconds(70))
+        let result = try await V2ActorGrantedSendBatchAdapter(batcher: batcher).execute(
+            makeSends(token, ["bounded"]), batchDeadline: started + .milliseconds(70),
+            callDeadline: started + .milliseconds(500))
         #expect(result.count == 1)
         #expect(started.duration(to: .now) < .milliseconds(175))
         #expect(await store.scalarCompletionOrder() == ["warmup", "bounded"])
+    }
+
+    @Test("expired caller budget rejects before SQL even when host window remains")
+    func adaptiveCallerDeadline() async throws {
+        let store = GrantedBatchStore()
+        let batcher = makeAdaptiveBatcher(store: store)
+        let token = try makeToken(32)
+        _ = try await batcher.acceptGrantedTurn(makeSends(token, ["warmup"]),
+            batchDeadline: .now + .seconds(1), callDeadline: .now + .seconds(1))
+        let started = ContinuousClock.now
+        await #expect(throws: V2RoomCallFailure.notAccepted(.deadlineExceeded)) {
+            try await V2ActorGrantedSendBatchAdapter(batcher: batcher).execute(
+                makeSends(token, ["bounded"]), batchDeadline: started + .milliseconds(90),
+                callDeadline: started + .milliseconds(70))
+        }
+        #expect(started.duration(to: .now) < .milliseconds(175))
+        #expect(await store.scalarCompletionOrder() == ["warmup"])
     }
 
     @Test("granted turns still select high-activity delay when the host budget allows it")
@@ -180,6 +192,15 @@ struct V2ActorGrantedMultiLaneBatchTests {
             }
             await Task.yield()
         }
+    }
+
+    private func makeAdaptiveBatcher(store: GrantedBatchStore) -> V2SendMessageAdmissionBatcher {
+        V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 8, maximumDelay: .milliseconds(25),
+                adaptiveDelayPolicy: .init(highActivityMaximumDelay: .milliseconds(200),
+                    minimumRequestsInWindow: 2, observationWindow: .seconds(5))),
+            actorGrantedStoreFactory: { _ in store })
     }
 
     private func makeToken(_ suffix: Int) throws -> V2RoomActivationToken {

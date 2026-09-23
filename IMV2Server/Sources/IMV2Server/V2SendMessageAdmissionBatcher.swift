@@ -50,6 +50,36 @@ final class V2SharedSendMessagePendingCapacity: Sendable {
     }
 }
 
+/// One owner-wide budget for exact activation identities across all send lanes.
+/// A token remains reserved after its last SQL request finishes because
+/// the owner's credit pool can retain unused credits until exact retirement.
+final class V2SharedSendMessageActivationCapacity: Sendable {
+    private let maximum: Int
+    private let tokens = Mutex<Set<V2RoomActivationToken>>([])
+
+    init(maximum: Int) {
+        precondition(maximum > 0)
+        self.maximum = maximum
+    }
+
+    func tryReserve(_ token: V2RoomActivationToken) -> Bool {
+        tokens.withLock { reserved in
+            // A room always routes to one lane. Its actor holds this slot until
+            // all pending/in-flight requests finish or exact retirement clears it.
+            precondition(!reserved.contains(token), "activation reserved twice")
+            guard reserved.count < maximum else { return false }
+            reserved.insert(token)
+            return true
+        }
+    }
+
+    func release(_ token: V2RoomActivationToken) {
+        tokens.withLock { reserved in
+            precondition(reserved.remove(token) != nil, "activation released twice")
+        }
+    }
+}
+
 /// 命令接受的有界 FIFO 批处理边界。
 ///
 /// 批处理器不持有任何房间状态，且在其持久路径报告命令完成之前，
@@ -201,9 +231,9 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         /// 必须对它单独设界：把数据库准入移到批次边界，
         /// 不能等于用一个无界队列替换一个原本有界的队列。
         public let maximumPendingRequests: Int
-        /// Upper bound for active or uncertain activation identities retained
-        /// by this batcher. An uncertain identity holds its slot until the
-        /// hosting executor closes and explicitly retires that exact token.
+        /// Upper bound for activation identities retained by this batcher.
+        /// Granted lanes keep a completed identity until the hosting executor
+        /// closes its credit pool and explicitly retires that exact token.
         public let maximumTrackedActivations: Int
 
         public init(
@@ -295,6 +325,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     private let actorGrantedStoreFactory: (@Sendable ([V2RoomActivationToken]) throws -> any V2AtomicRoomWriteBatchStore)?
     private let configuration: Configuration
     private let sharedPendingCapacity: V2SharedSendMessagePendingCapacity?
+    private let sharedActivationCapacity: V2SharedSendMessageActivationCapacity?
     /// 侵入式 FIFO 存储让入队与取消保持 O(1)。
     ///
     /// 批次选择仍按到达顺序遍历暂存请求，
@@ -371,6 +402,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         self.databaseWorkAdmission = databaseWorkAdmission
         self.committedMessageObserver = committedMessageObserver
         sharedPendingCapacity = nil
+        sharedActivationCapacity = nil
         managesForegroundWriteAdmission = databaseWorkAdmission != nil
         publishesCommittedGroupEvents = committedMessageObserver != nil
     }
@@ -391,6 +423,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         configuration: Configuration,
         databaseWorkAdmission: V2DatabaseWorkAdmissionController?,
         sharedPendingCapacity: V2SharedSendMessagePendingCapacity,
+        sharedActivationCapacity: V2SharedSendMessageActivationCapacity,
         committedMessageObserver: (any V2CommittedMessageBatchObserving)?,
         actorGrantedStoreFactory: (@Sendable ([V2RoomActivationToken]) throws -> any V2AtomicRoomWriteBatchStore)?
     ) {
@@ -400,6 +433,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         self.databaseWorkAdmission = databaseWorkAdmission
         self.committedMessageObserver = committedMessageObserver
         self.sharedPendingCapacity = sharedPendingCapacity
+        self.sharedActivationCapacity = sharedActivationCapacity
         managesForegroundWriteAdmission = databaseWorkAdmission != nil
         publishesCommittedGroupEvents = committedMessageObserver != nil
     }
@@ -414,6 +448,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         self.configuration = configuration
         self.actorGrantedStoreFactory = actorGrantedStoreFactory
         sharedPendingCapacity = nil
+        sharedActivationCapacity = nil
         databaseWorkAdmission = nil
         committedMessageObserver = nil
         managesForegroundWriteAdmission = false
@@ -551,6 +586,13 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 continuation.resume(throwing: V2SendMessageAdmissionBatcherError.serverBusy)
                 return
             }
+            if trackedActivations[first.token] == nil,
+               let sharedActivationCapacity,
+               !sharedActivationCapacity.tryReserve(first.token) {
+                for _ in 0..<reserved { sharedPendingCapacity?.release() }
+                continuation.resume(throwing: V2SendMessageAdmissionBatcherError.serverBusy)
+                return
+            }
             let turnID = UUID()
             trackedActivations[first.token, default: 0] += sends.count
             grantedTurns[turnID] = .init(
@@ -608,6 +650,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             trackedActivations.removeValue(forKey: token)
             quarantinedActivations.remove(token)
             retiringActivations.remove(token)
+            sharedActivationCapacity?.release(token)
         }
     }
 
@@ -1433,13 +1476,13 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         if let remaining = trackedActivations[granted.token] {
             precondition(remaining > 0, "tracked activation completed twice")
             if remaining == 1 {
-                if quarantinedActivations.contains(granted.token) &&
-                   !retiringActivations.contains(granted.token) {
+                if !retiringActivations.contains(granted.token) {
                     trackedActivations[granted.token] = 0
                 } else {
                     trackedActivations.removeValue(forKey: granted.token)
                     quarantinedActivations.remove(granted.token)
                     retiringActivations.remove(granted.token)
+                    sharedActivationCapacity?.release(granted.token)
                 }
             } else {
                 trackedActivations[granted.token] = remaining - 1
