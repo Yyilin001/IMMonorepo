@@ -35,7 +35,7 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
             #expect(prior.readThroughRoomSequence == 1)
             let readers = try V2ActorReadReceiptReadersQueryWire(roomID: .init(uuid: room),
                 messageID: .init(uuid: UUID()), actorUserID: .init(uuid: actor), cursor: nil, pageSize: 10)
-            let missing = try await receipt.query(.readers(readers), token: old)
+            let missing = try await receipt.query(.readerCandidates(readers), token: old)
             #expect(missing == .readersFailure(.messageNotFound))
             #expect(try await activation.release(token: old))
             let successor = try await acquire(activation, room: room, owner: owner, host: "host-b")

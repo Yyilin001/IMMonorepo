@@ -112,6 +112,8 @@ public actor V2ActorSessionAuthenticator {
             switch request {
             case .administration(.trustedSafety):
                 guard call.principal == .service, peer.permissions.contains(.trustedSafety) else { throw V2ActorAuthenticationError.forbidden }
+            case .receiptQuery(.readers):
+                throw V2ActorAuthenticationError.forbidden
             case .maintenance:
                 guard call.principal == .service, peer.permissions.contains(.roomMaintenance) else { throw V2ActorAuthenticationError.forbidden }
             case .specialAccountAudit:

@@ -157,3 +157,22 @@ public extension V2ActorRoomReceiptFailureWire {
         }
     }
 }
+
+public extension V2ActorReadReceiptCandidatePageWire {
+    init(_ value: V2GroupReadReceiptReaderCandidatePage) {
+        self.init(roomID: value.roomID, messageID: value.messageID,
+            candidates: value.candidates.map {
+                .init(userID: $0.userID, readThroughRoomSequence: $0.readThroughRoomSequence)
+            }, nextCursor: value.nextCursor)
+    }
+    func domainValue() throws -> V2GroupReadReceiptReaderCandidatePage {
+        guard candidates.count <= 100,
+              Set(candidates.map(\.userID)).count == candidates.count,
+              candidates.allSatisfy({ $0.readThroughRoomSequence <= UInt64(Int64.max) }) else {
+            throw V2ActorRoomReceiptWireError.invalidResult
+        }
+        return .init(roomID: roomID, messageID: messageID,
+            candidates: candidates.map { .init(userID: $0.userID,
+                readThroughRoomSequence: $0.readThroughRoomSequence) }, nextCursor: nextCursor)
+    }
+}

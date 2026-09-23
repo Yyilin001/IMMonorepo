@@ -49,12 +49,14 @@ public struct V2ActorRoomReceiptExecutor: Sendable {
         let reader = V2ActorRoomQueryExecutor(database: database, timeouts: timeouts)
         return try await reader.withFencedRead(roomIDs: [query.roomID], tokens: [token]) { transaction in
             switch query {
-            case .readers(let wire):
+            case .readers:
+                throw V2RoomCallFailure.notAccepted(.invalidRequest)
+            case .readerCandidates(let wire):
                 do {
-                    let page = try await store(transaction).readers(roomID: wire.roomID,
+                    let page = try await store(transaction).readerCandidates(roomID: wire.roomID,
                         messageID: wire.messageID, actorUserID: wire.actorUserID,
                         cursor: wire.cursor, pageSize: wire.pageSize)
-                    return .readers(.init(page))
+                    return .readerCandidates(.init(page))
                 } catch let error as V2ReadReceiptStoreError {
                     return .readersFailure(.init(error))
                 }

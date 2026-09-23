@@ -112,12 +112,15 @@ public enum V2RoomReceiptCommand: Codable, Equatable, Sendable {
 }
 
 public enum V2RoomReceiptQuery: Codable, Equatable, Sendable {
+    /// Legacy combined room/user read. Production transport rejects this;
+    /// candidates must pass through authoritative control privacy filtering.
     case readers(V2ActorReadReceiptReadersQueryWire)
+    case readerCandidates(V2ActorReadReceiptReadersQueryWire)
     public var roomID: RoomID {
-        switch self { case .readers(let value): value.roomID }
+        switch self { case .readers(let value), .readerCandidates(let value): value.roomID }
     }
     public var actorUserID: UserID {
-        switch self { case .readers(let value): value.actorUserID }
+        switch self { case .readers(let value), .readerCandidates(let value): value.actorUserID }
     }
     public var replayPolicy: V2RoomReplayPolicy { .readOnly }
 }
@@ -132,6 +135,7 @@ public enum V2RoomReceiptResult: Codable, Equatable, Sendable {
     case readersFailure(V2ActorReadReceiptStoreErrorWire)
     case record(V2ActorRecordReadReceiptResultWire)
     case readers(V2ActorReadReceiptReadersPageWire)
+    case readerCandidates(V2ActorReadReceiptCandidatePageWire)
 }
 
 /// Optional physical microbatch transport preserves one outcome or domain rejection per item.
@@ -162,4 +166,29 @@ public enum V2ActorReadReceiptBatchItemResultWire: Codable, Equatable, Sendable 
 public struct V2ActorReadReceiptRecordBatchResultWire: Codable, Equatable, Sendable {
     public let results: [V2ActorReadReceiptBatchItemResultWire]
     public init(results: [V2ActorReadReceiptBatchItemResultWire]) { self.results = results }
+}
+
+/// Room-owned facts only. Candidate identity disclosure must be checked in the
+/// control database before any caller-facing reader page is assembled.
+public struct V2ActorReadReceiptCandidateWire: Codable, Equatable, Sendable {
+    public let userID: UserID
+    public let readThroughRoomSequence: UInt64
+    public init(userID: UserID, readThroughRoomSequence: UInt64) {
+        self.userID = userID
+        self.readThroughRoomSequence = readThroughRoomSequence
+    }
+}
+
+public struct V2ActorReadReceiptCandidatePageWire: Codable, Equatable, Sendable {
+    public let roomID: RoomID
+    public let messageID: MessageID
+    public let candidates: [V2ActorReadReceiptCandidateWire]
+    public let nextCursor: String?
+    public init(roomID: RoomID, messageID: MessageID,
+                candidates: [V2ActorReadReceiptCandidateWire], nextCursor: String?) {
+        self.roomID = roomID
+        self.messageID = messageID
+        self.candidates = candidates
+        self.nextCursor = nextCursor
+    }
 }
