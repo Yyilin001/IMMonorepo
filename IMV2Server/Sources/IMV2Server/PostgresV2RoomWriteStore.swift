@@ -515,15 +515,58 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         identifiers: V2AcceptanceIdentifiers,
         now: Date
     ) async throws -> V2ForwardImportOutcome {
-        let inbox = PostgresV2ForwardInboxStore(database: database)
+        var inbox = PostgresV2ForwardInboxStore(database: database)
+        if let token = try activationScope?.token(for: export.intent.targetRoomID) {
+            inbox = try inbox.usingActivationToken(token)
+        }
         try await inbox.receive(export, now: now)
+        do {
+            return try await importReceivedForwardExport(export, capacityProfile: capacityProfile,
+                limits: limits, identifiers: identifiers, now: now)
+        } catch {
+            // Receive has committed a durable workflow fact. A later failure
+            // cannot prove rollback of this entire turn; retain the operation
+            // identity and recover through the inbox on the next activation.
+            if activationScope != nil { throw V2RoomTransactionOutcomeUnknown() }
+            throw error
+        }
+    }
+
+    /// Actor entry binds every phase, including immutable receipt replay, to
+    /// the exact target incarnation. It does not grant source-room authority.
+    public func importForwardExport(
+        _ export: V2ForwardExport,
+        activationToken: V2RoomActivationToken,
+        capacityProfile: V2CapacityProfile,
+        limits: V2MessageCommandLimits,
+        identifiers: V2AcceptanceIdentifiers,
+        now: Date
+    ) async throws -> V2ForwardImportOutcome {
+        guard activationToken.roomID.uuidValue == export.intent.targetRoomID,
+              activationToken.owner.shardID == export.intent.targetShardID,
+              activationToken.owner.epoch == export.intent.targetEpoch else {
+            throw V2RoomActivationLeaseError.activationChanged
+        }
+        return try await usingActivationScope(.init(tokens: [activationToken]))
+            .importForwardExport(export, capacityProfile: capacityProfile, limits: limits,
+                identifiers: identifiers, now: now)
+    }
+
+    private func importReceivedForwardExport(
+        _ export: V2ForwardExport,
+        capacityProfile: V2CapacityProfile,
+        limits: V2MessageCommandLimits,
+        identifiers: V2AcceptanceIdentifiers,
+        now: Date
+    ) async throws -> V2ForwardImportOutcome {
         if let controlDatabase, controlPolicyScope == nil {
             // This short owner-only preflight ends before control reservation.
             // The acceptance transaction below rechecks the inbox, media mapping,
             // exact command fingerprint and owner before any message write.
-            let preflight: (V2SendMessageCommand?, V2ForwardImportOutcome?) = try await database.transaction { transaction in
+            let preflight: (V2SendMessageCommand?, V2ForwardImportOutcome?) = try await withRoomWriteTransaction { transaction in
                 guard let sql = transaction as? any SQLDatabase else { throw V2ForwardInboxError.corruptPersistenceState }
                 let row = try await v2LockForwardInbox(exportID: export.intent.exportID, sql: sql)
+                try await activationScope?.require([export.intent.targetRoomID], sql: sql)
                 guard row.digest == export.digest else { throw V2ForwardInboxError.idempotencyConflict }
                 if row.state == "completed" || row.state == "rejected" { return (nil, try row.outcome) }
                 guard row.payload == export.payload else { throw V2ForwardInboxError.idempotencyConflict }
@@ -571,15 +614,19 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                 guard let sql = transaction as? any SQLDatabase else { throw V2ForwardInboxError.corruptPersistenceState }
                 let row = try await v2LockForwardInbox(exportID: export.intent.exportID, sql: sql)
                 guard row.digest == export.digest else { throw V2ForwardInboxError.idempotencyConflict }
-                if row.state == "completed" || row.state == "rejected" { return (try row.outcome, nil, nil) }
+                if row.state == "completed" || row.state == "rejected" {
+                    try await activationScope?.require([export.intent.targetRoomID], sql: sql)
+                    return (try row.outcome, nil, nil)
+                }
                 guard row.payload == export.payload else { throw V2ForwardInboxError.idempotencyConflict }
                 guard let authority = try await v2ForwardInboxAuthorization(row, sql: sql) else {
                     guard row.state == "pending" else { throw V2ForwardInboxError.corruptPersistenceState }
+                    try await activationScope?.require([export.intent.targetRoomID], sql: sql)
                     return (.pending(.media), nil, nil)
                 }
                 // Preserve inbox -> message operation -> room lock ordering.
                 // Fence before command validation can persist a rejection;
-                // completed/rejected immutable receipts returned above need no write.
+                // receipt and pending reads above are separately fenced before return.
                 try await acquireMessageOperationLock(roomID: export.intent.targetRoomID,
                     senderID: export.intent.actorUserID, clientMessageID: export.intent.targetClientMessageID, sql: sql)
                 try await v2AssertForwardInboxOwner(authority, sql: sql)
@@ -632,9 +679,10 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         // A crash or completion-transaction failure before this transition leaves the
         // accepted receipt durable. Retry recovers its normal post-commit work
         // from message_send_completions before exposing target success.
-        return try await database.transaction { transaction in
+        return try await withRoomWriteTransaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ForwardInboxError.corruptPersistenceState }
             let row = try await v2LockForwardInbox(exportID: export.intent.exportID, sql: sql)
+            try await activationScope?.require([export.intent.targetRoomID], sql: sql)
             if row.state == "completed" { return try row.outcome }
             try await v2AssertForwardInboxOwner(.init(export: try row.export, mediaIDs: []), sql: sql)
             guard row.state == "accepted", let receipt = commit.outcome.acceptanceReceipt,
