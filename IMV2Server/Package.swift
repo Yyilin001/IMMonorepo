@@ -5,6 +5,8 @@ let package = Package(
     name: "IMV2Server",
     platforms: [.macOS("26.2")],
     products: [
+        .library(name: "IMV2ActorContracts", targets: ["IMV2ActorContracts"]),
+        .library(name: "IMV2ActorRuntime", targets: ["IMV2ActorRuntime"]),
         .library(name: "IMV2Server", targets: ["IMV2Server"]),
         .library(name: "IMV2ServerHTTP", targets: ["IMV2ServerHTTP"]),
         .executable(name: "IMV2ServerApp", targets: ["IMV2ServerApp"]),
@@ -33,6 +35,22 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
     ],
     targets: [
+        .target(
+            name: "IMV2ActorContracts",
+            dependencies: ["IMV2Core"]
+        ),
+        .testTarget(
+            name: "IMV2ActorContractsTests",
+            dependencies: ["IMV2ActorContracts", "IMV2Core"]
+        ),
+        .target(
+            name: "IMV2ActorRuntime",
+            dependencies: ["IMV2ActorContracts", "IMV2Core"]
+        ),
+        .testTarget(
+            name: "IMV2ActorRuntimeTests",
+            dependencies: ["IMV2ActorRuntime", "IMV2ActorContracts", "IMV2Core"]
+        ),
         .target(
             name: "CIMV2Argon2",
             exclude: ["LICENSE", "UPSTREAM.json"],
