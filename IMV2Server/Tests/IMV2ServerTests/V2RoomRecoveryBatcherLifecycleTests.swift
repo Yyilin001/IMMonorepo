@@ -29,9 +29,11 @@ struct V2RoomRecoveryBatcherLifecycleTests {
         let deadline = ContinuousClock.now + .seconds(2)
         let first = Task { try await batcher.state(.init(token: tokens[0], actorUserID: actor,
             batchDeadline: deadline, callDeadline: deadline)) }
-        while await batcher.pendingCount != 1 { await Task.yield() }
+        defer { first.cancel() }
+        try await waitForFirstPendingCall(batcher)
         let second = Task { try await batcher.state(.init(token: tokens[1], actorUserID: actor,
             batchDeadline: deadline, callDeadline: deadline)) }
+        defer { second.cancel() }
         await #expect(throws: V2RoomRecoveryReadError.corruptPersistence) { try await first.value }
         await #expect(throws: V2RoomRecoveryReadError.corruptPersistence) { try await second.value }
         #expect(observed.withLock { $0 } == 1)
@@ -58,18 +60,26 @@ struct V2RoomRecoveryBatcherLifecycleTests {
         let later = earlier + .seconds(2)
         let first = Task { try await batcher.state(.init(token: firstToken, actorUserID: actor,
             batchDeadline: later, callDeadline: earlier)) }
-        for _ in 0..<100 {
-            if await batcher.pendingCount == 1 { break }
-            await Task.yield()
-        }
-        #expect(await batcher.pendingCount == 1)
+        defer { first.cancel() }
+        try await waitForFirstPendingCall(batcher)
         let second = Task { try await V2RoomSQLDeadline.withSelectedDeadline(later + .seconds(5)) {
             try await batcher.state(.init(token: secondToken, actorUserID: actor,
                 batchDeadline: later, callDeadline: later))
         } }
+        defer { second.cancel() }
         await #expect(throws: V2RoomRecoveryReadError.corruptPersistence) { try await first.value }
         await #expect(throws: V2RoomRecoveryReadError.corruptPersistence) { try await second.value }
         #expect(observed.withLock { $0 } == [earlier])
+    }
+
+    private func waitForFirstPendingCall(_ batcher: V2HostRoomRecoveryQueryBatcher) async throws {
+        // A fixed number of yields does not establish that another task has
+        // entered the actor, especially on the bounded Linux CI executor.
+        let deadline = ContinuousClock.now + .seconds(1)
+        while await batcher.pendingCount != 1, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        try #require(await batcher.pendingCount == 1)
     }
 
     @Test("completed user keys release all timer identity bookkeeping")
