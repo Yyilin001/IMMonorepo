@@ -276,7 +276,10 @@ class Probe:
                            f"WHERE client_message_id = '{identifier(101)}'") != "3":
             raise RuntimeError("database restart lost earlier durable business state")
         self.mark("owner-restart-ready")
-        self.wait_file("owner-restart-recovered.json", seconds=90, watched=("host-a", "host-b"))
+        # The client's 65s retry horizon may start one final 10s call, followed
+        # by a 10s replay and 10s resolve. Bound the observer independently;
+        # individual business deadlines remain unchanged.
+        self.wait_file("owner-restart-recovered.json", seconds=105, watched=("host-a", "host-b"))
         for database, operation in (("owner-a", 501), ("owner-b", 502)):
             counts = self.query(database, "SELECT (SELECT count(*) FROM im_v2.messages "
                 f"WHERE client_message_id = '{identifier(operation)}'), "
