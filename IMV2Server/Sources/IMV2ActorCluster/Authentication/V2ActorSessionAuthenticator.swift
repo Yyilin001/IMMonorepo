@@ -114,6 +114,13 @@ public actor V2ActorSessionAuthenticator {
                 guard call.principal == .service, peer.permissions.contains(.trustedSafety) else { throw V2ActorAuthenticationError.forbidden }
             case .specialAccountAudit:
                 guard call.principal == .service, peer.permissions.contains(.specialAccountAudit) else { throw V2ActorAuthenticationError.forbidden }
+            case .invitation(.create):
+                // Secret issuance and the durable creation intent belong to
+                // the control coordinator, never a direct room invocation.
+                throw V2ActorAuthenticationError.forbidden
+            case .invitation(.commitCreation), .invitation(.submitReserved),
+                 .invitationQuery(.preflightCreation), .invitationQuery(.reservedSubmissionResponse):
+                guard call.principal == .service, peer.permissions.contains(.roomCoordination) else { throw V2ActorAuthenticationError.forbidden }
             default:
                 guard let user = request.actorUserID, call.principal == .user(user),
                       peer.permissions.contains(.userRoomCalls) else { throw V2ActorAuthenticationError.forbidden }

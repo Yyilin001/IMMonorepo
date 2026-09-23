@@ -281,6 +281,7 @@ public enum V2ActorGroupJoinDecisionOutcomeWire: Codable, Equatable, Sendable {
     case unavailable
 }
 public enum V2RoomInvitationResult: Codable, Equatable, Sendable {
+    case failure(V2ActorInvitationErrorWire)
     case created(V2ActorGroupInviteLinkWire)
     case createdStored(V2ActorStoredGroupInviteWire)
     case active([V2ActorGroupInviteLinkWire])

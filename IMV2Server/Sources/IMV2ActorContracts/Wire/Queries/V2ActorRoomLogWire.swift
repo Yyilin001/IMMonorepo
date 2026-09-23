@@ -169,6 +169,11 @@ public enum V2RoomLogQuery: Equatable, Codable, Sendable {
 }
 
 public enum V2RoomLogQueryResult: Equatable, Codable, Sendable {
+    case failure(V2ActorRoomLogFailureWire)
     case page(V2ActorRoomLogPageWire)
     case subscription(V2ActorRoomLogSubscriptionWire)
+}
+
+public enum V2ActorRoomLogFailureWire: String, Equatable, Codable, Sendable {
+    case invalidRequest, roomNotFound, actorNotMember, corruptPersistenceState
 }

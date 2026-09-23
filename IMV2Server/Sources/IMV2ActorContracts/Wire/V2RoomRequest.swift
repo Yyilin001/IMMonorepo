@@ -33,6 +33,8 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
     case roomLog(V2RoomLogQuery)
     case directory(V2RoomDirectoryQuery)
     case recovery(V2ActorRoomRecoveryItemQuery)
+    case invitation(V2RoomInvitationCommand)
+    case invitationQuery(V2RoomInvitationQuery)
     case specialAccountAudit(V2ActorSpecialAccountAuditWire)
 
     public var roomID: RoomID {
@@ -45,6 +47,8 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
         case .roomLog(let value): value.roomID
         case .directory(let value): value.roomID
         case .recovery(let value): value.roomID
+        case .invitation(let value): value.roomID
+        case .invitationQuery(let value): value.roomID
         case .specialAccountAudit(let value): value.roomID
         }
     }
@@ -61,6 +65,8 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
         case .roomLog(let value): value.actorUserID
         case .directory(let value): value.actorUserID
         case .recovery(let value): value.actorUserID
+        case .invitation(let value): value.actorUserID
+        case .invitationQuery(let value): value.actorUserID
         case .specialAccountAudit: nil
         }
     }
@@ -69,6 +75,8 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
         switch self {
         case .messaging, .administration, .receipt, .specialAccountAudit: .durableIdempotent
         case .administrationQuery, .receiptQuery, .roomLog, .directory, .recovery: .readOnly
+        case .invitation(let value): value.retryPolicy
+        case .invitationQuery: .readOnly
         }
     }
 
@@ -76,6 +84,8 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
         switch self {
         case .messaging, .administration, .receipt, .specialAccountAudit: true
         case .administrationQuery, .receiptQuery, .roomLog, .directory, .recovery: false
+        case .invitation(let value): value.stableOperationIdentity != nil
+        case .invitationQuery: false
         }
     }
 
@@ -92,5 +102,6 @@ public enum V2RoomResponse: Codable, Equatable, Sendable {
     case roomLog(V2RoomLogQueryResult)
     case directory(V2RoomDirectoryResult)
     case recovery(V2ActorRoomRecoveryItemResult)
+    case invitation(V2RoomInvitationResult)
     case specialAccountAudit(V2ActorSpecialAccountAuditResultWire)
 }

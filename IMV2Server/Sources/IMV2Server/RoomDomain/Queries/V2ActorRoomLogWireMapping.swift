@@ -1,5 +1,25 @@
 import IMV2ActorContracts
 
+public extension V2ActorRoomLogFailureWire {
+    init(_ error: V2GroupEventLogError) {
+        switch error {
+        case .invalidRequest: self = .invalidRequest
+        case .roomNotFound: self = .roomNotFound
+        case .actorNotMember: self = .actorNotMember
+        case .corruptPersistenceState: self = .corruptPersistenceState
+        }
+    }
+
+    func domainError() -> V2GroupEventLogError {
+        switch self {
+        case .invalidRequest: .invalidRequest
+        case .roomNotFound: .roomNotFound
+        case .actorNotMember: .actorNotMember
+        case .corruptPersistenceState: .corruptPersistenceState
+        }
+    }
+}
+
 public extension V2ActorRoomLogEntryWire {
     init(_ value: V2GroupEventLogEntry) throws {
         try self.init(

@@ -115,6 +115,40 @@ struct V2ActorAuthenticationTests {
         #expect(try fixture.trust.verifySessionGrant(signedGrant, for: hello, maximumBytes: 10_000) == session)
     }
 
+    @Test("invitation control grants require the coordinator service permission")
+    func invitationCoordinatorPermission() async throws {
+        let fixture = try Fixture(workerPermissions: [.roomCoordination])
+        let userGrant = try await fixture.open()
+        let workerGrant = try await fixture.auth.openSession(fixture.worker.sign(
+            fixture.hello(serviceID: fixture.worker.serviceID), maximumBytes: 10_000))
+        let createdAt = Date()
+        let creation = V2ActorInviteCreatePersistenceWire(inviteID: .init(uuid: UUID()),
+            roomID: fixture.token.roomID, actorUserID: fixture.user, operationID: .init(uuid: UUID()),
+            tokenDigest: .init(bytes: Data(repeating: 1, count: 32)), requestedLifetimeSeconds: 300,
+            expiresAt: createdAt.addingTimeInterval(300), maximumApprovedUses: 10,
+            maximumActiveInvitesPerRoom: 10, createdAt: createdAt, evaluatedAt: createdAt)
+        let requests: [V2RoomRequest] = [.invitation(.commitCreation(creation)),
+                                        .invitationQuery(.preflightCreation(creation))]
+        for (index, request) in requests.enumerated() {
+            for principal in [V2ActorCallPrincipal.user(fixture.user), .service] {
+                let rejected = try fixture.call(grant: userGrant,
+                    sequence: UInt64(index + 1), principal: principal, request: request)
+                await failure(.forbidden) {
+                    _ = try await fixture.auth.accept(fixture.client.sign(rejected, maximumBytes: 10_000))
+                }
+            }
+            let accepted = try fixture.call(grant: workerGrant, sequence: UInt64(index + 1),
+                principal: .service, request: request)
+            _ = try await fixture.auth.accept(fixture.worker.sign(accepted, maximumBytes: 10_000))
+        }
+        let directCreate = V2RoomRequest.invitation(.create(.init(roomID: fixture.token.roomID,
+            actorUserID: fixture.user, operationID: .init(uuid: UUID()), lifetime: 300, maximumApprovedUses: 10)))
+        await failure(.forbidden) {
+            _ = try await fixture.auth.accept(fixture.worker.sign(fixture.call(grant: workerGrant,
+                sequence: 3, principal: .service, request: directCreate), maximumBytes: 10_000))
+        }
+    }
+
     @Test("wrong process incarnation, protocol and oversized payload fail before dispatch")
     func versionAndLimits() async throws {
         let fixture = try Fixture()
@@ -152,7 +186,8 @@ struct V2ActorAuthenticationTests {
         let limits: V2ActorAuthenticationLimits
         let auth: V2ActorSessionAuthenticator
 
-        init(limits: V2ActorAuthenticationLimits = try! .init(), clock: TestClock = .init()) throws {
+        init(limits: V2ActorAuthenticationLimits = try! .init(), clock: TestClock = .init(),
+             workerPermissions: Set<V2ActorServicePermission> = [.trustedSafety]) throws {
             self.limits = limits
             let host = V2ActorHostIdentity(hostID: V2ActorHostID(uuid: UUID()), incarnationID: UUID())
             token = .init(roomID: RoomID(uuid: UUID()), owner: try .init(shardID: "owner", epoch: 0),
@@ -165,7 +200,7 @@ struct V2ActorAuthenticationTests {
             hostSigner = try .init(serviceID: V2ActorServiceID("host"), privateKey: hostKey.rawRepresentation)
             trust = try .init(services: [
                 .init(serviceID: client.serviceID, publicKey: clientKey.publicKey.rawRepresentation, permissions: [.userRoomCalls]),
-                .init(serviceID: worker.serviceID, publicKey: workerKey.publicKey.rawRepresentation, permissions: [.trustedSafety]),
+                .init(serviceID: worker.serviceID, publicKey: workerKey.publicKey.rawRepresentation, permissions: workerPermissions),
                 .init(serviceID: hostSigner.serviceID, publicKey: hostKey.publicKey.rawRepresentation, permissions: [], hostedIDs: [host.hostID]),
             ])
             auth = .init(host: host, trust: trust, limits: limits, now: { clock.now })

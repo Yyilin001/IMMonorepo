@@ -12,6 +12,7 @@ public struct V2ActorTrustedSafetyAuthority: Sendable {
 /// Concrete D2 room-domain executor. The caller selects the physical owner database;
 /// every store transaction rechecks this exact granted token before replay or mutation.
 public struct V2RoomAdministrationDomainExecutor: Sendable {
+    private let database: any Database
     private let token: V2RoomActivationToken
     private let capacityProfile: V2CapacityProfile
     private let membershipIdentities: any V2MembershipIdentitySnapshotValidating
@@ -31,6 +32,7 @@ public struct V2RoomAdministrationDomainExecutor: Sendable {
         now: @escaping @Sendable () -> Date = Date.init
     ) throws {
         let scope = try V2RoomActivationWriteScope(tokens: [token])
+        self.database = database
         self.token = token
         self.capacityProfile = capacityProfile
         self.membershipIdentities = membershipIdentities
@@ -127,14 +129,16 @@ public struct V2RoomAdministrationDomainExecutor: Sendable {
 
     public func execute(_ query: V2RoomAdministrationQuery) async throws -> V2RoomAdministrationResult {
         try requireRoom(query.roomID)
-        switch query {
-        case .groupNicknames(let request):
-            try request.validateForDomain()
-            let page = try await presentation.groupNicknames(
-                actorUserID: request.actorUserID, roomID: request.roomID,
-                afterUserID: request.afterUserID, limit: request.limit
-            )
-            return .groupNicknames(.init(page))
+        return try await V2ActorRoomQueryExecutor(database: database)
+            .withFencedRead(roomIDs: [query.roomID], tokens: [token]) { transaction in
+                switch query {
+                case .groupNicknames(let request):
+                    try request.validateForDomain()
+                    let page = try await PostgresV2ProfilePresentationStore(database: transaction, now: now)
+                        .groupNicknames(actorUserID: request.actorUserID, roomID: request.roomID,
+                            afterUserID: request.afterUserID, limit: request.limit)
+                    return .groupNicknames(.init(page))
+                }
         }
     }
 }

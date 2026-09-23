@@ -79,6 +79,7 @@ let package = Package(
             name: "IMV2Server",
             dependencies: [
                 "IMV2ActorContracts",
+                "IMV2ActorRuntime",
                 "IMV2Core",
                 "IMV2Compression",
                 "CIMV2Argon2",
