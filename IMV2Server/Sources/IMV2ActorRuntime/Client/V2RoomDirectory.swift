@@ -34,6 +34,14 @@ public protocol V2RoomClientTransport: Sendable {
     func activate(on host: V2ActorHostIdentity, roomID: RoomID, owner: V2RoomDataOwner,
                   deadline: ContinuousClock.Instant) async throws -> V2RoomActivationResolution
     func lookup(_ token: V2RoomActivationToken, deadline: ContinuousClock.Instant) async throws -> Bool
+    /// A speculative call-only hint. This never authenticates a request or
+    /// replaces the physical lookup required by public resolution.
+    func canInvokeCachedLocally(_ token: V2RoomActivationToken) async -> Bool
+    /// Executes only on the exact current same-process capability. A default
+    /// transport must fail closed rather than silently route a hint remotely.
+    func invokeCachedLocally(_ token: V2RoomActivationToken, request: V2RoomRequest,
+                             principal: V2RoomClientPrincipal,
+                             deadline: ContinuousClock.Instant) async throws -> V2RoomResponse
     func invoke(_ token: V2RoomActivationToken, request: V2RoomRequest,
                 principal: V2RoomClientPrincipal, deadline: ContinuousClock.Instant) async throws -> V2RoomResponse
     func reserve(_ token: V2RoomActivationToken, requestID: UUID,
@@ -42,6 +50,15 @@ public protocol V2RoomClientTransport: Sendable {
     func abort(_ grant: V2RoomReservation, deadline: ContinuousClock.Instant) async -> Bool
     func finish(_ grant: V2RoomReservation, completion: V2RoomReservationCompletion,
                 deadline: ContinuousClock.Instant) async -> Bool
+}
+
+public extension V2RoomClientTransport {
+    func canInvokeCachedLocally(_ token: V2RoomActivationToken) async -> Bool { false }
+    func invokeCachedLocally(_ token: V2RoomActivationToken, request: V2RoomRequest,
+                             principal: V2RoomClientPrincipal,
+                             deadline: ContinuousClock.Instant) async throws -> V2RoomResponse {
+        throw V2RoomCallFailure.notAccepted(.staleActivation)
+    }
 }
 
 public struct V2RoomRef: Sendable {
@@ -125,6 +142,11 @@ public actor V2RoomDirectory {
     }
 
     public func resolve(_ roomID: RoomID, deadline: ContinuousClock.Instant) async throws -> V2RoomActivationToken {
+        try await resolve(roomID, deadline: deadline, requiresPhysicalConfirmation: true).token
+    }
+
+    private func resolve(_ roomID: RoomID, deadline: ContinuousClock.Instant,
+                         requiresPhysicalConfirmation: Bool) async throws -> Resolution {
         guard accepting else { throw V2RoomCallFailure.notAccepted(.retired) }
         guard !Task.isCancelled else { throw V2RoomCallFailure.notAccepted(.cancelled) }
         guard clock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
@@ -156,6 +178,7 @@ public actor V2RoomDirectory {
                     }
                     return
                 }
+                if requiresPhysicalConfirmation { entry.requiresPhysicalConfirmation = true }
                 let timer = Task { [weak self] in
                     do { try await ContinuousClock().sleep(until: deadline) }
                     catch { return }
@@ -179,9 +202,22 @@ public actor V2RoomDirectory {
         var lastFailure: V2RoomCallFailure = .notAccepted(.unavailable)
         for _ in 0..<configuration.maximumResolveAttempts {
             try checkDeadline(deadline)
-            let token = try await resolve(request.roomID, deadline: deadline)
+            let mayUseLocalHint = request.replayPolicy == .readOnly ||
+                (request.replayPolicy == .durableIdempotent && request.hasStableOperationID)
+            let resolution = try await resolve(request.roomID, deadline: deadline,
+                                               requiresPhysicalConfirmation: !mayUseLocalHint)
+            let token = resolution.token
             try checkDeadline(deadline)
-            do { return try await transport.invoke(token, request: request, principal: principal, deadline: deadline) }
+            do {
+                switch resolution {
+                case .confirmed:
+                    return try await transport.invoke(token, request: request,
+                                                      principal: principal, deadline: deadline)
+                case .localHint:
+                    return try await transport.invokeCachedLocally(token, request: request,
+                                                                   principal: principal, deadline: deadline)
+                }
+            }
             catch {
                 let failure = error as? V2RoomCallFailure ?? .outcomeUnknown
                 lastFailure = failure
@@ -277,25 +313,49 @@ public actor V2RoomDirectory {
         defer { activeResolutions -= 1; pump() }
         guard let entry = pending[roomID], entry.generation == generation else { return }
         let resolutionDeadline = clock.now + configuration.callTimeout.duration
-        let result: Result<V2RoomActivationToken, any Error>
-        do { result = .success(try await performResolve(roomID, deadline: resolutionDeadline)) }
+        let result: Result<Resolution, any Error>
+        do {
+            var resolution = try await performResolve(roomID, deadline: resolutionDeadline,
+                hintEntry: entry.requiresPhysicalConfirmation ? nil : entry)
+            // Another waiter can join while the local predicate is suspended.
+            // A strict waiter is sticky even if it cancels, and the cache may
+            // have been replaced before this actor resumes.
+            if case .localHint(let token) = resolution,
+               (entry.requiresPhysicalConfirmation || !cacheMatches(token)) {
+                resolution = try await performResolve(roomID, deadline: resolutionDeadline,
+                                                      hintEntry: nil)
+            }
+            result = .success(resolution)
+        }
         catch { result = .failure(error) }
         guard pending[roomID] === entry else { return }
         pending.removeValue(forKey: roomID)
         complete(entry, with: result)
     }
 
-    private func performResolve(_ roomID: RoomID,
-                                deadline: ContinuousClock.Instant) async throws -> V2RoomActivationToken {
+    private func performResolve(_ roomID: RoomID, deadline: ContinuousClock.Instant,
+                                hintEntry: Pending?) async throws -> Resolution {
         try checkDeadline(deadline)
         let owner: V2RoomDataOwner
         do { owner = try await owners.owner(for: roomID) }
         catch { throw mapBeforeDispatch(error) }
         try checkDeadline(deadline)
         if let cached = cache[roomID], cached.owner == owner {
+            if let hintEntry {
+                let canInvoke = await transport.canInvokeCachedLocally(cached.token)
+                try checkDeadline(deadline)
+                guard cacheMatches(cached.token) else {
+                    // A changed cache cannot justify probing the old token.
+                    return try await performResolve(roomID, deadline: deadline, hintEntry: nil)
+                }
+                if canInvoke, pending[roomID] === hintEntry,
+                   !hintEntry.requiresPhysicalConfirmation {
+                    return .localHint(cached.token)
+                }
+            }
             do {
                 if try await transport.lookup(cached.token, deadline: locationLookupDeadline(deadline)) {
-                    return cached.token
+                    return .confirmed(cached.token)
                 }
             } catch { /* DB locate below is authoritative; never steal a valid lease. */ }
             invalidate(cached.token)
@@ -303,7 +363,7 @@ public actor V2RoomDirectory {
         let located: V2RoomActivationLease?
         do { located = try await leases.locate(roomID: roomID, owner: owner) }
         catch { throw mapBeforeDispatch(error) }
-        if let lease = located { return try await confirm(lease.token, roomID: roomID, owner: owner, deadline: deadline) }
+        if let lease = located { return .confirmed(try await confirm(lease.token, roomID: roomID, owner: owner, deadline: deadline)) }
         let candidates: [V2RoomHostCandidate]
         do { candidates = try await hosts.candidates(for: owner) }
         catch { throw mapBeforeDispatch(error) }
@@ -320,15 +380,15 @@ public actor V2RoomDirectory {
                     guard token.host == candidate.identity else {
                         throw V2RoomCallFailure.notAccepted(.staleActivation)
                     }
-                    return try await confirm(token, roomID: roomID, owner: owner, deadline: deadline)
+                    return .confirmed(try await confirm(token, roomID: roomID, owner: owner, deadline: deadline))
                 case .occupied(let lease):
-                    return try await confirm(lease.token, roomID: roomID, owner: owner, deadline: deadline)
+                    return .confirmed(try await confirm(lease.token, roomID: roomID, owner: owner, deadline: deadline))
                 }
             } catch {
                 // An acquire may have committed before a transport failure.
                 // Recheck the DB before considering another candidate.
                 if let lease = try await leases.locate(roomID: roomID, owner: owner) {
-                    return try await confirm(lease.token, roomID: roomID, owner: owner, deadline: deadline)
+                    return .confirmed(try await confirm(lease.token, roomID: roomID, owner: owner, deadline: deadline))
                 }
                 // Absence in this observation does not prove that an
                 // in-flight/uncertain acquire rolled back. Do not launch a
@@ -363,6 +423,10 @@ public actor V2RoomDirectory {
         min(deadline, clock.now + Self.locationLookupTimeout)
     }
 
+    private func cacheMatches(_ token: V2RoomActivationToken) -> Bool {
+        cache[token.roomID]?.token == token && cache[token.roomID]?.owner == token.owner
+    }
+
     func remember(_ token: V2RoomActivationToken) {
         if let old = cache[token.roomID]?.token, old != token {
             guard token.isNewer(than: old) else { return }
@@ -382,7 +446,7 @@ public actor V2RoomDirectory {
         cacheOrder.removeAll { $0 == token.roomID }
     }
 
-    private func complete(_ entry: Pending, with result: Result<V2RoomActivationToken, any Error>) {
+    private func complete(_ entry: Pending, with result: Result<Resolution, any Error>) {
         let waiters = entry.waiters
         entry.waiters.removeAll()
         waiterCount -= waiters.count
@@ -421,6 +485,17 @@ public actor V2RoomDirectory {
         let token: V2RoomActivationToken
     }
 
+    private enum Resolution {
+        case confirmed(V2RoomActivationToken)
+        case localHint(V2RoomActivationToken)
+
+        var token: V2RoomActivationToken {
+            switch self {
+            case .confirmed(let token), .localHint(let token): token
+            }
+        }
+    }
+
     private struct GroupKey: Hashable, Sendable {
         let host: V2ActorHostIdentity
         let owner: V2RoomDataOwner
@@ -430,12 +505,13 @@ public actor V2RoomDirectory {
         let roomID: RoomID
         let generation = UUID()
         var started = false
+        var requiresPhysicalConfirmation = false
         var waiters: [UUID: Waiter] = [:]
         init(roomID: RoomID) { self.roomID = roomID }
     }
 
     private struct Waiter {
-        let continuation: CheckedContinuation<V2RoomActivationToken, any Error>
+        let continuation: CheckedContinuation<Resolution, any Error>
         let timer: Task<Void, Never>
         let deadline: ContinuousClock.Instant
     }

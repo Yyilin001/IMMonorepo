@@ -230,6 +230,38 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         }
     }
 
+    /// A read-only hint for a retryable RoomRef.call. The authenticated invoke
+    /// still rechecks the session, capability, replay window, bound token and
+    /// host activation; this does not dispatch an RPC.
+    public func canInvokeCachedLocally(_ token: V2RoomActivationToken) async -> Bool {
+        cachedLocalInvocation(for: token) != nil
+    }
+
+    private func cachedLocalInvocation(for token: V2RoomActivationToken)
+        -> (port: V2RoomLocalPort, session: Session, capability: V2ActorLocalCapability)? {
+        guard accepting, !suspendedHosts.contains(token.host),
+              let descriptor = descriptors[token.host],
+              descriptor.identity == token.host,
+              descriptor.accessibleShardIDs.contains(token.owner.shardID),
+              let port = localPort,
+              port.identity == descriptor.identity,
+              port.endpointID == descriptor.endpointID,
+              let session = sessions[token.host],
+              session.expires > .now + .milliseconds(100),
+              session.grant.host == token.host,
+              session.grant.serviceID == signer.serviceID,
+              session.grant.callerIncarnation == callerIncarnation,
+              let capability = session.localCapability,
+              capability.generation == port.generation,
+              capability.host == token.host,
+              capability.sessionID == session.grant.sessionID,
+              capability.serviceID == signer.serviceID,
+              capability.callerIncarnation == callerIncarnation,
+              roomActors[token] != nil
+        else { return nil }
+        return (port, session, capability)
+    }
+
     public func invoke(_ token: V2RoomActivationToken, request: V2RoomRequest,
                        principal: V2RoomClientPrincipal,
                        deadline: ContinuousClock.Instant) async throws -> V2RoomResponse {
@@ -240,6 +272,22 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         let response = try await exchange(.invoke(token: token, request: request), on: token.host,
                                           principal: principal.actorPrincipal, deadline: deadline,
                                           roomToken: token)
+        switch response {
+        case .result(let result): return result
+        case .failure(let failure): throw failure
+        default: throw V2RoomCallFailure.outcomeUnknown
+        }
+    }
+
+    public func invokeCachedLocally(_ token: V2RoomActivationToken, request: V2RoomRequest,
+                                    principal: V2RoomClientPrincipal,
+                                    deadline: ContinuousClock.Instant) async throws -> V2RoomResponse {
+        guard request.roomID == token.roomID else {
+            throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        }
+        let response = try await exchange(.invoke(token: token, request: request), on: token.host,
+                                          principal: principal.actorPrincipal, deadline: deadline,
+                                          roomToken: token, requireCachedLocal: true)
         switch response {
         case .result(let result): return result
         case .failure(let failure): throw failure
@@ -337,7 +385,8 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
 
     private func exchange(_ request: V2ActorRPCRequest, on host: V2ActorHostIdentity,
                           principal: V2ActorCallPrincipal, deadline: ContinuousClock.Instant,
-                          roomToken: V2RoomActivationToken?) async throws -> V2ActorRPCResponse {
+                          roomToken: V2RoomActivationToken?,
+                          requireCachedLocal: Bool = false) async throws -> V2ActorRPCResponse {
         guard accepting, !suspendedHosts.contains(host),
               let descriptor = descriptors[host] ?? retiredDescriptor(for: request, host: host) else {
             throw V2RoomCallFailure.notAccepted(.unavailable)
@@ -358,7 +407,15 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
             finishStopIfIdle()
         }
         let generation = descriptorGenerations[host, default: 0]
-        let session = try await session(for: descriptor, deadline: deadline)
+        let localInvocation = requireCachedLocal ? roomToken.flatMap(cachedLocalInvocation(for:)) : nil
+        if requireCachedLocal && localInvocation == nil {
+            throw V2RoomCallFailure.notAccepted(.staleActivation)
+        }
+        // A hinted call cannot open a remote hello or fall back to a signed
+        // packet if its exact local capability disappeared.
+        let session: Session
+        if let localInvocation { session = localInvocation.session }
+        else { session = try await self.session(for: descriptor, deadline: deadline) }
         guard descriptorGenerations[host] == generation else {
             throw V2RoomCallFailure.notAccepted(.staleActivation)
         }
@@ -375,9 +432,9 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
             attemptID: UUID(), traceID: UUID(), remainingBudget: budget,
             principal: principal, request: request
         )
-        let isLocal = localPort.map { descriptor.identity == $0.identity &&
+        let isLocal = requireCachedLocal || (localPort.map { descriptor.identity == $0.identity &&
                                       descriptor.endpointID == $0.endpointID } == true &&
-                      live.localCapability != nil
+                      live.localCapability != nil)
         let remotePacket: V2ActorSignedPacket?
         if isLocal {
             remotePacket = nil
@@ -388,7 +445,22 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         let transportReply: TransportReply
         do {
             let timeout = boundedTimeout(deadline)
-            if let port = localPort, descriptor.identity == port.identity,
+            if requireCachedLocal {
+                guard let roomToken else {
+                    throw V2RoomCallFailure.notAccepted(.staleActivation)
+                }
+                let payload: V2ActorLocalPayload<V2ActorAuthenticatedCall>
+                do { payload = try .init(call) }
+                catch { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+                guard payload.byteCount > 0, payload.byteCount <= limits.maximumRequestBytes else {
+                    throw V2RoomCallFailure.notAccepted(.invalidRequest)
+                }
+                transportReply = try await boundedDispatch(deadline: deadline, request: request,
+                                                           host: host) { [self] in
+                    try await dispatchCachedLocal(payload, token: roomToken,
+                                                  sessionID: call.sessionID)
+                }
+            } else if let port = localPort, descriptor.identity == port.identity,
                descriptor.endpointID == port.endpointID,
                let capability = live.localCapability {
                 if let roomToken, roomActors[roomToken] == nil {
@@ -448,6 +520,18 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         catch {
             throw transportFailure(for: request)
         }
+    }
+
+    private func dispatchCachedLocal(_ payload: V2ActorLocalPayload<V2ActorAuthenticatedCall>,
+                                     token: V2RoomActivationToken,
+                                     sessionID: UUID) async throws -> TransportReply {
+        guard let current = cachedLocalInvocation(for: token),
+              current.session.grant.sessionID == sessionID else {
+            throw V2RoomCallFailure.notAccepted(.staleActivation)
+        }
+        return .local(try await current.port.inbound.exchangeLocal(payload,
+            capability: current.capability, generation: current.port.generation,
+            boundToken: token))
     }
 
     private func transportFailure(for request: V2ActorRPCRequest) -> V2RoomCallFailure {

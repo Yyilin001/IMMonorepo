@@ -128,6 +128,18 @@ struct V2RoomClusterBridgeTests {
                                                     owner: fixture.owner, deadline: deadline)
         guard case .ready(let token) = activation else { Issue.record("expected ready"); return }
         #expect(try await caller.lookup(token, deadline: deadline))
+        #expect(!(await caller.canInvokeCachedLocally(token)))
+        let user = UserID(uuid: UUID())
+        do {
+            _ = try await caller.invokeCachedLocally(token,
+                request: .messaging(.send(.init(roomID: fixture.room, actorUserID: user,
+                    clientMessageID: .init(uuid: UUID()), text: "remote-hint-denied",
+                    media: [], mentions: [], entities: [], replyTo: nil))),
+                principal: .user(user), deadline: deadline)
+            Issue.record("remote host accepted a local-only hint")
+        } catch {
+            #expect(error as? V2RoomCallFailure == .notAccepted(.staleActivation))
+        }
         #expect(await caller.sessionCount() == 1)
         #expect(await caller.physicalReferenceCount() == 1)
         await caller.stop()

@@ -16,8 +16,13 @@ struct V2RoomLocalCapabilityIntegrationTests {
             let response = try await fixture.client.invoke(token, request: fixture.send(text: "local"),
                 principal: .user(fixture.user), deadline: .now + .seconds(5))
             #expect(response == .recovery(.failure(.invalidRequest)))
+            #expect(await fixture.client.canInvokeCachedLocally(token))
+            let hinted = try await fixture.client.invokeCachedLocally(token,
+                request: fixture.send(text: "hinted"), principal: .user(fixture.user),
+                deadline: .now + .seconds(5))
+            #expect(hinted == .recovery(.failure(.invalidRequest)))
             #expect(await fixture.client.sessionCount() == 1)
-            #expect(await fixture.executions.count() == 1)
+            #expect(await fixture.executions.count() == 2)
         }
     }
 
@@ -75,7 +80,7 @@ struct V2RoomLocalCapabilityIntegrationTests {
         try await withFixture(executionGate: gate) { fixture in
             let token = try await fixture.activate()
             let call = Task {
-                try await fixture.client.invoke(token, request: fixture.send(text: "pending"),
+                try await fixture.client.invokeCachedLocally(token, request: fixture.send(text: "pending"),
                     principal: .user(fixture.user), deadline: .now + .milliseconds(250))
             }
             try await gate.waitForEntry()
@@ -87,6 +92,18 @@ struct V2RoomLocalCapabilityIntegrationTests {
             let trackedCalls = await fixture.client.dispatchedCallCount()
             #expect(stillExecuting)
             #expect(trackedCalls == 1)
+        }
+    }
+
+    @Test("expired local session removes the hint until authenticated lookup renews it")
+    func expiredSession() async throws {
+        try await withFixture(hostLimits: .init(sessionLifetimeMilliseconds: 1_200)) { fixture in
+            let token = try await fixture.activate()
+            #expect(await fixture.client.canInvokeCachedLocally(token))
+            try await Task.sleep(for: .milliseconds(1_250))
+            #expect(!(await fixture.client.canInvokeCachedLocally(token)))
+            #expect(try await fixture.client.lookup(token, deadline: .now + .seconds(5)))
+            #expect(await fixture.client.canInvokeCachedLocally(token))
         }
     }
 
@@ -108,10 +125,98 @@ struct V2RoomLocalCapabilityIntegrationTests {
                 port: oldDescriptor.port, accessibleShardIDs: oldDescriptor.accessibleShardIDs,
                 availableRooms: oldDescriptor.availableRooms, isHealthy: true))
             #expect(await fixture.client.retiredDescriptorCount() == 1)
+            #expect(!(await fixture.client.canInvokeCachedLocally(token)))
+            do {
+                _ = try await fixture.client.invokeCachedLocally(token,
+                    request: fixture.send(text: "must-not-route-remote"),
+                    principal: .user(fixture.user), deadline: .now + .seconds(2))
+                Issue.record("replaced descriptor accepted an old local hint")
+            } catch {
+                guard case .notAccepted = error as? V2RoomCallFailure else {
+                    Issue.record("expected a definite pre-dispatch rejection: \(error)")
+                    return
+                }
+            }
             await gate.open()
             #expect(try await call.value == .recovery(.failure(.invalidRequest)))
             try await fixture.expectReplacementRejected(replacement)
             #expect(await fixture.executions.count() == 1)
+        }
+    }
+
+    @Test("physical reference eviction fails the local hint and requires a lookup")
+    func evictedReference() async throws {
+        try await withFixture(maximumCachedLocations: 1) { fixture in
+            let first = try await fixture.activate()
+            #expect(await fixture.client.canInvokeCachedLocally(first))
+            let otherRoom = RoomID(uuid: UUID())
+            let second = try await fixture.activate(roomID: otherRoom)
+            #expect(await fixture.client.canInvokeCachedLocally(second))
+            #expect(!(await fixture.client.canInvokeCachedLocally(first)))
+            do {
+                _ = try await fixture.client.invokeCachedLocally(first,
+                    request: fixture.send(text: "evicted"), principal: .user(fixture.user),
+                    deadline: .now + .seconds(2))
+                Issue.record("evicted physical reference accepted a local hint")
+            } catch {
+                guard case .notAccepted = error as? V2RoomCallFailure else {
+                    Issue.record("expected definite eviction rejection: \(error)")
+                    return
+                }
+            }
+            #expect(await fixture.executions.count() == 0)
+            #expect(try await fixture.client.lookup(first, deadline: .now + .seconds(5)))
+            #expect(await fixture.client.canInvokeCachedLocally(first))
+            #expect(!(await fixture.client.canInvokeCachedLocally(second)))
+        }
+    }
+
+    @Test("a descriptor replacement between local resolution and dispatch cannot route remotely")
+    func localHintDescriptorRace() async throws {
+        try await withFixture { fixture in
+            let token = try await fixture.activate()
+            let gate = ExecutionGate(closed: true)
+            let transport = PausedHintTransport(client: fixture.client, gate: gate)
+            let owners = StaticOwner(owner: fixture.owner)
+            let directory = V2RoomDirectory(owners: owners, leases: StaticLease(token: token),
+                hosts: fixture.client, transport: transport,
+                configuration: try .init(maximumActiveRooms: 2, maximumConcurrentRestores: 1,
+                    maximumActivationWaitersPerRoom: 2, maximumPendingActivations: 2,
+                    maximumActivationWaitersPerHost: 4, maximumConcurrentResolutions: 1,
+                    maximumConcurrentReservations: 1))
+            #expect(try await directory.resolve(fixture.room, deadline: .now + .seconds(5)) == token)
+            #expect(await fixture.client.canInvokeCachedLocally(token))
+            let call = Task {
+                try await directory.room(fixture.room).call(fixture.send(text: "held-hint"),
+                    principal: .user(fixture.user), deadline: .now + .seconds(5))
+            }
+            do {
+                try await gate.waitForEntry() // the real client answered true; the hint has not returned
+                let prior = fixture.descriptor
+                try await fixture.client.installDiscovered(.init(identity: .init(
+                    hostID: fixture.identity.hostID, incarnationID: UUID()),
+                    endpointID: prior.endpointID, address: prior.address, port: prior.port,
+                    accessibleShardIDs: prior.accessibleShardIDs,
+                    availableRooms: prior.availableRooms, isHealthy: true))
+            } catch {
+                await gate.open()
+                call.cancel()
+                _ = try? await call.value
+                _ = await directory.quiesce(deadline: .now + .seconds(2))
+                throw error
+            }
+            await gate.open()
+            do { _ = try await call.value; Issue.record("stale local hint executed") }
+            catch { #expect(error is V2RoomCallFailure) }
+            #expect(await transport.localInvocations == 1)
+            let localFailure = await transport.localFailure
+            // The replaced descriptor may already be absent at the first
+            // exchange guard; either failure proves it was never dispatched.
+            #expect(localFailure == .notAccepted(.staleActivation) ||
+                    localFailure == .notAccepted(.unavailable))
+            #expect(await owners.calls >= 2) // existing retryAction attempted authoritative relocation
+            #expect(await fixture.executions.count() == 0)
+            #expect(await directory.quiesce(deadline: .now + .seconds(2)))
         }
     }
 
@@ -120,10 +225,12 @@ struct V2RoomLocalCapabilityIntegrationTests {
         clientLimits: V2ActorAuthenticationLimits = try! .init(),
         executionGate: ExecutionGate = .init(),
         largeReply: Bool = false,
+        maximumCachedLocations: Int = 1_024,
         operation: (Fixture) async throws -> Void
     ) async throws {
         let fixture = try await Fixture(hostLimits: hostLimits, clientLimits: clientLimits,
-                                        executionGate: executionGate, largeReply: largeReply)
+                                        executionGate: executionGate, largeReply: largeReply,
+                                        maximumCachedLocations: maximumCachedLocations)
         var operationError: (any Error)?
         do { try await operation(fixture) }
         catch { operationError = error }
@@ -156,7 +263,8 @@ struct V2RoomLocalCapabilityIntegrationTests {
 
         init(hostLimits: V2ActorAuthenticationLimits = try! .init(),
              clientLimits: V2ActorAuthenticationLimits = try! .init(),
-             executionGate: ExecutionGate = .init(), largeReply: Bool = false) async throws {
+             executionGate: ExecutionGate = .init(), largeReply: Bool = false,
+             maximumCachedLocations: Int = 1_024) async throws {
             self.executions = executionGate
             let directory = FileManager.default.temporaryDirectory
                 .appending(path: "imv2-local-capability-\(UUID())")
@@ -206,6 +314,7 @@ struct V2RoomLocalCapabilityIntegrationTests {
                 maximumActiveRooms: 2, maximumConcurrentRestores: 1,
                 maximumActivationWaitersPerRoom: 2, maximumPendingActivations: 2,
                 maximumActivationWaitersPerHost: 4, maximumConcurrentResolutions: 1,
+                maximumCachedLocations: maximumCachedLocations,
                 maximumConcurrentReservations: 1)
             let oversizedResponse: V2RoomResponse = .roomLog(.page(try .init(
                 roomID: .init(uuid: UUID()),
@@ -245,8 +354,8 @@ struct V2RoomLocalCapabilityIntegrationTests {
             }
         }
 
-        func activate() async throws -> V2RoomActivationToken {
-            let result = try await client.activate(on: identity, roomID: room,
+        func activate(roomID: RoomID? = nil) async throws -> V2RoomActivationToken {
+            let result = try await client.activate(on: identity, roomID: roomID ?? room,
                 owner: owner, deadline: .now + .seconds(5))
             guard case .ready(let token) = result else { throw V2ActorAuthenticationError.wrongRecipient }
             return token
@@ -301,34 +410,34 @@ struct V2RoomLocalCapabilityIntegrationTests {
     }
 
     private actor LocalLeaseStore: V2RoomActivationLeaseStore {
-        private var lease: V2RoomActivationLease?
+        private var leases: [RoomID: V2RoomActivationLease] = [:]
 
         func locate(roomID: RoomID, owner: V2RoomDataOwner) async throws -> V2RoomActivationLease? {
-            guard let lease, lease.token.roomID == roomID, lease.token.owner == owner else { return nil }
+            guard let lease = leases[roomID], lease.token.owner == owner else { return nil }
             return lease
         }
 
         func acquire(roomID: RoomID, owner: V2RoomDataOwner, host: V2ActorHostIdentity,
                      duration: V2ActorMilliseconds) async throws -> V2RoomActivationAcquisition {
-            if let lease { return .occupied(lease) }
+            if let lease = leases[roomID] { return .occupied(lease) }
             let token = V2RoomActivationToken(roomID: roomID, owner: owner,
                 activationEpoch: try .init(1), host: host)
             let value = try makeLease(token, duration: duration)
-            lease = value
+            leases[roomID] = value
             return .acquired(value)
         }
 
         func renew(token: V2RoomActivationToken,
                    duration: V2ActorMilliseconds) async throws -> V2RoomActivationLease {
-            guard lease?.token == token else { throw V2RoomActivationLeaseError.activationChanged }
+            guard leases[token.roomID]?.token == token else { throw V2RoomActivationLeaseError.activationChanged }
             let value = try makeLease(token, duration: duration)
-            lease = value
+            leases[token.roomID] = value
             return value
         }
 
         func release(token: V2RoomActivationToken) async throws -> Bool {
-            guard lease?.token == token else { return false }
-            lease = nil
+            guard leases[token.roomID]?.token == token else { return false }
+            leases.removeValue(forKey: token.roomID)
             return true
         }
 
@@ -337,6 +446,91 @@ struct V2RoomLocalCapabilityIntegrationTests {
             let observed = Date(timeIntervalSince1970: 1_000)
             return try .init(token: token, databaseObservedAt: observed,
                 expiresAt: observed.addingTimeInterval(Double(duration.rawValue) / 1_000))
+        }
+    }
+
+    private actor StaticOwner: V2RoomDataOwnerResolving {
+        let owner: V2RoomDataOwner
+        var calls = 0
+        init(owner: V2RoomDataOwner) { self.owner = owner }
+        func owner(for roomID: RoomID) async throws -> V2RoomDataOwner {
+            calls += 1
+            return owner
+        }
+    }
+
+    private actor StaticLease: V2RoomActivationLeaseStore {
+        let token: V2RoomActivationToken
+        init(token: V2RoomActivationToken) { self.token = token }
+        func locate(roomID: RoomID, owner: V2RoomDataOwner) async throws -> V2RoomActivationLease? {
+            guard roomID == token.roomID, owner == token.owner else { return nil }
+            return try .init(token: token, databaseObservedAt: Date(timeIntervalSince1970: 1_000),
+                expiresAt: Date(timeIntervalSince1970: 1_030))
+        }
+        func acquire(roomID: RoomID, owner: V2RoomDataOwner, host: V2ActorHostIdentity,
+                     duration: V2ActorMilliseconds) async throws -> V2RoomActivationAcquisition {
+            throw V2RoomActivationLeaseError.activationChanged
+        }
+        func renew(token: V2RoomActivationToken,
+                   duration: V2ActorMilliseconds) async throws -> V2RoomActivationLease {
+            throw V2RoomActivationLeaseError.activationChanged
+        }
+        func release(token: V2RoomActivationToken) async throws -> Bool { false }
+    }
+
+    private actor PausedHintTransport: V2RoomClientTransport {
+        let client: V2RoomClusterClient
+        let gate: ExecutionGate
+        var localInvocations = 0
+        var localFailure: V2RoomCallFailure?
+        init(client: V2RoomClusterClient, gate: ExecutionGate) {
+            self.client = client
+            self.gate = gate
+        }
+        func canInvokeCachedLocally(_ token: V2RoomActivationToken) async -> Bool {
+            let available = await client.canInvokeCachedLocally(token)
+            if available { await gate.waitIfClosed() }
+            return available
+        }
+        func activate(on host: V2ActorHostIdentity, roomID: RoomID, owner: V2RoomDataOwner,
+                      deadline: ContinuousClock.Instant) async throws -> V2RoomActivationResolution {
+            try await client.activate(on: host, roomID: roomID, owner: owner, deadline: deadline)
+        }
+        func lookup(_ token: V2RoomActivationToken,
+                    deadline: ContinuousClock.Instant) async throws -> Bool {
+            try await client.lookup(token, deadline: deadline)
+        }
+        func invoke(_ token: V2RoomActivationToken, request: V2RoomRequest,
+                    principal: V2RoomClientPrincipal,
+                    deadline: ContinuousClock.Instant) async throws -> V2RoomResponse {
+            try await client.invoke(token, request: request, principal: principal, deadline: deadline)
+        }
+        func invokeCachedLocally(_ token: V2RoomActivationToken, request: V2RoomRequest,
+                                 principal: V2RoomClientPrincipal,
+                                 deadline: ContinuousClock.Instant) async throws -> V2RoomResponse {
+            localInvocations += 1
+            do {
+                return try await client.invokeCachedLocally(token, request: request,
+                    principal: principal, deadline: deadline)
+            } catch {
+                localFailure = error as? V2RoomCallFailure
+                throw error
+            }
+        }
+        func reserve(_ token: V2RoomActivationToken, requestID: UUID,
+                     deadline: ContinuousClock.Instant) async throws -> V2RoomReservation {
+            try await client.reserve(token, requestID: requestID, deadline: deadline)
+        }
+        func markDispatched(_ grant: V2RoomReservation,
+                            deadline: ContinuousClock.Instant) async throws {
+            try await client.markDispatched(grant, deadline: deadline)
+        }
+        func abort(_ grant: V2RoomReservation, deadline: ContinuousClock.Instant) async -> Bool {
+            await client.abort(grant, deadline: deadline)
+        }
+        func finish(_ grant: V2RoomReservation, completion: V2RoomReservationCompletion,
+                    deadline: ContinuousClock.Instant) async -> Bool {
+            await client.finish(grant, completion: completion, deadline: deadline)
         }
     }
 }
