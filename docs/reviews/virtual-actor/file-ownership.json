@@ -1529,6 +1529,14 @@
     {
       "path": "scripts/generate_v2_protobuf.sh",
       "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/virtual-actor-fixtures/capacity-recovery-canary-v1.json",
+      "owner": "V1"
+    },
+    {
+      "path": "scripts/check_v2_document_links.sh",
+      "owner": "V1"
     }
   ]
 }
