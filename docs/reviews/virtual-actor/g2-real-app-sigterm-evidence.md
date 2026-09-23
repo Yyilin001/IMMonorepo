@@ -23,4 +23,34 @@ unchanged. All credentials, Compose configuration, and database state are
 private to the disposable run; the test reports only UUIDs, process/backend
 IDs, lease epochs, and phase timestamps. The default runner mode is unchanged.
 
-Execution evidence: pending the Linux probe rebuild and disposable run.
+Execution evidence from the unmodified production binaries at source
+`5765185e21ce36fa192ceda782b4eaa3906aa488` plus a rebuilt test probe at
+`11b25fd1b9c8736c229d13310e730c61401cc609`:
+
+- Runner `b915ee6e4c97a97da74bf4e53d74d97703a84fb3`, disposable Linux
+  `colima-imv2-vapor5` run
+  `/Users/yyl/.codex/virtual-actor-builds/application/run-625257c40d6f4cc3816404afb95ef517/result.json`:
+  `ACTOR_APPLICATION_STACK_OK`, all Account/Gateway/Operator and HTTP checks
+  passed, private project and volumes cleaned. PostgreSQL showed backend 151
+  from Actor Host address `172.20.0.5/32` blocked by test backend 242 on the
+  admission row. SIGTERM occurred at Unix time `1790181869.400`; the test
+  released its row lock at `.466`, observed exactly one message and one send
+  completion at `.526`, then observed Actor Host exit code 0 at `.595` and a
+  released lease with epoch 1 at `.660`. The Host restart reacquired the room
+  at epoch 2. The original Gateway container and process start time were
+  unchanged. Its eighteenth request using the same client message ID returned
+  the original message ID after `33.28` seconds; the durable counts remained
+  one each.
+- An earlier 25-second replay window failed after Host restart, with the
+  original Gateway returning `UNAVAILABLE` and repeated `Missing Member`
+  gossip deserialization warnings. A 120-second window subsequently succeeded
+  on the nineteenth attempt in
+  `/Users/yyl/.codex/virtual-actor-builds/application/run-190be8b17d934593a72ae84007cf1437/result.json`.
+  Thus these runs establish eventual recovery, while exposing a roughly
+  30-second recovery tail. They do not establish that gossip decoding alone
+  caused that tail.
+
+The final frozen production build with the pending gossip fix still requires
+this same original-Gateway scenario to be rerun. The earlier diagnostic in
+which Gateway was restarted before replay is deliberately excluded from
+acceptance evidence.
