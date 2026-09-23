@@ -68,6 +68,48 @@ def capture_harness_provenance(*, require_clean: bool) -> dict:
             "filesSHA256": {key: sha256(RUNNER_ROOT / key) for key in HARNESS_FILE_KEYS}}
 
 
+def capture_project_diagnostics(*, compose: list[str], service_names: list[str],
+                                run: Path, environment: dict[str, str],
+                                invoke: object = subprocess.run) -> dict:
+    """Keep bounded, redacted project-local diagnostics before Compose teardown."""
+    def call(args: list[str]) -> subprocess.CompletedProcess[str]:
+        return invoke(compose + args, cwd=RUNNER_ROOT, env=environment,
+                      capture_output=True, text=True, timeout=30, check=False)
+
+    status = call(["ps", "--all", "--format", "json"])
+    rows: list[dict] = []
+    status_valid = status.returncode == 0
+    if status.returncode == 0:
+        try:
+            body = status.stdout.strip()
+            parsed = json.loads(body) if body.startswith("[") else [json.loads(line) for line in body.splitlines()]
+            for row in parsed:
+                if row.get("Service") in service_names:
+                    rows.append({"service": row.get("Service"), "containerID": row.get("ID"),
+                                 "state": row.get("State"), "health": row.get("Health"),
+                                 "exitCode": row.get("ExitCode")})
+        except (ValueError, AttributeError, TypeError):
+            status_valid = False
+            rows = []
+    write_private(run / "services-status.json", json.dumps({
+        "complete": status_valid, "containers": rows}, indent=2, sort_keys=True) + "\n")
+
+    # The one-off loader already has a separately followed loader.log. Keep
+    # Compose's service log query focused on the Gateway and databases.
+    logs = call(["logs", "--no-color", "--tail", "120",
+                 *(name for name in service_names if name != "loader")])
+    sensitive = re.compile(r"password|token|secret|credential|authorization|bearer|private|access[_-]?key|database[_-]?url|postgres://|va1_|statement:|parameters:|binds:", re.I)
+    lines = [line[:2048] for line in logs.stdout.splitlines()
+             if not sensitive.search(line) and "://" not in line]
+    tail = "\n".join(lines[-480:])[-131072:]
+    write_private(run / "services-tail.log", tail + ("\n" if tail else ""))
+    return {"statusSHA256": sha256(run / "services-status.json"),
+            "logSHA256": sha256(run / "services-tail.log"),
+            "statusAvailable": status_valid,
+            "logsAvailable": logs.returncode == 0,
+            "logScope": "project services, last 120 lines each, sensitive lines omitted, 128 KiB maximum"}
+
+
 def require_regular(path: Path, label: str) -> None:
     if path.is_symlink() or not path.is_file():
         raise CanaryFailure(f"{label} must be a regular file")
@@ -338,6 +380,18 @@ def make_tls(private: Path, execute: object) -> Path:
     return tls
 
 
+def preserve_incomplete_measurement(*, run: Path, current: str | None,
+                                    expected: list[str], boundaries: dict,
+                                    observations: list[dict], scenario_detail: dict) -> None:
+    """Retain observations already captured; never synthesize a missing phase."""
+    write_private(run / "measurement-incomplete-snapshots.json", json.dumps({
+        "complete": False, "failureStage": current or "before-first-phase",
+        "expectedPhaseMarkersRemaining": expected,
+        "observedUntilMonotonicNs": time.monotonic_ns(),
+        "boundaries": boundaries, "periodic": observations,
+        "scenario": scenario_detail}, indent=2, sort_keys=True) + "\n")
+
+
 def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], docker: list[str],
                     environment: dict[str, str], services: dict[str, str],
                     execute: object, psql: object, scenario_detail: dict) -> dict:
@@ -404,6 +458,7 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
     reader.start()
     deadline = time.monotonic() + 30 * 60
     next_sample = time.monotonic()
+    completed = False
     try:
         while True:
             if time.monotonic() >= deadline:
@@ -517,6 +572,7 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
             "boundaries": boundaries, "periodic": observations, "scenario": scenario_detail,
             "coldRetirement": cold_evidence, "ownerFailure": fault_evidence},
             indent=2, sort_keys=True) + "\n")
+        completed = True
         return {"scenario": scenario_detail, "loadReportSHA256": sha256(report_path),
                 "phaseFiles": {name: sha256(run / f"measurement-{name}.json") for name in phase_results},
                 "snapshotSHA256": sha256(run / "measurement-snapshots.json"),
@@ -526,6 +582,13 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
                 "coldRetirement": cold_evidence, "ownerFailure": fault_evidence,
                 "nativeFailed": report.get("failed"), "nativeDirectRoomAttempted": report.get("directRoomAttempted")}
     finally:
+        if not completed:
+            try:
+                preserve_incomplete_measurement(run=run, current=current, expected=expected,
+                    boundaries=boundaries, observations=observations,
+                    scenario_detail=scenario_detail)
+            except (OSError, TypeError, ValueError):
+                pass
         if fault:
             fault.cleanup()
         if follow.poll() is None:
@@ -963,7 +1026,16 @@ def main() -> int:
         result["failureType"] = type(error).__name__
         result["failurePhase"] = phase
     finally:
+        incomplete = run / "measurement-incomplete-snapshots.json"
+        if incomplete.is_file():
+            result["incompleteMeasurementSnapshotsSHA256"] = sha256(incomplete)
         if started:
+            try:
+                result["projectDiagnostics"] = capture_project_diagnostics(
+                    compose=compose, service_names=list(services), run=run,
+                    environment=environment)
+            except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+                result["projectDiagnosticsUnavailable"] = True
             try:
                 execute(compose + ["down", "--volumes", "--remove-orphans", "--timeout", "180"], "cleanup.log", 240)
             except (subprocess.SubprocessError, OSError):

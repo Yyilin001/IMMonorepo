@@ -10,7 +10,10 @@ import sys
 import tempfile
 import unittest
 
-from test_v2_virtual_actor_capacity_canary import capture_runtime_provenance
+from test_v2_virtual_actor_capacity_canary import (
+    capture_project_diagnostics, capture_runtime_provenance,
+    preserve_incomplete_measurement,
+)
 
 
 HERE = Path(__file__).resolve().parent
@@ -19,6 +22,40 @@ PREPARE = HERE / "prepare_v2_virtual_actor_capacity_fixture.py"
 
 
 class CanaryRunnerPreflightTests(unittest.TestCase):
+    def test_failure_artifacts_are_private_bounded_and_not_complete_phases(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            commands = []
+            def invoke(command, **kwargs):
+                commands.append(command)
+                if "ps" in command:
+                    return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
+                        "Service": "gateway", "ID": "a" * 64, "State": "running",
+                        "Health": "healthy", "ExitCode": 0,
+                        "Command": "must-not-appear"}) + "\n" + json.dumps({
+                        "Service": "unrelated", "ID": "b" * 64}) + "\n", stderr="")
+                return subprocess.CompletedProcess(command, 0,
+                    stdout="gateway | admission queue full\n"
+                           "gateway | accessToken=must-not-appear\n"
+                           "gateway | postgres://must-not-appear\n", stderr="")
+            evidence = capture_project_diagnostics(compose=["docker", "compose", "-p", "private"],
+                service_names=["gateway"], run=run, environment={}, invoke=invoke)
+            self.assertTrue(evidence["statusAvailable"])
+            self.assertEqual(len(json.loads((run / "services-status.json").read_text())["containers"]), 1)
+            self.assertEqual((run / "services-tail.log").read_text(), "gateway | admission queue full\n")
+            self.assertTrue(all((run / name).stat().st_mode & 0o777 == 0o600 for name in
+                                ("services-status.json", "services-tail.log")))
+            self.assertTrue(all(command[:4] == ["docker", "compose", "-p", "private"]
+                                for command in commands))
+            preserve_incomplete_measurement(run=run, current="warmup",
+                expected=["steady", "cooldown"], boundaries={"warmup": {"sample": 1}},
+                observations=[{"phase": "warmup", "sample": 2}], scenario_detail={"workload": "hot"})
+            incomplete = json.loads((run / "measurement-incomplete-snapshots.json").read_text())
+            self.assertFalse(incomplete["complete"])
+            self.assertEqual(incomplete["failureStage"], "warmup")
+            self.assertEqual(set(incomplete["boundaries"]), {"warmup"})
+            self.assertEqual(incomplete["expectedPhaseMarkersRemaining"], ["steady", "cooldown"])
+
     def test_runtime_provenance_reads_only_project_and_setting_whitelists(self) -> None:
         container = "a" * 64
         calls = []
