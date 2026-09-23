@@ -4,6 +4,10 @@ public struct V2RoomRuntimeConfiguration: Equatable, Sendable {
     public let maximumActiveRooms: Int
     public let maximumConcurrentRestores: Int
     public let maximumActivationWaitersPerRoom: Int
+    public let maximumPendingActivations: Int
+    public let maximumActivationWaitersPerHost: Int
+    public let maximumConcurrentResolutions: Int
+    public let maximumCachedLocations: Int
     public let maximumQueuedCommandsPerRoom: Int
     public let maximumQueuedBytesPerRoom: Int
     public let maximumQueuedCommandsPerHost: Int
@@ -27,6 +31,10 @@ public struct V2RoomRuntimeConfiguration: Equatable, Sendable {
         maximumActiveRooms: Int = 10_000,
         maximumConcurrentRestores: Int = 32,
         maximumActivationWaitersPerRoom: Int = 256,
+        maximumPendingActivations: Int = 1_024,
+        maximumActivationWaitersPerHost: Int = 4_096,
+        maximumConcurrentResolutions: Int = 128,
+        maximumCachedLocations: Int = 20_000,
         maximumQueuedCommandsPerRoom: Int = 256,
         maximumQueuedBytesPerRoom: Int = 4 * 1_024 * 1_024,
         maximumQueuedCommandsPerHost: Int = 32_768,
@@ -50,6 +58,10 @@ public struct V2RoomRuntimeConfiguration: Equatable, Sendable {
             ("maximumActiveRooms", maximumActiveRooms),
             ("maximumConcurrentRestores", maximumConcurrentRestores),
             ("maximumActivationWaitersPerRoom", maximumActivationWaitersPerRoom),
+            ("maximumPendingActivations", maximumPendingActivations),
+            ("maximumActivationWaitersPerHost", maximumActivationWaitersPerHost),
+            ("maximumConcurrentResolutions", maximumConcurrentResolutions),
+            ("maximumCachedLocations", maximumCachedLocations),
             ("maximumQueuedCommandsPerRoom", maximumQueuedCommandsPerRoom),
             ("maximumQueuedBytesPerRoom", maximumQueuedBytesPerRoom),
             ("maximumQueuedCommandsPerHost", maximumQueuedCommandsPerHost),
@@ -64,6 +76,10 @@ public struct V2RoomRuntimeConfiguration: Equatable, Sendable {
             throw V2ActorContractError.invalidConfiguration(name)
         }
         guard maximumConcurrentRestores <= maximumActiveRooms,
+              maximumConcurrentRestores <= maximumPendingActivations,
+              maximumPendingActivations <= maximumActivationWaitersPerHost,
+              maximumActivationWaitersPerRoom <= maximumActivationWaitersPerHost,
+              maximumConcurrentResolutions <= maximumActivationWaitersPerHost,
               maximumQueuedCommandsPerRoom <= maximumQueuedCommandsPerHost,
               maximumQueuedBytesPerRoom <= maximumQueuedBytesPerHost,
               maximumRequestBytes <= maximumQueuedBytesPerRoom,
@@ -92,6 +108,10 @@ public struct V2RoomRuntimeConfiguration: Equatable, Sendable {
         self.maximumActiveRooms = maximumActiveRooms
         self.maximumConcurrentRestores = maximumConcurrentRestores
         self.maximumActivationWaitersPerRoom = maximumActivationWaitersPerRoom
+        self.maximumPendingActivations = maximumPendingActivations
+        self.maximumActivationWaitersPerHost = maximumActivationWaitersPerHost
+        self.maximumConcurrentResolutions = maximumConcurrentResolutions
+        self.maximumCachedLocations = maximumCachedLocations
         self.maximumQueuedCommandsPerRoom = maximumQueuedCommandsPerRoom
         self.maximumQueuedBytesPerRoom = maximumQueuedBytesPerRoom
         self.maximumQueuedCommandsPerHost = maximumQueuedCommandsPerHost

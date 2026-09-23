@@ -115,7 +115,9 @@ public struct V2RoomActivationLease: Equatable, Codable, Sendable {
     public init(token: V2RoomActivationToken, databaseObservedAt: Date, expiresAt: Date) throws {
         guard databaseObservedAt.timeIntervalSince1970.isFinite,
               expiresAt.timeIntervalSince1970.isFinite,
-              expiresAt > databaseObservedAt
+              expiresAt > databaseObservedAt,
+              expiresAt.timeIntervalSince(databaseObservedAt)
+                <= Double(V2ActorMilliseconds.maximum) / 1_000
         else { throw V2ActorContractError.invalidLeaseTimestamp }
         self.token = token
         self.databaseObservedAt = databaseObservedAt

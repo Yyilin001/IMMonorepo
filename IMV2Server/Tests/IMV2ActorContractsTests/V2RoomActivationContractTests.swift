@@ -70,6 +70,11 @@ struct V2RoomActivationContractTests {
                 expiresAt: Date(timeIntervalSince1970: .infinity)
             )
         }
+        #expect(throws: V2ActorContractError.invalidLeaseTimestamp) {
+            try V2RoomActivationLease(
+                token: token, databaseObservedAt: now, expiresAt: now.addingTimeInterval(3_601)
+            )
+        }
         let lease = try V2RoomActivationLease(
             token: token, databaseObservedAt: now, expiresAt: now.addingTimeInterval(30)
         )
@@ -140,6 +145,18 @@ struct V2RoomActivationContractTests {
         }
         #expect(throws: (any Error).self) {
             try V2RoomRuntimeConfiguration(callTimeoutMilliseconds: 0)
+        }
+        #expect(throws: (any Error).self) {
+            try V2RoomRuntimeConfiguration(maximumPendingActivations: 0)
+        }
+        #expect(throws: (any Error).self) {
+            try V2RoomRuntimeConfiguration(maximumActivationWaitersPerHost: 128)
+        }
+        #expect(throws: (any Error).self) {
+            try V2RoomRuntimeConfiguration(maximumConcurrentResolutions: 0)
+        }
+        #expect(throws: (any Error).self) {
+            try V2RoomRuntimeConfiguration(maximumCachedLocations: 0)
         }
     }
 

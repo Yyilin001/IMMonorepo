@@ -6,7 +6,10 @@ import IMV2Core
 /// Only the budget that issued it can return its capacity.
 public struct V2RoomCommandPermit: Equatable, Sendable {
     public let roomID: RoomID
-    public let byteCount: Int
+    /// Dispatch uses these exact immutable bytes, not a separately supplied
+    /// payload with a caller-reported size. Data copies share immutable storage.
+    public let encodedRequest: Data
+    public var byteCount: Int { encodedRequest.count }
     fileprivate let budgetID: UUID
     fileprivate let permitID: UUID
 }
@@ -30,7 +33,8 @@ public actor V2RoomCommandBudget {
         self.configuration = configuration
     }
 
-    public func acquire(roomID: RoomID, byteCount: Int) throws -> V2RoomCommandPermit {
+    public func acquire(roomID: RoomID, encodedRequest: Data) throws -> V2RoomCommandPermit {
+        let byteCount = encodedRequest.count
         guard byteCount > 0, byteCount <= configuration.maximumRequestBytes else {
             throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
@@ -42,7 +46,7 @@ public actor V2RoomCommandBudget {
         else { throw V2RoomCallFailure.notAccepted(.overloaded) }
 
         let permit = V2RoomCommandPermit(
-            roomID: roomID, byteCount: byteCount, budgetID: identity, permitID: UUID()
+            roomID: roomID, encodedRequest: encodedRequest, budgetID: identity, permitID: UUID()
         )
         permits[permit.permitID] = permit
         rooms[roomID] = RoomUsage(

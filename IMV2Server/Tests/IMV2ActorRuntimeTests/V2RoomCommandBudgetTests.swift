@@ -1,3 +1,4 @@
+import Foundation
 import IMV2ActorContracts
 import IMV2ActorRuntime
 import IMV2Core
@@ -10,12 +11,12 @@ struct V2RoomCommandBudgetTests {
         let budget = V2RoomCommandBudget(configuration: try configuration())
         let hot = try RoomID("hot")
         let healthy = try RoomID("healthy")
-        let first = try await budget.acquire(roomID: hot, byteCount: 10)
-        let second = try await budget.acquire(roomID: hot, byteCount: 10)
+        let first = try await budget.acquire(roomID: hot, encodedRequest: bytes(10))
+        let second = try await budget.acquire(roomID: hot, encodedRequest: bytes(10))
         await #expect(throws: V2RoomCallFailure.notAccepted(.overloaded)) {
-            try await budget.acquire(roomID: hot, byteCount: 1)
+            try await budget.acquire(roomID: hot, encodedRequest: bytes(1))
         }
-        let third = try await budget.acquire(roomID: healthy, byteCount: 10)
+        let third = try await budget.acquire(roomID: healthy, encodedRequest: bytes(10))
         #expect(await budget.snapshot().commandCount == 3)
         #expect(await budget.release(first))
         #expect(await budget.release(second))
@@ -30,7 +31,7 @@ struct V2RoomCommandBudgetTests {
             for index in 0..<100 {
                 let room = try RoomID("room-\(index)")
                 group.addTask {
-                    do { return try await budget.acquire(roomID: room, byteCount: 10) }
+                    do { return try await budget.acquire(roomID: room, encodedRequest: bytes(10)) }
                     catch V2RoomCallFailure.notAccepted(.overloaded) { return nil }
                 }
             }
@@ -51,7 +52,7 @@ struct V2RoomCommandBudgetTests {
     func duplicateAndForeignRelease() async throws {
         let first = V2RoomCommandBudget(configuration: try configuration())
         let other = V2RoomCommandBudget(configuration: try configuration())
-        let permit = try await first.acquire(roomID: RoomID("room"), byteCount: 10)
+        let permit = try await first.acquire(roomID: RoomID("room"), encodedRequest: bytes(10))
         #expect(!(await other.release(permit)))
         #expect(await first.snapshot().byteCount == 10)
         let releaseCount = await withTaskGroup(of: Bool.self) { group in
@@ -69,18 +70,20 @@ struct V2RoomCommandBudgetTests {
         let budget = V2RoomCommandBudget(configuration: try configuration())
         let room = try RoomID("room")
         await #expect(throws: V2RoomCallFailure.notAccepted(.invalidRequest)) {
-            try await budget.acquire(roomID: room, byteCount: 0)
+            try await budget.acquire(roomID: room, encodedRequest: Data())
         }
         await #expect(throws: V2RoomCallFailure.notAccepted(.invalidRequest)) {
-            try await budget.acquire(roomID: room, byteCount: Int.max)
+            try await budget.acquire(roomID: room, encodedRequest: bytes(31))
         }
-        let first = try await budget.acquire(roomID: room, byteCount: 24)
+        let first = try await budget.acquire(roomID: room, encodedRequest: bytes(24))
+        #expect(first.encodedRequest == bytes(24))
+        #expect(first.byteCount == first.encodedRequest.count)
         await #expect(throws: V2RoomCallFailure.notAccepted(.overloaded)) {
-            try await budget.acquire(roomID: room, byteCount: 7)
+            try await budget.acquire(roomID: room, encodedRequest: bytes(7))
         }
-        let second = try await budget.acquire(roomID: RoomID("other"), byteCount: 16)
+        let second = try await budget.acquire(roomID: RoomID("other"), encodedRequest: bytes(16))
         await #expect(throws: V2RoomCallFailure.notAccepted(.overloaded)) {
-            try await budget.acquire(roomID: RoomID("third"), byteCount: 1)
+            try await budget.acquire(roomID: RoomID("third"), encodedRequest: bytes(1))
         }
         #expect(await budget.snapshot().commandCount == 2)
         #expect(await budget.release(first))
@@ -96,4 +99,6 @@ struct V2RoomCommandBudgetTests {
             maximumBytesPerTurn: 30, maximumConcurrentReservations: 2
         )
     }
+
+    private func bytes(_ count: Int) -> Data { Data(repeating: 65, count: count) }
 }
