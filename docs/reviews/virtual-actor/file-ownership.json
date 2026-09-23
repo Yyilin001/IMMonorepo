@@ -711,6 +711,14 @@
       "owner": "D3"
     },
     {
+      "path": "IMV2Server/Sources/IMV2Server/V2AdmittedRoomDatabaseWork.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2Server/V2AggregatedReadReceiptBatchMetrics.swift",
+      "owner": "D3"
+    },
+    {
       "path": "IMV2Server/Sources/IMV2Server/V2AggregatedSendMessageBatchMetrics.swift",
       "owner": "D1"
     },
@@ -1319,11 +1327,19 @@
       "owner": "I1"
     },
     {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2AggregatedReadReceiptBatchMetricsTests.swift",
+      "owner": "D3"
+    },
+    {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2AggregatedSendMessageBatchMetricsTests.swift",
       "owner": "D1"
     },
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2GatewayRoomActorCompositionTests.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2HostDatabaseWorkAdmissionTests.swift",
       "owner": "I1"
     },
     {
@@ -1333,6 +1349,14 @@
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2ModerationAuditRetentionWorkerTests.swift",
       "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2PostgresCommitAckLossProxy.swift",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomActivationCommitAckLossTests.swift",
+      "owner": "V1"
     },
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomActivationTransactionDeadlineTests.swift",

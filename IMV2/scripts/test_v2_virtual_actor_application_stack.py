@@ -71,13 +71,13 @@ def main() -> int:
         execute(docker + ["run", "--name", builder, "--init", "--cpus", "2", "--memory", "6g",
                           "--mount", f"type=bind,source={ROOT},target=/workspace,readonly",
                           "--mount", f"type=bind,source={scratch},target=/build", IMAGE,
-                          "bash", "-c", 'set -eu; for product in "$@"; do timeout --signal=TERM --kill-after=20s 7200s swift build --disable-automatic-resolution --jobs 2 -c release --package-path /workspace/IMV2Server --scratch-path /build/IMV2Server-release --product "$product"; done',
+                          "bash", "-c", 'set -eu; for product in "$@"; do timeout --signal=TERM --kill-after=20s 7200s swift build --disable-automatic-resolution --jobs 2 -c release --package-path /workspace/IMV2Server --scratch-path /build --product "$product"; done',
                           "actor-app-build", *PRODUCTS], "build.log", timeout=28_900)
         runtime = private / "runtime"
         runtime.mkdir()
         result["products"] = {}
         for product in PRODUCTS:
-            source = scratch / "IMV2Server-release/release" / product
+            source = scratch / "release" / product
             target = runtime / product
             shutil.copy2(source, target)
             result["products"][product] = hashlib.sha256(target.read_bytes()).hexdigest()

@@ -13,7 +13,7 @@
 | G2：真实双 host + PostgreSQL 激活/接管/排空 | [真实 SQL activation fence 与 Host 单元测试](r1-d1-progress-evidence.md)，以及[独立进程被杀后接管探针](g4-business-probe-evidence.md)通过；双 host 竞争及完整排空矩阵尚未验收 | 未完成 |
 | G3：真实远端 send/read 与领域合同 | [实际 Factory 与共享合批的 PostgreSQL 局部验证](i1-composition-progress-evidence.md)，以及[真实远端发送、日志、订阅与恢复](g4-business-probe-evidence.md)通过；完整领域合同尚未验收 | 未完成 |
 | G4：全部房间写者、查询和后台迁移 | Gateway 与 Account 生产入口已接入；[维护与投影压缩竞态验证](d6-maintenance-evidence.md)通过；全部 writer 覆盖及完整应用协议闭环仍在检查 | 未完成 |
-| G5：故障矩阵、Linux checks、相对性能 | [隔离工具/故障拓扑](v1-fault-harness.md)与[基线协议](v1-baseline-protocol.md)已合入，静态检查通过；尚未执行候选验收 | 未完成 |
+| G5：故障矩阵、Linux checks、相对性能 | [Linux 客户端先启动与 Host 重启恢复](g5-linux-functional-evidence.md)通过；完整[故障矩阵](v1-fault-harness.md)、应用栈、required checks 和[相对性能](v1-baseline-protocol.md)仍待完成 | 未完成 |
 
 ## 核对出的基线差异
 
@@ -30,5 +30,5 @@
 
 - [能力与完整方法签名目录](capability-catalog.md)：34 行能力分组与 219 个 DTO 的所属模块/字段记录；不是全部已经远程化。
 - [房间写者台账](writer-ledger.md)：30 个 writer 分组、38 个源符号/表的静态证据。逐项迁移后仍需补真实 fence 和运行测试证据。
-- [文件归属](file-ownership.md)：351 个既有与实施文件的唯一 owner；混合文件须先由 C0 抽取，再转交领域包。
+- [文件归属](file-ownership.md)：357 个既有与实施文件的唯一 owner；混合文件须先由 C0 抽取，再转交领域包。
 - 静态一致性检查：python3 scripts/check_v2_virtual_actor_inventory.py。该脚本检查文件、符号和清单一致性，不证明没有其他 writer 或已具备运行时覆盖。

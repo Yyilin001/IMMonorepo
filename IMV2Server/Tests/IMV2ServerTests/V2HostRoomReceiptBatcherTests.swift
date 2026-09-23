@@ -107,6 +107,37 @@ struct V2HostRoomReceiptBatcherTests {
         #expect(await batcher.inFlightBatchCount == 0)
     }
 
+    @Test("SQL admission respects the original receipt deadline and policy overload", arguments: [true, false])
+    func admissionDeadline(callerExpiresFirst: Bool) async throws {
+        let admission = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundWriteInFlight: 1, maximumInteractiveReadInFlight: 1,
+            maximumSyncInFlight: 1, maximumForegroundWriteQueued: 2,
+            maximumInteractiveReadQueued: 1, maximumSyncQueued: 1,
+            timeout: callerExpiresFirst ? .seconds(2) : .milliseconds(20)))
+        #expect(await admission.acquire(.foregroundWrite) == .admitted)
+        // Foreground classes share idle capacity. Occupy the read reservation
+        // too so this test reaches the real admission wait path.
+        #expect(await admission.acquire(.interactiveRead) == .admitted)
+        let batcher = V2HostRoomReceiptBatcher(configuration: configuration(size: 2),
+            databaseWorkAdmission: admission) { _, _, _ in
+            Issue.record("receipt SQL ran without a database permit")
+            return .init(results: [])
+        }
+        let token = try makeToken()
+        let deadline = ContinuousClock.now + (callerExpiresFirst ? .milliseconds(100) : .seconds(2))
+        let failure = V2RoomCallFailure.notAccepted(callerExpiresFirst ? .deadlineExceeded : .overloaded)
+        await #expect(throws: failure) {
+            try await batcher.record(try makeTurn(token, deadline: deadline))
+        }
+        #expect(await batcher.inFlightBatchCount == 0)
+        #expect(await batcher.pendingCount == 0)
+        let snapshot = await admission.snapshot()
+        #expect(snapshot.foregroundWrite.inFlight == 1)
+        #expect(snapshot.foregroundWrite.queued == 0)
+        await admission.release(.foregroundWrite)
+        await admission.release(.interactiveRead)
+    }
+
     @Test("queue-full rejection and completed work have distinct metrics")
     func queueFullMetrics() async throws {
         let gate = ReceiptBatchGate()

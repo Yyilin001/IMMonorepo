@@ -81,3 +81,9 @@ Runtime 现在立即派发已排队的连续发送，物理 owner batcher 消耗
 `/tmp/imv2-va-candidate-mutation-fences.log` 实际运行特殊账号审计与编辑/撤回/表态 3 参数场景。该次昵称因缺少其专用环境变量被跳过；随后上述 owner-batching PG 日志正确设置 D2 变量并运行通过。CI 的既有串行 PostgreSQL step 已显式启用 D2/D4/D5/事务期限专用 URL 与 disposable 开关，不能把默认跳过当作验收。
 
 入口审查新增 W30：审核审计副本原来只在控制库清理，遗漏其他 owner。新的 OwnerModerationAuditRetentionStore 使用所有 physical owner 的维护数据库、每轮共享行数预算与轮换起点。该副本不用于 Actor 恢复/幂等，过期清理保留为明确的外部例外。`/tmp/imv2-va-owner-audit-retention.log` 退出 0：既有维护时钟/参数委托及新多 owner 预算/失败公平性共 5 项通过；没有把这些内存 store 测试写成 PostgreSQL 验证。
+
+## Host 数据库准入与成功 COMMIT 丢回执
+
+Gateway RoomRef 入口不再占用等待 Host 的数据库许可。普通房间读写在物理 Host SQL 边界准入，send/receipt/recovery 按实际批次准入，同库 forward 在两个 reservation 获批后准入。Account 调用与 Gateway 调用使用同一 Host 约束。receipt 等待许可沿用原调用截止时间；较短策略等待超时报 overload，调用期限耗尽报 deadlineExceeded。
+
+根工作区 `/tmp/imv2-va-final-admission-wiring-verified.log` 退出 0：4 suites、76 tests，包含真实 PostgreSQL 成功 COMMIT 丢 ACK。测试代理观察 PostgreSQL 的 COMMIT CommandComplete 后截断回执，生产 scoped send 返回 V2RoomTransactionOutcomeUnknown；独立连接确认消息/completion 各一行，原操作 ID 重放返回原 messageID，事件仍一行。新 ACK-loss suite 已显式接入 CI 与隔离 Linux 数据库环境。该结果不代替多房间 shared-batch 丢回执和完整进程故障矩阵。

@@ -229,10 +229,13 @@ public actor V2HostRoomReceiptBatcher: V2ReadReceiptBatchMetricsReading {
     private func perform(_ selected: [Pending], deadline: ContinuousClock.Instant) async throws -> [V2RoomReceiptResult] {
         guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
         if let databaseWorkAdmission {
-            switch await databaseWorkAdmission.acquire(.foregroundWrite) {
+            switch await databaseWorkAdmission.acquire(.foregroundWrite, callerDeadline: deadline) {
             case .admitted: break
-            case .rejected: throw V2RoomCallFailure.notAccepted(.overloaded)
-            case .cancelled: throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
+            case .rejected(.queueFull): throw V2RoomCallFailure.notAccepted(.overloaded)
+            case .rejected(.timeout):
+                throw V2RoomCallFailure.notAccepted(deadline <= .now ? .deadlineExceeded : .overloaded)
+            case .cancelled:
+                throw V2RoomCallFailure.notAccepted(deadline <= .now ? .deadlineExceeded : .cancelled)
             }
         }
         do {

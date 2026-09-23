@@ -660,7 +660,8 @@ enum IMV2ServerApp {
                     direct: PostgresV2DirectMessagingStore(database: owner, shadowForwarder: userShardShadowForwarder),
                     group: PostgresV2GroupMessagingStore(database: owner), capacityProfile: configuration.capacityProfile)
                 forwardPairs[storage.shardID] = .init(database: owner, write: write,
-                    capacityProfile: configuration.capacityProfile, limits: configuration.messageLimits)
+                    capacityProfile: configuration.capacityProfile, limits: configuration.messageLimits,
+                    databaseWorkAdmission: databaseWorkAdmission)
             }
             let actorFactory = try V2RoomServerActivationFactory(owners: ownerResources,
                 safetyActorUserID: configuration.contentReviewSafetyActorUserID)
@@ -673,7 +674,8 @@ enum IMV2ServerApp {
             let roomQueries = V2RoomRefQueryClient(directory: actorDirectory, callTimeout: callTimeout.duration)
             let roomActorServices = V2GatewayRoomActorServices(directory: actorDirectory, callTimeout: callTimeout,
                 readReceiptControlStore: PostgresV2ReadReceiptStore(database: database,
-                    shadowForwarder: userShardShadowForwarder), directRoomLogEventCache: directRoomLogEventCache)
+                    shadowForwarder: userShardShadowForwarder), databaseWorkAdmission: databaseWorkAdmission,
+                directRoomLogEventCache: directRoomLogEventCache)
             let fixedBootstraps = bootstraps
             let bootstrapPort = V2ActorCreationBootstrapPort(execute: { request, deadline in
                 guard ContinuousClock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }

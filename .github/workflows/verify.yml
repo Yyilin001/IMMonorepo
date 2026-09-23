@@ -68,6 +68,8 @@ jobs:
           # disposable opt-in, including a pool-borrow/COMMIT fault fixture.
           IMV2_ACTOR_TRANSACTION_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
           IMV2_ACTOR_TRANSACTION_TEST_DATABASE_IS_DISPOSABLE: "1"
+          IMV2_ACTOR_ACK_LOSS_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+          IMV2_ACTOR_ACK_LOSS_TEST_DATABASE_IS_DISPOSABLE: "1"
           IMV2_ACTOR_D2_TEST_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
           IMV2_ACTOR_D2_TEST_DATABASE_IS_DISPOSABLE: "1"
           IMV2_ACTOR_D4_CONTROL_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres-control:5432/im_v2_test
@@ -81,6 +83,32 @@ jobs:
           IMV2_ACTOR_D5_MEDIA_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
           IMV2_ACTOR_D5_MEDIA_TEST_DATABASE_IS_DISPOSABLE: "1"
         run: swift test --disable-automatic-resolution --no-parallel --package-path IMV2Server
+
+  room-actor-process-recovery:
+    name: Linux room actor process recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install probe orchestration dependencies
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends ripgrep openssl python3
+      - name: Exercise client-first discovery and Host crash recovery
+        env:
+          DOCKER_CONTEXT: default
+          VA_G4_MODE: linux
+          VA_G4_LINUX_CLIENT_FIRST: "1"
+        run: |
+          export VA_G4_LINUX_SCRATCH_DIR="$RUNNER_TEMP/actor-swiftpm"
+          export VA_G4_LINUX_RUN_ROOT="$RUNNER_TEMP/actor-process-evidence"
+          mkdir -p "$VA_G4_LINUX_SCRATCH_DIR" "$VA_G4_LINUX_RUN_ROOT"
+          bash ./IMV2/scripts/test_v2_virtual_actor_business_probe.sh
+      - name: Upload process recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-actor-process-recovery
+          path: ${{ runner.temp }}/actor-process-evidence/*-evidence/
+          if-no-files-found: warn
 
   operational-config:
     name: Prometheus and local Compose configuration
