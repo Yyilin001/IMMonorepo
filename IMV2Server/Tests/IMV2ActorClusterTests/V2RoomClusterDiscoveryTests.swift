@@ -139,8 +139,18 @@ struct V2RoomClusterDiscoveryTests {
         for _ in 0..<3 { await discovery.pollOnce() }
         #expect(try await caller.candidates(for: owner).count == 1)
 
-        _ = try await callerSystem.cluster.joined(node: first.beacon.id.node,
-                                                   within: .seconds(5))
+        // The signed advertisement above proves that the remote endpoint is
+        // usable. For this restart test the old exact Node only needs to be
+        // present in membership. Promotion from .joining to .up additionally
+        // waits for leader election and gossip convergence, which is unrelated
+        // to replacing the host's process incarnation.
+        #expect(first.descriptor.endpointID.node == first.beacon.id.node)
+        try await waitUntil(discovery: discovery) {
+            guard let member = await callerSystem.cluster.membershipSnapshot.member(first.beacon.id.node) else {
+                return false
+            }
+            return member.status == .joining || member.status == .up
+        }
 
         try await hostSystem.shutdown().wait()
         hostSystem = await makeSystem(port: port)
