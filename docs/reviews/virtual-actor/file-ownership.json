@@ -47,6 +47,10 @@
       "owner": "V1"
     },
     {
+      "path": "IMV2/scripts/test_v2_virtual_actor_application_stack.py",
+      "owner": "V1"
+    },
+    {
       "path": "IMV2/scripts/test_v2_virtual_actor_bind_paths.py",
       "owner": "V1"
     },
@@ -64,6 +68,10 @@
     },
     {
       "path": "IMV2/scripts/validate_v2_virtual_actor_capacity.sh",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/verify_v2_local_account_stack.sh",
       "owner": "V1"
     },
     {

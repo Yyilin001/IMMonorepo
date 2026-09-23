@@ -8,10 +8,13 @@ set -Eeuo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 v2_dir="$(cd "${script_dir}/.." && pwd)"
 repo_root="$(cd "${v2_dir}/.." && pwd)"
-ca_path="${v2_dir}/local-ca/root.crt"
-compose_file="${v2_dir}/docker-compose.local-account.yml"
-env_file="${v2_dir}/.env.local"
+ca_path="${V2_LOCAL_CA_PATH:-${v2_dir}/local-ca/root.crt}"
+compose_file="${V2_LOCAL_COMPOSE_FILE:-${v2_dir}/docker-compose.local-account.yml}"
+env_file="${V2_LOCAL_ENV_FILE:-${v2_dir}/.env.local}"
 compose_project="${V2_LOCAL_COMPOSE_PROJECT:-imv2localaccount}"
+account_base_url="${V2_LOCAL_HTTP_BASE_URL:-https://localhost:8443}"
+gateway_tls_address="${V2_LOCAL_GATEWAY_TLS_ADDRESS:-localhost:7443}"
+registration_recovery_directory="${V2_LOCAL_REGISTRATION_RECOVERY_DIRECTORY:-${v2_dir}/local-ca/registration-recovery}"
 phase="preflight"
 
 source "${script_dir}/local_compose.sh"
@@ -96,7 +99,7 @@ invalid_status="$(curl --silent --show-error --output /dev/null --write-out '%{h
   --request POST \
   --header 'Content-Type: application/json' \
   --data '{}' \
-  https://localhost:8443/v2/account-auth/password/assertion)"
+  "${account_base_url}/v2/account-auth/password/assertion")"
 test "${invalid_status}" = '400' || {
   printf 'unexpected invalid account request status: %s\n' "${invalid_status}" >&2
   exit 1
@@ -114,7 +117,7 @@ assertion="$(curl --silent --show-error --fail \
   --request POST \
   --header 'Content-Type: application/json' \
   --data "{\"accountHandle\":\"${account_handle}\",\"password\":\"v2-local-smoke-password\",\"deviceID\":\"${device_id}\",\"publicHandle\":\"${public_handle}\",\"displayName\":\"Local Smoke\"}" \
-  https://localhost:8443/v2/account-auth/password/register | jq -er '.accountAssertion')"
+  "${account_base_url}/v2/account-auth/password/register" | jq -er '.accountAssertion')"
 
 # Exercise the real HTTPS route, PostgreSQL persistence and configured policy as
 # one path. The rate-limited account is separate from the credential smoke
@@ -131,7 +134,7 @@ rate_limit_registration_status="$(curl --silent --show-error --output /dev/null 
   --request POST \
   --header 'Content-Type: application/json' \
   --data "{\"accountHandle\":\"${rate_limit_handle}\",\"password\":\"${rate_limit_password}\",\"deviceID\":\"${rate_limit_device_id}\",\"publicHandle\":\"${rate_limit_public_handle}\",\"displayName\":\"Local Rate Limit\"}" \
-  https://localhost:8443/v2/account-auth/password/register)"
+  "${account_base_url}/v2/account-auth/password/register")"
 test "${rate_limit_registration_status}" = '200' || {
   printf 'unexpected password rate-limit registration status: %s\n' "${rate_limit_registration_status}" >&2
   exit 1
@@ -144,7 +147,7 @@ for _ in {1..5}; do
     --request POST \
     --header 'Content-Type: application/json' \
     --data "{\"accountHandle\":\"${rate_limit_handle}\",\"password\":\"${wrong_rate_limit_password}\",\"deviceID\":\"${rate_limit_device_id}\"}" \
-    https://localhost:8443/v2/account-auth/password/assertion)"
+    "${account_base_url}/v2/account-auth/password/assertion")"
   test "${rejected_status}" = '401' || {
     printf 'unexpected password rejection status before lockout: %s\n' "${rejected_status}" >&2
     exit 1
@@ -159,7 +162,7 @@ rate_limit_status="$(curl --silent --show-error --output /dev/null --dump-header
   --request POST \
   --header 'Content-Type: application/json' \
   --data "{\"accountHandle\":\"${rate_limit_handle}\",\"password\":\"${wrong_rate_limit_password}\",\"deviceID\":\"${rate_limit_device_id}\"}" \
-  https://localhost:8443/v2/account-auth/password/assertion)"
+  "${account_base_url}/v2/account-auth/password/assertion")"
 test "${rate_limit_status}" = '429' || {
   printf 'unexpected password rate-limit status: %s\n' "${rate_limit_status}" >&2
   exit 1
@@ -179,13 +182,13 @@ grep -Eiq '^retry-after:[[:space:]]*[1-9][0-9]*' "${rate_limit_headers}" || {
 
 phase="device credential issuance"
 cancellation="$(python3 "${script_dir}/prepare_v2_registration_cancellation.py" \
-  "${device_id}" "${operation_id}" "${v2_dir}/local-ca/registration-recovery")"
+  "${device_id}" "${operation_id}" "${registration_recovery_directory}")"
 issued_credentials="$(curl --silent --show-error --fail \
   --cacert "${ca_path}" \
   --request POST \
   --header 'Content-Type: application/json' \
   --data "{\"accountAssertion\":\"${assertion}\",\"deviceID\":\"${device_id}\",\"operationID\":\"${operation_id}\",\"cancellation\":${cancellation}}" \
-  https://localhost:8443/v2/device-credentials)"
+  "${account_base_url}/v2/device-credentials")"
 access_token="$(printf '%s' "${issued_credentials}" | jq -er '.accessToken')"
 refresh_credential="$(printf '%s' "${issued_credentials}" | jq -er '.refreshCredential')"
 revocation_credential="$(printf '%s' "${issued_credentials}" | jq -er '.revocationCredential')"
@@ -206,17 +209,17 @@ peer_assertion="$(curl --silent --show-error --fail \
   --request POST \
   --header 'Content-Type: application/json' \
   --data "{\"accountHandle\":\"${peer_account_handle}\",\"password\":\"v2-local-peer-password\",\"deviceID\":\"${peer_device_id}\",\"publicHandle\":\"${peer_public_handle}\",\"displayName\":\"Local Peer\"}" \
-  https://localhost:8443/v2/account-auth/password/register | jq -er '.accountAssertion')"
+  "${account_base_url}/v2/account-auth/password/register" | jq -er '.accountAssertion')"
 
 phase="peer device credential issuance"
 peer_cancellation="$(python3 "${script_dir}/prepare_v2_registration_cancellation.py" \
-  "${peer_device_id}" "${peer_operation_id}" "${v2_dir}/local-ca/registration-recovery")"
+  "${peer_device_id}" "${peer_operation_id}" "${registration_recovery_directory}")"
 peer_issued_credentials="$(curl --silent --show-error --fail \
   --cacert "${ca_path}" \
   --request POST \
   --header 'Content-Type: application/json' \
   --data "{\"accountAssertion\":\"${peer_assertion}\",\"deviceID\":\"${peer_device_id}\",\"operationID\":\"${peer_operation_id}\",\"cancellation\":${peer_cancellation}}" \
-  https://localhost:8443/v2/device-credentials)"
+  "${account_base_url}/v2/device-credentials")"
 peer_access_token="$(printf '%s' "${peer_issued_credentials}" | jq -er '.accessToken')"
 printf '%s' "${peer_issued_credentials}" | jq -e --argjson expected "${peer_cancellation}" '.registrationCancellation == $expected' > /dev/null
 peer_user_id="$(printf '%s' "${peer_issued_credentials}" | jq -er '.userID')"
@@ -266,7 +269,7 @@ pre_disable_assertion="$(curl --silent --show-error --fail \
   --request POST \
   --header 'Content-Type: application/json' \
   --data "{\"accountHandle\":\"${account_handle}\",\"password\":\"v2-local-smoke-password\",\"deviceID\":\"${pre_disable_device_id}\"}" \
-  https://localhost:8443/v2/account-auth/password/assertion | jq -er '.accountAssertion')"
+  "${account_base_url}/v2/account-auth/password/assertion" | jq -er '.accountAssertion')"
 
 # This exercises the authenticated endpoint route without printing or
 # persisting either credential. The opaque smoke token is deliberately not a
@@ -282,7 +285,7 @@ push_status="$(curl --silent --show-error --output /dev/null --dump-header "${pu
   --header 'Content-Type: application/json' \
   --header 'Cache-Control: no-store' \
   --data "{\"provider\":\"apns\",\"environment\":\"development\",\"token\":\"local-smoke-push-token-${suffix}\"}" \
-  https://localhost:8443/v2/push-endpoint)"
+  "${account_base_url}/v2/push-endpoint")"
 test "${push_status}" = '204' || {
   printf 'unexpected Push endpoint registration status: %s\n' "${push_status}" >&2
   exit 1
@@ -299,7 +302,7 @@ push_delete_status="$(curl --silent --show-error --output /dev/null --write-out 
   --header "Authorization: Bearer ${access_token}" \
   --header "X-IM-Device-ID: ${device_id}" \
   --header 'Cache-Control: no-store' \
-  https://localhost:8443/v2/push-endpoint)"
+  "${account_base_url}/v2/push-endpoint")"
 test "${push_delete_status}" = '204' || {
   printf 'unexpected Push endpoint removal status: %s\n' "${push_delete_status}" >&2
   exit 1
@@ -340,7 +343,7 @@ disabled_access_status="$(curl --silent --show-error --output /dev/null --write-
   --header "X-IM-Device-ID: ${device_id}" \
   --header 'Content-Type: application/json' \
   --data "{\"provider\":\"apns\",\"environment\":\"development\",\"token\":\"disabled-smoke-push-token-${suffix}\"}" \
-  https://localhost:8443/v2/push-endpoint)"
+  "${account_base_url}/v2/push-endpoint")"
 test "${disabled_access_status}" = '401' || {
   printf 'disabled access credential was unexpectedly accepted: %s\n' "${disabled_access_status}" >&2
   exit 1
@@ -352,7 +355,7 @@ disabled_refresh_status="$(curl --silent --show-error --output /dev/null --write
   --request POST \
   --header 'Content-Type: application/json' \
   --data "{\"userID\":\"${user_id}\",\"deviceID\":\"${device_id}\",\"refreshCredential\":\"${refresh_credential}\",\"revocationCredential\":\"${revocation_credential}\",\"operationID\":\"$(uuidgen | tr '[:upper:]' '[:lower:]')\"}" \
-  https://localhost:8443/v2/device-credentials/refresh)"
+  "${account_base_url}/v2/device-credentials/refresh")"
 test "${disabled_refresh_status}" = '401' || {
   printf 'disabled refresh credential was unexpectedly accepted: %s\n' "${disabled_refresh_status}" >&2
   exit 1
@@ -361,13 +364,13 @@ test "${disabled_refresh_status}" = '401' || {
 phase="disabled account assertion rejection"
 pre_disable_operation_id="$(uuidgen)"
 pre_disable_cancellation="$(python3 "${script_dir}/prepare_v2_registration_cancellation.py" \
-  "${pre_disable_device_id}" "${pre_disable_operation_id}" "${v2_dir}/local-ca/registration-recovery")"
+  "${pre_disable_device_id}" "${pre_disable_operation_id}" "${registration_recovery_directory}")"
 disabled_assertion_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
   --cacert "${ca_path}" \
   --request POST \
   --header 'Content-Type: application/json' \
   --data "{\"accountAssertion\":\"${pre_disable_assertion}\",\"deviceID\":\"${pre_disable_device_id}\",\"operationID\":\"${pre_disable_operation_id}\",\"cancellation\":${pre_disable_cancellation}}" \
-  https://localhost:8443/v2/device-credentials)"
+  "${account_base_url}/v2/device-credentials")"
 test "${disabled_assertion_status}" = '403' || {
   printf 'disabled account assertion was unexpectedly allowed to issue a credential: %s\n' "${disabled_assertion_status}" >&2
   exit 1
@@ -375,7 +378,7 @@ test "${disabled_assertion_status}" = '403' || {
 
 phase="TLS gateway handshake"
 gateway_probe="$(openssl s_client \
-  -connect localhost:7443 \
+  -connect "${gateway_tls_address}" \
   -servername localhost \
   -tls1_3 \
   -CAfile "${ca_path}" \
