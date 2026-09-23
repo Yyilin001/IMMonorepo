@@ -2,7 +2,7 @@
 
 Status: **performance failed; the latest SQL-context candidate passes SQL but still exceeds the frozen CPU limit**. Frozen main is `f1cdd78d6a21bf0ae23da627c0710c65115236aa`; the latest measured candidate is `812af24a319dbaaabcb66f0bd96d0c43bf95d2cc`. Earlier candidate results remain below. The hot operating point and thresholds were frozen before candidate sampling as recorded in the [baseline protocol](v1-baseline-protocol.md). Neither load nor thresholds are changed in response to these results.
 
-A later [same-process cached invocation change](r3-local-capability-evidence.md#仅限本机的缓存调用) has passed its native Runtime and Cluster suites. Its Linux Release build and fresh formal hot comparison are pending; it does not change the measured failure below.
+A later [same-process cached invocation change](r3-local-capability-evidence.md#仅限本机的缓存调用), frozen as `fb8a10478895f4b2d616f4bf7eb11eed51a84824`, has passed its native Runtime/Cluster suites and seven-product Linux Release build. Its fresh six-run formal hot comparison has started against the original freeze. No new candidate performance result is available yet; it does not change the measured failure below.
 
 ## Latest SQL-context candidate: two fewer SQL calls, CPU still over budget
 
