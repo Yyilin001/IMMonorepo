@@ -567,14 +567,23 @@ enum IMV2ServerApp {
             let committedHybridGroupEvents = V2CommittedHybridGroupEventObserver(
                 directRoomLogEventCache: directRoomLogEventCache)
             let actorBatchConfiguration = V2SendMessageAdmissionBatcher.Configuration(
-                maximumBatchSize: max(2, configuration.directRoomLogAppendBatchSize),
+                maximumBatchSize: max(1, configuration.directRoomLogAppendBatchSize),
                 maximumDelay: .milliseconds(max(1, configuration.directRoomLogAppendBatchMaximumDelayMilliseconds)),
+                adaptiveDelayPolicy: {
+                    guard configuration.directRoomLogAppendBatchSize > 0,
+                          let delay = configuration.directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds,
+                          let minimumRequests = configuration.directRoomLogAppendBatchHighActivityMinimumRequests,
+                          let window = configuration.directRoomLogAppendBatchHighActivityWindowMilliseconds
+                    else { return nil }
+                    return .init(highActivityMaximumDelay: .milliseconds(delay),
+                        minimumRequestsInWindow: minimumRequests, observationWindow: .milliseconds(window))
+                }(),
                 maximumInFlightBatches: configuration.directRoomLogAppendBatchMaximumInFlightBatches,
                 maximumPendingRequests: configuration.directRoomLogAppendMaximumPendingRequests,
                 maximumTrackedActivations: actorConfiguration.runtime.maximumActiveRooms)
             var ownerResources: [String: V2RoomServerOwnerResources] = [:]
             var physicalResources: [String: V2RoomServerOwnerResources] = [:]
-            var ownerBatchers: [String: V2SendMessageAdmissionBatcher] = [:]
+            var ownerBatchers: [String: any V2ActorGrantedSendBatching & V2SendMessageBatchMetricsReading] = [:]
             var forwardTargetWritesByShard: [String: PostgresV2RoomWriteStore] = [:]
             var physicalWrites: [String: PostgresV2RoomWriteStore] = [:]
             var physicalStoreKeyByShard: [String: String] = [:]
@@ -615,17 +624,32 @@ enum IMV2ServerApp {
                         appendStageMetrics: directRoomLogAppendStageMetrics)
                         .usingControlDatabase(directSendControlPool.database,
                             authorizationResolutionDatabase: authorizationControlDatabase)
-                    let batcher = V2SendMessageAdmissionBatcher(store: write,
-                        configuration: actorBatchConfiguration,
-                        databaseWorkAdmission: configuration.databaseWorkAdmissionEnabled ? databaseWorkAdmission : nil,
-                        committedMessageObserver: committedHybridGroupEvents, actorGrantedStore: write)
+                    let batcher: any V2ActorGrantedSendBatching & V2SendMessageBatchMetricsReading
+                    let appendAdmission = configuration.databaseWorkAdmissionEnabled ? databaseWorkAdmission : nil
+                    if configuration.directRoomLogAppendBatchSize > 0,
+                       configuration.directRoomLogAppendLaneCount > 1 {
+                        batcher = V2ShardedSendMessageAdmissionBatcher(store: write,
+                            configuration: actorBatchConfiguration,
+                            laneCount: configuration.directRoomLogAppendLaneCount,
+                            databaseWorkAdmission: appendAdmission,
+                            committedMessageObserver: committedHybridGroupEvents, actorGrantedStore: write)
+                    } else {
+                        batcher = V2SendMessageAdmissionBatcher(store: write,
+                            configuration: actorBatchConfiguration, databaseWorkAdmission: appendAdmission,
+                            committedMessageObserver: committedHybridGroupEvents, actorGrantedStore: write)
+                    }
                     resourcesForOwner = try .init(database: owner, writes: write, sendBatcher: batcher,
                         membershipIdentities: membershipIdentities, invitationIdentities: invitationIdentities,
                         receiptShadowForwarder: userShardShadowForwarder,
                         capacityProfile: configuration.capacityProfile, messageLimits: configuration.messageLimits,
                         maximumEditBytes: configuration.messageLimits.maxUTF8Bytes,
                         contentReviewMode: configuration.contentReviewMode,
-                        queryBatchConfiguration: .init())
+                        queryBatchConfiguration: .init(),
+                        receiptBatchConfiguration: .init(maximumBatchSize: configuration.readReceiptBatchSize,
+                            maximumDelay: .milliseconds(configuration.readReceiptBatchMaximumDelayMilliseconds),
+                            maximumInFlightBatches: configuration.readReceiptBatchMaximumInFlightBatches,
+                            maximumPendingRequests: configuration.readReceiptBatchMaximumPendingRequests),
+                        databaseWorkAdmission: databaseWorkAdmission)
                     physicalResources[physicalKey] = resourcesForOwner
                     physicalWrites[physicalKey] = write
                     ownerBatchers[physicalKey] = batcher

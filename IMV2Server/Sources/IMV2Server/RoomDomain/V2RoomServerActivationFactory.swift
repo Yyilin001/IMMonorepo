@@ -25,7 +25,7 @@ public struct V2RoomServerOwnerResources: Sendable {
     let maximumEditBytes: Int
 
     public init(database: any Database, writes: PostgresV2RoomWriteStore,
-                sendBatcher: V2SendMessageAdmissionBatcher,
+                sendBatcher: any V2ActorGrantedSendBatching,
                 membershipIdentities: any V2MembershipIdentitySnapshotValidating,
                 invitationIdentities: any V2GroupInvitationIdentityReading,
                 receiptShadowForwarder: any V2UserShardProjectionShadowing,
