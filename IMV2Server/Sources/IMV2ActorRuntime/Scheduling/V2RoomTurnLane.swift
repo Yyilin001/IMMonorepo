@@ -265,13 +265,11 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
 
     private func consume() async {
         while phase == .ready || phase == .draining {
-            guard let first = queue.first else { break }
-            let batchDeadline = min(first.admittedAt + configuration.batchWait.duration, first.deadline)
-            if isSend(first), clock.now < batchDeadline {
-                // Exactly one batching window is shared with the DB batcher.
-                do { try await clock.sleep(until: batchDeadline) }
-                catch { break }
-            }
+            guard !queue.isEmpty else { break }
+            // Grant already queued contiguous sends immediately. The shared
+            // physical-owner batcher owns the only collection delay, bounded
+            // by the first request's original admission time. Sleeping here
+            // first would consume that window before other rooms can join it.
             guard phase == .ready || phase == .draining else { break }
             // A timer callback may not have run yet. Do not dispatch an expired
             // request simply because the executor won the scheduling race.

@@ -64,6 +64,10 @@ jobs:
           IMV2_POSTGRES_TEST_CONTROL_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres-control:5432/im_v2_test
           IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE: "1"
           IMV2_REQUIRE_CROSS_STORE_POSTGRES_TESTS: "1"
+          # The physical-connection deadline suite uses its own explicit
+          # disposable opt-in, including a pool-borrow/COMMIT fault fixture.
+          IMV2_ACTOR_TRANSACTION_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+          IMV2_ACTOR_TRANSACTION_TEST_DATABASE_IS_DISPOSABLE: "1"
         run: swift test --disable-automatic-resolution --no-parallel --package-path IMV2Server
 
   operational-config:

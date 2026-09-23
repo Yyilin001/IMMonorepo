@@ -29,22 +29,26 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
 
     /// The required JSON file refers to PEM files and a raw 32-byte signing-key
     /// file. Secret material and the deployment document are never logged.
+    /// The host's collection window covers its configured send/receipt delays;
+    /// individual batchers still use their own shorter or adaptive delay.
     public init(environment: any V2RuntimeEnvironment, hostsRooms: Bool,
-                configuredShardIDs: Set<String>) throws {
+                configuredShardIDs: Set<String>, batchWaitMilliseconds: Int64 = 2) throws {
         guard let path = environment.value(for: "IMV2_ROOM_ACTOR_CONFIGURATION_FILE"),
               !path.isEmpty else { throw V2RoomActorApplicationConfigurationError.missingConfiguration }
         let bytes = try Self.readFile(path, maximumBytes: 1_048_576)
         try self.init(document: JSONDecoder().decode(Document.self, from: bytes),
-                      hostsRooms: hostsRooms, configuredShardIDs: configuredShardIDs)
+                      hostsRooms: hostsRooms, configuredShardIDs: configuredShardIDs,
+                      batchWaitMilliseconds: batchWaitMilliseconds)
     }
 
-    init(document: Document, hostsRooms: Bool, configuredShardIDs: Set<String>) throws {
+    init(document: Document, hostsRooms: Bool, configuredShardIDs: Set<String>,
+         batchWaitMilliseconds: Int64 = 2) throws {
         guard !document.name.isEmpty, document.name.utf8.count <= 128,
               Self.isDNSName(document.address),
               (1...65_535).contains(document.port), (1...64).contains(document.threadPoolSize),
               !configuredShardIDs.isEmpty, configuredShardIDs.count <= 256,
               (1...256).contains(document.services.count), (1...256).contains(document.peers.count),
-              hostsRooms == (document.hostID != nil) else {
+              hostsRooms == (document.hostID != nil), (1...25).contains(batchWaitMilliseconds) else {
             throw V2RoomActorApplicationConfigurationError.invalidConfiguration
         }
         let signingID = try V2ActorServiceID(document.serviceID)
@@ -87,7 +91,7 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         if let identity, pinnedHosts[identity.hostID] != signingID {
             throw V2RoomActorApplicationConfigurationError.invalidConfiguration
         }
-        let runtime = try V2RoomRuntimeConfiguration()
+        let runtime = try V2RoomRuntimeConfiguration(batchWaitMilliseconds: batchWaitMilliseconds)
         var peers: [V2RoomDiscoveryPeer] = []
         var seenHosts = Set<V2ActorHostID>()
         for peer in document.peers {

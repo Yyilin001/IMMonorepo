@@ -7,6 +7,18 @@
       "owner": "V1"
     },
     {
+      "path": "IMV2/docker-compose.local-account.yml",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2/docker-compose.virtual-actor-linux-bind.yml",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/docker-compose.virtual-actor-tests.yml",
+      "owner": "V1"
+    },
+    {
       "path": "IMV2/scripts/current_v2_schema_contract.sql",
       "owner": "R1"
     },
@@ -20,6 +32,46 @@
     },
     {
       "path": "IMV2/scripts/run_v2_high_active_10000.sh",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/run_v2_local_account_stack.sh",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2/scripts/run_v2_virtual_actor_faults.sh",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/run_v2_virtual_actor_linux.sh",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/test_v2_virtual_actor_bind_paths.py",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/test_v2_virtual_actor_business_probe.sh",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/v2_virtual_actor_bind_paths.py",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/v2_virtual_actor_linux_runner.sh",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/validate_v2_virtual_actor_capacity.sh",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/virtual-actor-fixtures/capacity-main-v1.json",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/virtual-actor-fixtures/fault-scenarios.json",
       "owner": "V1"
     },
     {
@@ -399,6 +451,10 @@
       "owner": "D6"
     },
     {
+      "path": "IMV2Server/Sources/IMV2Server/RoomClients/V2ActorGroupInvitationClient.swift",
+      "owner": "I1"
+    },
+    {
       "path": "IMV2Server/Sources/IMV2Server/RoomClients/V2GatewayRoomActorServices.swift",
       "owner": "I1"
     },
@@ -412,6 +468,10 @@
     },
     {
       "path": "IMV2Server/Sources/IMV2Server/RoomClients/V2RoomRefGroupEventLogClient.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2Server/RoomClients/V2RoomRefMediaDownloadClient.swift",
       "owner": "I1"
     },
     {
@@ -637,6 +697,10 @@
     {
       "path": "IMV2Server/Sources/IMV2Server/V2AccountRoomMembershipChange.swift",
       "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2Server/V2AggregatedSendMessageBatchMetrics.swift",
+      "owner": "D1"
     },
     {
       "path": "IMV2Server/Sources/IMV2Server/V2AuthenticatedGatewayAdmission.swift",
@@ -1011,6 +1075,10 @@
       "owner": "I1"
     },
     {
+      "path": "IMV2Server/Sources/IMV2Server/V2RuntimePressureMetrics.swift",
+      "owner": "I1"
+    },
+    {
       "path": "IMV2Server/Sources/IMV2Server/V2SchemaReadiness.swift",
       "owner": "R1"
     },
@@ -1227,6 +1295,10 @@
       "owner": "I1"
     },
     {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2AggregatedSendMessageBatchMetricsTests.swift",
+      "owner": "D1"
+    },
+    {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2GatewayRoomActorCompositionTests.swift",
       "owner": "I1"
     },
@@ -1276,6 +1348,10 @@
     },
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomRefClientsTests.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomRefMediaDownloadClientIntegrationTests.swift",
       "owner": "I1"
     },
     {

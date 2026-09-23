@@ -67,3 +67,11 @@ D6 的独立维护与压缩竞态证据见 [后台维护验证](d6-maintenance-e
 子代理独立 PostgreSQL 双库用例验证正常下载、provider 执行期间可见性撤销、设备撤销及 owner route 变化，4/4 通过；邀请恢复/审批竞态及 Vapor 路由用例通过。Account 与 Operator target build 均通过。日志保留在 `/Users/yyl/.codex/virtual-actor-builds/p0/i1-account-build-final.log`、`i1-operator-build.log`、`i1-invitation-test.log`、`i1-actor-invitation-test.log`、`i1-account-test-final.log`。这些结果没有包含真实 Account HTTP 进程的启动测试。
 
 `92f782c1` 的[真实业务进程探针](g4-business-probe-evidence.md)使用实际 Application/Factory、签名发现、私有 CA mTLS 和 PostgreSQL。调用进程保持存活，Host 被 SIGKILL 后等待数据库租约到期，再以新 incarnation/epoch 启动；同一 clientMessageID 重放得到同一 messageID，数据库仅一条消息，旧 token 新写被拒，订阅资格与日志水位恢复。原生执行退出 0；Linux 版本正在独立验证。
+
+## 事务期限与合批窗口收口
+
+`14e0b544` 将同一调用的绝对截止时间传入 Factory 恢复/执行、granted send、recovery batch、租约及其余 scoped SQL。批次采用实际参与项目的最早调用截止时间。每次重试重新借连接，不能重新获得完整时间预算；只有已证实回滚的失败可按未接受结果返回，COMMIT 无 ACK 保持 unknown。根集成工作区 `/tmp/imv2-va-final-sql-integration.log` 退出 0：真实 PG 事务期限 1 项（内部多个故障场景）、RoomRef 门面 9 项、聚合指标 2 项，共 12 项。
+
+`a53fb2f5` 在媒体控制 SQL/owner route await 的成功及抛错之后复查取消和原截止时间，并在最终 URL 返回前复查；子代理真实双库媒体 5 情景通过，包括 provider 跨越调用期限。`9bdd36cc`/`888fed4b` 将所有物理 owner 的发送指标作为只读快照聚合，最多并发采样 8 个 owner，不提供虚假的消息准入入口。
+
+Runtime 现在立即派发已排队的连续发送，物理 owner batcher 消耗唯一合批窗口，仍以第一次入队时刻为上限。原实现先在 lane 睡满窗口，导致 host 收到的 deadline 已过；这会使跨房间和 adaptive 合批失效。App 的窗口从现有发送/高活跃/回执配置取最大值，各 batcher 继续使用自己的较短延迟。`/tmp/imv2-va-single-batch-window.log` 退出 0：Runtime lane/预约 19 项与读取实际生成配置的 Application 3 项通过，包括 FIFO 屏障、执行中取消/unknown、预约超时，以及新请求把剩余窗口交给 host。

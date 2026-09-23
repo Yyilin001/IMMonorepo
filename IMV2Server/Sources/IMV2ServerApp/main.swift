@@ -559,7 +559,11 @@ enum IMV2ServerApp {
             }
             let actorConfiguration = try V2RoomActorApplicationConfiguration(
                 environment: ProcessRuntimeEnvironment(), hostsRooms: true,
-                configuredShardIDs: Set(configuration.roomShardStorage.map(\.shardID)))
+                configuredShardIDs: Set(configuration.roomShardStorage.map(\.shardID)),
+                batchWaitMilliseconds: Int64(max(
+                    configuration.directRoomLogAppendBatchMaximumDelayMilliseconds,
+                    configuration.directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds ?? 0,
+                    configuration.readReceiptBatchMaximumDelayMilliseconds)))
             let committedHybridGroupEvents = V2CommittedHybridGroupEventObserver(
                 directRoomLogEventCache: directRoomLogEventCache)
             let actorBatchConfiguration = V2SendMessageAdmissionBatcher.Configuration(

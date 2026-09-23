@@ -30,7 +30,18 @@ struct V2RoomTurnLaneTests {
         #expect(observed.starts == [[0], [1, 2], [3], [4]])
         #expect(observed.maximumConcurrentTurns == 1)
         #expect(observed.ordinals == [1, 2, 3, 4, 5])
-        #expect(observed.expiredBatchDeadlines.allSatisfy { $0 })
+        #expect(observed.expiredBatchDeadlines.count == 2)
+        try await fixture.waitForBudget(0)
+    }
+
+    @Test("a fresh send leaves its collection window to the shared owner batcher")
+    func collectionWindowRemainsForOwnerBatcher() async throws {
+        let fixture = try Fixture(configuration: .init(batchWaitMilliseconds: 1_000))
+        let send = fixture.submit(.init(id: 1, send: true))
+        #expect(try await send.value == 1)
+        let observed = await fixture.executor.observations()
+        #expect(observed.starts == [[1]])
+        #expect(observed.expiredBatchDeadlines == [false])
         try await fixture.waitForBudget(0)
     }
 

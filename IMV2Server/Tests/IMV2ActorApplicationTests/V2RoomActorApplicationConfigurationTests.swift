@@ -30,10 +30,19 @@ struct V2RoomActorApplicationConfigurationTests {
         for (name, isHost) in [("gateway", true), ("account", false)] {
             let configuration = try V2RoomActorApplicationConfiguration(
                 environment: FileEnvironment(path: root + "/" + name + "/configuration.json"),
-                hostsRooms: isHost, configuredShardIDs: ["rooms-primary"])
+                hostsRooms: isHost, configuredShardIDs: ["rooms-primary"], batchWaitMilliseconds: 25)
             #expect((configuration.hostIdentity != nil) == isHost)
             #expect(configuration.signer.serviceID.rawValue == name)
             #expect(configuration.discovery.peers.count == 1)
+            #expect(configuration.runtime.batchWait.rawValue == 25)
+            for invalidDelay: Int64 in [0, 26] {
+                #expect(throws: V2RoomActorApplicationConfigurationError.invalidConfiguration) {
+                    try V2RoomActorApplicationConfiguration(
+                        environment: FileEnvironment(path: root + "/" + name + "/configuration.json"),
+                        hostsRooms: isHost, configuredShardIDs: ["rooms-primary"],
+                        batchWaitMilliseconds: invalidDelay)
+                }
+            }
         }
     }
 
