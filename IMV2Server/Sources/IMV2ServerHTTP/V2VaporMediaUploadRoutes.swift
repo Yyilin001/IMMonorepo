@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// 媒体上传目标请求体。
 ///
@@ -51,7 +52,7 @@ public struct V2VaporMediaUploadRoutes: Sendable {
     public func register(on routes: RoutesBuilder) {
         routes.post("v2", "media", "uploads") { request async throws -> Response in
             let identity = try await authenticate(request)
-            let input = try request.content.decode(V2MediaUploadTargetHTTPRequest.self)
+            let input = try await request.content.decode(V2MediaUploadTargetHTTPRequest.self)
             let target: V2MediaUploadTargetEnvelope
             do {
                 target = try await handler.uploadTarget(
@@ -104,9 +105,9 @@ public struct V2VaporMediaUploadRoutes: Sendable {
             } catch {
                 throw Abort(.serviceUnavailable)
             }
-            var headers = HTTPHeaders()
-            headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-            headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+            var headers = HTTPFields()
+            headers[.cacheControl] = "no-store"
+            headers[.v2Pragma] = "no-cache"
             return .init(status: .noContent, headers: headers)
         }
 
@@ -139,10 +140,10 @@ public struct V2VaporMediaUploadRoutes: Sendable {
     /// 构造 no-store JSON 响应。
     private func noStoreJSONResponse<Payload: Encodable>(_ payload: Payload) throws -> Response {
         let data = try JSONEncoder().encode(payload)
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: .contentType, value: "application/json")
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+        var headers = HTTPFields()
+        headers[.contentType] = "application/json"
+        headers[.cacheControl] = "no-store"
+        headers[.v2Pragma] = "no-cache"
         return .init(status: .ok, headers: headers, body: .init(data: data))
     }
 }

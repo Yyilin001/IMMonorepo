@@ -1,3 +1,4 @@
+import HTTPTypes
 import Foundation
 import IMV2Core
 import IMV2Server
@@ -11,28 +12,29 @@ struct V2AuthenticatedAccountMiddlewareTests {
     @Test("authentication distinguishes credential rejection from dependency failure")
     func mapsAuthenticationFailures() async throws {
         for fixture in [
-            (AccountAuthenticationFixture.rejected, HTTPResponseStatus.unauthorized),
+            (AccountAuthenticationFixture.rejected, HTTPResponse.Status.unauthorized),
             (.unavailable, .serviceUnavailable),
         ] {
-            let app = try await Application.make(.testing)
-            defer { Task { try? await app.asyncShutdown() } }
+            let app = try await Application(.testing)
+            defer { Task { try? await app.shutdown() } }
             V2RedactedHTTPMiddlewareConfiguration.install(on: app)
             let routes = app.grouped(V2AuthenticatedAccountMiddleware(
                 authenticator: AccountAuthenticationFake(fixture: fixture.0)
             ))
             routes.get("v2", "profile", "me") { _ in "unreachable" }
 
-            try await app.testing().test(.GET, "v2/profile/me", beforeRequest: authenticatedHeaders) { response async in
+            try await app.testing { client in
+                let response = try await client.send(.get, to: "v2/profile/me", beforeSend: authenticatedHeaders)
                 #expect(response.status == fixture.1)
-                #expect(response.headers.first(name: .cacheControl) == "no-store")
+                #expect(response.headers[.cacheControl] == "no-store")
             }
         }
     }
 
     @Test("authenticated batch and mutation endpoints consume weighted scoped budgets")
     func chargesEndpointCosts() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let limiter = AccountRateLimitRecorder(result: .allowed)
         let routes = app
             .grouped(V2AuthenticatedAccountMiddleware(
@@ -50,17 +52,18 @@ struct V2AuthenticatedAccountMiddlewareTests {
         routes.put("v2", "push-endpoint", "intent") { _ in Response(status: .ok) }
 
         for (method, path) in [
-            (HTTPMethod.POST, "v2/profile-views/batch"),
-            (.PUT, "v2/profile/me"),
-            (.GET, "v2/profile-presentations/contact-aliases?limit=500"),
-            (.GET, "v2/devices?page_size=100"),
-            (.GET, "v2/public-identities/me"),
-            (.GET, "v2/public-identities/resolve?handle=alice"),
-            (.GET, "v2/push-endpoint/session"),
-            (.POST, "v2/push-endpoint/session"),
-            (.PUT, "v2/push-endpoint/intent"),
+            (HTTPRequest.Method.post, "v2/profile-views/batch"),
+            (.put, "v2/profile/me"),
+            (.get, "v2/profile-presentations/contact-aliases?limit=500"),
+            (.get, "v2/devices?page_size=100"),
+            (.get, "v2/public-identities/me"),
+            (.get, "v2/public-identities/resolve?handle=alice"),
+            (.get, "v2/push-endpoint/session"),
+            (.post, "v2/push-endpoint/session"),
+            (.put, "v2/push-endpoint/intent"),
         ] {
-            try await app.testing().test(method, path, beforeRequest: authenticatedHeaders) { response async in
+            try await app.testing { client in
+                let response = try await client.send(method, to: URI(string: path), beforeSend: authenticatedHeaders)
                 #expect(response.status == .ok)
             }
         }
@@ -73,8 +76,8 @@ struct V2AuthenticatedAccountMiddlewareTests {
 
     @Test("authenticated limiter returns a no-store retry interval")
     func rejectsExhaustedBudget() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let routes = app
             .grouped(V2AuthenticatedAccountMiddleware(
                 authenticator: AccountAuthenticationFake(fixture: .accepted)
@@ -84,20 +87,18 @@ struct V2AuthenticatedAccountMiddlewareTests {
             ))
         routes.get("v2", "devices") { _ in "unreachable" }
 
-        try await app.testing().test(.GET, "v2/devices", beforeRequest: authenticatedHeaders) { response async in
+        try await app.testing { client in
+            let response = try await client.send(.get, to: "v2/devices", beforeSend: authenticatedHeaders)
             #expect(response.status == .tooManyRequests)
-            #expect(response.headers.first(name: "Retry-After") == "7")
-            #expect(response.headers.first(name: .cacheControl) == "no-store")
+            #expect(response.headers[.retryAfter] == "7")
+            #expect(response.headers[.cacheControl] == "no-store")
         }
     }
 }
 
-private func authenticatedHeaders(_ request: inout TestingHTTPRequest) throws {
+private func authenticatedHeaders(_ request: inout ClientRequest) throws {
     request.headers.bearerAuthorization = .init(token: "opaque")
-    request.headers.replaceOrAdd(
-        name: "X-IM-Device-ID",
-        value: "00000000-0000-0000-0000-000000000902"
-    )
+    request.headers[HTTPField.Name("X-IM-Device-ID")!] = "00000000-0000-0000-0000-000000000902"
 }
 
 private enum AccountAuthenticationFixture: Sendable {

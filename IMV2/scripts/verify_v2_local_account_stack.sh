@@ -223,8 +223,8 @@ peer_user_id="$(printf '%s' "${peer_issued_credentials}" | jq -er '.userID')"
 
 # Exercise the real framed gateway protocol after the HTTPS account issuer has
 # produced two independent device credentials. The sender-side probe opens the
-# unique direct room and accepts a message; the recipient-side probe observes
-# that same message through its own SyncPull. Both run in the gateway container
+# unique direct room and accepts a message; the recipient-side probe reads
+# that same room-log event and checks its message ID. Both run in the gateway container
 # so they trust only the local Caddy root, and neither prints credentials or
 # identities or becomes a gateway debug endpoint.
 phase="authenticated V2 direct-message send"
@@ -241,7 +241,7 @@ test -n "${gateway_room_id}" && test -n "${gateway_message_id}" && test -z "${ga
   exit 1
 }
 
-phase="authenticated V2 recipient sync"
+phase="authenticated V2 recipient room-log delivery"
 gateway_receive_output="$(compose \
   exec -T \
   --env 'IM_V2_GATEWAY_PROBE_MODE=receiveDirectMessage' \
@@ -250,8 +250,8 @@ gateway_receive_output="$(compose \
   --env "IM_V2_GATEWAY_PROBE_EXPECTED_ROOM_ID=${gateway_room_id}" \
   --env "IM_V2_GATEWAY_PROBE_EXPECTED_MESSAGE_ID=${gateway_message_id}" \
   gateway /workspace/IMV2Server/.build/release/IMV2LocalGatewayProbe)"
-test "${gateway_receive_output}" = 'local V2 gateway direct message sync: verified' || {
-  printf 'local V2 gateway recipient sync probe returned an unexpected result\n' >&2
+test "${gateway_receive_output}" = 'local V2 gateway direct room-log delivery: verified' || {
+  printf 'local V2 gateway recipient room-log probe returned an unexpected result\n' >&2
   exit 1
 }
 
@@ -407,36 +407,38 @@ fi
 phase="private metrics probe"
 metrics_response="$(compose \
   exec -T gateway bash -lc 'exec 3<>/dev/tcp/127.0.0.1/9464; printf "GET /metrics HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n" >&3; cat <&3')"
-printf '%s\n' "${metrics_response}" | grep -Fq 'HTTP/1.1 200 OK' || {
+grep -Fq 'HTTP/1.1 200 OK' <<< "${metrics_response}" || {
   printf 'V2 private metrics listener did not return HTTP 200\n' >&2
   exit 1
 }
-printf '%s\n' "${metrics_response}" | grep -Fq 'cache-control: no-store, no-cache' || {
+grep -Fiq 'cache-control: no-store, no-cache' <<< "${metrics_response}" || {
   printf 'V2 private metrics listener omitted no-store cache control\n' >&2
   exit 1
 }
 for metric in \
   'im_v2_durable_work_metrics_available ' \
-  'im_v2_room_outbox_backlog{state="ready"}' \
-  'im_v2_room_outbox_backlog{state="leased"}' \
-  'im_v2_room_outbox_backlog{state="scheduled"}' \
-  'im_v2_room_outbox_backlog{state="paused"}' \
+  'im_v2_user_state_event_backlog{state="ready"}' \
+  'im_v2_user_state_event_backlog{state="leased"}' \
+  'im_v2_user_state_event_backlog{state="scheduled"}' \
+  'im_v2_user_state_event_backlog{state="paused"}' \
   'im_v2_direct_profile_update_backlog{state="ready"}' \
   'im_v2_direct_profile_update_backlog{state="leased"}' \
-  'im_v2_fanout_delivery_backlog{state="ready"}' \
-  'im_v2_fanout_delivery_backlog{state="leased"}' \
-  'im_v2_fanout_delivery_backlog{state="scheduled"}' \
-  'im_v2_fanout_delivery_backlog{state="paused"}' \
+  'im_v2_read_receipt_preference_propagation_backlog{state="ready"}' \
+  'im_v2_read_receipt_preference_propagation_backlog{state="leased"}' \
+  'im_v2_read_receipt_preference_propagation_backlog{state="scheduled"}' \
+  'im_v2_read_receipt_preference_propagation_backlog{state="paused"}' \
   'im_v2_content_review_backlog{state="ready"}' \
   'im_v2_content_review_backlog{state="leased"}' \
   'im_v2_content_review_backlog{state="scheduled"}' \
   'im_v2_content_review_backlog{state="paused"}' \
+  'im_v2_media_scan_backlog{state="ready"}' \
+  'im_v2_media_purge_backlog{state="ready"}' \
   'im_v2_user_sync_log_estimated_rows ' \
   'im_v2_user_sync_log_relation_bytes ' \
   'im_v2_push_wake_backlog{state="ready"}' \
   'im_v2_push_wake_backlog{state="leased"}' \
   'im_v2_push_wake_backlog{state="suppressed"}'; do
-  printf '%s\n' "${metrics_response}" | grep -Fq "${metric}" || {
+  grep -Fq "${metric}" <<< "${metrics_response}" || {
     printf 'V2 private metrics listener omitted required metric: %s\n' "${metric}" >&2
     exit 1
   }
@@ -445,26 +447,26 @@ done
 # The per-gateway revocation backlog is intentionally identified by the
 # scrape target, never a Prometheus node/device/user label. A label here
 # would disclose topology or identity and create cardinality pressure.
-if ! printf '%s\n' "${metrics_response}" | grep -Eq '^im_v2_device_revocation_events_pending [0-9]+$'; then
+if ! grep -Eq '^im_v2_device_revocation_events_pending [0-9]+$' <<< "${metrics_response}"; then
   printf 'V2 private metrics listener omitted the device-revocation backlog sample\n' >&2
   exit 1
 fi
-if printf '%s\n' "${metrics_response}" | grep -Fq 'im_v2_device_revocation_events_pending{'; then
+if grep -Fq 'im_v2_device_revocation_events_pending{' <<< "${metrics_response}"; then
   printf 'V2 private metrics listener exposed a label on device-revocation backlog\n' >&2
   exit 1
 fi
-if ! printf '%s\n' "${metrics_response}" | grep -Eq '^im_v2_revoked_device_projection_cleanup_events_pending [0-9]+$'; then
+if ! grep -Eq '^im_v2_revoked_device_projection_cleanup_events_pending [0-9]+$' <<< "${metrics_response}"; then
   printf 'V2 private metrics listener omitted the revoked-device projection cleanup sample\n' >&2
   exit 1
 fi
-if printf '%s\n' "${metrics_response}" | grep -Fq 'im_v2_revoked_device_projection_cleanup_events_pending{'; then
+if grep -Fq 'im_v2_revoked_device_projection_cleanup_events_pending{' <<< "${metrics_response}"; then
   printf 'V2 private metrics listener exposed a label on revoked-device projection cleanup\n' >&2
   exit 1
 fi
 
 printf 'local account HTTPS validation: 400\n'
 printf 'local password registration and device credential issuance: 200\n'
-printf 'local V2 gateway direct chat: auth, open, accept, recipient sync verified\n'
+printf 'local V2 gateway direct chat: auth, open, accept, recipient room-log delivery verified\n'
 printf 'local password failure limit: 5 x 401, then 429 no-store with Retry-After\n'
 printf 'local Push endpoint register/remove: 204, no-store\n'
 printf 'local loopback operator account disable: 200 no-store, then access/refresh 401 and prior assertion 403\n'

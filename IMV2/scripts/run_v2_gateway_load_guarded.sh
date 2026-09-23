@@ -3,7 +3,8 @@ set -Eeuo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
-binary="${repo_root}/IMV2Server/.build/release/IMV2GatewayLoadGenerator"
+binary_directory="$(swift build --disable-automatic-resolution -c release --package-path "${repo_root}/IMV2Server" --show-bin-path)"
+binary="${binary_directory}/IMV2GatewayLoadGenerator"
 maximum_rss_mb="${IM_V2_LOAD_LOCAL_MAX_RSS_MB:-2048}"
 maximum_cpu_percent="${IM_V2_LOAD_LOCAL_MAX_CPU_PERCENT:-500}"
 maximum_cpu_samples="${IM_V2_LOAD_LOCAL_MAX_CPU_SAMPLES:-5}"

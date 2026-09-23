@@ -1,5 +1,12 @@
 import FluentPostgresDriver
 import Foundation
+import FluentKit
+import Logging
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 import IMV2Server
 import IMV2ServerHTTP
 import NIOPosix
@@ -10,22 +17,35 @@ import Vapor
 /// 它刻意不提供公网 TLS 网关监听、账号认证因子路由、媒体边缘或指标端点。
 @main
 enum IMV2OperatorServerApp {
-    static func main() async throws {
+    static func main() async {
+        LoggingSystem.bootstrap(StreamLogHandler.standardError)
+        let logger = Logger(label: "imv2.operator")
+        do {
+            try await withLogger(logger) { _ in try await run(logger: logger) }
+        } catch {
+            logger.error("IM V2 operator startup or shutdown failed")
+            exit(EXIT_FAILURE)
+        }
+    }
+
+    private static func run(logger: Logger) async throws {
         V2ProcessTerminationSignal.install()
         let configuration = try V2OperatorReplayRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
         let applicationEventLoops = MultiThreadedEventLoopGroup(
             numberOfThreads: configuration.databasePolicy.eventLoopThreads
         )
+        let resources = V2DatabaseResources(eventLoopGroup: applicationEventLoops, logger: logger)
         let app: Application
         do {
-            app = try await Application.make(.production, .shared(applicationEventLoops))
+            app = try await V2HTTPService.makeApplication(host: configuration.listener.host, port: configuration.listener.port)
         } catch {
+            try? await resources.shutdown()
             try? await applicationEventLoops.shutdownGracefully()
             throw error
         }
         V2RedactedHTTPMiddlewareConfiguration.install(on: app)
         do {
-            app.databases.use(
+            resources.databases.use(
                 try postgresDatabaseConfiguration(
                     url: configuration.databaseURL,
                     policy: configuration.databasePolicy
@@ -36,8 +56,8 @@ enum IMV2OperatorServerApp {
             guard databaseEventLoops.count == configuration.databasePolicy.eventLoopThreads else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
-            let controlPool = try V2ApplicationEventLoopDatabasePool(
-                application: app,
+            let controlPool = try V2EventLoopDatabasePool(
+                databases: resources.databases, logger: logger,
                 identifier: .psql,
                 eventLoops: databaseEventLoops
             )
@@ -55,9 +75,9 @@ enum IMV2OperatorServerApp {
             var authorizationResolutionDatabases: [String: any Database] = [:]
             for (index, url) in configuration.directAuthorizationResolutionDatabaseURLs.enumerated() {
                 let id = DatabaseID(string: "operator-authorization-resolution-\(index)")
-                app.databases.use(try postgresDatabaseConfiguration(url: url, policy: configuration.databasePolicy,
+                resources.databases.use(try postgresDatabaseConfiguration(url: url, policy: configuration.databasePolicy,
                     maximumConnectionsPerEventLoop: 1), as: id)
-                let pool = try V2ApplicationEventLoopDatabasePool(application: app, identifier: id, eventLoops: databaseEventLoops)
+                let pool = try V2EventLoopDatabasePool(databases: resources.databases, logger: logger, identifier: id, eventLoops: databaseEventLoops)
                 for member in pool.eventLoopDatabases {
                     try await V2PostgresSessionReadiness.verify(database: member, policy: configuration.databasePolicy)
                 }
@@ -85,15 +105,15 @@ enum IMV2OperatorServerApp {
                     shardDatabase = existing
                 } else {
                     let identifier = DatabaseID(string: "user-shard-pool-\(shardDatabasesByURL.count)")
-                    app.databases.use(
+                    resources.databases.use(
                         try postgresDatabaseConfiguration(
                             url: storage.databaseURL,
                             policy: configuration.databasePolicy
                         ),
                         as: identifier
                     )
-                    let shardPool = try V2ApplicationEventLoopDatabasePool(
-                        application: app,
+                    let shardPool = try V2EventLoopDatabasePool(
+                        databases: resources.databases, logger: logger,
                         identifier: identifier,
                         eventLoops: databaseEventLoops
                     )
@@ -118,8 +138,8 @@ enum IMV2OperatorServerApp {
                     ownerDatabase = existing
                 } else {
                     let identifier = DatabaseID(string: "room-owner-pool-\(shardDatabasesByURL.count)")
-                    app.databases.use(try postgresDatabaseConfiguration(url: storage.databaseURL, policy: configuration.databasePolicy), as: identifier)
-                    let pool = try V2ApplicationEventLoopDatabasePool(application: app, identifier: identifier, eventLoops: databaseEventLoops)
+                    resources.databases.use(try postgresDatabaseConfiguration(url: storage.databaseURL, policy: configuration.databasePolicy), as: identifier)
+                    let pool = try V2EventLoopDatabasePool(databases: resources.databases, logger: logger, identifier: identifier, eventLoops: databaseEventLoops)
                     for member in pool.eventLoopDatabases {
                         try await V2PostgresSessionReadiness.verify(database: member, policy: configuration.databasePolicy)
                     }
@@ -135,8 +155,8 @@ enum IMV2OperatorServerApp {
             let coLocatedControlBuckets = Set(configuration.userShardStorage.compactMap { storage in
                 storage.databaseURL == configuration.databaseURL && storage.schema == "im_v2" ? storage.bucket : nil
             })
-            app.http.server.configuration.hostname = configuration.listener.host
-            app.http.server.configuration.port = configuration.listener.port
+            app.serverConfiguration.hostname = configuration.listener.host
+            app.serverConfiguration.port = configuration.listener.port
             V2VaporDurableWorkOperatorReplayRoutes(
                 authenticator: configuration.authenticator,
                 service: .init(
@@ -166,16 +186,20 @@ enum IMV2OperatorServerApp {
                     capabilityProfile: configuration.capabilityProfile
                 )
             ).register(on: app)
-            try await app.startup()
-            app.logger.notice("IM V2 durable-work operator service bound", metadata: [
+            try await V2HTTPService.withRunning(app, logger: logger,
+                waitForShutdown: V2ProcessTerminationSignal.wait) { shutdown in
+            logger.notice("IM V2 durable-work operator service bound", metadata: [
                 "host": "\(configuration.listener.host)",
                 "port": "\(configuration.listener.port)",
             ])
-            await V2ProcessTerminationSignal.wait()
-            try await app.asyncShutdown()
+                await shutdown.wait()
+            }
+            try await app.shutdown()
+            try await resources.shutdown()
             try await applicationEventLoops.shutdownGracefully()
         } catch {
-            try? await app.asyncShutdown()
+            try? await app.shutdown()
+            try? await resources.shutdown()
             try? await applicationEventLoops.shutdownGracefully()
             throw error
         }

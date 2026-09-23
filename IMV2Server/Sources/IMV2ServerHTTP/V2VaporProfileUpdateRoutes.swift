@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// 个人资料更新要求携带版本号与幂等 ID，并把头像替换与其他字段更新放在同一原子事务中处理。
 public struct V2VaporProfileUpdateRoutes: Sendable {
@@ -41,7 +42,7 @@ public struct V2VaporProfileUpdateRoutes: Sendable {
         }
         routes.put("v2", "profile", "me") { request async throws -> Response in
             let actor = try await authenticate(request)
-            let input = try request.content.decode(V2ProfileUpdateHTTPRequest.self)
+            let input = try await request.content.decode(V2ProfileUpdateHTTPRequest.self)
             let command: V2ProfileUpdateCommand
             do {
                 guard let expectedRevision = V2ProfileRevision(rawValue: input.expectedRevision) else {
@@ -102,12 +103,12 @@ public struct V2VaporProfileUpdateRoutes: Sendable {
     ///   - result: 要序列化的响应体。
     ///   - status: HTTP 状态码，默认 `.ok`。
     /// - Returns: 已设置 `content-type`、`cache-control`、`pragma` 的响应对象。
-    private func noStoreJSONResponse(_ result: V2ProfileUpdateHTTPResponse, status: HTTPResponseStatus = .ok) throws -> Response {
+    private func noStoreJSONResponse(_ result: V2ProfileUpdateHTTPResponse, status: HTTPResponse.Status = .ok) throws -> Response {
         let data = try JSONEncoder().encode(result)
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: .contentType, value: "application/json")
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+        var headers = HTTPFields()
+        headers[.contentType] = "application/json"
+        headers[.cacheControl] = "no-store"
+        headers[.v2Pragma] = "no-cache"
         return .init(status: status, headers: headers, body: .init(data: data))
     }
 }

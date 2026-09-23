@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// 群邀请与入群申请的 HTTP 路由入口。
 ///
@@ -35,7 +36,7 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
     public func register(on routes: RoutesBuilder) {
         routes.post("v2", "group-invites") { request async throws -> Response in
             let actor = try await authenticate(request)
-            let body = try request.content.decode(CreateBody.self)
+            let body = try await request.content.decode(CreateBody.self)
             guard let room = try? RoomID(body.roomID), let operation = try? GroupInviteOperationID(body.operationID) else { throw Abort(.badRequest) }
             let link = try await mapErrors {
                 try await invitations.create(.init(roomID: room, actorUserID: actor.userID, operationID: operation, lifetime: TimeInterval(body.lifetimeSeconds), maximumApprovedUses: body.maximumApprovedUses))
@@ -51,7 +52,7 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
 
         routes.post("v2", "group-invites", ":inviteID", "revoke") { request async throws -> Response in
             let actor = try await authenticate(request)
-            let body = try request.content.decode(RevokeBody.self)
+            let body = try await request.content.decode(RevokeBody.self)
             guard let rawInvite = request.parameters.get("inviteID"), let invite = try? GroupInviteID(rawInvite), let room = try? RoomID(body.roomID), let operation = try? GroupInviteOperationID(body.operationID) else { throw Abort(.badRequest) }
             try await mapErrors { try await invitations.revoke(inviteID: invite, roomID: room, actorUserID: actor.userID, operationID: operation) }
             return noContentResponse()
@@ -59,7 +60,7 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
 
         routes.post("v2", "group-invites", "preview") { request async throws -> Response in
             let actor = try await authenticate(request)
-            let body = try request.content.decode(TokenBody.self)
+            let body = try await request.content.decode(TokenBody.self)
             guard let secret = try? V2GroupInviteSecret(body.token) else { throw Abort(.badRequest) }
             guard let preview = try await mapErrors({ try await invitations.preview(secret: secret, applicantUserID: actor.userID) }) else { throw Abort(.notFound) }
             return try response(PreviewResponse(preview))
@@ -67,7 +68,7 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
 
         routes.post("v2", "group-join-requests") { request async throws -> Response in
             let actor = try await authenticate(request)
-            let body = try request.content.decode(SubmitBody.self)
+            let body = try await request.content.decode(SubmitBody.self)
             guard let secret = try? V2GroupInviteSecret(body.token), let operation = try? GroupJoinRequestOperationID(body.operationID) else { throw Abort(.badRequest) }
             switch try await mapErrors({ try await invitations.submit(.init(applicantUserID: actor.userID, operationID: operation, secret: secret, note: body.note)) }) {
             case .submitted(let value): return try response(SubmissionResponse(kind: "submitted", request: RequestResponse(value), preview: nil))
@@ -101,7 +102,7 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
 
         routes.post("v2", "group-join-requests", ":requestID", "cancel") { request async throws -> Response in
             let actor = try await authenticate(request)
-            let body = try request.content.decode(CancelBody.self)
+            let body = try await request.content.decode(CancelBody.self)
             guard let rawID = request.parameters.get("requestID"), let requestID = try? GroupJoinRequestID(rawID),
                   let room = try? RoomID(body.roomID) else { throw Abort(.badRequest) }
             let value = try await mapErrors {
@@ -112,14 +113,14 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
 
         routes.post("v2", "group-join-requests", ":requestID", "decision") { request async throws -> Response in
             let actor = try await authenticate(request)
-            let body = try request.content.decode(DecisionBody.self)
+            let body = try await request.content.decode(DecisionBody.self)
             guard let rawID = request.parameters.get("requestID"), let requestID = try? GroupJoinRequestID(rawID), let room = try? RoomID(body.roomID), let operation = try? GroupJoinDecisionOperationID(body.operationID), let decision = V2GroupJoinDecision(rawValue: body.decision) else { throw Abort(.badRequest) }
             switch try await mapErrors({ try await invitations.decide(.init(roomID: room, requestID: requestID, reviewerUserID: actor.userID, operationID: operation, decision: decision)) }) {
             case .approved(let value): return try response(DecisionResponse(kind: "approved", request: RequestResponse(value)))
             case .rejected(let value): return try response(DecisionResponse(kind: "rejected", request: RequestResponse(value)))
             case .alreadyDecided(let value): return try response(DecisionResponse(kind: "already_decided", request: RequestResponse(value)))
             case .conflict: throw Abort(.conflict)
-            case .memberLimitReached: throw Abort(.unprocessableEntity, reason: "member_limit_reached")
+            case .memberLimitReached: throw Abort(.unprocessableContent, reason: "member_limit_reached")
             case .rateLimited(let seconds): return retryAfter(seconds)
             case .unavailable: throw unavailableResponseError()
             }
@@ -200,15 +201,15 @@ private struct DecisionResponse: Content { let kind: String; let request: Reques
 /// 统一 JSON 编码 helper，统一加 no-store 响应头。
 private func response<T: Encodable>(_ value: T) throws -> Response {
     let data = try JSONEncoder().encode(value)
-    var headers = HTTPHeaders(); headers.replaceOrAdd(name: .contentType, value: "application/json"); headers.replaceOrAdd(name: .cacheControl, value: "no-store"); headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+    var headers = HTTPFields(); headers[.contentType] = "application/json"; headers[.cacheControl] = "no-store"; headers[.v2Pragma] = "no-cache"
     return .init(status: .ok, headers: headers, body: .init(data: data))
 }
 
 /// 无内容响应，使用 no-store 禁止缓存。
-private func noContentResponse() -> Response { var headers = HTTPHeaders(); headers.replaceOrAdd(name: .cacheControl, value: "no-store"); return .init(status: .noContent, headers: headers) }
+private func noContentResponse() -> Response { var headers = HTTPFields(); headers[.cacheControl] = "no-store"; return .init(status: .noContent, headers: headers) }
 
 /// 限流响应。
-private func retryAfter(_ seconds: Int) -> Response { var headers = HTTPHeaders(); headers.replaceOrAdd(name: .cacheControl, value: "no-store"); headers.replaceOrAdd(name: "Retry-After", value: String(max(1, seconds))); return .init(status: .tooManyRequests, headers: headers) }
+private func retryAfter(_ seconds: Int) -> Response { var headers = HTTPFields(); headers[.cacheControl] = "no-store"; headers[.retryAfter] = String(max(1, seconds)); return .init(status: .tooManyRequests, headers: headers) }
 
 /// 统一错误映射工具，隐藏底层实现差异，确保异常码边界稳定。
 private func mapErrors<T>(_ operation: () async throws -> T) async throws -> T {
@@ -236,7 +237,7 @@ private func mapErrors<T>(_ operation: () async throws -> T) async throws -> T {
 
 /// 统一返回服务不可用错误，并带 no-store/no-cache 头。
 private func unavailableResponseError() -> Abort {
-    Abort(.serviceUnavailable, headers: ["Cache-Control": "no-store", "Pragma": "no-cache"])
+    Abort(.serviceUnavailable, headers: [.cacheControl: "no-store", .v2Pragma: "no-cache"])
 }
 
 /// 时间转换为毫秒时间戳（服务接口统一使用 Int64 毫秒）。

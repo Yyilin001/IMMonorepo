@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// 仅返回版本元信息，边缘不回传供应商提供方内部素材。
 public struct V2PushIntentEpochHTTPResponse: Content, Sendable {
@@ -69,7 +70,7 @@ public struct V2VaporPushIntentRoutes: Sendable {
         routes.post("v2", "push-endpoint", "session") { request async -> Response in
             await respond {
                 let identity = try await request.v2AuthenticatedAccountIdentity(using: authenticator)
-                let body = try request.content.decode(V2PushIntentClaimHTTPRequest.self)
+                let body = try await request.content.decode(V2PushIntentClaimHTTPRequest.self)
                 let claim = try V2PushIntentSessionClaim(requestID: body.requestID, expectedEpoch: body.expectedEpoch)
                 let epoch = try await store.claimIntentSession(actorUserID: identity.userID, deviceID: identity.deviceID, claim: claim, now: now())
                 return try epochResponse(epoch)
@@ -78,7 +79,7 @@ public struct V2VaporPushIntentRoutes: Sendable {
         routes.put("v2", "push-endpoint", "intent") { request async -> Response in
             await respond {
                 let identity = try await request.v2AuthenticatedAccountIdentity(using: authenticator)
-                let body = try request.content.decode(V2PushIntentHTTPRequest.self)
+                let body = try await request.content.decode(V2PushIntentHTTPRequest.self)
                 let version = try V2PushIntentVersion(epoch: body.epoch, revision: body.revision)
                 let intent: V2PushEndpointIntent
                 if body.enabled {
@@ -96,18 +97,18 @@ public struct V2VaporPushIntentRoutes: Sendable {
 
     /// 构造 epoch 响应。
     private func epochResponse(_ epoch: UInt64) throws -> Response {
-        let response = Response(status: .ok)
+        var response = Response(status: .ok)
         try response.content.encode(V2PushIntentEpochHTTPResponse(epoch: epoch))
         return response
     }
 
     /// 统一错误转换包装，保证最终都带 no-store 头。
     private func respond(_ operation: () async throws -> Response) async -> Response {
-        let response: Response
+        var response: Response
         do { response = try await operation() }
         catch { response = v2PushIntentErrorResponse(error) }
-        response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        response.headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+        response.headers[.cacheControl] = "no-store"
+        response.headers[.v2Pragma] = "no-cache"
         return response
     }
 }
@@ -115,7 +116,7 @@ public struct V2VaporPushIntentRoutes: Sendable {
 /// 按错误类型映射固定诊断码，避免返回内部异常信息与请求内容。
 func v2PushIntentErrorResponse(_ error: any Error) -> Response {
     // 按错误类型映射为固定错误码。
-    let status: HTTPResponseStatus
+    let status: HTTPResponse.Status
     let code: String
     switch error {
     case V2PushDeviceEndpointError.staleIntent: status = .conflict; code = "stale_intent"
@@ -128,5 +129,5 @@ func v2PushIntentErrorResponse(_ error: any Error) -> Response {
         status = abort.status; code = "request_rejected"
     default: status = .serviceUnavailable; code = "unavailable"
     }
-    return Response(status: status, headers: ["Content-Type": "application/json", "Cache-Control": "no-store", "Pragma": "no-cache"], body: .init(string: "{\"code\":\"\(code)\"}"))
+    return Response(status: status, headers: [.contentType: "application/json", .cacheControl: "no-store", .v2Pragma: "no-cache"], body: .init(string: "{\"code\":\"\(code)\"}"))
 }

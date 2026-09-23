@@ -1,5 +1,5 @@
 import AsyncKit
-import Fluent
+import FluentKit
 import Foundation
 import PostgresNIO
 

@@ -1,5 +1,6 @@
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// 注册唯一的 HTTP 指标出口。
 ///
@@ -26,12 +27,9 @@ public enum V2VaporMetricsRoutes {
         runtimePressureMetrics: (any V2RuntimePressureMetricsSource)? = nil
     ) {
         app.get("metrics") { _ async -> Response in
-            let response = Response(status: .ok)
-            response.headers.replaceOrAdd(
-                name: .contentType,
-                value: "text/plain; version=0.0.4; charset=utf-8"
-            )
-            response.headers.replaceOrAdd(name: .cacheControl, value: "no-store, no-cache")
+            var response = Response(status: .ok)
+            response.headers[.contentType] = "text/plain; version=0.0.4; charset=utf-8"
+            response.headers[.cacheControl] = "no-store, no-cache"
             var document = await telemetry.renderPrometheus()
             if let connectionMetrics {
                 document += v2RenderPrometheusConnectionMetrics(await connectionMetrics.connectionMetricsSnapshot())

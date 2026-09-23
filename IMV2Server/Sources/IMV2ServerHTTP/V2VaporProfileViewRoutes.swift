@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// 用户资料视图查询路由。
 ///
@@ -28,7 +29,7 @@ public struct V2VaporProfileViewRoutes: Sendable {
     public func register(on routes: RoutesBuilder) {
         routes.post("v2", "profile-views", "batch") { request async throws -> Response in
             let actor = try await authenticate(request)
-            let input = try request.content.decode(V2ProfileViewBatchHTTPRequest.self)
+            let input = try await request.content.decode(V2ProfileViewBatchHTTPRequest.self)
             let keys: [V2ProfileViewLookupKey]
             do {
                 keys = try input.keys.map { try $0.lookupKey() }
@@ -51,10 +52,10 @@ public struct V2VaporProfileViewRoutes: Sendable {
     /// 统一 no-store JSON 响应。
     private func noStoreJSONResponse(_ result: V2ProfileViewBatchHTTPResponse) throws -> Response {
         let data = try JSONEncoder().encode(result)
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: .contentType, value: "application/json")
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+        var headers = HTTPFields()
+        headers[.contentType] = "application/json"
+        headers[.cacheControl] = "no-store"
+        headers[.v2Pragma] = "no-cache"
         return .init(status: .ok, headers: headers, body: .init(data: data))
     }
 }

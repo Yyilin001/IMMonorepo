@@ -1,3 +1,4 @@
+import HTTPTypes
 import Foundation
 import IMV2Core
 import IMV2Server
@@ -10,8 +11,8 @@ import VaporTesting
 struct V2VaporDurableWorkOperatorReplayRoutesTests {
     @Test("authorized operator replay is no-store, single-target, and idempotent")
     func authorizedReplay() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let token = Data(repeating: 9, count: 32).base64EncodedString()
         let store = OperatorReplayRouteStore()
         V2VaporDurableWorkOperatorReplayRoutes(
@@ -28,14 +29,15 @@ struct V2VaporDurableWorkOperatorReplayRoutesTests {
             reason: .dependencyRecovered
         )
 
-        try await app.testing().test(.POST, "internal/v2/durable-work/replay", headers: ["Authorization": "Bearer \(token)"], beforeRequest: { vaporRequest in
+        try await app.testing { client in
+            let response = try await client.send(.post, headers: [.authorization: "Bearer \(token)"], to: "internal/v2/durable-work/replay", beforeSend: { vaporRequest in
             try vaporRequest.content.encode(request)
-        }) { response async in
+        })
             #expect(response.status == .ok)
-            #expect(response.headers.first(name: .cacheControl) == "no-store")
-            #expect(response.headers.first(name: "Pragma") == "no-cache")
+            #expect(response.headers[.cacheControl] == "no-store")
+            #expect(response.headers[.pragma] == "no-cache")
             var decoded: V2DurableWorkReplayHTTPResponse?
-            expectContent(V2DurableWorkReplayHTTPResponse.self, response) { decoded = $0 }
+            decoded = try await response.content.decode(V2DurableWorkReplayHTTPResponse.self)
             #expect(decoded?.operationID == request.operationID)
             #expect(decoded?.outcome == .requeued)
             #expect(decoded?.wasIdempotent == false)
@@ -47,8 +49,8 @@ struct V2VaporDurableWorkOperatorReplayRoutesTests {
 
     @Test("personal replay selects its configured source owner and never falls back to control")
     func sourceOwnerSelection() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let token = Data(repeating: 12, count: 32).base64EncodedString()
         let control = OperatorReplayRouteStore()
         let owner = OperatorReplayRouteStore()
@@ -60,18 +62,20 @@ struct V2VaporDurableWorkOperatorReplayRoutesTests {
             let single = V2DurableWorkReplayHTTPRequest(operationID: UUID(), targetKind: .userStateEvent,
                 sourceShardID: shard, sourceEventID: UUID().uuidString, targetUserID: UUID().uuidString,
                 projectionKind: "membership", reason: .dataRepaired)
-            try await app.testing().test(.POST, "internal/v2/durable-work/replay", headers: ["Authorization": "Bearer \(token)"], beforeRequest: { request in
+            try await app.testing { client in
+                let response = try await client.send(.post, headers: [.authorization: "Bearer \(token)"], to: "internal/v2/durable-work/replay", beforeSend: { request in
                 try request.content.encode(single)
-            }) { response async in
+            })
                 #expect(response.status == (shard == "room-a" ? .ok : .badRequest))
             }
             let batch = V2DurableWorkEventReplayHTTPRequest(operationID: UUID(), targetKind: .userStateEvent,
                 sourceShardID: shard, sourceEventID: UUID().uuidString, reason: .dataRepaired, limit: 10)
-            try await app.testing().test(.POST, "internal/v2/durable-work/replay-event", headers: ["Authorization": "Bearer \(token)"], beforeRequest: { request in
+            try await app.testing { client in
+                let response = try await client.send(.post, headers: [.authorization: "Bearer \(token)"], to: "internal/v2/durable-work/replay-event", beforeSend: { request in
                 try request.content.encode(batch)
-            }) { response async in
+            })
                 #expect(response.status == (shard == "room-a" ? .ok : .badRequest))
-                if shard == "room-a" { #expect(response.headers.first(name: .cacheControl) == "no-store") }
+                if shard == "room-a" { #expect(response.headers[.cacheControl] == "no-store") }
             }
         }
         #expect(await owner.commands().count == 1)
@@ -80,9 +84,10 @@ struct V2VaporDurableWorkOperatorReplayRoutesTests {
         #expect(await control.events().isEmpty)
         let invalid = V2DurableWorkReplayHTTPRequest(operationID: UUID(), targetKind: .mediaScan,
             sourceShardID: "room-a", sourceEventID: UUID().uuidString, reason: .dataRepaired)
-        try await app.testing().test(.POST, "internal/v2/durable-work/replay", headers: ["Authorization": "Bearer \(token)"], beforeRequest: { request in
+        try await app.testing { client in
+            let response = try await client.send(.post, headers: [.authorization: "Bearer \(token)"], to: "internal/v2/durable-work/replay", beforeSend: { request in
             try request.content.encode(invalid)
-        }) { response async in
+        })
             #expect(response.status == .badRequest)
         }
         #expect(await control.commands().isEmpty)
@@ -91,8 +96,8 @@ struct V2VaporDurableWorkOperatorReplayRoutesTests {
 
     @Test("route refuses absent or invalid bearer credentials before invoking replay")
     func rejectsUnauthenticatedReplay() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let token = Data(repeating: 10, count: 32).base64EncodedString()
         let store = OperatorReplayRouteStore()
         V2VaporDurableWorkOperatorReplayRoutes(
@@ -106,14 +111,16 @@ struct V2VaporDurableWorkOperatorReplayRoutesTests {
             reason: .falsePositive
         )
 
-        try await app.testing().test(.POST, "internal/v2/durable-work/replay", beforeRequest: { vaporRequest in
+        try await app.testing { client in
+            let response = try await client.send(.post, to: "internal/v2/durable-work/replay", beforeSend: { vaporRequest in
             try vaporRequest.content.encode(request)
-        }) { response async in
+        })
             #expect(response.status == .unauthorized)
         }
-        try await app.testing().test(.POST, "internal/v2/durable-work/replay", headers: ["Authorization": "Bearer wrong"], beforeRequest: { vaporRequest in
+        try await app.testing { client in
+            let response = try await client.send(.post, headers: [.authorization: "Bearer wrong"], to: "internal/v2/durable-work/replay", beforeSend: { vaporRequest in
             try vaporRequest.content.encode(request)
-        }) { response async in
+        })
             #expect(response.status == .unauthorized)
         }
         #expect(await store.commands().isEmpty)
@@ -121,8 +128,8 @@ struct V2VaporDurableWorkOperatorReplayRoutesTests {
 
     @Test("route rejects malformed target shapes without calling replay")
     func rejectsMalformedTarget() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let token = Data(repeating: 11, count: 32).base64EncodedString()
         let store = OperatorReplayRouteStore()
         V2VaporDurableWorkOperatorReplayRoutes(
@@ -136,9 +143,10 @@ struct V2VaporDurableWorkOperatorReplayRoutesTests {
             sourceEventID: "00000000-0000-0000-0000-000000000895",
             reason: .dataRepaired
         )
-        try await app.testing().test(.POST, "internal/v2/durable-work/replay", headers: ["Authorization": "Bearer \(token)"], beforeRequest: { vaporRequest in
+        try await app.testing { client in
+            let response = try await client.send(.post, headers: [.authorization: "Bearer \(token)"], to: "internal/v2/durable-work/replay", beforeSend: { vaporRequest in
             try vaporRequest.content.encode(malformed)
-        }) { response async in
+        })
             #expect(response.status == .badRequest)
         }
         #expect(await store.commands().isEmpty)

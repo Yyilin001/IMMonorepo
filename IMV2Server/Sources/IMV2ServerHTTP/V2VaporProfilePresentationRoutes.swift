@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// 关系展示名与群昵称相关路由。
 ///
@@ -43,7 +44,7 @@ public struct V2VaporProfilePresentationRoutes: Sendable {
         routes.put("v2", "profile-presentations", "contact-aliases", ":target") { request async throws -> Response in
             let actor = try await authenticate(request)
             guard let rawTarget = request.parameters.get("target"), let target = try? UserID(rawTarget) else { throw Abort(.badRequest) }
-            let input = try request.content.decode(AliasUpdateRequest.self)
+            let input = try await request.content.decode(AliasUpdateRequest.self)
             do {
                 let value = try await presentations.updateContactAlias(ownerUserID: actor.userID, targetUserID: target, operationID: try .init(input.operationID), expectedRevision: validatedRevision(input.expectedRevision), remarkName: input.remarkName)
                 return try response(AliasResponse(value: value))
@@ -63,7 +64,7 @@ public struct V2VaporProfilePresentationRoutes: Sendable {
         routes.put("v2", "profile-presentations", "groups", ":room", "nickname") { request async throws -> Response in
             let actor = try await authenticate(request)
             guard let rawRoom = request.parameters.get("room"), let room = try? RoomID(rawRoom) else { throw Abort(.badRequest) }
-            let input = try request.content.decode(NicknameUpdateRequest.self)
+            let input = try await request.content.decode(NicknameUpdateRequest.self)
             do {
                 let value = try await presentations.updateOwnGroupNickname(actorUserID: actor.userID, roomID: room, operationID: try .init(input.operationID), expectedRevision: validatedRevision(input.expectedRevision), nickname: input.nickname)
                 return try response(NicknameResponse(value: value))
@@ -121,10 +122,10 @@ public struct V2VaporProfilePresentationRoutes: Sendable {
     /// 统一编码 JSON 响应体。
     private func response<T: Content>(_ value: T) throws -> Response {
         let data = try JSONEncoder().encode(value)
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: .contentType, value: "application/json")
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+        var headers = HTTPFields()
+        headers[.contentType] = "application/json"
+        headers[.cacheControl] = "no-store"
+        headers[.v2Pragma] = "no-cache"
         return .init(status: .ok, headers: headers, body: .init(data: data))
     }
 }

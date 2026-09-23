@@ -1,4 +1,4 @@
-import Fluent
+import FluentKit
 import Foundation
 
 enum V2DirectAuthorizationCoordinationError: Error, Equatable, Sendable {

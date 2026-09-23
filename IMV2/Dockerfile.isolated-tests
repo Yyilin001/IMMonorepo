@@ -5,7 +5,7 @@ FROM prom/prometheus:v2.54.1 AS promtool
 
 # The test runner is intentionally Linux-only and disposable. Source is
 # mounted read-only by compose; SwiftPM artifacts are written under /tmp.
-FROM swift:6.3-jammy
+FROM swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6
 
 COPY --from=promtool /bin/promtool /usr/local/bin/promtool
 

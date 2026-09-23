@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// 精确 Handle 查询路由族（仅支持单条 exact 查询，不提供模糊、批量或前缀列表）。
 ///
@@ -58,19 +59,19 @@ public struct V2VaporPublicIdentityRoutes: Sendable {
     /// no-store JSON 响应输出。
     private func noStoreJSONResponse(_ result: V2PublicIdentityHTTPResponse) throws -> Response {
         let data = try JSONEncoder().encode(result)
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: .contentType, value: "application/json")
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+        var headers = HTTPFields()
+        headers[.contentType] = "application/json"
+        headers[.cacheControl] = "no-store"
+        headers[.v2Pragma] = "no-cache"
         return .init(status: .ok, headers: headers, body: .init(data: data))
     }
 
     /// 超频返回 `Retry-After`，并保持 no-store。
     private func noStoreRetryAfterResponse(seconds: Int) -> Response {
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
-        headers.replaceOrAdd(name: "Retry-After", value: String(seconds))
+        var headers = HTTPFields()
+        headers[.cacheControl] = "no-store"
+        headers[.v2Pragma] = "no-cache"
+        headers[.retryAfter] = String(seconds)
         return .init(status: .tooManyRequests, headers: headers)
     }
 }

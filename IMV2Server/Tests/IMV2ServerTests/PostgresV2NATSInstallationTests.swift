@@ -1,5 +1,5 @@
 import Foundation
-import Fluent
+import FluentKit
 import IMV2Core
 @testable import IMV2Server
 import SQLKit

@@ -1,4 +1,4 @@
-import Fluent
+import FluentKit
 import Foundation
 
 /// 将房间逻辑分片映射到部署配置的数据库与 schema 的运行时位置。

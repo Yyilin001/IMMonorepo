@@ -1,4 +1,4 @@
-import Fluent
+import FluentKit
 import SQLKit
 
 public enum V2SchemaReadinessError: Error, Equatable, Sendable { case unavailableTable(String), unsupportedDatabase }
@@ -24,10 +24,45 @@ public enum V2SchemaReadiness {
     ]
 
     public static func verify(database: any Database, schema: String = "im_v2") async throws {
-        guard let sql = database as? any SQLDatabase else { throw V2SchemaReadinessError.unsupportedDatabase }
+        guard database is any SQLDatabase else { throw V2SchemaReadinessError.unsupportedDatabase }
         guard schema.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil else {
             throw V2SchemaReadinessError.unavailableTable(schema)
         }
+        // Fluent's pinned connection advertises inTransaction even when the
+        // caller only requested withConnection, so transaction() would skip
+        // BEGIN and SET LOCAL would have no effect. Restore that pinned
+        // session explicitly; an ordinary pool handle uses a real transaction.
+        if database.inTransaction {
+            guard let sql = database as? any SQLDatabase else {
+                throw V2SchemaReadinessError.unsupportedDatabase
+            }
+            guard let original = try await sql.raw("SELECT current_setting('search_path') AS path")
+                .first(decoding: SearchPathRow.self)?.path else {
+                throw V2SchemaReadinessError.unsupportedDatabase
+            }
+            try await sql.raw("SELECT set_config('search_path', '', false)").run()
+            do {
+                try await verifySchema(sql: sql, schema: schema)
+                try await sql.raw("SELECT set_config('search_path', \(bind: original), false)").run()
+            } catch {
+                try? await sql.raw("SELECT set_config('search_path', \(bind: original), false)").run()
+                throw error
+            }
+            return
+        }
+        // pg_get_constraintdef/pg_get_indexdef omit schema qualifiers when the
+        // schema is on search_path. SET LOCAL confines catalog rendering to
+        // readiness and PostgreSQL restores the path on commit or rollback.
+        try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else {
+                throw V2SchemaReadinessError.unsupportedDatabase
+            }
+            try await sql.raw("SET LOCAL search_path TO ''").run()
+            try await verifySchema(sql: sql, schema: schema)
+        }
+    }
+
+    private static func verifySchema(sql: any SQLDatabase, schema: String) async throws {
         for table in requiredTables {
             let name = "\(schema).\(table)"
             guard let row = try await sql.raw("SELECT to_regclass(\(bind: name)) IS NOT NULL AS exists").first(decoding: ExistsRow.self), row.exists else {
@@ -1102,3 +1137,4 @@ public enum V2SchemaReadiness {
 }
 
 private struct ExistsRow: Decodable { let exists: Bool }
+private struct SearchPathRow: Decodable { let path: String }

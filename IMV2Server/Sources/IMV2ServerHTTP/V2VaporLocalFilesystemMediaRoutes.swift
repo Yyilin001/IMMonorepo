@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 import _NIOFileSystem
 
 /// 本地文件系统媒体边缘接口（开发/测试用途）。
@@ -9,11 +10,13 @@ import _NIOFileSystem
 /// 生产环境建议改为对象存储原生边缘实现。
 public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
     private let provider: V2LocalFilesystemMediaProvider
+    private let fileIO: FileIO
     private let publicBaseURL: URL
     private let maximumUploadBytes: Int
 
     public init(
         provider: V2LocalFilesystemMediaProvider,
+        fileIO: FileIO,
         publicBaseURL: URL,
         maximumUploadBytes: Int64
     ) throws {
@@ -25,6 +28,7 @@ public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
               maximumUploadBytes <= Int64(Int.max)
         else { throw V2VaporLocalFilesystemMediaRoutesError.invalidConfiguration }
         self.provider = provider
+        self.fileIO = fileIO
         self.publicBaseURL = publicBaseURL
         self.maximumUploadBytes = Int(maximumUploadBytes)
     }
@@ -34,20 +38,20 @@ public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
     /// - `GET /v2/local-media/download/{mediaID}`：下载对象。
     public func register(on routes: RoutesBuilder) {
         routes.on(
-            .PUT,
+            .put,
             "v2", "local-media", "upload", ":mediaID",
-            body: .stream
+            maxBodySize: ByteCount(value: maximumUploadBytes)
         ) { request async throws -> Response in
             guard let rawMediaID = request.parameters.get("mediaID"),
                   let mediaID = try? MediaID(rawMediaID),
                   let targetURL = targetURL(for: request),
-                  let contentType = request.headers.first(name: .contentType),
-                  let rawContentLength = request.headers.first(name: .contentLength),
+                  let contentType = request.headers[.contentType],
+                  let rawContentLength = request.headers[.contentLength],
                   let contentLength = Int64(rawContentLength),
                   contentLength >= 0
             else { throw Abort(.forbidden) }
             guard contentLength <= Int64(maximumUploadBytes) else {
-                throw Abort(.payloadTooLarge)
+                throw Abort(.contentTooLarge)
             }
             let upload: V2LocalFilesystemStagedUpload
             do {
@@ -66,18 +70,26 @@ public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
             }
             do {
                 let byteCounter = V2StreamingUploadByteCounter(maximumBytes: maximumUploadBytes)
-                let written = try await request.body
-                    .map { buffer in
-                        try byteCounter.consume(buffer.readableBytes)
-                        return Data(buffer.readableBytesView)
-                    }
-                    .write(
-                    toFileAt: .init(upload.fileURL.path),
+                let written = try await FileSystem.shared.withFileHandle(
+                    forWritingAt: .init(upload.fileURL.path),
                     options: .newFile(replaceExisting: false)
-                )
+                ) { handle in
+                    var writer = handle.bufferedWriter()
+                    var written: Int64 = 0
+                    try await request.body.forEachChunk { chunk in
+                        try Task.checkCancellation()
+                        try byteCounter.consume(chunk.count)
+                        let bytes = chunk.withUnsafeBytes { Array($0) }
+                        written += try await writer.write(contentsOf: bytes)
+                    }
+                    try Task.checkCancellation()
+                    try await writer.flush()
+                    return written
+                }
                 guard written == contentLength else {
                     throw V2LocalFilesystemMediaProviderError.byteCountMismatch
                 }
+                try Task.checkCancellation()
                 try await provider.commitUploadedObject(upload, actualByteCount: written)
             } catch let abort as AbortError {
                 await provider.discardUploadedObject(upload)
@@ -108,14 +120,15 @@ public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
                 throw Abort(.serviceUnavailable)
             }
             guard object.byteCount <= Int64(Int.max) else { throw Abort(.serviceUnavailable) }
-            let response = try await request.fileio.asyncStreamFile(
+            var response = try await fileIO.streamFile(
                 at: object.fileURL.path,
+                for: request,
                 mediaType: .init(type: "application", subType: "octet-stream")
             )
             for header in noStoreHeaders() {
-                response.headers.replaceOrAdd(name: header.name, value: header.value)
+                response.headers[header.name] = header.value
             }
-            response.headers.replaceOrAdd(name: .contentType, value: "application/octet-stream")
+            response.headers[.contentType] = "application/octet-stream"
             return response
         }
     }
@@ -129,14 +142,14 @@ public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
         return components.url
     }
 
-    private func noStoreResponse(status: HTTPResponseStatus) -> Response {
+    private func noStoreResponse(status: HTTPResponse.Status) -> Response {
         .init(status: status, headers: noStoreHeaders())
     }
 
-    private func noStoreHeaders() -> HTTPHeaders {
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+    private func noStoreHeaders() -> HTTPFields {
+        var headers = HTTPFields()
+        headers[.cacheControl] = "no-store"
+        headers[.v2Pragma] = "no-cache"
         return headers
     }
 }
@@ -160,6 +173,6 @@ final class V2StreamingUploadByteCounter: @unchecked Sendable {
             consumedBytes += count
             return true
         }
-        guard accepted else { throw Abort(.payloadTooLarge) }
+        guard accepted else { throw Abort(.contentTooLarge) }
     }
 }

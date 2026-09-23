@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// 媒体边缘下载查询适配器。
 ///
@@ -70,10 +71,10 @@ public struct V2VaporMediaEdgeRoutes: Sendable {
     /// no-store JSON 响应，返回 `V2MediaDownloadTargetEnvelope`。
     private func makeNoStoreJSONResponse(_ target: V2MediaDownloadTargetEnvelope) throws -> Response {
         let data = try JSONEncoder().encode(target)
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: .contentType, value: "application/json")
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+        var headers = HTTPFields()
+        headers[.contentType] = "application/json"
+        headers[.cacheControl] = "no-store"
+        headers[.v2Pragma] = "no-cache"
         return .init(status: .ok, headers: headers, body: .init(data: data))
     }
 }

@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// 设备撤销能力请求体。
 ///
@@ -52,16 +53,22 @@ public struct V2VaporDeviceRevocationCapabilityRoutes: Sendable {
 
     /// 挂载 `POST /v2/device-credentials/revoke`。
     public func register(on routes: any RoutesBuilder) {
-        routes.on(.POST, "v2", "device-credentials", "revoke", body: .collect(maxSize: "1kb")) { request async -> Response in
-            guard (request.body.data?.readableBytes ?? 0) <= 1_024 else {
-                return Self.response(.payloadTooLarge)
+        routes.on(.post, "v2", "device-credentials", "revoke", maxBodySize: "1kb") { request async -> Response in
+            // Live streams honor maxBodySize during collect; an already
+            // buffered body is returned as-is, so check its size explicitly.
+            do {
+                let body = try await request.body.collect()
+                guard (body?.count ?? 0) <= 1_024 else { return Self.response(.contentTooLarge) }
             }
+            catch let abort as Abort where abort.status == .contentTooLarge { return Self.response(.contentTooLarge) }
+            catch { return Self.response(.badRequest) }
             guard request.headers.contentType?.type == "application",
                   request.headers.contentType?.subType == "json" else {
                 return Self.response(.badRequest)
             }
             let input: V2DeviceRevocationCapabilityHTTPRequest
-            do { input = try request.content.decode(V2DeviceRevocationCapabilityHTTPRequest.self) }
+            do { input = try await request.content.decode(V2DeviceRevocationCapabilityHTTPRequest.self) }
+            catch let abort as Abort where abort.status == .contentTooLarge { return Self.response(.contentTooLarge) }
             catch { return Self.response(.badRequest) }
             do {
                 switch try await service.redeem(input.credential, operationID: input.operationID) {
@@ -77,7 +84,7 @@ public struct V2VaporDeviceRevocationCapabilityRoutes: Sendable {
     }
 
     /// 统一构造 no-store 空体响应。
-    private static func response(_ status: HTTPResponseStatus) -> Response {
-        .init(status: status, headers: ["Cache-Control": "no-store", "Pragma": "no-cache"])
+    private static func response(_ status: HTTPResponse.Status) -> Response {
+        .init(status: status, headers: [.cacheControl: "no-store", .v2Pragma: "no-cache"])
     }
 }

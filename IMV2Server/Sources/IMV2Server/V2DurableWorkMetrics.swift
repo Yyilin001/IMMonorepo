@@ -1,4 +1,4 @@
-import Fluent
+import FluentKit
 import Foundation
 import SQLKit
 import Synchronization

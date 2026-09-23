@@ -1,25 +1,24 @@
-import Fluent
+import FluentKit
 import FluentPostgresDriver
 import Foundation
 import IMV2Core
 @testable import IMV2Server
 import SQLKit
 import Testing
-import Vapor
 
 @Suite("Three-database member directory", .serialized)
 struct PostgresV2MemberDirectoryRoutingTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func ownerSwitchHiddenProfilesAndRejoin() async throws {
-        let app = try await Application.make(.testing)
+        let resources = makeV2DatabaseTestResources()
         var installed: [DatabaseID] = []
         do {
             let names = ["IMV2_POSTGRES_TEST_CONTROL_DATABASE_URL", "IMV2_POSTGRES_TEST_DATABASE_URL", "IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"]
             let urls = try names.map { try #require(ProcessInfo.processInfo.environment[$0]) }
             try #require(Set(urls).count == 3)
             let ids = names.indices.map { DatabaseID(string: "directory-\($0)") }
-            for (id, url) in zip(ids, urls) { app.databases.use(try .postgres(url: url, maxConnectionsPerEventLoop: 2), as: id) }
-            let databases = ids.map { app.db($0) }
+            for (id, url) in zip(ids, urls) { resources.databases.use(try .postgres(url: url, maxConnectionsPerEventLoop: 2), as: id) }
+            let databases = ids.map { resources.database($0) }
             let sqls = try databases.map { try #require($0 as? any SQLDatabase) }
             let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             let source = try String(contentsOf: root.appending(path: "IMV2/sql/schema.sql"), encoding: .utf8)
@@ -114,12 +113,12 @@ struct PostgresV2MemberDirectoryRoutingTests {
             // A physical owner that no longer matches the route is rejected independently.
             try await second.raw("UPDATE im_v2.rooms SET owner_epoch = 5 WHERE room_id = \(bind: room)").run()
             await #expect(throws: V2RoomMembershipDirectoryError.ownerChanged) { try await store.list(request()) }
-            for id in installed { try await (app.db(id) as! any SQLDatabase).raw("DROP SCHEMA im_v2 CASCADE").run() }
+            for id in installed { try await (resources.database(id) as! any SQLDatabase).raw("DROP SCHEMA im_v2 CASCADE").run() }
             installed = []
-            try await app.asyncShutdown()
+            try await resources.shutdown()
         } catch {
-            for id in installed { if let sql = app.db(id) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() } }
-            try? await app.asyncShutdown()
+            for id in installed { if let sql = resources.database(id) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() } }
+            try? await resources.shutdown()
             throw error
         }
     }

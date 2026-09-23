@@ -116,6 +116,9 @@ def main():
                             '--product', 'IMV2ServerApp'], cwd=ROOT / 'IMV2Server', env=environment,
                            stdout=log, stderr=subprocess.STDOUT, check=True)
     print('Native account executable built from current sources.', flush=True)
+    binary_directory = Path(subprocess.check_output(
+        ['swift', 'build', '--disable-automatic-resolution', '--show-bin-path'],
+        cwd=ROOT / 'IMV2Server', env=environment, text=True).strip())
     with tempfile.TemporaryDirectory(prefix='im-v2-live-account-') as temporary:
         private = Path(temporary)
         data = private / 'postgres'
@@ -214,7 +217,7 @@ def main():
                             'ACCOUNT_EDGE_AUTHORIZATION_SECRET', 'ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY',
                             'ACCOUNT_ASSERTION_HMAC_KEY', 'GROUP_INVITE_TOKEN_HMAC_KEY']:
                     config['IM_V2_' + key + '_BASE64'] = base64.b64encode(os.urandom(32)).decode('ascii')
-                account = subprocess.Popen([str(ROOT / 'IMV2Server/.build/debug/IMV2AccountServerApp')],
+                account = subprocess.Popen([str(binary_directory / 'IMV2AccountServerApp')],
                                            env=dict(environment, **config), stdout=account_log, stderr=subprocess.STDOUT)
                 deadline = time.monotonic() + 30
                 while True:
@@ -286,7 +289,7 @@ def main():
                             IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX='imv2.recovery.acceptance',
                             IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64=base64.b64encode(os.urandom(32)).decode())
                     gateway_log = (output / 'gateway.log').open('w')
-                    gateway = subprocess.Popen([str(ROOT / 'IMV2Server/.build/debug/IMV2ServerApp')],
+                    gateway = subprocess.Popen([str(binary_directory / 'IMV2ServerApp')],
                         env=dict(environment, **gateway_config), stdout=gateway_log, stderr=subprocess.STDOUT)
                     deadline = time.monotonic() + 40
                     while True:
@@ -309,7 +312,7 @@ def main():
                         additional_logs.append(secondary_log)
                         secondary_config = dict(gateway_config, IM_V2_GATEWAY_NODE_ID='recovery-gateway-secondary',
                             IM_V2_TLS_PORT=str(secondary_port), IM_V2_METRICS_PORT=str(free_port()))
-                        secondary = subprocess.Popen([str(ROOT / 'IMV2Server/.build/debug/IMV2ServerApp')],
+                        secondary = subprocess.Popen([str(binary_directory / 'IMV2ServerApp')],
                             env=dict(environment, **secondary_config), stdout=secondary_log, stderr=subprocess.STDOUT)
                         additional_processes.append(secondary)
                         deadline = time.monotonic() + 40

@@ -1,5 +1,7 @@
 import Foundation
+import Logging
 import Vapor
+import HTTPTypes
 
 /// HTTP 中间件安装入口。
 ///
@@ -23,12 +25,12 @@ public enum V2RedactedHTTPMiddlewareConfiguration {
 /// 只记录匹配到的路由模板，绝不记录调用方控制的路径或查询串。
 /// 模板可让日志基数保持有界，并避免持久化标识符。
 private struct V2RedactedRouteLoggingMiddleware: Middleware {
-    func respond(to request: Request, chainingTo next: any Responder) -> EventLoopFuture<Response> {
+    func respond(to request: Request, chainingTo next: any Responder) async throws -> Response {
         // Successful request-per-line logging is diagnostic, not an
         // operational event. Keeping it below the production info threshold
         // avoids synchronous formatting and log-pipeline pressure at high QPS.
-        request.logger.debug("HTTP request", metadata: request.v2RedactedHTTPMetadata)
-        return next.respond(to: request)
+        Logger.current.debug("HTTP request", metadata: request.v2RedactedHTTPMetadata)
+        return try await next.respond(to: request)
     }
 }
 
@@ -38,11 +40,13 @@ private struct V2RedactedRouteLoggingMiddleware: Middleware {
 /// 底层错误可能包含 SQL、提供方 URL、令牌或文件系统路径。
 /// 使用稳定的错误 reason 并统一返回 JSON envelope，避免泄露底层异常细节。
 private struct V2RedactedErrorMiddleware: Middleware {
-    func respond(to request: Request, chainingTo next: any Responder) -> EventLoopFuture<Response> {
-        next.respond(to: request).flatMapErrorThrowing { error in
-            let status: HTTPResponseStatus
+    func respond(to request: Request, chainingTo next: any Responder) async throws -> Response {
+        do {
+            return try await next.respond(to: request)
+        } catch {
+            let status: HTTPResponse.Status
             let reason: String
-            var headers: HTTPHeaders
+            var headers: HTTPFields
             if let abort = error as? any AbortError {
                 status = abort.status
                 // Decoder and dependency errors may conform to AbortError and
@@ -60,10 +64,10 @@ private struct V2RedactedErrorMiddleware: Middleware {
             metadata["status"] = "\(status.code)"
             let level = (error as? any DebuggableError)?.logLevel
                 ?? (status.code >= 500 ? .error : .warning)
-            request.logger.log(level: level, "HTTP request failed", metadata: metadata)
+            Logger.current.log(level: level, "HTTP request failed", metadata: metadata)
 
-            headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-            headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+            headers[.cacheControl] = "no-store"
+            headers[.v2Pragma] = "no-cache"
             headers.contentType = .json
             let envelope = V2HTTPErrorEnvelope(error: true, reason: reason)
             let body = try JSONEncoder().encode(envelope)

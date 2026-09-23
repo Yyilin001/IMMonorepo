@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// 密码账户认证与注册路由。
 ///
@@ -32,7 +33,7 @@ public struct V2PasswordAccountRoutes: Sendable {
     /// - `POST /v2/account-auth/password/assertion`：提交密码断言以换取会话凭据。
     public func register(on routes: RoutesBuilder) {
         routes.post("v2", "account-auth", "password", "register") { request async throws -> Response in
-            let input = try request.content.decode(V2PasswordAccountHTTPRequest.self)
+            let input = try await request.content.decode(V2PasswordAccountHTTPRequest.self)
             let deviceID = try parsedDeviceID(input.deviceID)
             do {
                 try validatePassword(input.password)
@@ -68,7 +69,7 @@ public struct V2PasswordAccountRoutes: Sendable {
         }
 
         routes.post("v2", "account-auth", "password", "assertion") { request async throws -> Response in
-            let input = try request.content.decode(V2PasswordAccountHTTPRequest.self)
+            let input = try await request.content.decode(V2PasswordAccountHTTPRequest.self)
             let deviceID = try parsedDeviceID(input.deviceID)
             do {
                 try validatePassword(input.password)
@@ -140,34 +141,34 @@ public struct V2PasswordAccountRoutes: Sendable {
 
     private func conflictResponse(code: String) throws -> Response {
         let data = try JSONEncoder().encode(["code": code])
-        return .init(status: .conflict, headers: ["Content-Type": "application/json", "Cache-Control": "no-store", "Pragma": "no-cache"], body: .init(data: data))
+        return .init(status: .conflict, headers: [.contentType: "application/json", .cacheControl: "no-store", .v2Pragma: "no-cache"], body: .init(data: data))
     }
 
     /// 返回 no-store JSON。
     private func noStoreJSONResponse(_ response: V2AccountAssertionHTTPResponse) throws -> Response {
         let data = try JSONEncoder().encode(response)
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: .contentType, value: "application/json")
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+        var headers = HTTPFields()
+        headers[.contentType] = "application/json"
+        headers[.cacheControl] = "no-store"
+        headers[.v2Pragma] = "no-cache"
         return .init(status: .ok, headers: headers, body: .init(data: data))
     }
 
     /// 下游忙碌时返回 503（no-store + Retry-After）。
     private func noStoreUnavailableResponse() -> Response {
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
-        headers.replaceOrAdd(name: "Retry-After", value: "1")
+        var headers = HTTPFields()
+        headers[.cacheControl] = "no-store"
+        headers[.v2Pragma] = "no-cache"
+        headers[.retryAfter] = "1"
         return .init(status: .serviceUnavailable, headers: headers)
     }
 
     /// 返回限流重试响应。
     private func noStoreRetryAfterResponse(seconds: Int) -> Response {
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
-        headers.replaceOrAdd(name: "Retry-After", value: String(seconds))
+        var headers = HTTPFields()
+        headers[.cacheControl] = "no-store"
+        headers[.v2Pragma] = "no-cache"
+        headers[.retryAfter] = String(seconds)
         return .init(status: .tooManyRequests, headers: headers)
     }
 }

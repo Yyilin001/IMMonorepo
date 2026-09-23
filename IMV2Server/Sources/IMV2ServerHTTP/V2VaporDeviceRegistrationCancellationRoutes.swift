@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// 设备注册注销请求体。
 ///
@@ -46,13 +47,22 @@ public struct V2VaporDeviceRegistrationCancellationRoutes: Sendable {
     /// - 请求体大小上限 1KB；非法媒体类型返回 400。
     /// - 成功返回 204；幂等/过期/不可重放分别返回 204/410。
     public func register(on routes: any RoutesBuilder) {
-        routes.on(.POST, "v2", "device-credentials", "cancel-registration", body: .collect(maxSize: "1kb")) { request async -> Response in
-            guard (request.body.data?.readableBytes ?? 0) <= 1_024 else { return Self.response(.payloadTooLarge) }
+        routes.on(.post, "v2", "device-credentials", "cancel-registration", maxBodySize: "1kb") { request async -> Response in
+            // Vapor's collect limit applies to a live stream; an in-memory
+            // request body is already collected and is returned without a
+            // second size check. Enforce the same 1 KB contract in both cases.
+            do {
+                let body = try await request.body.collect()
+                guard (body?.count ?? 0) <= 1_024 else { return Self.response(.contentTooLarge) }
+            }
+            catch let abort as Abort where abort.status == .contentTooLarge { return Self.response(.contentTooLarge) }
+            catch { return Self.response(.badRequest) }
             guard request.headers.contentType?.type == "application", request.headers.contentType?.subType == "json" else {
                 return Self.response(.badRequest)
             }
             let input: V2DeviceRegistrationCancellationHTTPRequest
-            do { input = try request.content.decode(V2DeviceRegistrationCancellationHTTPRequest.self) }
+            do { input = try await request.content.decode(V2DeviceRegistrationCancellationHTTPRequest.self) }
+            catch let abort as Abort where abort.status == .contentTooLarge { return Self.response(.contentTooLarge) }
             catch { return Self.response(.badRequest) }
             do {
                 switch try await service.cancel(input.cancellation) {
@@ -68,7 +78,7 @@ public struct V2VaporDeviceRegistrationCancellationRoutes: Sendable {
     }
 
     /// 统一构造仅包含 no-store 的轻量响应。
-    private static func response(_ status: HTTPResponseStatus) -> Response {
-        .init(status: status, headers: ["Cache-Control": "no-store", "Pragma": "no-cache"])
+    private static func response(_ status: HTTPResponse.Status) -> Response {
+        .init(status: status, headers: [.cacheControl: "no-store", .v2Pragma: "no-cache"])
     }
 }

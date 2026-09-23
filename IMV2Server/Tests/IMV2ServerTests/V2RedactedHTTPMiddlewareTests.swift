@@ -1,5 +1,7 @@
+import HTTPTypes
 import Foundation
 import IMV2ServerHTTP
+import Logging
 import Testing
 import Vapor
 import VaporTesting
@@ -12,8 +14,7 @@ struct V2RedactedHTTPMiddlewareTests {
         let logger = Logger(label: "im-v2-redacted-test") { _ in
             CapturingHTTPLogHandler(capture: capture)
         }
-        let app = try await Application.make(.testing, logger: logger)
-        do {
+        try await withApp(logger: logger) { app in
             V2RedactedHTTPMiddlewareConfiguration.install(on: app)
             app.get("objects", ":mediaID") { _ async throws -> Response in
                 throw Abort(.forbidden)
@@ -24,23 +25,23 @@ struct V2RedactedHTTPMiddlewareTests {
             app.get("abort-reason") { _ async throws -> Response in
                 throw Abort(.badRequest, reason: SensitiveTestFailure.secret)
             }
-            let tester = try app.testing()
-            try await tester.test(
-                .GET,
-                "/objects/private-media-id?target=secret-signed-capability"
-            ) { response async in
+
+            try await app.testing { client in
+                let response = try await client.send(.get, headers: [.authorization: "Bearer secret-access-token"], to: "/objects/private-media-id?target=secret-signed-capability")
                 #expect(response.status == .forbidden)
-                #expect(response.headers.first(name: .cacheControl) == "no-store")
+                #expect(response.headers[.cacheControl] == "no-store")
             }
-            try await tester.test(.GET, "/internal") { response async throws in
+            try await app.testing { client in
+                let response = try await client.send(.get, to: "/internal")
                 #expect(response.status == .internalServerError)
-                let body = String(decoding: response.body.readableBytesView, as: UTF8.self)
+                let body = try await response.body.string() ?? ""
                 #expect(body.contains("Something went wrong."))
                 #expect(!body.contains(SensitiveTestFailure.secret))
             }
-            try await tester.test(.GET, "/abort-reason") { response async throws in
+            try await app.testing { client in
+                let response = try await client.send(.get, to: "/abort-reason")
                 #expect(response.status == .badRequest)
-                let body = String(decoding: response.body.readableBytesView, as: UTF8.self)
+                let body = try await response.body.string() ?? ""
                 #expect(body.contains("Bad Request"))
                 #expect(!body.contains(SensitiveTestFailure.secret))
             }
@@ -49,12 +50,9 @@ struct V2RedactedHTTPMiddlewareTests {
             #expect(rendered.contains("GET /objects/:mediaID"))
             #expect(!rendered.contains("secret-signed-capability"))
             #expect(!rendered.contains("private-media-id"))
+            #expect(!rendered.contains("secret-access-token"))
             #expect(!rendered.contains(SensitiveTestFailure.secret))
-        } catch {
-            try? await app.asyncShutdown()
-            throw error
         }
-        try await app.asyncShutdown()
     }
 }
 

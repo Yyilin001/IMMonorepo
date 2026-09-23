@@ -1,4 +1,5 @@
 import Foundation
+import HTTPTypes
 import IMV2Core
 import IMV2Server
 @testable import IMV2ServerHTTP
@@ -10,8 +11,8 @@ import VaporTesting
 struct V2VaporDeviceSnapshotResetOperatorRoutesTests {
     @Test("operator reset is bearer-gated, no-store, and forwards one durable command")
     func stagesReset() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let token = Data(repeating: 0x41, count: 32).base64EncodedString()
         let userID = try UserID("00000000-0000-0000-0000-000000000851")
         let deviceID = try DeviceID("00000000-0000-0000-0000-000000000852")
@@ -22,14 +23,15 @@ struct V2VaporDeviceSnapshotResetOperatorRoutesTests {
             service: service
         ).register(on: app)
 
-        try await app.testing().test(.POST, "internal/v2/device-snapshots/reset", beforeRequest: { request in
+        try await app.testing { client in
+            let response = try await client.send(.post, to: "internal/v2/device-snapshots/reset", beforeSend: { request in
             request.headers.bearerAuthorization = .init(token: token)
             try request.content.encode(V2DeviceSnapshotResetHTTPRequest(operationID: operationID, userID: userID.rawValue, deviceID: deviceID.rawValue))
-        }) { response async in
+        })
             #expect(response.status == .ok)
-            #expect(response.headers.first(name: .cacheControl) == "no-store")
+            #expect(response.headers[.cacheControl] == "no-store")
             var decoded: V2DeviceSnapshotResetHTTPResponse?
-            expectContent(V2DeviceSnapshotResetHTTPResponse.self, response) { decoded = $0 }
+            decoded = try await response.content.decode(V2DeviceSnapshotResetHTTPResponse.self)
             #expect(decoded == .init(operationID: operationID, generation: 3, state: .preparing, wasIdempotent: false))
         }
         let command = try #require(await service.command())
@@ -40,12 +42,13 @@ struct V2VaporDeviceSnapshotResetOperatorRoutesTests {
 
     @Test("reset rejects malformed and unauthorized requests before staging")
     func rejectsInvalidRequests() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let token = Data(repeating: 0x42, count: 32).base64EncodedString()
         let service = SnapshotResetRouteService()
         V2VaporDeviceSnapshotResetOperatorRoutes(authenticator: try .init(base64EncodedBearerToken: token), service: service).register(on: app)
-        try await app.testing().test(.POST, "internal/v2/device-snapshots/reset") { response async in
+        try await app.testing { client in
+            let response = try await client.send(.post, to: "internal/v2/device-snapshots/reset")
             #expect(response.status == .unauthorized)
         }
         #expect(await service.command() == nil)

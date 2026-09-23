@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// 设备推送端点写入请求体。
 ///
@@ -52,7 +53,7 @@ public struct V2VaporPushEndpointRoutes: Sendable {
     public func register(on routes: RoutesBuilder) {
         routes.put("v2", "push-endpoint") { request async throws -> Response in
             let identity = try await authenticate(request)
-            let input = try request.content.decode(V2PushEndpointHTTPRequest.self)
+            let input = try await request.content.decode(V2PushEndpointHTTPRequest.self)
             let endpoint: V2PushDeviceEndpointRegistration
             do {
                 endpoint = try .init(provider: input.provider, environment: input.environment, token: input.token)
@@ -86,9 +87,9 @@ public struct V2VaporPushEndpointRoutes: Sendable {
 
     /// 构造 no-store 的空体响应。
     private func noStoreNoContent() -> Response {
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+        var headers = HTTPFields()
+        headers[.cacheControl] = "no-store"
+        headers[.v2Pragma] = "no-cache"
         return .init(status: .noContent, headers: headers)
     }
 }

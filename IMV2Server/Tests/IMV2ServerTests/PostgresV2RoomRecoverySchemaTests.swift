@@ -1,11 +1,64 @@
 import Foundation
 @testable import IMV2Server
+import FluentPostgresDriver
 import SQLKit
 import PostgresNIO
 import Testing
 
 @Suite("Room recovery schema retirement", .serialized)
 struct PostgresV2RoomRecoverySchemaTests {
+    @Test("readiness renders catalog definitions independently of the connection search path")
+    func readinessPreservesConnectionSearchPath() async throws {
+        try await withUserEventDatabase { _, _, schema in
+            let url = try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"])
+            let resources = makeV2DatabaseTestResources()
+            do {
+                var configuration = try SQLPostgresConfiguration(url: url)
+                configuration.searchPath = [schema]
+                resources.databases.use(.postgres(configuration: configuration), as: .psql, isDefault: true)
+                let database = resources.database(.psql)
+                let sql = try #require(database as? any SQLDatabase)
+                let before = try #require(try await sql.raw("""
+                    SELECT current_setting('search_path') AS path,
+                           pg_get_constraintdef(oid) AS definition
+                    FROM pg_constraint
+                    WHERE conrelid = to_regclass(\(bind: schema + ".direct_authorization_receipts"))
+                      AND conname = 'direct_authorization_receipts_room_fkey'
+                    """).first(decoding: SearchPathReadinessRow.self))
+                #expect(before.path == schema)
+                #expect(before.definition == "FOREIGN KEY (room_id) REFERENCES rooms(room_id)")
+
+                try await V2SchemaReadiness.verify(database: database, schema: schema)
+
+                let after = try #require(try await sql.raw("""
+                    SELECT current_setting('search_path') AS path,
+                           pg_get_constraintdef(oid) AS definition
+                    FROM pg_constraint
+                    WHERE conrelid = to_regclass(\(bind: schema + ".direct_authorization_receipts"))
+                      AND conname = 'direct_authorization_receipts_room_fkey'
+                    """).first(decoding: SearchPathReadinessRow.self))
+                #expect(after.path == schema)
+                #expect(after.definition == before.definition)
+
+                try await database.withConnection { pinned in
+                    #expect(pinned.inTransaction)
+                    let pinnedSQL = try #require(pinned as? any SQLDatabase)
+                    try await V2SchemaReadiness.verify(database: pinned, schema: schema)
+                    await #expect(throws: V2SchemaReadinessError.unavailableTable(schema + "_missing.direct_authorization_intents")) {
+                        try await V2SchemaReadiness.verify(database: pinned, schema: schema + "_missing")
+                    }
+                    let path = try #require(try await pinnedSQL.raw("SELECT current_setting('search_path') AS path")
+                        .first(decoding: SearchPathOnlyRow.self)).path
+                    #expect(path == schema)
+                }
+                try await resources.shutdown()
+            } catch {
+                try? await resources.shutdown()
+                throw error
+            }
+        }
+    }
+
     @Test(arguments: [PostgresV2ControlPlaneHousekeepingStore.housekeepingRotationPeriod, Int64.max])
     func housekeepingReadinessRejectsOutOfRangeRotation(rotation: Int64) async throws {
         try await withUserEventDatabase { database, sql, schema in
@@ -102,3 +155,10 @@ struct PostgresV2RoomRecoverySchemaTests {
         }
     }
 }
+
+private struct SearchPathReadinessRow: Decodable {
+    let path: String
+    let definition: String
+}
+
+private struct SearchPathOnlyRow: Decodable { let path: String }

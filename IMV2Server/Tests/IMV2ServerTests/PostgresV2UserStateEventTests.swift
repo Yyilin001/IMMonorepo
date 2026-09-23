@@ -1,11 +1,10 @@
-import Fluent
+import FluentKit
 import FluentPostgresDriver
 import Foundation
 import IMV2Core
 @testable import IMV2Server
 import SQLKit
 import Testing
-import Vapor
 
 @Suite("Independent user state events", .serialized)
 struct PostgresV2UserStateEventTests {
@@ -106,7 +105,7 @@ struct PostgresV2UserStateEventTests {
 
     @Test("direct receipt delivery uses authoritative preferences across databases and freezes retries", arguments: [false, true])
     func authoritativeDirectReceiptPolicy(viewerDisables: Bool) async throws {
-        guard let secondary = Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL") else { return }
+        guard let secondary = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"] else { return }
         try await withUserEventDatabase { control, controlSQL, controlSchema in
             try await withUserEventDatabase(databaseURL: secondary) { target, targetSQL, targetSchema in
                 let viewer = UUID(), reader = UUID(), room = UUID()
@@ -687,22 +686,22 @@ private func executeUserStateSQL(_ source: String, on sql: any SQLDatabase) asyn
     }
 }
 func withUserEventDatabase(databaseURL: String? = nil, _ operation: (any Database, any SQLDatabase, String) async throws -> Void) async throws {
-    guard let url = databaseURL ?? Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-          Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
-    let app = try await Application.make(.testing)
+    guard let url = databaseURL ?? ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+          ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
+    let resources = makeV2DatabaseTestResources()
     let schema = "state_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     do {
-        app.databases.use(try .postgres(url: url, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
-        let sql = try #require(app.db(.psql) as? any SQLDatabase)
+        resources.databases.use(try .postgres(url: url, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
+        let sql = try #require(resources.database(.psql) as? any SQLDatabase)
         let source = try String(contentsOf: userStateRepoRoot.appending(path: "IMV2/sql/schema.sql"), encoding: .utf8)
             .replacingOccurrences(of: "im_v2", with: schema)
         try await executeUserStateSQL(source, on: sql)
-        try await operation(app.db(.psql), sql, schema)
+        try await operation(resources.database(.psql), sql, schema)
         try await sql.raw("DROP SCHEMA \(unsafeRaw: schema) CASCADE").run()
-        try await app.asyncShutdown()
+        try await resources.shutdown()
     } catch {
-        if let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS \(unsafeRaw: schema) CASCADE").run() }
-        try? await app.asyncShutdown()
+        if let sql = resources.database(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS \(unsafeRaw: schema) CASCADE").run() }
+        try? await resources.shutdown()
         throw error
     }
 }
@@ -718,15 +717,15 @@ private struct UserStateTestRouteFence: V2UserShardRouteFencing {
 
 
 private func withUserStateRouteConnection(_ operation: @escaping @Sendable (any Database) async throws -> Void) async throws {
-    guard let url = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-          Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
-    let app = try await Application.make(.testing)
+    guard let url = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+          ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
+    let resources = makeV2DatabaseTestResources()
     do {
-        app.databases.use(try .postgres(url: url, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
-        try await operation(app.db(.psql))
-        try await app.asyncShutdown()
+        resources.databases.use(try .postgres(url: url, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+        try await operation(resources.database(.psql))
+        try await resources.shutdown()
     } catch {
-        try? await app.asyncShutdown()
+        try? await resources.shutdown()
         throw error
     }
 }

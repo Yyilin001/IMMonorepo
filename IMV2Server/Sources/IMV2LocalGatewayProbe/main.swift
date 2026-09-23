@@ -126,7 +126,7 @@ private enum ProbeResult: Sendable {
             // local process environment, never written to disk.
             return "\(roomID.rawValue) \(messageID.rawValue)"
         case .messageDelivered:
-            return "local V2 gateway direct message sync: verified"
+            return "local V2 gateway direct room-log delivery: verified"
         }
     }
 }
@@ -144,7 +144,7 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
     private var decoder: V2FrameDecoder
     private var stage: Stage = .awaitingHello
     private var nextRequestID: UInt64 = 3
-    private var nextSyncToken: String?
+    private var nextRoomSequence: UInt64 = 0
     private var deliveryPolls = 0
     private var finished = false
 
@@ -196,9 +196,14 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
 
     private func receive(_ frame: V2Frame, context: ChannelHandlerContext) throws {
         let envelope = try V2ServerProtobufFrameCodec.decode(frame)
-        // Availability hints are deliberately best effort and may arrive while
-        // a request is in flight. They must not be confused with its response.
-        if frame.requestID == 0, case .syncAvailable? = envelope.body {
+        // Availability hints are best effort and may arrive while a durable
+        // room-log pull is in flight. They are not responses to this probe.
+        if frame.requestID == 0,
+           case .syncAvailable? = envelope.body {
+            return
+        }
+        if frame.requestID == 0,
+           case .groupEventAvailable? = envelope.body {
             return
         }
         switch stage {
@@ -230,7 +235,7 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
             case .sendDirectMessage:
                 try sendOpenDirectRoom(context: context)
             case .receiveDirectMessage:
-                try sendSyncPull(context: context)
+                try sendRoomEventPull(context: context)
             }
 
         case .awaitingDirectRoom(let requestID):
@@ -252,22 +257,25 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
             else { throw ProbeError.unexpectedResponse }
             finish(context: context, result: .success(.messageAccepted(roomID: roomID, messageID: messageID)), closeChannel: false)
 
-        case .awaitingSync(let requestID):
+        case .awaitingRoomEventPage(let requestID, let requestedAfterRoomSequence):
             guard frame.requestID == requestID,
-                  case .syncBatch(let batch)? = envelope.body,
-                  batch.generation > 0,
-                  !batch.nextSyncToken.isEmpty,
-                  !batch.syncReceipt.isEmpty,
-                  batch.capabilityProfile == "base"
+                  case .groupEventPage(let page)? = envelope.body,
+                  page.roomID == configuration.expectedRoomID?.rawValue,
+                  page.nextRoomSequence >= requestedAfterRoomSequence,
+                  page.events.count <= 100,
+                  page.events.first.map({ $0.roomSequence > requestedAfterRoomSequence }) ?? true,
+                  zip(page.events, page.events.dropFirst()).allSatisfy({ $0.roomSequence < $1.roomSequence }),
+                  (page.events.last?.roomSequence ?? requestedAfterRoomSequence) <= page.nextRoomSequence,
+                  (!page.hasMore_p || page.events.last?.roomSequence == page.nextRoomSequence)
             else { throw ProbeError.unexpectedResponse }
-            if containsExpectedMessage(batch.records) {
+            if containsExpectedMessage(page.events) {
                 finish(context: context, result: .success(.messageDelivered), closeChannel: false)
                 return
             }
-            nextSyncToken = batch.nextSyncToken
+            nextRoomSequence = page.nextRoomSequence
             deliveryPolls += 1
             guard deliveryPolls < 50 else { throw ProbeError.messageDeliveryNotObserved }
-            let delay: TimeAmount = batch.hasMore_p ? .milliseconds(1) : .milliseconds(100)
+            let delay: TimeAmount = page.hasMore_p ? .milliseconds(1) : .milliseconds(100)
             let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
             let boundContext = context.loopBound
             context.eventLoop.scheduleTask(in: delay) {
@@ -275,7 +283,7 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
                 let context = boundContext.value
                 guard !handler.finished else { return }
                 do {
-                    try handler.sendSyncPull(context: context)
+                    try handler.sendRoomEventPull(context: context)
                 } catch {
                     handler.finish(context: context, result: .failure(error))
                 }
@@ -310,28 +318,34 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
         try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
     }
 
-    private func sendSyncPull(context: ChannelHandlerContext) throws {
+    private func sendRoomEventPull(context: ChannelHandlerContext) throws {
+        guard let roomID = configuration.expectedRoomID else { throw ProbeError.invalidConfiguration }
         let requestID = takeRequestID()
         var request = IMV2Envelope()
         request.requestID = requestID
         request.protocolVersion = IMV2ProtocolVersion.current
-        request.syncPull = .init()
-        request.syncPull.syncToken = nextSyncToken ?? ""
-        request.syncPull.maxRecords = 100
-        stage = .awaitingSync(requestID)
+        request.groupEventPull = .init()
+        request.groupEventPull.roomID = roomID.rawValue
+        request.groupEventPull.afterRoomSequence = nextRoomSequence
+        request.groupEventPull.pageSize = 100
+        stage = .awaitingRoomEventPage(requestID, nextRoomSequence)
         try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
     }
 
-    private func containsExpectedMessage(_ records: [IMV2SyncRecord]) -> Bool {
+    private func containsExpectedMessage(_ records: [IMV2GroupEvent]) -> Bool {
         guard let expectedRoomID = configuration.expectedRoomID,
               let expectedMessageID = configuration.expectedMessageID
         else { return false }
         return records.contains { record in
-            guard record.projectionKind == "message",
+            guard record.roomSequence > 0,
+                  !record.sourceEventID.isEmpty,
+                  record.projectionKind == "message",
                   let object = try? JSONSerialization.jsonObject(with: record.payload) as? [String: Any],
                   object["event_type"] as? String == "message.accepted",
-                  object["room_id"] as? String == expectedRoomID.rawValue,
-                  object["message_id"] as? String == expectedMessageID.rawValue,
+                  let roomID = object["room_id"] as? String,
+                  let messageID = object["message_id"] as? String,
+                  UUID(uuidString: roomID) == UUID(uuidString: expectedRoomID.rawValue),
+                  UUID(uuidString: messageID) == UUID(uuidString: expectedMessageID.rawValue),
                   object["text"] as? String == Configuration.messageText
             else { return false }
             return true
@@ -369,6 +383,6 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
         case awaitingAuthentication
         case awaitingDirectRoom(UInt64)
         case awaitingMessageAcceptance(UInt64, RoomID)
-        case awaitingSync(UInt64)
+        case awaitingRoomEventPage(UInt64, UInt64)
     }
 }

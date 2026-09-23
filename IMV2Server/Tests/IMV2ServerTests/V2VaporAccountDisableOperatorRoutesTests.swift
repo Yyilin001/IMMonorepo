@@ -1,3 +1,4 @@
+import HTTPTypes
 import Foundation
 import IMV2Core
 import IMV2Server
@@ -10,7 +11,7 @@ import VaporTesting
 struct V2VaporAccountDisableOperatorRoutesTests {
     @Test("account-disable responses reject unrepresentable timestamps and preserve floor rounding", arguments: ["disabled", "idempotent", "already_disabled"])
     func responseClockBounds(kind: String) async throws {
-        let app = try await Application.make(.testing)
+        let app = try await Application(.testing)
         do {
             let token = Data(repeating: 14, count: 32).base64EncodedString()
             let service = AccountDisableRouteService()
@@ -26,29 +27,32 @@ struct V2VaporAccountDisableOperatorRoutesTests {
             let badDates = [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, Double(Int64.max) / 1_000, Double(Int64.min) / 1_000 - 2].map { Date(timeIntervalSince1970: $0) }
             for bad in badDates {
                 await service.setOutcome(outcome(bad))
-                try await app.testing().test(.POST, "internal/v2/accounts/disable", headers: ["Authorization": "Bearer \(token)"], beforeRequest: { request in
+                try await app.testing { client in
+                    let response = try await client.send(.post, headers: [.authorization: "Bearer \(token)"], to: "internal/v2/accounts/disable", beforeSend: { request in
                     try request.content.encode(input)
-                }) { response async in
+                })
                     #expect(response.status == .serviceUnavailable)
-                    #expect(response.headers.first(name: .cacheControl) == "no-store")
-                    #expect(response.headers.first(name: "Pragma") == "no-cache")
-                    #expect(response.body.readableBytes == 0)
+                    #expect(response.headers[.cacheControl] == "no-store")
+                    #expect(response.headers[.pragma] == "no-cache")
+                    #expect((try await response.body.data() ?? Data()).isEmpty)
                 }
             }
             await service.setFailure(.unavailable)
-            try await app.testing().test(.POST, "internal/v2/accounts/disable", headers: ["Authorization": "Bearer \(token)"], beforeRequest: { request in
+            try await app.testing { client in
+                let response = try await client.send(.post, headers: [.authorization: "Bearer \(token)"], to: "internal/v2/accounts/disable", beforeSend: { request in
                 try request.content.encode(input)
-            }) { response async in
+            })
                 #expect(response.status == .serviceUnavailable)
-                #expect(response.headers.first(name: .cacheControl) == "no-store")
-                #expect(response.headers.first(name: "Pragma") == "no-cache")
-                #expect(response.body.readableBytes == 0)
+                #expect(response.headers[.cacheControl] == "no-store")
+                #expect(response.headers[.pragma] == "no-cache")
+                #expect((try await response.body.data() ?? Data()).isEmpty)
             }
-            for (error, status) in [(V2AccountDisableError.operationConflict, HTTPResponseStatus.conflict), (.invalidUserID, .badRequest)] {
+            for (error, status) in [(V2AccountDisableError.operationConflict, HTTPResponse.Status.conflict), (.invalidUserID, .badRequest)] {
                 await service.setFailure(error)
-                try await app.testing().test(.POST, "internal/v2/accounts/disable", headers: ["Authorization": "Bearer \(token)"], beforeRequest: { request in
+                try await app.testing { client in
+                    let response = try await client.send(.post, headers: [.authorization: "Bearer \(token)"], to: "internal/v2/accounts/disable", beforeSend: { request in
                     try request.content.encode(input)
-                }) { response async in
+                })
                     #expect(response.status == status)
                 }
             }
@@ -60,31 +64,32 @@ struct V2VaporAccountDisableOperatorRoutesTests {
             ]
             for (seconds, expected) in validDates {
                 await service.setOutcome(outcome(Date(timeIntervalSince1970: seconds)))
-                try await app.testing().test(.POST, "internal/v2/accounts/disable", headers: ["Authorization": "Bearer \(token)"], beforeRequest: { request in
+                try await app.testing { client in
+                    let response = try await client.send(.post, headers: [.authorization: "Bearer \(token)"], to: "internal/v2/accounts/disable", beforeSend: { request in
                     try request.content.encode(input)
-                }) { response async in
+                })
                     #expect(response.status == .ok)
-                    #expect(response.headers.first(name: .cacheControl) == "no-store")
-                    #expect(response.headers.first(name: "Pragma") == "no-cache")
+                    #expect(response.headers[.cacheControl] == "no-store")
+                    #expect(response.headers[.pragma] == "no-cache")
                     var decoded: V2AccountDisableHTTPResponse?
-                    expectContent(V2AccountDisableHTTPResponse.self, response) { decoded = $0 }
+                    decoded = try await response.content.decode(V2AccountDisableHTTPResponse.self)
                     #expect(decoded?.operationID == input.operationID)
                     #expect(decoded?.outcome == kind)
                     #expect(decoded?.disabledAtMilliseconds == expected)
                 }
             }
             #expect(await service.receivedCommand()?.operationID == input.operationID)
-            try await app.asyncShutdown()
+            try await app.shutdown()
         } catch {
-            try? await app.asyncShutdown()
+            try? await app.shutdown()
             throw error
         }
     }
 
     @Test("account disable requires its dedicated credential and returns an audited no-store result")
     func authorizedDisable() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let token = Data(repeating: 14, count: 32).base64EncodedString()
         let service = AccountDisableRouteService()
         V2VaporAccountDisableOperatorRoutes(
@@ -95,14 +100,15 @@ struct V2VaporAccountDisableOperatorRoutesTests {
             userID: "00000000-0000-0000-0000-000000000982", reason: .credentialCompromise
         )
 
-        try await app.testing().test(.POST, "internal/v2/accounts/disable", headers: ["Authorization": "Bearer \(token)"], beforeRequest: { request in
+        try await app.testing { client in
+            let response = try await client.send(.post, headers: [.authorization: "Bearer \(token)"], to: "internal/v2/accounts/disable", beforeSend: { request in
             try request.content.encode(input)
-        }) { response async in
+        })
             #expect(response.status == .ok)
-            #expect(response.headers.first(name: .cacheControl) == "no-store")
-            #expect(response.headers.first(name: "Pragma") == "no-cache")
+            #expect(response.headers[.cacheControl] == "no-store")
+            #expect(response.headers[.pragma] == "no-cache")
             var decoded: V2AccountDisableHTTPResponse?
-            expectContent(V2AccountDisableHTTPResponse.self, response) { decoded = $0 }
+            decoded = try await response.content.decode(V2AccountDisableHTTPResponse.self)
             #expect(decoded?.operationID == input.operationID)
             #expect(decoded?.outcome == "disabled")
             #expect(decoded?.disabledAtMilliseconds == 1_750_000_000_000)
@@ -115,23 +121,25 @@ struct V2VaporAccountDisableOperatorRoutesTests {
 
     @Test("account disable refuses unauthenticated and malformed requests before calling the service")
     func rejectsUnauthenticatedOrMalformedRequest() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let token = Data(repeating: 15, count: 32).base64EncodedString()
         let service = AccountDisableRouteService()
         V2VaporAccountDisableOperatorRoutes(
             authenticator: try .init(base64EncodedBearerToken: token), service: service
         ).register(on: app)
         let valid = V2AccountDisableHTTPRequest(operationID: UUID(), userID: "00000000-0000-0000-0000-000000000983", reason: .userRequested)
-        try await app.testing().test(.POST, "internal/v2/accounts/disable", beforeRequest: { request in
+        try await app.testing { client in
+            let response = try await client.send(.post, to: "internal/v2/accounts/disable", beforeSend: { request in
             try request.content.encode(valid)
-        }) { response async in
+        })
             #expect(response.status == .unauthorized)
         }
         let malformed = V2AccountDisableHTTPRequest(operationID: UUID(), userID: "not-a-uuid", reason: .userRequested)
-        try await app.testing().test(.POST, "internal/v2/accounts/disable", headers: ["Authorization": "Bearer \(token)"], beforeRequest: { request in
+        try await app.testing { client in
+            let response = try await client.send(.post, headers: [.authorization: "Bearer \(token)"], to: "internal/v2/accounts/disable", beforeSend: { request in
             try request.content.encode(malformed)
-        }) { response async in
+        })
             #expect(response.status == .badRequest)
         }
         #expect(await service.receivedCommand() == nil)

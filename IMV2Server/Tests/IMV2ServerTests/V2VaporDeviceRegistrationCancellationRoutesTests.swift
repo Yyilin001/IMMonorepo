@@ -1,4 +1,5 @@
 import Foundation
+import HTTPTypes
 import IMV2Core
 import IMV2Server
 import IMV2ServerHTTP
@@ -14,28 +15,29 @@ struct V2VaporDeviceRegistrationCancellationRoutesTests {
 
     @Test("cancelled, expired and infrastructure failure have distinct opaque responses", arguments: [204, 208, 410, 400, 503])
     func outcomes(status: Int) async throws {
-        let app = try await Application.make(.testing)
+        let app = try await Application(.testing)
         do {
             let service = CancellationRouteRecorder(status: status)
             V2VaporDeviceRegistrationCancellationRoutes(service: service).register(on: app)
             let value = try cancellation()
-            try await app.testing().test(.POST, V2VaporDeviceRegistrationCancellationRoutes.path, beforeRequest: { request in
+            try await app.testing { client in
+                let response = try await client.send(.post, to: URI(string: V2VaporDeviceRegistrationCancellationRoutes.path), beforeSend: { request in
                 request.headers.bearerAuthorization = .init(token: "unrelated-new-account-token")
                 try request.content.encode(V2DeviceRegistrationCancellationHTTPRequest(value))
-            }) { response async in
-                #expect(response.status.code == (status == 208 ? 204 : UInt(status)))
-                #expect(response.headers.first(name: .cacheControl) == "no-store")
-                #expect(response.headers.first(name: "Pragma") == "no-cache")
-                #expect(response.body.readableBytes == 0)
+            })
+                #expect(response.status.code == (status == 208 ? 204 : status))
+                #expect(response.headers[.cacheControl] == "no-store")
+                #expect(response.headers[.pragma] == "no-cache")
+                #expect((try await response.body.data() ?? Data()).isEmpty)
             }
             #expect(await service.request() == value)
-            try await app.asyncShutdown()
-        } catch { try? await app.asyncShutdown(); throw error }
+            try await app.shutdown()
+        } catch { try? await app.shutdown(); throw error }
     }
 
-    @Test("rejects account targeting, incomplete or malformed proof identities and oversized input", arguments: ["userID", "null-user", "unknown", "missing-proof", "access-proof", "bad-device", "bad-operation", "bad-deadline", "null-deadline", "malformed", "oversized", "form"])
+    @Test("rejects account targeting, incomplete or malformed proof identities and oversized input", arguments: ["userID", "null-user", "unknown", "missing-proof", "access-proof", "bad-device", "bad-operation", "bad-deadline", "null-deadline", "malformed", "oversized", "oversized-form", "form"])
     func validation(scenario: String) async throws {
-        let app = try await Application.make(.testing)
+        let app = try await Application(.testing)
         do {
             let service = CancellationRouteRecorder(status: 204)
             V2VaporDeviceRegistrationCancellationRoutes(service: service).register(on: app)
@@ -50,24 +52,25 @@ struct V2VaporDeviceRegistrationCancellationRoutesTests {
             case "bad-operation": body["operationID"] = "not-a-uuid"
             case "bad-deadline": body["issueBeforeMilliseconds"] = Int64.max
             case "null-deadline": body["issueBeforeMilliseconds"] = NSNull()
-            case "oversized": body["proof"] = String(repeating: "x", count: 2_048)
+            case "oversized", "oversized-form": body["proof"] = String(repeating: "x", count: 2_048)
             default: break
             }
             let data = scenario == "malformed" ? Data("{".utf8) : try JSONSerialization.data(withJSONObject: body)
-            try await app.testing().test(.POST, V2VaporDeviceRegistrationCancellationRoutes.path, beforeRequest: { request in
-                request.headers.replaceOrAdd(name: .contentType, value: scenario == "form" ? "application/x-www-form-urlencoded" : "application/json")
+            try await app.testing { client in
+                let response = try await client.send(.post, to: URI(string: V2VaporDeviceRegistrationCancellationRoutes.path), beforeSend: { request in
+                request.headers[.contentType] = scenario == "form" || scenario == "oversized-form" ? "application/x-www-form-urlencoded" : "application/json"
                 request.body = .init(data: data)
-            }) { response async in
-                #expect(response.status == (scenario == "oversized" ? .payloadTooLarge : .badRequest))
+            })
+                #expect(response.status == (scenario == "oversized" || scenario == "oversized-form" ? .contentTooLarge : .badRequest))
             }
             #expect(await service.request() == nil)
-            try await app.asyncShutdown()
-        } catch { try? await app.asyncShutdown(); throw error }
+            try await app.shutdown()
+        } catch { try? await app.shutdown(); throw error }
     }
 
     @Test("trusted edge and client address budget are required", arguments: ["missing-proof", "missing-address", "limited", "limiter-failed", "allowed"])
     func middleware(scenario: String) async throws {
-        let app = try await Application.make(.testing)
+        let app = try await Application(.testing)
         do {
             let edge = Data(repeating: 0x43, count: 32).base64EncodedString()
             app.middleware.use(V2AccountEdgeAuthenticationMiddleware(secret: try .init(base64Encoded: edge)))
@@ -76,12 +79,13 @@ struct V2VaporDeviceRegistrationCancellationRoutesTests {
             let service = CancellationRouteRecorder(status: 204)
             V2VaporDeviceRegistrationCancellationRoutes(service: service).register(on: app)
             let value = try cancellation()
-            try await app.testing().test(.POST, V2VaporDeviceRegistrationCancellationRoutes.path, beforeRequest: { request in
-                if scenario != "missing-proof" { request.headers.replaceOrAdd(name: V2AccountEdgeAuthenticationMiddleware.headerName, value: edge) }
-                if scenario != "missing-address" { request.headers.replaceOrAdd(name: V2AccountEdgeAuthenticationMiddleware.clientAddressHeaderName, value: "192.0.2.16") }
+            try await app.testing { client in
+                let response = try await client.send(.post, to: URI(string: V2VaporDeviceRegistrationCancellationRoutes.path), beforeSend: { request in
+                if scenario != "missing-proof" { request.headers[V2AccountEdgeAuthenticationMiddleware.headerName] = edge }
+                if scenario != "missing-address" { request.headers[V2AccountEdgeAuthenticationMiddleware.clientAddressHeaderName] = "192.0.2.16" }
                 try request.content.encode(V2DeviceRegistrationCancellationHTTPRequest(value))
-            }) { response async in
-                let status: HTTPResponseStatus
+            })
+                let status: HTTPResponse.Status
                 switch scenario {
                 case "missing-proof", "missing-address": status = .forbidden
                 case "limited": status = .tooManyRequests
@@ -89,11 +93,11 @@ struct V2VaporDeviceRegistrationCancellationRoutesTests {
                 default: status = .noContent
                 }
                 #expect(response.status == status)
-                if scenario == "limited" { #expect(response.headers.first(name: "Retry-After") == "19") }
+                if scenario == "limited" { #expect(response.headers[.retryAfter] == "19") }
             }
             #expect((await service.request() != nil) == (scenario == "allowed"))
-            try await app.asyncShutdown()
-        } catch { try? await app.asyncShutdown(); throw error }
+            try await app.shutdown()
+        } catch { try? await app.shutdown(); throw error }
     }
 }
 

@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// 设备会话管理响应模型（会话清单接口）。
 public struct V2DeviceSessionHTTPResponse: Content, Sendable {
@@ -91,7 +92,7 @@ public struct V2VaporDeviceSessionRoutes: Sendable {
 
         routes.post("v2", "devices", "revoke") { request async throws -> Response in
             let identity = try await authenticate(request)
-            let input = try request.content.decode(V2DeviceSessionMutationHTTPRequest.self)
+            let input = try await request.content.decode(V2DeviceSessionMutationHTTPRequest.self)
             guard let rawDeviceID = input.deviceID, let target = try? DeviceID(rawDeviceID) else { throw Abort(.badRequest) }
             let result: V2DeviceSessionMutationOutcome
             do { result = try await sessions.revokeDevice(actorUserID: identity.userID, currentDeviceID: identity.deviceID, targetDeviceID: target, operationID: input.operationID) }
@@ -102,7 +103,7 @@ public struct V2VaporDeviceSessionRoutes: Sendable {
 
         routes.post("v2", "devices", "revoke-current") { request async throws -> Response in
             let identity = try await authenticate(request)
-            let input = try request.content.decode(V2DeviceSessionMutationHTTPRequest.self)
+            let input = try await request.content.decode(V2DeviceSessionMutationHTTPRequest.self)
             guard input.deviceID == nil else { throw Abort(.badRequest) }
             let result: V2DeviceSessionMutationOutcome
             do { result = try await sessions.revokeCurrentDevice(actorUserID: identity.userID, currentDeviceID: identity.deviceID, operationID: input.operationID) }
@@ -113,7 +114,7 @@ public struct V2VaporDeviceSessionRoutes: Sendable {
 
         routes.post("v2", "devices", "revoke-others") { request async throws -> Response in
             let identity = try await authenticate(request)
-            let input = try request.content.decode(V2DeviceSessionMutationHTTPRequest.self)
+            let input = try await request.content.decode(V2DeviceSessionMutationHTTPRequest.self)
             guard input.deviceID == nil else { throw Abort(.badRequest) }
             let result: V2DeviceSessionMutationOutcome
             do { result = try await sessions.revokeOtherDevices(actorUserID: identity.userID, currentDeviceID: identity.deviceID, operationID: input.operationID) }
@@ -139,7 +140,7 @@ public struct V2VaporDeviceSessionRoutes: Sendable {
     private func noStoreJSON(_ body: V2DeviceSessionPageHTTPResponse) throws -> Response {
         let data = try JSONEncoder().encode(body)
         var headers = noStoreHeaders()
-        headers.replaceOrAdd(name: .contentType, value: "application/json")
+        headers[.contentType] = "application/json"
         return .init(status: .ok, headers: headers, body: .init(data: data))
     }
 
@@ -149,10 +150,10 @@ public struct V2VaporDeviceSessionRoutes: Sendable {
     }
 
     /// no-store 公共头。
-    private func noStoreHeaders() -> HTTPHeaders {
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+    private func noStoreHeaders() -> HTTPFields {
+        var headers = HTTPFields()
+        headers[.cacheControl] = "no-store"
+        headers[.v2Pragma] = "no-cache"
         return headers
     }
 }

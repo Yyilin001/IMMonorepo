@@ -1,6 +1,5 @@
-import Fluent
+import FluentKit
 import FluentPostgresDriver
-import Vapor
 import Foundation
 @testable import IMV2Server
 import SQLKit
@@ -13,15 +12,15 @@ struct PostgresV2DirectAuthorizationIntentTests {
     @Test(arguments: [false, true])
     func resolutionWithOccupiedSingleConnectionPools(separateOwner: Bool) async throws {
         try await fixture(separateOwner: separateOwner) { context in
-            let controlURL = try #require(Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"))
+            let controlURL = try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"])
             let ownerURL = separateOwner
-                ? try #require(Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL")) : controlURL
-            let app = try await Application.make(.testing)
+                ? try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"]) : controlURL
+            let resources = makeV2DatabaseTestResources()
             do {
                 func pool(_ role: String, _ url: String) throws -> any Database {
                     let id = DatabaseID(string: role)
-                    app.databases.use(try .postgres(url: url, maxConnectionsPerEventLoop: 1), as: id)
-                    return app.db(id)
+                    resources.databases.use(try .postgres(url: url, maxConnectionsPerEventLoop: 1), as: id)
+                    return resources.database(id)
                 }
                 let writer = try pool("writer", controlURL)
                 let reservation = try pool("reservation", controlURL)
@@ -57,9 +56,9 @@ struct PostgresV2DirectAuthorizationIntentTests {
                 #expect(renewed.attempt.generation == 2)
                 #expect(renewed.policy.blocked)
                 #expect(try await coordinator.recover(limit: 8, now: now.addingTimeInterval(31)) == .init(claimed: 1, resolved: 1, deferred: 0))
-                try await app.asyncShutdown()
+                try await resources.shutdown()
             } catch {
-                try? await app.asyncShutdown()
+                try? await resources.shutdown()
                 throw error
             }
         }
@@ -69,9 +68,17 @@ struct PostgresV2DirectAuthorizationIntentTests {
         try await fixture { context in
             let request = context.request(), intents = context.intents
             let grant = try #require(try await intents.reserve([request], now: now).first)
-            let backend = try #require(try await context.controlSQL.raw("SELECT pg_backend_pid()::bigint AS value").first(decoding: Count.self))
-            let killed = try #require(try await context.ownerSQL.raw("SELECT pg_terminate_backend(\(bind: backend.value)::int4) AS value").first(decoding: Flag.self))
-            #expect(killed.value)
+            // Keep the selected control connection alive until termination.
+            // A different connection on the same PostgreSQL server must issue
+            // the signal; owner may live on a separate physical server.
+            let killed = try await context.controlSQL.withSession { pinned in
+                let backend = try #require(try await pinned.raw("SELECT pg_backend_pid()::bigint AS value")
+                    .first(decoding: Count.self))
+                return try #require(try await context.controlSQL.raw(
+                    "SELECT pg_terminate_backend(\(bind: backend.value)::int4) AS value"
+                ).first(decoding: Flag.self)).value
+            }
+            #expect(killed)
             // Pool reconnect is asynchronous. Retrying the same operation must
             // not allocate a new generation or discard the durable obligation.
             var replay: V2DirectAuthorizationGrant?

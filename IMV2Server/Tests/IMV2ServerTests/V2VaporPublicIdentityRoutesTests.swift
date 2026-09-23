@@ -1,3 +1,4 @@
+import HTTPTypes
 import Foundation
 import IMV2Core
 import IMV2Server
@@ -10,21 +11,22 @@ import VaporTesting
 struct V2VaporPublicIdentityRoutesTests {
     @Test("exact handle lookup requires device credentials and returns no-store profile facts")
     func resolvesExactHandle() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         V2VaporPublicIdentityRoutes(
             authenticator: PublicIdentityRouteAuthenticator(userID: try .init("actor-user")),
             directory: PublicIdentityDirectoryFake(identity: try .init(userID: .init("target-user"), handle: .init("target_user"), displayName: "Target", accountKind: .regular))
         ).register(on: app)
 
-        try await app.testing().test(.GET, "v2/public-identities/resolve?handle=%40TARGET_USER", beforeRequest: { request in
+        try await app.testing { client in
+            let response = try await client.send(.get, to: "v2/public-identities/resolve?handle=%40TARGET_USER", beforeSend: { request in
             request.headers.bearerAuthorization = .init(token: "access-token")
-            request.headers.replaceOrAdd(name: "X-IM-Device-ID", value: "00000000-0000-0000-0000-000000000901")
-        }) { response async throws in
+            request.headers[HTTPField.Name("X-IM-Device-ID")!] = "00000000-0000-0000-0000-000000000901"
+        })
             #expect(response.status == .ok)
-            #expect(response.headers.first(name: .cacheControl) == "no-store")
-            #expect(response.headers.first(name: "Pragma") == "no-cache")
-            let body = try response.content.decode(V2PublicIdentityHTTPResponse.self)
+            #expect(response.headers[.cacheControl] == "no-store")
+            #expect(response.headers[.pragma] == "no-cache")
+            let body = try await response.content.decode(V2PublicIdentityHTTPResponse.self)
             #expect(body.userID == "target-user")
             #expect(body.handle == "target_user")
             #expect(body.displayName == "Target")
@@ -33,21 +35,21 @@ struct V2VaporPublicIdentityRoutesTests {
 
     @Test("unknown and hidden identities share the same not-found response")
     func absentIdentityIsNotFound() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         V2VaporPublicIdentityRoutes(
             authenticator: PublicIdentityRouteAuthenticator(userID: try .init("actor-user")),
             directory: PublicIdentityDirectoryFake(identity: nil)
         ).register(on: app)
 
-        try await app.testing().test(.GET, "v2/public-identities/resolve?handle=missing_user", beforeRequest: { request in
+        try await app.testing { client in
+            let response = try await client.send(.get, to: "v2/public-identities/resolve?handle=missing_user", beforeSend: { request in
             request.headers.bearerAuthorization = .init(token: "access-token")
-            request.headers.replaceOrAdd(name: "X-IM-Device-ID", value: "00000000-0000-0000-0000-000000000901")
-        }) { response async in
+            request.headers[HTTPField.Name("X-IM-Device-ID")!] = "00000000-0000-0000-0000-000000000901"
+        })
             #expect(response.status == .notFound)
         }
     }
-
 }
 
 private struct PublicIdentityRouteAuthenticator: V2GatewayAuthenticator {

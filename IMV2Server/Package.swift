@@ -1,9 +1,9 @@
-// swift-tools-version:6.0
+// swift-tools-version:6.4
 import PackageDescription
 
 let package = Package(
     name: "IMV2Server",
-    platforms: [.macOS(.v15)],
+    platforms: [.macOS("26.2")],
     products: [
         .library(name: "IMV2Server", targets: ["IMV2Server"]),
         .library(name: "IMV2ServerHTTP", targets: ["IMV2ServerHTTP"]),
@@ -14,18 +14,23 @@ let package = Package(
         .executable(name: "IMV2GatewayLoadGenerator", targets: ["IMV2GatewayLoadGenerator"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/vapor/routing-kit.git", from: "5.0.0-beta"),
+        .package(url: "https://github.com/apple/swift-http-types.git", from: "1.7.0"),
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.14.0"),
+        .package(url: "https://github.com/apple/swift-configuration.git", from: "1.2.0"),
+        .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.11.0"),
         .package(path: "../IMV2Core"),
         .package(path: "../IMV2Compression"),
-        .package(url: "https://github.com/vapor/vapor.git", from: "4.115.0"),
-        .package(url: "https://github.com/vapor/fluent.git", from: "4.11.0"),
+        .package(url: "https://github.com/vapor/vapor.git", exact: "5.0.0-beta.2"),
+        .package(url: "https://github.com/vapor/fluent-kit.git", exact: "1.57.0"),
         .package(url: "https://github.com/vapor/fluent-postgres-driver.git", from: "2.9.0"),
-        .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.33.1"),
+        .package(path: "Vendor/postgres-nio"),
         .package(url: "https://github.com/vapor/async-kit.git", from: "1.22.0"),
         .package(url: "https://github.com/vapor/sql-kit.git", from: "3.35.0"),
         .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.29.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.34.0"),
-        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.9.0"),
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
     ],
     targets: [
         .target(
@@ -41,7 +46,8 @@ let package = Package(
                 "IMV2Core",
                 "IMV2Compression",
                 "CIMV2Argon2",
-                .product(name: "Fluent", package: "fluent"),
+                .product(name: "FluentKit", package: "fluent-kit"),
+                .product(name: "Logging", package: "swift-log"),
                 .product(name: "PostgresNIO", package: "postgres-nio"),
                 .product(name: "AsyncKit", package: "async-kit"),
                 .product(name: "SQLKit", package: "sql-kit"),
@@ -57,6 +63,12 @@ let package = Package(
             dependencies: [
                 "IMV2Server",
                 .product(name: "Vapor", package: "vapor"),
+                .product(name: "HTTPTypes", package: "swift-http-types"),
+                .product(name: "RoutingKit", package: "routing-kit"),
+                .product(name: "FluentKit", package: "fluent-kit"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "Configuration", package: "swift-configuration"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "_NIOFileSystem", package: "swift-nio"),
             ]
         ),
@@ -66,6 +78,12 @@ let package = Package(
                 "IMV2Server",
                 "IMV2ServerHTTP",
                 .product(name: "Vapor", package: "vapor"),
+                .product(name: "HTTPTypes", package: "swift-http-types"),
+                .product(name: "RoutingKit", package: "routing-kit"),
+                .product(name: "FluentKit", package: "fluent-kit"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "Configuration", package: "swift-configuration"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
                 .product(name: "NIOPosix", package: "swift-nio"),
             ]
@@ -76,6 +94,12 @@ let package = Package(
                 "IMV2Server",
                 "IMV2ServerHTTP",
                 .product(name: "Vapor", package: "vapor"),
+                .product(name: "HTTPTypes", package: "swift-http-types"),
+                .product(name: "RoutingKit", package: "routing-kit"),
+                .product(name: "FluentKit", package: "fluent-kit"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "Configuration", package: "swift-configuration"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
                 .product(name: "NIOPosix", package: "swift-nio"),
             ]
@@ -86,6 +110,12 @@ let package = Package(
                 "IMV2Server",
                 "IMV2ServerHTTP",
                 .product(name: "Vapor", package: "vapor"),
+                .product(name: "HTTPTypes", package: "swift-http-types"),
+                .product(name: "RoutingKit", package: "routing-kit"),
+                .product(name: "FluentKit", package: "fluent-kit"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "Configuration", package: "swift-configuration"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
                 .product(name: "NIOPosix", package: "swift-nio"),
             ]
@@ -126,6 +156,12 @@ let package = Package(
                 "IMV2ServerHTTP",
                 .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
                 .product(name: "Vapor", package: "vapor"),
+                .product(name: "HTTPTypes", package: "swift-http-types"),
+                .product(name: "RoutingKit", package: "routing-kit"),
+                .product(name: "FluentKit", package: "fluent-kit"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "Configuration", package: "swift-configuration"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "VaporTesting", package: "vapor"),
                 .product(name: "NIOTLS", package: "swift-nio"),
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
@@ -133,6 +169,15 @@ let package = Package(
                 .product(name: "SQLKit", package: "sql-kit"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
+            ],
+            swiftSettings: [
+                // Swift 6.4 emits very large DWARF for the parameterized database
+                // tests on Linux. Keep line-number backtraces and compile each
+                // source separately; production debug information is unchanged.
+                .unsafeFlags(
+                    ["-driver-batch-size-limit", "1", "-Xfrontend", "-gline-tables-only"],
+                    .when(platforms: [.linux], configuration: .debug)
+                ),
             ]
         ),
     ]

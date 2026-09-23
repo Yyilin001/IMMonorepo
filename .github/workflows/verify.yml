@@ -12,7 +12,7 @@ jobs:
   swift-and-postgres:
     name: Swift packages and PostgreSQL integration
     runs-on: ubuntu-latest
-    container: swift:6.2-jammy
+    container: swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6
     services:
       postgres:
         image: postgres:16-alpine
@@ -32,6 +32,15 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U im_v2_test -d im_v2_test"
           --health-interval 1s --health-timeout 3s --health-retries 30
+      postgres-control:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: im_v2_test
+          POSTGRES_USER: im_v2_test
+          POSTGRES_PASSWORD: im_v2_test
+        options: >-
+          --health-cmd "pg_isready -U im_v2_test -d im_v2_test"
+          --health-interval 1s --health-timeout 3s --health-retries 30
     steps:
       - uses: actions/checkout@v4
       - name: Install native verification dependencies
@@ -43,13 +52,19 @@ jobs:
           # installs the canonical schema into a clean PostgreSQL database.
           V2_SCHEMA_BOOTSTRAP_COVERED_BY_POSTGRES_INTEGRATION: "1"
         run: bash ./scripts/run_v2_swift_tests.sh
+      - name: Build Linux release products
+        run: |
+          for product in IMV2AccountServerApp IMV2OperatorServerApp IMV2ServerApp IMV2LocalGatewayProbe IMV2GatewayLoadGenerator; do
+            swift build --disable-automatic-resolution --jobs 4 -c release --package-path IMV2Server --product "$product"
+          done
       - name: Run PostgreSQL integration tests
         env:
           IMV2_POSTGRES_TEST_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
           IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres-secondary:5432/im_v2_test
+          IMV2_POSTGRES_TEST_CONTROL_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres-control:5432/im_v2_test
           IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE: "1"
           IMV2_REQUIRE_CROSS_STORE_POSTGRES_TESTS: "1"
-        run: swift test --package-path IMV2Server
+        run: swift test --disable-automatic-resolution --no-parallel --package-path IMV2Server
 
   operational-config:
     name: Prometheus and local Compose configuration

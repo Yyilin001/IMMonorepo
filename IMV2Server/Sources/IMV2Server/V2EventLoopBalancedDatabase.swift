@@ -1,4 +1,5 @@
-import Fluent
+import FluentKit
+import Logging
 import NIOCore
 import SQLKit
 import Synchronization
@@ -17,7 +18,7 @@ public enum V2EventLoopBalancedDatabaseError: Error, Equatable, Sendable {
 
 /// 把相互独立的数据库操作分发到每个应用事件循环各一个 Fluent 数据库句柄上。
 ///
-/// Fluent 会把 `Application.db(...)` 返回的数据库绑定到创建该句柄时选定的事件循环，
+/// FluentKit 会把 `Databases.database(..., on:)` 返回的数据库绑定到指定的事件循环，
 /// 因此长期存活的 Store 若只持有其中一个句柄，无论配置了多少事件循环，
 /// 都只会用到 `EventLoopGroupConnectionPool` 中的一个成员。该适配器恢复预期的连接池拓扑，
 /// 同时让事务与单会话工作严格固定在同一个底层句柄上。

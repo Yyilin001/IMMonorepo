@@ -1,3 +1,4 @@
+import HTTPTypes
 import Foundation
 import IMV2Core
 @testable import IMV2Server
@@ -20,11 +21,11 @@ struct V2VaporGroupInvitationRoutesTests {
         let route = parts[0], field = parts[1]
         let fixture = InvitationClockFixture()
         let store = InvitationClockStore(fixture: fixture, route: route, field: field)
-        let app = try await Application.make(.testing)
+        let app = try await Application(.testing)
         do {
             let service = V2GroupInvitationService(store: store, capacityProfile: try invitationClockProfile(), secretIssuer: try .init(rawKey: Data(repeating: 0x19, count: 32)), now: { fixture.base })
             V2VaporGroupInvitationRoutes(authenticator: InvitationClockAuthenticator(userID: fixture.userID), invitations: service).register(on: app)
-            let method: HTTPMethod = route == "list" || route == "pending_page" ? .GET : .POST
+            let method: HTTPRequest.Method = route == "list" || route == "pending_page" ? .get : .post
             let path: String
             switch route {
             case "cancel": path = "v2/group-join-requests/\(fixture.requestID.rawValue)/cancel"
@@ -40,22 +41,23 @@ struct V2VaporGroupInvitationRoutesTests {
             let valid: [(Double, Int64)] = [(1_750_000_000.125, 1_750_000_000_125), (-1.00025, -1_000), (946_684_800 - 211_813_488_000, -210_866_803_200_000), (946_684_800 + 9_223_371_331_200 - 10, 9_224_318_015_990_000)]
             for (seconds, expected) in invalid.map({ ($0, Optional<Int64>.none) }) + valid.map({ ($0.0, Optional($0.1)) }) {
                 await store.setDate(Date(timeIntervalSince1970: seconds))
-                try await app.testing().test(method, path, beforeRequest: { request in
+                try await app.testing { client in
+                    let response = try await client.send(method, to: URI(string: path), beforeSend: { request in
                     request.headers.bearerAuthorization = .init(token: "invitation-clock-fixture")
-                    request.headers.replaceOrAdd(name: "X-IM-Device-ID", value: fixture.deviceID.rawValue)
-                    if method == .POST { try request.content.encode(body) }
-                }) { response async throws in
-                    #expect(response.headers.first(name: .cacheControl) == "no-store")
-                    #expect(response.headers.first(name: "Pragma") == "no-cache")
+                    request.headers[HTTPField.Name("X-IM-Device-ID")!] = fixture.deviceID.rawValue
+                    if method == .post { try request.content.encode(body) }
+                })
+                    #expect(response.headers[.cacheControl] == "no-store")
+                    #expect(response.headers[.pragma] == "no-cache")
                     guard let expected else {
                         #expect(response.status == .serviceUnavailable)
-                        let error = try JSONSerialization.jsonObject(with: Data(response.body.readableBytesView)) as? [String: Any]
+                        let error = try JSONSerialization.jsonObject(with: (try await response.body.data() ?? Data())) as? [String: Any]
                         #expect(error?["error"] as? Bool == true)
                         #expect(error?["items"] == nil && error?["token"] == nil && error?["request"] == nil)
                         return
                     }
                     #expect(response.status == .ok)
-                    let root = try #require(try JSONSerialization.jsonObject(with: Data(response.body.readableBytesView)) as? [String: Any])
+                    let root = try #require(try JSONSerialization.jsonObject(with: (try await response.body.data() ?? Data())) as? [String: Any])
                     let value: [String: Any]
                     switch route {
                     case "list", "pending_page":
@@ -91,9 +93,9 @@ struct V2VaporGroupInvitationRoutesTests {
                     }
                 }
             }
-            try await app.asyncShutdown()
+            try await app.shutdown()
         } catch {
-            try? await app.asyncShutdown()
+            try? await app.shutdown()
             throw error
         }
     }

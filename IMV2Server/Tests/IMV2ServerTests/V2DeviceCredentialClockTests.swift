@@ -1,4 +1,5 @@
 import FluentPostgresDriver
+import FluentKit
 import Foundation
 import IMV2Core
 import NIOCore
@@ -6,7 +7,6 @@ import PostgresNIO
 import SQLKit
 import Synchronization
 import Testing
-import Vapor
 @testable import IMV2Server
 
 @Suite("Device service clock validation order")
@@ -506,16 +506,17 @@ private func makeService(_ database: ClockDatabase, state: DeviceClockState,
 }
 
 private func withClockDatabase(_ body: (ClockDatabase) async throws -> Void) async throws {
-    let app = try await Application.make(.testing)
+    let resources = makeV2DatabaseTestResources()
     do {
         // Only borrow the driver's context and SQL dialect. The spy never
         // connects to this address or forwards any database operation.
-        app.databases.use(try .postgres(url: "postgres://fixture:unused@127.0.0.1:1/fixture"), as: .psql)
-        let sql = try #require(app.db as? any SQLDatabase)
-        try await body(ClockDatabase(context: app.db.context, dialect: sql.dialect))
-        try await app.asyncShutdown()
+        resources.databases.use(try .postgres(url: "postgres://fixture:unused@127.0.0.1:1/fixture"), as: .psql)
+        let database = resources.database(.psql)
+        let sql = try #require(database as? any SQLDatabase)
+        try await body(ClockDatabase(context: database.context, dialect: sql.dialect))
+        try await resources.shutdown()
     } catch {
-        try? await app.asyncShutdown()
+        try? await resources.shutdown()
         throw error
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import HTTPTypes
 import IMV2Core
 import IMV2Server
 import IMV2ServerHTTP
@@ -10,8 +11,8 @@ import VaporTesting
 struct V2VaporMediaUploadRoutesTests {
     @Test("authenticated upload target, completion, and status preserve the device boundary")
     func authenticatedUploadLifecycle() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let now = Date(timeIntervalSince1970: 1_750_000_000)
         let userID = try UserID("user")
         let deviceID = try DeviceID("device")
@@ -45,35 +46,38 @@ struct V2VaporMediaUploadRoutesTests {
             handler: .init(edge: edge)
         ).register(on: app)
 
-        let headers: HTTPHeaders = [
-            "Authorization": "Bearer access-token",
-            "X-IM-Device-ID": deviceID.rawValue,
+        let headers: HTTPFields = [
+            .authorization: "Bearer access-token",
+            HTTPField.Name("X-IM-Device-ID")!: deviceID.rawValue,
         ]
-        let tester = try app.testing()
-        try await tester.test(.POST, "v2/media/uploads", headers: headers, beforeRequest: { request in
+
+        try await app.testing { client in
+            let response = try await client.send(.post, headers: headers, to: "v2/media/uploads", beforeSend: { request in
             try request.content.encode(V2MediaUploadTargetHTTPRequest(
                 operationID: "operation",
                 mediaID: mediaID.rawValue,
                 contentType: "image/jpeg",
                 byteCount: 5
             ))
-        }) { response async in
+        })
             #expect(response.status == .ok)
-            #expect(response.headers.first(name: .cacheControl) == "no-store")
-            #expect(response.headers.first(name: "Pragma") == "no-cache")
+            #expect(response.headers[.cacheControl] == "no-store")
+            #expect(response.headers[.pragma] == "no-cache")
             var envelope: V2MediaUploadTargetEnvelope?
-            expectContent(V2MediaUploadTargetEnvelope.self, response) { envelope = $0 }
+            envelope = try await response.content.decode(V2MediaUploadTargetEnvelope.self)
             #expect(envelope?.url == "https://provider.invalid/upload")
             #expect(envelope?.expectedByteCount == 5)
         }
-        try await tester.test(.POST, "v2/media/media/complete", headers: headers) { response async in
+        try await app.testing { client in
+            let response = try await client.send(.post, headers: headers, to: "v2/media/media/complete")
             #expect(response.status == .noContent)
-            #expect(response.headers.first(name: .cacheControl) == "no-store")
+            #expect(response.headers[.cacheControl] == "no-store")
         }
-        try await tester.test(.GET, "v2/media/media/upload-status", headers: headers) { response async in
+        try await app.testing { client in
+            let response = try await client.send(.get, headers: headers, to: "v2/media/media/upload-status")
             #expect(response.status == .ok)
             var envelope: V2MediaUploadStatusEnvelope?
-            expectContent(V2MediaUploadStatusEnvelope.self, response) { envelope = $0 }
+            envelope = try await response.content.decode(V2MediaUploadStatusEnvelope.self)
             #expect(envelope?.state == .available)
         }
 
@@ -90,8 +94,8 @@ struct V2VaporMediaUploadRoutesTests {
 
     @Test("authentication failure never reaches the upload store")
     func rejectsUnauthenticatedUpload() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let store = UploadRouteMediaStore(grant: nil)
         let edge = try V2MediaEdgeUploadService(
             media: .init(store: store, limits: try .init(maximumBytes: 10)),
@@ -102,17 +106,18 @@ struct V2VaporMediaUploadRoutesTests {
             handler: .init(edge: edge)
         ).register(on: app)
 
-        try await app.testing().test(.POST, "v2/media/uploads", headers: [
-            "Authorization": "Bearer invalid",
-            "X-IM-Device-ID": "device",
-        ], beforeRequest: { request in
+        try await app.testing { client in
+            let response = try await client.send(.post, headers: [
+            .authorization: "Bearer invalid",
+            HTTPField.Name("X-IM-Device-ID")!: "device",
+        ], to: "v2/media/uploads", beforeSend: { request in
             try request.content.encode(V2MediaUploadTargetHTTPRequest(
                 operationID: "operation",
                 mediaID: "media",
                 contentType: "image/jpeg",
                 byteCount: 5
             ))
-        }) { response async in
+        })
             #expect(response.status == .unauthorized)
         }
         #expect(await store.uploadRequest() == nil)

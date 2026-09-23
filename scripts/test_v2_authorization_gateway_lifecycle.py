@@ -16,6 +16,7 @@ for key in ('PGHOST','PGPORT','PGUSER'):
 if os.environ['PGHOST'] not in ('localhost','127.0.0.1','::1'):
     raise SystemExit('This probe requires a loopback disposable cluster.')
 PG=Path(os.environ.get('IMV2_PG_BINDIR') or subprocess.check_output(['pg_config','--bindir'],text=True).strip())
+BIN=Path(subprocess.check_output(['swift','build','--disable-automatic-resolution','--package-path',str(ROOT/'IMV2Server'),'--show-bin-path'],text=True).strip())
 DIR=Path('/tmp/imv2-auth-gateway-'+str(uuid.uuid4()));DIR.mkdir()
 DB='auth_gateway_'+uuid.uuid4().hex[:12]
 ENV={**os.environ,'PGDATABASE':DB}
@@ -36,7 +37,7 @@ def port():
 def launch(label):
     global process,output
     output=(DIR/(label+'.log')).open('w')
-    process=subprocess.Popen([str(ROOT/'IMV2Server/.build/debug/IMV2ServerApp')],env=config,stdout=output,stderr=subprocess.STDOUT)
+    process=subprocess.Popen([str(BIN/'IMV2ServerApp')],env=config,stdout=output,stderr=subprocess.STDOUT)
     wait(lambda:'IM V2 metrics listener bound' in (DIR/(label+'.log')).read_text(),20)
 def stop(sig):
     global process,output

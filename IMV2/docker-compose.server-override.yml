@@ -100,10 +100,10 @@ services:
   gateway:
     restart: unless-stopped
     mem_limit: 3g
-    # The process stops accepting new sockets first and cooperatively drains
-    # service tasks for at most 20 seconds. Keep Docker's outer grace larger
-    # so normal shutdown cannot be turned into SIGKILL/exit 137.
-    stop_grace_period: 30s
+    # The gateway drains listeners, then cancellation and workers, before
+    # releasing database resources. Cover both HTTP phases, worker drain,
+    # and cleanup before Docker can send SIGKILL/exit 137.
+    stop_grace_period: 120s
     environment:
       IM_V2_SHUTDOWN_GRACE_MS: 20000
       # 本地/自托管叠加层显式固定兼容基线：把单聊切到 room_log 是需要单独验证的

@@ -1,3 +1,4 @@
+import HTTPTypes
 import Foundation
 @testable import IMV2Server
 @testable import IMV2ServerHTTP
@@ -9,8 +10,8 @@ import VaporTesting
 struct V2VaporMetricsRoutesTests {
     @Test("metrics route exposes only aggregate Prometheus text with no-store semantics")
     func rendersAggregateMetrics() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let telemetry = V2PrometheusTelemetrySink()
         await telemetry.record(.gatewayCommand(
             traceID: UUID(uuidString: "00000000-0000-0000-0000-000000000901")!,
@@ -21,14 +22,15 @@ struct V2VaporMetricsRoutesTests {
         ))
         V2VaporMetricsRoutes.register(on: app, telemetry: telemetry)
 
-        try await app.testing().test(.GET, "metrics") { response async throws in
+        try await app.testing { client in
+            let response = try await client.send(.get, to: "metrics")
             #expect(response.status == .ok)
-            let contentType = try #require(response.headers.first(name: .contentType))
+            let contentType = try #require(response.headers[.contentType])
             #expect(contentType.contains("text/plain"))
             #expect(contentType.contains("version=0.0.4"))
             #expect(contentType.contains("charset=utf-8"))
-            #expect(response.headers.first(name: .cacheControl) == "no-store, no-cache")
-            let body = response.body.string
+            #expect(response.headers[.cacheControl] == "no-store, no-cache")
+            let body = (try await response.body.string() ?? "")
             #expect(body.contains("im_v2_gateway_commands_total{command=\"send_message\",outcome=\"accepted\",rejection=\"none\"} 1"))
             #expect(!body.contains("00000000-0000-0000-0000-000000000901"))
         }
@@ -36,15 +38,16 @@ struct V2VaporMetricsRoutesTests {
 
     @Test("metrics route includes only aggregate live connection gauges when configured")
     func rendersConnectionGauges() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let telemetry = V2PrometheusTelemetrySink()
         let connectionMetrics = ConnectionMetricsProbe(snapshot: .init(activeDevices: 2, activeConnections: 3))
         V2VaporMetricsRoutes.register(on: app, telemetry: telemetry, connectionMetrics: connectionMetrics)
 
-        try await app.testing().test(.GET, "metrics") { response async throws in
+        try await app.testing { client in
+            let response = try await client.send(.get, to: "metrics")
             #expect(response.status == .ok)
-            let body = response.body.string
+            let body = (try await response.body.string() ?? "")
             #expect(body.contains("im_v2_gateway_active_devices 2"))
             #expect(body.contains("im_v2_gateway_active_connections 3"))
             #expect(!body.contains("user_id"))
@@ -54,8 +57,8 @@ struct V2VaporMetricsRoutesTests {
 
     @Test("metrics route includes aggregate transport gauges when configured")
     func rendersTransportGauges() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let telemetry = V2PrometheusTelemetrySink()
         let transportMetrics = TransportMetricsProbe(snapshot: .init(
             activeConnections: 4,
@@ -64,8 +67,9 @@ struct V2VaporMetricsRoutesTests {
         ))
         V2VaporMetricsRoutes.register(on: app, telemetry: telemetry, transportMetrics: transportMetrics)
 
-        try await app.testing().test(.GET, "metrics") { response async throws in
-            let body = response.body.string
+        try await app.testing { client in
+            let response = try await client.send(.get, to: "metrics")
+            let body = (try await response.body.string() ?? "")
             #expect(body.contains("im_v2_gateway_transport_active_connections 4"))
             #expect(body.contains("im_v2_gateway_inbound_queue_peak_bytes 512"))
             #expect(body.contains("im_v2_gateway_connection_closures_total{reason=\"idle_timeout\"} 2"))
@@ -74,8 +78,8 @@ struct V2VaporMetricsRoutesTests {
 
     @Test("metrics route includes bounded runtime-pressure gauges and counters")
     func rendersRuntimePressureMetrics() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let telemetry = V2PrometheusTelemetrySink()
         let source = RuntimePressureMetricsProbe(snapshot: .init(
             databaseWork: .init(
@@ -200,8 +204,9 @@ struct V2VaporMetricsRoutesTests {
             on: app, telemetry: telemetry, runtimePressureMetrics: source
         )
 
-        try await app.testing().test(.GET, "metrics") { response async throws in
-            let body = response.body.string
+        try await app.testing { client in
+            let response = try await client.send(.get, to: "metrics")
+            let body = (try await response.body.string() ?? "")
             #expect(body.contains("im_v2_database_work_in_flight{class=\"foreground_write\"} 4"))
             #expect(body.contains("im_v2_database_work_in_flight{class=\"foreground_control_write\"} 0"))
             #expect(body.contains("im_v2_database_work_queued{class=\"interactive_read\"} 2"))
@@ -289,8 +294,8 @@ struct V2VaporMetricsRoutesTests {
 
     @Test("metrics route includes durable-work aggregates without accepting a shard label")
     func rendersDurableWorkGauges() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let telemetry = V2PrometheusTelemetrySink()
         let durableWorkMetrics = DurableWorkMetricsProbe(snapshot: .init(
             isAvailable: true,
@@ -339,8 +344,9 @@ struct V2VaporMetricsRoutesTests {
         ))
         V2VaporMetricsRoutes.register(on: app, telemetry: telemetry, durableWorkMetrics: durableWorkMetrics)
 
-        try await app.testing().test(.GET, "metrics") { response async throws in
-            let body = response.body.string
+        try await app.testing { client in
+            let response = try await client.send(.get, to: "metrics")
+            let body = (try await response.body.string() ?? "")
             #expect(body.contains("im_v2_durable_work_metrics_available 1"))
             #expect(body.contains("im_v2_user_state_event_backlog{state=\"ready\"} 2"))
             #expect(body.contains("im_v2_user_state_event_backlog{state=\"scheduled\"} 6"))

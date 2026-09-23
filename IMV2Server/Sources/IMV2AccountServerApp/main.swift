@@ -1,5 +1,12 @@
 import FluentPostgresDriver
 import Foundation
+import FluentKit
+import Logging
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 import IMV2Core
 import IMV2Server
 import IMV2ServerHTTP
@@ -8,26 +15,38 @@ import Vapor
 
 @main
 enum IMV2AccountServerApp {
-    static func main() async throws {
+    static func main() async {
+        LoggingSystem.bootstrap(StreamLogHandler.standardError)
+        let logger = Logger(label: "imv2.account")
+        do {
+            try await withLogger(logger) { _ in try await run(logger: logger) }
+        } catch {
+            logger.error("IM V2 account startup or shutdown failed")
+            exit(EXIT_FAILURE)
+        }
+    }
+
+    private static func run(logger: Logger) async throws {
         V2ProcessTerminationSignal.install()
         let configuration = try V2AccountRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
         let localMediaConfiguration = try V2LocalFilesystemMediaRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
         let applicationEventLoops = MultiThreadedEventLoopGroup(
             numberOfThreads: configuration.databasePolicy.eventLoopThreads
         )
+        let resources = V2DatabaseResources(eventLoopGroup: applicationEventLoops, logger: logger)
         let app: Application
         do {
-            app = try await Application.make(.production, .shared(applicationEventLoops))
+            app = try await V2HTTPService.makeApplication(host: configuration.listener.host, port: configuration.listener.port)
         } catch {
+            try? await resources.shutdown()
             try? await applicationEventLoops.shutdownGracefully()
             throw error
         }
         V2RedactedHTTPMiddlewareConfiguration.install(on: app)
         let runtimeTasks = RuntimeTaskSupervisor()
+        let passwordWorker = V2PasswordHashWorker()
         do {
-            let passwordWorker = V2PasswordHashWorker()
-            app.lifecycle.use(PasswordWorkerLifecycle(worker: passwordWorker))
-            app.databases.use(
+            resources.databases.use(
                 try postgresDatabaseConfiguration(
                     url: configuration.databaseURL,
                     policy: configuration.databasePolicy
@@ -38,8 +57,8 @@ enum IMV2AccountServerApp {
             guard databaseEventLoops.count == configuration.databasePolicy.eventLoopThreads else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
-            let databasePool = try V2ApplicationEventLoopDatabasePool(
-                application: app,
+            let databasePool = try V2EventLoopDatabasePool(
+                databases: resources.databases, logger: logger,
                 identifier: .psql,
                 eventLoops: databaseEventLoops
             )
@@ -52,8 +71,8 @@ enum IMV2AccountServerApp {
             let database: any Database = databasePool.database
             try await V2SchemaReadiness.verify(database: database)
             try await V2CapacityProfileReadiness.verify(database: database, profile: configuration.capacityProfile)
-            app.http.server.configuration.hostname = configuration.listener.host
-            app.http.server.configuration.port = configuration.listener.port
+            app.serverConfiguration.hostname = configuration.listener.host
+            app.serverConfiguration.port = configuration.listener.port
             app.middleware.use(V2AccountEdgeAuthenticationMiddleware(secret: configuration.edgeAuthorizationSecret))
             let edgeClientRateLimiter = V2PostgresAccountEdgeClientRateLimiter(
                 database: database,
@@ -96,7 +115,7 @@ enum IMV2AccountServerApp {
                     } catch is CancellationError {
                         break
                     } catch {
-                        app.logger.error("IM V2 account-edge rate-limit retention failed; retrying")
+                        logger.error("IM V2 account-edge rate-limit retention failed; retrying")
                     }
                     do {
                         try await v2Sleep(for: .seconds(60))
@@ -110,8 +129,8 @@ enum IMV2AccountServerApp {
             var accountStorageDatabases: [String: any Database] = [configuration.databaseURL: database]
             for url in Set(configuration.roomShardStorage.map(\.databaseURL)) where accountStorageDatabases[url] == nil {
                 let identifier = DatabaseID(string: "account-owner-\(accountStorageDatabases.count)")
-                app.databases.use(try postgresDatabaseConfiguration(url: url, policy: configuration.databasePolicy), as: identifier)
-                let pool = try V2ApplicationEventLoopDatabasePool(application: app, identifier: identifier, eventLoops: databaseEventLoops)
+                resources.databases.use(try postgresDatabaseConfiguration(url: url, policy: configuration.databasePolicy), as: identifier)
+                let pool = try V2EventLoopDatabasePool(databases: resources.databases, logger: logger, identifier: identifier, eventLoops: databaseEventLoops)
                 for member in pool.eventLoopDatabases {
                     try await V2PostgresSessionReadiness.verify(database: member, policy: configuration.databasePolicy)
                 }
@@ -145,8 +164,8 @@ enum IMV2AccountServerApp {
                 let mediaEventLoops = Array(applicationEventLoops.makeIterator())
                 for url in Set(configuration.roomShardStorage.map(\.databaseURL) + configuration.userShardStorage.map(\.databaseURL)) where accountStorageDatabases[url] == nil {
                     let identifier = DatabaseID(string: "media-store-\(accountStorageDatabases.count)")
-                    app.databases.use(try postgresDatabaseConfiguration(url: url, policy: configuration.databasePolicy), as: identifier)
-                    let pool = try V2ApplicationEventLoopDatabasePool(application: app, identifier: identifier, eventLoops: mediaEventLoops)
+                    resources.databases.use(try postgresDatabaseConfiguration(url: url, policy: configuration.databasePolicy), as: identifier)
+                    let pool = try V2EventLoopDatabasePool(databases: resources.databases, logger: logger, identifier: identifier, eventLoops: mediaEventLoops)
                     for member in pool.eventLoopDatabases {
                         try await V2PostgresSessionReadiness.verify(database: member, policy: configuration.databasePolicy)
                     }
@@ -173,6 +192,7 @@ enum IMV2AccountServerApp {
                 ).register(on: authenticatedAccountRoutes)
                 try V2VaporLocalFilesystemMediaRoutes(
                     provider: provider,
+                    fileIO: app.fileio,
                     publicBaseURL: localMediaConfiguration.publicBaseURL,
                     maximumUploadBytes: localMediaConfiguration.maximumBytes
                 ).register(on: app)
@@ -185,7 +205,6 @@ enum IMV2AccountServerApp {
                     store: PostgresV2MediaPurgeStore(database: database),
                     provider: provider
                 )
-                let logger = app.logger
                 await runtimeTasks.start {
                     while !Task.isCancelled {
                         do {
@@ -208,7 +227,7 @@ enum IMV2AccountServerApp {
                         }
                     }
                 }
-                app.logger.notice("IM V2 local filesystem media edge enabled")
+                logger.notice("IM V2 local filesystem media edge enabled")
             }
             V2VaporDeviceCredentialRoutes(assertionVerifier: assertionIssuer, issuer: credentials).register(on: app)
             V2VaporDeviceRevocationCapabilityRoutes(
@@ -255,12 +274,12 @@ enum IMV2AccountServerApp {
                     do {
                         let report = try await inviteRecovery.runOnce(limit: 8)
                         if report.paused > 0 {
-                            app.logger.error("IM V2 invite creation recovery paused; inspect control recovery reasons", metadata: ["paused": "\(report.paused)"])
+                            logger.error("IM V2 invite creation recovery paused; inspect control recovery reasons", metadata: ["paused": "\(report.paused)"])
                         } else if report.deferred > 0 {
-                            app.logger.warning("IM V2 invite creation recovery deferred", metadata: ["deferred": "\(report.deferred)"])
+                            logger.warning("IM V2 invite creation recovery deferred", metadata: ["deferred": "\(report.deferred)"])
                         }
                     } catch is CancellationError { break }
-                    catch { app.logger.error("IM V2 invite creation recovery failed; retrying") }
+                    catch { logger.error("IM V2 invite creation recovery failed; retrying") }
                     do { try await v2Sleep(for: .seconds(5)) } catch { break }
                 }
             }
@@ -270,10 +289,10 @@ enum IMV2AccountServerApp {
                     do {
                         let report = try await joinQuotaRecovery.runOnce(limit: 8)
                         if report.deferred > 0 {
-                            app.logger.warning("IM V2 join quota recovery deferred", metadata: ["deferred": "\(report.deferred)"])
+                            logger.warning("IM V2 join quota recovery deferred", metadata: ["deferred": "\(report.deferred)"])
                         }
                     } catch is CancellationError { break }
-                    catch { app.logger.error("IM V2 join quota recovery failed; retrying") }
+                    catch { logger.error("IM V2 join quota recovery failed; retrying") }
                     do { try await v2Sleep(for: .seconds(5)) } catch { break }
                 }
             }
@@ -298,15 +317,21 @@ enum IMV2AccountServerApp {
                     policy: configuration.passwordLoginRateLimit
                 )
             ).register(on: app)
-            try await app.startup()
-            app.logger.notice("IM V2 account service bound", metadata: ["host": "\(configuration.listener.host)", "port": "\(configuration.listener.port)"])
-            await V2ProcessTerminationSignal.wait()
-            await runtimeTasks.cancelAndWait()
-            try await app.asyncShutdown()
+            try await V2HTTPService.withRunning(app, logger: logger,
+                waitForShutdown: V2ProcessTerminationSignal.wait) { shutdown in
+                logger.notice("IM V2 account service bound", metadata: ["host": "\(configuration.listener.host)", "port": "\(configuration.listener.port)"])
+                await shutdown.wait()
+            }
+            await runtimeTasks.cancelAndWait(logger: logger)
+            try await passwordWorker.shutdown()
+            try await app.shutdown()
+            try await resources.shutdown()
             try await applicationEventLoops.shutdownGracefully()
         } catch {
-            await runtimeTasks.cancelAndWait()
-            try? await app.asyncShutdown()
+            await runtimeTasks.cancelAndWait(logger: logger)
+            try? await passwordWorker.shutdown()
+            try? await app.shutdown()
+            try? await resources.shutdown()
             try? await applicationEventLoops.shutdownGracefully()
             throw error
         }
@@ -336,7 +361,7 @@ private struct ProcessRuntimeEnvironment: V2RuntimeEnvironment {
 }
 
 
-/// 持有必须在 `Application.startup` 完成之前启动的非结构化进程任务。
+/// 持有服务运行期间的非结构化后台任务。
 ///
 /// 无论正常退出还是异常退出，都会在开始关闭数据库与事件循环之前取消并等待这批任务收敛。
 private actor RuntimeTaskSupervisor {
@@ -348,20 +373,15 @@ private actor RuntimeTaskSupervisor {
         tasks.append(Task { await operation() })
     }
 
-    func cancelAndWait() async {
+    func cancelAndWait(logger: Logger) async {
         guard !isShuttingDown else { return }
         isShuttingDown = true
         let ownedTasks = tasks
         tasks.removeAll(keepingCapacity: false)
         for task in ownedTasks { task.cancel() }
-        for task in ownedTasks { await task.value }
-    }
-}
-
-private struct PasswordWorkerLifecycle: LifecycleHandler {
-    let worker: V2PasswordHashWorker
-    func shutdownAsync(_ application: Application) async {
-        do { try await worker.shutdown() }
-        catch { application.logger.error("Password worker shutdown failed") }
+        guard await v2WaitForTaskDrain(ownedTasks, timeout: .seconds(30)) else {
+            logger.critical("IM V2 account task drain exceeded its shutdown deadline")
+            exit(EXIT_FAILURE)
+        }
     }
 }

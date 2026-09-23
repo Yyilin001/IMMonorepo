@@ -556,7 +556,9 @@ public enum V2GatewayTelemetryRejection: String, CaseIterable, Hashable, Sendabl
     }
 }
 
-public enum V2TelemetryEvent: Equatable, Sendable {
+// Swift 6.4 Linux Release crashes while an async composite sink records the
+// inline event layout. Keep this indirect until that toolchain path is fixed.
+public indirect enum V2TelemetryEvent: Equatable, Sendable {
     /// 跟踪 ID 用于关联单条网关命令，且不标识任何用户、设备、房间、消息、令牌或协议载荷。
     case gatewayCommand(
         traceID: UUID,

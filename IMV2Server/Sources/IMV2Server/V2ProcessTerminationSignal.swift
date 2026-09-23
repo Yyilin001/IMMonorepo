@@ -15,9 +15,11 @@ import Musl
 /// libdispatch 曾出现过 use-after-free。该源由操作系统在进程退出时回收，
 /// 互斥锁只用于在重复 SIGTERM 时保护等待的 continuation。
 public enum V2ProcessTerminationSignal {
+    private final class WaiterID: Sendable {}
     private struct State: Sendable {
         var source: DispatchSourceSignal?
         var continuation: CheckedContinuation<Void, Never>?
+        var waiterID: WaiterID?
         var isInstalled = false
         var didReceiveSignal = false
     }
@@ -49,16 +51,31 @@ public enum V2ProcessTerminationSignal {
     ///
     /// 信号若已到达则立即返回，否则挂起当前任务直到收到 SIGTERM。
     /// 同一进程只允许一个等待者：重复安装等待者会直接失败。
+    /// 服务任务失败时，取消等待也会返回，允许所属任务作用域完成资源清理。
+    /// 取消仅移除等待者，不取消进程全局 Dispatch source。
     public static func wait() async {
         install()
-        await withCheckedContinuation { continuation in
-            let resumeImmediately = state.withLock { state -> Bool in
-                guard !state.didReceiveSignal else { return true }
-                precondition(state.continuation == nil, "process termination waiter installed more than once")
-                state.continuation = continuation
-                return false
+        let waiterID = WaiterID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let resumeImmediately = state.withLock { state -> Bool in
+                    guard !state.didReceiveSignal, !Task.isCancelled else { return true }
+                    precondition(state.continuation == nil, "process termination waiter installed more than once")
+                    state.continuation = continuation
+                    state.waiterID = waiterID
+                    return false
+                }
+                if resumeImmediately { continuation.resume() }
             }
-            if resumeImmediately { continuation.resume() }
+        } onCancel: {
+            let continuation = state.withLock { state -> CheckedContinuation<Void, Never>? in
+                guard state.waiterID === waiterID else { return nil }
+                let continuation = state.continuation
+                state.continuation = nil
+                state.waiterID = nil
+                return continuation
+            }
+            continuation?.resume()
         }
     }
 
@@ -71,6 +88,7 @@ public enum V2ProcessTerminationSignal {
             state.didReceiveSignal = true
             let continuation = state.continuation
             state.continuation = nil
+            state.waiterID = nil
             return continuation
         }
         continuation?.resume()

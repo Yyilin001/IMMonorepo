@@ -1,3 +1,4 @@
+import HTTPTypes
 import Foundation
 import IMV2Core
 import IMV2Server
@@ -10,8 +11,8 @@ import VaporTesting
 struct V2VaporProfilePresentationRoutesTests {
     @Test("contact aliases are scoped to the authenticated owner and disable caching")
     func contactAliasesUseAuthenticatedOwner() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let owner = try UserID("owner")
         let target = try UserID("target")
         let alias = try V2ContactAlias(
@@ -26,11 +27,12 @@ struct V2VaporProfilePresentationRoutesTests {
             presentations: manager
         ).register(on: app)
 
-        try await app.testing().test(.GET, "v2/profile-presentations/contact-aliases?cursor=target&limit=20", headers: authenticatedHeaders()) { response async in
+        try await app.testing { client in
+            let response = try await client.send(.get, headers: authenticatedHeaders(), to: "v2/profile-presentations/contact-aliases?cursor=target&limit=20")
             #expect(response.status == .ok)
-            #expect(response.headers.first(name: .cacheControl) == "no-store")
-            #expect(response.headers.first(name: "Pragma") == "no-cache")
-            let body = String(decoding: response.body.readableBytesView, as: UTF8.self)
+            #expect(response.headers[.cacheControl] == "no-store")
+            #expect(response.headers[.pragma] == "no-cache")
+            let body = try await response.body.string() ?? ""
             #expect(body.contains("朋友"))
             #expect(body.contains("target"))
         }
@@ -42,8 +44,8 @@ struct V2VaporProfilePresentationRoutesTests {
 
     @Test("group nickname mutation cannot name another actor")
     func groupNicknameUsesAuthenticatedActor() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let actor = try UserID("actor")
         let room = try RoomID("room")
         let nickname = try V2GroupMemberPresentation(
@@ -58,11 +60,12 @@ struct V2VaporProfilePresentationRoutesTests {
             presentations: manager
         ).register(on: app)
 
-        try await app.testing().test(.PUT, "v2/profile-presentations/groups/room/nickname", headers: authenticatedHeaders(), beforeRequest: { request in
+        try await app.testing { client in
+            let response = try await client.send(.put, headers: authenticatedHeaders(), to: "v2/profile-presentations/groups/room/nickname", beforeSend: { request in
             try request.content.encode(NicknameMutationRequest(operationID: "operation", expectedRevision: 1, nickname: "值班"))
-        }) { response async in
+        })
             #expect(response.status == .ok)
-            #expect(response.headers.first(name: .cacheControl) == "no-store")
+            #expect(response.headers[.cacheControl] == "no-store")
         }
         let request = try #require(await manager.nicknameUpdateRequest())
         #expect(request.actor == actor)
@@ -73,36 +76,41 @@ struct V2VaporProfilePresentationRoutesTests {
 
     @Test("overflowing profile revisions are rejected before the presentation store", arguments: [UInt64(0), UInt64(Int64.max)+1, UInt64.max], ["alias", "nickname"])
     func rejectsUnrepresentableRevision(_ revision: UInt64, route: String) async throws {
-        let app = try await Application.make(.testing)
+        let app = try await Application(.testing)
         do {
             let actor = try UserID("actor")
             let manager = PresentationRouteManager()
             V2VaporProfilePresentationRoutes(authenticator: PresentationRouteAuthenticator(userID: actor), presentations: manager).register(on: app)
             let path = route == "alias" ? "v2/profile-presentations/contact-aliases/target" : "v2/profile-presentations/groups/room/nickname"
-            try await app.testing().test(.PUT, path, headers: authenticatedHeaders(), beforeRequest: { request in
+            try await app.testing { client in
+                let response = try await client.send(.put, headers: authenticatedHeaders(), to: URI(string: path), beforeSend: { request in
                 if route == "alias" { try request.content.encode(AliasMutationRequest(operationID: "operation", expectedRevision: revision, remarkName: "name")) }
                 else { try request.content.encode(NicknameMutationRequest(operationID: "operation", expectedRevision: revision, nickname: "name")) }
-            }) { response async in #expect(response.status == .badRequest) }
+            })
+ #expect(response.status == .badRequest)
+            }
             #expect(await manager.nicknameUpdateRequest() == nil)
             #expect(await manager.aliasUpdateCount() == 0)
-            try await app.asyncShutdown()
-        } catch { try? await app.asyncShutdown(); throw error }
+            try await app.shutdown()
+        } catch { try? await app.shutdown(); throw error }
     }
 
     @Test("pagination and domain errors map to stable public statuses")
     func mapsValidationAndDomainErrors() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let owner = try UserID("owner")
         V2VaporProfilePresentationRoutes(
             authenticator: PresentationRouteAuthenticator(userID: owner),
             presentations: PresentationRouteManager(error: .forbidden)
         ).register(on: app)
-        let tester = try app.testing()
-        try await tester.test(.GET, "v2/profile-presentations/contact-aliases?limit=501", headers: authenticatedHeaders()) { response async in
+
+        try await app.testing { client in
+            let response = try await client.send(.get, headers: authenticatedHeaders(), to: "v2/profile-presentations/contact-aliases?limit=501")
             #expect(response.status == .badRequest)
         }
-        try await tester.test(.GET, "v2/profile-presentations/contact-aliases", headers: authenticatedHeaders()) { response async in
+        try await app.testing { client in
+            let response = try await client.send(.get, headers: authenticatedHeaders(), to: "v2/profile-presentations/contact-aliases")
             #expect(response.status == .forbidden)
         }
     }
@@ -166,8 +174,8 @@ private struct PresentationRouteAuthenticator: V2GatewayAuthenticator {
     }
 }
 
-private func authenticatedHeaders() -> HTTPHeaders {
-    ["Authorization": "Bearer access-token", "X-IM-Device-ID": "device"]
+private func authenticatedHeaders() -> HTTPFields {
+    [.authorization: "Bearer access-token", HTTPField.Name("X-IM-Device-ID")!: "device"]
 }
 
 private struct AliasMutationRequest: Content {

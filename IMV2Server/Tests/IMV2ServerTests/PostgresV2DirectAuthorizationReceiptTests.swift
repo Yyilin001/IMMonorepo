@@ -1,4 +1,4 @@
-import Fluent
+import FluentKit
 import Foundation
 @testable import IMV2Server
 import SQLKit

@@ -2,6 +2,8 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
+import RoutingKit
 
 /// Public factor endpoints protected by the trusted edge proof and shared address budget.
 /// Password-bearing operations additionally consume the canonical account's attempt budget.
@@ -11,10 +13,11 @@ public struct V2PasswordLifecycleRoutes: Sendable {
 
     public func register(on routes: any RoutesBuilder) {
         for action in ["change", "recovery-code", "recover"] {
-            routes.on(.POST, "v2", "account-auth", "password", PathComponent(stringLiteral: action), body: .collect(maxSize: "8kb")) { request async -> Response in
+            routes.on(.post, "v2", "account-auth", "password", PathComponent(stringLiteral: action), maxBodySize: "8kb") { request async -> Response in
                 do {
+                    _ = try await request.body.collect()
                     guard request.headers.contentType?.type == "application", request.headers.contentType?.subType == "json" else { return response(.badRequest) }
-                    let input = try request.content.decode(Input.self)
+                    let input = try await request.content.decode(Input.self)
                     guard let uuid = UUID(uuidString: input.deviceID) else { return response(.badRequest) }
                     let device = DeviceID(uuid: uuid)
                     switch action {
@@ -34,6 +37,7 @@ public struct V2PasswordLifecycleRoutes: Sendable {
                 catch V2PasswordAccountStoreError.invalidAccountHandle { return response(.badRequest) }
                 catch V2PasswordLifecycleError.rateLimited(let seconds) { return response(.tooManyRequests, retry: seconds) }
                 catch V2PasswordHashError.busy { return response(.serviceUnavailable, retry: 1) }
+                catch let abort as Abort where abort.status == .contentTooLarge { return response(.contentTooLarge) }
                 catch is DecodingError { return response(.badRequest) }
                 catch let abort as Abort where abort.status == .badRequest || abort.status == .unsupportedMediaType { return response(.badRequest) }
                 catch { return response(.serviceUnavailable) }
@@ -41,9 +45,9 @@ public struct V2PasswordLifecycleRoutes: Sendable {
         }
     }
 
-    private func response(_ status: HTTPStatus, retry: Int? = nil) -> Response {
-        var headers: HTTPHeaders = ["Cache-Control": "no-store", "Pragma": "no-cache"]
-        if let retry { headers.replaceOrAdd(name: "Retry-After", value: String(retry)) }
+    private func response(_ status: HTTPResponse.Status, retry: Int? = nil) -> Response {
+        var headers: HTTPFields = [.cacheControl: "no-store", .v2Pragma: "no-cache"]
+        if let retry { headers[.retryAfter] = String(retry) }
         return .init(status: status, headers: headers)
     }
 

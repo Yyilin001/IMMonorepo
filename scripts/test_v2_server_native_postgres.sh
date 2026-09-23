@@ -58,5 +58,6 @@ export IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE=1
 export IMV2_POSTGRES_TEST_DATABASE_URL="$(connection_url "${prefix}_primary")"
 export IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL="$(connection_url "${prefix}_secondary")"
 export IMV2_POSTGRES_TEST_CONTROL_DATABASE_URL="$(connection_url "${prefix}_control")"
+export IMV2_REQUIRE_CROSS_STORE_POSTGRES_TESTS=1
 printf 'Running server tests with three owned disposable databases (%s).\n' "$prefix"
-swift test --package-path "${root_dir}/IMV2Server" --jobs 4 --no-parallel "$@"
+swift test --disable-automatic-resolution --package-path "${root_dir}/IMV2Server" --jobs 4 --no-parallel "$@"

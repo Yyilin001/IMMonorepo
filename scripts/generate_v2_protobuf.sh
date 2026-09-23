@@ -19,7 +19,7 @@ resolve_plugin() {
     [[ -x "$PROTOC_GEN_SWIFT" ]] || fail "PROTOC_GEN_SWIFT is not executable"
     printf '%s' "$PROTOC_GEN_SWIFT"; return
   fi
-  [[ -d "$SWIFT_PROTOBUF_CHECKOUT" ]] || swift package --package-path "$ROOT_DIR/IMV2Server" resolve >/dev/null
+  [[ -d "$SWIFT_PROTOBUF_CHECKOUT" ]] || swift package --disable-automatic-resolution --package-path "$ROOT_DIR/IMV2Server" resolve >/dev/null
   local build_arguments=(swift build --package-path "$SWIFT_PROTOBUF_CHECKOUT" -c release --product protoc-gen-swift)
   if [[ -n "$SWIFT_PROTOBUF_PLUGIN_SCRATCH_PATH" ]]; then
     mkdir -p "$SWIFT_PROTOBUF_PLUGIN_SCRATCH_PATH"
@@ -27,8 +27,11 @@ resolve_plugin() {
   fi
   "${build_arguments[@]}" >/dev/null
   local plugin
-  local build_root="${SWIFT_PROTOBUF_PLUGIN_SCRATCH_PATH:-$SWIFT_PROTOBUF_CHECKOUT/.build}"
-  plugin="$(find "$build_root" -path '*/release/protoc-gen-swift' -type f | sort | head -n 1)"
+  # Swift 6.4 uses Swift Build on macOS, whose products live under
+  # out/Products/Release rather than the Linux SwiftPM release directory.
+  local bin_path
+  bin_path="$("${build_arguments[@]}" --show-bin-path)"
+  plugin="$bin_path/protoc-gen-swift"
   [[ -x "$plugin" ]] || fail "unable to locate protoc-gen-swift"
   printf '%s' "$plugin"
 }

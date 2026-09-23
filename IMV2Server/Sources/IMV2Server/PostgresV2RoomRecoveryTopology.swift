@@ -1,5 +1,5 @@
 import Crypto
-import Fluent
+import FluentKit
 import Foundation
 import SQLKit
 

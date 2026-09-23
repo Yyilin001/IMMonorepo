@@ -1,5 +1,12 @@
 import FluentPostgresDriver
 import Foundation
+import FluentKit
+import Logging
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 import IMV2Server
 import IMV2ServerHTTP
 import NIOPosix
@@ -7,17 +14,30 @@ import Vapor
 
 @main
 enum IMV2ServerApp {
-    static func main() async throws {
+    static func main() async {
+        LoggingSystem.bootstrap(StreamLogHandler.standardError)
+        let logger = Logger(label: "imv2.gateway")
+        do {
+            try await withLogger(logger) { _ in try await run(logger: logger) }
+        } catch {
+            logger.error("IM V2 gateway startup or shutdown failed")
+            exit(EXIT_FAILURE)
+        }
+    }
+
+    private static func run(logger: Logger) async throws {
         V2ProcessTerminationSignal.install()
         let configuration = try V2GatewayRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
         let localMediaConfiguration = try V2LocalFilesystemMediaRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
         let applicationEventLoops = MultiThreadedEventLoopGroup(
             numberOfThreads: configuration.databasePolicy.eventLoopThreads
         )
+        let resources = V2DatabaseResources(eventLoopGroup: applicationEventLoops, logger: logger)
         let app: Application
         do {
-            app = try await Application.make(.production, .shared(applicationEventLoops))
+            app = try await V2HTTPService.makeApplication(host: configuration.metrics.host, port: configuration.metrics.port)
         } catch {
+            try? await resources.shutdown()
             try? await applicationEventLoops.shutdownGracefully()
             throw error
         }
@@ -48,7 +68,7 @@ enum IMV2ServerApp {
                     let identifier: DatabaseID = role == .foreground && url == configuration.databaseURL
                         ? .psql
                         : DatabaseID(string: "gateway-\(role.rawValue)-pool-\(urlIndex)")
-                    app.databases.use(
+                    resources.databases.use(
                         try postgresDatabaseConfiguration(
                             url: url,
                             policy: configuration.databasePolicy,
@@ -61,8 +81,8 @@ enum IMV2ServerApp {
                         ),
                         as: identifier
                     )
-                    let eventLoopPool = try V2ApplicationEventLoopDatabasePool(
-                        application: app,
+                    let eventLoopPool = try V2EventLoopDatabasePool(
+                        databases: resources.databases, logger: logger,
                         identifier: identifier,
                         eventLoops: databaseEventLoops
                     )
@@ -94,13 +114,13 @@ enum IMV2ServerApp {
             // 独立控制连接持有路由围栏，数据连接先提交源端再镜像。
             // 即使关闭工作类别隔离也不能合并这两个池；总连接数已在配置阶段计入预算。
             let userStateRouteDatabaseID = DatabaseID(string: "gateway-user-state-route")
-            app.databases.use(try postgresDatabaseConfiguration(
+            resources.databases.use(try postgresDatabaseConfiguration(
                 url: configuration.databaseURL,
                 policy: configuration.databasePolicy,
                 maximumConnectionsPerEventLoop: 1
             ), as: userStateRouteDatabaseID)
-            let userStateRoutePool = try V2ApplicationEventLoopDatabasePool(
-                application: app, identifier: userStateRouteDatabaseID, eventLoops: databaseEventLoops
+            let userStateRoutePool = try V2EventLoopDatabasePool(
+                databases: resources.databases, logger: logger, identifier: userStateRouteDatabaseID, eventLoops: databaseEventLoops
             )
             for routeDatabase in userStateRoutePool.eventLoopDatabases {
                 try await V2PostgresSessionReadiness.verify(database: routeDatabase, policy: configuration.databasePolicy)
@@ -108,11 +128,11 @@ enum IMV2ServerApp {
             let userStateRouter = V2PostgresUserShardRouter(database: userStateRoutePool.database)
 
             let directSendControlID = DatabaseID(string: "gateway-direct-send-control")
-            app.databases.use(try postgresDatabaseConfiguration(url: configuration.databaseURL,
+            resources.databases.use(try postgresDatabaseConfiguration(url: configuration.databaseURL,
                 policy: configuration.databasePolicy,
                 maximumConnectionsPerEventLoop: configuration.directSendControlConnectionsPerEventLoop),
                 as: directSendControlID)
-            let directSendControlPool = try V2ApplicationEventLoopDatabasePool(application: app,
+            let directSendControlPool = try V2EventLoopDatabasePool(databases: resources.databases, logger: logger,
                 identifier: directSendControlID, eventLoops: databaseEventLoops)
             for policyDatabase in directSendControlPool.eventLoopDatabases {
                 try await V2PostgresSessionReadiness.verify(database: policyDatabase, policy: configuration.databasePolicy)
@@ -124,9 +144,9 @@ enum IMV2ServerApp {
             var authorizationResolutionDatabases: [String: any Database] = [:]
             for (index, url) in configuration.directAuthorizationResolutionDatabaseURLs.enumerated() {
                 let id = DatabaseID(string: "gateway-authorization-resolution-\(index)")
-                app.databases.use(try postgresDatabaseConfiguration(url: url, policy: configuration.databasePolicy,
+                resources.databases.use(try postgresDatabaseConfiguration(url: url, policy: configuration.databasePolicy,
                     maximumConnectionsPerEventLoop: 1), as: id)
-                let pool = try V2ApplicationEventLoopDatabasePool(application: app, identifier: id, eventLoops: databaseEventLoops)
+                let pool = try V2EventLoopDatabasePool(databases: resources.databases, logger: logger, identifier: id, eventLoops: databaseEventLoops)
                 for member in pool.eventLoopDatabases {
                     try await V2PostgresSessionReadiness.verify(database: member, policy: configuration.databasePolicy)
                 }
@@ -257,8 +277,8 @@ enum IMV2ServerApp {
             // Metrics intentionally use a distinct loopback-only HTTP
             // listener. The native TLS gateway and public media edge must
             // never expose operational metrics.
-            app.http.server.configuration.hostname = configuration.metrics.host
-            app.http.server.configuration.port = configuration.metrics.port
+            app.serverConfiguration.hostname = configuration.metrics.host
+            app.serverConfiguration.port = configuration.metrics.port
             let authenticator = V2PostgresGatewayAuthenticator(database: database, tokenKey: configuration.accessTokenKey)
             let commandRateLimiter = V2AuthenticatedGatewayCommandRateLimiter(
                 policy: configuration.commandRateLimitPolicy
@@ -408,7 +428,7 @@ enum IMV2ServerApp {
             )
             let telemetry = V2CompositeTelemetrySink([
                 V2ApplicationTelemetrySink(
-                    logger: app.logger,
+                    logger: logger,
                     successSamplePermille: configuration.commandSuccessLogSamplePermille,
                     slowCommandThresholdMilliseconds:
                         configuration.commandSlowLogThresholdMilliseconds,
@@ -1377,7 +1397,7 @@ enum IMV2ServerApp {
             // at zero on first deployment. This closes the outage window in
             // which no gateway existed to observe a historical revocation.
             try await revokedDeviceProjectionCleanupWorker.initializeForStartup()
-            let forwardLogger = app.logger
+            let forwardLogger = logger
             // Local-only byte adapter: the account edge and Gateway must share
             // this configured object root. Do not call prepare() here because
             // the edge owns startup cleanup of active upload staging files.
@@ -1412,95 +1432,338 @@ enum IMV2ServerApp {
             let forwardRuntime = try V2ForwardDeliveryRuntime(workers: forwardWorkers,
                 minimumPollMilliseconds: configuration.workerPollIntervalMilliseconds,
                 onFailure: { _ in forwardLogger.error("IM V2 forward delivery worker failed; retrying") })
-            try await server.bind()
-            app.logger.notice("IM V2 TLS gateway bound", metadata: ["host": "\(configuration.tls.host)", "port": "\(configuration.tls.port)"])
+            var serverIsShutdown = false
             do {
-                try await app.startup()
-            } catch {
-                try? await server.shutdown()
-                throw error
-            }
-            app.logger.notice("IM V2 metrics listener bound", metadata: ["host": "\(configuration.metrics.host)", "port": "\(configuration.metrics.port)"])
-            let logger = app.logger
-            let forwardDeliveryTask = Task { await forwardRuntime.run() }
-            let directAuthorizationRecoveryTask = Task {
-                while !Task.isCancelled {
-                    do {
-                        let report = try await directAuthorizationCoordinator.recover(limit: 8, now: Date())
-                        if report.deferred > 0 {
-                            logger.warning("IM V2 authorization recovery deferred owner work", metadata: ["count": "\(report.deferred)"])
-                        }
-                    } catch is CancellationError { break }
-                    catch { logger.error("IM V2 authorization recovery failed; retrying") }
-                    do { try await v2Sleep(for: .milliseconds(configuration.workerPollIntervalMilliseconds)) }
-                    catch { break }
-                }
-            }
-
-            let maintenanceCadence = try V2MaintenanceCadence(
-                intervalMilliseconds: configuration.maintenancePollIntervalMilliseconds
-            )
-            // Foreground metadata publication is deliberately owned outside
-            // the command handler. An optional broker or socket stall can
-            // therefore never extend the committed-message response path.
-            let foregroundGroupEventHintTask = Task {
-                await foregroundGroupEventHints.run()
-            }
-            let directRoomLogEventCacheTask = Task {
-                if let directRoomLogEventCache {
-                    await directRoomLogEventCache.run()
-                }
-            }
-            let syncWakeCoalescerTask = Task {
-                if configuration.syncWakeCoalescingEnabled {
-                    await syncWakeCoalescer.run()
-                }
-            }
-            // `SKIP LOCKED` checkpoint claims allow several bounded workers
-            // per physical store while preserving strict sequence for one
-            // user. Snapshot publication keeps one loop per store because it
-            // is a heavier, separately fenced artifact build.
-            let userProjectionTasks = userProjectionWorkers.flatMap { worker in
-                (0 ..< configuration.userProjectionConcurrency).map { workerIndex in
-                    Task {
-                        var cadence = V2BoundedBusyDrainCadence(
-                            minimumIdleIntervalMilliseconds:
-                                configuration.workerPollIntervalMilliseconds,
-                            maximumConsecutiveBusyPasses: configuration
-                                .userProjectionMaximumConsecutiveBusyPasses,
-                            maximumConsecutiveBusyDurationMilliseconds: configuration
-                                .userProjectionBusyDrainBudgetMilliseconds
-                        )
+                try await server.bind()
+                logger.notice("IM V2 TLS gateway bound", metadata: ["host": "\(configuration.tls.host)", "port": "\(configuration.tls.port)"])
+                try await V2HTTPService.withRunning(app, logger: logger,
+                    gracefulShutdownDuration: .milliseconds(configuration.shutdownGraceMilliseconds),
+                    waitForShutdown: V2ProcessTerminationSignal.wait) { shutdown in
+                    logger.notice("IM V2 metrics listener bound", metadata: ["host": "\(configuration.metrics.host)", "port": "\(configuration.metrics.port)"])
+                    let maintenanceCadence = try V2MaintenanceCadence(
+                        intervalMilliseconds: configuration.maintenancePollIntervalMilliseconds
+                    )
+                    let forwardDeliveryTask = Task { await forwardRuntime.run() }
+                    let directAuthorizationRecoveryTask = Task {
                         while !Task.isCancelled {
-                            // One reserved projector always guarantees durable
-                            // convergence. Additional lanes are opportunistic:
-                            // they yield while foreground or Sync is already
-                            // waiting at the database admission boundary.
-                            if workerIndex > 0,
-                               configuration.databaseWorkAdmissionEnabled,
-                               await databaseWorkAdmission.snapshot().queued > 0 {
+                            do {
+                                let report = try await directAuthorizationCoordinator.recover(limit: 8, now: Date())
+                                if report.deferred > 0 {
+                                    logger.warning("IM V2 authorization recovery deferred owner work", metadata: ["count": "\(report.deferred)"])
+                                }
+                            } catch is CancellationError { break }
+                            catch { logger.error("IM V2 authorization recovery failed; retrying") }
+                            do { try await v2Sleep(for: .milliseconds(configuration.workerPollIntervalMilliseconds)) }
+                            catch { break }
+                        }
+                    }
+
+                    // Foreground metadata publication is deliberately owned outside
+                    // the command handler. An optional broker or socket stall can
+                    // therefore never extend the committed-message response path.
+                    let foregroundGroupEventHintTask = Task {
+                        await foregroundGroupEventHints.run()
+                    }
+                    let directRoomLogEventCacheTask = Task {
+                        if let directRoomLogEventCache {
+                            await directRoomLogEventCache.run()
+                        }
+                    }
+                    let syncWakeCoalescerTask = Task {
+                        if configuration.syncWakeCoalescingEnabled {
+                            await syncWakeCoalescer.run()
+                        }
+                    }
+                    // `SKIP LOCKED` checkpoint claims allow several bounded workers
+                    // per physical store while preserving strict sequence for one
+                    // user. Snapshot publication keeps one loop per store because it
+                    // is a heavier, separately fenced artifact build.
+                    let userProjectionTasks = userProjectionWorkers.flatMap { worker in
+                        (0 ..< configuration.userProjectionConcurrency).map { workerIndex in
+                            Task {
+                                var cadence = V2BoundedBusyDrainCadence(
+                                    minimumIdleIntervalMilliseconds:
+                                        configuration.workerPollIntervalMilliseconds,
+                                    maximumConsecutiveBusyPasses: configuration
+                                        .userProjectionMaximumConsecutiveBusyPasses,
+                                    maximumConsecutiveBusyDurationMilliseconds: configuration
+                                        .userProjectionBusyDrainBudgetMilliseconds
+                                )
+                                while !Task.isCancelled {
+                                    // One reserved projector always guarantees durable
+                                    // convergence. Additional lanes are opportunistic:
+                                    // they yield while foreground or Sync is already
+                                    // waiting at the database admission boundary.
+                                    if workerIndex > 0,
+                                       configuration.databaseWorkAdmissionEnabled,
+                                       await databaseWorkAdmission.snapshot().queued > 0 {
+                                        do {
+                                            try await v2Sleep(for: .milliseconds(
+                                                configuration.workerPollIntervalMilliseconds
+                                            ))
+                                        } catch {
+                                            break
+                                        }
+                                        continue
+                                    }
+                                    let passStartedAt = ContinuousClock.now
+                                    var didWork = false
+                                    do {
+                                        didWork = try await worker.runOnce().claimed
+                                    } catch is CancellationError {
+                                        break
+                                    } catch {
+                                        logger.error("IM V2 user snapshot projection failed; retrying")
+                                    }
+                                    let passDuration = passStartedAt.duration(to: .now)
+                                    switch cadence.decisionAfterPass(
+                                        didWork: didWork,
+                                        passDuration: passDuration
+                                    ) {
+                                    case .continueImmediately:
+                                        continue
+                                    case .yield:
+                                        await Task.yield()
+                                    case .sleep(let duration):
+                                        do {
+                                            try await v2Sleep(for: duration)
+                                        } catch {
+                                            break
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let snapshotArtifactTasks = snapshotArtifactBuilders.map { builder in
+                        Task {
+                            var cadence = V2AdaptiveWorkerCadence(
+                                minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
+                            )
+                            while !Task.isCancelled {
+                                var didWork = false
                                 do {
-                                    try await v2Sleep(for: .milliseconds(
-                                        configuration.workerPollIntervalMilliseconds
-                                    ))
+                                    didWork = try await builder.runOnce().claimed
+                                } catch is CancellationError {
+                                    break
+                                } catch {
+                                    logger.error("IM V2 snapshot artifact build failed; retrying")
+                                }
+                                do {
+                                    try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
                                 } catch {
                                     break
                                 }
-                                continue
                             }
-                            let passStartedAt = ContinuousClock.now
+                        }
+                    }
+                    // Historical conversion is isolated from latency-sensitive user
+                    // projection. Busy batches drain continuously; an empty shard
+                    // backs off to a cheap bounded poll.
+                    let messageProjectionStateBodyCompactionTasks =
+                        messageProjectionStateBodyCompactionWorkers.map { worker in
+                            Task {
+                                var cadence = V2AdaptiveWorkerCadence(
+                                    minimumIntervalMilliseconds:
+                                        configuration.workerPollIntervalMilliseconds
+                                )
+                                while !Task.isCancelled {
+                                    var didWork = false
+                                    do {
+                                        let report = try await worker.runOnce(
+                                            limit: cadence.claimLimit(
+                                                configuredLimit: configuration.workerBatchSize
+                                            )
+                                        )
+                                        didWork = report.didWork
+                                    } catch is CancellationError {
+                                        break
+                                    } catch {
+                                        logger.error(
+                                            "IM V2 message-state body compaction failed; retrying"
+                                        )
+                                    }
+                                    do {
+                                        try await Task.sleep(
+                                            for: cadence.delayAfterPass(didWork: didWork)
+                                        )
+                                    } catch {
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                    let userStateTasks = userStateWorkers.map { worker in
+                        Task {
+                            var cadence = V2AdaptiveWorkerCadence(
+                                minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
+                            )
+                            while !Task.isCancelled {
+                                var didWork = false
+                                do {
+                                    didWork = try await worker.runOnce(limit: min(1024, cadence.claimLimit(
+                                        configuredLimit: configuration.workerBatchSize
+                                    ))) > 0
+                                } catch is CancellationError {
+                                    break
+                                } catch {
+                                    logger.error("IM V2 personal state delivery failed; retrying")
+                                }
+                                do {
+                                    try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
+                                } catch { break }
+                            }
+                        }
+                    }
+                    // Room event payloads already use the low-latency foreground
+                    // dispatcher. The durable wake is a coalesced repair hint: give
+                    // independent Gateway publishers time to deliver their payloads
+                    // before announcing a later waterline to every active client.
+                    let groupEventWakeTask = Task {
+                        var cadence = V2AdaptiveWorkerCadence(
+                            minimumIntervalMilliseconds:
+                                configuration.groupEventWakePollIntervalMilliseconds
+                        )
+                        while !Task.isCancelled {
                             var didWork = false
                             do {
-                                didWork = try await worker.runOnce().claimed
+                                let report = try await groupEventWakeRelay.runOnce(
+                                    limit: cadence.claimLimit(
+                                        configuredLimit: configuration.workerBatchSize
+                                    )
+                                )
+                                didWork = report.claimed > 0 || report.published > 0
+                                    || report.retryScheduled > 0
                             } catch is CancellationError {
                                 break
                             } catch {
-                                logger.error("IM V2 user snapshot projection failed; retrying")
+                                logger.error("IM V2 group-event wake relay failed; retrying")
                             }
-                            let passDuration = passStartedAt.duration(to: .now)
+                            do {
+                                try await Task.sleep(
+                                    for: cadence.delayAfterPass(didWork: didWork)
+                                )
+                            } catch is CancellationError {
+                                break
+                            } catch {
+                                break
+                            }
+                        }
+                    }
+                    // Review runs independently of personal state delivery and maintenance.
+                    // A slow external/OCR adapter must never increase the accepted
+                    // message's recipient delivery latency or delay media retention.
+                    let contentReviewTask = Task {
+                        guard let contentReviewWorker else { return }
+                        var cadence = V2AdaptiveWorkerCadence(
+                            minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
+                        )
+                        while !Task.isCancelled {
+                            var didWork = false
+                            do {
+                                let report = try await contentReviewWorker.runOnce(
+                                    limitPerOwner: configuration.workerBatchSize
+                                )
+                                didWork = report.claimedCount > 0 || report.resolvedCount > 0 ||
+                                    report.redactedCount > 0 || report.releasedCount > 0
+                            } catch is CancellationError {
+                                break
+                            } catch {
+                                // No message text, identifiers, or provider response
+                                // is included in this log line.
+                                logger.error("IM V2 content-review worker failed; retrying")
+                            }
+                            do {
+                                try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
+                            } catch is CancellationError {
+                                break
+                            } catch {
+                                break
+                            }
+                        }
+                    }
+                    // Push owns external-network latency and retry policy. It must not
+                    // serialize revocation, propagation, or database housekeeping.
+                    let pushWakeTask = Task {
+                        guard let pushWakeWorker else { return }
+                        var cadence = V2AdaptiveWorkerCadence(
+                            minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
+                        )
+                        while !Task.isCancelled {
+                            var didWork = false
+                            do {
+                                let report = try await pushWakeWorker.runOnce(limit: configuration.workerBatchSize)
+                                didWork = report.admittedCount > 0 || report.sentCount > 0 || report.releasedCount > 0
+                            } catch is CancellationError {
+                                break
+                            } catch {
+                                // Provider and endpoint detail must never reach logs.
+                                logger.error("IM V2 Push wake worker failed; retrying")
+                            }
+                            do {
+                                try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
+                            } catch is CancellationError {
+                                break
+                            } catch {
+                                break
+                            }
+                        }
+                    }
+                    // Projection cleanup can cross a remote shard boundary. Give it
+                    // an independent retry cadence so one unavailable shard cannot
+                    // delay live-socket revocation or unrelated control-plane work.
+                    let revokedDeviceProjectionCleanupTask = Task {
+                        var cadence = V2AdaptiveWorkerCadence(
+                            minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
+                        )
+                        while !Task.isCancelled {
+                            var didWork = false
+                            do {
+                                didWork = try await revokedDeviceProjectionCleanupWorker.runOnce(
+                                    limit: configuration.workerBatchSize
+                                ) > 0
+                            } catch is CancellationError {
+                                break
+                            } catch {
+                                logger.error("IM V2 revoked-device projection cleanup failed; retrying")
+                            }
+                            do {
+                                try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
+                            } catch is CancellationError {
+                                break
+                            } catch {
+                                break
+                            }
+                        }
+                    }
+                    // These tables grow with message throughput rather than operator
+                    // activity. Keep their catch-up capacity independent of the
+                    // minute-scale retention sweep while bounding executor and
+                    // maintenance-pool occupancy after every database transaction.
+                    let controlPlaneHousekeepingTask = Task {
+                        var cadence = V2BoundedBusyDrainCadence(
+                            minimumIdleIntervalMilliseconds:
+                                configuration.backlogMaintenanceIdlePollIntervalMilliseconds,
+                            maximumConsecutiveBusyPasses:
+                                configuration.backlogMaintenanceMaximumConsecutiveBusyPasses,
+                            maximumConsecutiveBusyDurationMilliseconds:
+                                configuration.backlogMaintenanceBusyDrainBudgetMilliseconds
+                        )
+                        while !Task.isCancelled {
+                            let passStartedAt = ContinuousClock.now
+                            var didWork = false
+                            do {
+                                didWork = try await controlPlaneHousekeepingWorker.runOnce(
+                                    limit: configuration.workerBatchSize
+                                ).didWork
+                            } catch is CancellationError {
+                                break
+                            } catch {
+                                logger.error("IM V2 control-plane housekeeping failed; retrying")
+                            }
                             switch cadence.decisionAfterPass(
                                 didWork: didWork,
-                                passDuration: passDuration
+                                passDuration: passStartedAt.duration(to: .now)
                             ) {
                             case .continueImmediately:
                                 continue
@@ -1515,521 +1778,292 @@ enum IMV2ServerApp {
                             }
                         }
                     }
-                }
-            }
-            let snapshotArtifactTasks = snapshotArtifactBuilders.map { builder in
-                Task {
-                    var cadence = V2AdaptiveWorkerCadence(
-                        minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
-                    )
-                    while !Task.isCancelled {
-                        var didWork = false
-                        do {
-                            didWork = try await builder.runOnce().claimed
-                        } catch is CancellationError {
-                            break
-                        } catch {
-                            logger.error("IM V2 snapshot artifact build failed; retrying")
-                        }
-                        do {
-                            try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
-                        } catch {
-                            break
+                    let syncLogCompactionTask = Task { [syncLogCompactionWorkers] in
+                        var cadence = V2BoundedBusyDrainCadence(
+                            minimumIdleIntervalMilliseconds:
+                                configuration.backlogMaintenanceIdlePollIntervalMilliseconds,
+                            maximumConsecutiveBusyPasses:
+                                configuration.backlogMaintenanceMaximumConsecutiveBusyPasses,
+                            maximumConsecutiveBusyDurationMilliseconds:
+                                configuration.backlogMaintenanceBusyDrainBudgetMilliseconds
+                        )
+                        while !Task.isCancelled {
+                            let passStartedAt = ContinuousClock.now
+                            var didWork = false
+                            for worker in syncLogCompactionWorkers {
+                                do {
+                                    let report = try await worker.runOnce(
+                                        userLimit: min(8, configuration.workerBatchSize),
+                                        rowLimit: configuration.workerBatchSize
+                                    )
+                                    didWork = didWork || report.didWork
+                                } catch is CancellationError {
+                                    return
+                                } catch {
+                                    logger.error("IM V2 user sync-log compaction failed; retrying")
+                                }
+                            }
+                            switch cadence.decisionAfterPass(
+                                didWork: didWork,
+                                passDuration: passStartedAt.duration(to: .now)
+                            ) {
+                            case .continueImmediately:
+                                continue
+                            case .yield:
+                                await Task.yield()
+                            case .sleep(let duration):
+                                do {
+                                    try await v2Sleep(for: duration)
+                                } catch {
+                                    break
+                                }
+                            }
                         }
                     }
-                }
-            }
-            // Historical conversion is isolated from latency-sensitive user
-            // projection. Busy batches drain continuously; an empty shard
-            // backs off to a cheap bounded poll.
-            let messageProjectionStateBodyCompactionTasks =
-                messageProjectionStateBodyCompactionWorkers.map { worker in
-                    Task {
+                    let maintenanceTask = Task { [roomLogRetentionWorkers, syncHousekeepingWorkers,
+                        projectionVersionGCWorkers, personalEventGCWorkers,
+                        messageProjectionStateGCWorkers, forwardBackgroundDatabases] in
+                        var nextMaintenanceAt: ContinuousClock.Instant?
                         var cadence = V2AdaptiveWorkerCadence(
-                            minimumIntervalMilliseconds:
-                                configuration.workerPollIntervalMilliseconds
+                            minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
                         )
                         while !Task.isCancelled {
                             var didWork = false
                             do {
-                                let report = try await worker.runOnce(
-                                    limit: cadence.claimLimit(
-                                        configuredLimit: configuration.workerBatchSize
+                                // Profile changes are a distinct direct-contact
+                                // graph from room-event fan-out. Its work budget is
+                                // per recipient, so one very connected account never
+                                // turns a maintenance tick into an unbounded loop.
+                                let report = try await directRoomProfilePropagationWorker.runOnce(
+                                    limit: configuration.workerBatchSize
+                                )
+                                didWork = report.claimedUpdateCount > 0 || report.projectedRecipientCount > 0 ||
+                                    report.completedUpdateCount > 0
+                            } catch is CancellationError {
+                                break
+                            } catch {
+                                logger.error("IM V2 direct-profile propagation failed; retrying")
+                            }
+                            do {
+                                let report = try await readReceiptPreferencePropagationWorker.runOnce(
+                                    limit: configuration.workerBatchSize
+                                )
+                                didWork = didWork || report.claimedOperationCount > 0 ||
+                                    report.projectedRoomCount > 0 || report.completedOperationCount > 0 ||
+                                    report.releasedOperationCount > 0 || report.pausedOperationCount > 0
+                            } catch is CancellationError {
+                                break
+                            } catch {
+                                logger.error("IM V2 read-receipt preference propagation failed; retrying")
+                            }
+                            do {
+                                didWork = try await deviceRevocationWorker.runOnce(limit: configuration.workerBatchSize) > 0 || didWork
+                            } catch is CancellationError {
+                                break
+                            } catch {
+                                logger.error("IM V2 device revocation worker failed; retrying")
+                            }
+                            let maintenanceNow = ContinuousClock.now
+                            if maintenanceCadence.isDue(now: maintenanceNow, nextScheduledAt: nextMaintenanceAt) {
+                                do {
+                                    _ = try await moderationAuditRetentionWorker.runOnce(limit: configuration.workerBatchSize)
+                                } catch is CancellationError {
+                                    break
+                                } catch {
+                                    logger.error("IM V2 moderation-audit retention worker failed; retrying")
+                                }
+                                do {
+                                    // Staged creation drafts own potentially large
+                                    // temporary audiences. Reclaim them on the same
+                                    // bounded maintenance cadence as other retention
+                                    // work; cancellation and actor-local admission
+                                    // also perform immediate targeted cleanup.
+                                    _ = try await maintenanceGroupAudienceImports.purgeExpired(
+                                        limit: configuration.workerBatchSize
                                     )
-                                )
-                                didWork = report.didWork
-                            } catch is CancellationError {
-                                break
-                            } catch {
-                                logger.error(
-                                    "IM V2 message-state body compaction failed; retrying"
-                                )
+                                } catch is CancellationError {
+                                    return
+                                } catch {
+                                    logger.error("IM V2 group creation draft cleanup failed; retrying")
+                                }
+                                do {
+                                    let report = try await maintenanceGroupAudienceImports.recoverFinalizing(
+                                        limit: configuration.workerBatchSize
+                                    )
+                                    if report.failedCount > 0 {
+                                        logger.warning("IM V2 group creation finalization recovery left retryable drafts")
+                                    }
+                                } catch is CancellationError {
+                                    break
+                                } catch {
+                                    logger.error("IM V2 group creation finalization recovery failed; retrying")
+                                }
+                                do {
+                                    _ = try await mediaRetentionWorker.runOnce(limit: configuration.workerBatchSize)
+                                } catch is CancellationError {
+                                    break
+                                } catch {
+                                    logger.error("IM V2 media retention worker failed; retrying")
+                                }
+                                for worker in roomLogRetentionWorkers {
+                                    do {
+                                        _ = try await worker.runOnce(limit: configuration.workerBatchSize)
+                                    } catch is CancellationError {
+                                        return
+                                    } catch {
+                                        logger.error("IM V2 room log retention worker failed; retrying")
+                                    }
+                                }
+                                for worker in syncHousekeepingWorkers {
+                                    do {
+                                        _ = try await worker.runOnce(limit: configuration.workerBatchSize)
+                                    } catch is CancellationError {
+                                        return
+                                    } catch {
+                                        logger.error("IM V2 sync capability housekeeping failed; retrying")
+                                    }
+                                }
+                                for worker in projectionVersionGCWorkers {
+                                    do {
+                                        _ = try await worker.runOnce(limit: configuration.workerBatchSize)
+                                    } catch is CancellationError {
+                                        return
+                                    } catch {
+                                        logger.error("IM V2 snapshot projection history cleanup failed; retrying")
+                                    }
+                                }
+                                for worker in personalEventGCWorkers {
+                                    do {
+                                        _ = try await worker.runOnce(limit: configuration.workerBatchSize)
+                                    } catch is CancellationError {
+                                        return
+                                    } catch {
+                                        logger.error("IM V2 completed personal event cleanup failed; retrying")
+                                    }
+                                }
+                                for worker in messageProjectionStateGCWorkers {
+                                    do {
+                                        _ = try await worker.runOnce(limit: configuration.workerBatchSize)
+                                    } catch is CancellationError {
+                                        return
+                                    } catch {
+                                        logger.error("IM V2 shared message-state cleanup failed; retrying")
+                                    }
+                                }
+                                for database in forwardBackgroundDatabases.values {
+                                    do {
+                                        _ = try await PostgresV2ForwardExportCompactor(database: database).runOnce(
+                                            limit: min(1_024, max(1, configuration.workerBatchSize)))
+                                    } catch is CancellationError {
+                                        return
+                                    } catch {
+                                        logger.error("IM V2 terminal forward export compaction failed; retrying")
+                                    }
+                                    do {
+                                        _ = try await PostgresV2ForwardInboxCompactor(database: database).runOnce(
+                                            limit: min(1_024, max(1, configuration.workerBatchSize)))
+                                    } catch is CancellationError {
+                                        return
+                                    } catch {
+                                        logger.error("IM V2 terminal forward inbox compaction failed; retrying")
+                                    }
+                                }
+                                nextMaintenanceAt = maintenanceCadence.nextScheduledAt(after: maintenanceNow)
                             }
                             do {
-                                try await Task.sleep(
-                                    for: cadence.delayAfterPass(didWork: didWork)
-                                )
+                                try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
+                            } catch is CancellationError {
+                                break
                             } catch {
                                 break
                             }
                         }
                     }
-                }
-            let userStateTasks = userStateWorkers.map { worker in
-                Task {
-                    var cadence = V2AdaptiveWorkerCadence(
-                        minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
+                    await shutdown.wait()
+                    logger.notice("IM V2 shutdown signal received")
+                    // Stop admitting new sockets before cancelling background work.
+                    // Existing channels remain alive for the bounded cooperative
+                    // drain and are closed by the full server shutdown below.
+                    var listenerShutdownError: (any Error)?
+                    do { try await server.stopAccepting() }
+                    catch { listenerShutdownError = error }
+                    logger.notice("IM V2 public listener closed")
+                    userStateTasks.forEach { $0.cancel() }
+                    userProjectionTasks.forEach { $0.cancel() }
+                    snapshotArtifactTasks.forEach { $0.cancel() }
+                    messageProjectionStateBodyCompactionTasks.forEach { $0.cancel() }
+                    directAuthorizationRecoveryTask.cancel()
+                    forwardDeliveryTask.cancel()
+                    groupEventWakeTask.cancel()
+                    contentReviewTask.cancel()
+                    pushWakeTask.cancel()
+                    revokedDeviceProjectionCleanupTask.cancel()
+                    controlPlaneHousekeepingTask.cancel()
+                    syncLogCompactionTask.cancel()
+                    maintenanceTask.cancel()
+                    foregroundGroupEventHintTask.cancel()
+                    directRoomLogEventCacheTask.cancel()
+                    syncWakeCoalescerTask.cancel()
+                    foregroundGroupEventHints.finish()
+                    await directRoomLogEventCache?.finish()
+                    var serviceTasks: [Task<Void, Never>] = []
+                    serviceTasks.append(contentsOf: userStateTasks)
+                    serviceTasks.append(contentsOf: userProjectionTasks)
+                    serviceTasks.append(contentsOf: snapshotArtifactTasks)
+                    serviceTasks.append(contentsOf: messageProjectionStateBodyCompactionTasks)
+                    serviceTasks.append(contentsOf: [
+                        directAuthorizationRecoveryTask,
+                        forwardDeliveryTask,
+                        groupEventWakeTask,
+                        contentReviewTask,
+                        pushWakeTask,
+                        revokedDeviceProjectionCleanupTask,
+                        controlPlaneHousekeepingTask,
+                        syncLogCompactionTask,
+                        maintenanceTask,
+                        foregroundGroupEventHintTask,
+                        directRoomLogEventCacheTask,
+                        syncWakeCoalescerTask,
+                    ])
+                    let drained = await v2WaitForTaskDrain(
+                        serviceTasks,
+                        timeout: .milliseconds(configuration.shutdownGraceMilliseconds)
                     )
-                    while !Task.isCancelled {
-                        var didWork = false
-                        do {
-                            didWork = try await worker.runOnce(limit: min(1024, cadence.claimLimit(
-                                configuredLimit: configuration.workerBatchSize
-                            ))) > 0
-                        } catch is CancellationError {
-                            break
-                        } catch {
-                            logger.error("IM V2 personal state delivery failed; retrying")
-                        }
-                        do {
-                            try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
-                        } catch { break }
+                    guard drained else {
+                        // A live worker may still own a transaction. Do not free its
+                        // pools or event loops underneath it after the deadline.
+                        logger.critical("IM V2 service-task drain exceeded its shutdown deadline")
+                        exit(EXIT_FAILURE)
                     }
+                    logger.notice("IM V2 service-task drain finished", metadata: ["drained": "\(drained)"])
+                    await connectionRegistry.finishLivePresenceRenewals()
+                    await connectionRegistry.detachForegroundGroupInterestManager()
+                    await connectionRegistry.detachLiveActivityBroker()
+                    await natsLiveActivityBroker?.shutdown()
+                    await accountRoomChangeService?.shutdown()
+                    await sharedGroupWakeInterests?.shutdown()
+                    await natsGroupWakeBroker?.shutdown()
+                    logger.notice("IM V2 broker and presence shutdown finished")
+                    try await server.shutdown()
+                    serverIsShutdown = true
+                    logger.notice("IM V2 TLS event loops shut down")
+                    if let listenerShutdownError { throw listenerShutdownError }
                 }
+            } catch {
+                if !serverIsShutdown { try? await server.shutdown() }
+                throw error
             }
-            // Room event payloads already use the low-latency foreground
-            // dispatcher. The durable wake is a coalesced repair hint: give
-            // independent Gateway publishers time to deliver their payloads
-            // before announcing a later waterline to every active client.
-            let groupEventWakeTask = Task {
-                var cadence = V2AdaptiveWorkerCadence(
-                    minimumIntervalMilliseconds:
-                        configuration.groupEventWakePollIntervalMilliseconds
-                )
-                while !Task.isCancelled {
-                    var didWork = false
-                    do {
-                        let report = try await groupEventWakeRelay.runOnce(
-                            limit: cadence.claimLimit(
-                                configuredLimit: configuration.workerBatchSize
-                            )
-                        )
-                        didWork = report.claimed > 0 || report.published > 0
-                            || report.retryScheduled > 0
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        logger.error("IM V2 group-event wake relay failed; retrying")
-                    }
-                    do {
-                        try await Task.sleep(
-                            for: cadence.delayAfterPass(didWork: didWork)
-                        )
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        break
-                    }
-                }
-            }
-            // Review runs independently of personal state delivery and maintenance.
-            // A slow external/OCR adapter must never increase the accepted
-            // message's recipient delivery latency or delay media retention.
-            let contentReviewTask = Task {
-                guard let contentReviewWorker else { return }
-                var cadence = V2AdaptiveWorkerCadence(
-                    minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
-                )
-                while !Task.isCancelled {
-                    var didWork = false
-                    do {
-                        let report = try await contentReviewWorker.runOnce(
-                            limitPerOwner: configuration.workerBatchSize
-                        )
-                        didWork = report.claimedCount > 0 || report.resolvedCount > 0 ||
-                            report.redactedCount > 0 || report.releasedCount > 0
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        // No message text, identifiers, or provider response
-                        // is included in this log line.
-                        logger.error("IM V2 content-review worker failed; retrying")
-                    }
-                    do {
-                        try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        break
-                    }
-                }
-            }
-            // Push owns external-network latency and retry policy. It must not
-            // serialize revocation, propagation, or database housekeeping.
-            let pushWakeTask = Task {
-                guard let pushWakeWorker else { return }
-                var cadence = V2AdaptiveWorkerCadence(
-                    minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
-                )
-                while !Task.isCancelled {
-                    var didWork = false
-                    do {
-                        let report = try await pushWakeWorker.runOnce(limit: configuration.workerBatchSize)
-                        didWork = report.admittedCount > 0 || report.sentCount > 0 || report.releasedCount > 0
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        // Provider and endpoint detail must never reach logs.
-                        logger.error("IM V2 Push wake worker failed; retrying")
-                    }
-                    do {
-                        try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        break
-                    }
-                }
-            }
-            // Projection cleanup can cross a remote shard boundary. Give it
-            // an independent retry cadence so one unavailable shard cannot
-            // delay live-socket revocation or unrelated control-plane work.
-            let revokedDeviceProjectionCleanupTask = Task {
-                var cadence = V2AdaptiveWorkerCadence(
-                    minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
-                )
-                while !Task.isCancelled {
-                    var didWork = false
-                    do {
-                        didWork = try await revokedDeviceProjectionCleanupWorker.runOnce(
-                            limit: configuration.workerBatchSize
-                        ) > 0
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        logger.error("IM V2 revoked-device projection cleanup failed; retrying")
-                    }
-                    do {
-                        try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        break
-                    }
-                }
-            }
-            // These tables grow with message throughput rather than operator
-            // activity. Keep their catch-up capacity independent of the
-            // minute-scale retention sweep while bounding executor and
-            // maintenance-pool occupancy after every database transaction.
-            let controlPlaneHousekeepingTask = Task {
-                var cadence = V2BoundedBusyDrainCadence(
-                    minimumIdleIntervalMilliseconds:
-                        configuration.backlogMaintenanceIdlePollIntervalMilliseconds,
-                    maximumConsecutiveBusyPasses:
-                        configuration.backlogMaintenanceMaximumConsecutiveBusyPasses,
-                    maximumConsecutiveBusyDurationMilliseconds:
-                        configuration.backlogMaintenanceBusyDrainBudgetMilliseconds
-                )
-                while !Task.isCancelled {
-                    let passStartedAt = ContinuousClock.now
-                    var didWork = false
-                    do {
-                        didWork = try await controlPlaneHousekeepingWorker.runOnce(
-                            limit: configuration.workerBatchSize
-                        ).didWork
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        logger.error("IM V2 control-plane housekeeping failed; retrying")
-                    }
-                    switch cadence.decisionAfterPass(
-                        didWork: didWork,
-                        passDuration: passStartedAt.duration(to: .now)
-                    ) {
-                    case .continueImmediately:
-                        continue
-                    case .yield:
-                        await Task.yield()
-                    case .sleep(let duration):
-                        do {
-                            try await v2Sleep(for: duration)
-                        } catch {
-                            break
-                        }
-                    }
-                }
-            }
-            let syncLogCompactionTask = Task {
-                var cadence = V2BoundedBusyDrainCadence(
-                    minimumIdleIntervalMilliseconds:
-                        configuration.backlogMaintenanceIdlePollIntervalMilliseconds,
-                    maximumConsecutiveBusyPasses:
-                        configuration.backlogMaintenanceMaximumConsecutiveBusyPasses,
-                    maximumConsecutiveBusyDurationMilliseconds:
-                        configuration.backlogMaintenanceBusyDrainBudgetMilliseconds
-                )
-                while !Task.isCancelled {
-                    let passStartedAt = ContinuousClock.now
-                    var didWork = false
-                    for worker in syncLogCompactionWorkers {
-                        do {
-                            let report = try await worker.runOnce(
-                                userLimit: min(8, configuration.workerBatchSize),
-                                rowLimit: configuration.workerBatchSize
-                            )
-                            didWork = didWork || report.didWork
-                        } catch is CancellationError {
-                            return
-                        } catch {
-                            logger.error("IM V2 user sync-log compaction failed; retrying")
-                        }
-                    }
-                    switch cadence.decisionAfterPass(
-                        didWork: didWork,
-                        passDuration: passStartedAt.duration(to: .now)
-                    ) {
-                    case .continueImmediately:
-                        continue
-                    case .yield:
-                        await Task.yield()
-                    case .sleep(let duration):
-                        do {
-                            try await v2Sleep(for: duration)
-                        } catch {
-                            break
-                        }
-                    }
-                }
-            }
-            let maintenanceTask = Task {
-                var nextMaintenanceAt: ContinuousClock.Instant?
-                var cadence = V2AdaptiveWorkerCadence(
-                    minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
-                )
-                while !Task.isCancelled {
-                    var didWork = false
-                    do {
-                        // Profile changes are a distinct direct-contact
-                        // graph from room-event fan-out. Its work budget is
-                        // per recipient, so one very connected account never
-                        // turns a maintenance tick into an unbounded loop.
-                        let report = try await directRoomProfilePropagationWorker.runOnce(
-                            limit: configuration.workerBatchSize
-                        )
-                        didWork = report.claimedUpdateCount > 0 || report.projectedRecipientCount > 0 ||
-                            report.completedUpdateCount > 0
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        logger.error("IM V2 direct-profile propagation failed; retrying")
-                    }
-                    do {
-                        let report = try await readReceiptPreferencePropagationWorker.runOnce(
-                            limit: configuration.workerBatchSize
-                        )
-                        didWork = didWork || report.claimedOperationCount > 0 ||
-                            report.projectedRoomCount > 0 || report.completedOperationCount > 0 ||
-                            report.releasedOperationCount > 0 || report.pausedOperationCount > 0
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        logger.error("IM V2 read-receipt preference propagation failed; retrying")
-                    }
-                    do {
-                        didWork = try await deviceRevocationWorker.runOnce(limit: configuration.workerBatchSize) > 0 || didWork
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        logger.error("IM V2 device revocation worker failed; retrying")
-                    }
-                    let maintenanceNow = ContinuousClock.now
-                    if maintenanceCadence.isDue(now: maintenanceNow, nextScheduledAt: nextMaintenanceAt) {
-                        do {
-                            _ = try await moderationAuditRetentionWorker.runOnce(limit: configuration.workerBatchSize)
-                        } catch is CancellationError {
-                            break
-                        } catch {
-                            logger.error("IM V2 moderation-audit retention worker failed; retrying")
-                        }
-                        do {
-                            // Staged creation drafts own potentially large
-                            // temporary audiences. Reclaim them on the same
-                            // bounded maintenance cadence as other retention
-                            // work; cancellation and actor-local admission
-                            // also perform immediate targeted cleanup.
-                            _ = try await maintenanceGroupAudienceImports.purgeExpired(
-                                limit: configuration.workerBatchSize
-                            )
-                        } catch is CancellationError {
-                            return
-                        } catch {
-                            logger.error("IM V2 group creation draft cleanup failed; retrying")
-                        }
-                        do {
-                            let report = try await maintenanceGroupAudienceImports.recoverFinalizing(
-                                limit: configuration.workerBatchSize
-                            )
-                            if report.failedCount > 0 {
-                                logger.warning("IM V2 group creation finalization recovery left retryable drafts")
-                            }
-                        } catch is CancellationError {
-                            break
-                        } catch {
-                            logger.error("IM V2 group creation finalization recovery failed; retrying")
-                        }
-                        do {
-                            _ = try await mediaRetentionWorker.runOnce(limit: configuration.workerBatchSize)
-                        } catch is CancellationError {
-                            break
-                        } catch {
-                            logger.error("IM V2 media retention worker failed; retrying")
-                        }
-                        for worker in roomLogRetentionWorkers {
-                            do {
-                                _ = try await worker.runOnce(limit: configuration.workerBatchSize)
-                            } catch is CancellationError {
-                                return
-                            } catch {
-                                logger.error("IM V2 room log retention worker failed; retrying")
-                            }
-                        }
-                        for worker in syncHousekeepingWorkers {
-                            do {
-                                _ = try await worker.runOnce(limit: configuration.workerBatchSize)
-                            } catch is CancellationError {
-                                return
-                            } catch {
-                                logger.error("IM V2 sync capability housekeeping failed; retrying")
-                            }
-                        }
-                        for worker in projectionVersionGCWorkers {
-                            do {
-                                _ = try await worker.runOnce(limit: configuration.workerBatchSize)
-                            } catch is CancellationError {
-                                return
-                            } catch {
-                                logger.error("IM V2 snapshot projection history cleanup failed; retrying")
-                            }
-                        }
-                        for worker in personalEventGCWorkers {
-                            do {
-                                _ = try await worker.runOnce(limit: configuration.workerBatchSize)
-                            } catch is CancellationError {
-                                return
-                            } catch {
-                                logger.error("IM V2 completed personal event cleanup failed; retrying")
-                            }
-                        }
-                        for worker in messageProjectionStateGCWorkers {
-                            do {
-                                _ = try await worker.runOnce(limit: configuration.workerBatchSize)
-                            } catch is CancellationError {
-                                return
-                            } catch {
-                                logger.error("IM V2 shared message-state cleanup failed; retrying")
-                            }
-                        }
-                        for database in forwardBackgroundDatabases.values {
-                            do {
-                                _ = try await PostgresV2ForwardExportCompactor(database: database).runOnce(
-                                    limit: min(1_024, max(1, configuration.workerBatchSize)))
-                            } catch is CancellationError {
-                                return
-                            } catch {
-                                logger.error("IM V2 terminal forward export compaction failed; retrying")
-                            }
-                            do {
-                                _ = try await PostgresV2ForwardInboxCompactor(database: database).runOnce(
-                                    limit: min(1_024, max(1, configuration.workerBatchSize)))
-                            } catch is CancellationError {
-                                return
-                            } catch {
-                                logger.error("IM V2 terminal forward inbox compaction failed; retrying")
-                            }
-                        }
-                        nextMaintenanceAt = maintenanceCadence.nextScheduledAt(after: maintenanceNow)
-                    }
-                    do {
-                        try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        break
-                    }
-                }
-            }
-            await V2ProcessTerminationSignal.wait()
-            logger.notice("IM V2 shutdown signal received")
-            // Stop admitting new sockets before cancelling background work.
-            // Existing channels remain alive for the bounded cooperative
-            // drain and are closed by the full server shutdown below.
-            try await server.stopAccepting()
-            logger.notice("IM V2 public listener closed")
-            userStateTasks.forEach { $0.cancel() }
-            userProjectionTasks.forEach { $0.cancel() }
-            snapshotArtifactTasks.forEach { $0.cancel() }
-            messageProjectionStateBodyCompactionTasks.forEach { $0.cancel() }
-            directAuthorizationRecoveryTask.cancel()
-            forwardDeliveryTask.cancel()
-            groupEventWakeTask.cancel()
-            contentReviewTask.cancel()
-            pushWakeTask.cancel()
-            revokedDeviceProjectionCleanupTask.cancel()
-            controlPlaneHousekeepingTask.cancel()
-            syncLogCompactionTask.cancel()
-            maintenanceTask.cancel()
-            foregroundGroupEventHintTask.cancel()
-            directRoomLogEventCacheTask.cancel()
-            syncWakeCoalescerTask.cancel()
-            foregroundGroupEventHints.finish()
-            await directRoomLogEventCache?.finish()
-            var serviceTasks: [Task<Void, Never>] = []
-            serviceTasks.append(contentsOf: userStateTasks)
-            serviceTasks.append(contentsOf: userProjectionTasks)
-            serviceTasks.append(contentsOf: snapshotArtifactTasks)
-            serviceTasks.append(contentsOf: messageProjectionStateBodyCompactionTasks)
-            serviceTasks.append(contentsOf: [
-                directAuthorizationRecoveryTask,
-                forwardDeliveryTask,
-                groupEventWakeTask,
-                contentReviewTask,
-                pushWakeTask,
-                revokedDeviceProjectionCleanupTask,
-                controlPlaneHousekeepingTask,
-                syncLogCompactionTask,
-                maintenanceTask,
-                foregroundGroupEventHintTask,
-                directRoomLogEventCacheTask,
-                syncWakeCoalescerTask,
-            ])
-            let drained = await v2WaitForTaskDrain(
-                serviceTasks,
-                timeout: .milliseconds(configuration.shutdownGraceMilliseconds)
-            )
-            if !drained {
-                logger.warning("IM V2 service-task drain reached its shutdown deadline")
-            }
-            logger.notice("IM V2 service-task drain finished", metadata: ["drained": "\(drained)"])
-            await connectionRegistry.finishLivePresenceRenewals()
-            await connectionRegistry.detachForegroundGroupInterestManager()
-            await connectionRegistry.detachLiveActivityBroker()
-            await natsLiveActivityBroker?.shutdown()
-            await accountRoomChangeService?.shutdown()
-            await sharedGroupWakeInterests?.shutdown()
-            await natsGroupWakeBroker?.shutdown()
-            logger.notice("IM V2 broker and presence shutdown finished")
-            try await server.shutdown()
-            logger.notice("IM V2 TLS event loops shut down")
-            try await app.asyncShutdown()
+            try await app.shutdown()
             logger.notice("IM V2 Vapor application shut down")
+            try await resources.shutdown()
             try await applicationEventLoops.shutdownGracefully()
         } catch {
             await natsLiveActivityBroker?.shutdown()
             await accountRoomChangeService?.shutdown()
             await sharedGroupWakeInterests?.shutdown()
             await natsGroupWakeBroker?.shutdown()
-            try? await app.asyncShutdown()
+            try? await app.shutdown()
+            try? await resources.shutdown()
             try? await applicationEventLoops.shutdownGracefully()
             throw error
         }

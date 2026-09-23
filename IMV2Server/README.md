@@ -9,6 +9,11 @@ and the [V2 document entry](../IMV2/docs/README.md).
 
 ## Provisioning
 
+The server package requires Swift 6.4 (macOS 26.2 or later on macOS) and pins
+Vapor 5.0.0-beta.2. Linux images and CI use the same Swift 6.4 Jammy digest.
+See [the Vapor 5 migration contract](../IMV2/docs/00-foundation/vapor5-migration.md)
+for database ownership, shutdown order, dependency boundaries and validation.
+
 1. Create an empty PostgreSQL database and install the single current schema:
    `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f IMV2/sql/schema.sql`. Before
    deployment, run `bash scripts/test_v2_postgres_schema_bootstrap.sh` against

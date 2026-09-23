@@ -11,7 +11,7 @@ let package = Package(
         .library(name: "IMV2Core", targets: ["IMV2Core"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.9.0"),
+        .package(url: "https://github.com/apple/swift-crypto.git", "3.9.0"..<"5.0.0"),
     ],
     targets: [
         .target(

@@ -1,4 +1,4 @@
-import Fluent
+import FluentKit
 import Foundation
 
 public struct V2GroupJoinQuotaRecoveryReport: Equatable, Sendable {

@@ -1,13 +1,12 @@
 #if os(macOS)
 import Darwin
-import Fluent
+import FluentKit
 import FluentPostgresDriver
 import Foundation
 import IMV2Core
 @testable import IMV2Server
 import SQLKit
 import Testing
-import Vapor
 
 private final class ForwardCompactionCrashBundleMarker: NSObject {}
 
@@ -22,15 +21,15 @@ struct PostgresV2ForwardCompactionCrashTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" && ProcessInfo.processInfo.environment["IMV2_FORWARD_CRASH_MODE"] == nil),
           arguments: ["source-before", "source-after", "target-before", "target-after"], [false, true])
     func forwardCompactionKilledRecovery(scenario: String, rejected: Bool) async throws {
-        let url = try #require(Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"))
+        let url = try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"])
         let root = FileManager.default.temporaryDirectory.appending(path: "im-forward-crash-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: root) }
-        let app = try await Application.make(.testing)
+        let resources = makeV2DatabaseTestResources()
         var ownsSchema = false
         do {
-            app.databases.use(try .postgres(url: url), as: .psql, isDefault: true)
-            let sql = try #require(app.db(.psql) as? any SQLDatabase)
+            resources.databases.use(try .postgres(url: url), as: .psql, isDefault: true)
+            let sql = try #require(resources.database(.psql) as? any SQLDatabase)
             try #require(try await sql.raw("SELECT to_regnamespace('im_v2') IS NULL AS value").first(decoding: Flag.self)?.value == true)
             let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             let schema = try String(contentsOf: repo.appending(path: "IMV2/sql/schema.sql"), encoding: .utf8)
@@ -53,10 +52,10 @@ struct PostgresV2ForwardCompactionCrashTests {
             }
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             ownsSchema = false
-            try await app.asyncShutdown()
+            try await resources.shutdown()
         } catch {
-            if ownsSchema, let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA im_v2 CASCADE").run() }
-            try? await app.asyncShutdown()
+            if ownsSchema, let sql = resources.database(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA im_v2 CASCADE").run() }
+            try? await resources.shutdown()
             throw error
         }
     }
@@ -72,10 +71,10 @@ struct PostgresV2ForwardCompactionCrashTests {
         let source = scenario.hasPrefix("source"), before = scenario.hasSuffix("before")
         let rejected = environment["IMV2_FORWARD_CRASH_REJECTED"] == "1"
         let export = try V2ForwardExport(payload: Data(contentsOf: root.appending(path: "payload")), digest: Data(contentsOf: root.appending(path: "digest")))
-        let app = try await Application.make(.testing)
+        let resources = makeV2DatabaseTestResources()
         do {
-            app.databases.use(try .postgres(url: #require(environment["IMV2_POSTGRES_TEST_DATABASE_URL"])), as: .psql, isDefault: true)
-            let database = app.db(.psql), sql = try #require(database as? any SQLDatabase)
+            resources.databases.use(try .postgres(url: #require(environment["IMV2_POSTGRES_TEST_DATABASE_URL"])), as: .psql, isDefault: true)
+            let database = resources.database(.psql), sql = try #require(database as? any SQLDatabase)
             let at = Self.now.addingTimeInterval(PostgresV2ForwardExportCompactor.retentionSeconds)
             @Sendable func compact(_ database: any Database) async throws -> Int {
                 if source { return try await PostgresV2ForwardExportCompactor(database: database).runOnce(now: at, limit: 1) }
@@ -135,8 +134,8 @@ struct PostgresV2ForwardCompactionCrashTests {
                     limits: .init(maxUTF8Bytes: 64), identifiers: V2AcceptanceIDFactory().make(at: at), now: at) == expected)
                 try scenario.write(to: root.appending(path: "recover.checkpoint"), atomically: true, encoding: .utf8)
             }
-            try await app.asyncShutdown()
-        } catch { try? await app.asyncShutdown(); throw error }
+            try await resources.shutdown()
+        } catch { try? await resources.shutdown(); throw error }
     }
 
     private static func seed(_ export: V2ForwardExport, rejected: Bool, sql: any SQLDatabase) async throws {

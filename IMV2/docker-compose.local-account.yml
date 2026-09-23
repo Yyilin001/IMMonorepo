@@ -25,6 +25,9 @@ services:
 
   account:
     image: imv2localaccount-v2server
+    # HTTP drain and cancellation can each take 30s, followed by up to 30s
+    # for workers; leave cleanup time before Compose sends SIGKILL.
+    stop_grace_period: 120s
     env_file:
       - .env.local
     environment:
@@ -90,6 +93,9 @@ services:
 
   gateway:
     image: imv2localaccount-v2server
+    # TLS/HTTP drain and cancellation precede worker and database cleanup.
+    # Cover both 30s HTTP phases, 30s of worker drain, and cleanup headroom.
+    stop_grace_period: 120s
     command: ["/workspace/IMV2Server/.build/release/IMV2ServerApp"]
     env_file:
       - .env.local
@@ -220,6 +226,8 @@ services:
   # that production must place behind a bastion or mTLS proxy.
   operator:
     image: imv2localaccount-v2server
+    # Cover both 30s HTTP phases, 30s of worker drain, and cleanup headroom.
+    stop_grace_period: 120s
     command: ["/workspace/IMV2Server/.build/release/IMV2OperatorServerApp"]
     env_file:
       - .env.local

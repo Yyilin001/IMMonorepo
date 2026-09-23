@@ -1,3 +1,4 @@
+import HTTPTypes
 import Foundation
 import IMV2Core
 import IMV2Server
@@ -31,16 +32,16 @@ struct V2VaporMediaEdgeRoutesTests {
                 handler: .init(edge: edge)
             ).register(on: app)
 
-            let tester = try app.testing()
-            try await tester.test(.GET, "v2/media/media", headers: [
-                "Authorization": "Bearer access-token",
-                "X-IM-Device-ID": "device",
-            ]) { response async in
+            try await app.testing { client in
+                let response = try await client.send(.get, headers: [
+                .authorization: "Bearer access-token",
+                HTTPField.Name("X-IM-Device-ID")!: "device",
+            ], to: "v2/media/media")
                 #expect(response.status == .ok)
-                #expect(response.headers.first(name: .cacheControl) == "no-store")
-                #expect(response.headers.first(name: "Pragma") == "no-cache")
+                #expect(response.headers[.cacheControl] == "no-store")
+                #expect(response.headers[.pragma] == "no-cache")
                 var envelope: V2MediaDownloadTargetEnvelope?
-                expectContent(V2MediaDownloadTargetEnvelope.self, response) { envelope = $0 }
+                envelope = try await response.content.decode(V2MediaDownloadTargetEnvelope.self)
                 guard let envelope else {
                     Issue.record("media edge did not return a decodable target envelope")
                     return
@@ -69,9 +70,10 @@ struct V2VaporMediaEdgeRoutesTests {
             case "malformed": query = "room_id=invalid&message_id=\(message.rawValue)"
             default: query = "room_id=\(room.rawValue.lowercased())&message_id=\(message.rawValue.lowercased())"
             }
-            try await app.testing().test(.GET, "v2/media/media?\(query)", headers: [
-                "Authorization": "Bearer access-token", "X-IM-Device-ID": "device",
-            ]) { response async in
+            try await app.testing { client in
+                let response = try await client.send(.get, headers: [
+                .authorization: "Bearer access-token", HTTPField.Name("X-IM-Device-ID")!: "device",
+            ], to: URI(string: "v2/media/media?\(query)"))
                 #expect(response.status == (scenario == "valid" ? .ok : .badRequest))
             }
             #expect(await resolver.locations == (scenario == "valid" ? [.init(roomID: room, messageID: message)] : []))
@@ -90,14 +92,15 @@ struct V2VaporMediaEdgeRoutesTests {
                 handler: .init(edge: edge)
             ).register(on: app)
 
-            let tester = try app.testing()
-            try await tester.test(.GET, "v2/media/media") { response async in
+            try await app.testing { client in
+                let response = try await client.send(.get, to: "v2/media/media")
                 #expect(response.status == .unauthorized)
             }
-            try await tester.test(.GET, "v2/media/media", headers: [
-                "Authorization": "Bearer invalid",
-                "X-IM-Device-ID": "device",
-            ]) { response async in
+            try await app.testing { client in
+                let response = try await client.send(.get, headers: [
+                .authorization: "Bearer invalid",
+                HTTPField.Name("X-IM-Device-ID")!: "device",
+            ], to: "v2/media/media")
                 #expect(response.status == .unauthorized)
             }
         }
@@ -115,11 +118,11 @@ struct V2VaporMediaEdgeRoutesTests {
                 handler: .init(edge: edge)
             ).register(on: app)
 
-            let tester = try app.testing()
-            try await tester.test(.GET, "v2/media/media", headers: [
-                "Authorization": "Bearer access-token",
-                "X-IM-Device-ID": "device",
-            ]) { response async in
+            try await app.testing { client in
+                let response = try await client.send(.get, headers: [
+                .authorization: "Bearer access-token",
+                HTTPField.Name("X-IM-Device-ID")!: "device",
+            ], to: "v2/media/media")
                 #expect(response.status == .notFound)
             }
         }
@@ -149,11 +152,11 @@ struct V2VaporMediaEdgeRoutesTests {
                 handler: .init(edge: edge)
             ).register(on: app)
 
-            let tester = try app.testing()
-            try await tester.test(.GET, "v2/media/media", headers: [
-                "Authorization": "Bearer access-token",
-                "X-IM-Device-ID": "device",
-            ]) { response async in
+            try await app.testing { client in
+                let response = try await client.send(.get, headers: [
+                .authorization: "Bearer access-token",
+                HTTPField.Name("X-IM-Device-ID")!: "device",
+            ], to: "v2/media/media")
                 #expect(response.status == .serviceUnavailable)
             }
         }

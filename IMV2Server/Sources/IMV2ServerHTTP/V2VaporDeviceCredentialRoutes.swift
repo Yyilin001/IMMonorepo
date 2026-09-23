@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// `POST /v2/device-credentials` 使用的设备注册与凭证签发请求体。
 ///
@@ -185,10 +186,12 @@ public struct V2VaporDeviceCredentialRoutes: Sendable {
     ///
     /// - Parameter routes: 接收这两个接口的路由集合；调用方选择挂载它们的服务实例。
     public func register(on routes: RoutesBuilder) {
-        routes.on(.POST, "v2", "device-credentials", body: .collect(maxSize: "16kb")) { request async throws -> Response in
+        routes.on(.post, "v2", "device-credentials", maxBodySize: "16kb") { request async throws -> Response in
+            _ = try await request.body.collect()
             guard request.headers.contentType?.type == "application", request.headers.contentType?.subType == "json" else { throw Abort(.badRequest) }
             let input: V2DeviceCredentialIssueHTTPRequest
-            do { input = try request.content.decode(V2DeviceCredentialIssueHTTPRequest.self) }
+            do { input = try await request.content.decode(V2DeviceCredentialIssueHTTPRequest.self) }
+            catch let abort as Abort where abort.status == .contentTooLarge { throw abort }
             catch { throw Abort(.badRequest) }
             guard !input.accountAssertion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   let deviceID = try? DeviceID(input.deviceID),
@@ -209,7 +212,7 @@ public struct V2VaporDeviceCredentialRoutes: Sendable {
                 )
                 revision = try await assertionVerifier.credentialRevision(for: input.accountAssertion, deviceID: deviceID)
             } catch V2AccountAssertionError.invalidClock {
-                return .init(status: .serviceUnavailable, headers: ["Cache-Control": "no-store", "Pragma": "no-cache"])
+                return .init(status: .serviceUnavailable, headers: [.cacheControl: "no-store", .v2Pragma: "no-cache"])
             } catch {
                 throw Abort(.unauthorized)
             }
@@ -242,7 +245,7 @@ public struct V2VaporDeviceCredentialRoutes: Sendable {
         }
 
         routes.post("v2", "device-credentials", "refresh") { request async throws -> Response in
-            let input = try request.content.decode(V2DeviceCredentialRefreshHTTPRequest.self)
+            let input = try await request.content.decode(V2DeviceCredentialRefreshHTTPRequest.self)
             guard let userID = try? UserID(input.userID),
                   let deviceID = try? DeviceID(input.deviceID),
                   let refresh = try? V2DeviceCredentialRefresh(userID: userID, deviceID: deviceID, refreshCredential: input.refreshCredential, revocationCredential: input.revocationCredential, operationID: input.operationID)
@@ -268,19 +271,19 @@ public struct V2VaporDeviceCredentialRoutes: Sendable {
     /// no-store JSON 响应，防止凭证信息被缓存。
     private func noStoreJSONResponse(_ response: V2DeviceCredentialIssueHTTPResponse) throws -> Response {
         let data = try JSONEncoder().encode(response)
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: .contentType, value: "application/json")
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+        var headers = HTTPFields()
+        headers[.contentType] = "application/json"
+        headers[.cacheControl] = "no-store"
+        headers[.v2Pragma] = "no-cache"
         return .init(status: .ok, headers: headers, body: .init(data: data))
     }
 
     /// 限流或额度不足时返回 retry-after。
     private func noStoreRetryAfterResponse(seconds: Int) -> Response {
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
-        headers.replaceOrAdd(name: "Retry-After", value: String(max(1, seconds)))
+        var headers = HTTPFields()
+        headers[.cacheControl] = "no-store"
+        headers[.v2Pragma] = "no-cache"
+        headers[.retryAfter] = String(max(1, seconds))
         return .init(status: .tooManyRequests, headers: headers)
     }
 }

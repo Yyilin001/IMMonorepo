@@ -1,3 +1,4 @@
+import HTTPTypes
 import Foundation
 import IMV2Core
 import IMV2Server
@@ -10,25 +11,26 @@ import VaporTesting
 struct V2VaporProfileViewRoutesTests {
     @Test("batch profile hydration is authenticated, no-store, and preserves unavailable results")
     func readsAuthorizedViews() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let profile = try fixtureProfile()
         V2VaporProfileViewRoutes(
             authenticator: ProfileRouteAuthenticator(userID: try .init("00000000-0000-0000-0000-000000000801")),
             profiles: .init(store: ProfileRouteStore(profile: profile))
         ).register(on: app)
 
-        try await app.testing().test(.POST, "v2/profile-views/batch", beforeRequest: { request in
+        try await app.testing { client in
+            let response = try await client.send(.post, to: "v2/profile-views/batch", beforeSend: { request in
             request.headers.bearerAuthorization = .init(token: "access-token")
-            request.headers.replaceOrAdd(name: "X-IM-Device-ID", value: "00000000-0000-0000-0000-000000000803")
+            request.headers[HTTPField.Name("X-IM-Device-ID")!] = "00000000-0000-0000-0000-000000000803"
             try request.content.encode(V2ProfileViewBatchHTTPRequest(keys: [
                 .init(userID: profile.userID.rawValue),
                 .init(userID: "00000000-0000-0000-0000-000000000804", context: "room", roomID: "00000000-0000-0000-0000-000000000805"),
             ]))
-        }) { response async throws in
+        })
             #expect(response.status == .ok)
-            #expect(response.headers.first(name: .cacheControl) == "no-store")
-            let body = try response.content.decode(V2ProfileViewBatchHTTPResponse.self)
+            #expect(response.headers[.cacheControl] == "no-store")
+            let body = try await response.content.decode(V2ProfileViewBatchHTTPResponse.self)
             #expect(body.results.count == 2)
             #expect(body.results[0].unavailable == false)
             #expect(body.results[0].context == "direct")
@@ -43,23 +45,24 @@ struct V2VaporProfileViewRoutesTests {
 
     @Test("relationship context is preserved without a room identifier")
     func preservesRelationshipContext() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let profile = try fixtureProfile()
         V2VaporProfileViewRoutes(
             authenticator: ProfileRouteAuthenticator(userID: try .init("00000000-0000-0000-0000-000000000801")),
             profiles: .init(store: ProfileRouteStore(profile: profile))
         ).register(on: app)
 
-        try await app.testing().test(.POST, "v2/profile-views/batch", beforeRequest: { request in
+        try await app.testing { client in
+            let response = try await client.send(.post, to: "v2/profile-views/batch", beforeSend: { request in
             request.headers.bearerAuthorization = .init(token: "access-token")
-            request.headers.replaceOrAdd(name: "X-IM-Device-ID", value: "00000000-0000-0000-0000-000000000803")
+            request.headers[HTTPField.Name("X-IM-Device-ID")!] = "00000000-0000-0000-0000-000000000803"
             try request.content.encode(V2ProfileViewBatchHTTPRequest(keys: [
                 .init(userID: profile.userID.rawValue, context: "relationship"),
             ]))
-        }) { response async throws in
+        })
             #expect(response.status == .ok)
-            let body = try response.content.decode(V2ProfileViewBatchHTTPResponse.self)
+            let body = try await response.content.decode(V2ProfileViewBatchHTTPResponse.self)
             #expect(body.results.first?.context == "relationship")
             #expect(body.results.first?.roomID == nil)
         }

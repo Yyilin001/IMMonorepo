@@ -1,3 +1,9 @@
+-- pg_get_constraintdef and pg_get_indexdef qualify im_v2 objects according to
+-- the caller's search_path. Evaluate the contract in a private empty path so
+-- the exact DDL checks work from psql, Compose, and application sessions alike.
+WITH schema_visibility AS MATERIALIZED (
+ SELECT pg_catalog.set_config('search_path', '', true) AS active_path
+)
 SELECT ((SELECT count(*) = 18 FROM information_schema.columns
  WHERE table_schema = 'im_v2' AND table_name = 'direct_authorization_intents'
  AND (column_name, udt_name, is_nullable, COALESCE(column_default,'')) IN (
@@ -697,4 +703,5 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
    AND (SELECT count(*) = 3 FROM pg_constraint
        WHERE conrelid = to_regclass('im_v2.control_housekeeping_cursor') AND convalidated AND NOT condeferrable
          AND pg_get_constraintdef(oid) IN ('PRIMARY KEY (singleton)', 'CHECK (singleton)', 'CHECK ((rotation >= 0))'))
-   AND to_regclass('im_v2.local_schema_migrations') IS NULL)));
+   AND to_regclass('im_v2.local_schema_migrations') IS NULL)))
+FROM schema_visibility WHERE active_path = '';

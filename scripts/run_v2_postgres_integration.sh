@@ -14,6 +14,7 @@ trap cleanup EXIT
 docker compose --project-name "${project_name}" --file "${compose_file}" up --detach --wait
 IMV2_POSTGRES_TEST_DATABASE_URL='postgres://im_v2_test:im_v2_test@127.0.0.1:55432/im_v2_test' \
 IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL='postgres://im_v2_test:im_v2_test@127.0.0.1:55433/im_v2_test' \
+IMV2_POSTGRES_TEST_CONTROL_DATABASE_URL='postgres://im_v2_test:im_v2_test@127.0.0.1:55434/im_v2_test' \
 IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE=1 \
 IMV2_REQUIRE_CROSS_STORE_POSTGRES_TESTS=1 \
-swift test --package-path "${repo_root}/IMV2Server"
+swift test --disable-automatic-resolution --no-parallel --package-path "${repo_root}/IMV2Server"

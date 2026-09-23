@@ -1,6 +1,7 @@
 import Foundation
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// 转发工作重放请求体。
 ///
@@ -42,7 +43,7 @@ public struct V2VaporForwardWorkOperatorReplayRoutes: Sendable {
     public func register(on routes: RoutesBuilder) {
         routes.post("internal", "v2", "forward-work", "replay") { request async throws -> Response in
             guard authenticator.isAuthorized(bearerToken: request.headers.bearerAuthorization?.token) else { throw Abort(.unauthorized) }
-            let input = try request.content.decode(V2ForwardWorkReplayHTTPRequest.self)
+            let input = try await request.content.decode(V2ForwardWorkReplayHTTPRequest.self)
             let command: V2ForwardWorkReplayCommand
             do {
                 command = try .init(operationID: input.operationID, shardID: input.shardID, kind: input.kind,
@@ -57,10 +58,10 @@ public struct V2VaporForwardWorkOperatorReplayRoutes: Sendable {
             } catch V2ForwardWorkReplayError.idempotencyConflict { throw Abort(.conflict)
             } catch { throw Abort(.serviceUnavailable) }
             let data = try JSONEncoder().encode(V2DurableWorkReplayHTTPResponse(result))
-            var headers = HTTPHeaders()
-            headers.replaceOrAdd(name: .contentType, value: "application/json")
-            headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-            headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+            var headers = HTTPFields()
+            headers[.contentType] = "application/json"
+            headers[.cacheControl] = "no-store"
+            headers[.v2Pragma] = "no-cache"
             return .init(status: .ok, headers: headers, body: .init(data: data))
         }
     }

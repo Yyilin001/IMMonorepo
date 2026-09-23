@@ -1,11 +1,10 @@
 import Foundation
-import Fluent
+import FluentKit
 import FluentPostgresDriver
 import IMV2Core
 @testable import IMV2Server
 import SQLKit
 import Testing
-import Vapor
 
 struct PostgresV2ForwardTerminalReplayTests {
     @Test(arguments: [0, 1, 31, 33])
@@ -17,13 +16,13 @@ struct PostgresV2ForwardTerminalReplayTests {
     }
 
     @Test func terminalPairReplayChecksIdentityAndDigest() async throws {
-        guard let url = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
-        let app = try await Application.make(.testing)
+        guard let url = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
+        let resources = makeV2DatabaseTestResources()
         var ownsSchema = false
         do {
-            app.databases.use(try .postgres(url: url, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
-            let sql = try #require(app.db(.psql) as? any SQLDatabase)
+            resources.databases.use(try .postgres(url: url, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
+            let sql = try #require(resources.database(.psql) as? any SQLDatabase)
             struct Exists: Decodable { let exists: Bool }
             guard try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: Exists.self)?.exists == false else { throw CancellationError() }
             let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -34,9 +33,9 @@ struct PostgresV2ForwardTerminalReplayTests {
             for statement in postgresStatements(in: executable) where !statement.isEmpty && statement != "BEGIN" && statement != "COMMIT" {
                 try await sql.raw("\(unsafeRaw: statement)").run()
             }
-            let receipts = PostgresV2ForwardReceiptStore(database: app.db(.psql))
+            let receipts = PostgresV2ForwardReceiptStore(database: resources.database(.psql))
             let service = try V2CrossOwnerForwardService(sources: ["source": .init(
-                exports: .init(database: app.db(.psql)), receipts: receipts, jobs: .init(database: app.db(.psql)))])
+                exports: .init(database: resources.database(.psql)), receipts: receipts, jobs: .init(database: resources.database(.psql)))])
             for scenario in 0..<3 {
                 let rejected = scenario == 1
                 let actor = UserID(uuid: UUID()), operation = MessageForwardOperationID(uuid: UUID())
@@ -57,10 +56,10 @@ struct PostgresV2ForwardTerminalReplayTests {
                         if source { return try await PostgresV2ForwardExportCompactor(database: database).runOnce(now: at, limit: 1) }
                         return try await PostgresV2ForwardInboxCompactor(database: database).runOnce(now: at, limit: 1)
                     }
-                    try await app.db(.psql).transaction { transaction in
+                    try await resources.database(.psql).transaction { transaction in
                         let scoped = try #require(transaction as? any SQLDatabase)
                         try await scoped.raw("SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: roomID.uuidValue!) FOR UPDATE").run()
-                        #expect(try await compact(app.db(.psql)) == 0)
+                        #expect(try await compact(resources.database(.psql)) == 0)
                     }
 
                 }
@@ -71,7 +70,7 @@ struct PostgresV2ForwardTerminalReplayTests {
                      'target', 0, \(bind: export.payload), \(bind: export.digest), '{}', \(bind: now), NULL, NULL)
                     """).run()
                 #expect(try await receipts.terminalStatus(actor: actor, operation: operation, source: reference, target: target) == nil)
-                let exports = PostgresV2ForwardExportStore(database: app.db(.psql))
+                let exports = PostgresV2ForwardExportStore(database: resources.database(.psql))
                 func prepare(_ source: V2ForwardMessageReference) async throws -> V2ForwardExportPreparation {
                     try await exports.prepareForDelivery(actorUserID: actor, operationID: operation, source: source,
                         sourceRoute: .init(shardID: "source", epoch: 9), targetRoomID: target,
@@ -90,7 +89,7 @@ struct PostgresV2ForwardTerminalReplayTests {
                     (\(bind: id), \(bind: receiptDigest), \(bind: rejected ? "rejected" : "completed"),
                      \(bind: result), \(bind: sequence), \(bind: code), \(bind: now))
                     """).run()
-                let sourceCompactor = PostgresV2ForwardExportCompactor(database: app.db(.psql))
+                let sourceCompactor = PostgresV2ForwardExportCompactor(database: resources.database(.psql))
                 let sourceCompactAt = now.addingTimeInterval(PostgresV2ForwardExportCompactor.retentionSeconds)
                 #expect(try await sourceCompactor.runOnce(now: sourceCompactAt, limit: 1) == 0)
                 // A receipt alone cannot authorize compaction or manufacture completion.
@@ -132,11 +131,11 @@ struct PostgresV2ForwardTerminalReplayTests {
                         lease_expires_at = \(bind: now.addingTimeInterval(30)) WHERE export_id = \(bind: id)
                     """).run()
                 #expect(try await sourceCompactor.runOnce(now: sourceCompactAt, limit: 1) == 0)
-                let delivery = PostgresV2ForwardDeliveryStore(database: app.db(.psql))
+                let delivery = PostgresV2ForwardDeliveryStore(database: resources.database(.psql))
                 let lease = V2ForwardDeliveryLease(export: export, claimToken: token, attempt: 1, expiresAt: now.addingTimeInterval(30))
                 // Completion and cleanup eligibility roll back together.
                 await #expect(throws: CancellationError.self) {
-                    try await app.db(.psql).transaction { transaction in
+                    try await resources.database(.psql).transaction { transaction in
                         #expect(try await PostgresV2ForwardDeliveryStore(database: transaction).complete(lease, now: now))
                         throw CancellationError()
                     }
@@ -146,7 +145,7 @@ struct PostgresV2ForwardTerminalReplayTests {
                 try await verifyBusyRoom(roomID: room, shard: "source", source: true, at: sourceCompactAt)
                 #expect(try await sourceCompactor.runOnce(now: sourceCompactAt.addingTimeInterval(-1), limit: 1) == 0)
                 await #expect(throws: CancellationError.self) {
-                    try await app.db(.psql).transaction { transaction in
+                    try await resources.database(.psql).transaction { transaction in
                         #expect(try await PostgresV2ForwardExportCompactor(database: transaction).runOnce(now: sourceCompactAt, limit: 1) == 1)
                         throw CancellationError()
                     }
@@ -182,7 +181,7 @@ struct PostgresV2ForwardTerminalReplayTests {
                             \(bind: export.digest), 'pending', NULL, NULL, NULL, \(bind: now), NULL, NULL)
                     """).run()
                 let compactAt = now.addingTimeInterval(PostgresV2ForwardInboxCompactor.retentionSeconds)
-                let compactor = PostgresV2ForwardInboxCompactor(database: app.db(.psql))
+                let compactor = PostgresV2ForwardInboxCompactor(database: resources.database(.psql))
                 #expect(try await compactor.runOnce(now: compactAt, limit: 1) == 0)
                 await #expect(throws: (any Error).self) {
                     try await sql.raw("UPDATE im_v2.message_forward_inbox SET payload = NULL, payload_compacted_at = \(bind: compactAt) WHERE export_id = \(bind: id)").run()
@@ -201,7 +200,7 @@ struct PostgresV2ForwardTerminalReplayTests {
                 try await verifyBusyRoom(roomID: target, shard: "target", source: false, at: compactAt)
                 #expect(try await compactor.runOnce(now: compactAt.addingTimeInterval(-1), limit: 1) == 0)
                 await #expect(throws: CancellationError.self) {
-                    try await app.db(.psql).transaction { transaction in
+                    try await resources.database(.psql).transaction { transaction in
                         #expect(try await PostgresV2ForwardInboxCompactor(database: transaction).runOnce(now: compactAt, limit: 1) == 1)
                         throw CancellationError()
                     }
@@ -230,21 +229,21 @@ struct PostgresV2ForwardTerminalReplayTests {
                 guard case .terminal(let preparedTerminal) = try await prepare(reference) else {
                     Issue.record("Expected terminal after preflight miss"); throw CancellationError()
                 }
-                let inbox = PostgresV2ForwardInboxStore(database: app.db(.psql))
+                let inbox = PostgresV2ForwardInboxStore(database: resources.database(.psql))
                 try await inbox.receive(export, now: now)
                 let terminal = try #require(try await inbox.terminalReceipt(exportID: id))
                 #expect(terminal.matches(export))
                 try await receipts.record(terminal, now: now)
                 #expect(preparedTerminal == terminal.outcome)
                 #expect(try await inbox.status(exportID: id) == terminal.outcome)
-                let locked = try await app.db(.psql).transaction { transaction in
+                let locked = try await resources.database(.psql).transaction { transaction in
                     try await v2LockForwardInbox(exportID: id, sql: try #require(transaction as? any SQLDatabase))
                 }
                 #expect(locked.payload == nil)
                 #expect(try locked.outcome == terminal.outcome)
                 let profile = try V2CapacityProfile(id: "terminal-replay", limits: .init(maxEligibleMembers: 10,
                     maxCommandsPerWindow: 10, retryAfterSeconds: 1))
-                #expect(try await PostgresV2RoomWriteStore(database: app.db(.psql)).importForwardExport(export,
+                #expect(try await PostgresV2RoomWriteStore(database: resources.database(.psql)).importForwardExport(export,
                     capacityProfile: profile, limits: .init(maxUTF8Bytes: 64),
                     identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID())), now: now) == terminal.outcome)
                 var changed = try #require(JSONSerialization.jsonObject(with: export.payload) as? [String: Any])
@@ -274,10 +273,10 @@ struct PostgresV2ForwardTerminalReplayTests {
             }
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             ownsSchema = false
-            try await app.asyncShutdown()
+            try await resources.shutdown()
         } catch {
-            if ownsSchema, let sql = app.db(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA im_v2 CASCADE").run() }
-            try? await app.asyncShutdown()
+            if ownsSchema, let sql = resources.database(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA im_v2 CASCADE").run() }
+            try? await resources.shutdown()
             throw error
         }
     }

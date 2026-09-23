@@ -1,3 +1,4 @@
+import HTTPTypes
 import Foundation
 import IMV2Core
 import IMV2Server
@@ -10,8 +11,8 @@ import VaporTesting
 struct V2VaporPushEndpointRoutesTests {
     @Test("authenticated device registers an opaque endpoint with no-store semantics")
     func authenticatedDeviceRegistersEndpoint() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let user = try UserID("00000000-0000-0000-0000-000000000811")
         let device = try DeviceID("00000000-0000-0000-0000-000000000812")
         let store = RoutePushEndpointStore()
@@ -26,16 +27,17 @@ struct V2VaporPushEndpointRoutesTests {
             environment: .development,
             token: String(repeating: "a", count: 64)
         )
-        try await app.testing().test(.PUT, "v2/push-endpoint", headers: [
-            "Authorization": "Bearer access-token",
-            "X-IM-Device-ID": device.rawValue,
-        ], beforeRequest: { request in
+        try await app.testing { client in
+            let response = try await client.send(.put, headers: [
+            .authorization: "Bearer access-token",
+            HTTPField.Name("X-IM-Device-ID")!: device.rawValue,
+        ], to: "v2/push-endpoint", beforeSend: { request in
             try request.content.encode(body)
-        }) { response async in
+        })
             #expect(response.status == .noContent)
-            #expect(response.headers.first(name: .cacheControl) == "no-store")
-            #expect(response.headers.first(name: "Pragma") == "no-cache")
-            #expect(!response.body.string.contains(body.token))
+            #expect(response.headers[.cacheControl] == "no-store")
+            #expect(response.headers[.pragma] == "no-cache")
+            #expect(!(try await response.body.string() ?? "").contains(body.token))
         }
         let registration = try #require(await store.registrations().first)
         #expect(registration.userID == user)
@@ -45,8 +47,8 @@ struct V2VaporPushEndpointRoutesTests {
 
     @Test("authenticated delete disables by identity without reading provider material")
     func authenticatedDeviceDeletesEndpoint() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         let user = try UserID("00000000-0000-0000-0000-000000000811")
         let device = try DeviceID("00000000-0000-0000-0000-000000000812")
         let store = RoutePushEndpointStore()
@@ -56,12 +58,13 @@ struct V2VaporPushEndpointRoutesTests {
             now: { Date(timeIntervalSince1970: 100) }
         ).register(on: app)
 
-        try await app.testing().test(.DELETE, "v2/push-endpoint", headers: [
-            "Authorization": "Bearer access-token",
-            "X-IM-Device-ID": device.rawValue,
-        ]) { response async in
+        try await app.testing { client in
+            let response = try await client.send(.delete, headers: [
+            .authorization: "Bearer access-token",
+            HTTPField.Name("X-IM-Device-ID")!: device.rawValue,
+        ], to: "v2/push-endpoint")
             #expect(response.status == .noContent)
-            #expect(response.headers.first(name: .cacheControl) == "no-store")
+            #expect(response.headers[.cacheControl] == "no-store")
         }
         let deletion = try #require(await store.deletions().first)
         #expect(deletion.userID == user)
@@ -71,20 +74,22 @@ struct V2VaporPushEndpointRoutesTests {
 
     @Test("malformed or unauthenticated endpoint registration is rejected")
     func rejectsInvalidRequests() async throws {
-        let app = try await Application.make(.testing)
-        defer { Task { try? await app.asyncShutdown() } }
+        let app = try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
         V2VaporPushEndpointRoutes(
             authenticator: RoutePushAuthenticator(userID: try .init("user"), accepts: false),
             store: RoutePushEndpointStore()
         ).register(on: app)
-        let tester = try app.testing()
-        try await tester.test(.PUT, "v2/push-endpoint") { response async in
+
+        try await app.testing { client in
+            let response = try await client.send(.put, to: "v2/push-endpoint")
             #expect(response.status == .unauthorized)
         }
-        try await tester.test(.PUT, "v2/push-endpoint", headers: [
-            "Authorization": "Bearer rejected",
-            "X-IM-Device-ID": "device",
-        ]) { response async in
+        try await app.testing { client in
+            let response = try await client.send(.put, headers: [
+            .authorization: "Bearer rejected",
+            HTTPField.Name("X-IM-Device-ID")!: "device",
+        ], to: "v2/push-endpoint")
             #expect(response.status == .unauthorized)
         }
     }

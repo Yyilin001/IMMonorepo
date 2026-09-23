@@ -69,6 +69,15 @@ test "$(current_schema_contract)" = 'f'
 psql < "${schema_file}" >/dev/null
 test "$(current_schema_contract)" = 't'
 
+# A login role named im_v2 makes the schema visible through PostgreSQL's
+# default "$user" search path. The catalog contract must also work when
+# pg_get_constraintdef / pg_get_indexdef would otherwise omit its qualifier.
+visible_schema_contract="$({
+  printf '%s\n' 'SET search_path TO im_v2, public;'
+  cat "${schema_contract_query}"
+} | psql -qAt | tr -d '[:space:]')"
+test "${visible_schema_contract}" = 't'
+
 assert_scalar() {
   local label="$1"
   local query="$2"

@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 public struct V2DurableWorkReplayHTTPRequest: Content, Sendable {
     public let operationID: UUID
@@ -129,7 +130,7 @@ public struct V2VaporDurableWorkOperatorReplayRoutes: Sendable {
             guard authenticator.isAuthorized(bearerToken: request.headers.bearerAuthorization?.token) else {
                 throw Abort(.unauthorized)
             }
-            let input = try request.content.decode(V2DurableWorkEventReplayHTTPRequest.self)
+            let input = try await request.content.decode(V2DurableWorkEventReplayHTTPRequest.self)
             let command: V2DurableWorkEventReplayCommand
             do {
                 command = try input.command()
@@ -146,7 +147,7 @@ public struct V2VaporDurableWorkOperatorReplayRoutes: Sendable {
                 // disclose row identity or exception text on the operator API.
                 throw Abort(.serviceUnavailable)
             }
-            let response = Response(status: .ok, headers: ["Cache-Control": "no-store", "Pragma": "no-cache"])
+            var response = Response(status: .ok, headers: [.cacheControl: "no-store", .v2Pragma: "no-cache"])
             try response.content.encode(V2DurableWorkEventReplayHTTPResponse(result))
             return response
         }
@@ -154,7 +155,7 @@ public struct V2VaporDurableWorkOperatorReplayRoutes: Sendable {
             guard authenticator.isAuthorized(bearerToken: request.headers.bearerAuthorization?.token) else {
                 throw Abort(.unauthorized)
             }
-            let input = try request.content.decode(V2DurableWorkReplayHTTPRequest.self)
+            let input = try await request.content.decode(V2DurableWorkReplayHTTPRequest.self)
             let command: V2DurableWorkReplayCommand
             do {
                 command = try input.command()
@@ -179,10 +180,10 @@ public struct V2VaporDurableWorkOperatorReplayRoutes: Sendable {
 
     private func noStoreJSON(_ response: V2DurableWorkReplayHTTPResponse) throws -> Response {
         let data = try JSONEncoder().encode(response)
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: .contentType, value: "application/json")
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+        var headers = HTTPFields()
+        headers[.contentType] = "application/json"
+        headers[.cacheControl] = "no-store"
+        headers[.v2Pragma] = "no-cache"
         return .init(status: .ok, headers: headers, body: .init(data: data))
     }
 }

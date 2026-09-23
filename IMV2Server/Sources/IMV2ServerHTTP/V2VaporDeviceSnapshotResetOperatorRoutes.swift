@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// 设备快照重置请求体。
 ///
@@ -56,7 +57,7 @@ public struct V2VaporDeviceSnapshotResetOperatorRoutes: Sendable {
         routes.post("internal", "v2", "device-snapshots", "reset") { request async throws -> Response in
             guard authenticator.isAuthorized(bearerToken: request.headers.bearerAuthorization?.token) else { throw Abort(.unauthorized) }
             let command: V2DeviceSnapshotResetCommand
-            do { command = try request.content.decode(V2DeviceSnapshotResetHTTPRequest.self).command() }
+            do { command = try await request.content.decode(V2DeviceSnapshotResetHTTPRequest.self).command() }
             catch { throw Abort(.badRequest) }
             let result: V2DeviceSnapshotResetResult
             do { result = try await service.stage(command) }
@@ -64,10 +65,10 @@ public struct V2VaporDeviceSnapshotResetOperatorRoutes: Sendable {
             catch V2DeviceSnapshotResetError.resetAlreadyPending { throw Abort(.conflict) }
             catch { throw Abort(.serviceUnavailable) }
             let data = try JSONEncoder().encode(V2DeviceSnapshotResetHTTPResponse(operationID: command.operationID, generation: result.generation, state: result.state, wasIdempotent: result.wasIdempotent))
-            var headers = HTTPHeaders()
-            headers.replaceOrAdd(name: .contentType, value: "application/json")
-            headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-            headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+            var headers = HTTPFields()
+            headers[.contentType] = "application/json"
+            headers[.cacheControl] = "no-store"
+            headers[.v2Pragma] = "no-cache"
             return .init(status: .ok, headers: headers, body: .init(data: data))
         }
     }

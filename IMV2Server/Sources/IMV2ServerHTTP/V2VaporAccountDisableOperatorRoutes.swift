@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2Server
 import Vapor
+import HTTPTypes
 
 /// 账户封禁请求体。
 public struct V2AccountDisableHTTPRequest: Content, Sendable {
@@ -52,7 +53,7 @@ public struct V2VaporAccountDisableOperatorRoutes: Sendable {
                 throw Abort(.unauthorized)
             }
             let command: V2AccountDisableCommand
-            do { command = try request.content.decode(V2AccountDisableHTTPRequest.self).command() }
+            do { command = try await request.content.decode(V2AccountDisableHTTPRequest.self).command() }
             catch { throw Abort(.badRequest) }
             let result: V2AccountDisableOutcome
             do { result = try await service.disable(command) }
@@ -91,16 +92,16 @@ public struct V2VaporAccountDisableOperatorRoutes: Sendable {
 
     /// 服务不可用响应（no-store）。
     private func unavailableResponse() -> Response {
-        .init(status: .serviceUnavailable, headers: ["Cache-Control": "no-store", "Pragma": "no-cache"])
+        .init(status: .serviceUnavailable, headers: [.cacheControl: "no-store", .v2Pragma: "no-cache"])
     }
 
     /// 返回禁用结果 JSON（no-store）。
     private func noStoreJSON(_ response: V2AccountDisableHTTPResponse) throws -> Response {
         let data = try JSONEncoder().encode(response)
-        var headers = HTTPHeaders()
-        headers.replaceOrAdd(name: .contentType, value: "application/json")
-        headers.replaceOrAdd(name: .cacheControl, value: "no-store")
-        headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+        var headers = HTTPFields()
+        headers[.contentType] = "application/json"
+        headers[.cacheControl] = "no-store"
+        headers[.v2Pragma] = "no-cache"
         return .init(status: .ok, headers: headers, body: .init(data: data))
     }
 }
