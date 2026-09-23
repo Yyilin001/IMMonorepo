@@ -6,7 +6,7 @@
 
 下表是对本次审查的后续处置；后文保留审查时的原始判断，以便核对当时证据，不能再把已关闭的条目当成当前缺陷。
 
-再次按原方案逐句核对 `5c2d5509` 后，除五类相对性能和 #19 单 owner 查询故障之外，尚须取得以下直接证据：#11 生产 Host 的热房间及节点队列饱和、健康房间前进与资源回落；#17 真实 PostgreSQL 重启；#18 生产 Host 在满队列和待处理 shared batch 下排空；#21 review/import 各自临界点接管；最终源码的一次完整 Linux required checks 全绿记录。这些项目已分工准备，尚未运行，不能由现有代表路径提前标记完成。原 #7 的真实成功 COMMIT ACK 截断已处于“DB 提交与 RPC 返回之间”，不额外要求 Actor 网络帧丢失；#13 的真实 PG 双房间 unknown 与 Host 退役分层证据保留，不增加无原文要求的同场组合。已有真实 OS SIGTERM→App drain 的证据，与待补的生产 Host 队列/batch 状态验证分别证明信号接线与排空行为。
+再次按原方案逐句核对 `5c2d5509` 后，除五类相对性能和 #19 单 owner 查询故障之外，尚须取得以下直接证据：#11 生产 Host 的热房间及节点队列饱和、健康房间前进与资源回落；#17 真实 PostgreSQL 重启；#18 生产 Host 在满队列和待处理 shared batch 下排空；#21 review/import 各自临界点接管；最终源码的一次完整 Linux required checks 全绿记录。这是该提交的差距清单；后续进展必须以新增执行证据逐项关闭，不能由代表路径提前标记完成。原 #7 的真实成功 COMMIT ACK 截断已处于“DB 提交与 RPC 返回之间”，不额外要求 Actor 网络帧丢失；#13 的真实 PG 双房间 unknown 与 Host 退役分层证据保留，不增加无原文要求的同场组合。已有真实 OS SIGTERM→App drain 的证据，与待补的生产 Host 队列/batch 状态验证分别证明信号接线与排空行为。
 
 | 原差距 | 新证据与当前边界 |
 | --- | --- |
@@ -17,7 +17,7 @@
 | #15/#16 查询与 pair 交错 | [真实 Host/Factory/PG reservation](g2-pg-query-reservation-evidence.md)已通过：获准 B 恢复独立 flush、A 等待、对向 pair 统一次序、等待取消归还许可；实际 SQL 后注入 unknown 使两实例退役并以新 epoch 重放原消息。这里的 unknown 明确是测试注入，真正成功 COMMIT 丢 ACK 由原 #7/#13 的 wire proxy 独立验证。 |
 | #14 暖额度与 refill/fence 次序 | [生产 direct append 的真实 PG 屏障](g5-credit-refill-fence-evidence.md)原生与 Linux 均 2/2 通过：暖额度耗尽、另一连接的 refill 等待业务 fence、回滚返还及旧 epoch 拒绝。unknown 子场景只检查本地 discard，实际成功 COMMIT 丢 ACK 仍引用 #7/#13 的独立证据。 |
 | 无效 V1 总入口 | 已删除未实现探针的旧 scaffold，当前[故障入口](v1-fault-harness.md)逐项指向真实可运行脚本；没有宣称覆盖全部 21 项。G6 已接入 Linux 进程恢复 CI。 |
-| #10/#21 取消和后台 writer 接管 | [真实 Host/Factory/PG 取消与 retention](g2-pg-cancellation-maintenance-evidence.md)通过：执行中的取消不早释 lease/许可，排队取消无持久写；后台 trimLog 持 fence 时第二 Host 不能接管，旧 token 在新 epoch 下被拒绝。这是生产 retention 代表路径，import/review 的既有 PG 专项测试仍是分层证据。 |
+| #10/#21 取消和后台 writer 接管 | [真实 Host/Factory/PG 取消与 retention](g2-pg-cancellation-maintenance-evidence.md)通过：执行中的取消不早释 lease/许可，排队取消无持久写；后台 trimLog 持 fence 时第二 Host 不能接管，旧 token 在新 epoch 下被拒绝。随后在 `d4f173df` 加入 review/import 各自临界点屏障，同 suite 原生真实 PG **4/4** 通过：实际 worker 的失败 job 可重试、目标 import 的持久接收与终态唯一，新 epoch 重放保持原结果；这两项 Linux 仍待最终全量运行。 |
 | #20 跨入口禁用账号 | [真实 Linux 三入口应用栈](g5-cross-entry-disable-evidence.md)已通过：独立 Actor Host、caller-only Gateway、Account/Operator HTTP；两条旧 Gateway 会话在暖房间及 Operator 请求前仍活，禁用提交后被主动关闭，固定新操作无消息/完成记录，Host epoch 未变。此轮因主动关闭而未在禁用后实际派发房间命令；不等同于成员 revision 或媒体授权的同场实测。 |
 | #17 独立 owner/control DB 链路 | [真实双 Host、caller 与三个 PostgreSQL](g5-database-edge-evidence.md)通过：单独断开 Host A 到 control 或 owner-a，B 继续业务服务，A 在 control 故障期间持续续租、owner 失租后无持久写；恢复按原操作 ID 仅一次效果。真实 DB 重启将使用该拓扑的独立阶段；容量 fault 只承担 #19 的部分 owner 查询，不能把它当作尚未运行的数据库重启证据。 |
 | #19、容量与 Linux required checks | #19 部分 owner 查询仍按下方历史矩阵的验收边界核对。容量功能 canary 不等于性能结论。[G5 Linux 回归记录](g5-linux-regression-evidence.md)列出初始完整运行的实际失败、针对性修正后的聚焦通过和最新 discovery/合同检查通过；不能把它们合称为同一提交的一次全量全绿 required run。 |
