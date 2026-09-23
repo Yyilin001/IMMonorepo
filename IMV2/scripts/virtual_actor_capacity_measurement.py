@@ -17,7 +17,7 @@ from typing import Any
 
 PHASES = ("warmup", "steady", "cooldown")
 WORKLOADS = {
-    "hot": ("hot", "IMV2/scripts/virtual-actor-fixtures/send-one-canary.json", None),
+    "hot": ("hot", "IMV2/scripts/virtual-actor-fixtures/capacity-hot-write-v1.json", None),
     "same-owner": ("same-owner", "IMV2/load-scenarios/direct-1500-message-only-900-server-saturation.json",
                    "ab74cd0d64d73040b7aba935cb2e0f33da32928fcdc806e3e55bf19d7e6bbfbe"),
     "mixed": ("mixed", "IMV2/load-scenarios/high-active-10000.json",
@@ -152,7 +152,9 @@ def create_scenario(source: Path, protocol: dict[str, Any], fixture: dict[str, A
         for key in ("messagesPerSecond", "roomLogReadsPerSecond", "syncPullsPerSecond",
                     "readReceiptsPerSecond"):
             if key in phase:
-                phase[key] *= rate_scale
+                phase[key] = 0 if name == "cooldown" else phase[key] * rate_scale
+        if name == "cooldown":
+            phase["reconnectPercentPerMinute"] = 0
         result["phases"].append(phase)
     # Keep the original seed/personas/queue bounds. The scenario is a new
     # measured artifact with its own digest; the frozen source is unchanged.

@@ -29,6 +29,15 @@ class MeasurementTests(unittest.TestCase):
             self.assertEqual(detail["batchRecoveryQueriesCovered"], False)
             self.assertEqual(scenario["phases"][0]["messagesPerSecond"],
                              scenario["phases"][1]["messagesPerSecond"])
+            self.assertTrue(all(scenario["phases"][2].get(name, 0) == 0 for name in
+                                ("messagesPerSecond", "roomLogReadsPerSecond", "syncPullsPerSecond",
+                                 "readReceiptsPerSecond", "reconnectPercentPerMinute")))
+        hot, hot_detail = create_scenario(ROOT, PROTOCOL, fixture, "hot", 100, 1.0)
+        self.assertEqual(hot["phases"][1]["messagesPerSecond"], 500)
+        self.assertEqual(hot["sendDispatch"], "bounded_client_queue")
+        self.assertEqual(hot["maximumQueuedMessagesPerConnection"], 32)
+        self.assertEqual(hot_detail["templatePath"],
+                         "IMV2/scripts/virtual-actor-fixtures/capacity-hot-write-v1.json")
         with self.assertRaises(MeasurementFailure):
             create_scenario(ROOT, PROTOCOL, fixture, "cold", 100, 1)
         with self.assertRaises(MeasurementFailure):
