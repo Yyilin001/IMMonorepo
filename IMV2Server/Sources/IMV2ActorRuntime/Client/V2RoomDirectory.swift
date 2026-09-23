@@ -300,6 +300,12 @@ public actor V2RoomDirectory {
                 if let lease = try await leases.locate(roomID: roomID, owner: owner) {
                     return try await confirm(lease.token, roomID: roomID, owner: owner, deadline: deadline)
                 }
+                // Absence in this observation does not prove that an
+                // in-flight/uncertain acquire rolled back. Do not launch a
+                // second host's acquire in that case.
+                if (error as? V2RoomCallFailure) == .outcomeUnknown {
+                    throw V2RoomCallFailure.outcomeUnknown
+                }
             }
         }
         throw V2RoomCallFailure.notAccepted(.unavailable)

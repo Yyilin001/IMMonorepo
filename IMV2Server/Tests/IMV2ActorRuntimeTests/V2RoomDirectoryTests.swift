@@ -32,6 +32,16 @@ struct V2RoomDirectoryTests {
         #expect(await fixture.leases.locates == 1)
     }
 
+    @Test("unknown activation remains unknown after an empty locate")
+    func unknownActivation() async throws {
+        let fixture = try Fixture(activationFailure: .outcomeUnknown)
+        await failure(.outcomeUnknown) {
+            _ = try await fixture.directory.resolve(fixture.room, deadline: .now + .seconds(1))
+        }
+        #expect(await fixture.transport.activations == 1)
+        #expect(await fixture.leases.locates == 2)
+    }
+
     @Test("unknown owner rejects without activating an empty room")
     func unknownRoom() async throws {
         let fixture = try Fixture(missingOwner: true)
@@ -115,6 +125,7 @@ struct V2RoomDirectoryTests {
 
         init(ownerGate: Gate? = nil, existingLease: Bool = false,
              unreachable: Bool = false, missingOwner: Bool = false,
+             activationFailure: V2RoomCallFailure? = nil,
              invokeFailures: [V2RoomCallFailure] = [],
              maximumCachedLocations: Int = 2) throws {
             owner = try .init(shardID: "shard-a", epoch: 0)
@@ -126,7 +137,8 @@ struct V2RoomDirectoryTests {
                 expiresAt: Date(timeIntervalSince1970: 1_030)
             )
             leases = Leases(lease: existingLease ? lease : nil)
-            transport = Transport(token: token, unreachable: unreachable, failures: invokeFailures)
+            transport = Transport(token: token, unreachable: unreachable,
+                                  activationFailure: activationFailure, failures: invokeFailures)
             let provider = Hosts(host: host)
             let configuration = try V2RoomRuntimeConfiguration(
                 maximumActiveRooms: 2, maximumConcurrentRestores: 1,
@@ -183,15 +195,19 @@ struct V2RoomDirectoryTests {
     private actor Transport: V2RoomClientTransport {
         let token: V2RoomActivationToken
         let unreachable: Bool
+        let activationFailure: V2RoomCallFailure?
         var failures: [V2RoomCallFailure]
         var activations = 0
         var invoked: [V2RoomRequest] = []
-        init(token: V2RoomActivationToken, unreachable: Bool, failures: [V2RoomCallFailure]) {
-            self.token = token; self.unreachable = unreachable; self.failures = failures
+        init(token: V2RoomActivationToken, unreachable: Bool,
+             activationFailure: V2RoomCallFailure?, failures: [V2RoomCallFailure]) {
+            self.token = token; self.unreachable = unreachable
+            self.activationFailure = activationFailure; self.failures = failures
         }
         func activate(on host: V2ActorHostIdentity, roomID: RoomID, owner: V2RoomDataOwner,
                       deadline: ContinuousClock.Instant) async throws -> V2RoomActivationResolution {
             activations += 1
+            if let activationFailure { throw activationFailure }
             return .ready(token)
         }
         func lookup(_ token: V2RoomActivationToken, deadline: ContinuousClock.Instant) async throws -> Bool {
