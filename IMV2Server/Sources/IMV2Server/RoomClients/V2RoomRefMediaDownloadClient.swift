@@ -65,6 +65,10 @@ public struct V2RoomRefMediaDownloadClient: V2MediaDownloadTargetResolving {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
         guard target.expiresAt > returnedAt else { throw V2MediaProviderSessionError.expiredSession }
+        try Task.checkCancellation()
+        guard ContinuousClock.now < deadline else {
+            throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
+        }
         return target
     }
 }
@@ -118,27 +122,48 @@ private struct RoomRefMediaGuard: Sendable {
     }
 
     private func checkRoute() async throws {
+        try checkBudget()
         let current: V2RoomShardRoute
         do { current = try await rooms.route(for: context.roomID) }
-        catch V2RoomShardRouteError.roomNotFound { throw V2MediaStoreError.downloadNotAuthorized }
+        catch {
+            try checkBudget()
+            if let routeError = error as? V2RoomShardRouteError,
+               routeError == .roomNotFound {
+                throw V2MediaStoreError.downloadNotAuthorized
+            }
+            throw error
+        }
+        try checkBudget()
         guard current == context.route else { throw V2MediaStoreError.downloadNotAuthorized }
     }
 
     private func checkDevice() async throws {
+        try checkBudget()
+        guard let sql = controlDatabase as? any SQLDatabase else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        let valid: Bool
+        do {
+            valid = try await sql.raw("""
+                SELECT 1 FROM im_v2.auth_devices AS device
+                JOIN im_v2.public_user_profiles AS profile ON profile.user_id = device.user_id AND profile.state = 'active'
+                WHERE device.user_id = \(bind: context.actor) AND device.device_id = \(bind: context.device)
+                  AND device.revoked_at IS NULL AND device.session_expires_at > clock_timestamp()
+                  AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables WHERE user_id = device.user_id)
+                """).first() != nil
+        } catch {
+            try checkBudget()
+            throw error
+        }
+        try checkBudget()
+        guard valid else { throw V2MediaStoreError.downloadNotAuthorized }
+    }
+
+    private func checkBudget() throws {
         try Task.checkCancellation()
         guard ContinuousClock.now < deadline else {
             throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
         }
-        guard let sql = controlDatabase as? any SQLDatabase else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-        guard try await sql.raw("""
-            SELECT 1 FROM im_v2.auth_devices AS device
-            JOIN im_v2.public_user_profiles AS profile ON profile.user_id = device.user_id AND profile.state = 'active'
-            WHERE device.user_id = \(bind: context.actor) AND device.device_id = \(bind: context.device)
-              AND device.revoked_at IS NULL AND device.session_expires_at > clock_timestamp()
-              AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables WHERE user_id = device.user_id)
-            """).first() != nil else { throw V2MediaStoreError.downloadNotAuthorized }
     }
 }
 

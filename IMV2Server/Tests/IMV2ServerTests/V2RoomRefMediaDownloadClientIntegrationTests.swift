@@ -8,7 +8,7 @@ import Testing
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("RoomRef media grants recheck visibility and devices after provider wait",
-          arguments: ["valid", "visibility-revoked", "device-revoked", "route-changed"])
+          arguments: ["valid", "visibility-revoked", "device-revoked", "route-changed", "deadline-exceeded"])
     func roomRefMediaDownload(scenario: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { controlDB, ownerDB, controlSQL, ownerSQL, room in
             let now = Date(), user = UserID(uuid: memberTwoUUID)
@@ -51,6 +51,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                             updated_at = clock_timestamp() WHERE room_id = \(bind: room.uuidValue!)
                         """).run()
                 }
+                if scenario == "deadline-exceeded" {
+                    try await Task.sleep(for: .milliseconds(1_100))
+                }
             }
             let localProvider = MediaProviderProbe { _ in }
             let local = V2MediaEdgeDownloadService(media: .init(
@@ -62,13 +65,20 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let client = V2RoomRefMediaDownloadClient(local: local,
                 rooms: V2PostgresRoomShardRouter(database: controlDB),
                 owners: ["room-b": .init(database: ownerDB, provider: provider)],
-                controlDatabase: controlDB, authorization: port)
+                controlDatabase: controlDB, authorization: port,
+                callTimeout: scenario == "deadline-exceeded" ? .seconds(1) : .seconds(10))
             let location = V2MediaMessageLocation(roomID: room, messageID: message)
             if scenario == "valid" {
                 let target = try await client.downloadTarget(actorUserID: user,
                     deviceID: device, mediaID: media, message: location)
                 #expect(target.url.scheme == "https")
                 #expect(try await count("im_v2.media_download_grants WHERE state = 'consumed'", on: ownerSQL) == 1)
+            } else if scenario == "deadline-exceeded" {
+                await #expect(throws: V2RoomCallFailure.notAccepted(.deadlineExceeded)) {
+                    try await client.downloadTarget(actorUserID: user,
+                        deviceID: device, mediaID: media, message: location)
+                }
+                #expect(try await count("im_v2.media_download_grants WHERE state = 'pending'", on: ownerSQL) == 1)
             } else {
                 await #expect(throws: V2MediaStoreError.downloadNotAuthorized) {
                     try await client.downloadTarget(actorUserID: user,
@@ -77,7 +87,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(try await count("im_v2.media_download_grants WHERE state = 'pending'", on: ownerSQL) == 1)
                 #expect(try await count("im_v2.media_download_grants WHERE state = 'consumed'", on: ownerSQL) == 0)
             }
-            #expect(await visibility.calls >= (scenario == "device-revoked" ? 3 : 4))
+            #expect(await visibility.calls >= (scenario == "device-revoked" || scenario == "deadline-exceeded" ? 3 : 4))
             #expect(await provider.calls == 1)
         }
     }
