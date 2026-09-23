@@ -109,7 +109,12 @@ func v2WithPostgresTransactionRetry<Result: Sendable>(
             }
             return try await database.transaction(body)
         } catch {
-            let error = classifyCommitFailure ? attempt.classify(error) : error
+            // The physical-deadline primitive already proved rollback versus
+            // missing COMMIT ACK. The legacy Fluent path still needs the
+            // body-return heuristic, which would misclassify a settled close
+            // just before COMMIT as unknown.
+            let error = roomDeadline == nil && classifyCommitFailure
+                ? attempt.classify(error) : error
             guard v2PostgresFailureDisposition(error) == .retryTransaction,
                   retryCount < maximumRetryCount
             else { throw error }

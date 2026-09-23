@@ -42,6 +42,60 @@ struct V2RoomActivationTransactionDeadlineTests {
             #expect(committed == 17)
             #expect(try await count(id: 1, sql: sql) == 1)
 
+            await #expect(throws: V2RoomCallFailure.rolledBack(.deadlineExceeded)) {
+                try await V2RoomSQLDeadline.withDeadline(.now + .milliseconds(270)) {
+                    _ = try await v2WithRoomScopedTransaction(database: database,
+                        timeouts: timeouts) { borrowed in
+                        let connection = try deadlineSQL(borrowed)
+                        try await connection.raw("INSERT INTO public.v2_actor_deadline_probe VALUES (8)").run()
+                        try await connection.raw("SELECT pg_sleep(0.14)").run()
+                        try await connection.raw("SELECT pg_sleep(0.14)").run()
+                    }
+                }
+            }
+            #expect(try await count(id: 8, sql: sql) == 0)
+
+            // The body can return after the watchdog has closed its borrowed
+            // connection but before COMMIT dispatch. That is a proved
+            // rollback, even though the legacy attempt marker saw a return.
+            await #expect(throws: V2RoomCallFailure.rolledBack(.deadlineExceeded)) {
+                try await V2RoomSQLDeadline.withDeadline(.now + .milliseconds(100)) {
+                    _ = try await v2WithPostgresTransactionRetry(database: database,
+                        maximumRetryCount: 0, classifyCommitFailure: true,
+                        useRoomDeadline: true) { borrowed in
+                        try await deadlineSQL(borrowed).raw(
+                            "INSERT INTO public.v2_actor_deadline_probe VALUES (10)").run()
+                        try await Task.sleep(for: .milliseconds(180))
+                    }
+                }
+            }
+            #expect(try await count(id: 10, sql: sql) == 0)
+
+            try await sql.raw("CREATE SEQUENCE public.v2_actor_deadline_retry_counter").run()
+            try await sql.raw("""
+                CREATE FUNCTION public.v2_actor_deadline_retry_probe() RETURNS void
+                LANGUAGE plpgsql AS $$ BEGIN
+                    IF nextval('public.v2_actor_deadline_retry_counter') = 1 THEN
+                        PERFORM pg_sleep(0.22);
+                        RAISE EXCEPTION 'retry this complete transaction' USING ERRCODE = '40001';
+                    END IF;
+                    PERFORM pg_sleep(0.22);
+                END; $$
+                """).run()
+            await #expect(throws: V2RoomCallFailure.rolledBack(.deadlineExceeded)) {
+                try await V2RoomSQLDeadline.withDeadline(.now + .milliseconds(350)) {
+                    _ = try await v2WithPostgresTransactionRetry(database: database,
+                        maximumRetryCount: 1, useRoomDeadline: true) { borrowed in
+                        let connection = try deadlineSQL(borrowed)
+                        try await connection.raw("SELECT public.v2_actor_deadline_retry_probe()").run()
+                        try await connection.raw("INSERT INTO public.v2_actor_deadline_probe VALUES (9)").run()
+                    }
+                }
+            }
+            #expect(try await count(id: 9, sql: sql) == 0)
+            #expect(try await sql.raw("SELECT last_value AS value FROM public.v2_actor_deadline_retry_counter")
+                .first(decoding: DeadlineCount.self)?.value == 2)
+
             let borrowedReady = AsyncStream<Void>.makeStream()
             let poolHolder = Task {
                 try await singleConnectionDatabase.withConnection { borrowed in
@@ -209,10 +263,14 @@ struct V2RoomActivationTransactionDeadlineTests {
 
             try await sql.raw("DROP TABLE public.v2_actor_deadline_probe").run()
             try await sql.raw("DROP FUNCTION public.v2_actor_deadline_commit_sleep()").run()
+            try await sql.raw("DROP FUNCTION public.v2_actor_deadline_retry_probe()").run()
+            try await sql.raw("DROP SEQUENCE public.v2_actor_deadline_retry_counter").run()
             try await resources.shutdown()
         } catch {
             try? await sql.raw("DROP TABLE IF EXISTS public.v2_actor_deadline_probe CASCADE").run()
             try? await sql.raw("DROP FUNCTION IF EXISTS public.v2_actor_deadline_commit_sleep()").run()
+            try? await sql.raw("DROP FUNCTION IF EXISTS public.v2_actor_deadline_retry_probe()").run()
+            try? await sql.raw("DROP SEQUENCE IF EXISTS public.v2_actor_deadline_retry_counter").run()
             try? await resources.shutdown()
             throw error
         }
