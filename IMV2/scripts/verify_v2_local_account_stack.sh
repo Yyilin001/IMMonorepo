@@ -279,7 +279,7 @@ if [[ -n "${busy_term_fixture}" || -n "${busy_term_release}" ]]; then
       "${peer_device_id}" "${user_id}" "${peer_user_id}" > "${busy_term_fixture}" )
   phase="busy-TERM runner barrier"
   busy_term_timeout="${V2_LOCAL_BUSY_TERM_BARRIER_TIMEOUT_SECONDS:-45}"
-  [[ "${busy_term_timeout}" =~ ^[1-9][0-9]*$ ]] && (( busy_term_timeout <= 60 )) || {
+  [[ "${busy_term_timeout}" =~ ^[1-9][0-9]*$ ]] && (( busy_term_timeout <= 180 )) || {
     printf 'invalid busy-TERM barrier timeout\n' >&2
     exit 1
   }

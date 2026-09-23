@@ -33,15 +33,16 @@ PRODUCT_INPUTS = ["IMV2Server/Sources", "IMV2Server/Vendor", "IMV2Server/Package
 
 def busy_sigterm_smoke(*, root: Path, run: Path, private: Path, docker: list[str],
                        compose: list[str], environment: dict[str, str],
-                       actor_container: str, actor_host_id: str,
+                       actor_container: str, gateway_container: str,
+                       actor_host_id: str,
                        evidence: dict[str, object]) -> None:
-    """Signal a real Actor Host while its fenced send waits on a PG room row."""
+    """Signal a real Actor Host while its fenced send waits on PG admission."""
     fixture = private / "busy-term-fixture"
     release = private / "busy-term-release"
     smoke_environment = dict(environment)
     smoke_environment.update({"V2_LOCAL_BUSY_TERM_FIXTURE_PATH": str(fixture),
                               "V2_LOCAL_BUSY_TERM_RELEASE_PATH": str(release),
-                              "V2_LOCAL_BUSY_TERM_BARRIER_TIMEOUT_SECONDS": "60"})
+                              "V2_LOCAL_BUSY_TERM_BARRIER_TIMEOUT_SECONDS": "150"})
     evidence["stage"] = "starting-smoke"
     smoke: subprocess.Popen[str] | None = None
     holder: subprocess.Popen[str] | None = None
@@ -101,6 +102,7 @@ def busy_sigterm_smoke(*, root: Path, run: Path, private: Path, docker: list[str
 
         actor_inspection = inspect(actor_container)
         old_started_at = actor_inspection["State"]["StartedAt"]
+        gateway_started_at = inspect(gateway_container)["State"]["StartedAt"]
         actor_networks = actor_inspection["NetworkSettings"]["Networks"]
         if len(actor_networks) != 1:
             raise RuntimeError("Actor Host must have exactly one private Compose network")
@@ -118,7 +120,7 @@ def busy_sigterm_smoke(*, root: Path, run: Path, private: Path, docker: list[str
 
         marker = "va_busy_term_" + uuid.uuid4().hex
         holder_sql = ("BEGIN; "
-            f"SELECT 1 FROM im_v2.rooms WHERE room_id = '{room_id}' FOR UPDATE; "
+            f"SELECT 1 FROM im_v2.room_admission WHERE room_id = '{room_id}' FOR UPDATE; "
             f"SELECT pg_sleep(20) /* {marker} */; COMMIT;")
         with (run / "busy-lock-holder.log").open("a") as output:
             holder = subprocess.Popen(compose + ["exec", "-T", "postgres", "psql", "-X", "-q",
@@ -132,8 +134,8 @@ def busy_sigterm_smoke(*, root: Path, run: Path, private: Path, docker: list[str
                 f"AND wait_event = 'PgSleep' AND query LIKE '%{marker}%' LIMIT 1")
             return int(value) if value else None
 
-        holder_pid = await_stage(held_pid, seconds=5, stage="PG room row lock held")
-        evidence.update({"stage": "room-row-locked", "holderBackendPID": holder_pid})
+        holder_pid = await_stage(held_pid, seconds=5, stage="PG room admission lock held")
+        evidence.update({"stage": "admission-row-locked", "holderBackendPID": holder_pid})
 
         probe_environment = dict(environment)
         probe_environment.update({"IM_V2_GATEWAY_PROBE_MODE": "sendDirectMessage",
@@ -156,13 +158,15 @@ def busy_sigterm_smoke(*, root: Path, run: Path, private: Path, docker: list[str
             rows = psql("SELECT pid, COALESCE(client_addr::text, '') FROM pg_stat_activity "
                 f"WHERE {holder_pid} = ANY(pg_blocking_pids(pid)) "
                 "AND wait_event_type = 'Lock' ORDER BY pid")
+            if rows:
+                evidence["blockedCandidates"] = rows.splitlines()
             for row in rows.splitlines():
                 pid, client_ip = row.split("|")
-                if client_ip == actor_ip:
+                if client_ip.split("/", 1)[0] == actor_ip:
                     return int(pid), client_ip
             return None
 
-        blocked_pid, blocked_ip = await_stage(blocked_backend, seconds=1.5,
+        blocked_pid, blocked_ip = await_stage(blocked_backend, seconds=8,
             stage="Actor Host backend blocked by held room row")
         evidence.update({"stage": "actor-backend-blocked", "blockedBackendPID": blocked_pid,
                          "blockedClientIP": blocked_ip})
@@ -222,17 +226,44 @@ def busy_sigterm_smoke(*, root: Path, run: Path, private: Path, docker: list[str
             raise RuntimeError("Actor Host did not start a new process")
         evidence.update({"stage": "actor-host-restarted", "restartedContainerID": restarted,
                          "restartedAt": inspect(restarted)["State"]["StartedAt"]})
-        with (run / "busy-replay-probe.log").open("a") as output:
-            subprocess.run(compose + ["exec", "-T", *probe_flags, "gateway",
-                "/workspace/IMV2Server/.build/release/IMV2LocalGatewayProbe"],
-                cwd=root, env=probe_environment, text=True, stdout=output,
-                stderr=subprocess.STDOUT, timeout=20, check=True)
-        replay_ids = (run / "busy-replay-probe.log").read_text().strip().split()
+        # Docker health means the process is ready, but the freshly restarted
+        # cluster member may not yet be routable from the original Gateway.
+        # Keep that caller process alive and retry the same stable business
+        # operation until an accepted response, bounded by one total window.
+        replay_deadline = time.monotonic() + 120
+        replay_started_at = time.time()
+        replay_failures = 0
+        replay_ids: list[str] = []
+        while time.monotonic() < replay_deadline:
+            remaining = max(1, replay_deadline - time.monotonic())
+            try:
+                attempt = subprocess.run(compose + ["exec", "-T", *probe_flags, "gateway",
+                    "/workspace/IMV2Server/.build/release/IMV2LocalGatewayProbe"],
+                    cwd=root, env=probe_environment, text=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, timeout=min(10, remaining))
+            except subprocess.TimeoutExpired:
+                replay_failures += 1
+            else:
+                if attempt.returncode == 0:
+                    replay_ids = attempt.stdout.strip().split()
+                    (run / "busy-replay-probe.log").write_text(attempt.stdout)
+                    break
+                replay_failures += 1
+            time.sleep(0.5)
+        evidence["replayAttempts"] = replay_failures + (1 if replay_ids else 0)
+        evidence["replayWaitSeconds"] = round(time.time() - replay_started_at, 3)
         if len(replay_ids) != 2 or replay_ids[0].lower() != room_id.lower() or \
                 replay_ids[1].lower() != message_id.lower() or \
                 message_state(room_id, sender_user_id, operation_id) != durable:
             raise RuntimeError("original send operation did not replay its durable result")
         evidence.update({"stage": "idempotent-replay-verified", "replayMessageID": replay_ids[1]})
+        current_gateway = subprocess.check_output(compose + ["ps", "-q", "gateway"],
+            cwd=root, env=environment, text=True, timeout=10).strip()
+        gateway_state = inspect(gateway_container)["State"]
+        if current_gateway != gateway_container or not gateway_state["Running"] or \
+                gateway_state["StartedAt"] != gateway_started_at:
+            raise RuntimeError("Gateway caller process changed during Host restart and replay")
+        evidence["originalGatewayProcessRetained"] = True
 
         release.touch(mode=0o600)
         if smoke is None or smoke.wait(timeout=80) != 0:
@@ -489,7 +520,8 @@ def main() -> int:
             result["busySigterm"] = {}
             busy_sigterm_smoke(root=ROOT, run=run, private=private,
                 docker=docker, compose=compose, environment=environment,
-                actor_container=containers["actor-host"]["containerID"], actor_host_id=expected_host,
+                actor_container=containers["actor-host"]["containerID"],
+                gateway_container=containers["gateway"]["containerID"], actor_host_id=expected_host,
                 evidence=result["busySigterm"])
         else:
             execute(["bash", str(ROOT / "IMV2/scripts/verify_v2_local_account_stack.sh")], "smoke.log", timeout=300)

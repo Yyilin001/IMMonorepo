@@ -7,7 +7,9 @@ only as a Room Actor caller. An independent Actor Host owns the room lease.
 
 The runner receives a disposable device credential through a private `0600`
 fixture, acquires a PostgreSQL row lock on the active room, and observes the
-Actor Host's backend blocked by that lock in `pg_stat_activity`. It sends
+Actor Host's backend blocked by that lock in `pg_stat_activity`. The lock is on
+`room_admission`: a `rooms` row lock blocks Gateway's own control lookup before
+the request enters the Actor Host. It sends
 SIGTERM to the Actor Host at that barrier, immediately cancels its own lock
 holder, then checks one durable message and send completion for a stable
 client message ID. It observes process exit and the old lease cease to be
