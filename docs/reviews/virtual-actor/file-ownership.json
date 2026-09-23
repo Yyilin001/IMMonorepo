@@ -27,6 +27,10 @@
       "owner": "I1"
     },
     {
+      "path": "IMV2/scripts/prepare_v2_virtual_actor_capacity_fixture.py",
+      "owner": "V1"
+    },
+    {
       "path": "IMV2/scripts/run_v2_gateway_load_guarded.sh",
       "owner": "V1"
     },
@@ -44,6 +48,10 @@
     },
     {
       "path": "IMV2/scripts/run_v2_virtual_actor_linux.sh",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/test_prepare_v2_virtual_actor_capacity_fixture.py",
       "owner": "V1"
     },
     {
@@ -88,6 +96,14 @@
     },
     {
       "path": "IMV2/scripts/virtual-actor-fixtures/fault-scenarios.json",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/virtual-actor-fixtures/mixed-send-roomlog-receipt-canary.json",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/virtual-actor-fixtures/send-one-canary.json",
       "owner": "V1"
     },
     {
@@ -1429,6 +1445,10 @@
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2ShardedSendActivationCapacityTests.swift",
       "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2SharedRoomSendCommitAckLossTests.swift",
+      "owner": "V1"
     },
     {
       "path": "IMV2Server/Tests/VirtualActorCompatibilityProbe/compose.yml",

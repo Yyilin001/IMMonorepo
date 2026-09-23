@@ -91,3 +91,7 @@ Gateway RoomRef 入口不再占用等待 Host 的数据库许可。普通房间�
 ## owner 激活身份容量
 
 `19046774` 将所有 send lanes 的 activation token 容量合并为 owner 共享硬上限。单 lane 与多 lane 都保留已完成身份，直到 Host 清理对应 credit pool 后 exact retire；未知结果和仍在执行的退役身份继续占位，旧 epoch 不释放新 token。独立 native 新容量测试 4/4、granted 回归 20/20 通过。deadline 回归分别验证 Host 合批窗口先到时执行 SQL、调用截止先到时返回 typed 拒绝且不进入 SQL；没有放宽生产截止时间。Linux 集成结果随后登记。
+
+## 共享事务成功提交但 ACK 丢失
+
+`a13d246d` 的 `V2SharedRoomSendCommitAckLossTests` 使用真实生产 send batcher 与可丢弃 PostgreSQL：首 turn 已排队后放入第二房间，一笔原子事务承载两个房间，实际代理观察成功 COMMIT 再截断 ACK。两项均返回 unknown 且该 token 后续被拒绝，不执行新 SQL；独立连接确认各一条消息/completion，重放原 operation ID 返回原 messageID，紧凑 accepted event 仍保存在原消息行。Native 1/1 通过；Host unknown 退役另由现有 19 项 Host 测试覆盖，本测试本身未实例化 Host。专用环境开关已接入 CI 与隔离 Linux gate。

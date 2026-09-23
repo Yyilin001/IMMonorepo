@@ -102,6 +102,8 @@ services:
       IMV2_ACTOR_TRANSACTION_TEST_DATABASE_IS_DISPOSABLE: "1"
       IMV2_ACTOR_ACK_LOSS_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
       IMV2_ACTOR_ACK_LOSS_TEST_DATABASE_IS_DISPOSABLE: "1"
+      IMV2_SHARED_SEND_ACK_LOSS_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+      IMV2_SHARED_SEND_ACK_LOSS_TEST_DATABASE_IS_DISPOSABLE: "1"
       IMV2_ACTOR_D2_TEST_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
       IMV2_ACTOR_D2_TEST_DATABASE_IS_DISPOSABLE: "1"
       IMV2_ACTOR_D4_CONTROL_DATABASE_URL: postgres://im_v2_control_test:im_v2_control_test@postgres-control:5432/im_v2_control_test
