@@ -270,7 +270,10 @@ def main() -> int:
                 "-v", "ON_ERROR_STOP=1", "-U", "im_v2", "-d", "im_v2", "-tA", "-F", "|", "-c", query],
                 env=environment, text=True, timeout=15).strip().splitlines()
             leases = [row.split("|") for row in rows if row]
-            if not leases or any(len(row) != 4 or row[1] != expected_host or row[3] != "true"
+            # UUID/epoch/liveness are safe to retain even on a failed run;
+            # the private database and Compose configuration are discarded.
+            result["remoteTopology"]["observedLeaseRows"] = leases
+            if not leases or any(len(row) != 4 or row[1].lower() != expected_host.lower() or row[3] != "true"
                                  for row in leases):
                 raise RuntimeError("message room lease was not held by the remote Actor Host")
             result["remoteTopology"]["messageRoomLeases"] = [
