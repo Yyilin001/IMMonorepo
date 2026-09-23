@@ -180,7 +180,8 @@ def main() -> None:
                   "notes": ["SQL counts include all captured database statements and observer/background work.",
                             "Mixed SQL/CPU are normalized by acknowledged messages; batch query rates are separate.",
                             "Actor outstanding peaks include executing and reconciling permits, not just waiting queues.",
-                            "Per-phase RSS is sampled PID 1 RSS; cgroup memory remains separately available in raw evidence."]}
+                            "Per-phase RSS is sampled PID 1 RSS; cgroup memory remains separately available in raw evidence.",
+                            "CPU is measured per container, including bounded observer exec work; it is not an instrumented function cost."]}
     args.output.write_text(json.dumps(output, indent=2, sort_keys=True) + "\n")
 
 

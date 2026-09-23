@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | G0：Swift 6.4 / Vapor 5 / DistributedCluster 兼容 | [固定 revision 的 Linux Release 双进程探针及 ServerApp 构建通过](p0-evidence.md)；[vendor 帧上限与真实 mTLS 超限头重跑通过](p0-bounded-transport-evidence.md)，其他依赖 pin 不变 | 已通过兼容性探针 |
 | G1：可编译完整公共契约与文件所有权 | 完整 wire/领域门面、Runtime/Cluster/Application 已编译并接线；[当前合同](../room-virtual-actor-contract.md)与文件归属已登记；性能预算仍待 main 基线冻结 | 未完成 |
-| G2：真实双 host + PostgreSQL 激活/接管/排空 | [真实 SQL activation fence 与 Host 单元测试](r1-d1-progress-evidence.md)，以及[独立进程被杀后接管探针](g4-business-probe-evidence.md)通过；[双 Host 原生进程竞争与旧实例恢复](g6-multihost-evidence.md)也通过；Linux 双 Host、仅 Actor 网络分区及旧 token 拒绝也已通过；[真实 Host/PG 生命周期](g2-host-pg-lifecycle-evidence.md)与[慢事务排空](g5-host-pg-drain-evidence.md)通过；完整 OS 排空矩阵仍待验收 | 未完成 |
+| G2：真实双 host + PostgreSQL 激活/接管/排空 | [真实 SQL activation fence 与 Host 单元测试](r1-d1-progress-evidence.md)，以及[独立进程被杀后接管探针](g4-business-probe-evidence.md)通过；[双 Host 原生进程竞争与旧实例恢复](g6-multihost-evidence.md)也通过；Linux 双 Host、仅 Actor 网络分区及旧 token 拒绝也已通过；[真实 Host/PG 生命周期](g2-host-pg-lifecycle-evidence.md)与[慢事务排空](g5-host-pg-drain-evidence.md)通过；[真实 Linux 应用 busy SIGTERM](g2-real-app-sigterm-evidence.md)已通过；多节点 gossip 恢复长尾的 vendor 修复正复验 | 未完成 |
 | G3：真实远端 send/read 与领域合同 | [实际 Factory 与共享合批的 PostgreSQL 局部验证](i1-composition-progress-evidence.md)，以及[真实远端发送、日志、订阅与恢复](g4-business-probe-evidence.md)通过；[caller-only Gateway → 独立 Host 的 Linux TCP/HTTP 闭环](g3-caller-only-gateway-evidence.md)已通过；相对性能仍待验收 | 未完成 |
 | G4：全部房间写者、查询和后台迁移 | Gateway 与 Account 生产入口已接入；[维护与投影压缩竞态验证](d6-maintenance-evidence.md)通过；[完整 Linux 应用协议及 Account 房间 HTTP 闭环](i1-application-smoke-harness.md)已通过；[Host 取消与后台 retention 接管](g2-pg-cancellation-maintenance-evidence.md)通过；单 owner 故障仍在验证 | 未完成 |
 | G5：故障矩阵、Linux checks、相对性能 | [Linux 客户端先启动与 Host 重启恢复](g5-linux-functional-evidence.md)通过；完整[故障矩阵](v1-fault-harness.md)、应用栈、required checks 和[相对性能](v1-baseline-protocol.md)仍待完成 | 未完成 |
@@ -30,5 +30,5 @@
 
 - [能力与完整方法签名目录](capability-catalog.md)：34 行能力分组与 219 个 DTO 的所属模块/字段记录；不是全部已经远程化。
 - [房间写者台账](writer-ledger.md)：30 个 writer 分组、38 个源符号/表的静态证据。逐项迁移后仍需补真实 fence 和运行测试证据。
-- [文件归属](file-ownership.md)：377 个既有与实施文件的唯一 owner；混合文件须先由 C0 抽取，再转交领域包。
+- [文件归属](file-ownership.md)：382 个既有与实施文件的唯一 owner；混合文件须先由 C0 抽取，再转交领域包。
 - 静态一致性检查：python3 scripts/check_v2_virtual_actor_inventory.py。该脚本检查文件、符号和清单一致性，不证明没有其他 writer 或已具备运行时覆盖。

@@ -83,6 +83,10 @@
       "owner": "V1"
     },
     {
+      "path": "IMV2/scripts/test_virtual_actor_capacity_lifecycle.py",
+      "owner": "V1"
+    },
+    {
       "path": "IMV2/scripts/test_virtual_actor_capacity_measurement.py",
       "owner": "V1"
     },
@@ -120,6 +124,10 @@
     },
     {
       "path": "IMV2/scripts/virtual-actor-fixtures/send-one-canary.json",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/virtual_actor_capacity_lifecycle.py",
       "owner": "V1"
     },
     {
@@ -1243,6 +1251,10 @@
       "owner": "R3"
     },
     {
+      "path": "IMV2Server/Tests/IMV2ActorClusterTests/V2MembershipGossipRestartTests.swift",
+      "owner": "R3"
+    },
+    {
       "path": "IMV2Server/Tests/IMV2ActorClusterTests/V2RoomClusterBridgeTests.swift",
       "owner": "R3"
     },
@@ -1509,6 +1521,14 @@
     {
       "path": "IMV2Server/Tests/VirtualActorCompatibilityProbe/run-linux-release.sh",
       "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Vendor/swift-distributed-actors/Sources/DistributedCluster/Cluster/MembershipGossip/Cluster+MembershipGossip+Serialization.swift",
+      "owner": "R3"
+    },
+    {
+      "path": "scripts/generate_v2_protobuf.sh",
+      "owner": "V1"
     }
   ]
 }
