@@ -30,6 +30,8 @@ Gateway 的房间命令、Account 的群昵称/邀请/消息媒体授权，以�
 
 Directory 的只读位置 lookup 每跳最多等待 3 秒，已有更短截止优先。旧物理地址无响应后重新读取权威租约；超时不证明租约失效，也不允许抢占有效租约。激活、业务写和未知结果核对保留各自原有期限，已经派发的底层 RPC 仍追踪到实际完成。
 
+只读或带稳定操作 ID 的持久幂等 `RoomRef.call` 可复用已确认的本机缓存，省略重复物理 lookup；共享寻址仍读取 owner，并保留所有等待者、期限和排空限额。公开 resolve、预约、grouped read 及远端调用仍要求物理确认；共享等待者中的严格要求即使取消也不降低。本机 hint 只进入专用本机调用入口，实际派发前再次核对当前 descriptor、会话、capability 和物理引用，失效时确定拒绝并按原失败策略重新定位，不得静默转成远端调用。实现与分层验证见[本机缓存调用证据](virtual-actor/r3-local-capability-evidence.md#仅限本机的缓存调用)。
+
 ## 顺序、微批与失败语义
 
 Swift actor 的隔离不能保证跨 await 的完整业务串行。Runtime 显式维护 admission 次序和单个未决 turn；只有队首连续兼容 send 可以合批，管理变更、查询和 reservation 形成相应屏障。
