@@ -15,6 +15,8 @@ compose_project="${V2_LOCAL_COMPOSE_PROJECT:-imv2localaccount}"
 account_base_url="${V2_LOCAL_HTTP_BASE_URL:-https://localhost:8443}"
 gateway_tls_address="${V2_LOCAL_GATEWAY_TLS_ADDRESS:-localhost:7443}"
 registration_recovery_directory="${V2_LOCAL_REGISTRATION_RECOVERY_DIRECTORY:-${v2_dir}/local-ca/registration-recovery}"
+busy_term_fixture="${V2_LOCAL_BUSY_TERM_FIXTURE_PATH:-}"
+busy_term_release="${V2_LOCAL_BUSY_TERM_RELEASE_PATH:-}"
 phase="preflight"
 
 source "${script_dir}/local_compose.sh"
@@ -257,6 +259,39 @@ test "${gateway_receive_output}" = 'local V2 gateway direct room-log delivery: v
   printf 'local V2 gateway recipient room-log probe returned an unexpected result\n' >&2
   exit 1
 }
+
+# Opt-in test-only handoff. The recipient is still active here; the operator
+# disable below applies to the original sender. Keep the access credential in
+# the runner's private directory, never in stdout, service logs, or a command
+# argument to another process. A file barrier lets the runner stage a real
+# room transaction before the ordinary smoke continues unchanged.
+if [[ -n "${busy_term_fixture}" || -n "${busy_term_release}" ]]; then
+  phase="busy-TERM fixture handoff"
+  [[ "${busy_term_fixture}" == /* && "${busy_term_release}" == /* &&
+     "${busy_term_fixture}" != "${busy_term_release}" &&
+     -d "$(dirname "${busy_term_fixture}")" &&
+     -d "$(dirname "${busy_term_release}")" &&
+     ! -e "${busy_term_fixture}" && ! -e "${busy_term_release}" ]] || {
+    printf 'invalid private busy-TERM fixture/barrier paths\n' >&2
+    exit 1
+  }
+  ( umask 077; set -C; printf '%s\n' "${gateway_room_id}" "${peer_access_token}" \
+      "${peer_device_id}" "${user_id}" "${peer_user_id}" > "${busy_term_fixture}" )
+  phase="busy-TERM runner barrier"
+  busy_term_timeout="${V2_LOCAL_BUSY_TERM_BARRIER_TIMEOUT_SECONDS:-45}"
+  [[ "${busy_term_timeout}" =~ ^[1-9][0-9]*$ ]] && (( busy_term_timeout <= 60 )) || {
+    printf 'invalid busy-TERM barrier timeout\n' >&2
+    exit 1
+  }
+  busy_term_deadline=$(( $(date +%s) + busy_term_timeout ))
+  while [[ ! -f "${busy_term_release}" ]]; do
+    (( $(date +%s) < busy_term_deadline )) || {
+      printf 'busy-TERM runner barrier was not released\n' >&2
+      exit 1
+    }
+    sleep 0.05
+  done
+fi
 
 # Capture a second, short-lived device-bound assertion before disabling the
 # account. It remains intentionally unexchanged until after the operator

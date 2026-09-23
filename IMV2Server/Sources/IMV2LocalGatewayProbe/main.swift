@@ -10,6 +10,7 @@ import IMV2Server
 /// 它用于证明：通过本地 HTTPS 账号边缘签发的凭据，能够在真实的 TLS/protobuf 网关上完成认证
 /// 并交换普通私聊命令。它不暴露任何网关路由，不持久化凭据，
 /// 也不会打印身份或凭据材料。
+/// `sendDirectMessage` 可选 CLIENT_MESSAGE_ID，用于测试进程故障后按原业务操作重放。
 /// `sendRoomMediaMessage` 另要求 EXPECTED_ROOM_ID、MEDIA_ID、CLIENT_MESSAGE_ID；
 /// 它只输出接受结果的 room/message ID，供外部 smoke 在 SQL 中校验唯一消息与媒体归属。
 @main
@@ -94,7 +95,7 @@ private struct Configuration: Sendable {
             }
         case .sendDirectMessage:
             guard targetUserID != nil, expectedRoomID == nil, expectedMessageID == nil,
-                  mediaID == nil, clientMessageID == nil else {
+                  mediaID == nil else {
                 throw ProbeError.invalidConfiguration
             }
         case .receiveDirectMessage:
