@@ -40,7 +40,17 @@ enum IMV2LocalGatewayProbe {
                 .connect(host: configuration.host, port: configuration.port)
                 .get()
             let result = try await completion.futureResult.get()
-            try await channel.close().get()
+            // A disabled account may proactively close this authenticated
+            // socket before the held probe issues its post-disable request.
+            // The handler has already classified that terminal event. Only
+            // an already-closed cleanup race may be ignored here.
+            if channel.isActive {
+                do {
+                    try await channel.close().get()
+                } catch ChannelError.alreadyClosed {
+                    // The peer closed between isActive and close().
+                }
+            }
             try await group.shutdownGracefully()
             print(result.standardOutput)
         } catch {
