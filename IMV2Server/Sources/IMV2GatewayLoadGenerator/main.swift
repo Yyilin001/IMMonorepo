@@ -135,6 +135,7 @@ private struct LoadConfiguration: Sendable {
     let roomLogRecoveryGraceMilliseconds: Int
     let peerTopology: PeerTopology
     let heartbeatSeconds: Int
+    let recoveryBatchTimeoutSeconds: Int
     let maximumRSSMegabytes: Int
     let maximumFailurePercent: Double
     let scenario: LoadScenario?
@@ -187,6 +188,9 @@ private struct LoadConfiguration: Sendable {
         holdSeconds = try Self.integer(values["--hold-seconds"] ?? "60", range: 10...28_800)
         eventLoops = try Self.integer(values["--event-loops"] ?? "2", range: 1...4)
         heartbeatSeconds = try Self.integer(values["--heartbeat-seconds"] ?? "30", range: 10...50)
+        recoveryBatchTimeoutSeconds = try Self.integer(
+            values["--recovery-batch-timeout-seconds"] ?? "10", range: 1...60
+        )
         // This is deliberately a generator-side safety bound, not a Gateway
         // capacity claim.  A 1,000 msg/s cap prevented the load tool from
         // locating the next server-side saturation point after a successful
@@ -908,6 +912,7 @@ private struct LoadRun {
                             targetUserIDs: targetUserIDs,
                             connectionIndex: connectionIndex,
                             heartbeatSeconds: configuration.heartbeatSeconds,
+                            recoveryBatchTimeoutSeconds: configuration.recoveryBatchTimeoutSeconds,
                             messagesPerSecond: configuration.messagesPerSecond,
                             totalConnections: configuration.connections,
                             maximumInFlightMessagesPerConnection: configuration.maximumInFlightMessagesPerConnection,
@@ -1472,6 +1477,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private let targetUserIDs: [String]
     private let connectionIndex: Int
     private let heartbeatSeconds: Int
+    private let recoveryBatchTimeoutSeconds: Int
     private let messageIntervalMilliseconds: Int64?
     private let messageInitialDelayMilliseconds: Int64
     private let maximumInFlightMessagesPerConnection: Int
@@ -1527,6 +1533,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         targetUserIDs: [String],
         connectionIndex: Int,
         heartbeatSeconds: Int,
+        recoveryBatchTimeoutSeconds: Int,
         messagesPerSecond: Int,
         totalConnections: Int,
         maximumInFlightMessagesPerConnection: Int,
@@ -1552,6 +1559,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         } ?? []
         self.connectionIndex = connectionIndex
         self.heartbeatSeconds = heartbeatSeconds
+        self.recoveryBatchTimeoutSeconds = recoveryBatchTimeoutSeconds
         self.maximumInFlightMessagesPerConnection = maximumInFlightMessagesPerConnection
         self.scenarioSendDispatch = scenarioSendDispatch
         self.maximumQueuedScenarioMessages = maximumQueuedScenarioMessages
@@ -2640,7 +2648,9 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         recoveryInFlightRequestID = requestID
         let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
         let boundContext = context.loopBound
-        recoveryDeadlineTask = context.eventLoop.scheduleTask(in: .seconds(10)) {
+        recoveryDeadlineTask = context.eventLoop.scheduleTask(
+            in: .seconds(Int64(recoveryBatchTimeoutSeconds))
+        ) {
             let handler = handler.value
             let context = boundContext.value
             guard handler.recoveryInFlightRequestID == requestID,
@@ -2884,6 +2894,7 @@ private struct LoadReport: Encodable {
     let roomLogReads: Bool
     let roomLogReadTrigger: String
     let roomLogRecoveryGraceMilliseconds: Int
+    let recoveryBatchTimeoutSeconds: Int
     let peerTopology: String
     let startedAt: Date
     let endedAt: Date
@@ -2976,6 +2987,7 @@ private struct LoadReport: Encodable {
         roomLogReadTrigger = configuration.roomLogReadTrigger.rawValue
         roomLogRecoveryGraceMilliseconds =
             configuration.roomLogRecoveryGraceMilliseconds
+        recoveryBatchTimeoutSeconds = configuration.recoveryBatchTimeoutSeconds
         peerTopology = configuration.peerTopology.rawValue
         self.startedAt = startedAt
         self.endedAt = endedAt
