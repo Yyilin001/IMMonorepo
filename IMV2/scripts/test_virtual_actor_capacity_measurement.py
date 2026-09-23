@@ -9,7 +9,7 @@ import unittest
 
 from virtual_actor_capacity_measurement import (
     MeasurementFailure, create_scenario, freeze_calibrations, parse_cgroup,
-    parse_prometheus, phase_delta, verify_freeze,
+    parse_prometheus, phase_delta, supports_recovery_loader, verify_freeze,
 )
 
 
@@ -31,7 +31,13 @@ class MeasurementTests(unittest.TestCase):
                              scenario["phases"][1]["messagesPerSecond"])
             self.assertTrue(all(scenario["phases"][2].get(name, 0) == 0 for name in
                                 ("messagesPerSecond", "roomLogReadsPerSecond", "syncPullsPerSecond",
-                                 "readReceiptsPerSecond", "reconnectPercentPerMinute")))
+                                 "readReceiptsPerSecond", "roomSyncStateBatchesPerSecond",
+                                 "roomLatestVisibleBatchesPerSecond", "reconnectPercentPerMinute")))
+            if workload == "mixed":
+                self.assertEqual(scenario["phases"][1]["readReceiptsPerSecond"], 20)
+                self.assertEqual(scenario["phases"][1]["roomSyncStateBatchesPerSecond"], 20)
+                self.assertEqual(scenario["phases"][1]["roomLatestVisibleBatchesPerSecond"], 20)
+                self.assertTrue(detail["batchRecoveryQueriesRequired"])
         hot, hot_detail = create_scenario(ROOT, PROTOCOL, fixture, "hot", 100, 1.0)
         self.assertEqual(hot["phases"][1]["messagesPerSecond"], 500)
         self.assertEqual(hot["sendDispatch"], "bounded_client_queue")
@@ -53,19 +59,21 @@ class MeasurementTests(unittest.TestCase):
         before = {"postgres": {"postgres": {"statsReset": "start", "statements": [
             {"key": "1:t:123", "calls": 2, "totalExecMs": 4.5, "rows": 2, "walBytes": 10}]}},
             "cgroup": {"gateway": {"cpuUsageUsec": 100, "memoryCurrentBytes": 10,
-                                  "memoryPeakBytes": 20}},
+                                  "memoryPeakBytes": 20, "processRSSBytes": 7}},
             "metrics": {"im_v2_send_batches_total": 4.0, "im_v2_room_actor_active_rooms": 2.0}}
         after = {"postgres": {"postgres": {"statsReset": "start", "statements": [
             {"key": "1:t:123", "calls": 5, "totalExecMs": 9.5, "rows": 5, "walBytes": 30}]}},
             "cgroup": {"gateway": {"cpuUsageUsec": 300, "memoryCurrentBytes": 15,
-                                  "memoryPeakBytes": 30}},
+                                  "memoryPeakBytes": 30, "processRSSBytes": 9}},
             "metrics": {"im_v2_send_batches_total": 7.0, "im_v2_room_actor_active_rooms": 1.0}}
-        samples = [{"postgres": {}, "cgroup": {"gateway": {"memoryCurrentBytes": 24}},
+        samples = [{"postgres": {}, "cgroup": {"gateway": {"memoryCurrentBytes": 24,
+                                                                "processRSSBytes": 12}},
                     "metrics": {"im_v2_room_actor_active_rooms": 5.0}}]
         delta = phase_delta(before, after, samples)
         self.assertEqual(delta["sql"]["postgres"]["allStatementCalls"], 3)
         self.assertEqual(delta["containers"]["gateway"]["cpuUsageUsec"], 200)
-        self.assertEqual(delta["containers"]["gateway"]["sampledPeakRSSBytes"], 24)
+        self.assertEqual(delta["containers"]["gateway"]["sampledPeakCgroupMemoryCurrentBytes"], 24)
+        self.assertEqual(delta["containers"]["gateway"]["sampledPeakProcessRSSBytes"], 12)
         self.assertEqual(delta["metricsCounterDeltas"]["im_v2_send_batches_total"], 3)
         self.assertEqual(delta["metricsSampledMaximum"]["im_v2_room_actor_active_rooms"], 5)
         after["postgres"]["postgres"]["statsReset"] = "changed"
@@ -75,8 +83,18 @@ class MeasurementTests(unittest.TestCase):
     def test_metrics_and_cgroup_parser(self) -> None:
         self.assertEqual(parse_prometheus("# HELP x y\nx 2\ny{kind=\"a\"} 3\n"),
                          {"x": 2.0, 'y{kind="a"}': 3.0})
-        self.assertEqual(parse_cgroup("usage_usec 42;user_usec 30;system_usec 12;\n20\n80\n"),
-                         {"cpuUsageUsec": 42, "memoryCurrentBytes": 20, "memoryPeakBytes": 80})
+        self.assertEqual(parse_cgroup("usage_usec 42;user_usec 30;system_usec 12;\n20\n80\n15\n"),
+                         {"cpuUsageUsec": 42, "memoryCurrentBytes": 20,
+                          "memoryPeakBytes": 80, "processRSSBytes": 15})
+
+    def test_mixed_requires_binary_with_both_native_batch_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "loader"
+            binary.write_bytes(b"ELF\0room_sync_state_batches_per_second=")
+            self.assertFalse(supports_recovery_loader(binary))
+            binary.write_bytes(binary.read_bytes() + b"x" * (1024 * 1024) +
+                               b"room_latest_visible_batches_per_second=")
+            self.assertTrue(supports_recovery_loader(binary))
 
     def test_main_calibration_freeze_precedes_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

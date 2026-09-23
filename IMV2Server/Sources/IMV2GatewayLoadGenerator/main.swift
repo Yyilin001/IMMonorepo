@@ -101,6 +101,8 @@ private func loadResponseKind(_ body: IMV2Envelope.OneOf_Body?) -> String {
     case .groupEventSubscribed: "group_event_subscribed"
     case .groupEventAvailable: "group_event_available"
     case .readReceiptRecorded: "read_receipt_recorded"
+    case .roomSyncStateBatchResult: "room_sync_state_batch_result"
+    case .roomLatestVisibleBatchResult: "room_latest_visible_batch_result"
     case .error: "error"
     case nil: "none"
     default: "other"
@@ -273,8 +275,12 @@ private struct LoadScenario: Decodable, Sendable {
         let roomLogReadWeight: Double
         let syncPullWeight: Double
         let readReceiptWeight: Double?
+        let roomSyncStateBatchWeight: Double?
+        let roomLatestVisibleBatchWeight: Double?
 
         var effectiveReadReceiptWeight: Double { readReceiptWeight ?? 0 }
+        var effectiveRoomSyncStateBatchWeight: Double { roomSyncStateBatchWeight ?? 0 }
+        var effectiveRoomLatestVisibleBatchWeight: Double { roomLatestVisibleBatchWeight ?? 0 }
     }
 
     struct Phase: Decodable, Sendable {
@@ -284,11 +290,15 @@ private struct LoadScenario: Decodable, Sendable {
         let roomLogReadsPerSecond: Double
         let syncPullsPerSecond: Double
         let readReceiptsPerSecond: Double?
+        let roomSyncStateBatchesPerSecond: Double?
+        let roomLatestVisibleBatchesPerSecond: Double?
         let reconnectPercentPerMinute: Double
 
         var effectiveReadReceiptsPerSecond: Double {
             readReceiptsPerSecond ?? 0
         }
+        var effectiveRoomSyncStateBatchesPerSecond: Double { roomSyncStateBatchesPerSecond ?? 0 }
+        var effectiveRoomLatestVisibleBatchesPerSecond: Double { roomLatestVisibleBatchesPerSecond ?? 0 }
     }
 
     let name: String
@@ -344,8 +354,13 @@ private struct LoadScenario: Decodable, Sendable {
                   !$0.name.isEmpty && $0.share >= 0 && $0.sendWeight >= 0
                       && $0.roomLogReadWeight >= 0 && $0.syncPullWeight >= 0
                       && $0.effectiveReadReceiptWeight >= 0
+                      && $0.effectiveRoomSyncStateBatchWeight >= 0
+                      && $0.effectiveRoomLatestVisibleBatchWeight >= 0
               }),
-              scenario.personas.contains(where: { $0.sendWeight > 0 }),
+              scenario.personas.contains(where: {
+                  $0.sendWeight > 0 || $0.effectiveRoomSyncStateBatchWeight > 0
+                      || $0.effectiveRoomLatestVisibleBatchWeight > 0
+              }),
               (scenario.sendDispatch != .boundedClientQueue
                   || ((scenario.maximumQueuedMessagesPerConnection ?? 0) >= 1
                       && (scenario.maximumQueuedMessagesPerConnection ?? 0) <= 1_024)),
@@ -353,8 +368,14 @@ private struct LoadScenario: Decodable, Sendable {
                   !$0.name.isEmpty && $0.durationSeconds > 0 && $0.messagesPerSecond >= 0
                       && $0.roomLogReadsPerSecond >= 0 && $0.syncPullsPerSecond >= 0
                       && $0.effectiveReadReceiptsPerSecond >= 0
+                      && $0.effectiveRoomSyncStateBatchesPerSecond >= 0
+                      && $0.effectiveRoomLatestVisibleBatchesPerSecond >= 0
                       && $0.reconnectPercentPerMinute >= 0 && $0.reconnectPercentPerMinute <= 100
-              })
+              }),
+              (scenario.phases.allSatisfy { $0.effectiveRoomSyncStateBatchesPerSecond == 0 }
+                  || scenario.personas.contains { $0.effectiveRoomSyncStateBatchWeight > 0 }),
+              (scenario.phases.allSatisfy { $0.effectiveRoomLatestVisibleBatchesPerSecond == 0 }
+                  || scenario.personas.contains { $0.effectiveRoomLatestVisibleBatchWeight > 0 })
         else { throw LoadError.invalidScenario("invalid persona weights or phase rates") }
         return scenario
     }
@@ -403,6 +424,31 @@ private struct LoadCredential: Decodable, Sendable {
         guard !credentials.isEmpty else { throw LoadError.invalidCredentialFile }
         return credentials
     }
+}
+
+private enum RecoveryBatchKind: Sendable {
+    case roomSyncState
+    case roomLatestVisible
+
+    var failureLabel: String {
+        switch self {
+        case .roomSyncState: "room_sync_state_batch"
+        case .roomLatestVisible: "room_latest_visible_batch"
+        }
+    }
+}
+
+private struct RecoveryBatchStats {
+    var scheduled = 0
+    var sent = 0
+    var completed = 0
+    var skipped = 0
+    var successfulRooms = 0
+    var unavailableRooms = 0
+    var retryRooms = 0
+    var rejected = 0
+    var timedOut = 0
+    var latency = LatencyHistogram()
 }
 
 private final class LoadStatistics: @unchecked Sendable {
@@ -462,6 +508,8 @@ private final class LoadStatistics: @unchecked Sendable {
         var syncPullLatency = LatencyHistogram()
         var roomEventPullLatency = LatencyHistogram()
         var readReceiptLatency = LatencyHistogram()
+        var roomSyncStateBatch = RecoveryBatchStats()
+        var roomLatestVisibleBatch = RecoveryBatchStats()
         var maximumRSSBytes: UInt64 = 0
     }
 
@@ -626,6 +674,56 @@ private final class LoadStatistics: @unchecked Sendable {
     }
     func recordReadReceiptCoalesced() {
         lock.withLock { state.readReceiptsCoalesced += 1 }
+    }
+    private func updateRecovery(_ kind: RecoveryBatchKind,
+                                _ update: (inout RecoveryBatchStats) -> Void) {
+        lock.withLock {
+            switch kind {
+            case .roomSyncState: update(&state.roomSyncStateBatch)
+            case .roomLatestVisible: update(&state.roomLatestVisibleBatch)
+            }
+        }
+    }
+    func recordRecoveryScheduled(_ kind: RecoveryBatchKind) {
+        updateRecovery(kind) { $0.scheduled += 1 }
+    }
+    func recordRecoverySent(_ kind: RecoveryBatchKind) {
+        updateRecovery(kind) { $0.sent += 1 }
+    }
+    func recordRecoverySkipped(_ kind: RecoveryBatchKind) {
+        updateRecovery(kind) { $0.skipped += 1 }
+    }
+    func recordRecoveryCompleted(_ kind: RecoveryBatchKind, milliseconds: Double,
+                                 successful: Int, unavailable: Int, retry: Int) {
+        updateRecovery(kind) {
+            $0.completed += 1
+            $0.successfulRooms += successful
+            $0.unavailableRooms += unavailable
+            $0.retryRooms += retry
+            $0.latency.record(milliseconds)
+        }
+    }
+    func recordRecoveryRejected(_ kind: RecoveryBatchKind, code: String, retryable: Bool) {
+        lock.withLock {
+            switch kind {
+            case .roomSyncState: state.roomSyncStateBatch.rejected += 1
+            case .roomLatestVisible: state.roomLatestVisibleBatch.rejected += 1
+            }
+            state.workloadFailed += 1
+            state.workloadFailuresByKindAndCode[
+                "\(kind.failureLabel):\(code):\(retryable ? "retryable" : "terminal")", default: 0
+            ] += 1
+        }
+    }
+    func recordRecoveryTimedOut(_ kind: RecoveryBatchKind) {
+        lock.withLock {
+            switch kind {
+            case .roomSyncState: state.roomSyncStateBatch.timedOut += 1
+            case .roomLatestVisible: state.roomLatestVisibleBatch.timedOut += 1
+            }
+            state.workloadFailed += 1
+            state.workloadFailuresByKindAndCode["\(kind.failureLabel):CLIENT_DEADLINE:terminal", default: 0] += 1
+        }
     }
     func recordRSS(_ bytes: UInt64) { lock.withLock { state.maximumRSSBytes = max(state.maximumRSSBytes, bytes) } }
     func snapshot() -> State { lock.withLock { state } }
@@ -857,6 +955,7 @@ private struct LoadRun {
         }
         let workloadAttempted = snapshot.directRoomAttempted + snapshot.messagesSent
             + snapshot.syncPullsSent + snapshot.readReceiptsSent
+            + snapshot.roomSyncStateBatch.sent + snapshot.roomLatestVisibleBatch.sent
         guard workloadAttempted == 0 || Double(snapshot.workloadFailed) / Double(workloadAttempted) * 100 <= configuration.maximumFailurePercent else {
             throw LoadError.workloadFailureGuardTriggered(failed: snapshot.workloadFailed, attempted: workloadAttempted)
         }
@@ -906,35 +1005,49 @@ private struct LoadRun {
             var roomLogCarry = 0.0
             var syncCarry = 0.0
             var readReceiptCarry = 0.0
+            var roomSyncStateCarry = 0.0
+            var roomLatestVisibleCarry = 0.0
             var reconnectCarry = 0.0
             let messageRate = phase.messagesPerSecond * configuration.scenarioRateScale
             let roomLogRate = phase.roomLogReadsPerSecond * configuration.scenarioRateScale
             let syncRate = phase.syncPullsPerSecond * configuration.scenarioRateScale
             let readReceiptRate = phase.effectiveReadReceiptsPerSecond
                 * configuration.scenarioRateScale
-            print("scenario phase=\(phase.name) seconds=\(phase.durationSeconds) scheduler_hz=\(ticksPerSecond) messages_per_second=\(messageRate) room_log_reads_per_second=\(roomLogRate) sync_pulls_per_second=\(syncRate) read_receipts_per_second=\(readReceiptRate)")
+            let roomSyncStateRate = phase.effectiveRoomSyncStateBatchesPerSecond
+                * configuration.scenarioRateScale
+            let roomLatestVisibleRate = phase.effectiveRoomLatestVisibleBatchesPerSecond
+                * configuration.scenarioRateScale
+            print("scenario phase=\(phase.name) seconds=\(phase.durationSeconds) scheduler_hz=\(ticksPerSecond) messages_per_second=\(messageRate) room_log_reads_per_second=\(roomLogRate) sync_pulls_per_second=\(syncRate) read_receipts_per_second=\(readReceiptRate) room_sync_state_batches_per_second=\(roomSyncStateRate) room_latest_visible_batches_per_second=\(roomLatestVisibleRate)")
             do {
                 for tick in 0..<(phase.durationSeconds * ticksPerSecond) {
                     messageCarry += messageRate / Double(ticksPerSecond)
                     roomLogCarry += roomLogRate / Double(ticksPerSecond)
                     syncCarry += syncRate / Double(ticksPerSecond)
                     readReceiptCarry += readReceiptRate / Double(ticksPerSecond)
+                    roomSyncStateCarry += roomSyncStateRate / Double(ticksPerSecond)
+                    roomLatestVisibleCarry += roomLatestVisibleRate / Double(ticksPerSecond)
                     reconnectCarry += phase.reconnectPercentPerMinute / 100
                         * Double(slots.count) / Double(60 * ticksPerSecond)
                     let messageCount = Int(messageCarry.rounded(.down))
                     let roomLogCount = Int(roomLogCarry.rounded(.down))
                     let syncCount = Int(syncCarry.rounded(.down))
                     let readReceiptCount = Int(readReceiptCarry.rounded(.down))
+                    let roomSyncStateCount = Int(roomSyncStateCarry.rounded(.down))
+                    let roomLatestVisibleCount = Int(roomLatestVisibleCarry.rounded(.down))
                     let reconnectCount = Int(reconnectCarry.rounded(.down))
                     messageCarry -= Double(messageCount)
                     roomLogCarry -= Double(roomLogCount)
                     syncCarry -= Double(syncCount)
                     readReceiptCarry -= Double(readReceiptCount)
+                    roomSyncStateCarry -= Double(roomSyncStateCount)
+                    roomLatestVisibleCarry -= Double(roomLatestVisibleCount)
                     reconnectCarry -= Double(reconnectCount)
                     for _ in 0..<messageCount { assignments.pick(kind: .send, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioSendEvent()) }
                     for _ in 0..<roomLogCount { assignments.pick(kind: .roomLogRead, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioRoomLogReadEvent()) }
                     for _ in 0..<syncCount { assignments.pick(kind: .syncPull, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioSyncPullEvent()) }
                     for _ in 0..<readReceiptCount { assignments.pick(kind: .readReceipt, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioReadReceiptEvent()) }
+                    for _ in 0..<roomSyncStateCount { assignments.pick(kind: .roomSyncStateBatch, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioRoomSyncStateBatchEvent()) }
+                    for _ in 0..<roomLatestVisibleCount { assignments.pick(kind: .roomLatestVisibleBatch, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioRoomLatestVisibleBatchEvent()) }
                     for _ in 0..<reconnectCount {
                         if let slot = assignments.pickSlot(random: &random) {
                             try await reconnect(slot: slot, group: group, sslContext: sslContext, statistics: statistics)
@@ -1134,6 +1247,8 @@ private struct ScenarioSendEvent: Sendable {}
 private struct ScenarioRoomLogReadEvent: Sendable {}
 private struct ScenarioSyncPullEvent: Sendable {}
 private struct ScenarioReadReceiptEvent: Sendable {}
+private struct ScenarioRoomSyncStateBatchEvent: Sendable {}
+private struct ScenarioRoomLatestVisibleBatchEvent: Sendable {}
 
 private struct ScenarioPendingMessages: Sendable, Equatable, Encodable {
     var queued: Int
@@ -1167,6 +1282,8 @@ private enum ScenarioAction {
     case roomLogRead
     case syncPull
     case readReceipt
+    case roomSyncStateBatch
+    case roomLatestVisibleBatch
 }
 
 private final class LoadConnectionSlot: @unchecked Sendable {
@@ -1203,6 +1320,8 @@ private struct ScenarioAssignments {
     private let roomLogReads: [Entry]
     private let syncPulls: [Entry]
     private let readReceipts: [Entry]
+    private let roomSyncStateBatches: [Entry]
+    private let roomLatestVisibleBatches: [Entry]
     private let reconnectCandidates: [LoadConnectionSlot]
 
     init(scenario: LoadScenario, slots: [LoadConnectionSlot], totalConnections: Int) {
@@ -1212,6 +1331,8 @@ private struct ScenarioAssignments {
         var roomLogEntries: [(Double, LoadConnectionSlot)] = []
         var syncEntries: [(Double, LoadConnectionSlot)] = []
         var readReceiptEntries: [(Double, LoadConnectionSlot)] = []
+        var roomSyncStateEntries: [(Double, LoadConnectionSlot)] = []
+        var roomLatestVisibleEntries: [(Double, LoadConnectionSlot)] = []
         let personas = Self.shuffledPersonas(total: totalConnections, scenario: scenario, random: &random)
         for (index, slot) in slots.enumerated() {
             let persona = personas[index]
@@ -1221,11 +1342,19 @@ private struct ScenarioAssignments {
             if persona.effectiveReadReceiptWeight > 0 {
                 readReceiptEntries.append((persona.effectiveReadReceiptWeight, slot))
             }
+            if persona.effectiveRoomSyncStateBatchWeight > 0 {
+                roomSyncStateEntries.append((persona.effectiveRoomSyncStateBatchWeight, slot))
+            }
+            if persona.effectiveRoomLatestVisibleBatchWeight > 0 {
+                roomLatestVisibleEntries.append((persona.effectiveRoomLatestVisibleBatchWeight, slot))
+            }
         }
         sends = Self.entries(sendEntries)
         roomLogReads = Self.entries(roomLogEntries)
         syncPulls = Self.entries(syncEntries)
         readReceipts = Self.entries(readReceiptEntries)
+        roomSyncStateBatches = Self.entries(roomSyncStateEntries)
+        roomLatestVisibleBatches = Self.entries(roomLatestVisibleEntries)
         reconnectCandidates = slots
     }
 
@@ -1236,6 +1365,8 @@ private struct ScenarioAssignments {
         case .roomLogRead: entries = roomLogReads
         case .syncPull: entries = syncPulls
         case .readReceipt: entries = readReceipts
+        case .roomSyncStateBatch: entries = roomSyncStateBatches
+        case .roomLatestVisibleBatch: entries = roomLatestVisibleBatches
         }
         guard let total = entries.last?.cumulativeWeight, total > 0 else { return nil }
         let target = random.nextUnit() * total
@@ -1331,6 +1462,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         case roomEventPull(sent: NIODeadline, roomID: String, afterRoomSequence: UInt64)
         case roomEventSubscribe(roomID: String)
         case readReceipt(sent: NIODeadline, roomID: String, roomSequence: UInt64)
+        case recovery(kind: RecoveryBatchKind, sent: NIODeadline, roomIDs: [String])
         case syncAck(hasMore: Bool)
     }
 
@@ -1380,6 +1512,8 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private var readReceiptInFlightRooms: Set<String> = []
     private var readReceiptAcknowledgedSequences: [String: UInt64] = [:]
     private var readReceiptPendingSequences: [String: UInt64] = [:]
+    private var recoveryInFlightRequestID: UInt64?
+    private var recoveryDeadlineTask: Scheduled<Void>?
     private var heartbeatTask: RepeatedTask?
     private var messageTask: RepeatedTask?
     private var authenticationCompleted = false
@@ -1491,6 +1625,9 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         queuedScenarioMessages = 0
         readReceiptInFlightRooms.removeAll(keepingCapacity: false)
         readReceiptPendingSequences.removeAll(keepingCapacity: false)
+        recoveryDeadlineTask?.cancel()
+        recoveryDeadlineTask = nil
+        recoveryInFlightRequestID = nil
         if registered { statistics.recordDisconnected() }
         if !authenticationCompleted { failAuthentication(LoadError.connectionClosed, context: context, close: false) }
     }
@@ -1740,6 +1877,20 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                     )
                 }
 
+            case .recovery(let kind, let sent, let roomIDs):
+                guard recoveryInFlightRequestID == frame.requestID else {
+                    throw LoadError.unexpectedResponse
+                }
+                recoveryDeadlineTask?.cancel()
+                recoveryDeadlineTask = nil
+                recoveryInFlightRequestID = nil
+                let counts = try validateRecoveryResponse(kind: kind, roomIDs: roomIDs,
+                                                          body: envelope.body)
+                statistics.recordRecoveryCompleted(kind,
+                    milliseconds: (NIODeadline.now() - sent).millisecondsDouble,
+                    successful: counts.successful, unavailable: counts.unavailable,
+                    retry: counts.retry)
+
             case .syncPull(let sent):
                 guard case .syncBatch(let batch)? = envelope.body else {
                     if case .resetRequired? = envelope.body {
@@ -1906,6 +2057,22 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 )
                 context.close(promise: nil)
             }
+        case is ScenarioRoomSyncStateBatchEvent:
+            guard case .authenticated = stage, workloadStarted, context.channel.isActive else { return }
+            statistics.recordRecoveryScheduled(.roomSyncState)
+            do { try sendRecoveryBatch(.roomSyncState, context: context) }
+            catch {
+                statistics.recordWorkloadFailure(kind: "room_sync_state_batch", code: "CLIENT_WRITE_FAILURE")
+                context.close(promise: nil)
+            }
+        case is ScenarioRoomLatestVisibleBatchEvent:
+            guard case .authenticated = stage, workloadStarted, context.channel.isActive else { return }
+            statistics.recordRecoveryScheduled(.roomLatestVisible)
+            do { try sendRecoveryBatch(.roomLatestVisible, context: context) }
+            catch {
+                statistics.recordWorkloadFailure(kind: "room_latest_visible_batch", code: "CLIENT_WRITE_FAILURE")
+                context.close(promise: nil)
+            }
         case let probe as RoomCursorProbe:
             probe.completion.succeed(directRoomIDs.map { roomID in
                 RoomCursorSnapshot(connectionIndex: connectionIndex, roomID: roomID,
@@ -1915,6 +2082,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             probe.completion.succeed(.init(
                 queued: queuedScenarioMessages,
                 inFlight: messageRequestIDs.count + readReceiptInFlightRooms.count
+                    + (recoveryInFlightRequestID == nil ? 0 : 1)
             ))
         default:
             context.fireUserInboundEventTriggered(event)
@@ -2445,6 +2613,104 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         }
     }
 
+    private func sendRecoveryBatch(_ kind: RecoveryBatchKind,
+                                   context: ChannelHandlerContext) throws {
+        // One combined read batch per connection. Keep its complete response
+        // under the native frame bound even when every room has a preview.
+        guard recoveryInFlightRequestID == nil, !directRoomIDs.isEmpty else {
+            statistics.recordRecoverySkipped(kind)
+            return
+        }
+        let roomIDs = Array(directRoomIDs.prefix(32))
+        let requestID = takeRequestID()
+        var request = IMV2Envelope()
+        request.requestID = requestID
+        request.protocolVersion = IMV2ProtocolVersion.current
+        switch kind {
+        case .roomSyncState:
+            request.roomSyncStateBatch = .init()
+            request.roomSyncStateBatch.roomIds = roomIDs
+        case .roomLatestVisible:
+            request.roomLatestVisibleBatch = .init()
+            request.roomLatestVisibleBatch.roomIds = roomIDs
+        }
+        pendingRequests[requestID] = .recovery(kind: kind, sent: .now(), roomIDs: roomIDs)
+        recoveryInFlightRequestID = requestID
+        let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
+        let boundContext = context.loopBound
+        recoveryDeadlineTask = context.eventLoop.scheduleTask(in: .seconds(10)) {
+            let handler = handler.value
+            let context = boundContext.value
+            guard handler.recoveryInFlightRequestID == requestID,
+                  case .recovery(let pendingKind, _, _)? = handler.pendingRequests.removeValue(forKey: requestID)
+            else { return }
+            handler.recoveryInFlightRequestID = nil
+            handler.recoveryDeadlineTask = nil
+            handler.statistics.recordRecoveryTimedOut(pendingKind)
+            context.close(promise: nil)
+        }
+        do {
+            try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
+            statistics.recordRecoverySent(kind)
+        } catch {
+            pendingRequests.removeValue(forKey: requestID)
+            recoveryDeadlineTask?.cancel()
+            recoveryDeadlineTask = nil
+            recoveryInFlightRequestID = nil
+            throw error
+        }
+    }
+
+    private func validateRecoveryResponse(kind: RecoveryBatchKind, roomIDs: [String],
+                                          body: IMV2Envelope.OneOf_Body?) throws
+        -> (successful: Int, unavailable: Int, retry: Int) {
+        let expected = Set(roomIDs.compactMap(UUID.init(uuidString:)))
+        guard expected.count == roomIDs.count else { throw LoadError.unexpectedResponse }
+        var seen: Set<UUID> = []
+        var successful = 0
+        var unavailable = 0
+        var retry = 0
+        switch kind {
+        case .roomSyncState:
+            guard case .roomSyncStateBatchResult(let response)? = body,
+                  response.rooms.count == roomIDs.count else { throw LoadError.unexpectedResponse }
+            for item in response.rooms {
+                guard let room = UUID(uuidString: item.roomID), expected.contains(room),
+                      seen.insert(room).inserted else { throw LoadError.unexpectedResponse }
+                switch item.result {
+                case .state(let state)?:
+                    guard UUID(uuidString: state.roomID) == room else {
+                        throw LoadError.unexpectedResponse
+                    }
+                    successful += 1
+                case .unavailable?: unavailable += 1
+                case .retry(let value)?:
+                    guard value.retryAfterSeconds > 0 else { throw LoadError.unexpectedResponse }
+                    retry += 1
+                case nil: throw LoadError.unexpectedResponse
+                }
+            }
+        case .roomLatestVisible:
+            guard case .roomLatestVisibleBatchResult(let response)? = body,
+                  response.rooms.count == roomIDs.count else { throw LoadError.unexpectedResponse }
+            for item in response.rooms {
+                guard let room = UUID(uuidString: item.roomID), expected.contains(room),
+                      seen.insert(room).inserted else { throw LoadError.unexpectedResponse }
+                switch item.result {
+                case .snapshot?:
+                    successful += 1
+                case .unavailable?: unavailable += 1
+                case .retry(let value)?:
+                    guard value.retryAfterSeconds > 0 else { throw LoadError.unexpectedResponse }
+                    retry += 1
+                case nil: throw LoadError.unexpectedResponse
+                }
+            }
+        }
+        guard seen == expected else { throw LoadError.unexpectedResponse }
+        return (successful, unavailable, retry)
+    }
+
     private func sendSyncAck(
         generation: UInt64,
         highestSequence: UInt64,
@@ -2522,6 +2788,14 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             statistics.recordWorkloadFailure(
                 kind: "read_receipt", code: code, retryable: retryable
             )
+        case .recovery(let kind, _, _):
+            guard recoveryInFlightRequestID == requestID else {
+                throw LoadError.unexpectedResponse
+            }
+            recoveryDeadlineTask?.cancel()
+            recoveryDeadlineTask = nil
+            recoveryInFlightRequestID = nil
+            statistics.recordRecoveryRejected(kind, code: code, retryable: retryable)
         case .directRoom(let targetUserID, let operationID, let retryCount, _):
             if retryable, retryCount < Self.maximumDirectRoomRetries {
                 scheduleDirectRoomRetry(
@@ -2552,11 +2826,40 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private func failAuthentication(_ error: Error, context: ChannelHandlerContext, close: Bool = true) {
         heartbeatTask?.cancel()
         messageTask?.cancel()
+        recoveryDeadlineTask?.cancel()
+        recoveryDeadlineTask = nil
+        recoveryInFlightRequestID = nil
         if !authenticationCompleted {
             authenticationCompleted = true
             authenticatedPromise.fail(error)
         }
         if close { context.close(promise: nil) }
+    }
+}
+
+private struct RecoveryBatchReport: Encodable {
+    let scheduled: Int
+    let sent: Int
+    let completed: Int
+    let skipped: Int
+    let successfulRooms: Int
+    let unavailableRooms: Int
+    let retryRooms: Int
+    let rejected: Int
+    let timedOut: Int
+    let latency: Percentiles
+
+    init(start: RecoveryBatchStats, end: RecoveryBatchStats) {
+        scheduled = end.scheduled - start.scheduled
+        sent = end.sent - start.sent
+        completed = end.completed - start.completed
+        skipped = end.skipped - start.skipped
+        successfulRooms = end.successfulRooms - start.successfulRooms
+        unavailableRooms = end.unavailableRooms - start.unavailableRooms
+        retryRooms = end.retryRooms - start.retryRooms
+        rejected = end.rejected - start.rejected
+        timedOut = end.timedOut - start.timedOut
+        latency = end.latency.subtracting(start.latency).percentiles
     }
 }
 
@@ -2630,6 +2933,8 @@ private struct LoadReport: Encodable {
     let readReceiptsSent: Int
     let readReceiptsAcknowledged: Int
     let readReceiptsCoalesced: Int
+    let roomSyncStateBatch: RecoveryBatchReport
+    let roomLatestVisibleBatch: RecoveryBatchReport
     let maximumRSSMegabytes: Double
     let authenticationLatency: Percentiles
     let heartbeatLatency: Percentiles
@@ -2720,6 +3025,8 @@ private struct LoadReport: Encodable {
         readReceiptsSent = state.readReceiptsSent
         readReceiptsAcknowledged = state.readReceiptsAcknowledged
         readReceiptsCoalesced = state.readReceiptsCoalesced
+        roomSyncStateBatch = .init(start: .init(), end: state.roomSyncStateBatch)
+        roomLatestVisibleBatch = .init(start: .init(), end: state.roomLatestVisibleBatch)
         maximumRSSMegabytes = Double(state.maximumRSSBytes) / 1_048_576
         authenticationLatency = state.authenticationLatency.percentiles
         heartbeatLatency = state.heartbeatLatency.percentiles
@@ -2776,6 +3083,8 @@ private struct ScenarioPhaseReport: Encodable {
     let requestedRoomLogReadsPerSecond: Double
     let requestedSyncPullsPerSecond: Double
     let requestedReadReceiptsPerSecond: Double
+    let requestedRoomSyncStateBatchesPerSecond: Double
+    let requestedRoomLatestVisibleBatchesPerSecond: Double
     let messagesSent: Int
     let messagesAcknowledged: Int
     let messagesSkipped: Int
@@ -2801,6 +3110,8 @@ private struct ScenarioPhaseReport: Encodable {
     let syncPullLatency: Percentiles
     let roomEventPullLatency: Percentiles
     let readReceiptLatency: Percentiles
+    let roomSyncStateBatch: RecoveryBatchReport
+    let roomLatestVisibleBatch: RecoveryBatchReport
 
     func isSteadyStateDrained(maximumQueuedMessages: Int) -> Bool {
         scenarioMessageQueueOverflowed == 0 && queuedScenarioMessagesAtEnd <= maximumQueuedMessages
@@ -2822,6 +3133,8 @@ private struct ScenarioPhaseReport: Encodable {
         requestedRoomLogReadsPerSecond = phase.roomLogReadsPerSecond * rateScale
         requestedSyncPullsPerSecond = phase.syncPullsPerSecond * rateScale
         requestedReadReceiptsPerSecond = phase.effectiveReadReceiptsPerSecond * rateScale
+        requestedRoomSyncStateBatchesPerSecond = phase.effectiveRoomSyncStateBatchesPerSecond * rateScale
+        requestedRoomLatestVisibleBatchesPerSecond = phase.effectiveRoomLatestVisibleBatchesPerSecond * rateScale
         messagesSent = ended.messagesSent - started.messagesSent
         messagesAcknowledged = ended.messagesAcknowledged - started.messagesAcknowledged
         messagesSkipped = ended.messagesSkipped - started.messagesSkipped
@@ -2859,6 +3172,8 @@ private struct ScenarioPhaseReport: Encodable {
         readReceiptLatency = ended.readReceiptLatency
             .subtracting(started.readReceiptLatency)
             .percentiles
+        roomSyncStateBatch = .init(start: started.roomSyncStateBatch, end: ended.roomSyncStateBatch)
+        roomLatestVisibleBatch = .init(start: started.roomLatestVisibleBatch, end: ended.roomLatestVisibleBatch)
     }
 }
 

@@ -26,7 +26,8 @@ import time
 import uuid
 
 from virtual_actor_capacity_measurement import (
-    MeasurementFailure, capture_runtime, capture_snapshot, create_scenario, phase_delta, verify_freeze,
+    MeasurementFailure, capture_runtime, capture_snapshot, create_scenario, phase_delta,
+    supports_recovery_loader, verify_freeze,
 )
 
 
@@ -386,6 +387,14 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
                                                boundaries[next_phase]["captureDurationSeconds"]]
             phase_results[phase] = delta
             write_private(run / f"measurement-{phase}.json", json.dumps(delta, indent=2, sort_keys=True) + "\n")
+        batch_covered = False
+        if scenario_detail["workload"] == "mixed":
+            steady = phase_results["steady"]["nativeLoader"]
+            for family in ("roomSyncStateBatch", "roomLatestVisibleBatch"):
+                value = steady.get(family) or {}
+                if value.get("completed", 0) <= 0 or value.get("successfulRooms", 0) <= 0:
+                    raise MeasurementFailure("mixed workload did not complete both recovery batch families")
+            batch_covered = True
         write_private(run / "measurement-snapshots.json", json.dumps({
             "boundaries": boundaries, "periodic": observations, "scenario": scenario_detail},
             indent=2, sort_keys=True) + "\n")
@@ -394,6 +403,7 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
                 "snapshotSHA256": sha256(run / "measurement-snapshots.json"),
                 "nativeConnectionsAuthenticated": report.get("authenticated"),
                 "nativeMessagesAcknowledged": report.get("messagesAcknowledged"),
+                "batchRecoveryQueriesCovered": batch_covered,
                 "nativeFailed": report.get("failed"), "nativeDirectRoomAttempted": report.get("directRoomAttempted")}
     finally:
         if follow.poll() is None:
@@ -420,6 +430,9 @@ def main() -> int:
         "IMV2GatewayLoadGenerator": verify_product(args.loader_products_dir,
             "IMV2GatewayLoadGenerator", loader_build_result["products"]["IMV2GatewayLoadGenerator"]),
     }
+    if args.measurement_workload == "mixed" and not supports_recovery_loader(
+        args.loader_products_dir / "IMV2GatewayLoadGenerator"):
+        raise MeasurementFailure("common loader lacks native recovery-batch dispatch support")
     manifest, rooms, users, fixture_info = verify_fixture(args.fixture_dir, args.layout)
     scenario = RUNNER_ROOT / "IMV2/scripts/virtual-actor-fixtures/send-one-canary.json"
     require_regular(scenario, "single-send scenario")

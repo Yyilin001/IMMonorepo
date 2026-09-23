@@ -35,6 +35,22 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def supports_recovery_loader(binary: Path) -> bool:
+    """Refuse a binary that can parse but silently ignores the new rates."""
+    needles = {b"room_sync_state_batches_per_second=",
+               b"room_latest_visible_batches_per_second="}
+    overlap = max(map(len, needles)) - 1
+    tail = b""
+    with binary.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            block = tail + chunk
+            needles = {needle for needle in needles if needle not in block}
+            if not needles:
+                return True
+            tail = block[-overlap:]
+    return False
+
+
 def freeze_calibrations(runs: list[Path], thresholds: dict[str, float]) -> dict:
     """Build provenance for three successful frozen-main calibration runs."""
     if len(runs) != 3 or len(set(runs)) != 3 or not thresholds:
@@ -136,6 +152,17 @@ def create_scenario(source: Path, protocol: dict[str, Any], fixture: dict[str, A
     template = json.loads(template_path.read_text())
     if len(template["phases"]) < 1 or not template.get("personas"):
         raise MeasurementFailure("invalid workload template")
+    if workload == "mixed":
+        # The existing foreground recovery envelopes are new workload actions,
+        # not a change to the historically frozen high-active scenario.
+        for persona in template["personas"]:
+            weight = persona["roomLogReadWeight"]
+            persona["readReceiptWeight"] = weight
+            persona["roomSyncStateBatchWeight"] = weight
+            persona["roomLatestVisibleBatchWeight"] = weight
+        template["phases"][0]["readReceiptsPerSecond"] = 20
+        template["phases"][0]["roomSyncStateBatchesPerSecond"] = 20
+        template["phases"][0]["roomLatestVisibleBatchesPerSecond"] = 20
     measurement = protocol["measurement"]
     durations = (measurement["warmupSeconds"], measurement["steadySeconds"],
                  measurement["cooldownSeconds"])
@@ -150,7 +177,8 @@ def create_scenario(source: Path, protocol: dict[str, Any], fixture: dict[str, A
         phase["name"] = name
         phase["durationSeconds"] = seconds
         for key in ("messagesPerSecond", "roomLogReadsPerSecond", "syncPullsPerSecond",
-                    "readReceiptsPerSecond"):
+                    "readReceiptsPerSecond", "roomSyncStateBatchesPerSecond",
+                    "roomLatestVisibleBatchesPerSecond"):
             if key in phase:
                 phase[key] = 0 if name == "cooldown" else phase[key] * rate_scale
         if name == "cooldown":
@@ -161,8 +189,9 @@ def create_scenario(source: Path, protocol: dict[str, Any], fixture: dict[str, A
     detail = {"workload": workload, "layout": layout, "connections": connections,
               "rateScale": rate_scale, "templatePath": relative,
               "templateSHA256": template_digest, "phaseDurationsSeconds": list(durations),
+              "batchRecoveryQueriesRequired": workload == "mixed",
               "batchRecoveryQueriesCovered": False,
-              "status": "partial-recovery-batch" if workload == "mixed" else "supported"}
+              "status": "runtime-proof-required" if workload == "mixed" else "supported"}
     return result, detail
 
 
@@ -186,12 +215,12 @@ def parse_prometheus(body: str) -> dict[str, float]:
 
 def parse_cgroup(body: str) -> dict[str, int]:
     rows = body.splitlines()
-    if len(rows) < 3:
+    if len(rows) != 4:
         raise MeasurementFailure("incomplete cgroup sample")
     cpu = dict(row.split() for row in rows[0].split(";") if row)
     try:
         return {"cpuUsageUsec": int(cpu["usage_usec"]), "memoryCurrentBytes": int(rows[1]),
-                "memoryPeakBytes": int(rows[2])}
+                "memoryPeakBytes": int(rows[2]), "processRSSBytes": int(rows[3])}
     except (KeyError, ValueError) as error:
         raise MeasurementFailure("invalid cgroup v2 sample") from error
 
@@ -225,10 +254,14 @@ def phase_delta(before: dict, after: dict, samples: list[dict]) -> dict:
             raise MeasurementFailure("container CPU counter decreased")
         memory = [item["cgroup"][service]["memoryCurrentBytes"] for item in samples
                   if service in item["cgroup"]]
+        rss = [item["cgroup"][service]["processRSSBytes"] for item in samples
+               if service in item["cgroup"]]
         containers[service] = {"cpuUsageUsec": cpu,
-                               "sampledPeakRSSBytes": max(memory + [start["memoryCurrentBytes"],
-                                                              finish["memoryCurrentBytes"]]),
-                               "lifetimeMemoryPeakBytes": finish["memoryPeakBytes"]}
+                               "sampledPeakCgroupMemoryCurrentBytes": max(memory +
+                                   [start["memoryCurrentBytes"], finish["memoryCurrentBytes"]]),
+                               "lifetimeCgroupMemoryPeakBytes": finish["memoryPeakBytes"],
+                               "sampledPeakProcessRSSBytes": max(rss +
+                                   [start["processRSSBytes"], finish["processRSSBytes"]])}
     metrics = {}
     old_metrics = before["metrics"]
     for key, value in after["metrics"].items():
@@ -246,7 +279,7 @@ def phase_delta(before: dict, after: dict, samples: list[dict]) -> dict:
             "metricsAtStart": old_metrics, "metricsAtEnd": after["metrics"],
             "metricsSampledMaximum": sampled_metrics,
             "sampleCount": len(samples), "sqlScope": "whole disposable databases including background and observer SQL",
-            "rssScope": "sampled memory.current; lifetime memory.peak is separately reported"}
+            "memoryScope": "cgroup memory.current includes cache; memory.peak covers container lifetime; process RSS is sampled /proc/1/status VmRSS only (PostgreSQL backend children excluded)"}
 
 
 PG_SNAPSHOT_SQL = """SELECT json_build_object(
@@ -260,13 +293,14 @@ PG_SNAPSHOT_SQL = """SELECT json_build_object(
 
 def capture_runtime(docker: list[str], container_ids: dict[str, str],
                     metrics_url: str, execute: Any) -> dict:
-    """Sample process CPU/RSS and private Gateway metrics without SQL work."""
+    """Sample cgroup CPU/memory, PID 1 RSS and private Gateway metrics."""
     import time
 
     capture_started = time.monotonic_ns()
     cgroup = {}
     script = "awk 'BEGIN{ORS=\";\"} {print $1, $2}' /sys/fs/cgroup/cpu.stat; " \
-             "printf '\\n'; cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.peak"
+             "printf '\\n'; cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.peak; " \
+             "awk '/^VmRSS:/ {printf \"%.0f\\n\", $2 * 1024; exit}' /proc/1/status"
     for service, container_id in container_ids.items():
         raw = execute(docker + ["exec", container_id, "sh", "-c", script],
                       "measurement-containers.log", 15, record_stdout=False)
