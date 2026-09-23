@@ -12,11 +12,13 @@
 | --- | ---: |
 | Core | 129 tests / 41 suites |
 | Server | 1279 tests / 204 suites |
-| ActorContracts | 52 tests / 5 suites |
-| ActorRuntime | 20 tests / 8 suites |
+| ActorContracts | 20 tests / 8 suites |
+| ActorRuntime | 52 tests / 5 suites |
 | ActorCluster | 32 tests / 5 suites |
 | ActorApplication | 3 tests / 1 suite |
 | 合计 | **1515 tests / 264 suites** |
+
+这里仅修正 Contracts 与 Runtime 的**目标归属**，总测试数、suite 数、退出码和通过结论均未变化。原 `suite.log` 第 9076–9193 行的 52/5 执行段包含 `Room activation host owns restore, lease and retirement`、`Bounded room and host command admission` 等 Runtime suite；第 9194–9253 行的 20/8 执行段包含 `V2 actor creation wire contract`、`Closed room capability envelope` 等 Contracts suite。冻结源码的 `IMV2Server/Tests/IMV2ActorRuntimeTests`、`IMV2Server/Tests/IMV2ActorContractsTests` 及 `Package.swift` target 声明也对应这些名称。原始日志与离线 gate 工件未修改。
 
 本轮重点的 **11 个 suite / 21 个 case** 均有实际 started 与 passed 事件，不是只按测试源码或非零匹配推断。它们包括 Application 生成配置 3 项、direct credit 2 项、单房间及双房间成功 COMMIT ACK 丢失各 1 项、生产 Host 共享提交 ACK 丢失 1 项、慢 PG drain 1 项、Host 生命周期 3 项、pair/query 2 项、取消/maintenance/review/import 4 项、满队列与 pending shared batch 2 项、总事务期限 1 项。11 个重点 suite 并非全部都是 PostgreSQL suite。PostgresNIO vendor 校验与 7 项后置检查（protobuf 生成、local environment、schema readiness、Prometheus、runtime env examples、文档链接、文档结构）也在该次运行中通过。
 
@@ -32,10 +34,12 @@
 | --- | --- |
 | Core | 129 tests / 41 suites 通过 |
 | Server | 1262 tests / 196 suites，3 issues |
-| ActorContracts | 50 tests / 5 suites 通过 |
-| ActorRuntime | 20 tests / 8 suites 通过 |
+| ActorContracts | 20 tests / 8 suites 通过 |
+| ActorRuntime | 50 tests / 5 suites 通过 |
 | ActorCluster | 22 tests / 3 suites，1 issue |
 | ActorApplication | 3 tests / 1 suite，生成配置用例未启用；另两项通过 |
+
+早期 `final-linux-20260923-r2/suite.log` 同样由 Runtime Host suite 起始，第 9629 行汇总 50/5；其后的 Contracts wire suite 到第 9689 行汇总 20/8。这里只改目标标签，不改那次整体退出 1 或任何失败记录。
 
 四个问题均定位到具体测试条件：group append/receipt fixture 缺第二个房间的 control route；forward fixture 在已有本地 route 上重复 INSERT；recovery batcher 用 100 次 `Task.yield()` 代替等待真实入队；假 TCP listener 未像生产 transport 一样配置 `SO_REUSEADDR`，导致 Linux 同端口重绑失败。修复分别补齐 fixture、只插入远端 route、有期限地等待入队、对齐假 listener socket 配置，没有修改这些业务合同。
 
