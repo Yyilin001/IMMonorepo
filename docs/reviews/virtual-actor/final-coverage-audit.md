@@ -20,7 +20,7 @@
 | 无效 V1 总入口 | 已删除未实现探针的旧 scaffold，当前[故障入口](v1-fault-harness.md)逐项指向真实可运行脚本；没有宣称覆盖全部 21 项。G6 已接入 Linux 进程恢复 CI。 |
 | #10/#21 取消和后台 writer 接管 | [真实 Host/Factory/PG 取消与 retention](g2-pg-cancellation-maintenance-evidence.md)通过：执行中的取消不早释 lease/许可，排队取消无持久写；后台 trimLog 持 fence 时第二 Host 不能接管，旧 token 在新 epoch 下被拒绝。随后在 `d4f173df` 加入 review/import 各自临界点屏障，同 suite 原生真实 PG **4/4** 通过：实际 worker 的失败 job 可重试、目标 import 的持久接收与终态唯一，新 epoch 重放保持原结果；这两项 Linux 仍待最终全量运行。 |
 | #20 跨入口禁用账号 | [真实 Linux 三入口应用栈](g5-cross-entry-disable-evidence.md)已通过：独立 Actor Host、caller-only Gateway、Account/Operator HTTP；两条旧 Gateway 会话在暖房间及 Operator 请求前仍活，禁用提交后被主动关闭，固定新操作无消息/完成记录，Host epoch 未变。此轮因主动关闭而未在禁用后实际派发房间命令；不等同于成员 revision 或媒体授权的同场实测。 |
-| #17 独立 owner/control DB 链路 | [真实双 Host、caller 与三个 PostgreSQL](g5-database-edge-evidence.md)通过：单独断开 Host A 到 control 或 owner-a，B 继续业务服务，A 在 control 故障期间持续续租、owner 失租后无持久写；恢复按原操作 ID 仅一次效果。真实 DB 重启将使用该拓扑的独立阶段；容量 fault 只承担 #19 的部分 owner 查询，不能把它当作尚未运行的数据库重启证据。 |
+| #17 独立 owner/control DB 链路 | [真实双 Host、caller 与三个 PostgreSQL](g5-database-edge-evidence.md)通过：单独断开 Host A 到 control 或 owner-a，B 继续业务服务，A 在 control 故障期间持续续租、owner 失租后无持久写；恢复按原操作 ID 仅一次效果。同拓扑的 Linux 实际 PG 原容器停启也已通过：两个 Host 和 caller 保持同进程，owner-a 停库时 owner-b 继续写入；数据库恢复后旧状态保留、原 ID 重放唯一，租约安全换到新 epoch。容量 fault 仍只承担 #19 的部分 owner 查询。 |
 | #19、容量与 Linux required checks | #19 部分 owner 查询仍按下方历史矩阵的验收边界核对。容量功能 canary 不等于性能结论。[G5 Linux 回归记录](g5-linux-regression-evidence.md)列出初始完整运行的实际失败、针对性修正后的聚焦通过和最新 discovery/合同检查通过；不能把它们合称为同一提交的一次全量全绿 required run。 |
 
 ## G1–G4 可完成范围
