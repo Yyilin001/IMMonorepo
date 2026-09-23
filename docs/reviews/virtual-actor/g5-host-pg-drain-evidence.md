@@ -67,3 +67,16 @@ Vapor shutdown test. The executor is deliberately small so the SQL and close
 phase barriers are deterministic; the test does not exercise every concrete
 RoomDomain handler. The remaining SIGTERM process/lifecycle and query/pair
 interleaving matrix cases still need end-to-end fault probes.
+
+## Production Host queue saturation and pending shared batch
+
+`V2RoomHostPostgresOverloadDrainTests` adds two real Host/Factory/PostgreSQL cases at agent commit `2ea9f4c8`, integrated through `c3a626bf`. Native Swift 6.4 ran both with `--disable-automatic-resolution -j 2 --no-parallel --filter V2RoomHostPostgresOverloadDrainTests`: **2/2 passed, exit 0**, in 0.995 and 1.652 seconds. The log is `/Users/yyl/.codex/virtual-actor-builds/p0/host-overload-native/third.log`. The dedicated PG16 schema/container were removed and the build/test process ended. The dependency lockfile remained unchanged (`3af1e16190f46bdd8fad3de86c6b386dc196443291463355bf36edb62b7fd15c`).
+
+| Case | Direct assertions |
+| --- | --- |
+| Room and node queue saturation, then drain | A real fenced message INSERT blocks on a test advisory lock. With two hot-room commands admitted and one Host permit still free, a third hot-room send is rejected without a completion. A healthy room then takes the third Host permit, and a different room is rejected by the Host limit. Releasing only the healthy room's SQL lock lets its real recovery query finish while the hot INSERT remains blocked. Short drain retains the hot lease and both accepted commands; releasing the INSERT yields one completion per accepted send. Final command/byte/room budgets and batcher work return to zero, and all leases are released. |
+| Two granted sends pending in the production owner batcher | Two large-room sends reach `pendingRequests == 2` and `inFlightBatches == 0` before drain. A short drain retains both leases. The production atomic batch commits both requests, completions remain unique, and final batcher/Host budgets and leases are clear. An 800 ms test-only batch delay makes this state observable; it is not a production default or performance result. |
+
+The first attempt passed the queue case but failed the atomic-batch assertion: standard rooms deliberately use scalar append. The second attempt failed at fixture setup because the canonical schema forbids changing an existing room's capacity class. Both failed logs (`first.log`, `repeat.log`) remain. The fixture now creates large rooms from the start and supplies the production shard-credit pool; the atomic assertion was retained. No production implementation changed.
+
+The suite has its own explicit `IMV2_ACTOR_HOST_OVERLOAD_DATABASE_URL` and `IMV2_ACTOR_HOST_OVERLOAD_DATABASE_IS_DISPOSABLE=1` opt-ins. CI integration and the isolated Linux runner enable them against their disposable primary database and run the Server suites serially. These new cases have native PG execution evidence; their Linux run remains pending. The separate [real Linux busy SIGTERM](g2-real-app-sigterm-evidence.md) verifies OS signal→App drain wiring, while these cases verify production Host behavior in the queue and pending-batch states. They are complementary layers, not one combined OS-signal injection.
