@@ -105,17 +105,35 @@ struct V2RoomHostSharedSendCommitAckLossTests {
                 try await firstHost.host.invoke(token: firstToken,
                     encodedRequest: firstRequest, deadline: deadline)
             }
-            try await hostSharedAckWaitUntil {
+            try await hostSharedAckWaitUntil("first send pending") {
                 await firstHost.batcher.snapshot().pendingRequests == 1
             }
             let second = Task {
                 try await firstHost.host.invoke(token: secondToken,
                     encodedRequest: secondRequest, deadline: deadline)
             }
-            try await hostSharedAckWaitUntil {
+            do {
+                try await hostSharedAckWaitUntil("shared SQL advisory wait") {
+                    let batch = await firstHost.batcher.snapshot()
+                    guard batch.inFlightBatches == 1 else { return false }
+                    return try await hostSharedAckAdvisoryWait(sql: sql)
+                }
+            } catch {
                 let batch = await firstHost.batcher.snapshot()
-                guard batch.inFlightBatches == 1 else { return false }
-                return try await hostSharedAckAdvisoryWait(sql: sql)
+                let activity = try? await sql.raw("""
+                    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                        'state', state, 'wait', wait_event, 'query', left(query, 120))),
+                        '[]'::jsonb)::text AS value FROM pg_stat_activity
+                    WHERE datname = current_database() AND pid <> pg_backend_pid()
+                    """).first(decoding: HostSharedAckTextRow.self)?.value
+                let details = [
+                    "pending=\(batch.pendingRequests)", "inFlight=\(batch.inFlightBatches)",
+                    "completed=\(batch.completedBatches)", "atomic=\(batch.atomicBatchAttempts)",
+                    "singleton=\(batch.singletonDispatches)",
+                    "proxy=\(proxy.observedSuccessfulCommit)",
+                    "pg=\(activity ?? "unavailable")", "prior=\(error)",
+                ].joined(separator: ", ")
+                throw HostSharedAckFailure.phaseTimeout("shared SQL advisory wait: \(details)")
             }
             let queuedFirst = Task {
                 try await firstHost.host.invoke(token: firstToken,
@@ -127,7 +145,9 @@ struct V2RoomHostSharedSendCommitAckLossTests {
                     encodedRequest: try hostSharedAckSend(room: secondRoom,
                         operation: queuedSecondID, text: "queued second"), deadline: deadline)
             }
-            try await hostSharedAckWaitUntil { await firstHost.budget.snapshot().commandCount == 4 }
+            try await hostSharedAckWaitUntil("four Host permits charged") {
+                await firstHost.budget.snapshot().commandCount == 4
+            }
             #expect(try await hostSharedAckCount(sql, table: "messages", room: roomID,
                 operation: firstID) == 0)
             #expect(try await hostSharedAckCount(sql, table: "messages", room: secondRoom,
@@ -161,7 +181,7 @@ struct V2RoomHostSharedSendCommitAckLossTests {
                 #expect(try await hostSharedAckCount(sql, table: "message_send_completions", room: room,
                     operation: operation) == 0)
             }
-            try await hostSharedAckWaitUntil {
+            try await hostSharedAckWaitUntil("both retired and leases released") {
                 guard await firstHost.host.readyTokens().isEmpty else { return false }
                 guard try await leases.locate(roomID: roomID, owner: owner) == nil else { return false }
                 guard try await leases.locate(roomID: secondRoom, owner: owner) == nil else { return false }
@@ -263,8 +283,11 @@ private func hostSharedAckHost(database: any Database, writeDatabase: any Databa
         capacityProfile: fixture.forwardImportTestProfile(),
         messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
         contentReviewMode: .disabled, queryBatchConfiguration: .init())
+    // The write fixture's shard-admission lease is anchored at this business
+    // time. DB activation leases and fences continue to use the live PG clock.
     let factory = try V2RoomServerActivationFactory(owners: ["room-a": resources],
-        safetyActorUserID: senderID).runtimeFactory()
+        safetyActorUserID: senderID,
+        now: { Date(timeIntervalSince1970: 1_750_000_000) }).runtimeFactory()
     let budget = V2RoomCommandBudget(configuration: configuration)
     let identity = V2ActorHostIdentity(hostID: try .init("shared-ack-host"), incarnationID: UUID())
     return .init(host: .init(identity: identity, leaseStore: leases,
@@ -343,10 +366,11 @@ private func hostSharedAckAdvisoryWait(sql: any SQLDatabase) async throws -> Boo
         """).first(decoding: HostSharedAckBoolRow.self)?.value == true
 }
 
-private func hostSharedAckWaitUntil(_ condition: @escaping @Sendable () async throws -> Bool) async throws {
+private func hostSharedAckWaitUntil(_ phase: String,
+    _ condition: @escaping @Sendable () async throws -> Bool) async throws {
     let deadline = ContinuousClock.now + .seconds(5)
     while try !(await condition()) {
-        guard ContinuousClock.now < deadline else { throw HostSharedAckFailure.phaseTimeout }
+        guard ContinuousClock.now < deadline else { throw HostSharedAckFailure.phaseTimeout(phase) }
         try await Task.sleep(for: .milliseconds(5))
     }
 }
@@ -381,7 +405,7 @@ private actor HostSharedAckGate {
     }
 
     func waitUntilHeld() async throws {
-        try await hostSharedAckWaitUntil { await self.held }
+        try await hostSharedAckWaitUntil("advisory locker acquired") { await self.held }
     }
 
     func open() {
@@ -399,6 +423,8 @@ private struct HostSharedAckShadow: V2UserShardProjectionShadowing {
 private struct HostSharedAckBoolRow: Decodable { let value: Bool }
 private struct HostSharedAckCountRow: Decodable { let value: Int64 }
 private struct HostSharedAckUUIDRow: Decodable { let value: UUID }
+private struct HostSharedAckTextRow: Decodable { let value: String }
 private enum HostSharedAckFailure: Error {
-    case schemaAlreadyExists, activationUnavailable, replayNotIdempotent, phaseTimeout
+    case schemaAlreadyExists, activationUnavailable, replayNotIdempotent
+    case phaseTimeout(String)
 }
