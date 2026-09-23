@@ -185,7 +185,7 @@ extension V2ActorGroupBootstrapWire {
                                                       initialMemberUserIDs: initialMemberUserIDs)
         let intent = try intent.toDomain()
         guard intent.actorUserID == actorUserID, intent.operationID == operationID,
-              intent.state == .prepared, intent.audienceMemberCount == validatedMemberUserIDs.count,
+              intent.audienceMemberCount == validatedMemberUserIDs.count,
               validatedMemberUserIDs == validatedMemberUserIDs.sorted(),
               Set(validatedMemberUserIDs).count == validatedMemberUserIDs.count,
               validatedMemberUserIDs.contains(actorUserID),
@@ -203,7 +203,7 @@ extension V2ActorStagedGroupBootstrapWire {
                                                     stagedMemberCount: stagedMemberCount)
         let intent = try intent.toDomain()
         guard intent.actorUserID == actorUserID, intent.operationID == operationID,
-              intent.state == .prepared, intent.audienceMemberCount == stagedMemberCount + 1 else {
+              intent.audienceMemberCount == stagedMemberCount + 1 else {
             throw V2GroupRoomCreationIntentStoreError.invalidIntent
         }
         return command

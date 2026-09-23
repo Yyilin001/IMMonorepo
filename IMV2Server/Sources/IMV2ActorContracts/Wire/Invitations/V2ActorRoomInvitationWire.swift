@@ -130,11 +130,25 @@ public enum V2RoomInvitationQuery: Codable, Equatable, Sendable {
     case active(V2ActorActiveGroupInvitesQueryWire)
     case pending(V2ActorPendingGroupJoinsQueryWire)
     case resolvedPreview(V2ActorResolvedInvitePreviewQueryWire)
+    case preflightCreation(V2ActorInviteCreatePersistenceWire)
+    case reservedSubmissionResponse(V2ActorReservedSubmissionResponseQueryWire)
     public var roomID: RoomID {
-        switch self { case .active(let v): v.roomID; case .pending(let v): v.roomID; case .resolvedPreview(let v): v.roomID }
+        switch self {
+        case .active(let v): v.roomID
+        case .pending(let v): v.roomID
+        case .resolvedPreview(let v): v.roomID
+        case .preflightCreation(let v): v.roomID
+        case .reservedSubmissionResponse(let v): v.intent.roomID
+        }
     }
     public var actorUserID: UserID {
-        switch self { case .active(let v): v.actorUserID; case .pending(let v): v.reviewerUserID; case .resolvedPreview(let v): v.applicantUserID }
+        switch self {
+        case .active(let v): v.actorUserID
+        case .pending(let v): v.reviewerUserID
+        case .resolvedPreview(let v): v.applicantUserID
+        case .preflightCreation(let v): v.actorUserID
+        case .reservedSubmissionResponse(let v): v.intent.applicantUserID
+        }
     }
     public var retryPolicy: V2RoomReplayPolicy { .readOnly }
 }
@@ -282,6 +296,8 @@ public enum V2RoomInvitationResult: Codable, Equatable, Sendable {
     case cancelled(V2ActorGroupJoinRequestWire)
     case cancelledRecord(V2ActorGroupJoinRequestRecordWire)
     case reservedSubmission(V2ActorGroupJoinOwnerSubmissionWire)
+    case preflightStored(V2ActorStoredGroupInviteWire?)
+    case submission(V2ActorGroupJoinSubmissionOutcomeWire)
 }
 public enum V2ActorInvitationCoordinatorResult: Codable, Equatable, Sendable {
     case preview(V2ActorGroupInvitePreviewWire?)
@@ -460,5 +476,13 @@ public struct V2ActorGroupJoinOwnerSubmissionWire: Codable, Equatable, Sendable 
     public let wasInserted: Bool
     public init(outcome: V2ActorGroupJoinQuotaOutcomeWire, targetRequestID: GroupJoinRequestID?, wasInserted: Bool) {
         self.outcome = outcome; self.targetRequestID = targetRequestID; self.wasInserted = wasInserted
+    }
+}
+public struct V2ActorReservedSubmissionResponseQueryWire: Codable, Equatable, Sendable {
+    public let intent: V2ActorGroupJoinQuotaIntentWire
+    public let observed: V2ActorGroupJoinOwnerSubmissionWire
+    public init(intent: V2ActorGroupJoinQuotaIntentWire, observed: V2ActorGroupJoinOwnerSubmissionWire) {
+        self.intent = intent
+        self.observed = observed
     }
 }

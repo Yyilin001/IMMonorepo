@@ -1,5 +1,6 @@
 import FluentKit
 import Foundation
+import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
@@ -11,22 +12,41 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
     private let database: any Database
     private let identities: any V2GroupInvitationIdentityReading
     private let scope: V2GroupInvitationOwnerScope?
+    private let activationScope: V2RoomActivationWriteScope?
 
     public init(database: any Database) {
         self.database = database
         self.identities = PostgresV2GroupInvitationIdentityReader(database: database)
         self.scope = nil
+        self.activationScope = nil
     }
 
     init(database: any Database, identities: any V2GroupInvitationIdentityReading, scope: V2GroupInvitationOwnerScope) {
         self.database = database
         self.identities = identities
         self.scope = scope
+        self.activationScope = nil
+    }
+
+    /// Room actor operations bind every read, replay and mutation to one granted turn.
+    init(database: any Database, identities: any V2GroupInvitationIdentityReading,
+         activationToken: V2RoomActivationToken, inviteID: GroupInviteID? = nil) throws {
+        guard let room = activationToken.roomID.uuidValue else {
+            throw V2GroupInvitationServiceError.invalidRequest
+        }
+        self.database = database
+        self.identities = identities
+        self.scope = .init(roomID: room,
+                           route: try .init(shardID: activationToken.owner.shardID,
+                                            epoch: activationToken.owner.epoch),
+                           inviteID: inviteID?.uuidValue)
+        self.activationScope = try .init(tokens: [activationToken])
     }
 
     func preflightCreation(_ request: V2GroupInviteCreatePersistenceRequest) async throws -> V2StoredGroupInvite? {
         let actorIsActive = try await isActive(request.actorUserID)
-        return try await database.transaction { transaction in
+        return try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,
+            classifyCommitFailure: false) { transaction in
             let sql = try groupInviteSQL(transaction)
             let room = try groupInviteUUID(request.roomID), actor = try groupInviteUUID(request.actorUserID)
             try await fence(room: room, sql: sql, shared: true)
@@ -46,7 +66,8 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
 
     public func create(_ request: V2GroupInviteCreatePersistenceRequest) async throws -> V2StoredGroupInvite {
         let actorIsActive = try await isActive(request.actorUserID)
-        return try await database.transaction { transaction in
+        return try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,
+            classifyCommitFailure: activationScope != nil) { transaction in
             let sql = try groupInviteSQL(transaction)
             let room = try groupInviteUUID(request.roomID)
             let actor = try groupInviteUUID(request.actorUserID)
@@ -114,11 +135,13 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
 
     public func revoke(inviteID: GroupInviteID, roomID: RoomID, actorUserID: UserID, operationID: GroupInviteOperationID, now: Date) async throws {
         let actorIsActive = try await isActive(actorUserID)
-        try await database.transaction { transaction in
+        try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,
+            classifyCommitFailure: activationScope != nil) { transaction in
             let sql = try groupInviteSQL(transaction)
             let room = try groupInviteUUID(roomID)
             let actor = try groupInviteUUID(actorUserID)
             let operation = try groupInviteUUID(operationID)
+            try await advisoryLock(sql, value: "group-invite-revoke:\(actor):\(operation)")
             try await fence(room: room, sql: sql)
             _ = try await authorize(room: room, actor: actor, actorIsActive: actorIsActive, lockMembership: true, sql: sql)
             guard let invite = try await inviteByID(groupInviteUUID(inviteID), lock: true, sql: sql), invite.roomID == room else {
@@ -185,7 +208,8 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
 
     public func submit(_ request: V2GroupJoinSubmissionPersistenceRequest) async throws -> V2GroupJoinSubmissionPersistenceOutcome {
         let actorIsActive = try await isActive(request.applicantUserID)
-        let result = try await database.transaction { transaction in
+        let result = try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,
+            classifyCommitFailure: activationScope != nil) { transaction in
             let sql = try groupInviteSQL(transaction)
             try await lockSubmission(applicant: groupInviteUUID(request.applicantUserID), sql: sql)
             return try await submitLocked(request, actorIsActive: actorIsActive, evaluatedAt: request.createdAt, sql: sql)
@@ -321,7 +345,8 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
         let identityFacts = try await identities.read(userIDs: identityIDs)
         let actorIsActive = identityFacts[reviewerUserID]?.isActive == true
         do {
-            let result: GroupJoinApprovalResult = try await database.transaction { transaction in
+            let result: GroupJoinApprovalResult = try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,
+                classifyCommitFailure: activationScope != nil) { transaction in
                 let sql = try groupInviteSQL(transaction)
                 let room = try groupInviteUUID(roomID), reviewer = try groupInviteUUID(reviewerUserID)
                 let operation = try groupInviteUUID(operationID), request = try groupInviteUUID(requestID)
@@ -399,7 +424,8 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
 
     public func cancel(roomID: RoomID, requestID: GroupJoinRequestID, applicantUserID: UserID, now: Date) async throws -> V2GroupJoinRequestRecord {
         guard try await isActive(applicantUserID) else { throw V2GroupInvitationServiceError.permissionDenied }
-        let result = try await database.transaction { transaction in
+        let result = try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,
+            classifyCommitFailure: activationScope != nil) { transaction in
             let sql = try groupInviteSQL(transaction)
             let applicant = try groupInviteUUID(applicantUserID), room = try groupInviteUUID(roomID)
             // Submission uses this lock too: quota release and a subsequent
@@ -430,7 +456,8 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
 
     public func reject(roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID, operationID: GroupJoinDecisionOperationID, now: Date) async throws -> V2GroupJoinDecisionPreparationOutcome {
         let actorIsActive = try await isActive(reviewerUserID)
-        let result: GroupJoinDecisionResult = try await database.transaction { transaction in
+        let result: GroupJoinDecisionResult = try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,
+            classifyCommitFailure: activationScope != nil) { transaction in
             let sql = try groupInviteSQL(transaction)
             let room = try groupInviteUUID(roomID), reviewer = try groupInviteUUID(reviewerUserID), operation = try groupInviteUUID(operationID)
             try await advisoryLock(sql, value: reviewer.uuidString + ":" + operation.uuidString)
@@ -463,7 +490,7 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
         if lockMembership {
             // Lock the room before any member row, as membership.change does.
             // A separate statement makes the order independent of join plans.
-            try await sql.raw("SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: room) FOR UPDATE").run()
+            try await sql.raw("SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: room) FOR NO KEY UPDATE").run()
         }
         let lock = lockMembership ? " FOR UPDATE OF membership" : ""
         guard let row = try await sql.raw("""
@@ -517,6 +544,7 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
     }
 
     private func advisoryLock(_ sql: any SQLDatabase, value: String) async throws {
+        if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
         try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: value), 0))").run()
     }
 }
@@ -658,6 +686,11 @@ private extension PostgresV2GroupInvitationStore {
 
     func fence(room: UUID, sql: any SQLDatabase, shared: Bool = false) async throws {
         if let scope, room != scope.roomID { throw V2GroupInvitationServiceError.conflict }
+        if let activationScope {
+            try await v2SetRoomActivationSQLTimeouts(.default, sql: sql)
+            try await activationScope.require([room], sql: sql)
+            return
+        }
         guard let row = try await sql.raw("""
             SELECT room_shard_id, owner_epoch FROM im_v2.rooms
             WHERE room_id = \(bind: room) \(unsafeRaw: shared ? "FOR SHARE" : "FOR UPDATE")
@@ -746,7 +779,8 @@ extension PostgresV2GroupInvitationStore {
         let created = try V2PostgresTimestamp(date: intent.createdAt)
         let attempted = try V2PostgresTimestamp(date: intent.attemptCreatedAt)
         let active = try await isActive(.init(uuid: intent.applicantUserID))
-        return try await database.transaction { transaction in
+        return try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,
+            classifyCommitFailure: activationScope != nil) { transaction in
             let sql = try groupInviteSQL(transaction)
             try await lockSubmission(applicant: intent.applicantUserID, sql: sql)
             try validateInvite(invite: intent.inviteID, room: intent.roomID)
