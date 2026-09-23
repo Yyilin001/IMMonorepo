@@ -288,6 +288,8 @@ internal struct HandshakeStateMachine {
 // MARK: Handshake error types
 
 enum HandshakeError: Error {
+    case responseTimedOut
+    case channelClosedBeforeResponse
     /// The first handshake bytes did not match the expected "magic bytes";
     /// It is very likely the other side attempting to connect to our port is NOT a Swift Distributed Actors system,
     /// thus we should reject it immediately. This can happen due to misconfiguration, e.g. mixing

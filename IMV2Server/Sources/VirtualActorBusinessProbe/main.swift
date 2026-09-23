@@ -65,7 +65,7 @@ enum VirtualActorBusinessProbe {
             default: throw ProbeError.missingEnvironment("host|client mode")
             }
         } catch {
-            fputs("G4_PROBE_FAILURE \(error)\n", stderr)
+            FileHandle.standardError.write(Data("G4_PROBE_FAILURE \(error)\n".utf8))
             exit(EXIT_FAILURE)
         }
     }
@@ -166,6 +166,7 @@ enum VirtualActorBusinessProbe {
             let request = V2RoomRequest.messaging(.send(.init(roomID: roomID,
                 actorUserID: senderID, clientMessageID: clientID, text: "G4 real room send",
                 media: [], mentions: [], entities: [], replyTo: nil)))
+            try marker("client-started")
             let first = try await callUntilAvailable(ref, request: request, seconds: 35)
             guard case .messaging(.send(.accepted(let accepted))) = first,
                   accepted.clientMessageID == clientID else {

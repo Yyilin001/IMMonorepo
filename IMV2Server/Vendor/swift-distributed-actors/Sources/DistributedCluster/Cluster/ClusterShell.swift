@@ -1139,6 +1139,9 @@ extension ClusterShell {
                 metadata: state.metadataForHandshakes(node: reject.targetNode, error: nil)
             )
             self.terminateAssociation(context.system, state: &state, reject.targetNode)
+            if case .initiated? = state.handshakeInProgress(with: reject.targetNode.endpoint) {
+                _ = state.closeOutboundHandshakeChannel(with: reject.targetNode.endpoint)
+            }
             return self.ready(state: state)
         }
 
@@ -1157,11 +1160,14 @@ extension ClusterShell {
             metadata: state.metadataForHandshakes(node: reject.targetNode, error: nil)
         )
 
-        // FIXME: don't retry on rejections; those are final; just failures are not, clarify this
-        return .same
+        if case .initiated? = state.handshakeInProgress(with: reject.targetNode.endpoint) {
+            _ = state.closeOutboundHandshakeChannel(with: reject.targetNode.endpoint)
+        }
+        return self.ready(state: state)
     }
 
     private func onHandshakeFailed(_ context: _ActorContext<Message>, _ state: ClusterShellState, with endpoint: Cluster.Endpoint, error: Error) -> _Behavior<Message> {
+        var state = state
         // we MAY be seeing a handshake failure from a 2 nodes concurrently shaking hands on 2 connections,
         // and we decided to tie-break and terminate one of the connections. As such, the handshake COMPLETED successfully but
         // on the other connection; and the terminated one may yield an error (e.g. truncation error during proto parsing etc),
@@ -1189,7 +1195,10 @@ extension ClusterShell {
         // TODO: tweak logging some more, this is actually not scary in racy handshakes; so it may happen often
         state.log.warning("Handshake error while connecting [\(endpoint)]: \(error)", metadata: state.metadataForHandshakes(endpoint: endpoint, error: error))
 
-        return .same
+        if case .initiated? = state.handshakeInProgress(with: endpoint) {
+            _ = state.closeOutboundHandshakeChannel(with: endpoint)
+        }
+        return self.ready(state: state)
     }
 
     private func onRestInPeace(_ context: _ActorContext<Message>, _ state: ClusterShellState, intendedNode: Cluster.Node, fromNode: Cluster.Node) -> _Behavior<Message> {

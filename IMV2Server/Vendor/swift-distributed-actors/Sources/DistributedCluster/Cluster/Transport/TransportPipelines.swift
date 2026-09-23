@@ -35,6 +35,8 @@ private final class InitiatingHandshakeHandler: ChannelInboundHandler, Removable
     private let log: Logger
     private let handshakeOffer: Wire.HandshakeOffer
     private let cluster: ClusterShell.Ref
+    private var responseTimeout: Scheduled<Void>?
+    private var finished = false
 
     init(log: Logger, handshakeOffer: Wire.HandshakeOffer, cluster: ClusterShell.Ref) {
         self.log = log
@@ -42,12 +44,47 @@ private final class InitiatingHandshakeHandler: ChannelInboundHandler, Removable
         self.cluster = cluster
     }
 
+    func handlerAdded(context: ChannelHandlerContext) {
+        // ClientBootstrap's connect timeout ends at TCP establishment. A peer
+        // can close or stall before sending the Cluster handshake response;
+        // without this bound subsequent joins reuse a stuck in-flight offer.
+        responseTimeout = context.eventLoop.scheduleTask(in: .seconds(10)) {
+            self.fail(context: context, error: HandshakeError.responseTimedOut)
+            context.close(promise: nil)
+        }
+    }
+
+    func handlerRemoved(context: ChannelHandlerContext) {
+        fail(context: context, error: HandshakeError.channelClosedBeforeResponse)
+        responseTimeout?.cancel()
+        responseTimeout = nil
+    }
+
     func channelActive(context: ChannelHandlerContext) {
         self.initiateHandshake(context: context)
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        guard !finished else { return }
         self.readHandshakeResponse(context: context, bytes: self.unwrapInboundIn(data))
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        fail(context: context, error: HandshakeError.channelClosedBeforeResponse)
+        context.fireChannelInactive()
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        fail(context: context, error: error)
+        context.close(promise: nil)
+    }
+
+    private func fail(context: ChannelHandlerContext, error: Error) {
+        guard !finished else { return }
+        finished = true
+        responseTimeout?.cancel()
+        responseTimeout = nil
+        cluster.tell(.inbound(.handshakeFailed(handshakeOffer.targetEndpoint, error)))
     }
 
     private func initiateHandshake(context: ChannelHandlerContext) {
@@ -75,6 +112,9 @@ private final class InitiatingHandshakeHandler: ChannelInboundHandler, Removable
 
         do {
             let response = try self.readHandshakeResponse(bytes: &bytes)
+            finished = true
+            responseTimeout?.cancel()
+            responseTimeout = nil
             switch response {
             case .accept(let accept):
                 self.log.debug("Received handshake accept from: [\(reflecting: accept.targetNode)]", metadata: metadata)
@@ -90,7 +130,7 @@ private final class InitiatingHandshakeHandler: ChannelInboundHandler, Removable
             }
         } catch {
             self.log.debug("Handshake failure, error [\(error)]:\(String(reflecting: type(of: error)))", metadata: metadata)
-            self.cluster.tell(.inbound(.handshakeFailed(self.handshakeOffer.targetEndpoint, error)))
+            fail(context: context, error: error)
             _ = context.close(mode: .all)
         }
     }

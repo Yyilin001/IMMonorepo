@@ -4,11 +4,87 @@ import DistributedCluster
 import Foundation
 import IMV2ActorContracts
 import IMV2ActorRuntime
+import NIOCore
+import NIOPosix
+import Synchronization
 import Testing
 @testable import IMV2ActorCluster
 
 @Suite("Room Cluster signed discovery", .serialized)
 struct V2RoomClusterDiscoveryTests {
+    @Test("a TCP peer that closes or stalls before handshake cannot block a later host incarnation",
+          arguments: [true, false])
+    func rejoinAfterHandshakeFailure(closeImmediately: Bool) async throws {
+        let port = Int.random(in: 30_000...60_000)
+        let callerPort = Int.random(in: 30_000...60_000)
+        let hostID = try V2ActorHostID("closed-handshake-host")
+        let hostKey = Curve25519.Signing.PrivateKey()
+        let callerKey = Curve25519.Signing.PrivateKey()
+        let hostSigner = try V2ActorSigningIdentity(serviceID: .init("closed-host-service"),
+                                                     privateKey: hostKey.rawRepresentation)
+        let callerSigner = try V2ActorSigningIdentity(serviceID: .init("closed-caller-service"),
+                                                       privateKey: callerKey.rawRepresentation)
+        let trust = try V2ActorTrustStore(services: [
+            .init(serviceID: hostSigner.serviceID, publicKey: hostKey.publicKey.rawRepresentation,
+                  permissions: [], hostedIDs: [hostID]),
+            .init(serviceID: callerSigner.serviceID, publicKey: callerKey.publicKey.rawRepresentation,
+                  permissions: [.roomCoordination]),
+        ])
+        let runtime = try V2RoomRuntimeConfiguration(
+            maximumActiveRooms: 4, maximumConcurrentRestores: 2,
+            maximumActivationWaitersPerRoom: 2, maximumPendingActivations: 4,
+            maximumActivationWaitersPerHost: 4, maximumConcurrentResolutions: 2,
+            maximumConcurrentReservations: 2)
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let accepted = Mutex(0)
+        let disconnected = Mutex(false)
+        let dropper = try await ServerBootstrap(group: group)
+            .childChannelInitializer { channel in
+                accepted.withLock { $0 += 1 }
+                channel.closeFuture.whenComplete { _ in disconnected.withLock { $0 = true } }
+                return closeImmediately ? channel.close() : channel.eventLoop.makeSucceededFuture(())
+            }
+            .bind(host: "127.0.0.1", port: port).get()
+        do {
+            let callerSystem = await makeSystem(port: callerPort)
+            let caller = V2RoomClusterClient(system: callerSystem, signer: callerSigner,
+                                             trust: trust, limits: try .init(), configuration: runtime)
+            let peer = try V2RoomDiscoveryPeer(hostID: hostID, serviceID: hostSigner.serviceID,
+                                               address: "127.0.0.1", port: port,
+                                               accessibleShardIDs: ["pinned-shard"], maximumRooms: 1)
+            let discovery = V2RoomClusterDiscovery(system: callerSystem, client: caller,
+                trust: trust, configuration: try .init(peers: [peer], pollInterval: .milliseconds(100)))
+            await discovery.start()
+            try await waitUntil(discovery: discovery) { accepted.withLock { $0 > 0 } }
+            // The stalled case must end through the initiating handshake's own
+            // watchdog. Closing the fake listener first would hide that bug.
+            try await waitUntil(discovery: discovery, timeout: .seconds(14)) {
+                disconnected.withLock { $0 }
+            }
+            try await dropper.close().get()
+
+            let hostSystem = await makeSystem(port: port)
+            let published = try await publish(hostID: hostID, signer: hostSigner,
+                                              system: hostSystem, port: port, availableRooms: 1)
+            defer { withExtendedLifetime(published) {} }
+            let owner = try V2RoomDataOwner(shardID: "pinned-shard", epoch: 0)
+            try await waitUntil(discovery: discovery, timeout: .seconds(25)) {
+                try await caller.candidates(for: owner).first?.identity == published.descriptor.identity
+            }
+            await discovery.stop()
+            #expect(await discovery.quiesce(deadline: .now + .seconds(5)))
+            await caller.stop()
+            #expect(await caller.quiesce(deadline: .now + .seconds(2)))
+            try await callerSystem.shutdown().wait()
+            try await hostSystem.shutdown().wait()
+            try await group.shutdownGracefully()
+        } catch {
+            try? await dropper.close().get()
+            try? await group.shutdownGracefully()
+            throw error
+        }
+    }
+
     @Test("two real ClusterSystems discover a signed endpoint and replace its incarnation")
     func discoversRestartedHost() async throws {
         let port = Int.random(in: 30_000...60_000)
