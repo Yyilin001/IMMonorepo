@@ -50,7 +50,21 @@ Execution evidence from the unmodified production binaries at source
   30-second recovery tail. They do not establish that gossip decoding alone
   caused that tail.
 
-The final frozen production build with the pending gossip fix still requires
-this same original-Gateway scenario to be rerun. The earlier diagnostic in
-which Gateway was restarted before replay is deliberately excluded from
-acceptance evidence.
+The frozen build with the gossip fix was rerun from checkout and binary source
+`fb7ffdf1c56ff7f3247b0e71c553ef22344a8cf6`. The disposable run
+`/Users/yyl/.codex/virtual-actor-builds/application/run-303dc3576e734bcd9bb2967e7fc64a91/result.json`
+passed the same complete App stack and cleaned its private project. Actor Host
+backend 141 at `172.20.0.5/32` was blocked by admission-lock holder 222 when
+SIGTERM was sent at Unix time `1790182606.852`; one message and completion
+were visible after unlock, Host exited 0, and the old lease was released at
+epoch 1. The original Gateway process stayed running; after Host restart its
+eighteenth same-ID retry returned the original message ID in `30.412` seconds,
+with one durable message and completion and a new live lease at epoch 2.
+`services.log` contains zero `Missing Member for unique node id` errors, versus
+two in the comparable prior passing run and 270 in an earlier passing run.
+
+The gossip patch eliminated the observed decode errors in this run. The
+original caller still took about 30 seconds to recover, compared with
+`33.28` seconds before the patch. This single-run comparison does not prove a
+latency improvement. The earlier diagnostic in which Gateway was restarted
+before replay is deliberately excluded from acceptance evidence.
