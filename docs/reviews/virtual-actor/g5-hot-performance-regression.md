@@ -1,8 +1,24 @@
 # G5 hot candidates: functional pass, remaining CPU regression
 
-Status: **performance failed; the latest local-capability candidate passes SQL but still exceeds the frozen CPU limit**. Frozen main is `f1cdd78d6a21bf0ae23da627c0710c65115236aa`; the measured candidates are `171b34ef59c5345709cd6260d081233d7ae89a52`, optimized `fdf6838e9b0276eaf7e90acec3bed5d8fd8511fd`, and local-capability `c2214c1c299e10e7c57ae6260ae232ef3385f7a3`. The hot operating point and thresholds were frozen before candidate sampling as recorded in the [baseline protocol](v1-baseline-protocol.md). Neither load nor thresholds are changed in response to these results.
+Status: **performance failed; the latest SQL-context candidate passes SQL but still exceeds the frozen CPU limit**. Frozen main is `f1cdd78d6a21bf0ae23da627c0710c65115236aa`; the latest measured candidate is `812af24a319dbaaabcb66f0bd96d0c43bf95d2cc`. Earlier candidate results remain below. The hot operating point and thresholds were frozen before candidate sampling as recorded in the [baseline protocol](v1-baseline-protocol.md). Neither load nor thresholds are changed in response to these results.
 
-## Latest local-capability candidate: formal hot gate still failed
+## Latest SQL-context candidate: two fewer SQL calls, CPU still over budget
+
+The [transaction-bound SQL reuse implementation](g5-sql-context-evidence.md) passed ten focused PostgreSQL tests and its seven-product Linux Release build. Its `capacity-formal-hot-sql-context-rate025-campaign` then completed main 01 and candidate 02. Both runners passed correctness, formal eligibility and cleanup: 100 authenticated connections, 52,500 acknowledged and durable messages, zero workload errors, unchanged room count. The outer assessor exited 1 on candidate CPU and stopped before runs 03–06, whose artifact directories do not exist.
+
+| Steady metric | Main 01 | `812af24a` candidate 02 | Frozen limit | Candidate result |
+| --- | --- | --- | --- | --- |
+| Acknowledgements/s | 125 | 125 | ≥112.5 | Pass |
+| p95 / p99 (ms) | 8 / 9 | 9 / 12 | ≤18 / ≤35 | Pass |
+| SQL calls / acknowledgement | 18.351973 | 22.109413 | ≤24.775092 | Pass |
+| Gateway CPU ms / acknowledgement | 1.401979 | 2.218297 | ≤2.133047 | **Fail** |
+| Sampled Gateway PID-1 peak RSS (bytes) | 77,135,872 | 98,390,016 | ≤345,440,256 | Pass |
+
+Only `serverCPUSecondsPerAcceptedUnitMaximum` failed; exact candidate CPU is 2.21829656 ms/ACK against 2.13304732, about 4.0% over. SQL fell by about two calls/ACK from the earlier `c221` sample; CPU fell about 4.3%, but the implementation is not performance-accepted. Actor outstanding peaks were four commands / 1,648 bytes; mean physical send batch size was approximately one. Private project `imv2-va-cap-2228c083200b4769` was cleaned up, with no remaining containers, networks or volumes reported by the runner and independently checked by the verification agent.
+
+Evidence: `/Users/yyl/.codex/virtual-actor-builds/capacity-formal-hot-sql-context-rate025-campaign/assessment-02.json` SHA-256 `c83f44e9088f5af291951886517e0794cacec8d0e32794fcbaefbfdf9882d3e4`; candidate 02 `result.json` SHA-256 `418ec5af01984b61f2003891fa27524b1f7e2c4e1b70ab1f3c6dcff3360ef951`. Main 01 assessment SHA-256 is `f9a863f6651aab0e7521245863e409b8191766730f5b38ed2902ff1af8a65185`, and its result SHA-256 is `fa9d89e9fb5a5ff35955cf9c1c014b8ece2c5c9678637dc860541d439b2c4732`. A separate candidate-only CPU diagnostic is being collected; it cannot replace these formal results.
+
+## Earlier local-capability candidate (`c2214c1c`)
 
 The `capacity-formal-hot-local-capability-rate025-campaign` ran main 01 and candidate 02, then exited 1 at the CPU assessment; runs 03–06 were not started. Both immutable runners passed correctness and formal eligibility. Candidate 02 authenticated 100 connections, acknowledged and durably stored all 52,500 messages with zero workload errors, and completed project cleanup. The measured Gateway/container CPU includes the same-process Actor and observer work; it is not a per-function cost.
 
@@ -19,8 +35,6 @@ The assessor lists only `serverCPUSecondsPerAcceptedUnitMaximum` as failing; Act
 A separate [candidate-only CPU diagnostic](g5-hot-cpu-profile-evidence.md#later-c2214c1c-candidate-only-diagnostic) sampled the exact `c221` Release Gateway at the same 125 send/s hot operating point. Its frozen runner exited 0 with 52,500 acknowledged and durable messages, zero workload failures and complete private-project cleanup. The 45-second `task-clock:u` profile collected 437 user samples with zero lost, but 17.02% unresolved exclusive leaves. JSON encoding, SQL/PostgresNIO processing and a few SQL schema regular-expression stacks appear in the sample; these overlapping call paths do not fully explain the CPU excess. No simultaneous main profile was collected. This diagnostic is excluded from the frozen assessor, so the **formal CPU failure remains** and the rest of the six-run campaign stays unstarted.
 
 The formal candidate's `measurement-steady.json` (SHA-256 `2c2465f643d9cc3f088677db8a4125b2a654ddec1f368a56a87e3eae06222915`, in the candidate 02 directory above) identifies the executed write path: its final `singleton_dispatch` counter is 52,500, while atomic batches attempted and committed are both zero. The sampled steady counter delta is 37,454 singleton dispatches; the metrics scrape boundaries differ from the loader's exact 37,500-message steady window. Source tracing maps these singletons through `V2SendMessageAdmissionBatcher.acceptIndividually` to the store's scalar `acceptanceCommit` / `acceptInTransaction` path. An optimization limited to `acceptPlainHybridGroupBatch`, which requires at least two requests, would not affect this measured hot run. Subsequent SQL reuse work must cover the ordinary scalar path while preserving its existing operation/room/lease lock order and excluding forwarding, imports and authorization-receipt preparation from the narrowed optimization.
-
-The later [transaction-bound SQL reuse implementation](g5-sql-context-evidence.md) has ten passing focused PostgreSQL tests and covers the measured singleton path. Frozen candidate `812af24a` has passed its seven-product Linux Release build and input checks; the fresh formal hot campaign is running. No performance acceptance is recorded yet, and implementation evidence does not replace a prior failure or frozen limit.
 
 ## Prior optimized-candidate result (`fdf6838e`)
 
