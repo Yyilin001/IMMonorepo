@@ -305,6 +305,72 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             identifiers: request.identifiers, now: request.now)
     }
 
+    /// Accept one already reserved source/target pair together with its ledger.
+    /// The callbacks cannot acquire another room or another DB connection. They
+    /// run after message-operation and canonical room/token locks, in the exact
+    /// transaction that commits acceptance. Control authorization is prepared
+    /// before this transaction and acknowledged only after its commit.
+    func acceptActorForwardPair(
+        request: V2RoomWriteRequest, sourceRoomID: RoomID,
+        activationTokens: [V2RoomActivationToken],
+        prepareLedger: @escaping @Sendable (any Database) async throws -> Void,
+        recordLedger: @escaping @Sendable (V2SendMessageOutcome, any Database) async throws -> Void
+    ) async throws -> V2SendMessageOutcome {
+        let rooms = Set([sourceRoomID, request.command.roomID])
+        guard request.command.forwardedFrom != nil, activationTokens.count == rooms.count,
+              Set(activationTokens.map(\.roomID)) == rooms,
+              v2PostgresTimestampCanEncode(request.now) else {
+            throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        }
+        var scoped = usingActivationScope(try .init(tokens: activationTokens))
+        scoped.ownerRoutes = try Dictionary(uniqueKeysWithValues: activationTokens.map {
+            (try uuid($0.roomID), try V2RoomShardRoute(shardID: $0.owner.shardID, epoch: $0.owner.epoch))
+        })
+        scoped.forwardOwnerSourceRoomID = try uuid(sourceRoomID)
+        return try await scoped.acceptPreparedActorForwardPair(request: request,
+            prepareLedger: prepareLedger, recordLedger: recordLedger)
+    }
+
+    private func acceptPreparedActorForwardPair(
+        request: V2RoomWriteRequest,
+        prepareLedger: @escaping @Sendable (any Database) async throws -> Void,
+        recordLedger: @escaping @Sendable (V2SendMessageOutcome, any Database) async throws -> Void
+    ) async throws -> V2SendMessageOutcome {
+        if let controlDatabase, controlPolicyScope == nil {
+            return try await withDurableAuthorizations(commands: [request.command],
+                controlDatabase: controlDatabase, now: request.now) { scoped in
+                try await scoped.acceptPreparedActorForwardPair(request: request,
+                    prepareLedger: prepareLedger, recordLedger: recordLedger)
+            }
+        }
+        try validateAuthorizationCommand(request.command)
+        let room = try uuid(request.command.roomID), sender = try uuid(request.command.senderUserID)
+        guard let source = forwardOwnerSourceRoomID else { throw V2RoomActivationLeaseError.activationChanged }
+        let commit: RoomWriteCommit
+        do {
+            commit = try await withRoomWriteTransaction { transaction in
+                let sql = try sqlDatabase(from: transaction)
+                try await acquireMessageOperationLock(roomID: room, senderID: sender,
+                    clientMessageID: uuid(request.command.clientMessageID), sql: sql)
+                try await requireSelectedOwners([source, room], sql: sql)
+                try await prepareLedger(transaction)
+                let accepted = try await acceptInTransaction(command: request.command,
+                    capacityProfile: request.capacityProfile, identifiers: request.identifiers, now: request.now,
+                    roomID: room, senderID: sender, cachedDirectPolicy: nil, transaction: transaction)
+                try await recordLedger(accepted.outcome, transaction)
+                return accepted
+            }
+        } catch let rejection as LateShardAdmissionRejection {
+            // All pair ledger and message effects rolled back together.
+            switch rejection {
+            case .rateLimited(let seconds): return .rateLimited(retryAfterSeconds: seconds)
+            case .unavailable(let reason): return .unavailable(reason)
+            }
+        }
+        return try await finalizeCommittedAcceptance(command: request.command,
+            cacheKey: .init(roomID: room, senderID: sender), commit: commit)
+    }
+
     public func acceptAtomicallyOwnerValidated(
         requests: [V2OwnerValidatedRoomWriteRequest]
     ) async throws -> [V2SendMessageOutcome] {
