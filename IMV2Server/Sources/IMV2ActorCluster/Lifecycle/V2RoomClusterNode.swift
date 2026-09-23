@@ -121,15 +121,16 @@ public actor V2RoomClusterNode {
     }
 
     public func drain(deadline: ContinuousClock.Instant) async -> V2RoomActivationDrainResult {
-        await host.drain(deadline: deadline)
+        await host.beginDrain()
+        for client in clients { await client.stop() }
+        return await host.drain(deadline: deadline)
     }
 
     /// An incomplete drain leaves Cluster and DB access alive. The caller may
     /// retry stop after the executing SQL/restore has actually finished.
     public func stop(deadline: ContinuousClock.Instant) async throws -> V2RoomActivationDrainResult {
-        let result = await host.drain(deadline: deadline)
+        let result = await drain(deadline: deadline)
         guard result.completed else { return result }
-        for client in clients { await client.stop() }
         guard await inbound?.quiesce(deadline: deadline) ?? true else {
             throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
         }
