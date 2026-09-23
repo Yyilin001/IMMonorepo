@@ -1561,6 +1561,10 @@
     {
       "path": "docs/reviews/virtual-actor/g5-credit-refill-fence-evidence.md",
       "owner": "V1"
+    },
+    {
+      "path": "docs/reviews/virtual-actor/g5-database-edge-evidence.md",
+      "owner": "V1"
     }
   ]
 }

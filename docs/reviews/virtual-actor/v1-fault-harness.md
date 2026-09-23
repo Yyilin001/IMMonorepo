@@ -12,6 +12,7 @@
 | `V2RoomHostPostgresLifecycleTests` | 生产 Host/Server factory 和 PG lease；恢复中失租、共享等待者取消、容量隔离与 idle 回收重入 | [生命周期](g2-host-pg-lifecycle-evidence.md) |
 | `V2RoomCreditRefillFencePostgresTests` | 生产 direct append 暖额度耗尽、跨连接 refill/业务 fence、回滚和旧 epoch；原生与 Linux PG 均已执行 | [额度与 fence](g5-credit-refill-fence-evidence.md) |
 | `test_v2_virtual_actor_application_stack.py --cross-entry-disable` | 已认证的两条 Gateway 会话跨 Operator/Account 禁用提交，主动撤销连接、零新持久效果，原 Host/Gateway 保留 | [跨入口撤权](g5-cross-entry-disable-evidence.md) |
+| `test_v2_virtual_actor_database_edges.py` | 双 Host、caller、三个独立 PG；分别隔断 Host→control/owner，健康 Host 继续编辑/发送，数据库时钟失租后封闭写入并按原 ID 恢复 | [数据库链路隔离](g5-database-edge-evidence.md) |
 
 Linux 多 Host 复跑示例；scratch 由该次运行独占且位于源码之外：
 
