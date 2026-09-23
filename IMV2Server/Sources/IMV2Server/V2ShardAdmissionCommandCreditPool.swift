@@ -254,6 +254,16 @@ public actor V2ShardAdmissionCommandCreditPool {
     for token in tokens { commit(token) }
   }
 
+  /// An unknown COMMIT can have spent this shard credit. Keep the durable
+  /// debit, without refunding it or counting an unconfirmed commit.
+  func discard(_ token: Token) {
+    guard tokenKeys.removeValue(forKey: token.id) != nil,
+          var entry = credits[token.key] else { return }
+    entry.inFlight.remove(token.id)
+    credits[token.key] = entry
+    expiredCreditsDiscarded += 1
+  }
+
   /// 归还一个外层事务未提交的令牌。
   ///
   /// 归还是进程内行为；数据库侧整批额度仍保持安全计费。

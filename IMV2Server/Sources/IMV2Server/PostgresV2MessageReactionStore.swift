@@ -9,6 +9,13 @@ import SQLKit
 /// 加锁顺序与其他房间变更一致：操作 → 房间 → 消息 → 准入 → 分片。
 public struct PostgresV2MessageReactionStore: V2MessageReactionStore, V2OwnerValidatedMessageReactionStore {
     private let database: any Database
+    private var activationScope: V2RoomActivationWriteScope?
+
+    public func usingActivationScope(_ scope: V2RoomActivationWriteScope) -> Self {
+        var copy = self
+        copy.activationScope = scope
+        return copy
+    }
     /// 组合数据库。
     ///
     /// - Parameter database: 存放房间、消息、表情与准入状态的数据库。
@@ -58,13 +65,16 @@ public struct PostgresV2MessageReactionStore: V2MessageReactionStore, V2OwnerVal
     /// - Throws: 房间或消息不存在、发起者非成员、已达表情数量上限、
     ///   房间与分片租约不一致或持久化失败时抛出。
     private func change(command: V2ChangeMessageReactionCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageReactionOutcome {
-        return try await database.transaction { transaction in
+        return try await v2WithPostgresTransactionRetry(database: database,
+            maximumRetryCount: 0, classifyCommitFailure: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2MessageReactionStoreError.corruptPersistenceState }
+            if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             let roomID = try reactionUUID(command.roomID), actorID = try reactionUUID(command.actorUserID)
             let operationID = try reactionUUID(command.operationID), messageID = try reactionUUID(command.messageID)
             let lockKey = actorID.uuidString + ":" + operationID.uuidString
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             if let ownerRoute { try await v2RequireRoomOwner(roomID: roomID, route: ownerRoute, sql: sql) }
+            try await activationScope?.require([roomID], sql: sql)
             if let prior = try await sql.raw("SELECT room_id, message_id, reaction, action, room_sequence, event_id, created_at FROM im_v2.message_reaction_operations WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)").first(decoding: ReactionOperationRow.self) {
                 guard prior.matches(command, roomID: roomID, messageID: messageID) else { return .idempotencyConflict }
                 guard v2PostgresTimestampCanEncode(prior.createdAt) else { throw V2MessageReactionStoreError.corruptPersistenceState }

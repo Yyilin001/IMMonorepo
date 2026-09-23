@@ -1,5 +1,6 @@
 import FluentKit
 import Foundation
+import IMV2ActorContracts
 import IMV2Core
 import NIOCore
 import PostgresNIO
@@ -22,6 +23,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     // Immutable for the lifetime of one scoped value copy. Shared caches and
     // credit actors keep their identities; no mutable ambient route is used.
     private var ownerRoutes: [UUID: V2RoomShardRoute]?
+    private var activationScope: V2RoomActivationWriteScope?
     private var forwardOwnerSourceRoomID: UUID?
     private var controlPolicyScope: [V2DirectSendPolicyCache.Key: V2DirectSendControlPolicy]?
     private let strangerMessagePolicy: V2StrangerMessagePolicy
@@ -85,6 +87,15 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return copy
     }
 
+    /// Bind exact, already admitted activation authority. Every SQL path still
+    /// checks it inside its transaction; this value copy grants no authority by
+    /// itself and retains the shared cache and credit-pool identities.
+    public func usingActivationScope(_ scope: V2RoomActivationWriteScope) -> Self {
+        var copy = self
+        copy.activationScope = scope
+        return copy
+    }
+
     /// Bind the authoritative control pool. It must be independent of the owner
     /// pool even when both connect to the same physical database. Runtime must
     /// also pass an independent resolution pool: policy writers must not wait
@@ -133,7 +144,11 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     private func withRoomWriteTransaction<Result: Sendable>(
         _ operation: @escaping @Sendable (any Database) async throws -> Result
     ) async throws -> Result {
-        try await v2WithPostgresTransactionRetry(database: database) { transaction in
+        try await v2WithPostgresTransactionRetry(database: database,
+            classifyCommitFailure: activationScope != nil) { transaction in
+            if activationScope != nil {
+                try await v2SetRoomActivationSQLTimeouts(.default, sql: sqlDatabase(from: transaction))
+            }
             let result = try await operation(transaction)
             if let grants = authorizationGrants {
                 guard let recordedAt = authorizationRecordedAt else { throw V2DirectAuthorizationIntentError.corruptPersistence }
@@ -212,7 +227,11 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         // Finalize caches and consumed admission credits before a fallible ACK.
         // A transport failure here retains the obligation; retries/recovery read
         // the immutable owner proof and never return consumed credits.
-        try await acknowledgeAuthorizations(grants, now: now)
+        do { try await acknowledgeAuthorizations(grants, now: now) }
+        catch {
+            if activationScope != nil { throw V2RoomTransactionOutcomeUnknown() }
+            throw error
+        }
         return result
     }
 
@@ -323,6 +342,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                 return expected.shardID == row.shardID && expected.epoch == row.epoch
             }) else { throw V2RoomOwnerFenceError.ownerChanged }
         }
+        try await activationScope?.require(roomIDs, sql: sql)
         if let grants = authorizationGrants {
             guard let transaction = sql as? any Database else { throw V2DirectAuthorizationIntentError.corruptPersistence }
             for key in grants.keys.sorted() {
@@ -344,6 +364,11 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         guard v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let roomID = try uuid(command.roomID)
         let senderID = try uuid(command.senderUserID)
+        _ = try activationScope?.token(for: roomID)
+        if activationScope != nil, command.forwardedFrom != nil,
+           forwardOwnerSourceRoomID == nil {
+            throw V2RoomActivationLeaseError.activationChanged
+        }
         try validateAuthorizationCommand(command)
         if let controlDatabase, controlPolicyScope == nil {
             do {
@@ -476,6 +501,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                 try await acquireMessageOperationLock(roomID: export.intent.targetRoomID,
                     senderID: export.intent.actorUserID, clientMessageID: export.intent.targetClientMessageID, sql: sql)
                 try await v2AssertForwardInboxOwner(authority, sql: sql)
+                try await activationScope?.require([export.intent.targetRoomID], sql: sql)
                 guard v2PostgresTimestampCanEncode(now) else { throw V2ForwardInboxError.corruptPersistenceState }
                 do {
                     // Recovery of an already committed receipt must not be
@@ -759,6 +785,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     public func acceptAtomically(
         requests: [V2RoomWriteRequest]
     ) async throws -> [V2SendMessageOutcome] {
+        for request in requests { _ = try activationScope?.token(for: uuid(request.command.roomID)) }
         for request in requests { try validateAuthorizationCommand(request.command) }
         if let controlDatabase, controlPolicyScope == nil {
             guard requests.count >= 2, requests.count <= 128 else { throw V2DirectSendControlPolicyError.invalidBatch }
@@ -1093,7 +1120,11 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                 }
             }
         } catch {
-            await shardAdmissionCommandCreditPool.release(grantedTokens, now: releaseNow)
+            if error is V2RoomTransactionOutcomeUnknown {
+                for token in grantedTokens { await shardAdmissionCommandCreditPool.discard(token) }
+            } else {
+                await shardAdmissionCommandCreditPool.release(grantedTokens, now: releaseNow)
+            }
             if v2IsSendCompletionRace(error) {
                 await hybridGroupShardCreditSnapshotCache.invalidate(uniqueRoomIDs)
                 throw V2AtomicRoomWriteBatchError(reason: .conditionalWriteMismatch)
@@ -1104,6 +1135,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             throw error
         }
         await shardAdmissionCommandCreditPool.commit(grantedTokens)
+        do {
         var outcomes = Array<V2SendMessageOutcome?>(
             repeating: nil,
             count: requests.count
@@ -1118,6 +1150,10 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
         return outcomes.compactMap { $0 }
+        } catch {
+            if activationScope != nil { throw V2RoomTransactionOutcomeUnknown() }
+            throw error
+        }
     }
 
     /// 权威的冷路径/缓存未命中批次。
@@ -1526,7 +1562,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                     return .init(
                         roomID: candidate.roomID,
                         shardState: candidate.snapshot.shardState,
-                        now: candidate.request.now
+                        now: candidate.request.now,
+                        activation: try activationScope?.token(for: candidate.roomID)
                     )
                 }
             )
@@ -1710,15 +1747,24 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             await releaseFastPlainDirectRoomLogCredits(ordered)
             return nil
         } catch {
-            await releaseFastPlainDirectRoomLogCredits(ordered)
+            await releaseFastPlainDirectRoomLogCredits(ordered,
+                outcomeUnknown: error is V2RoomTransactionOutcomeUnknown)
             throw error
         }
     }
 
     private func releaseFastPlainDirectRoomLogCredits(
-        _ appends: [FastPlainDirectRoomLogAppend]
+        _ appends: [FastPlainDirectRoomLogAppend],
+        outcomeUnknown: Bool = false
     ) async {
         for append in appends {
+            if outcomeUnknown {
+                await shardAdmissionCommandCreditPool?.discard(append.shardCreditToken)
+                if let token = append.roomCreditToken {
+                    await roomAdmissionCommandCreditPool?.discard(token)
+                }
+                continue
+            }
             if let shardAdmissionCommandCreditPool {
                 await shardAdmissionCommandCreditPool.release(
                     append.shardCreditToken, now: append.request.now
@@ -2012,6 +2058,12 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             throw V2AtomicRoomWriteBatchError(reason: reason)
         }
         let usesRoomAdmissionCredits = item.usesRoomAdmissionCredits
+        // Activation-bound credits must be prefetched before this transaction.
+        // The live warm path does this in fastPlainDirectRoomLogCommitsIfEligible;
+        // the standard path supplies usesRoomAdmissionCredits = false.
+        guard activationScope == nil || !usesRoomAdmissionCredits else {
+            throw V2AtomicRoomWriteBatchError(reason: .roomCreditModeMismatch)
+        }
         let shard: ShardRow
         let roomCommandWindowUsed: Int
         if usesRoomAdmissionCredits {
@@ -2465,6 +2517,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             if importedForward == nil, let expectedSource = forwardOwnerSourceRoomID {
                 guard command.forwardedFrom != nil, let ownerRoutes else { throw V2RoomOwnerFenceError.ownerChanged }
                 try await v2RequireForwardOwners(ownerRoutes, sql: sql)
+                try await activationScope?.require([expectedSource, roomID], sql: sql)
                 forwardSourceRoomID = expectedSource
             } else if importedForward == nil, let forwarded = command.forwardedFrom {
                 forwardSourceRoomID = try await v2LockForwardRooms(
@@ -2842,6 +2895,19 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         cacheKey: V2DirectSendPolicyCache.Key,
         commit: RoomWriteCommit
     ) async throws -> V2SendMessageOutcome {
+        do {
+            return try await finalizeAcceptedValue(command: command, cacheKey: cacheKey, commit: commit)
+        } catch {
+            if activationScope != nil { throw V2RoomTransactionOutcomeUnknown() }
+            throw error
+        }
+    }
+
+    private func finalizeAcceptedValue(
+        command: V2SendMessageCommand,
+        cacheKey: V2DirectSendPolicyCache.Key,
+        commit: RoomWriteCommit
+    ) async throws -> V2SendMessageOutcome {
         let cacheStartedAt = ContinuousClock.now
         if let entry = commit.directPolicyCacheUpdate {
             await directSendPolicyCache.insert(entry, for: cacheKey)
@@ -2894,6 +2960,18 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     /// - Returns: 与请求顺序对应的发送结果。
     /// - Throws: 持久化结果损坏时抛出。
     private func finalizeCommittedAcceptances(
+        requests: [V2RoomWriteRequest],
+        committed: [OrderedRoomWriteCommit]
+    ) async throws -> [V2SendMessageOutcome] {
+        do {
+            return try await finalizeAcceptedValues(requests: requests, committed: committed)
+        } catch {
+            if activationScope != nil { throw V2RoomTransactionOutcomeUnknown() }
+            throw error
+        }
+    }
+
+    private func finalizeAcceptedValues(
         requests: [V2RoomWriteRequest],
         committed: [OrderedRoomWriteCommit]
     ) async throws -> [V2SendMessageOutcome] {

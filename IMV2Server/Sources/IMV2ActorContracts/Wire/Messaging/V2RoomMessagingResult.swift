@@ -192,6 +192,7 @@ public enum V2ActorMessageReactionResultWire: Codable, Equatable, Sendable {
 
 /// Result discriminator mirrors the command family without erasing business fields.
 public enum V2RoomMessagingResult: Codable, Equatable, Sendable {
+    case failure(V2ActorMessagingErrorWire)
     case send(V2ActorSendMessageResultWire)
     case edit(V2ActorMessageEditResultWire)
     case withdraw(V2ActorMessageWithdrawalResultWire)

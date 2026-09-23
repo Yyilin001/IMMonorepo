@@ -1,5 +1,6 @@
 import FluentKit
 import Foundation
+import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
@@ -18,6 +19,15 @@ public actor V2RoomAdmissionCommandCreditPool {
     let roomID: UUID
     let shardState: ShardAdmissionState
     let now: Date
+    let activation: V2RoomActivationToken?
+
+    init(roomID: UUID, shardState: ShardAdmissionState, now: Date,
+         activation: V2RoomActivationToken? = nil) {
+      self.roomID = roomID
+      self.shardState = shardState
+      self.now = now
+      self.activation = activation
+    }
   }
 
   /// 一次已签发额度的令牌。
@@ -67,6 +77,7 @@ public actor V2RoomAdmissionCommandCreditPool {
     let roomID: UUID
     let shardLeaseID: UUID
     let shardLeaseGeneration: Int64
+    let activation: V2RoomActivationToken?
   }
 
   private struct Credits: Sendable {
@@ -201,8 +212,12 @@ public actor V2RoomAdmissionCommandCreditPool {
   public func acquire(
     roomID: UUID,
     shardState: ShardAdmissionState,
-    now: Date
+    now: Date,
+    activation: V2RoomActivationToken? = nil
   ) async throws -> Acquisition {
+    guard activation == nil || activation?.roomID.uuidValue == roomID else {
+      throw V2RoomActivationLeaseError.activationChanged
+    }
     guard let lease = shardState.lease,
       let leaseID = UUID(uuidString: lease.id.rawValue),
       let generation = Int64(exactly: lease.generation)
@@ -219,7 +234,8 @@ public actor V2RoomAdmissionCommandCreditPool {
     let key = Key(
       roomID: roomID,
       shardLeaseID: leaseID,
-      shardLeaseGeneration: generation
+      shardLeaseGeneration: generation,
+      activation: activation
     )
     discardExpiredCredits(now: now)
 
@@ -280,7 +296,8 @@ public actor V2RoomAdmissionCommandCreditPool {
         acquisitions.append(try await acquire(
           roomID: request.roomID,
           shardState: request.shardState,
-          now: request.now
+          now: request.now,
+          activation: request.activation
         ))
       }
       return acquisitions
@@ -315,6 +332,26 @@ public actor V2RoomAdmissionCommandCreditPool {
   /// - Parameter tokens: 本批令牌。
   public func commit(_ tokens: [Token]) {
     for token in tokens { commit(token) }
+  }
+
+  /// A dispatched transaction may have spent this credit. Forget its local
+  /// handle without making it reusable or reporting a confirmed commit.
+  func discard(_ token: Token) {
+    guard tokenKeys.removeValue(forKey: token.id) != nil,
+          var entry = credits[token.key] else { return }
+    entry.inFlight.remove(token.id)
+    credits[token.key] = entry
+    expiredCreditsDiscarded += 1
+  }
+
+  /// Called when an activation is permanently retired, after its executor has
+  /// stopped. Its unspent balance is never transferred to a successor epoch.
+  func retire(activation: V2RoomActivationToken) {
+    for (key, entry) in credits where key.activation == activation {
+      expiredCreditsDiscarded += entry.available + entry.inFlight.count
+      for token in entry.inFlight { tokenKeys.removeValue(forKey: token) }
+      credits.removeValue(forKey: key)
+    }
   }
 
   /// 记录一批普通准入提交。
@@ -457,9 +494,27 @@ public actor V2RoomAdmissionCommandCreditPool {
     key: Key,
     batchSize: Int
   ) async throws -> Int? {
+    if let activation = key.activation {
+      // This independent refill must finish BEFORE the business transaction
+      // takes its room fence. Both transactions validate the same token.
+      return try await v2WithPostgresTransactionRetry(database: database,
+          classifyCommitFailure: true) { transaction in
+        guard let sql = transaction as? any SQLDatabase else {
+          throw V2RoomAdmissionCommandCreditError.nonSQLDatabase
+        }
+        try await v2RequireRoomActivation(token: activation, sql: sql)
+        return try await reserveBatchSQL(sql: sql, key: key, batchSize: batchSize)
+      }
+    }
     guard let sql = database as? any SQLDatabase else {
       throw V2RoomAdmissionCommandCreditError.nonSQLDatabase
     }
+    return try await reserveBatchSQL(sql: sql, key: key, batchSize: batchSize)
+  }
+
+  private static func reserveBatchSQL(
+    sql: any SQLDatabase, key: Key, batchSize: Int
+  ) async throws -> Int? {
     // The caller may already hold FOR NO KEY UPDATE while awaiting this
     // independent reservation. KEY SHARE remains compatible with that lock,
     // but serializes against exclusive room updates.

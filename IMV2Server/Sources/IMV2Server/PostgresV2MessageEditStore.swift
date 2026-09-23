@@ -8,6 +8,13 @@ import SQLKit
 /// 受修订约束的正文替换、权威房间事件、扇出计划与持久化操作重放记录会在同一个事务内提交。
 public struct PostgresV2MessageEditStore: V2MessageEditStore, V2OwnerValidatedMessageEditStore {
     private let database: any Database
+    private var activationScope: V2RoomActivationWriteScope?
+
+    public func usingActivationScope(_ scope: V2RoomActivationWriteScope) -> Self {
+        var copy = self
+        copy.activationScope = scope
+        return copy
+    }
     private let contentReviewMode: V2ContentReviewMode
     private let identities: any V2MembershipIdentitySnapshotValidating
 
@@ -73,12 +80,15 @@ public struct PostgresV2MessageEditStore: V2MessageEditStore, V2OwnerValidatedMe
         guard identity.actorUserID == command.actorUserID,
               identity.targetUserID == command.actorUserID
         else { throw V2MessageEditStoreError.corruptPersistenceState }
-        return try await database.transaction { transaction in
+        return try await v2WithPostgresTransactionRetry(database: database,
+            maximumRetryCount: 0, classifyCommitFailure: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2MessageEditStoreError.corruptPersistenceState }
+            if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             let roomID = try editUUID(command.roomID), actorID = try editUUID(command.actorUserID)
             let operationID = try editUUID(command.operationID), messageID = try editUUID(command.messageID)
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: actorID.uuidString + ":" + operationID.uuidString), 0))").run()
             if let ownerRoute { try await v2RequireRoomOwner(roomID: roomID, route: ownerRoute, sql: sql) }
+            try await activationScope?.require([roomID], sql: sql)
             if let prior = try await sql.raw("SELECT room_id, message_id, expected_message_revision, text_body, resulting_message_revision, room_sequence, event_id, created_at FROM im_v2.message_edit_operations WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)").first(decoding: EditOperationRow.self) {
                 guard prior.matches(command, roomID: roomID, messageID: messageID) else { return .idempotencyConflict }
                 guard v2PostgresTimestampCanEncode(prior.createdAt) else { throw V2MessageEditStoreError.corruptPersistenceState }
