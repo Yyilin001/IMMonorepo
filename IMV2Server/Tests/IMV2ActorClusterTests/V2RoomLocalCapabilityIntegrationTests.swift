@@ -83,7 +83,10 @@ struct V2RoomLocalCapabilityIntegrationTests {
             #expect(!first.completed)
             do { _ = try await call.value; Issue.record("timed-out call appeared committed") }
             catch { #expect(error as? V2RoomCallFailure == .outcomeUnknown) }
-            #expect(await fixture.client.dispatchedCallCount() == 1)
+            let stillExecuting = await gate.hasPendingExecution()
+            let trackedCalls = await fixture.client.dispatchedCallCount()
+            #expect(stillExecuting)
+            #expect(trackedCalls == 1)
         }
     }
 
@@ -284,6 +287,8 @@ struct V2RoomLocalCapabilityIntegrationTests {
         }
 
         func count() -> Int { entered }
+
+        func hasPendingExecution() -> Bool { pending != nil }
 
         func waitForEntry() async throws {
             let deadline = ContinuousClock.now + .seconds(3)
