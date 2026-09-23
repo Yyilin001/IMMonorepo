@@ -1541,6 +1541,18 @@
     {
       "path": "docs/reviews/virtual-actor/g5-linux-regression-evidence.md",
       "owner": "V1"
+    },
+    {
+      "path": "IMV2/scripts/test_v2_virtual_actor_database_edges.py",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2Server/Sources/VirtualActorBusinessProbe/DatabaseEdgeProbe.swift",
+      "owner": "V1"
+    },
+    {
+      "path": "docs/reviews/virtual-actor/g5-cross-entry-disable-evidence.md",
+      "owner": "V1"
     }
   ]
 }
