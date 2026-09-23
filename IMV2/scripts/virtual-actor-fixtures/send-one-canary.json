@@ -1,0 +1,25 @@
+{
+  "name": "va-fixture-single-send-canary-v1",
+  "seed": 20260923,
+  "roomWarmupTimeoutSeconds": 60,
+  "completionDrainSeconds": 10,
+  "personas": [
+    {
+      "name": "sender",
+      "share": 1.0,
+      "sendWeight": 1.0,
+      "roomLogReadWeight": 0.0,
+      "syncPullWeight": 0.0
+    }
+  ],
+  "phases": [
+    {
+      "name": "one_send",
+      "durationSeconds": 10,
+      "messagesPerSecond": 0.125,
+      "roomLogReadsPerSecond": 0,
+      "syncPullsPerSecond": 0,
+      "reconnectPercentPerMinute": 0
+    }
+  ]
+}

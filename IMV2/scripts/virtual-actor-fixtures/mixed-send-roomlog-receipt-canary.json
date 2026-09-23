@@ -1,0 +1,29 @@
+{
+  "name": "va-mixed-send-roomlog-receipt-canary-v1",
+  "seed": 20260923,
+  "roomWarmupTimeoutSeconds": 60,
+  "completionDrainSeconds": 10,
+  "sendDispatch": "bounded_client_queue",
+  "maximumQueuedMessagesPerConnection": 16,
+  "personas": [
+    {
+      "name": "mixed",
+      "share": 1.0,
+      "sendWeight": 1.0,
+      "roomLogReadWeight": 1.0,
+      "syncPullWeight": 0.0,
+      "readReceiptWeight": 1.0
+    }
+  ],
+  "phases": [
+    {
+      "name": "canary",
+      "durationSeconds": 10,
+      "messagesPerSecond": 8,
+      "roomLogReadsPerSecond": 12,
+      "syncPullsPerSecond": 0,
+      "readReceiptsPerSecond": 4,
+      "reconnectPercentPerMinute": 0
+    }
+  ]
+}
