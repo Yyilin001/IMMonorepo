@@ -1450,6 +1450,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     capacityProfile: profile, limits: limits, now: { clock.now() })
                 @Sendable func runUntil(target: any V2ForwardExportDelivering, state: String, attempts: Int64) async throws {
                     let worker = try V2ForwardDeliveryWorker(store: jobs, receipts: receipts, target: target,
+                        sourceCommand: forwardSourceCommand(database: sourceDB, now: { clock.now() }),
+                        deadline: { .now + .seconds(10) },
                         retryPolicy: .init(initialDelay: 1, maximumDelay: 1, maximumAttempts: 100, jitterFraction: 0), now: { clock.now() })
                     let runtime = try V2ForwardDeliveryRuntime(workers: ["room-a": worker], minimumPollMilliseconds: 10)
                     let task = Task { await runtime.run() }

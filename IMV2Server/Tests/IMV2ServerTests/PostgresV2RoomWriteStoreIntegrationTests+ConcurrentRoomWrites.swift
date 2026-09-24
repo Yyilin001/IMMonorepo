@@ -65,7 +65,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let transport = try V2ConfiguredForwardExportDelivery(targets: ["room-b": probe])
             let jobs = PostgresV2ForwardDeliveryStore(database: sourceDB), receipts = PostgresV2ForwardReceiptStore(database: sourceDB)
             func worker(at time: Date, target: any V2ForwardExportDelivering) throws -> V2ForwardDeliveryWorker {
-                try .init(store: jobs, receipts: receipts, target: target, leaseDuration: 10, deliveryTimeout: scenario == "deadline" ? 0.1 : 8, maximumConcurrency: 2,
+                try .init(store: jobs, receipts: receipts, target: target,
+                          sourceCommand: forwardSourceCommand(database: sourceDB, now: { time }), deadline: { .now + .seconds(10) }, leaseDuration: 10, deliveryTimeout: scenario == "deadline" ? 0.1 : 8, maximumConcurrency: 2,
                           retryPolicy: .init(initialDelay: 1, maximumDelay: 1, maximumAttempts: 2, jitterFraction: 0), now: { time })
             }
             if scenario == "accepted-target-owner" {
@@ -607,7 +608,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             ], crossOwner: cross)
             let target = V2ForwardImportEndpoint(inbox: .init(database: targetDB), write: writeB.usingWorkloadDatabase(targetDB), capacityProfile: profile, limits: limits, now: { now })
             let transport = try V2ConfiguredForwardExportDelivery(targets: ["room-b": target])
-            let worker = try V2ForwardDeliveryWorker(store: .init(database: sourceDB), receipts: .init(database: sourceDB), target: transport, now: { now })
+            let worker = try V2ForwardDeliveryWorker(store: .init(database: sourceDB), receipts: .init(database: sourceDB), target: transport, sourceCommand: forwardSourceCommand(database: sourceDB, now: { now }), deadline: { .now + .seconds(10) }, now: { now })
             let runtime = try V2ForwardDeliveryRuntime(workers: ["room-a": worker], minimumPollMilliseconds: 10)
             let reference = try V2ForwardMessageReference(roomID: roomID, messageID: source.messageID, revision: .init(1))
             let commands = try (0..<3).map { _ in try V2ForwardMessagesCommand(operationID: .init(uuid: UUID()), sources: [reference], targetRoomIDs: [roomID, targetRoom]) }
