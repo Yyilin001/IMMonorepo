@@ -4,11 +4,11 @@ import GRDB
 /// 运行时能够处理的持久化命令通道。
 ///
 /// 调度时只选择实际安装了处理器的通道，避免不受支持的到期记录使其他运行时持续刷新。
-/// 会话能力包含会话状态与消息收藏；转发计划和旧版逐条转发分别调度。
+/// 会话能力包含会话状态与消息收藏；转发按计划分块调度。
 public enum V2DurableCommandLane: Sendable, CaseIterable, Hashable {
     case messages, withdrawals, redactions, edits, reactions, readReceipts
     case membership, memberMutes, moderatedMemberRemovals, groupCapabilities
-    case conversationCapabilities, social, groupCreation, forwardPlans, legacyForwardMessages
+    case conversationCapabilities, social, groupCreation, forwardPlans
 }
 
 extension GRDBV2LocalSyncStore {
@@ -78,7 +78,6 @@ extension GRDBV2LocalSyncStore {
                 pending("v2_pending_message_favorites")
             case .social: pending("v2_pending_social_commands")
             case .groupCreation: pending("v2_pending_group_room_creations", states: "'pending','finalizing','cancelling'")
-            case .legacyForwardMessages: pending("v2_pending_forward_messages")
             case .forwardPlans:
                 pending("v2_forward_message_chunks")
                 candidates.append("""

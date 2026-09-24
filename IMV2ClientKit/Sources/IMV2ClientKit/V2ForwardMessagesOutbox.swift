@@ -8,61 +8,6 @@ public struct V2PendingForwardMessagesCommand: Equatable, Sendable {
     public let command: V2ForwardMessagesCommand; public let state: State; public let attemptCount: Int; public let nextAttemptAt: Date; public let terminalCode: String?
 }
 
-/// 本地转发发件箱存储能力。
-public protocol V2LocalForwardMessagesStore: Sendable {
-    /// 入队命令；等价命令复用原操作标识。
-    ///
-    /// - Parameter pending: 待入队条目。
-    /// - Returns: 实际入队或复用的条目。
-    /// - Throws: 持久化失败时抛出。
-    func enqueueOrReuseForwardMessages(_ pending: V2PendingForwardMessagesCommand) async throws -> V2PendingForwardMessagesCommand
-
-    /// 取出下一条已到发送时间的命令。
-    ///
-    /// - Parameter now: 当前时刻。
-    /// - Returns: 待发送命令；没有可发送项时返回 `nil`。
-    /// - Throws: 持久化失败时抛出。
-    func nextReadyForwardMessages(now: Date) async throws -> V2PendingForwardMessagesCommand?
-
-    /// 标记转发命令已被确认。
-    ///
-    /// - Parameter operationID: 操作标识。
-    /// - Throws: 持久化失败时抛出。
-    func markForwardMessagesAcknowledged(operationID: MessageForwardOperationID) async throws
-
-    /// 安排转发命令稍后重试。
-    ///
-    /// - Parameters:
-    ///   - operationID: 操作标识。
-    ///   - nextAttemptAt: 下次尝试时刻。
-    /// - Throws: 持久化失败时抛出。
-    func scheduleForwardMessagesRetry(operationID: MessageForwardOperationID, nextAttemptAt: Date) async throws
-
-    /// 以终态错误码拒绝转发命令。
-    ///
-    /// - Parameters:
-    ///   - operationID: 操作标识。
-    ///   - code: 服务端返回的稳定错误码。
-    /// - Throws: 持久化失败时抛出。
-    func rejectForwardMessages(operationID: MessageForwardOperationID, code: String) async throws
-}
-
-/// 单次转发命令刷新的结果。
-public enum V2ForwardMessagesFlushResult: Equatable, Sendable { case idle, acknowledged(MessageForwardOperationID, [V2ForwardMessageResult]), retryScheduled(MessageForwardOperationID), rejected(MessageForwardOperationID, code: String) }
-
-public actor V2ForwardMessagesOutboxEngine {
-    private let flushFlight = V2CommandFlushFlight<V2ForwardMessagesFlushResult>()
-
-    private let store: any V2LocalForwardMessagesStore; private let transport: any V2ClientForwardMessagesTransport; private let makeUUID: @Sendable () -> UUID; private let now: @Sendable () -> Date; private let retryDelay: TimeInterval
-    public init(store: any V2LocalForwardMessagesStore, transport: any V2ClientForwardMessagesTransport, makeUUID: @escaping @Sendable () -> UUID = UUID.init, now: @escaping @Sendable () -> Date = Date.init, retryDelay: TimeInterval = 1) { self.store = store; self.transport = transport; self.makeUUID = makeUUID; self.now = now; self.retryDelay = retryDelay }
-    public func enqueue(sources: [V2ForwardMessageReference], targetRoomIDs: [RoomID]) async throws -> V2PendingForwardMessagesCommand { let command = try V2ForwardMessagesCommand(operationID: .init(makeUUID().uuidString), sources: sources, targetRoomIDs: targetRoomIDs); return try await store.enqueueOrReuseForwardMessages(.init(command: command, state: .pending, attemptCount: 0, nextAttemptAt: now(), terminalCode: nil)) }
-    public func flushOnce() async throws -> V2ForwardMessagesFlushResult {
-        try await flushFlight.run { try await self.flushNextReadyCommand() }
-    }
-
-    private func flushNextReadyCommand() async throws -> V2ForwardMessagesFlushResult { guard let pending = try await store.nextReadyForwardMessages(now: now()) else { return .idle }; do { let results = try await transport.forwardMessages(command: pending.command); try Task.checkCancellation(); try await store.markForwardMessagesAcknowledged(operationID: pending.command.operationID); return .acknowledged(pending.command.operationID, results) } catch is CancellationError { throw CancellationError() } catch let error as V2RealtimeTransportError { if case .server(let code, let retryable, _, _) = error, !retryable { try await store.rejectForwardMessages(operationID: pending.command.operationID, code: code); return .rejected(pending.command.operationID, code: code) }; let delay: TimeInterval = { if case .server(_, _, let retryAfter, _) = error { return TimeInterval(max(retryAfter, 1)) }; return retryDelay }(); try await store.scheduleForwardMessagesRetry(operationID: pending.command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: delay)); return .retryScheduled(pending.command.operationID) } catch { try await store.scheduleForwardMessagesRetry(operationID: pending.command.operationID, nextAttemptAt: try v2CommandRetryDate(now: now(), delay: retryDelay)); return .retryScheduled(pending.command.operationID) } }
-}
-
 /// 批量转发计划。
 ///
 /// 父计划允许用户转发超过单条线路命令有界载荷的内容。分片按需生成且标识确定，
@@ -260,11 +205,6 @@ public actor V2BulkForwardMessagesOutboxEngine {
 }
 
 extension V2BulkForwardMessagesOutboxEngine: V2CommandFlushControlling {
-    public func suspendCommandFlushing() async { await flushFlight.suspend() }
-    public func resumeCommandFlushing() async { await flushFlight.resume() }
-}
-
-extension V2ForwardMessagesOutboxEngine: V2CommandFlushControlling {
     public func suspendCommandFlushing() async { await flushFlight.suspend() }
     public func resumeCommandFlushing() async { await flushFlight.resume() }
 }

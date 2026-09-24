@@ -91,7 +91,7 @@ public struct V2ClientConversationListPage: Equatable, Sendable {
 /// 本地同步存储。
 ///
 /// 本地数据库是权威的设备端投影，它在单个 SQLite 事务内增量应用同步记录。
-public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2LocalMembershipCommandStore, V2LocalMessageWithdrawalStore, V2LocalMessageRedactionStore, V2LocalMemberMuteStore, V2LocalModeratedMemberRemovalStore, V2LocalMessageReactionStore, V2LocalMessageEditStore, V2LocalReadReceiptStore, V2LocalConversationCapabilitiesStore, V2LocalGroupCapabilitiesStore, V2LocalForwardMessagesStore, V2BulkForwardMessagesStore, V2LocalSocialCommandStore, V2LocalGroupRoomCommandStore, V2LocalGroupEventStore, V2ClientProfileProjectionStore {
+public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2LocalMembershipCommandStore, V2LocalMessageWithdrawalStore, V2LocalMessageRedactionStore, V2LocalMemberMuteStore, V2LocalModeratedMemberRemovalStore, V2LocalMessageReactionStore, V2LocalMessageEditStore, V2LocalReadReceiptStore, V2LocalConversationCapabilitiesStore, V2LocalGroupCapabilitiesStore, V2BulkForwardMessagesStore, V2LocalSocialCommandStore, V2LocalGroupRoomCommandStore, V2LocalGroupEventStore, V2ClientProfileProjectionStore {
     /// 全部本地命令仓储共用的 actor 级连接池。
     ///
     /// 扩展方法保持 actor 边界，同时让各个持久化队列各自位于独立源文件中。
@@ -4753,7 +4753,6 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     }
     static func requirePendingConversationState(_ operationID: ConversationPreferenceOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_conversation_states WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingConversationStateCommand.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
     static func requirePendingMessageFavorite(_ operationID: MessageFavoriteOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_message_favorites WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingMessageFavoriteCommand.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
-    static func requirePendingForwardMessages(_ operationID: MessageForwardOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_forward_messages WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingForwardMessagesCommand.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
     static func requirePendingMessageEdit(_ operationID: MessageEditOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_message_edits WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingMessageEdit.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
     static func requirePendingReadReceipt(_ operationID: ReadReceiptOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_read_receipts WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingReadReceipt.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
     static func requirePendingSocialCommand(_ operationID: String, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_social_commands WHERE operation_id = ?", arguments: [operationID])?["state"], state == V2PendingSocialCommand.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
@@ -5007,12 +5006,6 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         else { throw V2ClientCommandError.commandConflict }
         return sources
     }
-    static func decodePendingForwardMessages(_ row: Row) throws -> V2PendingForwardMessagesCommand {
-        guard let state = V2PendingForwardMessagesCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
-        let sources = try decodeForwardSourceReferences(row)
-        let targets = try JSONDecoder().decode([String].self, from: Data((row["target_room_ids"] as String).utf8)).map(RoomID.init)
-        return try .init(command: .init(operationID: .init(row["operation_id"] as String), sources: sources, targetRoomIDs: targets), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), terminalCode: row["terminal_code"])
-    }
     static func decodeForwardMessagesPlan(_ row: Row) throws -> V2ForwardMessagesPlan {
         guard let state = V2ForwardMessagesPlan.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
         let sources = try JSONDecoder().decode([String].self, from: Data((row["source_message_ids"] as String).utf8))
@@ -5167,7 +5160,6 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         "v2_pending_conversation_states",
         "v2_pending_message_favorites",
         "v2_pending_group_capabilities",
-        "v2_pending_forward_messages",
         "v2_pending_social_commands",
         "v2_pending_group_room_creations"
     ]

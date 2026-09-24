@@ -934,26 +934,6 @@ extension GRDBV2LocalSyncStore {
     public func scheduleGroupCapabilityRetry(operationID: String, nextAttemptAt: Date) throws { try databasePool.write { db in guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_pending_group_capabilities WHERE operation_id = ? AND state = 'pending')", arguments: [operationID]) == true else { throw V2ClientCommandError.commandConflict }; try Self.scheduleCommandRetry(table: "v2_pending_group_capabilities", keyColumn: "operation_id", key: operationID, nextAttemptAt: nextAttemptAt, db: db) } }
     public func rejectGroupCapability(operationID: String, code: String) throws { guard !code.isEmpty else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in guard try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM v2_pending_group_capabilities WHERE operation_id = ? AND state = 'pending')", arguments: [operationID]) == true else { throw V2ClientCommandError.commandConflict }; try db.execute(sql: "UPDATE v2_pending_group_capabilities SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID]) } }
 
-    public func enqueueOrReuseForwardMessages(_ pending: V2PendingForwardMessagesCommand) throws -> V2PendingForwardMessagesCommand {
-        try databasePool.write { db in
-            let command = pending.command
-            if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_forward_messages WHERE operation_id = ?", arguments: [command.operationID.rawValue]) {
-                let existing = try Self.decodePendingForwardMessages(row)
-                guard existing.command == command else { throw V2ClientCommandError.commandConflict }
-                return existing
-            }
-            let sources = String(decoding: try JSONEncoder().encode(command.sourceMessageIDs.map(\.rawValue)), as: UTF8.self)
-            let references = String(decoding: try JSONEncoder().encode(command.sources), as: UTF8.self)
-            let targets = String(decoding: try JSONEncoder().encode(command.targetRoomIDs.map(\.rawValue)), as: UTF8.self)
-            try db.execute(sql: "INSERT INTO v2_pending_forward_messages (operation_id, source_message_ids, source_references, target_room_ids, state, attempt_count, next_attempt_at, created_at) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)", arguments: [command.operationID.rawValue, sources, references, targets, try Self.commandRetryTimestamp(pending.nextAttemptAt), try Self.commandRetryTimestamp(pending.nextAttemptAt)])
-            return pending
-        }
-    }
-    public func nextReadyForwardMessages(now: Date) throws -> V2PendingForwardMessagesCommand? { try databasePool.read { db in guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_pending_forward_messages WHERE state = 'pending' AND next_attempt_at <= ? ORDER BY created_at LIMIT 1", arguments: [try Self.commandRetryTimestamp(now)]) else { return nil }; return try Self.decodePendingForwardMessages(row) } }
-    public func markForwardMessagesAcknowledged(operationID: MessageForwardOperationID) throws { try databasePool.write { db in if try Self.acceptsRepeatedCompletion(table: "v2_pending_forward_messages", keyColumn: "operation_id", key: operationID.rawValue, completedState: "acknowledged", canonicalValues: [:], db: db) { return }; try db.execute(sql: "UPDATE v2_pending_forward_messages SET state = 'acknowledged' WHERE operation_id = ?", arguments: [operationID.rawValue]) } }
-    public func scheduleForwardMessagesRetry(operationID: MessageForwardOperationID, nextAttemptAt: Date) throws { try databasePool.write { db in try Self.requirePendingForwardMessages(operationID, db: db); try Self.scheduleCommandRetry(table: "v2_pending_forward_messages", keyColumn: "operation_id", key: operationID.rawValue, nextAttemptAt: nextAttemptAt, db: db) } }
-    public func rejectForwardMessages(operationID: MessageForwardOperationID, code: String) throws { guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw V2ClientCommandError.commandConflict }; try databasePool.write { db in try Self.requirePendingForwardMessages(operationID, db: db); try db.execute(sql: "UPDATE v2_pending_forward_messages SET state = 'rejected', terminal_code = ? WHERE operation_id = ?", arguments: [code, operationID.rawValue]) } }
-
     public func enqueueForwardPlan(_ plan: V2ForwardMessagesPlan, sources: [V2ForwardMessageReference], targetRoomIDs: [RoomID], now: Date) throws -> V2ForwardMessagesPlan {
         try databasePool.write { db in
             if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_plans WHERE plan_id = ?", arguments: [plan.operationID.rawValue]) {

@@ -391,8 +391,6 @@ extension GRDBV2LocalSyncStore {
                 CHECK ((state = 'pending' AND terminal_code IS NULL) OR (state = 'acknowledged' AND terminal_code IS NULL) OR (state = 'rejected' AND terminal_code IS NOT NULL))
             );
 
-        CREATE TABLE v2_pending_forward_messages (operation_id TEXT PRIMARY KEY, source_message_ids TEXT NOT NULL, source_references TEXT, target_room_ids TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('pending','acknowledged','rejected')), attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0), next_attempt_at REAL NOT NULL, created_at REAL NOT NULL, terminal_code TEXT, terminal_at REAL NULL);
-
         CREATE TABLE v2_pending_group_capabilities (
                 operation_id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('pin', 'announcement', 'rolePermissions', 'memberRole')),
                 room_id TEXT NOT NULL, message_id TEXT, is_pinned INTEGER CHECK (is_pinned IN (0, 1)), body TEXT,
@@ -804,12 +802,6 @@ extension GRDBV2LocalSyncStore {
 
         CREATE INDEX v2_pending_conversation_states_terminal_cleanup_idx ON v2_pending_conversation_states (terminal_at) WHERE state <> 'pending';
 
-        CREATE INDEX v2_pending_forward_messages_idempotency_expiry_idx ON v2_pending_forward_messages (created_at) WHERE state = 'pending';
-
-        CREATE INDEX v2_pending_forward_messages_ready_idx ON v2_pending_forward_messages (state, next_attempt_at, created_at) WHERE state = 'pending';
-
-        CREATE INDEX v2_pending_forward_messages_terminal_cleanup_idx ON v2_pending_forward_messages (terminal_at) WHERE state <> 'pending';
-
         CREATE INDEX v2_pending_group_capabilities_idempotency_expiry_idx ON v2_pending_group_capabilities (created_at) WHERE state = 'pending';
 
         CREATE INDEX v2_pending_group_capabilities_ready_idx ON v2_pending_group_capabilities (state, next_attempt_at, created_at) WHERE state = 'pending';
@@ -1196,15 +1188,6 @@ extension GRDBV2LocalSyncStore {
         WHEN NEW.terminal_at IS NULL AND NEW.state <> 'pending'
         BEGIN
             UPDATE v2_pending_conversation_states
-            SET terminal_at = (julianday('now') - 2440587.5) * 86400.0
-            WHERE rowid = NEW.rowid;
-        END;
-
-        CREATE TRIGGER v2_pending_forward_messages_set_terminal_at
-        AFTER UPDATE OF state ON v2_pending_forward_messages
-        WHEN NEW.terminal_at IS NULL AND NEW.state <> 'pending'
-        BEGIN
-            UPDATE v2_pending_forward_messages
             SET terminal_at = (julianday('now') - 2440587.5) * 86400.0
             WHERE rowid = NEW.rowid;
         END;
