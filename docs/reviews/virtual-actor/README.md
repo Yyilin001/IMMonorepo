@@ -19,6 +19,8 @@
 
 随后[仅限本机的缓存调用](r3-local-capability-evidence.md#仅限本机的缓存调用)已集成：可重试的 `RoomRef.call` 在 exact local capability 有效时省略重复 lookup，保持每次共享寻址的 owner 读取、严格等待者及远端确认。原生 Runtime 58/58、Cluster 35/35 通过，描述符替换、过期和逐出都不能让本机 hint 静默转成远端派发。冻结候选 `fb8a1047` 的七产品 Linux Release 已通过；[正式 hot 六轮](g5-hot-performance-regression.md#cached-local-candidate-fb8a1047)按原 freeze 以 main/candidate/candidate/main/main/candidate 顺序全部通过，每轮 52,500 ACK 与持久效果一致，零业务失败，驱动与最终 assessor 退出 0，私有资源全部清理。候选 CPU 为 2.110377 / 2.111085 / 2.093721 ms/ACK，距离 2.133047 上限的最小余量仅约 1%；main 吞吐 CV 为 0.0。末轮一个稳态 ACK 在 cooldown 到达，全程没有丢消息。same-owner 三轮 main 预算随后冻结，但[首候选 CPU 超限约 6.86%](g5-same-owner-performance.md)，该场比较已停止；四类相对性能、#19 与当前源码最终完整 Linux required run 仍未完成。hot 结果不代表生产 SLO。
 
+后续[减少临时分配的候选 `2772c846`](g5-same-owner-performance.md#allocation-candidate-2772c846)已冻结：单房间围栏、在途调用任务和单条出队三处改动的原生/真实 PG 回归合计 139/139、零跳过。首轮外置计数器误读参数化 Cluster 汇总的失败工件保留，前两套只做日志重验，其余 12 组另场运行。该候选仍须完成 Linux Release、按原预算重跑 hot/same-owner 六轮，以及其余性能场景和最终完整 Linux checks；旧 `fb8a1047` 的 hot 通过不转记到新源码。
+
 ## 核对出的基线差异
 
 - 数据 ownerEpoch 在 canonical schema 和 V2RoomShardRoute 中允许零，不能复用从一开始的 activationEpoch 类型。公共契约保持该区别。

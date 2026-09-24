@@ -19,7 +19,7 @@ Both runs authenticated all 1,500 connections and completed 189,000 sends, ackno
 
 Candidate CPU exceeded the unchanged ceiling by approximately 6.86%. Its 300-second steady window consumed 225.369906 Gateway CPU seconds and 7.492737 loader CPU seconds. SQL counters covered 3,049,067 calls across owner/control databases, including background and observer statements. Sampled active rooms peaked at 141; outstanding Actor work peaked at 63 commands and 25,956 bytes, within the existing bounds. The phase-counter ratio labelled mean physical send batch size was 0.999940669, with counters captured across phase boundaries; it does not establish multi-message batching. Main did not expose that metric, so its value remains unavailable.
 
-The next step is a separately labelled candidate-only CPU diagnostic at the frozen workload, followed by a targeted production optimization if supported by the evidence. The failed pair and freeze remain immutable. No load, budget, admission limit or correctness rule is relaxed in response to the candidate result.
+The candidate-only diagnostic and subsequent allocation changes are recorded below. The failed pair and freeze remain immutable. No load, budget, admission limit or correctness rule is relaxed in response to the candidate result.
 
 ## Immutable evidence
 
@@ -58,3 +58,24 @@ Private artifacts are under `/Users/yyl/.codex/virtual-actor-builds/capacity-sam
 | `analyze_cpu_profiles.py` | `23467c2ee92aa76cc997343bd472bff38639c996cb4df4675c8eaf149997e149` |
 
 The live Gateway and saved ELF both match Release SHA-256 `6e336cd3860777977789fa960770907e5b52efeda52e1ad154857ce091a5900d`; all eight saved DSO hashes were independently verified. Raw data and aggregate summaries remain private. The proposed small allocation optimizations must retain byte limits, command ordering, physical-call tracking, room/lease locks and the database clock check after lock acquisition. Their actual benefit remains subject to fresh formal comparisons under the original hot and same-owner freezes.
+
+## Allocation candidate `2772c846`
+
+The next immutable candidate is `2772c8465a58ef4ca3c9eab44b685ab5753b78a9`, in `/Users/yyl/.codex/worktrees/virtual-actor-candidate-allocation/IMMonorepo`. It contains three small changes developed in separate worktrees and reviewed together:
+
+- The transaction-bound fence uses a direct UUID lookup when there is exactly one room and the requested SQL timeouts equal the installed policy. It avoids building the multi-room set, sort, JSON array and lookup dictionary. The one-shot context, error priority, room lock, lease lock and separate database clock observation remain in order. Multiple rooms and different timeout policies retain the original path.
+- The client registers a dispatched RPC before starting one task that executes and records its physical completion. Caller cancellation or timeout still detaches only the caller; the in-flight entry and client remain alive until the operation returns.
+- A batch size of one removes the first pending request whose room is not active through the original removal/accounting path. This avoids the later repeated scan and room-set copy while preserving per-room FIFO, shared capacity release and granted-owner handling. The original size-one path already returned before the second batching pass; this change does not claim to remove that second pass.
+
+Native Runtime, Cluster, send-service and real PostgreSQL regressions passed **139/139 with zero skips**: Runtime 58, Cluster 36, send-service 29 and 16 database cases. Four new tests actually started and passed, covering scalar fence errors, late physical completion after caller cancellation, active-room/FIFO behavior and pending-capacity return. Existing multi-room batching, stale activation, total transaction deadline, credit refill, successful COMMIT ACK loss, Host overload/drain and maintenance takeover cases also passed. The source stayed clean and the lockfile remained `3af1e16190f46bdd8fad3de86c6b386dc196443291463355bf36edb62b7fd15c`.
+
+The first external driver exited 1 after miscounting a parameterized Cluster pass line; the underlying Runtime and Cluster test processes exited 0 with positive 58/36 summaries. The original failed artifact and driver `932d72feb16e1d49004390054fb485af05ed3044b5b7d990000471b6cc7d7073` remain unchanged. A corrected parser independently revalidated those two logs without rerunning them, then a new invocation ran the remaining 12 filters (45 tests). Its driver SHA-256 is `bd0d471e137d51e7e42df0d83a7e737c827e38e71ef30c51b8efe7aa30d18f63`. Both invocations removed all their private PostgreSQL containers; readiness required authenticated TCP `SELECT 1`.
+
+| Native evidence under `/Users/yyl/.codex/virtual-actor-builds/p0/` | SHA-256 |
+| --- | --- |
+| `scalar-fence-native-2772c846/runtime.log` | `4d81df940cf0c531ab169331218cb63e4ecc148f6a097f593417a65e9dfa96ed` |
+| `scalar-fence-native-2772c846/cluster.log` | `79277c285f4d875a80f5f59a77f91e4b132a0156f5830831db226ac38439a78c` |
+| `scalar-fence-native-2772c846-offline-revalidation/result.json` | `dd036be3d5239cd6e55c8c80615a668d8c6acbe9a93bdd296c3aa86468a72d28` |
+| `scalar-fence-native-2772c846-continued/result.json` | `94baafacb06ebf6848f1fc08e3946118855ce8bb83cc55a47b570dab1a761061` |
+
+Linux Release, fresh six-run hot/same-owner comparisons and the final complete Linux gate remain pending for this candidate. Native regressions do not establish CPU savings or replace those gates. The new same-owner comparison driver pins the original `15c0f975` freeze, all three original main calibration results and the same harness, loader and workload; it starts six fresh interleaved runs and stops on any failed budget. No previous candidate sample is reused.
