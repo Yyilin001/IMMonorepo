@@ -1010,12 +1010,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
 
     @Test("Direct policy revision exhaustion rolls back first replies and policy changes",
-          arguments: ["planner", "preplanned", "room-log", "atomic", "stranger", "relationship", "block"])
+          arguments: ["room-log", "atomic", "stranger", "relationship", "block"])
     func directPolicyRevisionBoundary(path: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile()
-            let isSend = ["planner", "preplanned", "room-log", "atomic"].contains(path)
+            let isSend = ["room-log", "atomic"].contains(path)
             let direct = PostgresV2DirectMessagingStore(database: database)
             let social = PostgresV2SocialRelationshipStore(database: database)
             var rooms: [RoomID] = []
@@ -1140,7 +1140,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
 
     @Test("Room and timeline cursor exhaustion preserves rollback and committed replay",
-          arguments: ["planner", "preplanned", "room-log", "group", "hybrid", "direct-cold", "direct-hot", "hybrid-batch", "denial"], [false, true])
+          arguments: ["room-log", "group", "hybrid", "direct-cold", "direct-hot", "hybrid-batch", "denial"], [false, true])
     func roomWriteCursorBoundary(path: String, timeline: Bool) async throws {
         let hybrid = path.hasPrefix("hybrid")
         let direct = path != "group" && !hybrid

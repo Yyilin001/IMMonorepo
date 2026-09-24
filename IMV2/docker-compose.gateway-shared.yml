@@ -1,5 +1,0 @@
-# Explicit post-backfill/clean-bootstrap rollout overlay. Do not apply this to
-# a legacy database until the projection-sharing runbook audits are zero.
-services:
-  gateway:
-    environment:

@@ -68,17 +68,11 @@ retries a mutation. Do not log passwords, recovery codes, request bodies or hash
 
 ## Deployment
 
-Schema `im-v2-current-36` adds a positive credential revision and nullable recovery
-HMAC to password credentials, and expands bounded password audit outcomes.
-New installations use `IMV2/sql/schema.sql`. Existing current-35 installations
-must stop/drain account issuers, back up the database, apply
-`IMV2/sql/upgrades/account-lifecycle-35-to-36.sql`, and restart services on the new
-code. The migration preserves accounts and existing device sessions. Legacy
-unversioned assertions are rejected; interrupted initial logins retry. Do not run
-old issuers alongside the new password mutation endpoints. Migration failure
-rolls back the transaction; after accepting new lifecycle operations, rollback
-requires restoring a pre-upgrade backup with corresponding credential invalidation,
-not deleting the new columns from live data.
+Password credentials carry a positive credential revision and nullable recovery
+HMAC, and password audit outcomes are bounded to the lifecycle operations above.
+The project is not yet launched: installations are created directly from
+`IMV2/sql/schema.sql`, and no historical schema upgrade script is provided.
+Unversioned assertions are rejected; interrupted initial logins retry.
 
 ## Verification
 
