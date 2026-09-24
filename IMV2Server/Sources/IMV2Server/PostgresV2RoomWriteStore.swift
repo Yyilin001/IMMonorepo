@@ -1,5 +1,6 @@
 import FluentKit
 import Foundation
+import IMV2ActorContracts
 import IMV2Core
 import NIOCore
 import PostgresNIO
@@ -22,6 +23,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     // Immutable for the lifetime of one scoped value copy. Shared caches and
     // credit actors keep their identities; no mutable ambient route is used.
     private var ownerRoutes: [UUID: V2RoomShardRoute]?
+    private var activationScope: V2RoomActivationWriteScope?
     private var forwardOwnerSourceRoomID: UUID?
     private var controlPolicyScope: [V2DirectSendPolicyCache.Key: V2DirectSendControlPolicy]?
     private let strangerMessagePolicy: V2StrangerMessagePolicy
@@ -85,6 +87,31 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return copy
     }
 
+    /// Bind exact, already admitted activation authority. Every SQL path still
+    /// checks it inside its transaction; this value copy grants no authority by
+    /// itself and retains the shared cache and credit-pool identities.
+    public func usingActivationScope(_ scope: V2RoomActivationWriteScope) -> Self {
+        var copy = self
+        copy.activationScope = scope
+        return copy
+    }
+
+    /// A reservation may change facts outside this executor's ordinary turn.
+    /// Clear hints before releasing its barrier; SQL remains authoritative.
+    func invalidateActorHints(token: V2RoomActivationToken) async {
+        guard let room = token.roomID.uuidValue else { return }
+        await directSendPolicyCache.invalidate(roomID: room)
+        await directRoomLogFastAppendCache.invalidate(roomID: room)
+        await hybridGroupShardCreditSnapshotCache.invalidate([room])
+    }
+
+    /// Hosting calls this only after the executor's SQL and batches settle.
+    /// Unspent credit belongs to this exact epoch and cannot reach a successor.
+    func closeActorState(token: V2RoomActivationToken) async {
+        await invalidateActorHints(token: token)
+        await roomAdmissionCommandCreditPool?.retire(activation: token)
+    }
+
     /// Bind the authoritative control pool. It must be independent of the owner
     /// pool even when both connect to the same physical database. Runtime must
     /// also pass an independent resolution pool: policy writers must not wait
@@ -133,12 +160,42 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     private func withRoomWriteTransaction<Result: Sendable>(
         _ operation: @escaping @Sendable (any Database) async throws -> Result
     ) async throws -> Result {
-        try await v2WithPostgresTransactionRetry(database: database) { transaction in
+        try await v2WithPostgresTransactionRetry(database: database,
+            classifyCommitFailure: activationScope != nil,
+            useRoomDeadline: activationScope != nil) { transaction in
+            // The room-deadline transaction sets the same LOCAL limits before
+            // this body starts. The activation fence below still reapplies
+            // them before locking; this middle call added no protection.
             let result = try await operation(transaction)
             if let grants = authorizationGrants {
                 guard let recordedAt = authorizationRecordedAt else { throw V2DirectAuthorizationIntentError.corruptPersistence }
                 for key in grants.keys.sorted() {
                     guard let grant = grants[key] else { throw V2DirectAuthorizationIntentError.corruptPersistence }
+                    _ = try await PostgresV2DirectAuthorizationReceiptStore().finishIfPresent(
+                        grant.attempt, now: recordedAt, transaction: transaction)
+                }
+            }
+            return result
+        }
+    }
+
+    /// Ordinary scalar acceptance and conditional group batches use this
+    /// transaction-bound fence; all other writers retain the general API.
+    private func withRoomWriteTransactionWithFenceContext<Result: Sendable>(
+        _ operation: @escaping @Sendable (any Database, V2ConfiguredRoomFenceContext?) async throws -> Result
+    ) async throws -> Result {
+        try await v2WithPostgresTransactionRetryWithRoomContext(database: database,
+            classifyCommitFailure: activationScope != nil,
+            useRoomDeadline: activationScope != nil) { transaction, context in
+            let result = try await operation(transaction, context)
+            if let grants = authorizationGrants {
+                guard let recordedAt = authorizationRecordedAt else {
+                    throw V2DirectAuthorizationIntentError.corruptPersistence
+                }
+                for key in grants.keys.sorted() {
+                    guard let grant = grants[key] else {
+                        throw V2DirectAuthorizationIntentError.corruptPersistence
+                    }
                     _ = try await PostgresV2DirectAuthorizationReceiptStore().finishIfPresent(
                         grant.attempt, now: recordedAt, transaction: transaction)
                 }
@@ -212,7 +269,11 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         // Finalize caches and consumed admission credits before a fallible ACK.
         // A transport failure here retains the obligation; retries/recovery read
         // the immutable owner proof and never return consumed credits.
-        try await acknowledgeAuthorizations(grants, now: now)
+        do { try await acknowledgeAuthorizations(grants, now: now) }
+        catch {
+            if activationScope != nil { throw V2RoomTransactionOutcomeUnknown() }
+            throw error
+        }
         return result
     }
 
@@ -270,6 +331,72 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             identifiers: request.identifiers, now: request.now)
     }
 
+    /// Accept one already reserved source/target pair together with its ledger.
+    /// The callbacks cannot acquire another room or another DB connection. They
+    /// run after message-operation and canonical room/token locks, in the exact
+    /// transaction that commits acceptance. Control authorization is prepared
+    /// before this transaction and acknowledged only after its commit.
+    func acceptActorForwardPair(
+        request: V2RoomWriteRequest, sourceRoomID: RoomID,
+        activationTokens: [V2RoomActivationToken],
+        prepareLedger: @escaping @Sendable (any Database) async throws -> Void,
+        recordLedger: @escaping @Sendable (V2SendMessageOutcome, any Database) async throws -> Void
+    ) async throws -> V2SendMessageOutcome {
+        let rooms = Set([sourceRoomID, request.command.roomID])
+        guard request.command.forwardedFrom != nil, activationTokens.count == rooms.count,
+              Set(activationTokens.map(\.roomID)) == rooms,
+              v2PostgresTimestampCanEncode(request.now) else {
+            throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        }
+        var scoped = usingActivationScope(try .init(tokens: activationTokens))
+        scoped.ownerRoutes = try Dictionary(uniqueKeysWithValues: activationTokens.map {
+            (try uuid($0.roomID), try V2RoomShardRoute(shardID: $0.owner.shardID, epoch: $0.owner.epoch))
+        })
+        scoped.forwardOwnerSourceRoomID = try uuid(sourceRoomID)
+        return try await scoped.acceptPreparedActorForwardPair(request: request,
+            prepareLedger: prepareLedger, recordLedger: recordLedger)
+    }
+
+    private func acceptPreparedActorForwardPair(
+        request: V2RoomWriteRequest,
+        prepareLedger: @escaping @Sendable (any Database) async throws -> Void,
+        recordLedger: @escaping @Sendable (V2SendMessageOutcome, any Database) async throws -> Void
+    ) async throws -> V2SendMessageOutcome {
+        if let controlDatabase, controlPolicyScope == nil {
+            return try await withDurableAuthorizations(commands: [request.command],
+                controlDatabase: controlDatabase, now: request.now) { scoped in
+                try await scoped.acceptPreparedActorForwardPair(request: request,
+                    prepareLedger: prepareLedger, recordLedger: recordLedger)
+            }
+        }
+        try validateAuthorizationCommand(request.command)
+        let room = try uuid(request.command.roomID), sender = try uuid(request.command.senderUserID)
+        guard let source = forwardOwnerSourceRoomID else { throw V2RoomActivationLeaseError.activationChanged }
+        let commit: RoomWriteCommit
+        do {
+            commit = try await withRoomWriteTransaction { transaction in
+                let sql = try sqlDatabase(from: transaction)
+                try await acquireMessageOperationLock(roomID: room, senderID: sender,
+                    clientMessageID: uuid(request.command.clientMessageID), sql: sql)
+                try await requireSelectedOwners([source, room], sql: sql)
+                try await prepareLedger(transaction)
+                let accepted = try await acceptInTransaction(command: request.command,
+                    capacityProfile: request.capacityProfile, identifiers: request.identifiers, now: request.now,
+                    roomID: room, senderID: sender, cachedDirectPolicy: nil, transaction: transaction)
+                try await recordLedger(accepted.outcome, transaction)
+                return accepted
+            }
+        } catch let rejection as LateShardAdmissionRejection {
+            // All pair ledger and message effects rolled back together.
+            switch rejection {
+            case .rateLimited(let seconds): return .rateLimited(retryAfterSeconds: seconds)
+            case .unavailable(let reason): return .unavailable(reason)
+            }
+        }
+        return try await finalizeCommittedAcceptance(command: request.command,
+            cacheKey: .init(roomID: room, senderID: sender), commit: commit)
+    }
+
     public func acceptAtomicallyOwnerValidated(
         requests: [V2OwnerValidatedRoomWriteRequest]
     ) async throws -> [V2SendMessageOutcome] {
@@ -323,6 +450,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                 return expected.shardID == row.shardID && expected.epoch == row.epoch
             }) else { throw V2RoomOwnerFenceError.ownerChanged }
         }
+        try await activationScope?.require(roomIDs, sql: sql)
         if let grants = authorizationGrants {
             guard let transaction = sql as? any Database else { throw V2DirectAuthorizationIntentError.corruptPersistence }
             for key in grants.keys.sorted() {
@@ -344,6 +472,11 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         guard v2PostgresTimestampCanEncode(now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let roomID = try uuid(command.roomID)
         let senderID = try uuid(command.senderUserID)
+        _ = try activationScope?.token(for: roomID)
+        if activationScope != nil, command.forwardedFrom != nil,
+           forwardOwnerSourceRoomID == nil {
+            throw V2RoomActivationLeaseError.activationChanged
+        }
         try validateAuthorizationCommand(command)
         if let controlDatabase, controlPolicyScope == nil {
             do {
@@ -408,15 +541,58 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         identifiers: V2AcceptanceIdentifiers,
         now: Date
     ) async throws -> V2ForwardImportOutcome {
-        let inbox = PostgresV2ForwardInboxStore(database: database)
+        var inbox = PostgresV2ForwardInboxStore(database: database)
+        if let token = try activationScope?.token(for: export.intent.targetRoomID) {
+            inbox = try inbox.usingActivationToken(token)
+        }
         try await inbox.receive(export, now: now)
+        do {
+            return try await importReceivedForwardExport(export, capacityProfile: capacityProfile,
+                limits: limits, identifiers: identifiers, now: now)
+        } catch {
+            // Receive has committed a durable workflow fact. A later failure
+            // cannot prove rollback of this entire turn; retain the operation
+            // identity and recover through the inbox on the next activation.
+            if activationScope != nil { throw V2RoomTransactionOutcomeUnknown() }
+            throw error
+        }
+    }
+
+    /// Actor entry binds every phase, including immutable receipt replay, to
+    /// the exact target incarnation. It does not grant source-room authority.
+    public func importForwardExport(
+        _ export: V2ForwardExport,
+        activationToken: V2RoomActivationToken,
+        capacityProfile: V2CapacityProfile,
+        limits: V2MessageCommandLimits,
+        identifiers: V2AcceptanceIdentifiers,
+        now: Date
+    ) async throws -> V2ForwardImportOutcome {
+        guard activationToken.roomID.uuidValue == export.intent.targetRoomID,
+              activationToken.owner.shardID == export.intent.targetShardID,
+              activationToken.owner.epoch == export.intent.targetEpoch else {
+            throw V2RoomActivationLeaseError.activationChanged
+        }
+        return try await usingActivationScope(.init(tokens: [activationToken]))
+            .importForwardExport(export, capacityProfile: capacityProfile, limits: limits,
+                identifiers: identifiers, now: now)
+    }
+
+    private func importReceivedForwardExport(
+        _ export: V2ForwardExport,
+        capacityProfile: V2CapacityProfile,
+        limits: V2MessageCommandLimits,
+        identifiers: V2AcceptanceIdentifiers,
+        now: Date
+    ) async throws -> V2ForwardImportOutcome {
         if let controlDatabase, controlPolicyScope == nil {
             // This short owner-only preflight ends before control reservation.
             // The acceptance transaction below rechecks the inbox, media mapping,
             // exact command fingerprint and owner before any message write.
-            let preflight: (V2SendMessageCommand?, V2ForwardImportOutcome?) = try await database.transaction { transaction in
+            let preflight: (V2SendMessageCommand?, V2ForwardImportOutcome?) = try await withRoomWriteTransaction { transaction in
                 guard let sql = transaction as? any SQLDatabase else { throw V2ForwardInboxError.corruptPersistenceState }
                 let row = try await v2LockForwardInbox(exportID: export.intent.exportID, sql: sql)
+                try await activationScope?.require([export.intent.targetRoomID], sql: sql)
                 guard row.digest == export.digest else { throw V2ForwardInboxError.idempotencyConflict }
                 if row.state == "completed" || row.state == "rejected" { return (nil, try row.outcome) }
                 guard row.payload == export.payload else { throw V2ForwardInboxError.idempotencyConflict }
@@ -464,18 +640,23 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                 guard let sql = transaction as? any SQLDatabase else { throw V2ForwardInboxError.corruptPersistenceState }
                 let row = try await v2LockForwardInbox(exportID: export.intent.exportID, sql: sql)
                 guard row.digest == export.digest else { throw V2ForwardInboxError.idempotencyConflict }
-                if row.state == "completed" || row.state == "rejected" { return (try row.outcome, nil, nil) }
+                if row.state == "completed" || row.state == "rejected" {
+                    try await activationScope?.require([export.intent.targetRoomID], sql: sql)
+                    return (try row.outcome, nil, nil)
+                }
                 guard row.payload == export.payload else { throw V2ForwardInboxError.idempotencyConflict }
                 guard let authority = try await v2ForwardInboxAuthorization(row, sql: sql) else {
                     guard row.state == "pending" else { throw V2ForwardInboxError.corruptPersistenceState }
+                    try await activationScope?.require([export.intent.targetRoomID], sql: sql)
                     return (.pending(.media), nil, nil)
                 }
                 // Preserve inbox -> message operation -> room lock ordering.
                 // Fence before command validation can persist a rejection;
-                // completed/rejected immutable receipts returned above need no write.
+                // receipt and pending reads above are separately fenced before return.
                 try await acquireMessageOperationLock(roomID: export.intent.targetRoomID,
                     senderID: export.intent.actorUserID, clientMessageID: export.intent.targetClientMessageID, sql: sql)
                 try await v2AssertForwardInboxOwner(authority, sql: sql)
+                try await activationScope?.require([export.intent.targetRoomID], sql: sql)
                 guard v2PostgresTimestampCanEncode(now) else { throw V2ForwardInboxError.corruptPersistenceState }
                 do {
                     // Recovery of an already committed receipt must not be
@@ -524,9 +705,10 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         // A crash or completion-transaction failure before this transition leaves the
         // accepted receipt durable. Retry recovers its normal post-commit work
         // from message_send_completions before exposing target success.
-        return try await database.transaction { transaction in
+        return try await withRoomWriteTransaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ForwardInboxError.corruptPersistenceState }
             let row = try await v2LockForwardInbox(exportID: export.intent.exportID, sql: sql)
+            try await activationScope?.require([export.intent.targetRoomID], sql: sql)
             if row.state == "completed" { return try row.outcome }
             try await v2AssertForwardInboxOwner(.init(export: try row.export, mediaIDs: []), sql: sql)
             guard row.state == "accepted", let receipt = commit.outcome.acceptanceReceipt,
@@ -721,7 +903,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         cachedDirectPolicy: V2DirectSendPolicyCache.Entry?
     ) async throws -> RoomWriteCommit {
         do {
-            return try await withRoomWriteTransaction { transaction in
+            return try await withRoomWriteTransactionWithFenceContext { transaction, fenceContext in
                 try await acceptInTransaction(
                     command: command,
                     capacityProfile: capacityProfile,
@@ -730,6 +912,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                     roomID: roomID,
                     senderID: senderID,
                     cachedDirectPolicy: cachedDirectPolicy,
+                    fenceContext: fenceContext,
                     transaction: transaction
                 )
             }
@@ -759,6 +942,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     public func acceptAtomically(
         requests: [V2RoomWriteRequest]
     ) async throws -> [V2SendMessageOutcome] {
+        for request in requests { _ = try activationScope?.token(for: uuid(request.command.roomID)) }
         for request in requests { try validateAuthorizationCommand(request.command) }
         if let controlDatabase, controlPolicyScope == nil {
             guard requests.count >= 2, requests.count <= 128 else { throw V2DirectSendControlPolicyError.invalidBatch }
@@ -953,7 +1137,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
 
         let committed: [OrderedRoomWriteCommit]
         do {
-            committed = try await withRoomWriteTransaction { transaction in
+            committed = try await withRoomWriteTransactionWithFenceContext { transaction, fenceContext in
                 let sql = try sqlDatabase(from: transaction)
                 // PostgreSQL can evaluate the complete ordinary-group
                 // contract and append the canonical rows in one conditional
@@ -964,9 +1148,18 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                 // writes and the batcher retries the immutable commands via
                 // the established complete path.
                 if sql is any PostgresDatabase {
-                    if ownerRoutes != nil {
+                    if ownerRoutes != nil || activationScope != nil {
                         try await acquireMessageOperationLocks(orderedRequests, sql: sql)
-                        try await requireSelectedOwners(orderedRequests.map(\.roomID), sql: sql)
+                        if let fenceContext, let activationScope,
+                           authorizationGrants == nil {
+                            try await fenceContext.requireSelectedOwnersAndActivations(
+                                roomIDs: orderedRequests.map(\.roomID),
+                                expectedRoutes: ownerRoutes,
+                                expectedKinds: controlScopeRoomKinds,
+                                scope: activationScope)
+                        } else {
+                            try await requireSelectedOwners(orderedRequests.map(\.roomID), sql: sql)
+                        }
                     }
                     return try await persistConditionalPlainHybridGroupMessages(
                         orderedRequests,
@@ -1093,7 +1286,11 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                 }
             }
         } catch {
-            await shardAdmissionCommandCreditPool.release(grantedTokens, now: releaseNow)
+            if error is V2RoomTransactionOutcomeUnknown {
+                for token in grantedTokens { await shardAdmissionCommandCreditPool.discard(token) }
+            } else {
+                await shardAdmissionCommandCreditPool.release(grantedTokens, now: releaseNow)
+            }
             if v2IsSendCompletionRace(error) {
                 await hybridGroupShardCreditSnapshotCache.invalidate(uniqueRoomIDs)
                 throw V2AtomicRoomWriteBatchError(reason: .conditionalWriteMismatch)
@@ -1104,6 +1301,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             throw error
         }
         await shardAdmissionCommandCreditPool.commit(grantedTokens)
+        do {
         var outcomes = Array<V2SendMessageOutcome?>(
             repeating: nil,
             count: requests.count
@@ -1118,6 +1316,10 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
         return outcomes.compactMap { $0 }
+        } catch {
+            if activationScope != nil { throw V2RoomTransactionOutcomeUnknown() }
+            throw error
+        }
     }
 
     /// 权威的冷路径/缓存未命中批次。
@@ -1526,7 +1728,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                     return .init(
                         roomID: candidate.roomID,
                         shardState: candidate.snapshot.shardState,
-                        now: candidate.request.now
+                        now: candidate.request.now,
+                        activation: try activationScope?.token(for: candidate.roomID)
                     )
                 }
             )
@@ -1710,15 +1913,24 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             await releaseFastPlainDirectRoomLogCredits(ordered)
             return nil
         } catch {
-            await releaseFastPlainDirectRoomLogCredits(ordered)
+            await releaseFastPlainDirectRoomLogCredits(ordered,
+                outcomeUnknown: error is V2RoomTransactionOutcomeUnknown)
             throw error
         }
     }
 
     private func releaseFastPlainDirectRoomLogCredits(
-        _ appends: [FastPlainDirectRoomLogAppend]
+        _ appends: [FastPlainDirectRoomLogAppend],
+        outcomeUnknown: Bool = false
     ) async {
         for append in appends {
+            if outcomeUnknown {
+                await shardAdmissionCommandCreditPool?.discard(append.shardCreditToken)
+                if let token = append.roomCreditToken {
+                    await roomAdmissionCommandCreditPool?.discard(token)
+                }
+                continue
+            }
             if let shardAdmissionCommandCreditPool {
                 await shardAdmissionCommandCreditPool.release(
                     append.shardCreditToken, now: append.request.now
@@ -2012,6 +2224,12 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             throw V2AtomicRoomWriteBatchError(reason: reason)
         }
         let usesRoomAdmissionCredits = item.usesRoomAdmissionCredits
+        // Activation-bound credits must be prefetched before this transaction.
+        // The live warm path does this in fastPlainDirectRoomLogCommitsIfEligible;
+        // the standard path supplies usesRoomAdmissionCredits = false.
+        guard activationScope == nil || !usesRoomAdmissionCredits else {
+            throw V2AtomicRoomWriteBatchError(reason: .roomCreditModeMismatch)
+        }
         let shard: ShardRow
         let roomCommandWindowUsed: Int
         if usesRoomAdmissionCredits {
@@ -2448,6 +2666,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         senderID: UUID,
         cachedDirectPolicy: V2DirectSendPolicyCache.Entry?,
         importedForward: ForwardInboxAuthorization? = nil,
+        fenceContext: V2ConfiguredRoomFenceContext? = nil,
         transaction: any Database
     ) async throws -> RoomWriteCommit {
             do {
@@ -2465,6 +2684,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             if importedForward == nil, let expectedSource = forwardOwnerSourceRoomID {
                 guard command.forwardedFrom != nil, let ownerRoutes else { throw V2RoomOwnerFenceError.ownerChanged }
                 try await v2RequireForwardOwners(ownerRoutes, sql: sql)
+                try await activationScope?.require([expectedSource, roomID], sql: sql)
                 forwardSourceRoomID = expectedSource
             } else if importedForward == nil, let forwarded = command.forwardedFrom {
                 forwardSourceRoomID = try await v2LockForwardRooms(
@@ -2473,7 +2693,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             } else {
                 forwardSourceRoomID = nil
             }
-            if forwardOwnerSourceRoomID == nil || authorizationGrants != nil { try await requireSelectedOwners([roomID], sql: sql) }
+            if forwardOwnerSourceRoomID == nil || authorizationGrants != nil {
+                if let fenceContext, let activationScope,
+                   command.forwardedFrom == nil, importedForward == nil,
+                   forwardOwnerSourceRoomID == nil, authorizationGrants == nil {
+                    try await fenceContext.requireSelectedOwnersAndActivations(
+                        roomIDs: [roomID], expectedRoutes: ownerRoutes,
+                        expectedKinds: controlScopeRoomKinds, scope: activationScope)
+                } else {
+                    try await requireSelectedOwners([roomID], sql: sql)
+                }
+            }
             let loadedContext = try await loadMessageAcceptanceContext(
                 roomID: roomID,
                 senderID: senderID,
@@ -2842,6 +3072,19 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         cacheKey: V2DirectSendPolicyCache.Key,
         commit: RoomWriteCommit
     ) async throws -> V2SendMessageOutcome {
+        do {
+            return try await finalizeAcceptedValue(command: command, cacheKey: cacheKey, commit: commit)
+        } catch {
+            if activationScope != nil { throw V2RoomTransactionOutcomeUnknown() }
+            throw error
+        }
+    }
+
+    private func finalizeAcceptedValue(
+        command: V2SendMessageCommand,
+        cacheKey: V2DirectSendPolicyCache.Key,
+        commit: RoomWriteCommit
+    ) async throws -> V2SendMessageOutcome {
         let cacheStartedAt = ContinuousClock.now
         if let entry = commit.directPolicyCacheUpdate {
             await directSendPolicyCache.insert(entry, for: cacheKey)
@@ -2894,6 +3137,18 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     /// - Returns: 与请求顺序对应的发送结果。
     /// - Throws: 持久化结果损坏时抛出。
     private func finalizeCommittedAcceptances(
+        requests: [V2RoomWriteRequest],
+        committed: [OrderedRoomWriteCommit]
+    ) async throws -> [V2SendMessageOutcome] {
+        do {
+            return try await finalizeAcceptedValues(requests: requests, committed: committed)
+        } catch {
+            if activationScope != nil { throw V2RoomTransactionOutcomeUnknown() }
+            throw error
+        }
+    }
+
+    private func finalizeAcceptedValues(
         requests: [V2RoomWriteRequest],
         committed: [OrderedRoomWriteCommit]
     ) async throws -> [V2SendMessageOutcome] {

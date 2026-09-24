@@ -10,6 +10,13 @@ import SQLKit
 /// 因此一次被接受的撤回不会留下部分可见的墓碑。
 public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore, V2OwnerValidatedMessageWithdrawalStore {
     private let database: any Database
+    private var activationScope: V2RoomActivationWriteScope?
+
+    public func usingActivationScope(_ scope: V2RoomActivationWriteScope) -> Self {
+        var copy = self
+        copy.activationScope = scope
+        return copy
+    }
 
     /// 组合数据库。
     ///
@@ -54,8 +61,10 @@ public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore, V2Owne
     /// - Returns: 撤回结果或不需要变更的结论。
     /// - Throws: 房间或消息不存在、发起者非作者、状态冲突或持久化失败时抛出。
     private func withdraw(command: V2WithdrawMessageCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageWithdrawalOutcome {
-        return try await database.transaction { transaction in
+        return try await v2WithPostgresTransactionRetry(database: database,
+            maximumRetryCount: 0, classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2MessageWithdrawalStoreError.corruptPersistenceState }
+            if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             let roomID = try withdrawalUUID(command.roomID)
             let actorID = try withdrawalUUID(command.actorUserID)
             let operationID = try withdrawalUUID(command.operationID)
@@ -63,6 +72,7 @@ public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore, V2Owne
             let lockKey = actorID.uuidString + ":" + operationID.uuidString
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             if let ownerRoute { try await v2RequireRoomOwner(roomID: roomID, route: ownerRoute, sql: sql) }
+            try await activationScope?.require([roomID], sql: sql)
 
             if let prior = try await sql.raw("""
                 SELECT room_id, message_id, expected_message_revision, resulting_message_revision,

@@ -1,5 +1,6 @@
 import FluentKit
 import Foundation
+import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
@@ -9,11 +10,18 @@ import SQLKit
 /// 只有目标侧持久化的终态结果才能写入回执。
 public struct PostgresV2ForwardReceiptStore: Sendable {
     private let database: any Database
+    private var activationScope: V2RoomActivationWriteScope?
 
     /// 组合数据库。
     ///
     /// - Parameter database: 存放转发导出与回执的数据库。
-    public init(database: any Database) { self.database = database }
+    public init(database: any Database) { self.database = database; self.activationScope = nil }
+
+    public func usingActivationToken(_ token: V2RoomActivationToken) throws -> Self {
+        var scoped = self
+        scoped.activationScope = try .init(tokens: [token])
+        return scoped
+    }
 
     /// 记录或重放一次终态回执。
     ///
@@ -29,14 +37,24 @@ public struct PostgresV2ForwardReceiptStore: Sendable {
     ///   ``V2ForwardExportError/idempotencyConflict`` 或
     ///   ``V2ForwardExportError/corruptPersistenceState``。
     public func record(_ receipt: V2ForwardTerminalReceipt, now: Date) async throws {
-        try await database.transaction { transaction in
+        try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,
+            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ForwardExportError.corruptPersistenceState }
+            if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             guard let original = try await sql.raw("""
                 SELECT source_room_id, source_shard_id, source_epoch, payload_digest FROM im_v2.message_forward_exports
                 WHERE export_id = \(bind: receipt.exportID)
                 """).first(decoding: ReceiptExportRow.self),
                   original.digest == receipt.payloadDigest
             else { throw V2ForwardExportError.idempotencyConflict }
+            if let activationScope {
+                let token = try activationScope.token(for: original.sourceRoomID)
+                guard token.owner.shardID == original.sourceShardID,
+                      token.owner.epoch == original.sourceEpoch else {
+                    throw V2RoomActivationLeaseError.activationChanged
+                }
+                try await activationScope.require([original.sourceRoomID], sql: sql)
+            }
             if let prior = try await read(exportID: receipt.exportID, sql: sql) {
                 try match(prior, receipt: receipt)
                 return
@@ -46,7 +64,7 @@ public struct PostgresV2ForwardReceiptStore: Sendable {
             // above remains valid without reauthorizing the original message.
             guard let room = try await sql.raw("""
                 SELECT room_shard_id, owner_epoch FROM im_v2.rooms
-                WHERE room_id = \(bind: original.sourceRoomID) FOR UPDATE
+                WHERE room_id = \(bind: original.sourceRoomID) FOR NO KEY UPDATE
                 """).first(decoding: ReceiptOwnerRow.self),
                   room.shardID == original.sourceShardID, room.epoch == original.sourceEpoch
             else { throw V2ForwardExportError.ownerChanged }

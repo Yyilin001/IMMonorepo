@@ -1,5 +1,6 @@
 import FluentKit
 import Foundation
+import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
@@ -239,12 +240,19 @@ public enum V2SpecialAccountMessagingError: Error, Equatable, Sendable {
 /// 基于 PostgreSQL 的特殊账号注册与审计实现。
 public struct PostgresV2SpecialAccountMessagingStore: V2SpecialAccountMessagingStore {
     private let database: any Database
+    private var activationScope: V2RoomActivationWriteScope?
 
     /// 组合数据库。
     ///
     /// - Parameter database: 存放特殊账号、会话与审计记录的数据库。
     public init(database: any Database) {
         self.database = database
+    }
+
+    public func usingActivationScope(_ scope: V2RoomActivationWriteScope) -> Self {
+        var copy = self
+        copy.activationScope = scope
+        return copy
     }
 
     /// 解析处于可用状态且允许服务消息的账号。
@@ -310,11 +318,16 @@ public struct PostgresV2SpecialAccountMessagingStore: V2SpecialAccountMessagingS
               message.senderUserID.uuidValue == accountUUID,
               message.clientMessageID.uuidValue == operationUUID
         else { throw V2SpecialAccountMessagingError.corruptPersistenceState }
-        try await database.transaction { transaction in
+        try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,
+                                               classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2SpecialAccountMessagingError.corruptPersistenceState }
+            if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             // Serialize retries even when the operation row does not exist yet.
             let lockKey = "special-account-message:\(accountUUID):\(operationUUID)"
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
+            // Replays are room writes too: validate authority before returning
+            // an existing receipt or repairing any audit row.
+            if let activationScope { try await activationScope.require([roomUUID], sql: sql) }
             if let existing = try await sql.raw("SELECT request_fingerprint, message_id, room_id FROM im_v2.special_account_message_operations WHERE account_user_id = \(bind: accountUUID) AND operation_id = \(bind: operationUUID) FOR UPDATE").first(decoding: SpecialAccountOperationRow.self) {
                 guard existing.requestFingerprint == request.requestFingerprint, existing.messageID == messageUUID, existing.roomID == roomUUID else {
                     throw V2SpecialAccountMessagingError.idempotencyConflict

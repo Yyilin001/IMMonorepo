@@ -30,6 +30,7 @@ require_command docker
 require_command openssl
 require_command rsync
 require_command uuidgen
+require_command python3
 
 # `docker image prune` only removes dangling images. Narrow it further to this
 # Dockerfile's build stage, so a repeated local rebuild cannot fill Docker's
@@ -79,6 +80,24 @@ if ! grep -q '^IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64=' "${env_file}"; then
 fi
 
 "${script_dir}/validate_v2_local_environment.sh" "${env_file}"
+
+# Room Actor transport has a separate private CA and stable process signing
+# identities. Existing identities are retained across ordinary local restarts.
+actor_configuration_directory="${v2_dir}/local-room-actors"
+if [[ ! -d "${actor_configuration_directory}" ]]; then
+  python3 "${script_dir}/prepare_v2_room_actor_configuration.py" \
+    --output-dir "${actor_configuration_directory}" \
+    --host gateway=gateway:7337 --caller account=account:7338 \
+    --shards rooms-primary --mount-root /run/im-v2-room-actor
+fi
+for actor_process in gateway account; do
+  test -s "${actor_configuration_directory}/${actor_process}/configuration.json" || {
+    printf 'Room Actor configuration is incomplete for %s; inspect %s before restarting.\n' \
+      "${actor_process}" "${actor_configuration_directory}" >&2
+    exit 1
+  }
+done
+
 
 # Older local Docker installations can lack Buildx and therefore ignore a
 # Dockerfile-specific .dockerignore. Build from a temporary, allow-listed

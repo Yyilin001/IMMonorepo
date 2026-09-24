@@ -1,5 +1,6 @@
 import FluentKit
 import Foundation
+import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
@@ -219,6 +220,40 @@ public struct V2ContentReviewReport: Equatable, Sendable {
     public let releasedCount: Int
 }
 
+/// Only the trusted-safety room capability may apply a review verdict. Job
+/// claiming, provider calls, and retry bookkeeping remain worker-owned.
+public protocol V2ContentReviewSafetyApplying: Sendable {
+    func apply(_ request: V2TrustedSafetyModeration) async throws -> V2ModerationOutcome
+}
+
+extension V2TrustedSafetyModerationService: V2ContentReviewSafetyApplying {}
+
+/// Production adapter for the already typed D2 trusted-safety command. The
+/// inbound service-role gate and room turn enforce authorization and the full
+/// activation fence; a transport failure is propagated for durable job retry.
+public struct V2RoomContentReviewSafetyApplicator: V2ContentReviewSafetyApplying {
+    private let invoke: @Sendable (V2RoomRequest, ContinuousClock.Instant) async throws -> V2RoomResponse
+    private let callTimeout: Duration
+
+    /// The composition layer supplies a service-principal RoomRef call. This
+    /// module intentionally does not depend on IMV2ActorRuntime.
+    public init(callTimeout: Duration = .seconds(10),
+                invoke: @escaping @Sendable (V2RoomRequest, ContinuousClock.Instant) async throws -> V2RoomResponse) {
+        precondition(callTimeout > .zero)
+        self.invoke = invoke
+        self.callTimeout = callTimeout
+    }
+
+    public func apply(_ request: V2TrustedSafetyModeration) async throws -> V2ModerationOutcome {
+        let response = try await invoke(.administration(.trustedSafety(.init(request))),
+            ContinuousClock.now.advanced(by: callTimeout))
+        guard case .administration(.trustedSafety(let outcome)) = response else {
+            throw V2ContentReviewWorkerError.dispositionNotApplied
+        }
+        return try outcome.domain()
+    }
+}
+
 /// 持久化且带租约栅栏的审核工作器。
 ///
 /// 安全屏蔽使用稳定的消息标识作为审核操作标识，因此「已完成屏蔽但尚未完成任务」时的崩溃
@@ -226,12 +261,12 @@ public struct V2ContentReviewReport: Equatable, Sendable {
 public struct V2ContentReviewWorker: Sendable {
     private let store: any V2ContentReviewStore
     private let reviewer: any V2ContentReviewing
-    private let moderation: V2TrustedSafetyModerationService
+    private let moderation: any V2ContentReviewSafetyApplying
     private let leaseDuration: TimeInterval
     private let retryPolicy: V2DurableRetryPolicy
     private let now: @Sendable () -> Date
 
-    public init(store: any V2ContentReviewStore, reviewer: any V2ContentReviewing, moderation: V2TrustedSafetyModerationService, leaseDuration: TimeInterval = 30, retryPolicy: V2DurableRetryPolicy = .standard, now: @escaping @Sendable () -> Date = Date.init) throws {
+    public init(store: any V2ContentReviewStore, reviewer: any V2ContentReviewing, moderation: any V2ContentReviewSafetyApplying, leaseDuration: TimeInterval = 30, retryPolicy: V2DurableRetryPolicy = .standard, now: @escaping @Sendable () -> Date = Date.init) throws {
         guard leaseDuration.isFinite, leaseDuration > 0 else { throw V2ContentReviewWorkerError.invalidLeaseDuration }
         self.store = store
         self.reviewer = reviewer

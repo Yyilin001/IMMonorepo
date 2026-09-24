@@ -1,6 +1,6 @@
 # V2 当前实现与发布证据
 
-最后审阅：2026-09-06
+最后审阅：2026-09-24（房间 Virtual Actor 与 schema；其他专题沿用各自证据）
 适用范围：当前 `IMV2Core`、`IMV2ClientKit`、`IMV2Server`、`IMApp` 与 `IMV2` 工具链。
 
 本文件只登记当前合同和可重复证据，不保留开发时间线。仓库内实现与本机测试通过不等于
@@ -29,7 +29,7 @@
   私聊与群聊的公共内容统一以房间日志为权威副本，不再提供 fanout 兼容模式；个人事件流保存个人状态与单侧提示。
   新编辑携带接受身份与显式完整状态以跨越合法版本缺口，见[完整编辑合同](../../docs/reviews/message-edit-replacement-contract.md)。
 - PostgreSQL 新环境从空数据库执行 [`IMV2/sql/schema.sql`](../sql/schema.sql)。当前结构为
-  `im-v2-current-51`；这是唯一新环境建库合同。仅撤销凭据已随注册事务原子交付、与 access/refresh 同项保存，刷新保持原证明与期限，见[原子签发合同](../../docs/reviews/atomic-revocation-credential-issue-contract.md)。真实 HTTPS/App 链路已验证；[独立持久退出交接](../../docs/reviews/device-revocation-handoff-contract.md)已接入，原凭据删除前保留撤销任务，[独立执行器与本地退出](../../docs/reviews/device-revocation-runner-contract.md)已接通前台重试，[暂停反馈与恢复](../../docs/reviews/device-revocation-status-contract.md)已完成，完整生命周期交互验收仍待完成。设备会话保存默认 30 天绝对截止，刷新、认证及 Push/媒体授权不能越过期限；见[期限合同](../../docs/reviews/device-session-absolute-expiry-contract.md)。群角色的显式策略标记独立于可清理的操作回执。
+  `im-v2-current-53`；这是唯一新环境建库合同。仅撤销凭据已随注册事务原子交付、与 access/refresh 同项保存，刷新保持原证明与期限，见[原子签发合同](../../docs/reviews/atomic-revocation-credential-issue-contract.md)。真实 HTTPS/App 链路已验证；[独立持久退出交接](../../docs/reviews/device-revocation-handoff-contract.md)已接入，原凭据删除前保留撤销任务，[独立执行器与本地退出](../../docs/reviews/device-revocation-runner-contract.md)已接通前台重试，[暂停反馈与恢复](../../docs/reviews/device-revocation-status-contract.md)已完成，完整生命周期交互验收仍待完成。设备会话保存默认 30 天绝对截止，刷新、认证及 Push/媒体授权不能越过期限；见[期限合同](../../docs/reviews/device-session-absolute-expiry-contract.md)。群角色的显式策略标记独立于可清理的操作回执。
   readiness 拒绝不符合当前结构的数据库；旧压测库须重建，不提供在线升级。
   schema 19→20 为群申请增加审核人＋决策操作唯一约束；新审批将成员、配额、事件、outbox 和
   申请记账放入一次事务。审批引用的成员操作回执已增加清理保留；旧 approving 及其恢复服务已删除，B27 owner 路由仍开放，见
@@ -61,6 +61,7 @@
 | TLS gateway 与协议 | TLS 1.3、protocol 30 协商、帧/深度/队列/请求上限、原子设备会话认证、心跳与关闭 | 仓库内已实现；package 和本地 gateway 回归 | 生产证书轮换、入口拓扑与故障演练 |
 | 账户与设备凭据 | 独立 account service、密码 cost-12、跨副本限流、设备绑定 assertion、刷新/撤销/账号禁用 | 本机集成已验证 | WebAuthn RP verifier、challenge/counter store、生产 trusted-proxy 与审计审批 |
 | 公开身份与联系人 | required account kind、精确 handle 查询、资料更新、关系/屏蔽、按上下文资料读取、active roster 公开身份 | 仓库内已实现；HTTP/SQLite/PostgreSQL/iOS 测试 | 真机离线、多语言与人工无障碍验收 |
+| 房间 Virtual Actor | RoomID 逻辑引用、持久 lease/activation fence、恢复与有界 FIFO/回收；前台和房间后台写入接入 | 本轮功能收口完成；真 PG、双 Host 分区/接管、单 owner 批查询与当前源码完整 Linux 回归（1529 tests / 264 suites）见[验证状态](../../docs/reviews/virtual-actor/README.md) | 相对性能按用户要求暂缓；首次未复现的测试进程停滞及诊断保留，不代表生产容量批准 |
 | 私聊与普通群 | 公共内容统一房间日志；幂等命令、事务准入、按房间游标恢复；个人流承载个人状态 | PostgreSQL、ClientKit 与本机 TLS/App 分层证据见会话同步验收状态 | 全链路规模、故障与长稳态验收 |
 | 大群房间日志 | 公共内容使用房间日志；账号级变化通知与有界详细订阅分离，mention 仅作推送提示 | 仓库内覆盖与缓冲区回归 | 持续负载、故障与设备可见延迟报告 |
 | 群管理、邀请与审核 | 成员 seek pagination、角色权限、禁言、审计移除、公告、置顶、内容审核 lease 与受控 replay；审批式邀请链接、QR、撤销/次数/有效期、待审批分页与可恢复批准 | 仓库内已实现；域/HTTP/schema/Simulator 回归 | 真实双端邀请 E2E、链接滥用、生产密钥轮换、审核 provider、operator 访问与保留政策 |

@@ -807,10 +807,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await seedRoom(on: primarySQL)
             try await seedRoom(roomID: roomB, shardID: "room-b", on: secondarySQL)
             let now = Date(timeIntervalSince1970: 1_750_000_000)
+            // seedRoom already installs the local room-a route. Add only the
+            // remote room-b route to this test's control directory.
             try await primarySQL.raw("""
                 INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at)
-                VALUES (\(bind: roomUUID), 'room-a', 0, \(bind: now), \(bind: now)),
-                       (\(bind: roomB), 'room-b', 0, \(bind: now), \(bind: now))
+                VALUES (\(bind: roomB), 'room-b', 0, \(bind: now), \(bind: now))
                 """).run()
             let profile = try V2CapacityProfile(id: "standard", limits: .init(
                 maxEligibleMembers: 10, maxCommandsPerWindow: 10,

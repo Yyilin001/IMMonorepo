@@ -8,6 +8,7 @@ V2 是一条没有历史兼容层的 greenfield 路径。本文档只描述当�
 | --- | --- |
 | 了解当前组件、数据流、群聊和 NATS 边界 | [当前架构](../../docs/current-system-map.md) |
 | 构建 Vapor 5 beta 服务与理解资源生命周期 | [Vapor 5 迁移](00-foundation/vapor5-migration.md) |
+| 房间 Virtual Actor 合同与实施验收 | [当前合同](../../docs/reviews/room-virtual-actor-contract.md) · [验证状态](../../docs/reviews/virtual-actor/README.md) · [并行实施方案](00-foundation/virtual-actor-parallel-plan.md) |
 | 判断能力、证据等级与当前实施路线 | [implementation status](implementation-status.md) |
 | 查看仍需部署、设备、容量或审批闭环的风险 | [residual risk register](10-operations/residual-risk-register.md) |
 | 查找已接受或待批准的设计决定 | [ADR register](ADR-REGISTER.md) |

@@ -255,8 +255,15 @@ public struct V2GroupAudienceImportService: Sendable {
         var failedCount = 0
         for candidate in candidates {
             do {
-                _ = try await finalize(actorUserID: candidate.actorUserID, operationID: candidate.operationID)
-                recoveredCount += 1
+                let outcome = try await finalize(actorUserID: candidate.actorUserID,
+                                                 operationID: candidate.operationID)
+                switch outcome {
+                case .created, .idempotent:
+                    recoveredCount += 1
+                case .idempotencyConflict, .invalidMembers, .memberLimitReached,
+                     .rateLimited, .unavailable:
+                    failedCount += 1
+                }
             } catch is CancellationError {
                 throw CancellationError()
             } catch {

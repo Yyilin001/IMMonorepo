@@ -8,6 +8,7 @@ import Darwin
 import Glibc
 #endif
 import IMV2Core
+import IMV2ActorApplication
 import IMV2Server
 import IMV2ServerHTTP
 import NIOPosix
@@ -45,6 +46,7 @@ enum IMV2AccountServerApp {
         V2RedactedHTTPMiddlewareConfiguration.install(on: app)
         let runtimeTasks = RuntimeTaskSupervisor()
         let passwordWorker = V2PasswordHashWorker()
+        var roomActor: V2RoomActorApplication?
         do {
             resources.databases.use(
                 try postgresDatabaseConfiguration(
@@ -124,8 +126,8 @@ enum IMV2AccountServerApp {
                     }
                 }
             }
-            // Reuse one physical pool for room invitations and local media.
-            // Owner routing must exist even when the filesystem media adapter is off.
+            // Keep one pool per physical owner for lease resolution and
+            // scoped media grants; room commands always use RoomRef.
             var accountStorageDatabases: [String: any Database] = [configuration.databaseURL: database]
             for url in Set(configuration.roomShardStorage.map(\.databaseURL)) where accountStorageDatabases[url] == nil {
                 let identifier = DatabaseID(string: "account-owner-\(accountStorageDatabases.count)")
@@ -138,10 +140,19 @@ enum IMV2AccountServerApp {
                 try await V2CapacityProfileReadiness.verify(database: pool.database, profile: configuration.capacityProfile)
                 accountStorageDatabases[url] = pool.database
             }
-            let invitationOwners = try V2StaticRoomShardStorageRegistry(locations: configuration.roomShardStorage.map { storage in
-                guard let owner = accountStorageDatabases[storage.databaseURL] else { throw V2RoomShardStorageRegistryError.unknownShardID }
-                return try .init(shardID: storage.shardID, database: owner, schema: storage.schema)
-            })
+            var roomDatabases: [String: any Database] = [:]
+            for storage in configuration.roomShardStorage {
+                guard let owner = accountStorageDatabases[storage.databaseURL] else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                roomDatabases[storage.shardID] = owner
+            }
+            let roomRouter = V2PostgresRoomShardRouter(database: database)
+            let actorConfiguration = try V2RoomActorApplicationConfiguration(
+                environment: ProcessRuntimeEnvironment(), hostsRooms: false,
+                configuredShardIDs: Set(roomDatabases.keys))
+            let actor = try await V2RoomActorApplication.start(
+                configuration: actorConfiguration, ownerRouter: roomRouter,
+                roomDatabases: roomDatabases)
+            roomActor = actor
             if let localMediaConfiguration {
                 let provider = try V2LocalFilesystemMediaProvider(
                     rootDirectory: localMediaConfiguration.rootDirectory,
@@ -177,10 +188,10 @@ enum IMV2AccountServerApp {
                     try await V2SchemaReadiness.verify(database: owner)
                     mediaOwners[storage.shardID] = .init(database: owner, provider: provider)
                 }
-                let mediaDownloads = V2RoutedMediaDownloadService(
+                let mediaDownloads = V2RoomRefMediaDownloadClient(
                     local: .init(media: media, providerSessions: downloadProviderSessions),
-                    rooms: V2PostgresRoomShardRouter(database: database), owners: mediaOwners,
-                    controlDatabase: database
+                    rooms: roomRouter, owners: mediaOwners, controlDatabase: database,
+                    authorization: .init(directory: actor.directory)
                 )
                 V2VaporMediaUploadRoutes(
                     authenticator: authenticator,
@@ -261,14 +272,19 @@ enum IMV2AccountServerApp {
             ).register(on: authenticatedAccountRoutes)
             V2VaporProfilePresentationRoutes(
                 authenticator: authenticator,
-                presentations: V2RoutedProfilePresentationStore(
+                presentations: V2RoomRefProfilePresentationClient(
                     aliases: PostgresV2ProfilePresentationStore(database: database),
-                    router: V2PostgresRoomShardRouter(database: database),
-                    owners: invitationOwners
+                    directory: actor.directory
                 )
             ).register(on: authenticatedAccountRoutes)
-            let routedInvitations = V2RoutedGroupInvitationStore(controlDatabase: database, router: V2PostgresRoomShardRouter(database: database), owners: invitationOwners)
-            let inviteRecovery = V2GroupInviteCreationRecoveryWorker(jobs: PostgresV2GroupInviteDirectory(database: database), invitations: routedInvitations)
+            let invitationCoordinator = V2ActorInvitationCoordinator(
+                controlDatabase: database,
+                room: .init(directory: actor.directory),
+                secretIssuer: try .init(rawKey: configuration.groupInviteTokenHMACKey))
+            let inviteRecovery = V2GroupInviteCreationRecoveryWorker(
+                jobs: PostgresV2GroupInviteDirectory(database: database),
+                coordinator: invitationCoordinator,
+                deadline: { .now + .seconds(10) })
             await runtimeTasks.start {
                 while !Task.isCancelled {
                     do {
@@ -283,7 +299,9 @@ enum IMV2AccountServerApp {
                     do { try await v2Sleep(for: .seconds(5)) } catch { break }
                 }
             }
-            let joinQuotaRecovery = V2GroupJoinQuotaRecoveryWorker(controlDatabase: database, invitations: routedInvitations)
+            let joinQuotaRecovery = V2GroupJoinQuotaRecoveryWorker(
+                controlDatabase: database, coordinator: invitationCoordinator,
+                deadline: { .now + .seconds(10) })
             await runtimeTasks.start {
                 while !Task.isCancelled {
                     do {
@@ -296,11 +314,7 @@ enum IMV2AccountServerApp {
                     do { try await v2Sleep(for: .seconds(5)) } catch { break }
                 }
             }
-            let groupInvitations = V2GroupInvitationService(
-                store: routedInvitations,
-                capacityProfile: configuration.capacityProfile,
-                secretIssuer: try .init(rawKey: configuration.groupInviteTokenHMACKey)
-            )
+            let groupInvitations = V2ActorGroupInvitationClient(coordinator: invitationCoordinator)
             V2VaporGroupInvitationRoutes(
                 authenticator: authenticator,
                 invitations: groupInvitations
@@ -325,12 +339,28 @@ enum IMV2AccountServerApp {
             await runtimeTasks.cancelAndWait(logger: logger)
             try await passwordWorker.shutdown()
             try await app.shutdown()
+            guard try await actor.stop(deadline: .now + actor.configuration.drainTimeout.duration) else {
+                logger.critical("IM V2 account room actor drain exceeded its shutdown deadline")
+                exit(EXIT_FAILURE)
+            }
+            roomActor = nil
             try await resources.shutdown()
             try await applicationEventLoops.shutdownGracefully()
         } catch {
             await runtimeTasks.cancelAndWait(logger: logger)
             try? await passwordWorker.shutdown()
             try? await app.shutdown()
+            if let roomActor {
+                do {
+                    guard try await roomActor.stop(deadline: .now + roomActor.configuration.drainTimeout.duration) else {
+                        logger.critical("IM V2 account room actor drain incomplete; retaining database resources")
+                        exit(EXIT_FAILURE)
+                    }
+                } catch {
+                    logger.critical("IM V2 account room actor shutdown failed; retaining database resources")
+                    exit(EXIT_FAILURE)
+                }
+            }
             try? await resources.shutdown()
             try? await applicationEventLoops.shutdownGracefully()
             throw error

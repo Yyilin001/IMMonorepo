@@ -1,4 +1,5 @@
 import Foundation
+import IMV2ActorContracts
 import IMV2Core
 
 private func v2MessageEntity(_ wire: IMV2MessageEntity) throws -> V2MessageEntity {
@@ -82,6 +83,14 @@ private func v2ProtobufVarintByteCount(_ value: UInt64) -> Int {
     }
     return count
 }
+
+protocol V2GatewaySendMessageHandling: Sendable {
+    var managesForegroundWriteAdmission: Bool { get }
+    var publishesCommittedGroupEvents: Bool { get }
+    func send(_ request: V2AuthenticatedSendMessage) async throws -> V2SendMessageOutcome
+}
+
+extension V2SendMessageService: V2GatewaySendMessageHandling {}
 
 protocol V2GatewayRoomMembershipHandling: Sendable {
     func change(_ request: V2AuthenticatedMembershipChange) async throws -> V2RoomMembershipChangeOutcome
@@ -212,7 +221,7 @@ extension V2GroupCapabilitiesService: V2GatewayGroupCapabilitiesHandling {}
 public struct V2GatewayDomainCommandHandler:
     V2GatewayCommandHandler,
     V2PreparedGroupEventCommandHandling {
-    private let sendMessage: V2SendMessageService
+    private let sendMessage: any V2GatewaySendMessageHandling
     private let membership: any V2GatewayRoomMembershipHandling
     private let withdrawal: any V2GatewayMessageWithdrawalHandling
     private let reaction: any V2GatewayMessageReactionHandling
@@ -235,6 +244,7 @@ public struct V2GatewayDomainCommandHandler:
     private let sync: V2SyncService
     private let telemetry: any V2TelemetrySink
     private let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
+    private let roomCommandsHostAdmitted: Bool
     private let controlWriteAdmissionEnabled: Bool
     /// 房间日志分页与其信封头共享普通网关帧的载荷预算。
     ///
@@ -243,6 +253,53 @@ public struct V2GatewayDomainCommandHandler:
     private let maximumGroupEventPagePayloadBytes: Int
     private let now: @Sendable () -> Date
     private let monotonicNow: @Sendable () -> ContinuousClock.Instant
+
+    /// Production composition for existing-room calls and pre-room creation.
+    /// User/control services remain explicit so a room capability cannot
+    /// accidentally become the authority for user-owned operations.
+    public init(roomActors: V2GatewayRoomActorServices,
+                roomCreation: V2GatewayRoomCreationServices,
+                liveActivity: V2LiveActivityService,
+                foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting,
+                roomRecovery: any V2RoomRecoveryCommandHandling,
+                accountChanges: any V2AccountRoomChangesStarting,
+                socialRelationships: V2SocialRelationshipService,
+                conversationCapabilities: V2ConversationCapabilitiesService,
+                forwardMessages: any V2ForwardMessagesHandling,
+                sync: V2SyncService,
+                telemetry: any V2TelemetrySink,
+                databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
+                controlWriteAdmissionEnabled: Bool = false,
+                maximumGroupEventPagePayloadBytes: Int = 48 * 1_024,
+                now: @escaping @Sendable () -> Date = Date.init,
+                monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
+        self.init(sendMessage: roomActors.messaging,
+                  membershipHandler: roomActors.administration,
+                  withdrawalHandler: roomActors.messaging,
+                  reactionHandler: roomActors.messaging,
+                  editHandler: roomActors.messaging,
+                  readReceiptHandler: roomActors.receipts,
+                  liveActivityHandler: liveActivity,
+                  directMessagingHandler: roomCreation.direct,
+                  groupAudienceImportHandler: roomCreation.staged,
+                  groupEventLogHandler: roomActors.eventLog,
+                  foregroundGroupEventHints: foregroundGroupEventHints,
+                  membershipDirectoryHandler: roomActors.queries,
+                  roomRecovery: roomRecovery,
+                  accountChanges: accountChanges,
+                  socialRelationshipHandler: socialRelationships,
+                  moderationHandler: roomActors.administration,
+                  conversationCapabilitiesHandler: conversationCapabilities,
+                  groupCapabilitiesHandler: roomActors.administration,
+                  groupRolePolicyBaseline: roomActors.queries,
+                  forwardMessagesHandler: forwardMessages,
+                  sync: sync, telemetry: telemetry,
+                  databaseWorkAdmission: databaseWorkAdmission,
+                  roomCommandsHostAdmitted: true,
+                  controlWriteAdmissionEnabled: controlWriteAdmissionEnabled,
+                  maximumGroupEventPagePayloadBytes: maximumGroupEventPagePayloadBytes,
+                  now: now, monotonicNow: monotonicNow)
+    }
 
     public init(sendMessage: V2SendMessageService, membership: V2RoomMembershipService, withdrawal: V2MessageWithdrawalService, reaction: V2MessageReactionService, edit: V2MessageEditService, readReceipt: V2ReadReceiptService, liveActivity: V2LiveActivityService, directMessaging: V2DirectMessagingService, groupAudienceImports: V2GroupAudienceImportService, groupEventLog: V2GroupEventLogService, foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting, membershipDirectory: V2RoomMembershipDirectoryService, roomRecovery: any V2RoomRecoveryCommandHandling, accountChanges: any V2AccountRoomChangesStarting, socialRelationships: V2SocialRelationshipService, moderation: V2ModerationService, conversationCapabilities: V2ConversationCapabilitiesService, groupCapabilities: V2GroupCapabilitiesService, groupRolePolicyBaseline: any V2GroupRolePolicyBaselineReading, forwardMessages: any V2ForwardMessagesHandling, sync: V2SyncService, telemetry: any V2TelemetrySink, databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil, controlWriteAdmissionEnabled: Bool = false, maximumGroupEventPagePayloadBytes: Int = 48 * 1_024, now: @escaping @Sendable () -> Date = Date.init, monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
         precondition(maximumGroupEventPagePayloadBytes > 0)
@@ -269,6 +326,7 @@ public struct V2GatewayDomainCommandHandler:
         self.sync = sync
         self.telemetry = telemetry
         self.databaseWorkAdmission = databaseWorkAdmission
+        self.roomCommandsHostAdmitted = false
         self.controlWriteAdmissionEnabled = controlWriteAdmissionEnabled
         self.maximumGroupEventPagePayloadBytes = maximumGroupEventPagePayloadBytes
         self.now = now
@@ -276,7 +334,7 @@ public struct V2GatewayDomainCommandHandler:
     }
 
     init(
-        sendMessage: V2SendMessageService,
+        sendMessage: any V2GatewaySendMessageHandling,
         membershipHandler: any V2GatewayRoomMembershipHandling,
         withdrawalHandler: any V2GatewayMessageWithdrawalHandling,
         reactionHandler: any V2GatewayMessageReactionHandling,
@@ -299,6 +357,7 @@ public struct V2GatewayDomainCommandHandler:
         sync: V2SyncService,
         telemetry: any V2TelemetrySink,
         databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
+        roomCommandsHostAdmitted: Bool = false,
         controlWriteAdmissionEnabled: Bool = false,
         maximumGroupEventPagePayloadBytes: Int = 48 * 1_024,
         now: @escaping @Sendable () -> Date = Date.init,
@@ -328,6 +387,7 @@ public struct V2GatewayDomainCommandHandler:
         self.sync = sync
         self.telemetry = telemetry
         self.databaseWorkAdmission = databaseWorkAdmission
+        self.roomCommandsHostAdmitted = roomCommandsHostAdmitted
         self.controlWriteAdmissionEnabled = controlWriteAdmissionEnabled
         self.maximumGroupEventPagePayloadBytes = maximumGroupEventPagePayloadBytes
         self.now = now
@@ -416,7 +476,7 @@ public struct V2GatewayDomainCommandHandler:
         let startedAt = monotonicNow()
         do {
             let result: V2PreparedGroupEventPullResult
-            if let databaseWorkAdmission {
+            if let databaseWorkAdmission, !roomCommandsHostAdmitted {
                 switch await databaseWorkAdmission.acquire(.interactiveRead) {
                 case .admitted:
                     break
@@ -622,6 +682,21 @@ public struct V2GatewayDomainCommandHandler:
     }
 
     private func commandManagesDatabaseAdmission(for envelope: IMV2Envelope) -> Bool {
+        if roomCommandsHostAdmitted {
+            switch envelope.body {
+            case .sendMessage, .changeRoomMembership, .withdrawMessage,
+                 .changeMessageReaction, .editMessage, .recordReadReceipt,
+                 .getGroupRolePolicyBaseline, .listRoomMembers,
+                 .roomSyncStateBatch, .roomLatestVisibleBatch,
+                 .groupEventPull, .groupEventSubscribe, .listReadReceiptReaders,
+                 .moderateMessage, .muteMember, .moderateMemberRemoval,
+                 .setPinnedMessage, .setGroupAnnouncement,
+                 .setGroupRolePermissions, .changeGroupMemberRole,
+                 .forwardMessages:
+                return true
+            default: break
+            }
+        }
         switch envelope.body {
         case .sendMessage:
             return sendMessage.managesForegroundWriteAdmission
@@ -726,6 +801,22 @@ public struct V2GatewayDomainCommandHandler:
             return errorEnvelope(code: "FORWARD_PENDING", retryable: true, retryAfter: 1)
         } catch V2ForwardPendingError.paused {
             return errorEnvelope(code: "FORWARD_PAUSED", retryable: true, retryAfter: 30)
+        } catch let failure as V2RoomCallFailure {
+            switch failure {
+            case .outcomeUnknown:
+                // The client keeps its operation ID on retry; a timed-out
+                // write may already be durable on the previous incarnation.
+                return errorEnvelope(code: "UNAVAILABLE", retryable: true)
+            case .notAccepted(let reason), .rolledBack(let reason):
+                switch reason {
+                case .cancelled: throw CancellationError()
+                case .forbidden: return errorEnvelope(code: "FORBIDDEN", retryable: false)
+                case .notFound: return errorEnvelope(code: "NOT_FOUND", retryable: false)
+                case .invalidRequest: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
+                case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
+                default: return errorEnvelope(code: "UNAVAILABLE", retryable: true)
+                }
+            }
         } catch V2RoomMembershipDirectoryError.revisionConflict(let currentRevision) {
             return errorEnvelope(code: "REVISION_CONFLICT", retryable: false, currentRevision: currentRevision)
         } catch V2RevisionValidationError.outOfRange, V2CoreError.invalidIdentifier, V2CoreError.invalidPositiveValue, V2SendMessageValidationError.invalidTextLength, V2MediaStoreError.invalidReferenceSet, V2MentionValidationError.invalidLimits, V2MentionValidationError.invalidTargetSet, V2ModerationValidationError.invalidReasonCode, V2ModerationValidationError.invalidActionShape, V2ModerationValidationError.invalidMuteExpiry, V2RoomMembershipValidationError.selfTargetingNotAllowed, V2DirectMessagingValidationError.selfTargetingNotAllowed, V2SocialRelationshipValidationError.selfTargetingNotAllowed, V2MessageReactionValidationError.invalidReaction, V2MessageEditValidationError.invalidText, V2ReadReceiptValidationError.invalidRoomSequence, V2GroupMessagingValidationError.invalidTitle, V2GroupMessagingValidationError.invalidInitialMembers, V2GroupAudienceImportError.invalidInput, V2RoomMembershipDirectoryError.invalidRequest, V2RoomMembershipDirectoryError.invalidCursor, V2GroupEventLogError.invalidRequest {

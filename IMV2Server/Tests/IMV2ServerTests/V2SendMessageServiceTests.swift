@@ -633,6 +633,162 @@ struct V2SendMessageServiceTests {
         #expect(await batcher.snapshot().cancelledPendingRequests == 1)
     }
 
+    @Test("singleton dequeue skips an active room without overtaking its FIFO")
+    func singletonDequeueSkipsActiveRoomAndPreservesFIFO() async throws {
+        let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
+        let roomA = try RoomID("00000000-0000-0000-0000-000000000166")
+        let roomB = try RoomID("00000000-0000-0000-0000-000000000167")
+        let senderID = try UserID("00000000-0000-0000-0000-000000000168")
+        let ids = try (1 ... 4).map {
+            try ClientMessageID(String(format: "00000000-0000-0000-0007-%012x", $0))
+        }
+        let store = GatedSingletonBatchTestStore(blockedID: ids[0])
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(
+                maximumBatchSize: 1,
+                maximumDelay: .seconds(5),
+                maximumInFlightBatches: 2
+            )
+        )
+        let service = V2SendMessageService(
+            store: store, capacityProfile: profile,
+            limits: try .init(maxUTF8Bytes: 64), batcher: batcher
+        )
+        var started: [Task<V2SendMessageOutcome, any Error>] = []
+        do {
+            let first = Task { try await service.send(.init(
+                roomID: roomA, actorUserID: senderID,
+                clientMessageID: ids[0], text: "a-first"
+            )) }
+            started.append(first)
+            try await singletonWaitUntil { await store.acceptedClientMessageIDs().count == 1 }
+
+            let second = Task { try await service.send(.init(
+                roomID: roomA, actorUserID: senderID,
+                clientMessageID: ids[1], text: "a-second"
+            )) }
+            started.append(second)
+            try await singletonWaitUntil { await batcher.snapshot().pendingRequests == 1 }
+
+            let independent = Task { try await service.send(.init(
+                roomID: roomB, actorUserID: senderID,
+                clientMessageID: ids[2], text: "b-first"
+            )) }
+            started.append(independent)
+            try await singletonWaitUntil { await store.acceptedClientMessageIDs().count == 2 }
+            _ = try await independent.value
+            #expect(await store.acceptedClientMessageIDs() == [ids[0], ids[2]])
+
+            let third = Task { try await service.send(.init(
+                roomID: roomA, actorUserID: senderID,
+                clientMessageID: ids[3], text: "a-third"
+            )) }
+            started.append(third)
+            try await singletonWaitUntil { await batcher.snapshot().pendingRequests == 2 }
+            await store.releaseBlocked()
+            for task in started { _ = try await task.value }
+
+            #expect(await store.acceptedClientMessageIDs() == [ids[0], ids[2], ids[1], ids[3]])
+            let snapshot = await batcher.snapshot()
+            #expect(snapshot.pendingRequests == 0)
+            #expect(snapshot.dequeuedRequests == 4)
+            #expect(snapshot.singletonDispatches == 4)
+            #expect(await store.atomicBatchCallCount() == 0)
+        } catch {
+            await store.releaseBlocked()
+            for task in started { task.cancel() }
+            for task in started { _ = try? await task.value }
+            throw error
+        }
+    }
+
+    @Test("singleton cancellation returns shared pending capacity")
+    func singletonCancellationReturnsSharedPendingCapacity() async throws {
+        let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
+        let roomA = try RoomID("00000000-0000-0000-0000-000000000169")
+        let roomB = try RoomID("00000000-0000-0000-0000-000000000170")
+        let senderID = try UserID("00000000-0000-0000-0000-000000000171")
+        let ids = try (1 ... 3).map {
+            try ClientMessageID(String(format: "00000000-0000-0000-0008-%012x", $0))
+        }
+        let store = GatedSingletonBatchTestStore(blockedID: ids[0])
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(
+                maximumBatchSize: 1,
+                maximumDelay: .seconds(5),
+                maximumInFlightBatches: 2
+            ),
+            databaseWorkAdmission: nil,
+            sharedPendingCapacity: .init(maximum: 1),
+            sharedActivationCapacity: .init(maximum: 1),
+            committedMessageObserver: nil,
+            actorGrantedStoreFactory: nil
+        )
+        let service = V2SendMessageService(
+            store: store, capacityProfile: profile,
+            limits: try .init(maxUTF8Bytes: 64), batcher: batcher
+        )
+        var started: [Task<V2SendMessageOutcome, any Error>] = []
+        do {
+            let first = Task { try await service.send(.init(
+                roomID: roomA, actorUserID: senderID,
+                clientMessageID: ids[0], text: "a-first"
+            )) }
+            started.append(first)
+            try await singletonWaitUntil { await store.acceptedClientMessageIDs().count == 1 }
+
+            let waiting = Task { try await service.send(.init(
+                roomID: roomA, actorUserID: senderID,
+                clientMessageID: ids[1], text: "a-cancelled"
+            )) }
+            started.append(waiting)
+            try await singletonWaitUntil { await batcher.snapshot().pendingRequests == 1 }
+
+            let rejected = Task { try await service.send(.init(
+                roomID: roomB, actorUserID: senderID,
+                clientMessageID: ids[2], text: "b-rejected"
+            )) }
+            started.append(rejected)
+            try await singletonWaitUntil {
+                await batcher.snapshot().stagingQueueFullRejections == 1
+            }
+            await #expect(throws: V2SendMessageAdmissionBatcherError.serverBusy) {
+                try await rejected.value
+            }
+
+            waiting.cancel()
+            try await singletonWaitUntil {
+                await batcher.snapshot().cancelledPendingRequests == 1
+            }
+            await #expect(throws: CancellationError.self) { try await waiting.value }
+            let replacement = Task { try await service.send(.init(
+                roomID: roomB, actorUserID: senderID,
+                clientMessageID: ids[2], text: "b-admitted"
+            )) }
+            started.append(replacement)
+            try await singletonWaitUntil { await store.acceptedClientMessageIDs().count == 2 }
+            _ = try await replacement.value
+            #expect(await store.acceptedClientMessageIDs() == [ids[0], ids[2]])
+            await store.releaseBlocked()
+            _ = try await first.value
+            for task in started { _ = try? await task.value }
+
+            let snapshot = await batcher.snapshot()
+            #expect(snapshot.pendingRequests == 0)
+            #expect(snapshot.cancelledPendingRequests == 1)
+            #expect(snapshot.stagingQueueFullRejections == 1)
+            #expect(snapshot.dequeuedRequests == 2)
+            #expect(snapshot.singletonDispatches == 2)
+        } catch {
+            await store.releaseBlocked()
+            for task in started { task.cancel() }
+            for task in started { _ = try? await task.value }
+            throw error
+        }
+    }
+
     @Test("an atomic batch failure is returned to each waiting command")
     func admissionBatchingPropagatesAtomicFailure() async throws {
         let profile = try V2CapacityProfile(id: "standard", limits: Fixture().profile)
@@ -1432,6 +1588,56 @@ private actor ConcurrentAtomicBatchTestStore: V2AtomicRoomWriteBatchStore {
     }
 
     func maximumInFlightBatchCount() -> Int { maximumInFlightBatchCountValue }
+}
+
+private actor GatedSingletonBatchTestStore: V2AtomicRoomWriteBatchStore {
+    private let blockedID: ClientMessageID
+    private var blockedContinuation: CheckedContinuation<Void, Never>?
+    private var released = false
+    private var acceptedIDs: [ClientMessageID] = []
+    private var atomicCalls = 0
+
+    init(blockedID: ClientMessageID) { self.blockedID = blockedID }
+
+    func accept(
+        command: V2SendMessageCommand,
+        capacityProfile _: V2CapacityProfile,
+        identifiers _: V2AcceptanceIdentifiers,
+        now _: Date
+    ) async -> V2SendMessageOutcome {
+        acceptedIDs.append(command.clientMessageID)
+        if command.clientMessageID == blockedID, !released {
+            await withCheckedContinuation { blockedContinuation = $0 }
+        }
+        return .rateLimited(retryAfterSeconds: 1)
+    }
+
+    func acceptAtomically(requests: [V2RoomWriteRequest]) -> [V2SendMessageOutcome] {
+        atomicCalls += 1
+        return requests.map { _ in .rateLimited(retryAfterSeconds: 1) }
+    }
+
+    func acceptedClientMessageIDs() -> [ClientMessageID] { acceptedIDs }
+    func atomicBatchCallCount() -> Int { atomicCalls }
+
+    func releaseBlocked() {
+        released = true
+        blockedContinuation?.resume()
+        blockedContinuation = nil
+    }
+}
+
+private struct SingletonWaitTimedOut: Error {}
+
+private func singletonWaitUntil(
+    _ condition: @escaping @Sendable () async -> Bool
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + .seconds(5)
+    while !(await condition()) {
+        guard clock.now < deadline else { throw SingletonWaitTimedOut() }
+        try await Task.sleep(for: .milliseconds(1))
+    }
 }
 
 private func captureSendOutcome(

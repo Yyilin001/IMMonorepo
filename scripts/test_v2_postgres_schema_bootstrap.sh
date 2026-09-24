@@ -8,7 +8,7 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 compose_file="${repo_root}/IMV2/docker-compose.isolated-tests.yml"
 schema_file="${repo_root}/IMV2/sql/schema.sql"
 schema_contract_query="${repo_root}/IMV2/scripts/current_v2_schema_contract.sql"
-project_name="imv2-schema-bootstrap-regression-$$"
+project_name="${IMV2_SCHEMA_BOOTSTRAP_PROJECT:-imv2-schema-bootstrap-regression-$$}"
 bootstrap_db="imv2_bootstrap_$$"
 restore_db="imv2_restore_$$"
 work_dir="$(mktemp -d)"
@@ -94,10 +94,11 @@ assert_scalar() {
 # Their seven indexes plus cancellation history add eight to the prior baseline.
 # Terminal forward inbox/export compaction adds two bounded-scan indexes.
 # Durable housekeeping adds a singleton cursor and its primary-key index.
+# Actor activation adds one durable owner-store table and its primary key.
 assert_scalar 'im_v2 relation count' \
-  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '146'
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '147'
 assert_scalar 'im_v2 index count' \
-  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '344'
+  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '345'
 assert_scalar 'im_v2 application trigger count' \
   "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '25'
 assert_scalar 'im_v2 function count' \
@@ -137,6 +138,16 @@ test "$(current_schema_contract)" = 'f'
 psql -c 'ALTER TABLE im_v2.control_housekeeping_cursor ADD CONSTRAINT control_housekeeping_cursor_rotation_check CHECK (rotation >= 0)' >/dev/null
 test "$(current_schema_contract)" = 't'
 
+
+psql -c 'ALTER TABLE im_v2.group_room_creation_drafts ADD CONSTRAINT group_room_creation_drafts_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id)' >/dev/null
+test "$(current_schema_contract)" = 'f'
+psql -c 'ALTER TABLE im_v2.group_room_creation_drafts DROP CONSTRAINT group_room_creation_drafts_room_id_fkey' >/dev/null
+test "$(current_schema_contract)" = 't'
+
+psql -c 'ALTER TABLE im_v2.room_activation_leases DROP CONSTRAINT room_activation_leases_holder_check' >/dev/null
+test "$(current_schema_contract)" = 'f'
+psql -c "ALTER TABLE im_v2.room_activation_leases ADD CONSTRAINT room_activation_leases_holder_check CHECK ((host_id IS NULL AND host_incarnation_id IS NULL AND expires_at IS NULL) OR (host_id IS NOT NULL AND length(btrim(host_id)) > 0 AND host_incarnation_id IS NOT NULL AND expires_at IS NOT NULL AND isfinite(expires_at)))" >/dev/null
+test "$(current_schema_contract)" = 't'
 
 psql -c 'CREATE INDEX rooms_last_event_at_idx ON im_v2.rooms(last_event_at DESC, room_id)' >/dev/null
 test "$(current_schema_contract)" = 'f'

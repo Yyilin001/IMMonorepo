@@ -1,6 +1,7 @@
 import AsyncKit
 import FluentKit
 import Foundation
+import IMV2ActorContracts
 import PostgresNIO
 
 /// 数据库失败的处置分类。
@@ -87,20 +88,85 @@ private func v2PostgresFailureDisposition(sqlState: String) -> V2PostgresFailure
 func v2WithPostgresTransactionRetry<Result: Sendable>(
     database: any Database,
     maximumRetryCount: Int = 2,
+    classifyCommitFailure: Bool = false,
+    useRoomDeadline: Bool = false,
     _ operation: @escaping @Sendable (any Database) async throws -> Result
+) async throws -> Result {
+    try await v2WithPostgresTransactionRetryCore(
+        database: database, maximumRetryCount: maximumRetryCount,
+        classifyCommitFailure: classifyCommitFailure, useRoomDeadline: useRoomDeadline,
+        needsFenceContext: false
+    ) { transaction, _ in
+        try await operation(transaction)
+    }
+}
+
+/// The optional context exists only for a room-deadline transaction after
+/// BEGIN and LOCAL timeout setup. Legacy transactions keep their old path.
+func v2WithPostgresTransactionRetryWithRoomContext<Result: Sendable>(
+    database: any Database,
+    maximumRetryCount: Int = 2,
+    classifyCommitFailure: Bool = false,
+    useRoomDeadline: Bool = false,
+    _ operation: @escaping @Sendable (any Database, V2ConfiguredRoomFenceContext?) async throws -> Result
+) async throws -> Result {
+    try await v2WithPostgresTransactionRetryCore(
+        database: database, maximumRetryCount: maximumRetryCount,
+        classifyCommitFailure: classifyCommitFailure, useRoomDeadline: useRoomDeadline,
+        needsFenceContext: true, operation
+    )
+}
+
+private func v2WithPostgresTransactionRetryCore<Result: Sendable>(
+    database: any Database,
+    maximumRetryCount: Int,
+    classifyCommitFailure: Bool,
+    useRoomDeadline: Bool,
+    needsFenceContext: Bool,
+    _ operation: @escaping @Sendable (any Database, V2ConfiguredRoomFenceContext?) async throws -> Result
 ) async throws -> Result {
     precondition(maximumRetryCount >= 0)
     var retryCount = 0
+    // Fix one absolute budget before the first attempt; retries borrow a new
+    // connection without ever extending the original room SQL deadline.
+    let roomDeadline = useRoomDeadline ? V2RoomSQLDeadline.boundedTransactionDeadline() : nil
     while true {
         try Task.checkCancellation()
+        let attempt = V2RoomTransactionAttempt()
         do {
-            return try await database.transaction(operation)
-        } catch is CancellationError {
-            throw CancellationError()
+            if let deadline = roomDeadline {
+                if needsFenceContext {
+                    return try await v2WithRoomActivationTransactionWithContext(
+                        database: database, deadline: deadline
+                    ) { transaction, context in
+                        try await attempt.body { try await operation(transaction, context) }
+                    }
+                }
+                return try await v2WithRoomActivationTransaction(
+                    database: database, deadline: deadline
+                ) { transaction in
+                    try await attempt.body { try await operation(transaction, nil) }
+                }
+            }
+            return try await database.transaction { transaction in
+                try await attempt.body { try await operation(transaction, nil) }
+            }
         } catch {
-            guard v2PostgresFailureDisposition(error) == .retryTransaction,
+            // The physical-deadline primitive already proved rollback versus
+            // missing COMMIT ACK. The legacy Fluent path still needs the
+            // body-return heuristic, which would misclassify a settled close
+            // just before COMMIT as unknown.
+            let error = roomDeadline == nil && classifyCommitFailure
+                ? attempt.classify(error) : error
+            let disposition = v2PostgresFailureDisposition(error)
+            guard disposition == .retryTransaction,
                   retryCount < maximumRetryCount
-            else { throw error }
+            else {
+                if roomDeadline != nil, disposition == .retryTransaction {
+                    throw V2RoomCallFailure.rolledBack(.unavailable)
+                }
+                throw error
+            }
             retryCount += 1
             // Short randomized backoff prevents opposing requests from
             // immediately rebuilding the same wait-for graph.

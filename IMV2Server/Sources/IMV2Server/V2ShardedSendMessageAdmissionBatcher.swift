@@ -1,13 +1,15 @@
 import Foundation
+import IMV2ActorContracts
 import IMV2Core
 
 /// 消息准入的稳定进程内分片。
 ///
 /// 每个房间在本值存活期间只会落入固定的一条通道，因此该房间的命令仍保持既有的
 /// 先进先出与不可超越语义；相互独立的房间则可以在不同 actor 执行器上并行推进。
-/// 数据库并发被拆分到各通道，而待处理请求改用进程级统一限流器，
+/// 数据库并发被拆分到各通道，而待处理请求和激活身份共用 owner 级限流器，
 /// 使哈希偏斜的房间可以借用空闲容量，又不会悄悄抬高 PostgreSQL 压力或驻留内存。
-public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission, Sendable {
+public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
+    V2ActorGrantedSendBatching, Sendable {
     private let lanes: [V2SendMessageAdmissionBatcher]
 
     /// 是否接管前台写入准入。
@@ -18,8 +20,8 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
     /// 构造分片准入器。
     ///
     /// 各通道的在途批量额度按商与余数精确分配；自适应策略中的最小窗口请求数按通道数向上取整，
-    /// 但至少为 2，保证单通道仍能观察到足够样本。进程级待处理上限由共享容量统一持有，
-    /// 通道内保留同值仅用于配置校验与诊断。
+    /// 但至少为 2，保证单通道仍能观察到足够样本。owner 级待处理和激活身份上限
+    /// 均由共享容量统一持有；通道内保留同值仅用于配置校验与诊断。
     ///
     /// - Parameters:
     ///   - store: 执行原子批量写入的存储。
@@ -27,12 +29,49 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
     ///   - laneCount: 通道数量，需大于 1 且不超过在途批量与待处理请求上限。
     ///   - databaseWorkAdmission: 可选的数据库工作准入控制器。
     ///   - committedMessageObserver: 可选的已提交消息观察者。
-    public init(
+    public convenience init(
         store: any V2AtomicRoomWriteBatchStore,
         configuration: V2SendMessageAdmissionBatcher.Configuration,
         laneCount: Int,
         databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
-        committedMessageObserver: (any V2CommittedMessageBatchObserving)? = nil
+        committedMessageObserver: (any V2CommittedMessageBatchObserving)? = nil,
+        actorGrantedStore: PostgresV2RoomWriteStore? = nil
+    ) {
+        let factory: (@Sendable ([V2RoomActivationToken]) throws -> any V2AtomicRoomWriteBatchStore)?
+        if let actorGrantedStore {
+            factory = { tokens in
+                let scope = try V2RoomActivationWriteScope(tokens: tokens)
+                return actorGrantedStore.usingActivationScope(scope)
+            }
+        } else {
+            factory = nil
+        }
+        self.init(store: store, configuration: configuration, laneCount: laneCount,
+                  databaseWorkAdmission: databaseWorkAdmission,
+                  committedMessageObserver: committedMessageObserver,
+                  actorGrantedStoreFactory: factory)
+    }
+
+    /// Test injection exercises the same shared-capacity and lane routing as
+    /// production without requiring a PostgreSQL connection for every case.
+    convenience init(
+        store: any V2AtomicRoomWriteBatchStore,
+        configuration: V2SendMessageAdmissionBatcher.Configuration,
+        laneCount: Int,
+        actorGrantedStoreFactory: @escaping @Sendable ([V2RoomActivationToken]) throws -> any V2AtomicRoomWriteBatchStore
+    ) {
+        self.init(store: store, configuration: configuration, laneCount: laneCount,
+                  databaseWorkAdmission: nil, committedMessageObserver: nil,
+                  actorGrantedStoreFactory: actorGrantedStoreFactory)
+    }
+
+    private init(
+        store: any V2AtomicRoomWriteBatchStore,
+        configuration: V2SendMessageAdmissionBatcher.Configuration,
+        laneCount: Int,
+        databaseWorkAdmission: V2DatabaseWorkAdmissionController?,
+        committedMessageObserver: (any V2CommittedMessageBatchObserving)?,
+        actorGrantedStoreFactory: (@Sendable ([V2RoomActivationToken]) throws -> any V2AtomicRoomWriteBatchStore)?
     ) {
         precondition(laneCount > 1)
         precondition(laneCount <= configuration.maximumInFlightBatches)
@@ -42,6 +81,9 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
         publishesCommittedGroupEvents = committedMessageObserver != nil
         let sharedPendingCapacity = V2SharedSendMessagePendingCapacity(
             maximum: configuration.maximumPendingRequests
+        )
+        let sharedActivationCapacity = V2SharedSendMessageActivationCapacity(
+            maximum: configuration.maximumTrackedActivations
         )
         lanes = (0 ..< laneCount).map { laneIndex in
             let inFlight = Self.portion(
@@ -69,11 +111,14 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
                     // The shared capacity below owns the process-wide bound.
                     // Retain the same value here for configuration invariants
                     // and diagnostics; a lane no longer gets a hard slice.
-                    maximumPendingRequests: configuration.maximumPendingRequests
+                    maximumPendingRequests: configuration.maximumPendingRequests,
+                    maximumTrackedActivations: configuration.maximumTrackedActivations
                 ),
                 databaseWorkAdmission: databaseWorkAdmission,
                 sharedPendingCapacity: sharedPendingCapacity,
-                committedMessageObserver: committedMessageObserver
+                sharedActivationCapacity: sharedActivationCapacity,
+                committedMessageObserver: committedMessageObserver,
+                actorGrantedStoreFactory: actorGrantedStoreFactory
             )
         }
     }
@@ -93,6 +138,28 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
             for: ownedRequest.command.roomID,
             laneCount: lanes.count
         )].accept(ownedRequest)
+    }
+
+    /// An entire granted turn stays on the room's stable lane. The source
+    /// actor validates the token and preserves each result's original index.
+    public func acceptGrantedTurn(
+        _ sends: [V2PreparedActorSend],
+        batchDeadline: ContinuousClock.Instant,
+        callDeadline: ContinuousClock.Instant
+    ) async throws -> [Result<V2SendMessageOutcome, any Error>] {
+        guard let first = sends.first,
+              sends.allSatisfy({ $0.token == first.token &&
+                                 $0.request.command.roomID == first.token.roomID }) else {
+            throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        }
+        return try await lanes[Self.laneIndex(for: first.token.roomID,
+                                              laneCount: lanes.count)].acceptGrantedTurn(
+            sends, batchDeadline: batchDeadline, callDeadline: callDeadline)
+    }
+
+    public func retireActivation(_ token: V2RoomActivationToken) async {
+        await lanes[Self.laneIndex(for: token.roomID,
+                                   laneCount: lanes.count)].retireActivation(token)
     }
 
     /// 汇总各通道的运行快照。
@@ -116,7 +183,7 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
             }
             return snapshots
         }
-        return Self.aggregate(laneSnapshots)
+        return V2SendMessageBatchSnapshotAggregator.aggregate(laneSnapshots)
     }
 
     /// 计算房间所属通道下标。
@@ -159,80 +226,5 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
         // Inputs are positive. Adding the divisor first can overflow even
         // though both the threshold and its per-lane result are representable.
         (value / divisor) + (value % divisor == 0 ? 0 : 1)
-    }
-
-    /// 聚合各通道快照。
-    ///
-    /// - Parameter snapshots: 各通道快照。
-    /// - Returns: 聚合后的快照。
-    private static func aggregate(
-        _ snapshots: [V2SendMessageAdmissionBatcher.Snapshot]
-    ) -> V2SendMessageAdmissionBatcher.Snapshot {
-        .init(
-            pendingRequests: snapshots.reduce(0) { $0 + $1.pendingRequests },
-            inFlightBatches: snapshots.reduce(0) { $0 + $1.inFlightBatches },
-            activeRooms: snapshots.reduce(0) { $0 + $1.activeRooms },
-            laneCount: snapshots.count,
-            busiestLanePendingRequests: snapshots.map(\.pendingRequests).max() ?? 0,
-            busiestLaneInFlightBatches: snapshots.map(\.inFlightBatches).max() ?? 0,
-            dequeuedRequests: saturatingSum(snapshots.map(\.dequeuedRequests)),
-            queueWaitMillisecondsTotal: saturatingSum(
-                snapshots.map(\.queueWaitMillisecondsTotal)
-            ),
-            queueWaitMillisecondsMax: snapshots.map(\.queueWaitMillisecondsMax).max() ?? 0,
-            completedBatches: saturatingSum(snapshots.map(\.completedBatches)),
-            batchExecutionMillisecondsTotal: saturatingSum(
-                snapshots.map(\.batchExecutionMillisecondsTotal)
-            ),
-            batchExecutionMillisecondsMax:
-                snapshots.map(\.batchExecutionMillisecondsMax).max() ?? 0,
-            stagingQueueFullRejections: saturatingSum(
-                snapshots.map(\.stagingQueueFullRejections)
-            ),
-            cancelledPendingRequests: saturatingSum(
-                snapshots.map(\.cancelledPendingRequests)
-            ),
-            baseDelayFlushes: saturatingSum(snapshots.map(\.baseDelayFlushes)),
-            highActivityDelayFlushes: saturatingSum(
-                snapshots.map(\.highActivityDelayFlushes)
-            ),
-            highActivityDelayScheduled: snapshots.contains {
-                $0.highActivityDelayScheduled
-            },
-            atomicBatchAttempts: saturatingSum(snapshots.map(\.atomicBatchAttempts)),
-            atomicBatchCommitted: saturatingSum(snapshots.map(\.atomicBatchCommitted)),
-            atomicBatchFallbacks: saturatingSum(snapshots.map(\.atomicBatchFallbacks)),
-            atomicBatchCommittedRequests: saturatingSum(
-                snapshots.map(\.atomicBatchCommittedRequests)
-            ),
-            atomicBatchFallbackRequests: saturatingSum(
-                snapshots.map(\.atomicBatchFallbackRequests)
-            ),
-            atomicBatchFallbackReasons: Dictionary(uniqueKeysWithValues:
-                V2AtomicRoomWriteBatchError.Reason.allCases.map { reason in
-                    (reason, saturatingSum(snapshots.map {
-                        $0.atomicBatchFallbackReasons[reason, default: 0]
-                    }))
-                }
-            ),
-            sameRoomDeferredRequests: saturatingSum(
-                snapshots.map(\.sameRoomDeferredRequests)
-            ),
-            atomicPreclassifiedIndividualRequests: saturatingSum(
-                snapshots.map(\.atomicPreclassifiedIndividualRequests)
-            ),
-            singletonDispatches: saturatingSum(snapshots.map(\.singletonDispatches))
-        )
-    }
-
-    /// 以饱和方式求和，溢出时返回 `UInt64.max`。
-    ///
-    /// - Parameter values: 待求和的计数。
-    /// - Returns: 求和结果。
-    private static func saturatingSum(_ values: [UInt64]) -> UInt64 {
-        values.reduce(0) { partial, value in
-            let sum = partial.addingReportingOverflow(value)
-            return sum.overflow ? .max : sum.partialValue
-        }
     }
 }

@@ -1,0 +1,18 @@
+# G5 shared COMMIT ACK loss across real Host turns
+
+`V2RoomHostSharedSendCommitAckLossTests` closes the direct Host behavior gap in original fault-matrix item 13. Test source `60618f0351c2f8e151ba65c7a19cb222f55626fe` passed **1 started / 1 passed**, exit 0, in 9.308 seconds on native Swift 6.4 with a fresh PostgreSQL 16 container. It is integrated as `81958775`; the new case is enabled in the serial CI and isolated Linux suites. The [frozen-source full Linux required run](g5-linux-regression-evidence.md) also records this exact suite and its case started/passed **1/1**, with suite/cleanup exit 0; see that record for the original metadata parser failure and independent log revalidation.
+
+The test constructs a production `V2RoomActivationHost`, concrete `V2RoomServerActivationFactory`, PostgreSQL lease/write stores and the production send batcher for two large rooms. Lease acquisition, restore, credit refill and the observer use a direct connection; only the business batch writer traverses the existing successful-COMMIT-ACK-loss proxy. A PostgreSQL trigger blocks the shared message INSERT after its transaction fences are acquired. The observer checks an actual advisory-lock waiter with `pg_blocking_pids`, then submits a second command to each room and waits until all four Host command permits are charged before releasing the transaction.
+
+The assertions establish the following in one injection:
+
+- The original two turns share one atomic batch, with no fallback or singleton dispatch. Both report `outcomeUnknown` after the proxy observes a successful COMMIT and withholds its acknowledgement.
+- Both already queued commands fail with `leaseLost` and leave zero message or completion rows. Later calls using the retired tokens are also rejected.
+- Both original messages and completion rows exist exactly once. Both old leases are released and Host command permits return to zero.
+- A successor Host incarnation acquires higher activation epochs and replays the original operation IDs as idempotent results with the same persisted message IDs. The queued operation IDs still have no effects.
+
+The test uses the fixture's fixed **business** clock because its shard-admission credit lease was seeded in 2025. PostgreSQL activation leases and fencing still use the live database clock; the original 4-second turn batching budget, 5-second batch timer and 5-second phase waits were not enlarged. The first three attempts had an expired fixture credit lease and never reached the blocked INSERT; their intercepted no-write COMMITs are failed test attempts, not evidence for item 13. Phase labels and a failure-only batch/PG activity snapshot now make that distinction visible.
+
+Private artifacts are under `/Users/yyl/.codex/virtual-actor-builds/p0/host-shared-ack-loss-native/`: final `suite.log`, `metadata.json`, `pg.log`, and cleanup logs; failed attempts are preserved under `run-01`, `run-02`, and `run-03`. The final command used `--disable-automatic-resolution -j 2 --no-parallel --filter V2RoomHostSharedSendCommitAckLossTests` with its explicit disposable-database opt-in. `Package.resolved` remained SHA-256 `3af1e16190f46bdd8fad3de86c6b386dc196443291463355bf36edb62b7fd15c`. The task-only `imv2-va-host-shared-ack-pg` container in `colima-imv2-va-capacity` was removed, cleanup exited 0, and no matching container or volume remained. The first attempt omitted the resolution flag, but its lockfile also remained unchanged; subsequent runs used the flag.
+
+This is direct production Host/Factory/batcher behavior against PostgreSQL in one test process, now verified on native Swift and in the full Linux suite. It does not claim that an Actor network reply frame was dropped or satisfy the relative-capacity gate.

@@ -8,6 +8,8 @@ import Darwin
 import Glibc
 #endif
 import IMV2Server
+import IMV2ActorApplication
+import IMV2ActorContracts
 import IMV2ServerHTTP
 import NIOPosix
 import Vapor
@@ -46,6 +48,7 @@ enum IMV2ServerApp {
         var sharedGroupWakeInterests: V2SharedGroupEventWakeInterests?
         var accountRoomChangeService: V2AccountRoomChangeService?
         var natsLiveActivityBroker: V2NATSLiveActivityBroker?
+        var roomActorApplication: V2RoomActorApplication?
         do {
             let databaseEventLoops = Array(applicationEventLoops.makeIterator())
             guard databaseEventLoops.count == configuration.databasePolicy.eventLoopThreads else {
@@ -554,401 +557,174 @@ enum IMV2ServerApp {
                     ownerStores: groupEventWakeStoresByPhysicalLocation
                 )
             }
-            var forwardTargetWritesByShard: [String: PostgresV2RoomWriteStore] = [:]
-            let forwardMessages: any V2ForwardMessagesHandling
-            let roomWriteStore: any V2AtomicRoomWriteBatchStore
-            let directMessagingStore: any V2DirectMessagingStore
-            let groupEventLogStore: any V2GroupEventLogStore
-            let membershipStore: any V2RoomMembershipStore
-            let withdrawalStore: any V2MessageWithdrawalStore
-            let reactionStore: any V2MessageReactionStore
-            let editStore: any V2MessageEditStore
-            let groupCapabilitiesStore: any V2GroupCapabilitiesStore
-            let moderationStore: any V2RoutedModerationOwnerStore
-            let readReceiptStore: any V2ReadReceiptBatchStore
-            if singleRoomOwnerIsControlDatabase
-                && configuration.groupRoomShardIDs.count == 1
-            {
-                // Preserve the send-message command-credit actors shared with the
-                // Gateway's pressure metrics and append batcher; creating a
-                // second actor over the same PostgreSQL rows changes credit
-                // refill/heat coordination without adding isolation. Membership
-                // separately retains route/epoch checks even on this local path.
-                let localRoomWriteStore = PostgresV2RoomWriteStore(
-                    database: database,
-                    strangerMessagePolicy: configuration.strangerMessagePolicy,
-                    contentReviewMode: configuration.contentReviewMode,
-                    directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode,
-                    directSendPolicyCache: directSendPolicyCache,
-                    directRoomLogFastAppendCache: directRoomLogFastAppendCache,
-                    shardAdmissionCommandCreditPool: directRoomLogShardAdmissionCredits,
-                    roomAdmissionCommandCreditPool: directRoomLogRoomAdmissionCredits,
-                    appendStageMetrics: directRoomLogAppendStageMetrics
-                ).usingControlDatabase(directSendControlPool.database, authorizationResolutionDatabase: authorizationControlDatabase)
-                // Direct and group shard IDs may differ even on one database.
-                // Register every configured owner while sharing the same actors.
-                func localStores<Store>(_ store: Store) -> [String: Store] {
-                    Dictionary(uniqueKeysWithValues: configuration.roomShardStorage.map {
-                        ($0.shardID, store)
-                    })
-                }
-                roomWriteStore = try V2RoutedRoomWriteStore(router: roomShardRouter,
-                    stores: localStores(localRoomWriteStore),
-                    physicalStoreKeyByShard: localStores("control"))
-                forwardTargetWritesByShard = localStores(localRoomWriteStore)
-                forwardMessages = try V2RoutedForwardMessagesService(router: roomShardRouter,
-                    owners: localStores(V2ForwardMessagesService(database: database, writeStore: localRoomWriteStore,
-                        capacityProfile: configuration.capacityProfile, limits: configuration.messageLimits)),
-                    physicalStoreKeyByShard: localStores("control"))
-                directMessagingStore = PostgresV2DirectMessagingStore(
-                    database: database, shadowForwarder: userShardShadowForwarder,
-                    authorizationCoordinator: directAuthorizationCoordinator
-                )
-                groupEventLogStore = PostgresV2GroupEventLogStore(
-                    database: database, directRoomLogEventCache: directRoomLogEventCache
-                )
-                membershipStore = try V2RoutedRoomMembershipStore(
-                    router: roomShardRouter,
-                    stores: localStores(PostgresV2RoomMembershipStore(database: database)),
-                    identities: V2PostgresMembershipIdentitySnapshotValidator(database: database)
-                )
-                withdrawalStore = try V2RoutedMessageWithdrawalStore(
-                    router: roomShardRouter,
-                    stores: localStores(PostgresV2MessageWithdrawalStore(database: database))
-                )
-                reactionStore = try V2RoutedMessageReactionStore(
-                    router: roomShardRouter,
-                    stores: localStores(PostgresV2MessageReactionStore(database: database))
-                )
-                editStore = try V2RoutedMessageEditStore(
-                    router: roomShardRouter,
-                    stores: localStores(PostgresV2MessageEditStore(database: database, contentReviewMode: configuration.contentReviewMode))
-                )
-                groupCapabilitiesStore = try V2RoutedGroupCapabilitiesStore(
-                    router: roomShardRouter,
-                    stores: localStores(PostgresV2GroupCapabilitiesStore(database: database))
-                )
-                moderationStore = try V2RoutedModerationStore(
-                    router: roomShardRouter,
-                    stores: localStores(PostgresV2ModerationStore(database: database))
-                )
-                let localReadReceiptStore = PostgresV2ReadReceiptStore(database: database, shadowForwarder: userShardShadowForwarder)
-                readReceiptStore = try V2RoutedReadReceiptStore(
-                    router: roomShardRouter,
-                    ownerStores: localStores(localReadReceiptStore),
-                    controlStore: localReadReceiptStore,
-                    physicalStoreKeyByShard: localStores("control")
-                )
-            } else {
-                var forwardServicesByShard: [String: any V2OwnerValidatedForwardMessagesHandling] = [:]
-                var roomWriteStoresByShard: [String: any V2OwnerValidatedRoomWriteStore] = [:]
-                var directMessagingStoresByShard: [String: any V2DirectMessagingStore] = [:]
-                var groupEventLogStoresByShard: [String: any V2GroupEventLogStore] = [:]
-                var membershipStoresByShard:
-                    [String: any V2ControlValidatedRoomMembershipStore] = [:]
-                var withdrawalStoresByShard:
-                    [String: any V2OwnerValidatedMessageWithdrawalStore] = [:]
-                var reactionStoresByShard:
-                    [String: any V2OwnerValidatedMessageReactionStore] = [:]
-                var editStoresByShard:
-                    [String: any V2OwnerValidatedMessageEditStore] = [:]
-                var groupCapabilitiesStoresByShard:
-                    [String: any V2OwnerValidatedGroupCapabilitiesStore] = [:]
-                var moderationStoresByShard:
-                    [String: any V2OwnerValidatedModerationStore] = [:]
-                var readReceiptStoresByShard:
-                    [String: any V2OwnerValidatedReadReceiptStore] = [:]
-                var roomStoreKeyByShard: [String: String] = [:]
-                var roomWriteStoresByPhysicalLocation: [String: PostgresV2RoomWriteStore] = [:]
-                var directMessagingStoresByPhysicalLocation: [String: any V2DirectMessagingStore] = [:]
-                var groupEventLogStoresByPhysicalLocation: [String: any V2GroupEventLogStore] = [:]
-                var membershipStoresByPhysicalLocation:
-                    [String: any V2ControlValidatedRoomMembershipStore] = [:]
-                var withdrawalStoresByPhysicalLocation:
-                    [String: any V2OwnerValidatedMessageWithdrawalStore] = [:]
-                var reactionStoresByPhysicalLocation:
-                    [String: any V2OwnerValidatedMessageReactionStore] = [:]
-                var editStoresByPhysicalLocation:
-                    [String: any V2OwnerValidatedMessageEditStore] = [:]
-                var groupCapabilitiesStoresByPhysicalLocation:
-                    [String: any V2OwnerValidatedGroupCapabilitiesStore] = [:]
-                var moderationStoresByPhysicalLocation:
-                    [String: any V2OwnerValidatedModerationStore] = [:]
-                var readReceiptStoresByPhysicalLocation:
-                    [String: any V2OwnerValidatedReadReceiptStore] = [:]
-                // Shared room operations include direct as well as group owners.
-                for storage in configuration.roomShardStorage {
-                    guard let ownerDatabase = roomShardDatabases[storage.shardID] else {
-                        throw V2RoomWriteStoreError.corruptPersistenceState
-                    }
-                    let physicalLocationKey = storage.databaseURL + "\u{0}" + storage.schema
-                    roomStoreKeyByShard[storage.shardID] = physicalLocationKey
-                    if let existingWrite = roomWriteStoresByPhysicalLocation[physicalLocationKey],
-                       let existingDirect = directMessagingStoresByPhysicalLocation[physicalLocationKey],
-                       let existingEvents = groupEventLogStoresByPhysicalLocation[physicalLocationKey],
-                       let existingMembership = membershipStoresByPhysicalLocation[physicalLocationKey],
-                       let existingWithdrawal = withdrawalStoresByPhysicalLocation[physicalLocationKey],
-                       let existingReaction = reactionStoresByPhysicalLocation[physicalLocationKey],
-                       let existingEdit = editStoresByPhysicalLocation[physicalLocationKey],
-                       let existingGroupCapabilities = groupCapabilitiesStoresByPhysicalLocation[physicalLocationKey],
-                       let existingModeration = moderationStoresByPhysicalLocation[physicalLocationKey],
-                       let existingReadReceipt = readReceiptStoresByPhysicalLocation[physicalLocationKey] {
-                        forwardServicesByShard[storage.shardID] = V2ForwardMessagesService(
-                            database: ownerDatabase, writeStore: existingWrite,
-                            capacityProfile: configuration.capacityProfile, limits: configuration.messageLimits
-                        )
-                        forwardTargetWritesByShard[storage.shardID] = existingWrite
-                        roomWriteStoresByShard[storage.shardID] = existingWrite
-                        directMessagingStoresByShard[storage.shardID] = existingDirect
-                        groupEventLogStoresByShard[storage.shardID] = existingEvents
-                        membershipStoresByShard[storage.shardID] = existingMembership
-                        withdrawalStoresByShard[storage.shardID] = existingWithdrawal
-                        reactionStoresByShard[storage.shardID] = existingReaction
-                        editStoresByShard[storage.shardID] = existingEdit
-                        groupCapabilitiesStoresByShard[storage.shardID] =
-                            existingGroupCapabilities
-                        moderationStoresByShard[storage.shardID] =
-                            existingModeration
-                        readReceiptStoresByShard[storage.shardID] =
-                            existingReadReceipt
-                        continue
-                    }
-                    let shardCredits: V2ShardAdmissionCommandCreditPool? =
-                        configuration.directRoomLogShardAdmissionCreditBatchSize > 0
-                        ? .init(database: ownerDatabase, batchSize: configuration.directRoomLogShardAdmissionCreditBatchSize)
-                        : nil
-                    let roomCredits: V2RoomAdmissionCommandCreditPool? =
-                        configuration.directRoomLogRoomAdmissionCreditBatchSize > 0
-                        ? .init(database: ownerDatabase, batchSize: configuration.directRoomLogRoomAdmissionCreditBatchSize)
-                        : nil
-                    let write = PostgresV2RoomWriteStore(database: ownerDatabase, strangerMessagePolicy: configuration.strangerMessagePolicy, contentReviewMode: configuration.contentReviewMode, directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode, directSendPolicyCache: directSendPolicyCache, directRoomLogFastAppendCache: directRoomLogFastAppendCache, shardAdmissionCommandCreditPool: shardCredits, roomAdmissionCommandCreditPool: roomCredits, appendStageMetrics: directRoomLogAppendStageMetrics).usingControlDatabase(directSendControlPool.database, authorizationResolutionDatabase: authorizationControlDatabase)
-                    let direct = PostgresV2DirectMessagingStore(database: ownerDatabase, shadowForwarder: userShardShadowForwarder)
-                    let events = PostgresV2GroupEventLogStore(database: ownerDatabase, directRoomLogEventCache: directRoomLogEventCache)
-                    let membership = PostgresV2RoomMembershipStore(
-                        database: ownerDatabase
-                    )
-                    let withdrawal = PostgresV2MessageWithdrawalStore(
-                        database: ownerDatabase
-                    )
-                    let reaction = PostgresV2MessageReactionStore(
-                        database: ownerDatabase
-                    )
-                    let edit = PostgresV2MessageEditStore(
-                        database: ownerDatabase,
-                        contentReviewMode: configuration.contentReviewMode,
-                        identities: V2PostgresMembershipIdentitySnapshotValidator(database: database)
-                    )
-                    let groupCapabilities = PostgresV2GroupCapabilitiesStore(
-                        database: ownerDatabase
-                    )
-                    let moderation = PostgresV2ModerationStore(
-                        database: ownerDatabase
-                    )
-                    let readReceipt = PostgresV2ReadReceiptStore(
-                        database: ownerDatabase,
-                        shadowForwarder: userShardShadowForwarder
-                    )
-                    roomWriteStoresByPhysicalLocation[physicalLocationKey] = write
-                    directMessagingStoresByPhysicalLocation[physicalLocationKey] = direct
-                    groupEventLogStoresByPhysicalLocation[physicalLocationKey] = events
-                    membershipStoresByPhysicalLocation[physicalLocationKey] = membership
-                    withdrawalStoresByPhysicalLocation[physicalLocationKey] = withdrawal
-                    reactionStoresByPhysicalLocation[physicalLocationKey] = reaction
-                    editStoresByPhysicalLocation[physicalLocationKey] = edit
-                    groupCapabilitiesStoresByPhysicalLocation[
-                        physicalLocationKey
-                    ] = groupCapabilities
-                    moderationStoresByPhysicalLocation[physicalLocationKey] =
-                        moderation
-                    readReceiptStoresByPhysicalLocation[physicalLocationKey] =
-                        readReceipt
-                    forwardServicesByShard[storage.shardID] = V2ForwardMessagesService(
-                        database: ownerDatabase, writeStore: write,
-                        capacityProfile: configuration.capacityProfile, limits: configuration.messageLimits
-                    )
-                    forwardTargetWritesByShard[storage.shardID] = write
-                    roomWriteStoresByShard[storage.shardID] = write
-                    directMessagingStoresByShard[storage.shardID] = direct
-                    groupEventLogStoresByShard[storage.shardID] = events
-                    membershipStoresByShard[storage.shardID] = membership
-                    withdrawalStoresByShard[storage.shardID] = withdrawal
-                    reactionStoresByShard[storage.shardID] = reaction
-                    editStoresByShard[storage.shardID] = edit
-                    groupCapabilitiesStoresByShard[storage.shardID] =
-                        groupCapabilities
-                    moderationStoresByShard[storage.shardID] = moderation
-                    readReceiptStoresByShard[storage.shardID] = readReceipt
-                }
-                let forwardSources = try Dictionary(uniqueKeysWithValues: forwardServicesByShard.keys.map { shardID in
-                    guard let source = roomShardDatabases[shardID] else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                    return (shardID, V2ForwardSourceEndpoint(exports: .init(database: source), receipts: .init(database: source), jobs: .init(database: source)))
-                })
-                forwardMessages = try V2RoutedForwardMessagesService(
-                    router: roomShardRouter, owners: forwardServicesByShard,
-                    physicalStoreKeyByShard: roomStoreKeyByShard,
-                    crossOwner: V2CrossOwnerForwardService(sources: forwardSources)
-                )
-                roomWriteStore = try V2RoutedRoomWriteStore(router: roomShardRouter, stores: roomWriteStoresByShard, physicalStoreKeyByShard: roomStoreKeyByShard)
-                directMessagingStore = try V2RoutedDirectMessagingStore(router: roomShardRouter, ownerStores: directMessagingStoresByShard, controlStore: PostgresV2DirectMessagingStore(database: database, shadowForwarder: userShardShadowForwarder, authorizationCoordinator: directAuthorizationCoordinator))
-                groupEventLogStore = try V2RoutedGroupEventLogStore(router: roomShardRouter, stores: groupEventLogStoresByShard)
-                membershipStore = try V2RoutedRoomMembershipStore(
-                    router: roomShardRouter,
-                    stores: membershipStoresByShard,
-                    identities: V2PostgresMembershipIdentitySnapshotValidator(
-                        database: database
-                    ),
-                    physicalStoreKeyByShard: roomStoreKeyByShard
-                )
-                withdrawalStore = try V2RoutedMessageWithdrawalStore(
-                    router: roomShardRouter,
-                    stores: withdrawalStoresByShard,
-                    physicalStoreKeyByShard: roomStoreKeyByShard
-                )
-                reactionStore = try V2RoutedMessageReactionStore(
-                    router: roomShardRouter,
-                    stores: reactionStoresByShard,
-                    physicalStoreKeyByShard: roomStoreKeyByShard
-                )
-                editStore = try V2RoutedMessageEditStore(
-                    router: roomShardRouter,
-                    stores: editStoresByShard,
-                    physicalStoreKeyByShard: roomStoreKeyByShard
-                )
-                groupCapabilitiesStore = try V2RoutedGroupCapabilitiesStore(
-                    router: roomShardRouter,
-                    stores: groupCapabilitiesStoresByShard,
-                    physicalStoreKeyByShard: roomStoreKeyByShard
-                )
-                moderationStore = try V2RoutedModerationStore(
-                    router: roomShardRouter,
-                    stores: moderationStoresByShard,
-                    physicalStoreKeyByShard: roomStoreKeyByShard
-                )
-                readReceiptStore = try V2RoutedReadReceiptStore(
-                    router: roomShardRouter,
-                    ownerStores: readReceiptStoresByShard,
-                    controlStore: PostgresV2ReadReceiptStore(
-                        database: database,
-                        shadowForwarder: userShardShadowForwarder
-                    ),
-                    physicalStoreKeyByShard: roomStoreKeyByShard
-                )
-            }
-            let groupMessagingStore: any V2GroupMessagingStore
-            if singleRoomOwnerIsControlDatabase {
-                // Preserve the existing one-transaction bootstrap for the
-                // ordinary co-located deployment. It needs no control intent
-                // because the operation ledger and room route share one
-                // PostgreSQL transaction domain.
-                groupMessagingStore = PostgresV2GroupMessagingStore(
-                    database: database)
-            } else {
-                var ownerStoresByShard:
-                    [String: any V2ControlValidatedStagedGroupMessagingStore] = [:]
-                var ownerStoresByPhysicalLocation:
-                    [String: any V2ControlValidatedStagedGroupMessagingStore] = [:]
-                for storage in configuration.roomShardStorage {
-                    guard let ownerDatabase = roomShardDatabases[storage.shardID] else {
-                        throw V2RoomWriteStoreError.corruptPersistenceState
-                    }
-                    let physicalLocationKey =
-                        storage.databaseURL + "\u{0}" + storage.schema
-                    if let existing = ownerStoresByPhysicalLocation[
-                        physicalLocationKey
-                    ] {
-                        ownerStoresByShard[storage.shardID] = existing
-                        continue
-                    }
-                    let store = PostgresV2GroupMessagingStore(
-                        database: ownerDatabase)
-                    ownerStoresByPhysicalLocation[physicalLocationKey] = store
-                    ownerStoresByShard[storage.shardID] = store
-                }
-                groupMessagingStore = try V2RoutedGroupMessagingStore(
-                    intentStore: PostgresV2GroupRoomCreationIntentStore(
-                        database: database
-                    ),
-                    ownerStores: ownerStoresByShard
-                )
-            }
+            let actorConfiguration = try V2RoomActorApplicationConfiguration(
+                environment: ProcessRuntimeEnvironment(), hostsRooms: nil,
+                configuredShardIDs: Set(configuration.roomShardStorage.map(\.shardID)),
+                batchWaitMilliseconds: Int64(max(
+                    configuration.directRoomLogAppendBatchMaximumDelayMilliseconds,
+                    configuration.directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds ?? 0,
+                    configuration.readReceiptBatchMaximumDelayMilliseconds)))
             let committedHybridGroupEvents = V2CommittedHybridGroupEventObserver(
-                directRoomLogEventCache: directRoomLogEventCache
-            )
-            let directRoomLogAppendBatcher: (any V2SendMessageAdmission)?
-            if configuration.directRoomLogAppendBatchSize > 0 {
-                let appendBatchConfiguration = V2SendMessageAdmissionBatcher.Configuration(
-                        maximumBatchSize: configuration.directRoomLogAppendBatchSize,
-                        maximumDelay: .milliseconds(
-                            configuration.directRoomLogAppendBatchMaximumDelayMilliseconds
-                        ),
-                        adaptiveDelayPolicy: {
-                            guard let highActivityDelay = configuration
-                                .directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds,
-                                  let minimumRequests = configuration
-                                .directRoomLogAppendBatchHighActivityMinimumRequests,
-                                  let windowMilliseconds = configuration
-                                .directRoomLogAppendBatchHighActivityWindowMilliseconds
-                            else { return nil }
-                            return .init(
-                                highActivityMaximumDelay: .milliseconds(highActivityDelay),
-                                minimumRequestsInWindow: minimumRequests,
-                                observationWindow: .milliseconds(windowMilliseconds)
-                            )
-                        }(),
-                        maximumInFlightBatches:
-                            configuration.directRoomLogAppendBatchMaximumInFlightBatches,
-                        maximumPendingRequests:
-                            configuration.directRoomLogAppendMaximumPendingRequests
-                )
-                let appendDatabaseWorkAdmission = configuration.databaseWorkAdmissionEnabled
-                    ? databaseWorkAdmission
-                    : nil
-                if configuration.directRoomLogAppendLaneCount == 1 {
-                    directRoomLogAppendBatcher = V2SendMessageAdmissionBatcher(
-                        store: roomWriteStore,
-                        configuration: appendBatchConfiguration,
-                        databaseWorkAdmission: appendDatabaseWorkAdmission,
-                        committedMessageObserver: committedHybridGroupEvents
-                    )
-                } else {
-                    directRoomLogAppendBatcher = V2ShardedSendMessageAdmissionBatcher(
-                        store: roomWriteStore,
-                        configuration: appendBatchConfiguration,
-                        laneCount: configuration.directRoomLogAppendLaneCount,
-                        databaseWorkAdmission: appendDatabaseWorkAdmission,
-                        committedMessageObserver: committedHybridGroupEvents
-                    )
+                directRoomLogEventCache: directRoomLogEventCache)
+            let actorBatchConfiguration = V2SendMessageAdmissionBatcher.Configuration(
+                maximumBatchSize: max(1, configuration.directRoomLogAppendBatchSize),
+                maximumDelay: .milliseconds(max(1, configuration.directRoomLogAppendBatchMaximumDelayMilliseconds)),
+                adaptiveDelayPolicy: {
+                    guard configuration.directRoomLogAppendBatchSize > 0,
+                          let delay = configuration.directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds,
+                          let minimumRequests = configuration.directRoomLogAppendBatchHighActivityMinimumRequests,
+                          let window = configuration.directRoomLogAppendBatchHighActivityWindowMilliseconds
+                    else { return nil }
+                    return .init(highActivityMaximumDelay: .milliseconds(delay),
+                        minimumRequestsInWindow: minimumRequests, observationWindow: .milliseconds(window))
+                }(),
+                maximumInFlightBatches: configuration.directRoomLogAppendBatchMaximumInFlightBatches,
+                maximumPendingRequests: configuration.directRoomLogAppendMaximumPendingRequests,
+                maximumTrackedActivations: actorConfiguration.runtime.maximumActiveRooms)
+            var ownerResources: [String: V2RoomServerOwnerResources] = [:]
+            var physicalResources: [String: V2RoomServerOwnerResources] = [:]
+            var ownerBatchers: [String: any V2ActorGrantedSendBatching & V2SendMessageBatchMetricsReading] = [:]
+            var forwardTargetWritesByShard: [String: PostgresV2RoomWriteStore] = [:]
+            var physicalWrites: [String: PostgresV2RoomWriteStore] = [:]
+            var physicalStoreKeyByShard: [String: String] = [:]
+            var bootstraps: [String: V2RoomBootstrapDomainExecutor] = [:]
+            var forwardPairs: [String: V2ActorForwardPairDomainExecutor] = [:]
+            let membershipIdentities = V2PostgresMembershipIdentitySnapshotValidator(database: database)
+            let invitationIdentities = PostgresV2GroupInvitationIdentityReader(database: database)
+            for storage in configuration.roomShardStorage {
+                guard let owner = roomShardDatabases[storage.shardID] else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
                 }
-            } else {
-                directRoomLogAppendBatcher = nil
+                let physicalKey = storage.databaseURL + "\u{0}" + storage.schema
+                physicalStoreKeyByShard[storage.shardID] = physicalKey
+                let write: PostgresV2RoomWriteStore
+                let resourcesForOwner: V2RoomServerOwnerResources
+                if let existing = physicalResources[physicalKey], let existingWrite = physicalWrites[physicalKey] {
+                    resourcesForOwner = existing
+                    write = existingWrite
+                } else {
+                    let shardCredits = singleRoomOwnerIsControlDatabase
+                        ? directRoomLogShardAdmissionCredits
+                        : configuration.directRoomLogShardAdmissionCreditBatchSize > 0
+                            ? V2ShardAdmissionCommandCreditPool(database: owner,
+                                batchSize: configuration.directRoomLogShardAdmissionCreditBatchSize) : nil
+                    let roomCredits = singleRoomOwnerIsControlDatabase
+                        ? directRoomLogRoomAdmissionCredits
+                        : configuration.directRoomLogRoomAdmissionCreditBatchSize > 0
+                            ? V2RoomAdmissionCommandCreditPool(database: owner,
+                                batchSize: configuration.directRoomLogRoomAdmissionCreditBatchSize) : nil
+                    write = PostgresV2RoomWriteStore(database: owner,
+                        strangerMessagePolicy: configuration.strangerMessagePolicy,
+                        contentReviewMode: configuration.contentReviewMode,
+                        directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode,
+                        directSendPolicyCache: directSendPolicyCache,
+                        directRoomLogFastAppendCache: directRoomLogFastAppendCache,
+                        shardAdmissionCommandCreditPool: shardCredits,
+                        roomAdmissionCommandCreditPool: roomCredits,
+                        appendStageMetrics: directRoomLogAppendStageMetrics)
+                        .usingControlDatabase(directSendControlPool.database,
+                            authorizationResolutionDatabase: authorizationControlDatabase)
+                    let batcher: any V2ActorGrantedSendBatching & V2SendMessageBatchMetricsReading
+                    let appendAdmission = configuration.databaseWorkAdmissionEnabled ? databaseWorkAdmission : nil
+                    if configuration.directRoomLogAppendBatchSize > 0,
+                       configuration.directRoomLogAppendLaneCount > 1 {
+                        batcher = V2ShardedSendMessageAdmissionBatcher(store: write,
+                            configuration: actorBatchConfiguration,
+                            laneCount: configuration.directRoomLogAppendLaneCount,
+                            databaseWorkAdmission: appendAdmission,
+                            committedMessageObserver: committedHybridGroupEvents, actorGrantedStore: write)
+                    } else {
+                        batcher = V2SendMessageAdmissionBatcher(store: write,
+                            configuration: actorBatchConfiguration, databaseWorkAdmission: appendAdmission,
+                            committedMessageObserver: committedHybridGroupEvents, actorGrantedStore: write)
+                    }
+                    resourcesForOwner = try .init(database: owner, writes: write, sendBatcher: batcher,
+                        membershipIdentities: membershipIdentities, invitationIdentities: invitationIdentities,
+                        receiptShadowForwarder: userShardShadowForwarder,
+                        capacityProfile: configuration.capacityProfile, messageLimits: configuration.messageLimits,
+                        maximumEditBytes: configuration.messageLimits.maxUTF8Bytes,
+                        contentReviewMode: configuration.contentReviewMode,
+                        queryBatchConfiguration: .init(),
+                        receiptBatchConfiguration: .init(maximumBatchSize: configuration.readReceiptBatchSize,
+                            maximumDelay: .milliseconds(configuration.readReceiptBatchMaximumDelayMilliseconds),
+                            maximumInFlightBatches: configuration.readReceiptBatchMaximumInFlightBatches,
+                            maximumPendingRequests: configuration.readReceiptBatchMaximumPendingRequests),
+                        databaseWorkAdmission: databaseWorkAdmission)
+                    physicalResources[physicalKey] = resourcesForOwner
+                    physicalWrites[physicalKey] = write
+                    ownerBatchers[physicalKey] = batcher
+                }
+                ownerResources[storage.shardID] = resourcesForOwner
+                forwardTargetWritesByShard[storage.shardID] = write
+                bootstraps[storage.shardID] = try .init(shardID: storage.shardID,
+                    direct: PostgresV2DirectMessagingStore(database: owner, shadowForwarder: userShardShadowForwarder),
+                    group: PostgresV2GroupMessagingStore(database: owner), capacityProfile: configuration.capacityProfile)
+                forwardPairs[storage.shardID] = .init(database: owner, write: write,
+                    capacityProfile: configuration.capacityProfile, limits: configuration.messageLimits,
+                    databaseWorkAdmission: databaseWorkAdmission)
             }
-            let readReceiptBatcher = V2ReadReceiptBatcher(
-                store: readReceiptStore,
-                configuration: .init(
-                    maximumBatchSize: configuration.readReceiptBatchSize,
-                    maximumDelay: .milliseconds(
-                        configuration.readReceiptBatchMaximumDelayMilliseconds
-                    ),
-                    maximumInFlightBatches:
-                        configuration.readReceiptBatchMaximumInFlightBatches,
-                    maximumPendingRequests:
-                        configuration.readReceiptBatchMaximumPendingRequests
-                ),
-                databaseWorkAdmission: databaseWorkAdmission
-            )
-            // Register after the optional append batcher exists so the
-            // loopback-only metrics endpoint can expose its aggregate queue
-            // and adaptive-timer facts. The application has not started its
-            // public listener yet, so this ordering changes no route timing.
-            V2VaporMetricsRoutes.register(
-                on: app,
-                telemetry: prometheusTelemetry,
-                connectionMetrics: connectionRegistry,
-                transportMetrics: transportMetrics,
+            let actorFactory = try V2RoomServerActivationFactory(owners: ownerResources,
+                safetyActorUserID: configuration.contentReviewSafetyActorUserID)
+            let actors = try await V2RoomActorApplication.start(configuration: actorConfiguration,
+                ownerRouter: V2PostgresRoomShardRouter(database: database),
+                roomDatabases: roomShardDatabases,
+                factory: actorConfiguration.hostIdentity == nil ? nil : actorFactory)
+            roomActorApplication = actors
+            let actorDirectory = actors.directory
+            let callTimeout = actorConfiguration.runtime.callTimeout
+            let roomQueries = V2RoomRefQueryClient(directory: actorDirectory, callTimeout: callTimeout.duration)
+            let roomActorServices = V2GatewayRoomActorServices(directory: actorDirectory, callTimeout: callTimeout,
+                readReceiptControlStore: PostgresV2ReadReceiptStore(database: database,
+                    shadowForwarder: userShardShadowForwarder), databaseWorkAdmission: databaseWorkAdmission,
+                directRoomLogEventCache: directRoomLogEventCache)
+            let fixedBootstraps = bootstraps
+            let bootstrapPort = V2ActorCreationBootstrapPort(execute: { request, deadline in
+                guard ContinuousClock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+                let shard: String
+                switch request {
+                case .direct(let value): shard = value.roomShardID
+                case .group(let value): shard = value.intent.roomShardID
+                case .stagedGroup(let value): shard = value.intent.roomShardID
+                }
+                guard let owner = fixedBootstraps[shard] else { throw V2RoomCallFailure.notAccepted(.unavailable) }
+                return try await owner.execute(request)
+            }, stage: { intent, page, deadline in
+                guard ContinuousClock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+                guard let owner = fixedBootstraps[intent.roomShardID] else { throw V2RoomCallFailure.notAccepted(.unavailable) }
+                try await owner.stage(intent: intent, page: page)
+            })
+            let roomCreation = V2ActorRoomCreationCoordinator(controlDatabase: database,
+                directRoutes: V2PostgresRoomShardRouter(database: database),
+                directSelector: configuration.directRoomShardRouter,
+                groupSelector: try .init(rawValue: configuration.groupRoomShardIDs.joined(separator: ",")),
+                bootstrap: bootstrapPort, capacityProfile: configuration.capacityProfile)
+            let roomCreationServices = V2GatewayRoomCreationServices(coordinator: roomCreation,
+                directPreferences: V2ControlDirectMessagePreferenceClient(store:
+                    PostgresV2DirectMessagingStore(database: database, shadowForwarder: userShardShadowForwarder,
+                        authorizationCoordinator: directAuthorizationCoordinator)), callTimeout: callTimeout)
+            let maintenanceGroupAudienceStore = PostgresV2GroupAudienceImportStore(database: maintenanceDatabase)
+            let groupEventLog = V2RoomRefGroupEventLogClient(rooms: roomQueries,
+                directRoomLogEventCache: directRoomLogEventCache)
+            let forwardPort = V2RoomRefForwardPort(directory: actorDirectory)
+            let forwardSources = roomShardDatabases.mapValues {
+                V2ActorForwardSourceEndpoint(receipts: .init(database: $0), jobs: .init(database: $0))
+            }
+            let forwardMessages = try V2ActorForwardingCoordinator(router: roomShardRouter,
+                physicalStoreKeyByShard: physicalStoreKeyByShard,
+                pair: .init(coordinator: actors.reservations, executorsByShard: forwardPairs),
+                crossOwner: V2ActorCrossOwnerForwardService(sources: forwardSources,
+                    sourceCommand: { try await forwardPort.execute($0, deadline: $1) },
+                    deadline: { .now + callTimeout.duration }),
+                deadline: { .now + callTimeout.duration })
+            let directRoomLogAppendBatcher = V2AggregatedSendMessageBatchMetrics(
+                owners: ownerBatchers.values.map { $0 as any V2SendMessageBatchMetricsReading })
+            let readReceiptBatcher = V2AggregatedReadReceiptBatchMetrics(
+                owners: physicalResources.values.map(\.receiptBatchMetrics))
+            V2VaporMetricsRoutes.register(on: app, telemetry: prometheusTelemetry,
+                connectionMetrics: connectionRegistry, transportMetrics: transportMetrics,
                 durableWorkMetrics: durableWorkMetrics,
                 runtimePressureMetrics: V2GatewayRuntimePressureMetricsSource(
-                    databaseWorkAdmission: databaseWorkAdmission,
-                    databasePools: databasePoolTopology,
+                    databaseWorkAdmission: databaseWorkAdmission, databasePools: databasePoolTopology,
                     syncWakeCoalescer: syncWakeCoalescer,
                     shardAdmissionCommandCredits: directRoomLogShardAdmissionCredits,
                     roomAdmissionCommandCredits: directRoomLogRoomAdmissionCredits,
@@ -960,102 +736,7 @@ enum IMV2ServerApp {
                     directRoomLogFastAppendCache: directRoomLogFastAppendCache,
                     directRoomLogEventCache: directRoomLogEventCache,
                     preparedGroupEventPageCache: preparedGroupEventPageCache,
-                    connectionRegistry: connectionRegistry
-                )
-            )
-            let sendMessage = V2SendMessageService(
-                store: roomWriteStore,
-                capacityProfile: configuration.capacityProfile,
-                limits: configuration.messageLimits,
-                batcher: directRoomLogAppendBatcher
-            )
-            let membership = V2RoomMembershipService(
-                store: membershipStore,
-                capacityProfile: configuration.capacityProfile
-            )
-            let withdrawal = V2MessageWithdrawalService(
-                store: withdrawalStore,
-                capacityProfile: configuration.capacityProfile
-            )
-            let reaction = V2MessageReactionService(
-                store: reactionStore,
-                capacityProfile: configuration.capacityProfile
-            )
-            let edit = V2MessageEditService(
-                store: editStore,
-                capacityProfile: configuration.capacityProfile,
-                maximumTextUTF8Bytes: configuration.messageLimits.maxUTF8Bytes
-            )
-            let readReceipt = V2ReadReceiptService(
-                store: readReceiptStore,
-                batcher: readReceiptBatcher
-            )
-            let directMessaging = try V2DirectMessagingService(
-                store: directMessagingStore,
-                capacityProfile: configuration.capacityProfile,
-                roomShardRouter: configuration.directRoomShardRouter
-            )
-            let groupMessaging = try V2GroupMessagingService(
-                store: groupMessagingStore,
-                capacityProfile: configuration.capacityProfile,
-                roomShardID: configuration.groupRoomShardID
-            )
-            let groupAudienceImports = V2GroupAudienceImportService(
-                store: PostgresV2GroupAudienceImportStore(database: database),
-                groupMessaging: groupMessaging
-            )
-            let maintenanceGroupMessagingStore: any V2GroupMessagingStore
-            if singleRoomOwnerIsControlDatabase
-                && configuration.groupRoomShardIDs.count == 1
-            {
-                maintenanceGroupMessagingStore = PostgresV2GroupMessagingStore(
-                    database: maintenanceDatabase)
-            } else {
-                let groupOwnerShardIDs = Set(configuration.groupRoomShardIDs)
-                var ownerStoresByShard:
-                    [String: any V2ControlValidatedStagedGroupMessagingStore] = [:]
-                var ownerStoresByPhysicalLocation:
-                    [String: any V2ControlValidatedStagedGroupMessagingStore] = [:]
-                for storage in configuration.roomShardStorage
-                where groupOwnerShardIDs.contains(storage.shardID) {
-                    guard let ownerDatabase = databaseForRole(
-                        for: .maintenance,
-                        url: storage.databaseURL
-                    ) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                    let physicalLocationKey =
-                        storage.databaseURL + "\u{0}" + storage.schema
-                    if let existing = ownerStoresByPhysicalLocation[
-                        physicalLocationKey
-                    ] {
-                        ownerStoresByShard[storage.shardID] = existing
-                        continue
-                    }
-                    let store = PostgresV2GroupMessagingStore(
-                        database: ownerDatabase
-                    )
-                    ownerStoresByPhysicalLocation[physicalLocationKey] = store
-                    ownerStoresByShard[storage.shardID] = store
-                }
-                maintenanceGroupMessagingStore = try V2RoutedGroupMessagingStore(
-                    intentStore: PostgresV2GroupRoomCreationIntentStore(
-                        database: maintenanceDatabase
-                    ),
-                    ownerStores: ownerStoresByShard
-                )
-            }
-            let maintenanceGroupMessaging = try V2GroupMessagingService(
-                store: maintenanceGroupMessagingStore,
-                capacityProfile: configuration.capacityProfile,
-                roomShardID: configuration.groupRoomShardID
-            )
-            let maintenanceGroupAudienceImports = V2GroupAudienceImportService(
-                store: PostgresV2GroupAudienceImportStore(database: maintenanceDatabase),
-                groupMessaging: maintenanceGroupMessaging
-            )
-            let groupEventLog = V2GroupEventLogService(
-                store: groupEventLogStore,
-                directRoomLogEventCache: directRoomLogEventCache
-            )
+                    connectionRegistry: connectionRegistry, roomActors: actors))
             // Foreground availability is intentionally a best-effort hint.
             // The same broker adapter also serves the durable Hybrid wake
             // outbox, but the two contracts remain distinct at the command
@@ -1137,10 +818,6 @@ enum IMV2ServerApp {
                 metrics: transportMetrics
             )
             committedHybridGroupEvents.install(sink: foregroundGroupEventHints)
-            let membershipDirectory = V2RoomMembershipDirectoryService(
-                store: try V2RoutedRoomMembershipDirectoryStore(controlDatabase: database,
-                    ownerDatabases: roomShardDatabases)
-            )
             // 会话摘要按房间分片扇出；未读与预览都由服务端聚合，客户端只回传游标。
             // Recovery scans use uncached control-plane routing, so a cached
             // owner cannot validate a stale physical copy after migration.
@@ -1173,10 +850,8 @@ enum IMV2ServerApp {
             let recoveryDirectory = V2UserRoomDirectoryService(topologySource: recoveryTopology,
                 cursorCodec: try .init(key: Data(configuration.accessTokenKey
                     .digest("im-v2-room-recovery-cursor-root-v1").utf8)))
-            let recoveryStates = V2RoutedRoomStateStore(router: recoveryRouter,
-                registry: try V2StaticRoomShardStorageRegistry(locations: recoveryLocations))
-            let latestVisible = try V2RoomLatestVisibleCommandService(reader: V2RoutedRoomLatestVisibleStore(
-                router: recoveryRouter, registry: V2StaticRoomShardStorageRegistry(locations: recoveryLocations)))
+            let recoveryStates = roomQueries
+            let latestVisible = try V2RoomLatestVisibleCommandService(reader: roomQueries)
             let roomRecovery = V2RoomRecoveryCommandService(directory: recoveryDirectory, states: recoveryStates, latestVisible: latestVisible)
             let accountInterests = sharedGroupWakeInterests
                 ?? V2SharedGroupEventWakeInterests(underlying: V2LocalRoomChangeInterest())
@@ -1187,22 +862,17 @@ enum IMV2ServerApp {
             let socialRelationships = V2SocialRelationshipService(
                 store: PostgresV2SocialRelationshipStore(database: database, shadowForwarder: userShardShadowForwarder, authorizationCoordinator: directAuthorizationCoordinator)
             )
-            let moderation = V2ModerationService(
-                store: moderationStore,
-                capacityProfile: configuration.capacityProfile
-            )
             let contentReviewWorker: V2RoutedContentReviewWorker?
             if configuration.contentReviewMode == .enabled,
-               let safetyActor = configuration.contentReviewSafetyActorUserID {
+               configuration.contentReviewSafetyActorUserID != nil {
                 let reviewer = V2ConfiguredContentReviewer(
                     violatingTerms: configuration.contentReviewViolationTerms,
                     reviewTerms: configuration.contentReviewEscalationTerms
                 )
-                let trustedModeration = V2TrustedSafetyModerationService(
-                    store: moderationStore,
-                    safetyActorUserID: safetyActor,
-                    capacityProfile: configuration.capacityProfile
-                )
+                let trustedModeration = V2RoomContentReviewSafetyApplicator(callTimeout: callTimeout.duration) {
+                    request, deadline in
+                    try await actorDirectory.room(request.roomID).call(request, principal: .service, deadline: deadline)
+                }
                 let reviewWorkers = try roomOwnerDatabaseURLs.map { ownerURL in
                     guard let ownerMaintenanceDatabase = databaseForRole(
                         for: .maintenance,
@@ -1228,40 +898,19 @@ enum IMV2ServerApp {
             let conversationCapabilities = V2ConversationCapabilitiesService(
                 store: PostgresV2ConversationCapabilitiesStore(database: database, shadowForwarder: userShardShadowForwarder)
             )
-            let groupCapabilities = V2GroupCapabilitiesService(
-                store: groupCapabilitiesStore,
-                capacityProfile: configuration.capacityProfile
-            )
             let liveActivityStore = try PostgresV2LiveActivityStore(database: database)
             let liveActivity = V2LiveActivityService(store: liveActivityStore)
             await connectionRegistry.configureLivePresenceLeases(liveActivityStore)
             await connectionRegistry.configureLiveActivityObservationAuthorizer(liveActivity)
-            var rolePolicyBaselinesByShard: [String: any V2GroupRolePolicyBaselineReading] = [:]
-            for shardID in configuration.groupRoomShardIDs {
-                guard let ownerDatabase = roomShardDatabases[shardID] else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                rolePolicyBaselinesByShard[shardID] = PostgresV2GroupRolePolicyBaselineStore(database: ownerDatabase)
-            }
-            let rolePolicyBaselines = try V2RoutedGroupRolePolicyBaselineStore(controlDatabase: database, stores: rolePolicyBaselinesByShard)
             let handler = V2GatewayDomainCommandHandler(
-                sendMessage: sendMessage,
-                membership: membership,
-                withdrawal: withdrawal,
-                reaction: reaction,
-                edit: edit,
-                readReceipt: readReceipt,
+                roomActors: roomActorServices,
+                roomCreation: roomCreationServices,
                 liveActivity: liveActivity,
-                directMessaging: directMessaging,
-                groupAudienceImports: groupAudienceImports,
-                groupEventLog: groupEventLog,
                 foregroundGroupEventHints: foregroundGroupEventHints,
-                membershipDirectory: membershipDirectory,
                 roomRecovery: roomRecovery,
                 accountChanges: connectionRegistry,
                 socialRelationships: socialRelationships,
-                moderation: moderation,
                 conversationCapabilities: conversationCapabilities,
-                groupCapabilities: groupCapabilities,
-                groupRolePolicyBaseline: rolePolicyBaselines,
                 forwardMessages: forwardMessages,
                 sync: .init(store: V2RoutedSyncStore(
                     registry: syncUserShardStorage, routeFence: syncUserShardRouter,
@@ -1317,7 +966,9 @@ enum IMV2ServerApp {
                 )
             )
             let moderationAuditRetentionWorker = V2ModerationAuditRetentionWorker(
-                store: PostgresV2ModerationAuditRetentionStore(database: maintenanceDatabase)
+                store: V2OwnerModerationAuditRetentionStore(owners: roomOwnerMaintenanceDatabases.map {
+                    PostgresV2ModerationAuditRetentionStore(database: $0)
+                })
             )
             let mediaRetentionWorker = try V2MediaRetentionWorker(
                 store: PostgresV2MediaRetentionStore(database: maintenanceDatabase),
@@ -1325,15 +976,12 @@ enum IMV2ServerApp {
             )
             // 房间日志保留：permanent 计入全部回执，window 只计入窗口内回执；
             // 缺少回执的当前成员始终保护历史，裁剪下界告知返回客户端历史不完整。
-            let roomLogRetentionWorkers = roomOwnerMaintenanceDatabases.map { ownerDatabase in
-                V2RoomLogRetentionWorker(
-                    store: PostgresV2RoomLogRetentionStore(database: ownerDatabase),
-                    mode: configuration.roomLogRetentionMode,
-                    window: configuration.roomLogRetentionWindowSeconds
-                )
+            let roomMaintenanceWorkers = roomOwnerMaintenanceDatabases.map { owner in
+                V2RoomActorMaintenanceWorker(scanner: PostgresV2RoomMaintenanceScanner(database: owner),
+                    invoker: V2RoomRefMaintenanceInvoker(directory: actorDirectory), callTimeout: callTimeout.duration)
             }
             let controlPlaneHousekeepingWorker = V2ControlPlaneHousekeepingWorker(
-                store: PostgresV2ControlPlaneHousekeepingStore(database: maintenanceDatabase),
+                store: PostgresV2ControlPlaneHousekeepingStore(database: maintenanceDatabase, roomCleanupMode: .actorOwned),
                 idempotencyRetention: TimeInterval(configuration.idempotencyRetentionSeconds)
             )
             let pushWakeWorker: V2PushWakeWorker?
@@ -1409,8 +1057,6 @@ enum IMV2ServerApp {
             var forwardTargetEndpoints: [String: any V2ForwardExportDelivering] = [:]
             var forwardBackgroundDatabases: [String: any Database] = [:]
             for storage in configuration.roomShardStorage {
-                guard let configuredWrite = forwardTargetWritesByShard[storage.shardID]
-                else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 guard let ownerDatabase = databaseForRole(for: .delivery, url: storage.databaseURL)
                 else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 forwardBackgroundDatabases[storage.shardID] = ownerDatabase
@@ -1421,13 +1067,16 @@ enum IMV2ServerApp {
                         copier: V2LocalFilesystemForwardMediaCopier(sources: sources, target: forwardMediaProvider, maximumBytes: localMediaConfiguration.maximumBytes),
                         scanner: V2LocalEICARMediaScanner(provider: forwardMediaProvider))
                 } else { mediaWorker = nil }
-                forwardTargetEndpoints[storage.shardID] = V2ForwardImportEndpoint(inbox: .init(database: ownerDatabase),
-                    write: configuredWrite.usingWorkloadDatabase(ownerDatabase), media: mediaWorker,
-                    capacityProfile: configuration.capacityProfile, limits: configuration.messageLimits)
+                forwardTargetEndpoints[storage.shardID] = V2ActorForwardImportEndpoint(
+                    inbox: .init(database: ownerDatabase), media: mediaWorker,
+                    roomCommand: { try await forwardPort.execute($0, deadline: $1) },
+                    deadline: { .now + callTimeout.duration })
             }
             let forwardTransport = try V2ConfiguredForwardExportDelivery(targets: forwardTargetEndpoints)
             let forwardWorkers = try Dictionary(uniqueKeysWithValues: forwardBackgroundDatabases.map { shardID, ownerDatabase in
-                (shardID, try V2ForwardDeliveryWorker(store: .init(database: ownerDatabase), receipts: .init(database: ownerDatabase), target: forwardTransport))
+                (shardID, try V2ForwardDeliveryWorker(store: .init(database: ownerDatabase), receipts: .init(database: ownerDatabase), target: forwardTransport,
+                    sourceCommand: { try await forwardPort.execute($0, deadline: $1) },
+                    deadline: { .now + callTimeout.duration }))
             })
             let forwardRuntime = try V2ForwardDeliveryRuntime(workers: forwardWorkers,
                 minimumPollMilliseconds: configuration.workerPollIntervalMilliseconds,
@@ -1820,7 +1469,7 @@ enum IMV2ServerApp {
                             }
                         }
                     }
-                    let maintenanceTask = Task { [roomLogRetentionWorkers, syncHousekeepingWorkers,
+                    let maintenanceTask = Task { [roomMaintenanceWorkers, syncHousekeepingWorkers,
                         projectionVersionGCWorkers, personalEventGCWorkers,
                         messageProjectionStateGCWorkers, forwardBackgroundDatabases] in
                         var nextMaintenanceAt: ContinuousClock.Instant?
@@ -1878,8 +1527,8 @@ enum IMV2ServerApp {
                                     // bounded maintenance cadence as other retention
                                     // work; cancellation and actor-local admission
                                     // also perform immediate targeted cleanup.
-                                    _ = try await maintenanceGroupAudienceImports.purgeExpired(
-                                        limit: configuration.workerBatchSize
+                                    _ = try await maintenanceGroupAudienceStore.purgeExpired(
+                                        now: Date(), limit: configuration.workerBatchSize
                                     )
                                 } catch is CancellationError {
                                     return
@@ -1887,8 +1536,8 @@ enum IMV2ServerApp {
                                     logger.error("IM V2 group creation draft cleanup failed; retrying")
                                 }
                                 do {
-                                    let report = try await maintenanceGroupAudienceImports.recoverFinalizing(
-                                        limit: configuration.workerBatchSize
+                                    let report = try await roomCreation.recoverFinalizing(
+                                        limit: configuration.workerBatchSize, deadline: .now + callTimeout.duration
                                     )
                                     if report.failedCount > 0 {
                                         logger.warning("IM V2 group creation finalization recovery left retryable drafts")
@@ -1905,9 +1554,15 @@ enum IMV2ServerApp {
                                 } catch {
                                     logger.error("IM V2 media retention worker failed; retrying")
                                 }
-                                for worker in roomLogRetentionWorkers {
+                                for worker in roomMaintenanceWorkers {
                                     do {
-                                        _ = try await worker.runOnce(limit: configuration.workerBatchSize)
+                                        _ = try await worker.runRetention(limit: configuration.workerBatchSize,
+                                            mode: configuration.roomLogRetentionMode,
+                                            window: configuration.roomLogRetentionWindowSeconds)
+                                        _ = try await worker.runBookkeeping(limit: configuration.workerBatchSize,
+                                            retention: 7 * 86_400,
+                                            idempotencyRetention: TimeInterval(configuration.idempotencyRetentionSeconds),
+                                            rowLimitPerRoom: configuration.workerBatchSize)
                                     } catch is CancellationError {
                                         return
                                     } catch {
@@ -2046,7 +1701,11 @@ enum IMV2ServerApp {
                     logger.notice("IM V2 broker and presence shutdown finished")
                     try await server.shutdown()
                     serverIsShutdown = true
-                    logger.notice("IM V2 TLS event loops shut down")
+                    guard try await actors.stop(deadline: .now + actorConfiguration.runtime.drainTimeout.duration) else {
+                        logger.critical("IM V2 room actors still own work after shutdown deadline")
+                        exit(EXIT_FAILURE)
+                    }
+                    logger.notice("IM V2 TLS event loops and room actors shut down")
                     if let listenerShutdownError { throw listenerShutdownError }
                 }
             } catch {
@@ -2058,6 +1717,17 @@ enum IMV2ServerApp {
             try await resources.shutdown()
             try await applicationEventLoops.shutdownGracefully()
         } catch {
+            if let roomActorApplication {
+                do {
+                    guard try await roomActorApplication.stop(deadline: .now + .seconds(60)) else {
+                        logger.critical("IM V2 room actor failure drain exceeded its deadline")
+                        exit(EXIT_FAILURE)
+                    }
+                } catch {
+                    logger.critical("IM V2 room actor failure drain failed")
+                    exit(EXIT_FAILURE)
+                }
+            }
             await natsLiveActivityBroker?.shutdown()
             await accountRoomChangeService?.shutdown()
             await sharedGroupWakeInterests?.shutdown()

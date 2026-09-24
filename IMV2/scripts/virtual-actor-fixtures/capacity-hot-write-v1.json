@@ -1,0 +1,30 @@
+{
+  "name": "va-capacity-hot-write-v1",
+  "seed": 20260923,
+  "roomWarmupTimeoutSeconds": 120,
+  "requiresSteadyStateDrain": true,
+  "maximumSteadyStateQueuedMessages": 64,
+  "completionDrainSeconds": 30,
+  "schedulerTicksPerSecond": 100,
+  "sendDispatch": "bounded_client_queue",
+  "maximumQueuedMessagesPerConnection": 32,
+  "personas": [
+    {
+      "name": "hot_room_sender",
+      "share": 1.0,
+      "sendWeight": 1.0,
+      "roomLogReadWeight": 0.0,
+      "syncPullWeight": 0.0
+    }
+  ],
+  "phases": [
+    {
+      "name": "base",
+      "durationSeconds": 300,
+      "messagesPerSecond": 500,
+      "roomLogReadsPerSecond": 0,
+      "syncPullsPerSecond": 0,
+      "reconnectPercentPerMinute": 0
+    }
+  ]
+}

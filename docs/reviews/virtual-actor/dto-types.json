@@ -1,0 +1,3293 @@
+{
+  "base": "f1cdd78d6a21bf0ae23da627c0710c65115236aa",
+  "meaning": "explicit Codable declaration or V2Identifier alias; other Sendable types require wire mapping",
+  "types": [
+    {
+      "name": "ClientMessageID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 172,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias ClientMessageID = V2Identifier<ClientMessageIDTag>",
+      "members": []
+    },
+    {
+      "name": "ContactAliasOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 199,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias ContactAliasOperationID = V2Identifier<ContactAliasOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "DeviceID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 169,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias DeviceID = V2Identifier<DeviceIDTag>",
+      "members": []
+    },
+    {
+      "name": "DirectRoomOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 181,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias DirectRoomOperationID = V2Identifier<DirectRoomOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "EventID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 171,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias EventID = V2Identifier<EventIDTag>",
+      "members": []
+    },
+    {
+      "name": "GroupAnnouncementOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 192,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias GroupAnnouncementOperationID = V2Identifier<GroupAnnouncementOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "GroupInviteID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 203,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias GroupInviteID = V2Identifier<GroupInviteIDTag>",
+      "members": []
+    },
+    {
+      "name": "GroupInviteOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 204,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias GroupInviteOperationID = V2Identifier<GroupInviteOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "GroupJoinDecisionOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 207,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias GroupJoinDecisionOperationID = V2Identifier<GroupJoinDecisionOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "GroupJoinRequestID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 205,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias GroupJoinRequestID = V2Identifier<GroupJoinRequestIDTag>",
+      "members": []
+    },
+    {
+      "name": "GroupJoinRequestOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 206,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias GroupJoinRequestOperationID = V2Identifier<GroupJoinRequestOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "GroupNicknameOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 200,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias GroupNicknameOperationID = V2Identifier<GroupNicknameOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "GroupPermissionOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 193,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias GroupPermissionOperationID = V2Identifier<GroupPermissionOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "GroupRoleOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 194,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias GroupRoleOperationID = V2Identifier<GroupRoleOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "GroupRoomOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 182,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias GroupRoomOperationID = V2Identifier<GroupRoomOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "IMV2Envelope",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/Generated/Protobuf/im_realtime/v2/im_v2.pb.swift",
+      "line": 540,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public nonisolated struct IMV2Envelope: Sendable",
+      "members": [
+        "public var requestID: UInt64 = 0",
+        "public var protocolVersion: UInt32 = 0",
+        "public var body: IMV2Envelope.OneOf_Body? = nil",
+        "public var clientHello: IMV2ClientHello {",
+        "public var serverHello: IMV2ServerHello {",
+        "public var authenticate: IMV2Authenticate {",
+        "public var authenticated: IMV2Authenticated {",
+        "public var heartbeat: IMV2Heartbeat {",
+        "public var heartbeatAck: IMV2HeartbeatAck {",
+        "public var sendMessage: IMV2SendMessage {",
+        "public var messageAccepted: IMV2MessageAccepted {",
+        "public var changeRoomMembership: IMV2ChangeRoomMembership {",
+        "public var membershipChanged: IMV2MembershipChanged {",
+        "public var withdrawMessage: IMV2WithdrawMessage {",
+        "public var messageWithdrawn: IMV2MessageWithdrawn {",
+        "public var changeMessageReaction: IMV2ChangeMessageReaction {",
+        "public var messageReactionChanged: IMV2MessageReactionChanged {",
+        "public var editMessage: IMV2EditMessage {",
+        "public var messageEdited: IMV2MessageEdited {",
+        "public var syncPull: IMV2SyncPull {",
+        "public var syncBatch: IMV2SyncBatch {",
+        "public var syncAck: IMV2SyncAck {",
+        "public var resetRequired: IMV2ResetRequired {",
+        "public var snapshotAck: IMV2SnapshotAck {",
+        "public var acknowledged: IMV2Acknowledged {",
+        "public var syncSnapshot: IMV2SyncSnapshot {",
+        "public var snapshotManifest: IMV2SnapshotManifest {",
+        "public var snapshotPagePull: IMV2SnapshotPagePull {",
+        "public var snapshotPage: IMV2SnapshotPage {",
+        "public var syncAvailable: IMV2SyncAvailable {",
+        "public var recordReadReceipt: IMV2RecordReadReceipt {",
+        "public var readReceiptRecorded: IMV2ReadReceiptRecorded {",
+        "public var openDirectRoom: IMV2OpenDirectRoom {",
+        "public var directRoomOpened: IMV2DirectRoomOpened {",
+        "public var setStrangerMessagePermission: IMV2SetStrangerMessagePermission {",
+        "public var strangerMessagePermissionSet: IMV2StrangerMessagePermissionSet {",
+        "public var changeRelationship: IMV2ChangeRelationship {",
+        "public var relationshipChanged: IMV2RelationshipChanged {",
+        "public var changeUserBlock: IMV2ChangeUserBlock {",
+        "public var userBlockChanged: IMV2UserBlockChanged {",
+        "public var moderateMessage: IMV2ModerateMessage {",
+        "public var messageRedacted: IMV2MessageRedacted {",
+        "public var muteMember: IMV2MuteMember {",
+        "public var memberMuted: IMV2MemberMuted {",
+        "public var moderateMemberRemoval: IMV2ModerateMemberRemoval {",
+        "public var memberRemovedByModerator: IMV2MemberRemovedByModerator {",
+        "public var groupRoomCreated: IMV2GroupRoomCreated {",
+        "public var listRoomMembers: IMV2ListRoomMembers {",
+        "public var roomMembersPage: IMV2RoomMembersPage {",
+        "public var groupEventPull: IMV2GroupEventPull {",
+        "public var groupEventPage: IMV2GroupEventPage {",
+        "public var groupEventSubscribe: IMV2GroupEventSubscribe {",
+        "public var groupEventSubscribed: IMV2GroupEventSubscribed {",
+        "public var groupEventUnsubscribe: IMV2GroupEventUnsubscribe {",
+        "public var groupEventAvailable: IMV2GroupEventAvailable {",
+        "public var beginGroupRoomCreation: IMV2BeginGroupRoomCreation {",
+        "public var groupRoomCreationPrepared: IMV2GroupRoomCreationPrepared {",
+        "public var appendGroupRoomCreationMembers: IMV2AppendGroupRoomCreationMembers {",
+        "public var groupRoomCreationMembersAppended: IMV2GroupRoomCreationMembersAppended {",
+        "public var finalizeGroupRoomCreation: IMV2FinalizeGroupRoomCreation {",
+        "public var cancelGroupRoomCreation: IMV2CancelGroupRoomCreation {",
+        "public var groupRoomCreationCancelled: IMV2GroupRoomCreationCancelled {",
+        "public var setUserAddPermission: IMV2SetUserAddPermission {",
+        "public var userAddPermissionSet: IMV2UserAddPermissionSet {",
+        "public var setReadReceiptPreferences: IMV2SetReadReceiptPreferences {",
+        "public var readReceiptPreferencesSet: IMV2ReadReceiptPreferencesSet {",
+        "public var listReadReceiptReaders: IMV2ListReadReceiptReaders {",
+        "public var readReceiptReadersPage: IMV2ReadReceiptReadersPage {",
+        "public var setLiveActivityPreferences: IMV2SetLiveActivityPreferences {",
+        "public var liveActivityPreferencesSet: IMV2LiveActivityPreferencesSet {",
+        "public var subscribePresence: IMV2SubscribePresence {",
+        "public var presenceSubscribed: IMV2PresenceSubscribed {",
+        "public var unsubscribePresence: IMV2UnsubscribePresence {",
+        "public var subscribeTyping: IMV2SubscribeTyping {",
+        "public var unsubscribeTyping: IMV2UnsubscribeTyping {",
+        "public var setTypingState: IMV2SetTypingState {",
+        "public var typingStateChanged: IMV2TypingStateChanged {",
+        "public var presenceChanged: IMV2PresenceChanged {",
+        "public var error: IMV2Error {",
+        "public var getLiveActivityPreferences: IMV2GetLiveActivityPreferences {",
+        "public var liveActivityPreferences: IMV2LiveActivityPreferences {",
+        "public var setConversationState: IMV2SetConversationState {",
+        "public var conversationStateSet: IMV2ConversationStateSet {",
+        "public var setMessageFavorite: IMV2SetMessageFavorite {",
+        "public var messageFavoriteChanged: IMV2MessageFavoriteChanged {",
+        "public var setPinnedMessage: IMV2SetPinnedMessage {",
+        "public var pinnedMessageChanged: IMV2PinnedMessageChanged {",
+        "public var setGroupAnnouncement: IMV2SetGroupAnnouncement {",
+        "public var groupAnnouncementChanged: IMV2GroupAnnouncementChanged {",
+        "public var setGroupRolePermissions: IMV2SetGroupRolePermissions {",
+        "public var groupRolePermissionsChanged: IMV2GroupRolePermissionsChanged {",
+        "public var changeGroupMemberRole: IMV2ChangeGroupMemberRole {",
+        "public var groupMemberRoleChanged: IMV2GroupMemberRoleChanged {",
+        "public var forwardMessages: IMV2ForwardMessages {",
+        "public var messagesForwarded: IMV2MessagesForwarded {",
+        "public var getGroupRolePolicyBaseline: IMV2GetGroupRolePolicyBaseline {",
+        "public var groupRolePolicyBaseline: IMV2GroupRolePolicyBaseline {",
+        "public var userRoomDirectoryList: IMV2UserRoomDirectoryList {",
+        "public var userRoomDirectoryPage: IMV2UserRoomDirectoryPage {",
+        "public var roomSyncStateBatch: IMV2RoomSyncStateBatch {",
+        "public var roomSyncStateBatchResult: IMV2RoomSyncStateBatchResult {",
+        "public var accountRoomChangesStart: IMV2AccountRoomChangesStart {",
+        "public var accountRoomChangesReady: IMV2AccountRoomChangesReady {",
+        "public var accountRoomChanged: IMV2AccountRoomChanged {",
+        "public var accountRoomResyncRequired: IMV2AccountRoomResyncRequired {",
+        "public var roomLatestVisibleBatch: IMV2RoomLatestVisibleBatch {",
+        "public var roomLatestVisibleBatchResult: IMV2RoomLatestVisibleBatchResult {",
+        "public var unknownFields = SwiftProtobuf.UnknownStorage()"
+      ]
+    },
+    {
+      "name": "IMV2RoomLatestVisibleBatch",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/Generated/Protobuf/im_realtime/v2/im_v2.pb.swift",
+      "line": 3711,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public nonisolated struct IMV2RoomLatestVisibleBatch: Sendable",
+      "members": [
+        "public var roomIds: [String] = []",
+        "public var unknownFields = SwiftProtobuf.UnknownStorage()"
+      ]
+    },
+    {
+      "name": "IMV2RoomSyncStateBatch",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/Generated/Protobuf/im_realtime/v2/im_v2.pb.swift",
+      "line": 2902,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public nonisolated struct IMV2RoomSyncStateBatch: Sendable",
+      "members": [
+        "public var roomIds: [String] = []",
+        "public var unknownFields = SwiftProtobuf.UnknownStorage()"
+      ]
+    },
+    {
+      "name": "IMV2UserRoomDirectoryList",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/Generated/Protobuf/im_realtime/v2/im_v2.pb.swift",
+      "line": 2853,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public nonisolated struct IMV2UserRoomDirectoryList: Sendable",
+      "members": [
+        "public var cursor: String = String()",
+        "public var pageSize: UInt32 = 0",
+        "public var unknownFields = SwiftProtobuf.UnknownStorage()"
+      ]
+    },
+    {
+      "name": "MediaDownloadSessionID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 202,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias MediaDownloadSessionID = V2Identifier<MediaDownloadSessionIDTag>",
+      "members": []
+    },
+    {
+      "name": "MediaID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 196,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias MediaID = V2Identifier<MediaIDTag>",
+      "members": []
+    },
+    {
+      "name": "MediaUploadOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 197,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias MediaUploadOperationID = V2Identifier<MediaUploadOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "MediaUploadSessionID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 201,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias MediaUploadSessionID = V2Identifier<MediaUploadSessionIDTag>",
+      "members": []
+    },
+    {
+      "name": "MembershipOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 175,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias MembershipOperationID = V2Identifier<MembershipOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "MessageEditOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 179,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias MessageEditOperationID = V2Identifier<MessageEditOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "MessageForwardOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 195,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias MessageForwardOperationID = V2Identifier<MessageForwardOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "MessageID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 170,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias MessageID = V2Identifier<MessageIDTag>",
+      "members": []
+    },
+    {
+      "name": "MessageReactionOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 178,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias MessageReactionOperationID = V2Identifier<MessageReactionOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "MessageWithdrawalOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 176,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias MessageWithdrawalOperationID = V2Identifier<MessageWithdrawalOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "ModerationOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 177,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias ModerationOperationID = V2Identifier<ModerationOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "PinnedMessageOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 191,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias PinnedMessageOperationID = V2Identifier<PinnedMessageOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "ReadReceiptOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 180,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias ReadReceiptOperationID = V2Identifier<ReadReceiptOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "ReadReceiptPreferenceOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 185,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias ReadReceiptPreferenceOperationID = V2Identifier<ReadReceiptPreferenceOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "RoomID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 167,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias RoomID = V2Identifier<RoomIDTag>",
+      "members": []
+    },
+    {
+      "name": "StrangerMessagePreferenceOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 183,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias StrangerMessagePreferenceOperationID = V2Identifier<StrangerMessagePreferenceOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "UserAddPreferenceOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 184,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias UserAddPreferenceOperationID = V2Identifier<UserAddPreferenceOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "UserID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Identifiers.swift",
+      "line": 168,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias UserID = V2Identifier<UserIDTag>",
+      "members": []
+    },
+    {
+      "name": "V2AcceptanceIdentifiers",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/SendMessageAcceptance.swift",
+      "line": 416,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2AcceptanceIdentifiers: Equatable, Sendable",
+      "members": [
+        "public let messageID: MessageID",
+        "public let eventID: EventID"
+      ]
+    },
+    {
+      "name": "V2AcceptedMessage",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/SendMessageAcceptance.swift",
+      "line": 257,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2AcceptedMessage: Equatable, Sendable",
+      "members": [
+        "public let messageID: MessageID",
+        "public let roomID: RoomID",
+        "public let roomSequence: UInt64",
+        "public let timelineSequence: UInt64",
+        "public let senderUserID: UserID",
+        "public let clientMessageID: ClientMessageID",
+        "public let text: String",
+        "public let media: [V2MediaReference]",
+        "public let mediaPresentations: [V2MediaPresentation]",
+        "public let mentions: [V2MentionTarget]",
+        "public let entities: [V2MessageEntity]",
+        "public let replyTo: V2MessageReplyReference?",
+        "public let groupCapacityClass: V2GroupCapacityClass?",
+        "public let sourceEventID: EventID?",
+        "public let acceptedMembershipRevision: UInt64?",
+        "public let directRecipientUserID: UserID?",
+        "public let projectionCreatedAtUnixMilliseconds: Int64?",
+        "public let createdAt: Date"
+      ]
+    },
+    {
+      "name": "V2AccountKind",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/PublicIdentity.swift",
+      "line": 6,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2AccountKind: String, Codable, CaseIterable, Equatable, Sendable",
+      "members": [
+        "case regular",
+        "case system",
+        "case customerSupport = \"customer_support\""
+      ]
+    },
+    {
+      "name": "V2AtomicRoomWriteBatchPartition",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2SendMessageService.swift",
+      "line": 276,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2AtomicRoomWriteBatchPartition: Hashable, Sendable",
+      "members": [
+        "public let rawValue: UInt8"
+      ]
+    },
+    {
+      "name": "V2AuthenticatedMembershipChange",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2RoomMembershipService.swift",
+      "line": 5,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2AuthenticatedMembershipChange: Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let actorUserID: UserID",
+        "public let operationID: MembershipOperationID",
+        "public let targetUserID: UserID",
+        "public let action: V2RoomMembershipAction",
+        "public let expectedMembershipRevision: UInt64"
+      ]
+    },
+    {
+      "name": "V2AuthenticatedMessageEdit",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2MessageEditService.swift",
+      "line": 7,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2AuthenticatedMessageEdit: Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let actorUserID: UserID",
+        "public let operationID: MessageEditOperationID",
+        "public let messageID: MessageID",
+        "public let expectedMessageRevision: UInt64",
+        "public let text: String"
+      ]
+    },
+    {
+      "name": "V2AuthenticatedMessageReaction",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2MessageReactionService.swift",
+      "line": 8,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2AuthenticatedMessageReaction: Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let actorUserID: UserID",
+        "public let operationID: MessageReactionOperationID",
+        "public let messageID: MessageID",
+        "public let reaction: String",
+        "public let action: V2MessageReactionAction"
+      ]
+    },
+    {
+      "name": "V2AuthenticatedMessageWithdrawal",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2MessageWithdrawalService.swift",
+      "line": 5,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2AuthenticatedMessageWithdrawal: Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let actorUserID: UserID",
+        "public let operationID: MessageWithdrawalOperationID",
+        "public let messageID: MessageID",
+        "public let expectedMessageRevision: UInt64"
+      ]
+    },
+    {
+      "name": "V2AuthenticatedModeration",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ModerationService.swift",
+      "line": 8,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2AuthenticatedModeration: Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let actorUserID: UserID",
+        "public let operationID: ModerationOperationID",
+        "public let action: V2ModerationAction",
+        "public let targetUserID: UserID?",
+        "public let messageID: MessageID?",
+        "public let muteUntil: Date?",
+        "public let reasonCode: V2ModerationReasonCode"
+      ]
+    },
+    {
+      "name": "V2AuthenticatedReadReceipt",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ReadReceiptService.swift",
+      "line": 5,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2AuthenticatedReadReceipt: Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let actorUserID: UserID",
+        "public let operationID: ReadReceiptOperationID",
+        "public let readThroughRoomSequence: UInt64"
+      ]
+    },
+    {
+      "name": "V2AuthenticatedSendMessage",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2SendMessageService.swift",
+      "line": 10,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2AuthenticatedSendMessage: Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let actorUserID: UserID",
+        "public let clientMessageID: ClientMessageID",
+        "public let text: String",
+        "public let media: [V2MediaReference]",
+        "public let mentions: [V2MentionTarget]",
+        "public let entities: [V2MessageEntity]",
+        "public let replyTo: V2MessageReplyReference?"
+      ]
+    },
+    {
+      "name": "V2CapacityProfile",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2SendMessageService.swift",
+      "line": 120,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2CapacityProfile: Equatable, Sendable",
+      "members": [
+        "public let id: String",
+        "public let limits: RoomCapacityProfile"
+      ]
+    },
+    {
+      "name": "V2ChangeMessageReactionCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/MessageReaction.swift",
+      "line": 22,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ChangeMessageReactionCommand: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let actorUserID: UserID",
+        "public let operationID: MessageReactionOperationID",
+        "public let messageID: MessageID",
+        "public let reaction: String",
+        "public let action: V2MessageReactionAction"
+      ]
+    },
+    {
+      "name": "V2ChangeRoomMembershipCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/RoomMembership.swift",
+      "line": 24,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ChangeRoomMembershipCommand: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let actorUserID: UserID",
+        "public let operationID: MembershipOperationID",
+        "public let targetUserID: UserID",
+        "public let action: V2RoomMembershipAction",
+        "public let expectedRevision: V2MembershipRevision",
+        "public var expectedMembershipRevision: UInt64 { expectedRevision.rawValue }"
+      ]
+    },
+    {
+      "name": "V2ClaimedMediaDownload",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2MediaProviderSessionService.swift",
+      "line": 48,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ClaimedMediaDownload: Equatable, Sendable",
+      "members": [
+        "public let mediaID: MediaID",
+        "public let downloadSessionID: MediaDownloadSessionID",
+        "public let expiresAt: Date",
+        "public let claimToken: UUID"
+      ]
+    },
+    {
+      "name": "V2CommandAdmissionUnavailableReason",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/CommandAdmission.swift",
+      "line": 112,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2CommandAdmissionUnavailableReason: Equatable, Sendable",
+      "members": [
+        "case missingShardLease",
+        "case expiredShardLease"
+      ]
+    },
+    {
+      "name": "V2ContactAlias",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/ProfilePresentation.swift",
+      "line": 221,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2ContactAlias: Codable, Equatable, Sendable",
+      "members": [
+        "public let ownerUserID: UserID",
+        "public let targetUserID: UserID",
+        "public let remarkName: String?",
+        "public let revision: V2ProfileRevision"
+      ]
+    },
+    {
+      "name": "V2ContactAliasPage",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ProfilePresentationService.swift",
+      "line": 52,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ContactAliasPage: Equatable, Sendable",
+      "members": [
+        "public let values: [V2ContactAlias]",
+        "public let nextCursor: UserID?"
+      ]
+    },
+    {
+      "name": "V2ContentReviewFinding",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ContentReviewWorker.swift",
+      "line": 42,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ContentReviewFinding: Equatable, Sendable",
+      "members": [
+        "public let category: String",
+        "public let severity: Int",
+        "public let confidence: Double"
+      ]
+    },
+    {
+      "name": "V2ContentReviewInput",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ContentReviewWorker.swift",
+      "line": 9,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ContentReviewInput: Sendable",
+      "members": [
+        "public let messageID: MessageID",
+        "public let roomID: RoomID",
+        "public let contentRevision: UInt64",
+        "public let text: String",
+        "public let mediaCount: Int"
+      ]
+    },
+    {
+      "name": "V2ContentReviewLease",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ContentReviewWorker.swift",
+      "line": 126,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ContentReviewLease: Sendable",
+      "members": [
+        "public let input: V2ContentReviewInput",
+        "public let claimToken: UUID",
+        "public let attempt: Int",
+        "public let stagedViolation: V2ContentReviewFinding?"
+      ]
+    },
+    {
+      "name": "V2ContentReviewLeaseValidation",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ContentReviewWorker.swift",
+      "line": 145,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2ContentReviewLeaseValidation: Equatable, Sendable",
+      "members": [
+        "case current",
+        "case superseded",
+        "case lostLease"
+      ]
+    },
+    {
+      "name": "V2ContentReviewReport",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ContentReviewWorker.swift",
+      "line": 211,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ContentReviewReport: Equatable, Sendable",
+      "members": [
+        "public let claimedCount: Int",
+        "public let resolvedCount: Int",
+        "public let redactedCount: Int",
+        "public let releasedCount: Int"
+      ]
+    },
+    {
+      "name": "V2ContentReviewVerdict",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ContentReviewWorker.swift",
+      "line": 66,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2ContentReviewVerdict: Equatable, Sendable",
+      "members": [
+        "case clear",
+        "case reviewRequired(V2ContentReviewFinding)",
+        "case violation(V2ContentReviewFinding)"
+      ]
+    },
+    {
+      "name": "V2ControlPlaneHousekeepingReport",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ControlPlaneHousekeepingWorker.swift",
+      "line": 7,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ControlPlaneHousekeepingReport: Equatable, Sendable",
+      "members": [
+        "public let deletedRows: Int",
+        "public let purgedIdempotencyRows: Int",
+        "public let purgedExpiredCredentialReplayRows: Int",
+        "public let purgedExpiredRefreshHistoryRows: Int",
+        "public let purgedExpiredConnectionLeaseRows: Int",
+        "public var didWork: Bool { deletedRows > 0 }"
+      ]
+    },
+    {
+      "name": "V2CreateGroupInviteRequest",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift",
+      "line": 120,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2CreateGroupInviteRequest: Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let actorUserID: UserID",
+        "public let operationID: GroupInviteOperationID",
+        "public let lifetime: TimeInterval",
+        "public let maximumApprovedUses: Int"
+      ]
+    },
+    {
+      "name": "V2CreateGroupRoomCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupMessaging.swift",
+      "line": 47,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2CreateGroupRoomCommand: Equatable, Sendable",
+      "members": [
+        "public let actorUserID: UserID",
+        "public let operationID: GroupRoomOperationID",
+        "public let title: String",
+        "public let capacityClass: V2GroupCapacityClass",
+        "public let initialMemberUserIDs: [UserID]",
+        "public var allMemberUserIDs: [UserID] {"
+      ]
+    },
+    {
+      "name": "V2CreateGroupRoomOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupMessagingService.swift",
+      "line": 5,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2CreateGroupRoomOutcome: Equatable, Sendable",
+      "members": [
+        "case created(V2GroupRoom)",
+        "case idempotent(V2GroupRoom)",
+        "case idempotencyConflict",
+        "case invalidMembers",
+        "case memberLimitReached",
+        "case rateLimited(retryAfterSeconds: Int)",
+        "case unavailable"
+      ]
+    },
+    {
+      "name": "V2CrossOwnerForwardOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2CrossOwnerForwardService.swift",
+      "line": 8,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2CrossOwnerForwardOutcome: Sendable",
+      "members": [
+        "case completed(V2ForwardMessageResult)",
+        "case pending(paused: Bool)"
+      ]
+    },
+    {
+      "name": "V2DecideGroupJoinRequest",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift",
+      "line": 150,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2DecideGroupJoinRequest: Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let requestID: GroupJoinRequestID",
+        "public let reviewerUserID: UserID",
+        "public let operationID: GroupJoinDecisionOperationID",
+        "public let decision: V2GroupJoinDecision"
+      ]
+    },
+    {
+      "name": "V2DirectMessageDenied",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2SendMessageService.swift",
+      "line": 79,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2DirectMessageDenied: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let sourceEventID: EventID",
+        "public let timelineSequence: UInt64",
+        "public let createdAt: Date",
+        "public let reason: Reason"
+      ]
+    },
+    {
+      "name": "V2DirectRoom",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/DirectMessaging.swift",
+      "line": 95,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2DirectRoom: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let actorUserID: UserID",
+        "public let targetUserID: UserID",
+        "public let createdAt: Date"
+      ]
+    },
+    {
+      "name": "V2DurableRetryDisposition",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2DurableRetryPolicy.swift",
+      "line": 116,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2DurableRetryDisposition: Equatable, Sendable",
+      "members": [
+        "case retry(at: Date)",
+        "case pause"
+      ]
+    },
+    {
+      "name": "V2DurableWorkReplayOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2DurableWorkOperatorReplay.swift",
+      "line": 109,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2DurableWorkReplayOutcome: String, Codable, Equatable, Sendable",
+      "members": [
+        "case requeued",
+        "case notPaused = \"not_paused\""
+      ]
+    },
+    {
+      "name": "V2DurableWorkReplayReason",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2DurableWorkOperatorReplay.swift",
+      "line": 25,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2DurableWorkReplayReason: String, CaseIterable, Codable, Equatable, Sendable",
+      "members": [
+        "case dependencyRecovered = \"dependency_recovered\"",
+        "case dataRepaired = \"data_repaired\"",
+        "case falsePositive = \"false_positive\""
+      ]
+    },
+    {
+      "name": "V2DurableWorkReplayResult",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2DurableWorkOperatorReplay.swift",
+      "line": 119,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2DurableWorkReplayResult: Equatable, Sendable",
+      "members": [
+        "public let operationID: UUID",
+        "public let outcome: V2DurableWorkReplayOutcome",
+        "public let wasIdempotent: Bool"
+      ]
+    },
+    {
+      "name": "V2EditMessageCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/MessageEdit.swift",
+      "line": 6,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2EditMessageCommand: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let actorUserID: UserID",
+        "public let operationID: MessageEditOperationID",
+        "public let messageID: MessageID",
+        "public let expectedRevision: V2MessageRevision",
+        "public var expectedMessageRevision: UInt64 { expectedRevision.rawValue }",
+        "public let text: String"
+      ]
+    },
+    {
+      "name": "V2ForwardDeliveryReport",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ForwardDeliveryWorker.swift",
+      "line": 27,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ForwardDeliveryReport: Equatable, Sendable",
+      "members": [
+        "public var claimed = 0",
+        "public var completed = 0",
+        "public var deferred = 0",
+        "public var retried = 0",
+        "public var paused = 0",
+        "public var superseded = 0"
+      ]
+    },
+    {
+      "name": "V2ForwardExport",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ForwardExport.swift",
+      "line": 9,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ForwardExport: Equatable, Sendable",
+      "members": [
+        "public let payload: Data",
+        "public let digest: Data",
+        "public let intent: V2ForwardExportIntent"
+      ]
+    },
+    {
+      "name": "V2ForwardExportIntent",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ForwardExport.swift",
+      "line": 77,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2ForwardExportIntent: Codable, Equatable, Sendable",
+      "members": [
+        "public let version: Int",
+        "public let exportID: UUID",
+        "public let actorUserID: UUID",
+        "public let operationID: UUID",
+        "public let sourceRoomID: UUID",
+        "public let sourceMessageID: UUID",
+        "public let sourceRevision: Int64",
+        "public let sourceSenderUserID: UUID",
+        "public let sourceShardID: String",
+        "public let sourceEpoch: Int64",
+        "public let targetRoomID: UUID",
+        "public let targetClientMessageID: UUID",
+        "public let targetShardID: String",
+        "public let targetEpoch: Int64",
+        "public let text: String",
+        "public let entities: [V2MessageEntity]",
+        "public let media: [V2ForwardExportMedia]"
+      ]
+    },
+    {
+      "name": "V2ForwardImportOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ForwardInboxStore.swift",
+      "line": 17,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2ForwardImportOutcome: Equatable, Sendable",
+      "members": [
+        "case accepted(messageID: MessageID, roomSequence: UInt64)",
+        "case rejected(code: String)",
+        "case pending(V2ForwardImportPendingReason)"
+      ]
+    },
+    {
+      "name": "V2ForwardImportPendingReason",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ForwardInboxStore.swift",
+      "line": 7,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2ForwardImportPendingReason: Equatable, Sendable",
+      "members": [
+        "case media",
+        "case admission",
+        "case finalization"
+      ]
+    },
+    {
+      "name": "V2ForwardMessageReference",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/ConversationCapabilities.swift",
+      "line": 103,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2ForwardMessageReference: Equatable, Hashable, Codable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let messageID: MessageID",
+        "public let revision: V2MessageRevision"
+      ]
+    },
+    {
+      "name": "V2ForwardMessageResult",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/ConversationCapabilities.swift",
+      "line": 179,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ForwardMessageResult: Equatable, Sendable",
+      "members": [
+        "public let sourceMessageID: MessageID",
+        "public let targetRoomID: RoomID",
+        "public let messageID: MessageID?",
+        "public let roomSequence: UInt64?",
+        "public let errorCode: String?"
+      ]
+    },
+    {
+      "name": "V2ForwardMessageSource",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/SendMessageAcceptance.swift",
+      "line": 113,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ForwardMessageSource: Equatable, Sendable",
+      "members": [
+        "public let messageID: MessageID",
+        "public let senderUserID: UserID",
+        "public let sourceRevision: V2MessageRevision"
+      ]
+    },
+    {
+      "name": "V2ForwardMessagesCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/ConversationCapabilities.swift",
+      "line": 144,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ForwardMessagesCommand: Equatable, Sendable",
+      "members": [
+        "public let operationID: MessageForwardOperationID",
+        "public let sources: [V2ForwardMessageReference]",
+        "public let targetRoomIDs: [RoomID]",
+        "public var sourceMessageIDs: [MessageID] { sources.map(\\.messageID) }"
+      ]
+    },
+    {
+      "name": "V2ForwardTerminalReceipt",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ForwardTerminalReceipt.swift",
+      "line": 8,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ForwardTerminalReceipt: Equatable, Sendable",
+      "members": [
+        "public let exportID: UUID",
+        "public let payloadDigest: Data",
+        "public let outcome: V2ForwardImportOutcome"
+      ]
+    },
+    {
+      "name": "V2ForwardWorkReplayCommand",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ForwardWorkOperatorReplay.swift",
+      "line": 7,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ForwardWorkReplayCommand: Equatable, Sendable",
+      "members": [
+        "public let operationID: UUID",
+        "public let shardID: String",
+        "public let kind: V2ForwardWorkReplayKind",
+        "public let exportID: UUID",
+        "public let ordinal: Int?",
+        "public let reason: V2DurableWorkReplayReason"
+      ]
+    },
+    {
+      "name": "V2ForwardWorkReplayKind",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ForwardWorkOperatorReplay.swift",
+      "line": 4,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2ForwardWorkReplayKind: String, Codable, Sendable",
+      "members": [
+        "case delivery, media"
+      ]
+    },
+    {
+      "name": "V2GroupAnnouncement",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupCapabilities.swift",
+      "line": 64,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupAnnouncement: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID; public let body: String; public let revision: UInt64; public let roomSequence: UInt64; public let updatedAt: Date"
+      ]
+    },
+    {
+      "name": "V2GroupAnnouncementCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupCapabilities.swift",
+      "line": 41,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupAnnouncementCommand: Equatable, Sendable",
+      "members": [
+        "public let operationID: GroupAnnouncementOperationID; public let roomID: RoomID; public let body: String; public let expectedRevision: UInt64"
+      ]
+    },
+    {
+      "name": "V2GroupAudienceDraft",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupAudienceImportService.swift",
+      "line": 97,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupAudienceDraft: Equatable, Sendable",
+      "members": [
+        "public let operationID: GroupRoomOperationID",
+        "public let title: String",
+        "public let stagedMemberCount: Int"
+      ]
+    },
+    {
+      "name": "V2GroupAudienceImport",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupAudienceImportService.swift",
+      "line": 10,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupAudienceImport: Equatable, Sendable",
+      "members": [
+        "public let actorUserID: UserID",
+        "public let operationID: GroupRoomOperationID",
+        "public let title: String",
+        "public let memberUserIDs: [UserID]",
+        "public let stagedMemberCount: Int",
+        "public let hasMaterializedMembers: Bool"
+      ]
+    },
+    {
+      "name": "V2GroupAudienceImportPolicy",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupAudienceImportService.swift",
+      "line": 66,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupAudienceImportPolicy: Equatable, Sendable",
+      "members": [
+        "public let maximumActiveDraftsPerActor: Int",
+        "public let maximumStagedMembersPerActor: Int",
+        "public let stagingLifetime: TimeInterval",
+        "public let completedRetention: TimeInterval",
+        "public let finalizingRecoveryInterval: TimeInterval"
+      ]
+    },
+    {
+      "name": "V2GroupAudienceRecoveryCandidate",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupAudienceImportService.swift",
+      "line": 103,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupAudienceRecoveryCandidate: Equatable, Sendable",
+      "members": [
+        "public let actorUserID: UserID",
+        "public let operationID: GroupRoomOperationID"
+      ]
+    },
+    {
+      "name": "V2GroupCapabilitiesOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupCapabilitiesService.swift",
+      "line": 59,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2GroupCapabilitiesOutcome<Value: Equatable & Sendable>: Equatable, Sendable",
+      "members": [
+        "case applied(Value)",
+        "case idempotent(Value)",
+        "case idempotencyConflict",
+        "case alreadyInDesiredState",
+        "case revisionConflict",
+        "case rateLimited(retryAfterSeconds: Int)",
+        "case unavailable(V2CommandAdmissionUnavailableReason)"
+      ]
+    },
+    {
+      "name": "V2GroupCapacityClass",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupMessaging.swift",
+      "line": 4,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2GroupCapacityClass: String, CaseIterable, Codable, Equatable, Sendable",
+      "members": [
+        "case standard = \"standard\"",
+        "case large = \"large\""
+      ]
+    },
+    {
+      "name": "V2GroupEventLogEntry",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupEventLogService.swift",
+      "line": 6,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupEventLogEntry: Equatable, Sendable",
+      "members": [
+        "public let sourceEventID: EventID",
+        "public let roomSequence: UInt64",
+        "public let projectionKind: String",
+        "public let payload: Data"
+      ]
+    },
+    {
+      "name": "V2GroupEventLogPage",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupEventLogService.swift",
+      "line": 35,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupEventLogPage: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let events: [V2GroupEventLogEntry]",
+        "public let nextRoomSequence: UInt64",
+        "public let hasMore: Bool",
+        "public let logTrimmedThroughRoomSequence: UInt64"
+      ]
+    },
+    {
+      "name": "V2GroupEventSubscription",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupEventLogService.swift",
+      "line": 110,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupEventSubscription: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let highWatermark: UInt64",
+        "public let membershipRevision: UInt64"
+      ]
+    },
+    {
+      "name": "V2GroupInviteCreatePersistenceRequest",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift",
+      "line": 210,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupInviteCreatePersistenceRequest: Sendable",
+      "members": [
+        "public let inviteID: GroupInviteID",
+        "public let roomID: RoomID",
+        "public let actorUserID: UserID",
+        "public let operationID: GroupInviteOperationID",
+        "public let tokenDigest: Data",
+        "public let requestedLifetimeSeconds: Int",
+        "public let expiresAt: Date",
+        "public let maximumApprovedUses: Int",
+        "public let maximumActiveInvitesPerRoom: Int",
+        "public let createdAt: Date",
+        "public let evaluatedAt: Date"
+      ]
+    },
+    {
+      "name": "V2GroupInviteCreationIntent",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInviteDirectory.swift",
+      "line": 16,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupInviteCreationIntent: Sendable",
+      "members": [
+        "public let request: V2GroupInviteCreatePersistenceRequest",
+        "public let isReady: Bool"
+      ]
+    },
+    {
+      "name": "V2GroupInviteCreationRecoveryClaim",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInviteCreationRecoveryWorker.swift",
+      "line": 4,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupInviteCreationRecoveryClaim: Sendable",
+      "members": [
+        "public let intent: V2GroupInviteCreationIntent",
+        "public let claimToken: UUID",
+        "public let attemptCount: Int"
+      ]
+    },
+    {
+      "name": "V2GroupInviteCreationRecoveryFailure",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInviteCreationRecoveryWorker.swift",
+      "line": 14,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2GroupInviteCreationRecoveryFailure: String, Sendable",
+      "members": [
+        "case dependencyUnavailable = \"dependency_unavailable\"",
+        "case ownerChanged = \"owner_changed\"",
+        "case rateLimited = \"rate_limited\"",
+        "case permissionDenied = \"permission_denied\"",
+        "case creationExpired = \"creation_expired\"",
+        "case conflictingEvidence = \"conflicting_evidence\""
+      ]
+    },
+    {
+      "name": "V2GroupInviteCreationRecoveryReport",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInviteCreationRecoveryWorker.swift",
+      "line": 69,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupInviteCreationRecoveryReport: Equatable, Sendable",
+      "members": [
+        "public var attempted = 0",
+        "public var completed = 0",
+        "public var deferred = 0",
+        "public var paused = 0",
+        "public var lostClaim = 0"
+      ]
+    },
+    {
+      "name": "V2GroupInviteCreationTimestamps",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift",
+      "line": 250,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "struct V2GroupInviteCreationTimestamps: Equatable, Sendable",
+      "members": [
+        "let createdAt: V2PostgresTimestamp",
+        "let expiresAt: V2PostgresTimestamp"
+      ]
+    },
+    {
+      "name": "V2GroupInviteLink",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupInvitations.swift",
+      "line": 68,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupInviteLink: Equatable, Sendable, Identifiable",
+      "members": [
+        "public let inviteID: GroupInviteID",
+        "public let roomID: RoomID",
+        "public let roomTitle: String",
+        "public let secret: V2GroupInviteSecret",
+        "public let state: V2GroupInviteState",
+        "public let expiresAt: Date",
+        "public let maximumApprovedUses: Int",
+        "public let approvedUseCount: Int",
+        "public let createdAt: Date",
+        "public var id: GroupInviteID { inviteID }"
+      ]
+    },
+    {
+      "name": "V2GroupInviteLocation",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInviteDirectory.swift",
+      "line": 8,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupInviteLocation: Equatable, Sendable",
+      "members": [
+        "public let inviteID: GroupInviteID",
+        "public let roomID: RoomID"
+      ]
+    },
+    {
+      "name": "V2GroupInvitePreview",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupInvitations.swift",
+      "line": 136,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupInvitePreview: Equatable, Sendable",
+      "members": [
+        "public let inviteID: GroupInviteID",
+        "public let roomID: RoomID",
+        "public let roomTitle: String",
+        "public let expiresAt: Date",
+        "public let requestState: V2GroupJoinRequestState?",
+        "public let requestID: GroupJoinRequestID?",
+        "public let isAlreadyMember: Bool"
+      ]
+    },
+    {
+      "name": "V2GroupInvitePreviewPersistenceOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift",
+      "line": 277,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2GroupInvitePreviewPersistenceOutcome: Equatable, Sendable",
+      "members": [
+        "case available(V2GroupInvitePreviewRecord)",
+        "case unavailable"
+      ]
+    },
+    {
+      "name": "V2GroupInvitePreviewRecord",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift",
+      "line": 182,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupInvitePreviewRecord: Equatable, Sendable",
+      "members": [
+        "public let inviteID: GroupInviteID",
+        "public let roomID: RoomID",
+        "public let roomTitle: String",
+        "public let expiresAt: Date",
+        "public let requestState: V2GroupJoinRequestState?",
+        "public let requestID: GroupJoinRequestID?",
+        "public let isAlreadyMember: Bool"
+      ]
+    },
+    {
+      "name": "V2GroupInviteSecret",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupInvitations.swift",
+      "line": 6,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupInviteSecret: Hashable, Sendable, CustomStringConvertible, CustomDebugStringConvertible",
+      "members": [
+        "public let rawValue: String",
+        "public var description: String { \"<redacted-group-invite-secret>\" }",
+        "public var debugDescription: String { description }"
+      ]
+    },
+    {
+      "name": "V2GroupInviteState",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupInvitations.swift",
+      "line": 32,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2GroupInviteState: String, Codable, Equatable, Sendable",
+      "members": [
+        "case active",
+        "case revoked",
+        "case expired",
+        "case exhausted"
+      ]
+    },
+    {
+      "name": "V2GroupJoinApprovalPersistenceOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift",
+      "line": 303,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2GroupJoinApprovalPersistenceOutcome: Equatable, Sendable",
+      "members": [
+        "case approved(V2GroupJoinRequestRecord)",
+        "case alreadyDecided(V2GroupJoinRequestRecord)",
+        "case conflict",
+        "case memberLimitReached",
+        "case rateLimited(retryAfterSeconds: Int)",
+        "case unavailable"
+      ]
+    },
+    {
+      "name": "V2GroupJoinDecision",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupInvitations.swift",
+      "line": 58,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2GroupJoinDecision: String, Codable, Equatable, Sendable",
+      "members": [
+        "case approve",
+        "case reject"
+      ]
+    },
+    {
+      "name": "V2GroupJoinDecisionOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift",
+      "line": 318,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2GroupJoinDecisionOutcome: Equatable, Sendable",
+      "members": [
+        "case approved(V2GroupJoinRequest)",
+        "case rejected(V2GroupJoinRequest)",
+        "case alreadyDecided(V2GroupJoinRequest)",
+        "case conflict",
+        "case memberLimitReached",
+        "case rateLimited(retryAfterSeconds: Int)",
+        "case unavailable"
+      ]
+    },
+    {
+      "name": "V2GroupJoinDecisionPreparationOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift",
+      "line": 292,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2GroupJoinDecisionPreparationOutcome: Equatable, Sendable",
+      "members": [
+        "case rejected(V2GroupJoinRequestRecord)",
+        "case alreadyApproved(V2GroupJoinRequestRecord)",
+        "case alreadyRejected(V2GroupJoinRequestRecord)",
+        "case decisionConflict",
+        "case inviteExhausted"
+      ]
+    },
+    {
+      "name": "V2GroupJoinQuotaRecoveryReport",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupJoinQuotaRecoveryWorker.swift",
+      "line": 4,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupJoinQuotaRecoveryReport: Equatable, Sendable",
+      "members": [
+        "public var attempted = 0",
+        "public var reconciled = 0",
+        "public var deferred = 0"
+      ]
+    },
+    {
+      "name": "V2GroupJoinRequest",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupInvitations.swift",
+      "line": 188,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupJoinRequest: Equatable, Sendable, Identifiable",
+      "members": [
+        "public let requestID: GroupJoinRequestID",
+        "public let inviteID: GroupInviteID",
+        "public let roomID: RoomID",
+        "public let applicant: V2PublicIdentity",
+        "public let note: String?",
+        "public let state: V2GroupJoinRequestState",
+        "public let resumableDecisionOperationID: GroupJoinDecisionOperationID?",
+        "public let createdAt: Date",
+        "public let decidedAt: Date?",
+        "public var id: GroupJoinRequestID { requestID }"
+      ]
+    },
+    {
+      "name": "V2GroupJoinRequestPage",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupInvitations.swift",
+      "line": 254,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupJoinRequestPage: Equatable, Sendable",
+      "members": [
+        "public let requests: [V2GroupJoinRequest]",
+        "public let nextCursor: String?"
+      ]
+    },
+    {
+      "name": "V2GroupJoinRequestRecord",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift",
+      "line": 192,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupJoinRequestRecord: Equatable, Sendable",
+      "members": [
+        "public let requestID: GroupJoinRequestID",
+        "public let inviteID: GroupInviteID",
+        "public let roomID: RoomID",
+        "public let applicant: V2PublicIdentity",
+        "public let note: String?",
+        "public let state: V2GroupJoinRequestState",
+        "public let decisionOperationID: GroupJoinDecisionOperationID?",
+        "public let decidedByUserID: UserID?",
+        "public let createdAt: Date",
+        "public let decidedAt: Date?"
+      ]
+    },
+    {
+      "name": "V2GroupJoinRequestRecordPage",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift",
+      "line": 205,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupJoinRequestRecordPage: Equatable, Sendable",
+      "members": [
+        "public let requests: [V2GroupJoinRequestRecord]",
+        "public let nextCursor: String?"
+      ]
+    },
+    {
+      "name": "V2GroupJoinRequestState",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupInvitations.swift",
+      "line": 44,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2GroupJoinRequestState: String, Codable, Equatable, Sendable",
+      "members": [
+        "case pending",
+        "case approving",
+        "case approved",
+        "case cancelled",
+        "case rejected"
+      ]
+    },
+    {
+      "name": "V2GroupJoinSubmissionPersistenceOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift",
+      "line": 282,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2GroupJoinSubmissionPersistenceOutcome: Equatable, Sendable",
+      "members": [
+        "case submitted(V2GroupJoinRequestRecord)",
+        "case alreadyPending(V2GroupJoinRequestRecord)",
+        "case alreadyMember(V2GroupInvitePreviewRecord)",
+        "case rejected(V2GroupJoinRequestRecord)",
+        "case cancelled(V2GroupJoinRequestRecord)",
+        "case unavailable",
+        "case rateLimited"
+      ]
+    },
+    {
+      "name": "V2GroupJoinSubmissionPersistenceRequest",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift",
+      "line": 266,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupJoinSubmissionPersistenceRequest: Sendable",
+      "members": [
+        "public let requestID: GroupJoinRequestID",
+        "public let applicantUserID: UserID",
+        "public let operationID: GroupJoinRequestOperationID",
+        "public let tokenDigest: Data",
+        "public let note: String?",
+        "public let createdAt: Date",
+        "public let maximumPendingRequestsPerApplicant: Int",
+        "public let maximumPendingRequestsPerInvite: Int"
+      ]
+    },
+    {
+      "name": "V2GroupMemberPresentation",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/ProfilePresentation.swift",
+      "line": 267,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2GroupMemberPresentation: Codable, Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let userID: UserID",
+        "public let groupNickname: String?",
+        "public let revision: V2ProfileRevision"
+      ]
+    },
+    {
+      "name": "V2GroupMemberRoleChange",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupCapabilities.swift",
+      "line": 146,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupMemberRoleChange: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID; public let targetUserID: UserID; public let role: V2RoomMembershipRole; public let membershipRevision: UInt64; public let roomSequence: UInt64"
+      ]
+    },
+    {
+      "name": "V2GroupMemberRoleCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupCapabilities.swift",
+      "line": 124,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupMemberRoleCommand: Equatable, Sendable",
+      "members": [
+        "public let operationID: GroupRoleOperationID; public let roomID: RoomID; public let targetUserID: UserID; public let role: V2RoomMembershipRole; public let expectedMembershipRevision: UInt64"
+      ]
+    },
+    {
+      "name": "V2GroupNicknamePage",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ProfilePresentationService.swift",
+      "line": 69,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupNicknamePage: Equatable, Sendable",
+      "members": [
+        "public let values: [V2GroupMemberPresentation]",
+        "public let nextCursor: UserID?"
+      ]
+    },
+    {
+      "name": "V2GroupPermission",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupPermissions.swift",
+      "line": 6,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2GroupPermission: String, CaseIterable, Codable, Hashable, Sendable",
+      "members": [
+        "case sendMessages = \"send_messages\"",
+        "case inviteMembers = \"invite_members\"",
+        "case removeMembers = \"remove_members\"",
+        "case changeMemberRoles = \"change_member_roles\"",
+        "case pinMessages = \"pin_messages\"",
+        "case manageAnnouncements = \"manage_announcements\"",
+        "case moderateMessages = \"moderate_messages\"",
+        "case muteMembers = \"mute_members\""
+      ]
+    },
+    {
+      "name": "V2GroupReadReceiptBatchResult",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ReadReceiptService.swift",
+      "line": 140,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2GroupReadReceiptBatchResult: Equatable, Sendable",
+      "members": [
+        "case success(V2GroupReadReceiptRecordingAttempt)",
+        "case failure(V2ReadReceiptStoreError)"
+      ]
+    },
+    {
+      "name": "V2GroupReadReceiptReaderCandidate",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ReadReceiptService.swift",
+      "line": 200,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupReadReceiptReaderCandidate: Equatable, Sendable",
+      "members": [
+        "public let userID: UserID",
+        "public let readThroughRoomSequence: UInt64"
+      ]
+    },
+    {
+      "name": "V2GroupReadReceiptReaderCandidatePage",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ReadReceiptService.swift",
+      "line": 218,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupReadReceiptReaderCandidatePage: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let messageID: MessageID",
+        "public let candidates: [V2GroupReadReceiptReaderCandidate]",
+        "public let nextCursor: String?"
+      ]
+    },
+    {
+      "name": "V2GroupReadReceiptRecordingAttempt",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ReadReceiptService.swift",
+      "line": 190,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2GroupReadReceiptRecordingAttempt: Equatable, Sendable",
+      "members": [
+        "case handled(V2ReadReceiptOutcome)",
+        "case notGroup"
+      ]
+    },
+    {
+      "name": "V2GroupRolePermissionsChange",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupCapabilities.swift",
+      "line": 105,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupRolePermissionsChange: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID; public let role: V2RoomMembershipRole; public let permissions: Set<V2GroupPermission>; public let revision: UInt64; public let roomSequence: UInt64"
+      ]
+    },
+    {
+      "name": "V2GroupRolePermissionsCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupCapabilities.swift",
+      "line": 83,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupRolePermissionsCommand: Equatable, Sendable",
+      "members": [
+        "public let operationID: GroupPermissionOperationID; public let roomID: RoomID; public let role: V2RoomMembershipRole; public let permissions: Set<V2GroupPermission>; public let expectedRevision: UInt64"
+      ]
+    },
+    {
+      "name": "V2GroupRolePolicyBaseline",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupRolePolicyBaseline.swift",
+      "line": 6,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupRolePolicyBaseline: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let permissionRevision: UInt64",
+        "public let membershipRevision: UInt64",
+        "public let roomSequence: UInt64",
+        "public let adminPermissions: Set<V2GroupPermission>",
+        "public let memberPermissions: Set<V2GroupPermission>"
+      ]
+    },
+    {
+      "name": "V2GroupRoom",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupMessaging.swift",
+      "line": 104,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupRoom: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let ownerUserID: UserID",
+        "public let title: String",
+        "public let capacityClass: V2GroupCapacityClass",
+        "public let memberCount: Int",
+        "public let memberUserIDs: [UserID]",
+        "public let createdAt: Date"
+      ]
+    },
+    {
+      "name": "V2GroupRoomCreationIntent",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupRoomCreationIntent.swift",
+      "line": 17,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupRoomCreationIntent: Equatable, Sendable",
+      "members": [
+        "public let actorUserID: UserID",
+        "public let operationID: GroupRoomOperationID",
+        "public let roomID: RoomID",
+        "public let eventID: EventID",
+        "public let roomShardID: String",
+        "public let routeEpoch: Int64",
+        "public let requestFingerprint: Data",
+        "public let audienceMemberCount: Int",
+        "public let state: V2GroupRoomCreationIntentState"
+      ]
+    },
+    {
+      "name": "V2GroupRoomCreationIntentState",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupRoomCreationIntent.swift",
+      "line": 7,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2GroupRoomCreationIntentState: String, Equatable, Sendable",
+      "members": [
+        "case prepared",
+        "case committed"
+      ]
+    },
+    {
+      "name": "V2GroupRoomCreationManifestPage",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupRoomCreationManifest.swift",
+      "line": 26,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupRoomCreationManifestPage: Equatable, Sendable",
+      "members": [
+        "public let pageNumber: Int",
+        "public let memberUserIDs: [UserID]",
+        "public let isFinal: Bool",
+        "public let digest: Data"
+      ]
+    },
+    {
+      "name": "V2GroupRoomCreationManifestSlice",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupRoomCreationManifest.swift",
+      "line": 6,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2GroupRoomCreationManifestSlice: Equatable, Sendable",
+      "members": [
+        "public let memberUserIDs: [UserID]",
+        "public let hasMore: Bool"
+      ]
+    },
+    {
+      "name": "V2MediaDownloadGrant",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/MediaReference.swift",
+      "line": 129,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2MediaDownloadGrant: Equatable, Sendable",
+      "members": [
+        "public let mediaID: MediaID",
+        "public let downloadSessionID: MediaDownloadSessionID",
+        "public let expiresAt: Date"
+      ]
+    },
+    {
+      "name": "V2MediaMessageLocation",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/MediaMessageLocation.swift",
+      "line": 2,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2MediaMessageLocation: Equatable, Hashable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let messageID: MessageID"
+      ]
+    },
+    {
+      "name": "V2MediaObjectState",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/MediaReference.swift",
+      "line": 288,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2MediaObjectState: String, Codable, Equatable, Sendable",
+      "members": [
+        "case pendingUpload",
+        "case scanning",
+        "case available",
+        "case failed",
+        "case expired"
+      ]
+    },
+    {
+      "name": "V2MediaProviderObjectTarget",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2MediaProviderSessionService.swift",
+      "line": 8,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2MediaProviderObjectTarget: Equatable, Sendable",
+      "members": [
+        "public let url: URL",
+        "public let headers: [String: String]",
+        "public let expiresAt: Date",
+        "public let expectedByteCount: Int64?"
+      ]
+    },
+    {
+      "name": "V2MediaReference",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/MediaReference.swift",
+      "line": 6,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2MediaReference: Hashable, Codable, Sendable",
+      "members": [
+        "public let mediaID: MediaID"
+      ]
+    },
+    {
+      "name": "V2MediaUploadGrant",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/MediaReference.swift",
+      "line": 111,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2MediaUploadGrant: Equatable, Sendable",
+      "members": [
+        "public let mediaID: MediaID",
+        "public let uploadSessionID: MediaUploadSessionID",
+        "public let expiresAt: Date"
+      ]
+    },
+    {
+      "name": "V2MembershipIdentitySnapshot",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2RoutedRoomMutationStores.swift",
+      "line": 10,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2MembershipIdentitySnapshot: Equatable, Sendable",
+      "members": [
+        "public let actorUserID: UserID",
+        "public let targetUserID: UserID",
+        "public let actorIsActive: Bool",
+        "public let targetIsActive: Bool"
+      ]
+    },
+    {
+      "name": "V2MembershipRevision",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Revisions.swift",
+      "line": 26,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2MembershipRevision: Equatable, Hashable, Sendable",
+      "members": [
+        "public let signedValue: Int64",
+        "public var rawValue: UInt64 { UInt64(signedValue) }"
+      ]
+    },
+    {
+      "name": "V2MentionTarget",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Mention.swift",
+      "line": 4,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2MentionTarget: Hashable, Sendable",
+      "members": [
+        "case user(UserID)",
+        "case everyone"
+      ]
+    },
+    {
+      "name": "V2MessageAcceptanceReceipt",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/MessageAcceptanceReceipt.swift",
+      "line": 7,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2MessageAcceptanceReceipt: Equatable, Sendable",
+      "members": [
+        "public let messageID: MessageID",
+        "public let roomID: RoomID",
+        "public let roomSequence: UInt64",
+        "public let timelineSequence: UInt64",
+        "public let senderUserID: UserID",
+        "public let clientMessageID: ClientMessageID",
+        "public let groupCapacityClass: V2GroupCapacityClass?",
+        "public let sourceEventID: EventID?",
+        "public let acceptedMembershipRevision: UInt64?",
+        "public let directRecipientUserID: UserID?",
+        "public let createdAt: Date"
+      ]
+    },
+    {
+      "name": "V2MessageEdit",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/MessageEdit.swift",
+      "line": 52,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2MessageEdit: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let messageID: MessageID",
+        "public let text: String",
+        "public let messageRevision: UInt64",
+        "public let roomSequence: UInt64",
+        "public let eventID: EventID",
+        "public let createdAt: Date"
+      ]
+    },
+    {
+      "name": "V2MessageEditOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2MessageEditService.swift",
+      "line": 37,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2MessageEditOutcome: Equatable, Sendable",
+      "members": [
+        "case edited(V2MessageEdit)",
+        "case idempotent(V2MessageEdit)",
+        "case idempotencyConflict",
+        "case revisionConflict(current: UInt64)",
+        "case alreadyWithdrawn",
+        "case rateLimited(retryAfterSeconds: Int)",
+        "case unavailable(V2CommandAdmissionUnavailableReason)"
+      ]
+    },
+    {
+      "name": "V2MessageEntity",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/RichMessageContent.swift",
+      "line": 7,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2MessageEntity: Hashable, Codable, Sendable",
+      "members": [
+        "public let offsetUTF16: Int",
+        "public let lengthUTF16: Int",
+        "public let kind: Kind",
+        "public let linkURL: URL?"
+      ]
+    },
+    {
+      "name": "V2MessageReactionAction",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/MessageReaction.swift",
+      "line": 4,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2MessageReactionAction: String, Codable, Equatable, Sendable",
+      "members": [
+        "case add",
+        "case remove"
+      ]
+    },
+    {
+      "name": "V2MessageReactionChange",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/MessageReaction.swift",
+      "line": 59,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2MessageReactionChange: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let messageID: MessageID",
+        "public let actorUserID: UserID",
+        "public let reaction: String",
+        "public let action: V2MessageReactionAction",
+        "public let roomSequence: UInt64",
+        "public let eventID: EventID",
+        "public let createdAt: Date"
+      ]
+    },
+    {
+      "name": "V2MessageReactionOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2MessageReactionService.swift",
+      "line": 38,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2MessageReactionOutcome: Equatable, Sendable",
+      "members": [
+        "case changed(V2MessageReactionChange)",
+        "case idempotent(V2MessageReactionChange)",
+        "case idempotencyConflict",
+        "case alreadyInDesiredState",
+        "case rateLimited(retryAfterSeconds: Int)",
+        "case unavailable(V2CommandAdmissionUnavailableReason)"
+      ]
+    },
+    {
+      "name": "V2MessageReplyReference",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/RichMessageContent.swift",
+      "line": 66,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2MessageReplyReference: Hashable, Codable, Sendable",
+      "members": [
+        "public let messageID: MessageID"
+      ]
+    },
+    {
+      "name": "V2MessageRevision",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Revisions.swift",
+      "line": 5,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2MessageRevision: Equatable, Hashable, Sendable",
+      "members": [
+        "public let signedValue: Int64",
+        "public var rawValue: UInt64 { UInt64(signedValue) }"
+      ]
+    },
+    {
+      "name": "V2MessageWithdrawal",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/MessageWithdrawal.swift",
+      "line": 43,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2MessageWithdrawal: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let messageID: MessageID",
+        "public let messageRevision: UInt64",
+        "public let roomSequence: UInt64",
+        "public let eventID: EventID",
+        "public let createdAt: Date"
+      ]
+    },
+    {
+      "name": "V2MessageWithdrawalOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2MessageWithdrawalService.swift",
+      "line": 35,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2MessageWithdrawalOutcome: Equatable, Sendable",
+      "members": [
+        "case withdrawn(V2MessageWithdrawal)",
+        "case idempotent(V2MessageWithdrawal)",
+        "case idempotencyConflict",
+        "case revisionConflict(current: UInt64)",
+        "case alreadyWithdrawn",
+        "case rateLimited(retryAfterSeconds: Int)",
+        "case unavailable(V2CommandAdmissionUnavailableReason)"
+      ]
+    },
+    {
+      "name": "V2ModerationAction",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Moderation.swift",
+      "line": 4,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2ModerationAction: String, Codable, CaseIterable, Equatable, Sendable",
+      "members": [
+        "case redactMessage",
+        "case removeMember",
+        "case muteMember",
+        "case freezeRoom",
+        "case unfreezeRoom"
+      ]
+    },
+    {
+      "name": "V2ModerationCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Moderation.swift",
+      "line": 37,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ModerationCommand: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let actorUserID: UserID",
+        "public let operationID: ModerationOperationID",
+        "public let action: V2ModerationAction",
+        "public let targetUserID: UserID?",
+        "public let messageID: MessageID?",
+        "public let expectedMessageRevision: UInt64?",
+        "public let muteUntil: Date?",
+        "public let reasonCode: V2ModerationReasonCode"
+      ]
+    },
+    {
+      "name": "V2ModerationOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ModerationService.swift",
+      "line": 118,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2ModerationOutcome: Equatable, Sendable",
+      "members": [
+        "case applied(V2ModerationResult)",
+        "case idempotent(V2ModerationResult)",
+        "case idempotencyConflict",
+        "case targetNotMember",
+        "case messageAlreadyRedacted",
+        "case actionAlreadyInDesiredState",
+        "case rateLimited(retryAfterSeconds: Int)",
+        "case unavailable(V2CommandAdmissionUnavailableReason)"
+      ]
+    },
+    {
+      "name": "V2ModerationReasonCode",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/Moderation.swift",
+      "line": 20,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2ModerationReasonCode: Hashable, Codable, Sendable",
+      "members": [
+        "public let rawValue: String"
+      ]
+    },
+    {
+      "name": "V2ModerationResult",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ModerationService.swift",
+      "line": 53,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ModerationResult: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let operationID: ModerationOperationID",
+        "public let action: V2ModerationAction",
+        "public let targetUserID: UserID?",
+        "public let messageID: MessageID?",
+        "public let messageRevision: UInt64?",
+        "public let membershipRevision: UInt64?",
+        "public let muteUntil: Date?",
+        "public let roomSequence: UInt64",
+        "public let eventID: EventID",
+        "public let createdAt: Date"
+      ]
+    },
+    {
+      "name": "V2OpenDirectRoomCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/DirectMessaging.swift",
+      "line": 22,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2OpenDirectRoomCommand: Equatable, Sendable",
+      "members": [
+        "public let actorUserID: UserID",
+        "public let operationID: DirectRoomOperationID",
+        "public let targetUserID: UserID"
+      ]
+    },
+    {
+      "name": "V2OpenDirectRoomOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2DirectMessagingService.swift",
+      "line": 87,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2OpenDirectRoomOutcome: Equatable, Sendable",
+      "members": [
+        "case opened(V2DirectRoom)",
+        "case idempotent(V2DirectRoom)",
+        "case idempotencyConflict",
+        "case unavailable"
+      ]
+    },
+    {
+      "name": "V2OwnerValidatedReadReceiptRequest",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2OwnerValidatedReadReceiptStore.swift",
+      "line": 7,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2OwnerValidatedReadReceiptRequest: Sendable",
+      "members": [
+        "public let request: V2ReadReceiptRecordRequest",
+        "public let ownerRoute: V2RoomShardRoute"
+      ]
+    },
+    {
+      "name": "V2OwnerValidatedRoomWriteRequest",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2OwnerValidatedRoomWriteStore.swift",
+      "line": 7,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2OwnerValidatedRoomWriteRequest: Sendable",
+      "members": [
+        "public let request: V2RoomWriteRequest",
+        "public let ownerRoute: V2RoomShardRoute"
+      ]
+    },
+    {
+      "name": "V2PinnedMessage",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupCapabilities.swift",
+      "line": 22,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2PinnedMessage: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID; public let messageID: MessageID; public let isPinned: Bool; public let roomSequence: UInt64; public let updatedAt: Date"
+      ]
+    },
+    {
+      "name": "V2PinnedMessageCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupCapabilities.swift",
+      "line": 6,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2PinnedMessageCommand: Equatable, Sendable",
+      "members": [
+        "public let operationID: PinnedMessageOperationID; public let roomID: RoomID; public let messageID: MessageID; public let isPinned: Bool"
+      ]
+    },
+    {
+      "name": "V2PrepareGroupRoomCreationIntentOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupRoomCreationIntent.swift",
+      "line": 105,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2PrepareGroupRoomCreationIntentOutcome: Equatable, Sendable",
+      "members": [
+        "case prepared(V2GroupRoomCreationIntent)",
+        "case idempotent(V2GroupRoomCreationIntent)",
+        "case idempotencyConflict",
+        "case invalidMembers"
+      ]
+    },
+    {
+      "name": "V2ProfileRevision",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/ProfilePresentation.swift",
+      "line": 6,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2ProfileRevision: RawRepresentable, Codable, Hashable, Comparable, Sendable",
+      "members": [
+        "public let rawValue: UInt64",
+        "public var signedValue: Int64 { Int64(rawValue) }"
+      ]
+    },
+    {
+      "name": "V2PublicHandle",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/PublicIdentity.swift",
+      "line": 19,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2PublicHandle: Hashable, Codable, Sendable, CustomStringConvertible",
+      "members": [
+        "public let rawValue: String",
+        "public var description: String { \"@\\(rawValue)\" }"
+      ]
+    },
+    {
+      "name": "V2PublicIdentity",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/PublicIdentity.swift",
+      "line": 50,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2PublicIdentity: Codable, Equatable, Sendable",
+      "members": [
+        "public let userID: UserID",
+        "public let handle: V2PublicHandle",
+        "public let displayName: String",
+        "public let accountKind: V2AccountKind"
+      ]
+    },
+    {
+      "name": "V2ReadReceipt",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/ReadReceipt.swift",
+      "line": 129,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ReadReceipt: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let userID: UserID",
+        "public let readThroughRoomSequence: UInt64",
+        "public let recordedAt: Date"
+      ]
+    },
+    {
+      "name": "V2ReadReceiptOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ReadReceiptService.swift",
+      "line": 25,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2ReadReceiptOutcome: Equatable, Sendable",
+      "members": [
+        "case recorded(V2ReadReceipt)",
+        "case idempotent(V2ReadReceipt)",
+        "case idempotencyConflict"
+      ]
+    },
+    {
+      "name": "V2ReadReceiptPreferences",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/ReadReceipt.swift",
+      "line": 6,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ReadReceiptPreferences: Equatable, Sendable",
+      "members": [
+        "public let allowsDirectReadReceipts: Bool",
+        "public let allowsGroupReadReceipts: Bool",
+        "public let updatedAt: Date"
+      ]
+    },
+    {
+      "name": "V2ReadReceiptReader",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/ReadReceipt.swift",
+      "line": 69,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ReadReceiptReader: Equatable, Sendable",
+      "members": [
+        "public let userID: UserID",
+        "public let publicIdentity: V2PublicIdentity"
+      ]
+    },
+    {
+      "name": "V2ReadReceiptReadersPage",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/ReadReceipt.swift",
+      "line": 84,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ReadReceiptReadersPage: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let messageID: MessageID",
+        "public let readers: [V2ReadReceiptReader]",
+        "public let nextCursor: String?"
+      ]
+    },
+    {
+      "name": "V2ReadReceiptRecordRequest",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ReadReceiptService.swift",
+      "line": 81,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ReadReceiptRecordRequest: Sendable",
+      "members": [
+        "public let command: V2RecordReadReceiptCommand",
+        "public let now: Date"
+      ]
+    },
+    {
+      "name": "V2ReadReceiptRecordResult",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ReadReceiptService.swift",
+      "line": 102,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2ReadReceiptRecordResult: Equatable, Sendable",
+      "members": [
+        "case success(V2ReadReceiptOutcome)",
+        "case failure(V2ReadReceiptStoreError)"
+      ]
+    },
+    {
+      "name": "V2RecordReadReceiptCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/ReadReceipt.swift",
+      "line": 108,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2RecordReadReceiptCommand: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let actorUserID: UserID",
+        "public let operationID: ReadReceiptOperationID",
+        "public let readThroughRoomSequence: UInt64"
+      ]
+    },
+    {
+      "name": "V2RequestMediaUploadCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/MediaReference.swift",
+      "line": 81,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2RequestMediaUploadCommand: Equatable, Sendable",
+      "members": [
+        "public let actorUserID: UserID",
+        "public let operationID: MediaUploadOperationID",
+        "public let mediaID: MediaID",
+        "public let contentType: String",
+        "public let byteCount: Int64"
+      ]
+    },
+    {
+      "name": "V2ResolvedSpecialAccount",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2SpecialAccountMessagingService.swift",
+      "line": 88,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2ResolvedSpecialAccount: Equatable, Sendable",
+      "members": [
+        "public let userID: UserID",
+        "public let stableKey: String",
+        "public let kind: V2AccountKind"
+      ]
+    },
+    {
+      "name": "V2RoomLatestVisible",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/RoomLatestVisible.swift",
+      "line": 5,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2RoomLatestVisible: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let ownerEpoch: UInt64",
+        "public let membershipRevision: UInt64",
+        "public let head: UInt64",
+        "public let latest: Message?"
+      ]
+    },
+    {
+      "name": "V2RoomLatestVisibleResult",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomLatestVisibleStore.swift",
+      "line": 6,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2RoomLatestVisibleResult: Equatable, Sendable",
+      "members": [
+        "case snapshot(V2RoomLatestVisible)",
+        "case unavailable",
+        "case retry"
+      ]
+    },
+    {
+      "name": "V2RoomLogRetentionMode",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2RoomLogRetention.swift",
+      "line": 10,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2RoomLogRetentionMode: String, Equatable, Sendable",
+      "members": [
+        "case window",
+        "case permanent"
+      ]
+    },
+    {
+      "name": "V2RoomLogTrimReport",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2RoomLogRetention.swift",
+      "line": 18,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2RoomLogTrimReport: Equatable, Sendable",
+      "members": [
+        "public let scannedRooms: Int",
+        "public let trimmedRooms: Int",
+        "public let deletedEvents: Int"
+      ]
+    },
+    {
+      "name": "V2RoomMembershipAction",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/RoomMembership.swift",
+      "line": 14,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2RoomMembershipAction: String, Codable, Equatable, Sendable",
+      "members": [
+        "case add",
+        "case remove"
+      ]
+    },
+    {
+      "name": "V2RoomMembershipChange",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/RoomMembership.swift",
+      "line": 71,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2RoomMembershipChange: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let targetUserID: UserID",
+        "public let action: V2RoomMembershipAction",
+        "public let membershipRevision: UInt64",
+        "public let roomSequence: UInt64",
+        "public let eventID: EventID",
+        "public let createdAt: Date"
+      ]
+    },
+    {
+      "name": "V2RoomMembershipChangeOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2RoomMembershipService.swift",
+      "line": 39,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2RoomMembershipChangeOutcome: Equatable, Sendable",
+      "members": [
+        "case changed(V2RoomMembershipChange)",
+        "case idempotent(V2RoomMembershipChange)",
+        "case idempotencyConflict",
+        "case revisionConflict(current: UInt64)",
+        "case targetAlreadyMember",
+        "case targetNotMember",
+        "case memberLimitReached",
+        "case rateLimited(retryAfterSeconds: Int)",
+        "case unavailable(V2CommandAdmissionUnavailableReason)"
+      ]
+    },
+    {
+      "name": "V2RoomMembershipDirectoryEntry",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2RoomMembershipDirectoryService.swift",
+      "line": 8,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2RoomMembershipDirectoryEntry: Equatable, Sendable",
+      "members": [
+        "public let userID: UserID",
+        "public let role: V2RoomMembershipRole",
+        "public let publicIdentity: V2PublicIdentity"
+      ]
+    },
+    {
+      "name": "V2RoomMembershipDirectoryPage",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2RoomMembershipDirectoryService.swift",
+      "line": 32,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2RoomMembershipDirectoryPage: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let membershipRevision: UInt64",
+        "public let actorRole: V2RoomMembershipRole",
+        "public let entries: [V2RoomMembershipDirectoryEntry]",
+        "public let nextCursor: String?"
+      ]
+    },
+    {
+      "name": "V2RoomMembershipDirectoryRequest",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2RoomMembershipDirectoryService.swift",
+      "line": 66,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2RoomMembershipDirectoryRequest: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let actorUserID: UserID",
+        "public let cursor: String?",
+        "public let pageSize: Int"
+      ]
+    },
+    {
+      "name": "V2RoomMembershipRole",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/RoomMembership.swift",
+      "line": 4,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2RoomMembershipRole: String, Codable, Equatable, Sendable",
+      "members": [
+        "case owner",
+        "case admin",
+        "case member"
+      ]
+    },
+    {
+      "name": "V2RoomShardRoute",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2RoomShardRouter.swift",
+      "line": 10,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2RoomShardRoute: Equatable, Sendable",
+      "members": [
+        "public let shardID: String",
+        "public let epoch: Int64"
+      ]
+    },
+    {
+      "name": "V2RoomStateReadResult",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2RoomRecoveryReading.swift",
+      "line": 11,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2RoomStateReadResult: Equatable, Sendable",
+      "members": [
+        "case state(V2RoomSynchronizationState)",
+        "case unavailable",
+        "case retry"
+      ]
+    },
+    {
+      "name": "V2RoomSynchronizationState",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/RoomSynchronizationState.swift",
+      "line": 5,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2RoomSynchronizationState: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let ownerEpoch: UInt64",
+        "public let viewerMembershipRevision: UInt64",
+        "public let head: UInt64",
+        "public let trimmedThrough: UInt64",
+        "public let readThrough: UInt64",
+        "public let latestOwnMessageSequence: UInt64",
+        "public var unreadCount: UInt64 {"
+      ]
+    },
+    {
+      "name": "V2RoomWriteRequest",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2SendMessageService.swift",
+      "line": 168,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2RoomWriteRequest: Sendable",
+      "members": [
+        "public let command: V2SendMessageCommand",
+        "public let capacityProfile: V2CapacityProfile",
+        "public let identifiers: V2AcceptanceIdentifiers",
+        "public let now: Date"
+      ]
+    },
+    {
+      "name": "V2SendMessageCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/SendMessageAcceptance.swift",
+      "line": 28,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2SendMessageCommand: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let senderUserID: UserID",
+        "public let clientMessageID: ClientMessageID",
+        "public let text: String",
+        "public let media: [V2MediaReference]",
+        "public let mentions: [V2MentionTarget]",
+        "public let entities: [V2MessageEntity]",
+        "public let replyTo: V2MessageReplyReference?",
+        "public let forwardedFrom: V2ForwardMessageSource?",
+        "public let fingerprint: V2SendMessageFingerprint"
+      ]
+    },
+    {
+      "name": "V2SendMessageFingerprint",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/SendMessageFingerprint.swift",
+      "line": 8,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2SendMessageFingerprint: Equatable, Encodable, Sendable",
+      "members": [
+        "public let version: UInt16",
+        "public let digest: Data"
+      ]
+    },
+    {
+      "name": "V2SendMessageOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2SendMessageService.swift",
+      "line": 54,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2SendMessageOutcome: Equatable, Sendable",
+      "members": [
+        "case accepted(V2AcceptedMessage)",
+        "case idempotent(V2MessageAcceptanceReceipt)",
+        "case idempotencyConflict",
+        "case rateLimited(retryAfterSeconds: Int)",
+        "case unavailable(V2CommandAdmissionUnavailableReason)",
+        "case denied(V2DirectMessageDenied)",
+        "public var acceptanceReceipt: V2MessageAcceptanceReceipt? {"
+      ]
+    },
+    {
+      "name": "V2SetReadReceiptPreferencesCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/ReadReceipt.swift",
+      "line": 23,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2SetReadReceiptPreferencesCommand: Equatable, Sendable",
+      "members": [
+        "public let actorUserID: UserID",
+        "public let operationID: ReadReceiptPreferenceOperationID",
+        "public let allowsDirectReadReceipts: Bool",
+        "public let allowsGroupReadReceipts: Bool"
+      ]
+    },
+    {
+      "name": "V2SetReadReceiptPreferencesOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ReadReceiptService.swift",
+      "line": 35,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2SetReadReceiptPreferencesOutcome: Equatable, Sendable",
+      "members": [
+        "case updated(V2ReadReceiptPreferences)",
+        "case idempotent(V2ReadReceiptPreferences)",
+        "case idempotencyConflict"
+      ]
+    },
+    {
+      "name": "V2SetStrangerMessagePermissionCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/DirectMessaging.swift",
+      "line": 47,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2SetStrangerMessagePermissionCommand: Equatable, Sendable",
+      "members": [
+        "public let actorUserID: UserID",
+        "public let operationID: StrangerMessagePreferenceOperationID",
+        "public let permission: V2StrangerMessagePermission"
+      ]
+    },
+    {
+      "name": "V2SetStrangerMessagePermissionOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2DirectMessagingService.swift",
+      "line": 99,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2SetStrangerMessagePermissionOutcome: Equatable, Sendable",
+      "members": [
+        "case updated(permission: V2StrangerMessagePermission, updatedAt: Date)",
+        "case idempotent(permission: V2StrangerMessagePermission, updatedAt: Date)",
+        "case idempotencyConflict"
+      ]
+    },
+    {
+      "name": "V2SetUserAddPermissionCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/DirectMessaging.swift",
+      "line": 71,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2SetUserAddPermissionCommand: Equatable, Sendable",
+      "members": [
+        "public let actorUserID: UserID",
+        "public let operationID: UserAddPreferenceOperationID",
+        "public let permission: V2UserAddPermission"
+      ]
+    },
+    {
+      "name": "V2SetUserAddPermissionOutcome",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2DirectMessagingService.swift",
+      "line": 109,
+      "kind": "enum",
+      "explicitCodable": false,
+      "declaration": "public enum V2SetUserAddPermissionOutcome: Equatable, Sendable",
+      "members": [
+        "case updated(permission: V2UserAddPermission, updatedAt: Date)",
+        "case idempotent(permission: V2UserAddPermission, updatedAt: Date)",
+        "case idempotencyConflict"
+      ]
+    },
+    {
+      "name": "V2StagedGroupRoomCommand",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupMessagingService.swift",
+      "line": 103,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2StagedGroupRoomCommand: Equatable, Sendable",
+      "members": [
+        "public let actorUserID: UserID",
+        "public let operationID: GroupRoomOperationID",
+        "public let title: String",
+        "public let capacityClass: V2GroupCapacityClass",
+        "public let stagedMemberCount: Int",
+        "public var allMemberCount: Int { stagedMemberCount + 1 }"
+      ]
+    },
+    {
+      "name": "V2StoredGroupInvite",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift",
+      "line": 166,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2StoredGroupInvite: Equatable, Sendable",
+      "members": [
+        "public let inviteID: GroupInviteID",
+        "public let roomID: RoomID",
+        "public let roomTitle: String",
+        "public let createdByUserID: UserID",
+        "public let creationOperationID: GroupInviteOperationID",
+        "public let state: V2GroupInviteState",
+        "public let expiresAt: Date",
+        "public let maximumApprovedUses: Int",
+        "public let approvedUseCount: Int",
+        "public let createdAt: Date",
+        "var persistedTimestamps: V2GroupInviteCreationTimestamps? = nil"
+      ]
+    },
+    {
+      "name": "V2StrangerMessagePermission",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/DirectMessaging.swift",
+      "line": 4,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2StrangerMessagePermission: String, Codable, Equatable, Sendable",
+      "members": [
+        "case allow",
+        "case deny"
+      ]
+    },
+    {
+      "name": "V2SubmitGroupJoinRequest",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift",
+      "line": 136,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2SubmitGroupJoinRequest: Sendable",
+      "members": [
+        "public let applicantUserID: UserID",
+        "public let operationID: GroupJoinRequestOperationID",
+        "public let secret: V2GroupInviteSecret",
+        "public let note: String?"
+      ]
+    },
+    {
+      "name": "V2TrustedSafetyModeration",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ModerationService.swift",
+      "line": 193,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2TrustedSafetyModeration: Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let operationID: ModerationOperationID",
+        "public let action: V2ModerationAction",
+        "public let messageID: MessageID?",
+        "public let expectedMessageRevision: UInt64?",
+        "public let reasonCode: V2ModerationReasonCode"
+      ]
+    },
+    {
+      "name": "V2TrustedSafetyRoomControl",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2ModerationService.swift",
+      "line": 158,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2TrustedSafetyRoomControl: Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let operationID: ModerationOperationID",
+        "public let action: V2ModerationAction",
+        "public let reasonCode: V2ModerationReasonCode"
+      ]
+    },
+    {
+      "name": "V2TrustedSpecialAccountMessage",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2SpecialAccountMessagingService.swift",
+      "line": 9,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2TrustedSpecialAccountMessage: Sendable",
+      "members": [
+        "public let stableAccountKey: String",
+        "public let servicePrincipal: String",
+        "public let operatorID: String?",
+        "public let operationID: ClientMessageID",
+        "public let requestFingerprint: String",
+        "public let customerUserID: UserID",
+        "public let text: String",
+        "public let media: [V2MediaReference]",
+        "public let mentions: [V2MentionTarget]",
+        "public let entities: [V2MessageEntity]",
+        "public let replyTo: V2MessageReplyReference?"
+      ]
+    },
+    {
+      "name": "V2UserAddPermission",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/DirectMessaging.swift",
+      "line": 12,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2UserAddPermission: String, Codable, Equatable, Sendable",
+      "members": [
+        "case allow",
+        "case deny"
+      ]
+    },
+    {
+      "name": "V2UserRoomDirectoryEntry",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2RoomRecoveryReading.swift",
+      "line": 22,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2UserRoomDirectoryEntry: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let roomKind: V2RoomKind",
+        "public let viewerMembershipRevision: UInt64",
+        "public let ownerEpoch: UInt64"
+      ]
+    },
+    {
+      "name": "V2UserRoomDirectorySlice",
+      "target": "IMV2Server",
+      "path": "IMV2Server/Sources/IMV2Server/V2RoomRecoveryReading.swift",
+      "line": 39,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2UserRoomDirectorySlice: Sendable",
+      "members": [
+        "public let entries: [V2UserRoomDirectoryEntry]",
+        "public let scannedThrough: RoomID?",
+        "public let hasMore: Bool"
+      ]
+    },
+    {
+      "name": "V2WithdrawMessageCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/MessageWithdrawal.swift",
+      "line": 6,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2WithdrawMessageCommand: Equatable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let actorUserID: UserID",
+        "public let operationID: MessageWithdrawalOperationID",
+        "public let messageID: MessageID",
+        "public let expectedRevision: V2MessageRevision",
+        "public var expectedMessageRevision: UInt64 { expectedRevision.rawValue }"
+      ]
+    }
+  ]
+}

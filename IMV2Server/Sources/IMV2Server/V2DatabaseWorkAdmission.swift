@@ -330,6 +330,7 @@ public actor V2DatabaseWorkAdmissionController {
         let workClass: V2DatabaseWorkClass
         let continuation: CheckedContinuation<V2DatabaseWorkAdmissionResult, Never>
         let enqueuedAt: ContinuousClock.Instant
+        let deadline: ContinuousClock.Instant
         var previous: UUID?
         var next: UUID?
         var timeoutTask: Task<Void, Never>?
@@ -373,11 +374,21 @@ public actor V2DatabaseWorkAdmissionController {
     /// 取消仅作用于仍在队列中的请求：立即获准路径不检查取消，已授予许可也不会自动撤回。
     /// 因此调用方无论随后成功、失败还是取消，只要结果为获准，都必须配对释放一次。
     ///
+    /// 调用方可提供原始单调截止时间；排队预算取该时间与策略等待期限中较早者。
+    /// 截止时刻已过的请求不会占用许可或进入数据库工作。
     /// - Parameter workClass: 本次工作所属类别，后续释放必须使用同一类别。
+    /// - Parameter callerDeadline: 原始调用截止时间，不从入队时重新计算。
     /// - Returns: 获准、队列满或超时拒绝，或排队期间取消；本方法不抛出取消错误。
     public func acquire(
-        _ workClass: V2DatabaseWorkClass
+        _ workClass: V2DatabaseWorkClass,
+        callerDeadline: ContinuousClock.Instant? = nil
     ) async -> V2DatabaseWorkAdmissionResult {
+        let policyDeadline = clock.now.advanced(by: policy.timeout)
+        let deadline = callerDeadline.map { min($0, policyDeadline) } ?? policyDeadline
+        guard deadline > clock.now else {
+            mutateLane(for: workClass) { $0.timeoutRejections = saturatingIncrement($0.timeoutRejections) }
+            return .rejected(.timeout)
+        }
         if canAcquire(workClass), lane(for: workClass).queued == 0 {
             admit(workClass)
             return .admitted
@@ -392,7 +403,7 @@ public actor V2DatabaseWorkAdmissionController {
         let waiterID = UUID()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
-                enqueue(waiterID, workClass: workClass, continuation: continuation)
+                enqueue(waiterID, workClass: workClass, deadline: deadline, continuation: continuation)
             }
         } onCancel: {
             // Cancellation handlers are synchronous. This bounded task only
@@ -436,13 +447,20 @@ public actor V2DatabaseWorkAdmissionController {
     private func enqueue(
         _ waiterID: UUID,
         workClass: V2DatabaseWorkClass,
+        deadline: ContinuousClock.Instant,
         continuation: CheckedContinuation<V2DatabaseWorkAdmissionResult, Never>
     ) {
+        guard deadline > clock.now else {
+            mutateLane(for: workClass) { $0.timeoutRejections = saturatingIncrement($0.timeoutRejections) }
+            continuation.resume(returning: .rejected(.timeout))
+            return
+        }
         let previous = lane(for: workClass).tail
         waiters[waiterID] = .init(
             workClass: workClass,
             continuation: continuation,
             enqueuedAt: clock.now,
+            deadline: deadline,
             previous: previous,
             next: nil,
             timeoutTask: nil
@@ -455,10 +473,9 @@ public actor V2DatabaseWorkAdmissionController {
             lane.tail = waiterID
             lane.queued += 1
         }
-        let timeout = policy.timeout
         let timeoutTask = Task { [weak self] in
             do {
-                try await v2Sleep(for: timeout)
+                try await ContinuousClock().sleep(until: deadline)
             } catch {
                 return
             }
@@ -472,26 +489,32 @@ public actor V2DatabaseWorkAdmissionController {
 
     /// 在指定类别可取得容量时授予其队首一个许可，并取消该等待者的超时任务。
     private func grantNextIfPossible(_ workClass: V2DatabaseWorkClass) {
-        guard canAcquire(workClass), let waiterID = lane(for: workClass).head,
-              let waiter = removeWaiter(waiterID)
-        else { return }
-        admit(workClass)
-        waiter.timeoutTask?.cancel()
-        waiter.continuation.resume(returning: .admitted)
+        while canAcquire(workClass), let waiterID = lane(for: workClass).head {
+            guard let waiter = waiters[waiterID] else { return }
+            if waiter.deadline <= clock.now { timeOut(waiterID); continue }
+            guard let granted = removeWaiter(waiterID) else { return }
+            admit(workClass)
+            granted.timeoutTask?.cancel()
+            granted.continuation.resume(returning: .admitted)
+            return
+        }
     }
 
     /// 将一个可用前台许可授予所选类别的队首，预留需求优先，同级类别轮转。
     ///
     /// 该调度只分配已释放容量，不取消在途操作；移除等待者后先计入获准，再恢复调用方。
     private func grantNextForegroundIfPossible() {
-        guard foregroundInFlight < foregroundCapacity,
+        while foregroundInFlight < foregroundCapacity,
               let workClass = nextForegroundWorkClass(),
-              let waiterID = lane(for: workClass).head,
-              let waiter = removeWaiter(waiterID)
-        else { return }
-        admit(workClass)
-        waiter.timeoutTask?.cancel()
-        waiter.continuation.resume(returning: .admitted)
+              let waiterID = lane(for: workClass).head {
+            guard let waiter = waiters[waiterID] else { return }
+            if waiter.deadline <= clock.now { timeOut(waiterID); continue }
+            guard let granted = removeWaiter(waiterID) else { return }
+            admit(workClass)
+            granted.timeoutTask?.cancel()
+            granted.continuation.resume(returning: .admitted)
+            return
+        }
     }
 
     /// 移除仍在队列中的超时请求，记录拒绝并恢复等待方；已完成请求保持不变。

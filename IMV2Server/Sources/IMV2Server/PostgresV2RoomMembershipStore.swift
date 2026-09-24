@@ -1,5 +1,6 @@
 import FluentKit
 import Foundation
+import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
@@ -11,11 +12,21 @@ import SQLKit
 public struct PostgresV2RoomMembershipStore:
     V2ControlValidatedRoomMembershipStore {
     private let database: any Database
+    private let activationScope: V2RoomActivationWriteScope?
 
     /// 组合数据库。
     ///
     /// - Parameter database: 存放房间、成员关系与准入状态的数据库。
-    public init(database: any Database) { self.database = database }
+    public init(database: any Database) {
+        self.database = database
+        activationScope = nil
+    }
+
+    /// Room actor writes require this fixed activation authority for every replay and mutation.
+    public init(database: any Database, activationScope: V2RoomActivationWriteScope) {
+        self.database = database
+        self.activationScope = activationScope
+    }
 
     /// 执行一次成员变更（不做控制面身份校验）。
     ///
@@ -77,11 +88,14 @@ public struct PostgresV2RoomMembershipStore:
         eventID: EventID,
         now: Date
     ) async throws -> V2RoomMembershipChangeOutcome {
-        return try await database.transaction { transaction in
+        return try await v2WithPostgresTransactionRetry(
+            database: database, maximumRetryCount: 0,
+            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil
+        ) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomMembershipStoreError.corruptPersistenceState }
             return try await Self.change(
                 in: sql, command: command, identitySnapshot: identitySnapshot, ownerRoute: ownerRoute,
-                capacityProfile: capacityProfile, eventID: eventID, now: now
+                activationScope: activationScope, capacityProfile: capacityProfile, eventID: eventID, now: now
             )
         }
     }
@@ -107,6 +121,7 @@ public struct PostgresV2RoomMembershipStore:
         command: V2ChangeRoomMembershipCommand,
         identitySnapshot: V2MembershipIdentitySnapshot? = nil,
         ownerRoute: V2RoomShardRoute? = nil,
+        activationScope: V2RoomActivationWriteScope? = nil,
         capacityProfile: V2CapacityProfile,
         eventID: EventID,
         now: Date
@@ -117,17 +132,21 @@ public struct PostgresV2RoomMembershipStore:
         let operationID = try membershipUUID(command.operationID)
         let operationLockKey = actorID.uuidString + ":" + operationID.uuidString
 
+        if activationScope != nil {
+            try await v2SetRoomActivationSQLTimeouts(.default, sql: sql)
+        }
         // An advisory lock serializes the absent-row case for this exact
         // durable operation key. Hash collisions can only add contention,
         // never merge two operation records.
         try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: operationLockKey), 0))").run()
+        if let activationScope { try await activationScope.require([roomID], sql: sql) }
         // The operation lock precedes the room lock, matching approval and
         // recovery. Fence even successful replays before consulting receipts.
         let fencedRoom: MembershipRoomRow?
-        if let ownerRoute {
+        if activationScope == nil, let ownerRoute {
             guard let value = try await sql.raw("""
                 SELECT room_shard_id, owner_epoch, room_sequence, membership_revision, capacity_profile_id, capacity_class
-                FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
+                FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR NO KEY UPDATE
                 """).first(decoding: MembershipRoomRow.self),
                   value.roomShardID == ownerRoute.shardID, value.ownerEpoch == ownerRoute.epoch
             else { throw V2RoomMembershipStoreError.ownerChanged }
@@ -161,7 +180,7 @@ public struct PostgresV2RoomMembershipStore:
         else {
             guard let value = try await sql.raw("""
                 SELECT room_shard_id, owner_epoch, room_sequence, membership_revision, capacity_profile_id, capacity_class
-                FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE
+                FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR NO KEY UPDATE
                 """).first(decoding: MembershipRoomRow.self) else { throw V2RoomMembershipStoreError.roomNotFound }
             room = value
         }

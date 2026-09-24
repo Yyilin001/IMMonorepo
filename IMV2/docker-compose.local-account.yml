@@ -25,12 +25,13 @@ services:
 
   account:
     image: imv2localaccount-v2server
-    # HTTP drain and cancellation can each take 30s, followed by up to 30s
-    # for workers; leave cleanup time before Compose sends SIGKILL.
-    stop_grace_period: 120s
+    # HTTP and workers drain first, followed by up to 60s for Room Actor
+    # transport and outstanding SQL; leave cleanup time before SIGKILL.
+    stop_grace_period: 180s
     env_file:
       - .env.local
     environment:
+      IMV2_ROOM_ACTOR_CONFIGURATION_FILE: /run/im-v2-room-actor/configuration.json
       IM_V2_DATABASE_URL: postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2
       IM_V2_DATABASE_EVENT_LOOP_THREADS: 2
       IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP: 4
@@ -87,19 +88,21 @@ services:
     ports:
       - "127.0.0.1:8443:8443"
     volumes:
+      - ./local-room-actors/account:/run/im-v2-room-actor:ro
       - v2-local-media-objects:/var/lib/im-v2-local-media
     mem_limit: 2g
     pids_limit: 256
 
   gateway:
     image: imv2localaccount-v2server
-    # TLS/HTTP drain and cancellation precede worker and database cleanup.
-    # Cover both 30s HTTP phases, 30s of worker drain, and cleanup headroom.
-    stop_grace_period: 120s
+    # TLS/HTTP and workers drain before the room actor's 60s drain deadline.
+    # Database resources are closed only after both drains complete.
+    stop_grace_period: 180s
     command: ["/workspace/IMV2Server/.build/release/IMV2ServerApp"]
     env_file:
       - .env.local
     environment:
+      IMV2_ROOM_ACTOR_CONFIGURATION_FILE: /run/im-v2-room-actor/configuration.json
       IM_V2_LOCAL_MEDIA_MODE: filesystem
       IM_V2_LOCAL_MEDIA_UNSAFE_TEST_ONLY: "1"
       IM_V2_LOCAL_MEDIA_ROOT_DIRECTORY: /var/lib/im-v2-local-media
@@ -214,6 +217,7 @@ services:
     ports:
       - "127.0.0.1:7443:7443"
     volumes:
+      - ./local-room-actors/gateway:/run/im-v2-room-actor:ro
       - v2-local-caddy-data:/caddy:ro
       - v2-local-media-objects:/var/lib/im-v2-local-media
     restart: on-failure:5

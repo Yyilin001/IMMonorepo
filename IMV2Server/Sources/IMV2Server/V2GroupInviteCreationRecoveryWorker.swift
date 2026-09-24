@@ -100,6 +100,16 @@ public struct V2GroupInviteCreationRecoveryWorker: Sendable {
         self.jobs = jobs; self.invitations = invitations; self.policy = policy; self.now = now
     }
 
+    public init(jobs: any V2GroupInviteCreationRecoveryStoring,
+                coordinator: V2ActorInvitationCoordinator,
+                deadline: @escaping @Sendable () -> ContinuousClock.Instant,
+                policy: V2GroupInvitationPolicy = .standard,
+                now: @escaping @Sendable () -> Date = Date.init) {
+        self.init(jobs: jobs,
+                  invitations: V2ActorInvitationCreationResumer(coordinator: coordinator, deadline: deadline),
+                  policy: policy, now: now)
+    }
+
     /// 执行一轮有界恢复。
     ///
     /// 权限拒绝、创建过期与证据冲突会暂停任务；其余失败按有上限的指数退避延期，

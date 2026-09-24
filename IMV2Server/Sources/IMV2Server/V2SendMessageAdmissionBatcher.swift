@@ -1,5 +1,6 @@
 import Foundation
 import IMV2Core
+import IMV2ActorContracts
 import Synchronization
 
 /// 面向可选进程本地投递加速的不挂起提交后边界。
@@ -46,6 +47,36 @@ final class V2SharedSendMessagePendingCapacity: Sendable {
     func release() {
         let result = reserved.wrappingSubtract(1, ordering: .relaxed)
         precondition(result.oldValue > 0, "shared pending capacity released twice")
+    }
+}
+
+/// One owner-wide budget for exact activation identities across all send lanes.
+/// A token remains reserved after its last SQL request finishes because
+/// the owner's credit pool can retain unused credits until exact retirement.
+final class V2SharedSendMessageActivationCapacity: Sendable {
+    private let maximum: Int
+    private let tokens = Mutex<Set<V2RoomActivationToken>>([])
+
+    init(maximum: Int) {
+        precondition(maximum > 0)
+        self.maximum = maximum
+    }
+
+    func tryReserve(_ token: V2RoomActivationToken) -> Bool {
+        tokens.withLock { reserved in
+            // A room always routes to one lane. Its actor holds this slot until
+            // all pending/in-flight requests finish or exact retirement clears it.
+            precondition(!reserved.contains(token), "activation reserved twice")
+            guard reserved.count < maximum else { return false }
+            reserved.insert(token)
+            return true
+        }
+    }
+
+    func release(_ token: V2RoomActivationToken) {
+        tokens.withLock { reserved in
+            precondition(reserved.remove(token) != nil, "activation released twice")
+        }
     }
 }
 
@@ -200,18 +231,26 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         /// 必须对它单独设界：把数据库准入移到批次边界，
         /// 不能等于用一个无界队列替换一个原本有界的队列。
         public let maximumPendingRequests: Int
+        /// Upper bound for activation identities retained by this batcher.
+        /// Granted lanes keep a completed identity until the hosting executor
+        /// closes its credit pool and explicitly retires that exact token.
+        public let maximumTrackedActivations: Int
 
         public init(
             maximumBatchSize: Int,
             maximumDelay: Duration,
             adaptiveDelayPolicy: AdaptiveDelayPolicy? = nil,
             maximumInFlightBatches: Int = 1,
-            maximumPendingRequests: Int = 1_024
+            maximumPendingRequests: Int = 1_024,
+            maximumTrackedActivations: Int = 16_384
         ) {
-            precondition((2 ... 128).contains(maximumBatchSize))
+            // One preserves deployments with append batching disabled: the
+            // granted path still fences each write, but never merges requests.
+            precondition((1 ... 128).contains(maximumBatchSize))
             precondition(maximumDelay > .zero)
             precondition((1 ... 128).contains(maximumInFlightBatches))
             precondition(maximumPendingRequests > 0)
+            precondition((1 ... 65_536).contains(maximumTrackedActivations))
             if let adaptiveDelayPolicy {
                 precondition(adaptiveDelayPolicy.highActivityMaximumDelay > maximumDelay)
                 precondition(adaptiveDelayPolicy.minimumRequestsInWindow <= maximumPendingRequests)
@@ -221,6 +260,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             self.adaptiveDelayPolicy = adaptiveDelayPolicy
             self.maximumInFlightBatches = maximumInFlightBatches
             self.maximumPendingRequests = maximumPendingRequests
+            self.maximumTrackedActivations = maximumTrackedActivations
         }
     }
 
@@ -237,7 +277,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     private final class Pending: @unchecked Sendable {
         let id: UInt64
         let request: V2RoomWriteRequest
-        let continuation: CheckedContinuation<V2SendMessageOutcome, any Error>
+        let continuation: CheckedContinuation<V2SendMessageOutcome, any Error>?
+        let granted: GrantedItem?
         let enqueuedAt: ContinuousClock.Instant
         var previousID: UInt64?
         var nextID: UInt64?
@@ -245,7 +286,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         init(
             id: UInt64,
             request: consuming V2RoomWriteRequest,
-            continuation: CheckedContinuation<V2SendMessageOutcome, any Error>,
+            continuation: CheckedContinuation<V2SendMessageOutcome, any Error>?,
+            granted: GrantedItem? = nil,
             enqueuedAt: ContinuousClock.Instant,
             previousID: UInt64?,
             nextID: UInt64?
@@ -253,6 +295,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             self.id = id
             self.request = request
             self.continuation = continuation
+            self.granted = granted
             self.enqueuedAt = enqueuedAt
             self.previousID = previousID
             self.nextID = nextID
@@ -262,11 +305,27 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     private enum ScheduledDelay: Equatable, Sendable {
         case base
         case highActivity
+        case granted
+    }
+
+    private struct GrantedItem: Sendable {
+        let turnID: UUID
+        let index: Int
+        let token: V2RoomActivationToken
+        let callDeadline: ContinuousClock.Instant
+    }
+
+    private struct GrantedTurn {
+        let continuation: CheckedContinuation<[Result<V2SendMessageOutcome, any Error>], any Error>
+        var results: [Result<V2SendMessageOutcome, any Error>?]
+        var remaining: Int
     }
 
     private let store: any V2AtomicRoomWriteBatchStore
+    private let actorGrantedStoreFactory: (@Sendable ([V2RoomActivationToken]) throws -> any V2AtomicRoomWriteBatchStore)?
     private let configuration: Configuration
     private let sharedPendingCapacity: V2SharedSendMessagePendingCapacity?
+    private let sharedActivationCapacity: V2SharedSendMessageActivationCapacity?
     /// 侵入式 FIFO 存储让入队与取消保持 O(1)。
     ///
     /// 批次选择仍按到达顺序遍历暂存请求，
@@ -280,6 +339,12 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     private var nextPendingID: UInt64 = 0
     private var pendingCount = 0
     private var flushTask: Task<Void, Never>?
+    private var flushDeadline: ContinuousClock.Instant?
+    private var flushGeneration: UInt64 = 0
+    private var grantedTurns: [UUID: GrantedTurn] = [:]
+    private var trackedActivations: [V2RoomActivationToken: Int] = [:]
+    private var quarantinedActivations: Set<V2RoomActivationToken> = []
+    private var retiringActivations: Set<V2RoomActivationToken> = []
     private var inFlightBatchCount = 0
     private var activeRoomIDs: Set<RoomID> = []
     private var stagingQueueFullRejections: UInt64 = 0
@@ -321,13 +386,23 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         store: any V2AtomicRoomWriteBatchStore,
         configuration: Configuration,
         databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
-        committedMessageObserver: (any V2CommittedMessageBatchObserving)? = nil
+        committedMessageObserver: (any V2CommittedMessageBatchObserving)? = nil,
+        actorGrantedStore: PostgresV2RoomWriteStore? = nil
     ) {
         self.store = store
+        if let actorGrantedStore {
+            actorGrantedStoreFactory = { tokens in
+                let scope = try V2RoomActivationWriteScope(tokens: tokens)
+                return actorGrantedStore.usingActivationScope(scope)
+            }
+        } else {
+            actorGrantedStoreFactory = nil
+        }
         self.configuration = configuration
         self.databaseWorkAdmission = databaseWorkAdmission
         self.committedMessageObserver = committedMessageObserver
         sharedPendingCapacity = nil
+        sharedActivationCapacity = nil
         managesForegroundWriteAdmission = databaseWorkAdmission != nil
         publishesCommittedGroupEvents = committedMessageObserver != nil
     }
@@ -348,15 +423,36 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         configuration: Configuration,
         databaseWorkAdmission: V2DatabaseWorkAdmissionController?,
         sharedPendingCapacity: V2SharedSendMessagePendingCapacity,
-        committedMessageObserver: (any V2CommittedMessageBatchObserving)?
+        sharedActivationCapacity: V2SharedSendMessageActivationCapacity,
+        committedMessageObserver: (any V2CommittedMessageBatchObserving)?,
+        actorGrantedStoreFactory: (@Sendable ([V2RoomActivationToken]) throws -> any V2AtomicRoomWriteBatchStore)?
     ) {
         self.store = store
+        self.actorGrantedStoreFactory = actorGrantedStoreFactory
         self.configuration = configuration
         self.databaseWorkAdmission = databaseWorkAdmission
         self.committedMessageObserver = committedMessageObserver
         self.sharedPendingCapacity = sharedPendingCapacity
+        self.sharedActivationCapacity = sharedActivationCapacity
         managesForegroundWriteAdmission = databaseWorkAdmission != nil
         publishesCommittedGroupEvents = committedMessageObserver != nil
+    }
+
+    /// Internal injection keeps the granted-turn batch selection testable without PostgreSQL.
+    init(
+        store: any V2AtomicRoomWriteBatchStore,
+        configuration: Configuration,
+        actorGrantedStoreFactory: @escaping @Sendable ([V2RoomActivationToken]) throws -> any V2AtomicRoomWriteBatchStore
+    ) {
+        self.store = store
+        self.configuration = configuration
+        self.actorGrantedStoreFactory = actorGrantedStoreFactory
+        sharedPendingCapacity = nil
+        sharedActivationCapacity = nil
+        databaseWorkAdmission = nil
+        committedMessageObserver = nil
+        managesForegroundWriteAdmission = false
+        publishesCommittedGroupEvents = false
     }
 
     deinit {
@@ -424,9 +520,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                     scheduleDelayedFlush()
                 }
                 if pendingCount >= configuration.maximumBatchSize {
-                    flushTask?.cancel()
-                    flushTask = nil
-                    scheduledDelay = nil
+                    cancelDelayedFlush()
                     startAvailableBatchesIfPossible()
                 }
                 if Task.isCancelled {
@@ -438,6 +532,125 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             // asks the owner to remove a request that has not started a
             // durable write; it has no detached business side effect.
             Task { await self.cancelPendingRequest(pendingID) }
+        }
+    }
+
+    /// Enqueues one already-granted room turn without an intervening actor hop.
+    /// The returned vector preserves each durable result even when a later SQL
+    /// partition of the same turn fails. Caller cancellation after acceptance
+    /// cannot revoke a write that may already be executing.
+    public func acceptGrantedTurn(
+        _ sends: [V2PreparedActorSend],
+        batchDeadline: ContinuousClock.Instant,
+        callDeadline: ContinuousClock.Instant? = nil
+    ) async throws -> [Result<V2SendMessageOutcome, any Error>] {
+        try Task.checkCancellation()
+        let effectiveCallDeadline = callDeadline ?? clock.now + .seconds(10)
+        guard effectiveCallDeadline > clock.now else {
+            throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
+        }
+        guard actorGrantedStoreFactory != nil,
+              !sends.isEmpty,
+              sends.count <= 128,
+              let first = sends.first,
+              sends.allSatisfy({
+                  $0.token == first.token &&
+                  $0.token.roomID == $0.request.command.roomID
+              })
+        else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+        if quarantinedActivations.contains(first.token) {
+            throw V2RoomCallFailure.outcomeUnknown
+        }
+        if retiringActivations.contains(first.token) {
+            throw V2RoomCallFailure.notAccepted(.retired)
+        }
+        if trackedActivations[first.token] == nil &&
+           trackedActivations.count >= configuration.maximumTrackedActivations {
+            throw V2SendMessageAdmissionBatcherError.serverBusy
+        }
+        guard sends.count <= configuration.maximumPendingRequests else {
+            throw V2SendMessageAdmissionBatcherError.serverBusy
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            var reserved = 0
+            if let sharedPendingCapacity {
+                while reserved < sends.count && sharedPendingCapacity.tryReserve() { reserved += 1 }
+                guard reserved == sends.count else {
+                    for _ in 0..<reserved { sharedPendingCapacity.release() }
+                    stagingQueueFullRejections &+= 1
+                    continuation.resume(throwing: V2SendMessageAdmissionBatcherError.serverBusy)
+                    return
+                }
+            } else if pendingCount > configuration.maximumPendingRequests - sends.count {
+                stagingQueueFullRejections &+= 1
+                continuation.resume(throwing: V2SendMessageAdmissionBatcherError.serverBusy)
+                return
+            }
+            if trackedActivations[first.token] == nil,
+               let sharedActivationCapacity,
+               !sharedActivationCapacity.tryReserve(first.token) {
+                for _ in 0..<reserved { sharedPendingCapacity?.release() }
+                continuation.resume(throwing: V2SendMessageAdmissionBatcherError.serverBusy)
+                return
+            }
+            let turnID = UUID()
+            trackedActivations[first.token, default: 0] += sends.count
+            grantedTurns[turnID] = .init(
+                continuation: continuation,
+                results: Array(repeating: nil, count: sends.count),
+                remaining: sends.count
+            )
+            let enqueuedAt = clock.now
+            for (index, send) in sends.enumerated() {
+                nextPendingID &+= 1
+                precondition(nextPendingID != 0, "pending request identity exhausted")
+                enqueuePending(.init(
+                    id: nextPendingID,
+                    request: send.request,
+                    continuation: nil,
+                    granted: .init(turnID: turnID, index: index, token: send.token,
+                        callDeadline: effectiveCallDeadline),
+                    enqueuedAt: enqueuedAt,
+                    previousID: nil,
+                    nextID: nil
+                ))
+                recordArrival()
+            }
+            let hardDeadline = min(batchDeadline, effectiveCallDeadline)
+            if pendingCount >= configuration.maximumBatchSize || hardDeadline <= clock.now {
+                cancelDelayedFlush()
+                startAvailableBatchesIfPossible()
+            } else {
+                let highActivity = isHighActivity()
+                let localDelay = highActivity
+                    ? configuration.adaptiveDelayPolicy!.highActivityMaximumDelay
+                    : configuration.maximumDelay
+                let localDeadline = clock.now + localDelay
+                let selectedDeadline = min(localDeadline, hardDeadline)
+                if flushDeadline == nil || selectedDeadline < flushDeadline! {
+                    cancelDelayedFlush()
+                    let reason: ScheduledDelay = selectedDeadline == hardDeadline
+                        ? .granted : highActivity ? .highActivity : .base
+                    installDelayedFlush(reason, until: selectedDeadline)
+                }
+            }
+        }
+    }
+
+    /// Called after the hosting executor has closed or fenced its token and
+    /// stopped admitting new calls. Queued work is completed as unknown;
+    /// executing SQL retains the slot until it ends. The host must enforce
+    /// post-close admission because settled token state is removed to keep
+    /// this batcher's identity table bounded.
+    public func retireActivation(_ token: V2RoomActivationToken) {
+        guard trackedActivations[token] != nil else { return }
+        retiringActivations.insert(token)
+        purgeQueuedRequests(for: Set([token]))
+        if trackedActivations[token] == 0 {
+            trackedActivations.removeValue(forKey: token)
+            quarantinedActivations.remove(token)
+            retiringActivations.remove(token)
+            sharedActivationCapacity?.release(token)
         }
     }
 
@@ -458,15 +671,33 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         _ selectedDelay: ScheduledDelay,
         after delay: Duration
     ) {
+        installDelayedFlush(selectedDelay, until: clock.now + delay)
+    }
+
+    private func installDelayedFlush(
+        _ selectedDelay: ScheduledDelay,
+        until deadline: ContinuousClock.Instant
+    ) {
         scheduledDelay = selectedDelay
+        flushDeadline = deadline
+        flushGeneration &+= 1
+        let generation = flushGeneration
         flushTask = Task { [weak self] in
             do {
-                try await v2Sleep(for: delay)
+                try await ContinuousClock().sleep(until: deadline)
             } catch {
                 return
             }
-            await self?.delayedFlushFired()
+            await self?.delayedFlushFired(generation: generation)
         }
+    }
+
+    private func cancelDelayedFlush() {
+        flushTask?.cancel()
+        flushTask = nil
+        flushDeadline = nil
+        scheduledDelay = nil
+        flushGeneration &+= 1
     }
 
     /// 在需要时缩短高活跃后继批次的刷新等待。
@@ -480,17 +711,22 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     private func shortenHighActivitySuccessorFlushIfNeeded() {
         guard pendingCount > 0,
               scheduledDelay == .highActivity,
-              flushTask != nil
+              flushTask != nil,
+              let existingDeadline = flushDeadline
         else { return }
-        flushTask?.cancel()
-        installDelayedFlush(.highActivity, after: configuration.maximumDelay)
+        cancelDelayedFlush()
+        installDelayedFlush(.highActivity,
+            until: min(existingDeadline, clock.now + configuration.maximumDelay))
     }
 
-    private func delayedFlushFired() {
+    private func delayedFlushFired(generation: UInt64) {
+        guard generation == flushGeneration else { return }
         flushTask = nil
+        flushDeadline = nil
         switch scheduledDelay {
         case .base: baseDelayFlushes &+= 1
         case .highActivity: highActivityDelayFlushes &+= 1
+        case .granted: break
         case nil:
             // A cancelled timer cannot safely initiate a second batch. This
             // guard also keeps a stale task from corrupting diagnostics.
@@ -576,9 +812,36 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     private func dequeueNextBatch() -> [Pending]? {
         guard pendingCount > 0 else { return nil }
 
+        var anchorID = pendingHeadID
+        var anchor: Pending?
+        while let itemID = anchorID, let item = pendingByID[itemID] {
+            anchorID = item.nextID
+            if !activeRoomIDs.contains(item.request.command.roomID) {
+                anchor = item
+                break
+            }
+        }
+        guard let anchor else { return nil }
+        if configuration.maximumBatchSize == 1 {
+            // The first inactive room is the only eligible slot. Removing it
+            // through the normal path also returns shared pending capacity.
+            guard let removed = removePending(anchor.id) else { return nil }
+            let batch = [removed]
+            recordDequeued(batch)
+            return batch
+        }
+        func compatible(_ item: Pending) -> Bool {
+            switch (anchor.granted, item.granted) {
+            case (nil, nil): true
+            case (.some(let lhs), .some(let rhs)):
+                lhs.token.owner.shardID == rhs.token.owner.shardID
+            default: false
+            }
+        }
+
         var selected: [Pending] = []
         defer { recordDequeued(selected) }
-        var selectedRoomIDs = activeRoomIDs
+        var seenRoomIDs = activeRoomIDs
         selected.reserveCapacity(configuration.maximumBatchSize)
 
         // Fairness pass: pick at most one command per inactive room first.
@@ -588,9 +851,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
               selected.count < configuration.maximumBatchSize
         {
             cursor = item.nextID
-            if selectedRoomIDs.insert(item.request.command.roomID).inserted,
-               let removed = removePending(itemID)
-            {
+            guard seenRoomIDs.insert(item.request.command.roomID).inserted else { continue }
+            if compatible(item), let removed = removePending(itemID) {
                 selected.append(removed)
             }
         }
@@ -600,15 +862,25 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         // `remaining` gives it first-pass priority in the next transaction.
         guard selected.count < configuration.maximumBatchSize else { return selected }
         let batchRoomIDs = Set(selected.map(\.request.command.roomID))
+        let selectedTokens = Dictionary(uniqueKeysWithValues: selected.compactMap { item in
+            item.granted.map { (item.request.command.roomID, $0.token) }
+        })
+        var blockedHotRooms: Set<RoomID> = []
         cursor = pendingHeadID
         while let itemID = cursor,
               let item = pendingByID[itemID],
               selected.count < configuration.maximumBatchSize
         {
             cursor = item.nextID
-            if batchRoomIDs.contains(item.request.command.roomID),
-               let removed = removePending(itemID)
-            {
+            let roomID = item.request.command.roomID
+            guard batchRoomIDs.contains(roomID), !blockedHotRooms.contains(roomID) else { continue }
+            guard compatible(item),
+                  item.granted == nil || selectedTokens[roomID] == item.granted?.token
+            else {
+                blockedHotRooms.insert(roomID)
+                continue
+            }
+            if let removed = removePending(itemID) {
                 selected.append(removed)
             }
         }
@@ -651,17 +923,32 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     private func start(batch: [Pending], roomIDs: Set<RoomID>) {
         sameRoomDeferredRequests &+= UInt64(batch.count - roomIDs.count)
         let executionStartedAt = clock.now
+        let sqlDeadline = batch.compactMap { $0.granted?.callDeadline }.min()
         Task {
+          await V2RoomSQLDeadline.withSelectedDeadline(sqlDeadline) {
             let results: [Result<V2SendMessageOutcome, any Error>]
             let disposition: BatchDisposition
+            let batchStore: any V2AtomicRoomWriteBatchStore
+            do {
+                batchStore = try store(for: batch)
+            } catch {
+                self.complete(
+                    batch: batch,
+                    roomIDs: roomIDs,
+                    results: Array(repeating: .failure(error), count: batch.count),
+                    disposition: .atomicFailed,
+                    executionStartedAt: executionStartedAt
+                )
+                return
+            }
             if batch.count == 1 {
                 // A single request cannot satisfy the atomic-store contract.
                 // Dispatch it directly instead of deliberately paying for an
                 // exception-driven fallback on every underfilled timer flush.
-                results = await acceptIndividually(batch)
+                results = await acceptIndividually(batch, store: batchStore)
                 disposition = .singleton
             } else {
-                let partitions = await store.atomicBatchPartitions(
+                let partitions = await batchStore.atomicBatchPartitions(
                     requests: batch.map(\.request)
                 )
                 guard partitions.count == batch.count else {
@@ -681,7 +968,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 }
                 let partitioned = await executePartitioned(
                     batch: batch,
-                    partitions: partitions
+                    partitions: partitions,
+                    store: batchStore
                 )
                 results = partitioned.results
                 disposition = partitioned.disposition
@@ -693,7 +981,31 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 disposition: disposition,
                 executionStartedAt: executionStartedAt
             )
+          }
         }
+    }
+
+    private func store(for batch: [Pending]) throws -> any V2AtomicRoomWriteBatchStore {
+        guard batch.first?.granted != nil else { return store }
+        guard let actorGrantedStoreFactory else {
+            throw V2RoomActivationLeaseError.activationChanged
+        }
+        var tokens: [V2RoomActivationToken] = []
+        var byRoom: [RoomID: V2RoomActivationToken] = [:]
+        for item in batch {
+            guard let token = item.granted?.token else {
+                throw V2RoomActivationLeaseError.activationChanged
+            }
+            if let existing = byRoom[token.roomID] {
+                guard existing == token else {
+                    throw V2RoomActivationLeaseError.activationChanged
+                }
+            } else {
+                byRoom[token.roomID] = token
+                tokens.append(token)
+            }
+        }
+        return try actorGrantedStoreFactory(tokens)
     }
 
     /// 为每个兼容子集保持原子存储契约。
@@ -713,8 +1025,25 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     /// - Returns: 分区执行结果。
     private func executePartitioned(
         batch: [Pending],
-        partitions: [V2AtomicRoomWriteBatchPartition?]
+        partitions: [V2AtomicRoomWriteBatchPartition?],
+        store: any V2AtomicRoomWriteBatchStore
     ) async -> PartitionedExecution {
+        // Partition classification is advisory. If one room receives mixed
+        // hints, a repeated-room partition must not leap over an earlier
+        // scalar command from that same admitted turn.
+        var firstIndexByRoom: [RoomID: Int] = [:]
+        var mixedRooms: Set<RoomID> = []
+        for (index, pending) in batch.enumerated() {
+            let roomID = pending.request.command.roomID
+            if let firstIndex = firstIndexByRoom[roomID] {
+                if partitions[firstIndex] != partitions[index] { mixedRooms.insert(roomID) }
+            } else {
+                firstIndexByRoom[roomID] = index
+            }
+        }
+        let safePartitions = batch.indices.map { index in
+            mixedRooms.contains(batch[index].request.command.roomID) ? nil : partitions[index]
+        }
         var results = Array<Result<V2SendMessageOutcome, any Error>?>(
             repeating: nil,
             count: batch.count
@@ -729,7 +1058,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         // falls back at the authoritative store boundary instead of merging
         // incompatible SQL graphs.
         var repeatedRoomPartitions: [V2AtomicRoomWriteBatchPartition] = []
-        for partition in partitions.compactMap({ $0 }) where
+        for partition in safePartitions.compactMap({ $0 }) where
             !repeatedRoomPartitions.contains(partition)
         {
             if await store.atomicBatchSupportsRepeatedRooms(in: partition) {
@@ -738,9 +1067,9 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         }
         var consumedIndices: Set<Int> = []
         for partition in repeatedRoomPartitions {
-            let indices = batch.indices.filter { partitions[$0] == partition }
+            let indices = batch.indices.filter { safePartitions[$0] == partition }
             guard indices.count >= 2 else { continue }
-            let execution = await executeAtomic(indices.map { batch[$0] })
+            let execution = await executeAtomic(indices.map { batch[$0] }, store: store)
             for (index, result) in zip(indices, execution.results) {
                 results[index] = result
             }
@@ -774,7 +1103,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             var indicesByPartition: [V2AtomicRoomWriteBatchPartition: [Int]] = [:]
             var individualIndices: [Int] = []
             for index in waveIndices {
-                guard let partition = partitions[index] else {
+                guard let partition = safePartitions[index] else {
                     individualIndices.append(index)
                     continue
                 }
@@ -790,7 +1119,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                     individualIndices.append(indices[0])
                     continue
                 }
-                let execution = await executeAtomic(indices.map { batch[$0] })
+                let execution = await executeAtomic(indices.map { batch[$0] }, store: store)
                 for (index, result) in zip(indices, execution.results) {
                     results[index] = result
                 }
@@ -799,7 +1128,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
 
             if !individualIndices.isEmpty {
                 let independentlyAccepted = await acceptIndividually(
-                    individualIndices.map { batch[$0] }
+                    individualIndices.map { batch[$0] }, store: store
                 )
                 for (index, result) in zip(individualIndices, independentlyAccepted) {
                     results[index] = result
@@ -819,10 +1148,13 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         )
     }
 
-    private func executeAtomic(_ batch: [Pending]) async -> AtomicExecution {
+    private func executeAtomic(
+        _ batch: [Pending],
+        store: any V2AtomicRoomWriteBatchStore
+    ) async -> AtomicExecution {
         do {
             let outcomes = try await withForegroundWriteAdmission {
-                try await self.store.acceptAtomically(requests: batch.map(\.request))
+                try await store.acceptAtomically(requests: batch.map(\.request))
             }
             guard outcomes.count == batch.count else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
@@ -832,6 +1164,15 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 disposition: .atomicCommitted(requestCount: batch.count)
             )
         } catch let batchError as V2AtomicRoomWriteBatchError {
+            // A retry that removes an isolated middle item would execute a
+            // later command in the same room first. Scalar fallback now
+            // preserves the original order per room.
+            if Set(batch.map(\.request.command.roomID)).count != batch.count {
+                return .init(
+                    results: await acceptIndividually(batch, store: store),
+                    disposition: .fallback(requestCount: batch.count, reason: batchError.reason)
+                )
+            }
             if let isolated = validatedIsolatedRequestIndices(
                 batchError.isolatedRequestIndices,
                 batchCount: batch.count
@@ -845,10 +1186,10 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 // existing scalar fallback remains the bounded behavior.
                 if compatibleIndices.count >= 2 {
                     let compatibleExecution = await executeAtomic(
-                        compatibleIndices.map { batch[$0] }
+                        compatibleIndices.map { batch[$0] }, store: store
                     )
                     let isolatedResults = await acceptIndividually(
-                        isolated.map { batch[$0] }
+                        isolated.map { batch[$0] }, store: store
                     )
                     var results = Array<Result<V2SendMessageOutcome, any Error>?>(
                         repeating: nil,
@@ -884,7 +1225,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             // this compatible subset retries individually; requests rejected
             // by the advisory classifier are already using that same path.
             return .init(
-                results: await acceptIndividually(batch),
+                results: await acceptIndividually(batch, store: store),
                 disposition: .fallback(
                     requestCount: batch.count,
                     reason: batchError.reason
@@ -911,35 +1252,54 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     }
 
     private func acceptIndividually(
-        _ batch: [Pending]
+        _ batch: [Pending],
+        store: any V2AtomicRoomWriteBatchStore
     ) async -> [Result<V2SendMessageOutcome, any Error>] {
-        await withTaskGroup(
-            of: (Int, Result<V2SendMessageOutcome, any Error>).self,
+        var orderedRooms: [RoomID] = []
+        var byRoom: [RoomID: [(Int, Pending)]] = [:]
+        for (index, pending) in batch.enumerated() {
+            let roomID = pending.request.command.roomID
+            if byRoom[roomID] == nil { orderedRooms.append(roomID) }
+            byRoom[roomID, default: []].append((index, pending))
+        }
+        return await withTaskGroup(
+            of: [(Int, Result<V2SendMessageOutcome, any Error>)].self,
             returning: [Result<V2SendMessageOutcome, any Error>].self
         ) { group in
-            for (index, pending) in batch.enumerated() {
+            for roomID in orderedRooms {
+                guard let items = byRoom[roomID] else { continue }
                 group.addTask {
-                    do {
-                        let outcome = try await self.withForegroundWriteAdmission {
-                            try await self.store.accept(
-                                command: pending.request.command,
-                                capacityProfile: pending.request.capacityProfile,
-                                identifiers: pending.request.identifiers,
-                                now: pending.request.now
-                            )
+                    var roomResults: [(Int, Result<V2SendMessageOutcome, any Error>)] = []
+                    var uncertain = false
+                    for (index, pending) in items {
+                        if uncertain {
+                            roomResults.append((index, .failure(V2RoomCallFailure.outcomeUnknown)))
+                            continue
                         }
-                        return (index, .success(outcome))
-                    } catch {
-                        return (index, .failure(error))
+                        do {
+                            let outcome = try await self.withForegroundWriteAdmission {
+                                try await store.accept(
+                                    command: pending.request.command,
+                                    capacityProfile: pending.request.capacityProfile,
+                                    identifiers: pending.request.identifiers,
+                                    now: pending.request.now
+                                )
+                            }
+                            roomResults.append((index, .success(outcome)))
+                        } catch {
+                            roomResults.append((index, .failure(error)))
+                            uncertain = pending.granted != nil && Self.requiresRetirement(error)
+                        }
                     }
+                    return roomResults
                 }
             }
             var results = Array<Result<V2SendMessageOutcome, any Error>?>(
                 repeating: nil,
                 count: batch.count
             )
-            for await (index, result) in group {
-                results[index] = result
+            for await roomResults in group {
+                for (index, result) in roomResults { results[index] = result }
             }
             return results.map { $0 ?? .failure(V2RoomWriteStoreError.corruptPersistenceState) }
         }
@@ -948,12 +1308,19 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     private func withForegroundWriteAdmission<Result: Sendable>(
         _ operation: @Sendable () async throws -> Result
     ) async throws -> Result {
+        let callerDeadline = V2RoomSQLDeadline.current
+        if let callerDeadline, callerDeadline <= .now {
+            throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
+        }
         guard let databaseWorkAdmission else {
             return try await operation()
         }
-        switch await databaseWorkAdmission.acquire(.foregroundWrite) {
+        switch await databaseWorkAdmission.acquire(.foregroundWrite, callerDeadline: callerDeadline) {
         case .admitted:
             do {
+                if let callerDeadline, callerDeadline <= .now {
+                    throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
+                }
                 let result = try await operation()
                 await databaseWorkAdmission.release(.foregroundWrite)
                 return result
@@ -961,7 +1328,12 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 await databaseWorkAdmission.release(.foregroundWrite)
                 throw error
             }
-        case .rejected:
+        case .rejected(.queueFull):
+            throw V2SendMessageAdmissionBatcherError.serverBusy
+        case .rejected(.timeout):
+            if let callerDeadline, callerDeadline <= .now {
+                throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
+            }
             throw V2SendMessageAdmissionBatcherError.serverBusy
         case .cancelled:
             throw CancellationError()
@@ -976,6 +1348,39 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         executionStartedAt: ContinuousClock.Instant
     ) {
         precondition(inFlightBatchCount > 0)
+        let resolvedResults = results.count == batch.count ? results : Array(
+            repeating: Result<V2SendMessageOutcome, any Error>.failure(
+                V2RoomWriteStoreError.corruptPersistenceState),
+            count: batch.count
+        )
+        var uncertainTokens = Set(zip(batch, resolvedResults).compactMap { pending, result in
+            guard let token = pending.granted?.token,
+                  case .failure(let error) = result,
+                  Self.requiresRetirement(error) else { return nil as V2RoomActivationToken? }
+            return token
+        })
+        // A proved rollback is safe only when the entire granted turn has the
+        // same proof. Earlier partitions may have committed, and later queued
+        // items must not start after a mixed turn becomes outcome-unknown.
+        for (pending, result) in zip(batch, resolvedResults) {
+            guard let granted = pending.granted,
+                  case .failure(let error) = result,
+                  Self.isProvedRollback(error),
+                  let turn = grantedTurns[granted.turnID] else { continue }
+            let current = zip(batch, resolvedResults).compactMap { item, value in
+                item.granted?.turnID == granted.turnID ? value : nil
+            }
+            let previous = turn.results.compactMap { $0 }
+            if turn.remaining > current.count ||
+                (previous + current).contains(where: { result in
+                    guard case .failure(let error) = result else { return true }
+                    return !Self.isProvedRollback(error)
+                }) {
+                uncertainTokens.insert(granted.token)
+            }
+        }
+        quarantinedActivations.formUnion(uncertainTokens)
+        purgeQueuedRequests(for: uncertainTokens)
         let executionMilliseconds = elapsedMilliseconds(since: executionStartedAt)
         completedBatches &+= 1
         batchExecutionMillisecondsTotal = saturatingAdd(
@@ -1012,11 +1417,6 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         case .singleton:
             singletonDispatches &+= 1
         }
-        guard results.count == batch.count else {
-            batch.forEach { $0.continuation.resume(throwing: V2RoomWriteStoreError.corruptPersistenceState) }
-            startAvailableBatchesIfPossible()
-            return
-        }
         // This actor still owns every room in `roomIDs` here. Submit the
         // committed batch before request continuations can resume and before
         // the next batch for one of those rooms can begin. That preserves the
@@ -1024,7 +1424,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         // boundary instead of asking independently resumed handlers to race.
         if let committedMessageObserver {
             committedMessageObserver.observeCommittedMessages(
-                results.compactMap { result in
+                resolvedResults.compactMap { result in
                     guard case .success(.accepted(let message)) = result else {
                         return nil
                     }
@@ -1032,13 +1432,80 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 }
             )
         }
-        for (pending, result) in zip(batch, results) {
-            switch result {
-            case .success(let outcome): pending.continuation.resume(returning: outcome)
-            case .failure(let error): pending.continuation.resume(throwing: error)
-            }
+        for (pending, result) in zip(batch, resolvedResults) {
+            completePending(pending, result: result)
         }
         startAvailableBatchesIfPossible()
+    }
+
+    private nonisolated static func requiresRetirement(_ error: any Error) -> Bool {
+        if let failure = error as? V2RoomCallFailure {
+            return failure == .outcomeUnknown
+        }
+        return error is V2RoomTransactionOutcomeUnknown ||
+            error is V2RoomActivationLeaseError ||
+            (error as? V2RoomWriteStoreError) == .corruptPersistenceState ||
+            V2ActorMessagingErrorWire(domainError: error) == nil
+    }
+
+    private nonisolated static func isProvedRollback(_ error: any Error) -> Bool {
+        guard let failure = error as? V2RoomCallFailure else { return false }
+        switch failure {
+        case .notAccepted, .rolledBack: return true
+        case .outcomeUnknown: return false
+        }
+    }
+
+    private func purgeQueuedRequests(for tokens: Set<V2RoomActivationToken>) {
+        guard !tokens.isEmpty else { return }
+        var cursor = pendingHeadID
+        while let itemID = cursor, let pending = pendingByID[itemID] {
+            cursor = pending.nextID
+            if let token = pending.granted?.token,
+               tokens.contains(token),
+               let removed = removePending(itemID) {
+                completePending(removed, result: .failure(V2RoomCallFailure.outcomeUnknown))
+            }
+        }
+        if pendingCount == 0 { cancelDelayedFlush() }
+    }
+
+    private func completePending(
+        _ pending: Pending,
+        result: Result<V2SendMessageOutcome, any Error>
+    ) {
+        if let continuation = pending.continuation {
+            continuation.resume(with: result)
+            return
+        }
+        guard let granted = pending.granted,
+              var turn = grantedTurns[granted.turnID],
+              turn.results[granted.index] == nil else { return }
+        if let remaining = trackedActivations[granted.token] {
+            precondition(remaining > 0, "tracked activation completed twice")
+            if remaining == 1 {
+                if !retiringActivations.contains(granted.token) {
+                    trackedActivations[granted.token] = 0
+                } else {
+                    trackedActivations.removeValue(forKey: granted.token)
+                    quarantinedActivations.remove(granted.token)
+                    retiringActivations.remove(granted.token)
+                    sharedActivationCapacity?.release(granted.token)
+                }
+            } else {
+                trackedActivations[granted.token] = remaining - 1
+            }
+        }
+        turn.results[granted.index] = result
+        turn.remaining -= 1
+        if turn.remaining == 0 {
+            grantedTurns.removeValue(forKey: granted.turnID)
+            turn.continuation.resume(returning: turn.results.map {
+                $0 ?? .failure(V2RoomWriteStoreError.corruptPersistenceState)
+            })
+        } else {
+            grantedTurns[granted.turnID] = turn
+        }
     }
 
     private enum BatchDisposition: Sendable {
@@ -1133,11 +1600,9 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             return
         }
         cancelledPendingRequests &+= 1
-        removed.continuation.resume(throwing: CancellationError())
+        removed.continuation?.resume(throwing: CancellationError())
         if pendingCount == 0 {
-            flushTask?.cancel()
-            flushTask = nil
-            scheduledDelay = nil
+            cancelDelayedFlush()
         }
     }
 

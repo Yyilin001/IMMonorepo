@@ -96,6 +96,40 @@ services:
       IMV2_POSTGRES_TEST_CONTROL_DATABASE_URL: postgres://im_v2_control_test:im_v2_control_test@postgres-control:5432/im_v2_control_test
       IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE: "1"
       IMV2_REQUIRE_CROSS_STORE_POSTGRES_TESTS: "1"
+      # Actor suites deliberately require their own disposable opt-ins. Run
+      # these serially with the ordinary schema-resetting integration suites.
+      IMV2_ACTOR_TRANSACTION_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+      IMV2_ACTOR_TRANSACTION_TEST_DATABASE_IS_DISPOSABLE: "1"
+      IMV2_ACTOR_ACK_LOSS_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+      IMV2_ACTOR_ACK_LOSS_TEST_DATABASE_IS_DISPOSABLE: "1"
+      IMV2_SHARED_SEND_ACK_LOSS_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+      IMV2_SHARED_SEND_ACK_LOSS_TEST_DATABASE_IS_DISPOSABLE: "1"
+      IMV2_ACTOR_HOST_DRAIN_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+      IMV2_ACTOR_HOST_DRAIN_DATABASE_IS_DISPOSABLE: "1"
+      IMV2_ACTOR_HOST_OVERLOAD_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+      IMV2_ACTOR_HOST_OVERLOAD_DATABASE_IS_DISPOSABLE: "1"
+      IMV2_ACTOR_HOST_SHARED_ACK_LOSS_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+      IMV2_ACTOR_HOST_SHARED_ACK_LOSS_DATABASE_IS_DISPOSABLE: "1"
+      IMV2_ACTOR_HOST_G2_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+      IMV2_ACTOR_HOST_G2_DATABASE_IS_DISPOSABLE: "1"
+      IMV2_ACTOR_PAIR_INTERLEAVE_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+      IMV2_ACTOR_PAIR_INTERLEAVE_DATABASE_IS_DISPOSABLE: "1"
+      IMV2_ACTOR_CANCEL_MAINT_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+      IMV2_ACTOR_CANCEL_MAINT_DATABASE_IS_DISPOSABLE: "1"
+      IMV2_ACTOR_CREDIT_FENCE_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+      IMV2_ACTOR_CREDIT_FENCE_DATABASE_IS_DISPOSABLE: "1"
+      IMV2_ACTOR_D2_TEST_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+      IMV2_ACTOR_D2_TEST_DATABASE_IS_DISPOSABLE: "1"
+      IMV2_ACTOR_D4_CONTROL_DATABASE_URL: postgres://im_v2_control_test:im_v2_control_test@postgres-control:5432/im_v2_control_test
+      IMV2_ACTOR_D4_OWNER_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+      IMV2_ACTOR_D4_TEST_DATABASE_IS_DISPOSABLE: "1"
+      IMV2_ACTOR_D5_OWNER_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+      IMV2_ACTOR_D5_TEST_DATABASE_IS_DISPOSABLE: "1"
+      IMV2_ACTOR_D5_SOURCE_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+      IMV2_ACTOR_D5_TARGET_DATABASE_URL: postgres://im_v2_secondary_test:im_v2_secondary_test@postgres-secondary:5432/im_v2_secondary_test
+      IMV2_ACTOR_D5_IMPORT_TEST_DATABASE_IS_DISPOSABLE: "1"
+      IMV2_ACTOR_D5_MEDIA_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
+      IMV2_ACTOR_D5_MEDIA_TEST_DATABASE_IS_DISPOSABLE: "1"
       IMV2_REAL_NATS_URL: nats://127.0.0.1:4222
       # Cold compilation plus the complete PostgreSQL suite running serially
       # can exceed an hour. This is a wall-clock watchdog, not a relaxation

@@ -1,0 +1,233 @@
+{
+  "base": "f1cdd78d6a21bf0ae23da627c0710c65115236aa",
+  "claims": [
+    {
+      "id": "W01",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteStore.swift",
+      "symbol": "func acceptInTransaction",
+      "table_or_marker": "im_v2.messages"
+    },
+    {
+      "id": "W01",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteStore.swift",
+      "symbol": "func acceptAtomically",
+      "table_or_marker": "im_v2.room_events"
+    },
+    {
+      "id": "W02",
+      "path": "IMV2Server/Sources/IMV2Server/V2RoomAdmissionCommandCreditPool.swift",
+      "symbol": "room_admission",
+      "table_or_marker": "im_v2.room_admission"
+    },
+    {
+      "id": "W02",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteStore.swift",
+      "symbol": "reserveTransactionalShardAdmissions",
+      "table_or_marker": "im_v2.shard_admission_pools"
+    },
+    {
+      "id": "W03",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MessageEditStore.swift",
+      "symbol": "func edit",
+      "table_or_marker": "im_v2.message_edit_operations"
+    },
+    {
+      "id": "W04",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MessageWithdrawalStore.swift",
+      "symbol": "func withdraw",
+      "table_or_marker": "im_v2.message_withdrawal_operations"
+    },
+    {
+      "id": "W05",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MessageReactionStore.swift",
+      "symbol": "func change",
+      "table_or_marker": "im_v2.message_reaction_operations"
+    },
+    {
+      "id": "W06",
+      "path": "IMV2Server/Sources/IMV2Server/V2SpecialAccountMessagingService.swift",
+      "symbol": "struct PostgresV2SpecialAccountMessagingStore",
+      "table_or_marker": "im_v2.special_account_message_operations"
+    },
+    {
+      "id": "W07",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomMembershipStore.swift",
+      "symbol": "func change",
+      "table_or_marker": "im_v2.room_membership_operations"
+    },
+    {
+      "id": "W08",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupCapabilitiesStore.swift",
+      "symbol": "func setPinnedMessage",
+      "table_or_marker": "im_v2.room_pinned_message_operations"
+    },
+    {
+      "id": "W09",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupCapabilitiesStore.swift",
+      "symbol": "func setAnnouncement",
+      "table_or_marker": "im_v2.group_announcement_operations"
+    },
+    {
+      "id": "W10",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupCapabilitiesStore.swift",
+      "symbol": "func setRolePermissions",
+      "table_or_marker": "im_v2.group_permission_operations"
+    },
+    {
+      "id": "W11",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ModerationStore.swift",
+      "symbol": "func apply",
+      "table_or_marker": "im_v2.moderation_operations"
+    },
+    {
+      "id": "W12",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ProfilePresentationStore.swift",
+      "symbol": "func updateOwnGroupNickname",
+      "table_or_marker": "im_v2.room_member_nickname_operations"
+    },
+    {
+      "id": "W13",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ReadReceiptStore.swift",
+      "symbol": "func record",
+      "table_or_marker": "im_v2.read_receipt_operations"
+    },
+    {
+      "id": "W29",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomReadWatermark.swift",
+      "symbol": "v2InitializeJoinedMemberReadWatermark",
+      "table_or_marker": "im_v2.room_read_receipts"
+    },
+    {
+      "id": "W14",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2DirectMessagingStore.swift",
+      "symbol": "func open",
+      "table_or_marker": "im_v2.direct_room_operations"
+    },
+    {
+      "id": "W15",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupMessagingStore.swift",
+      "symbol": "func create",
+      "table_or_marker": "im_v2.group_room_operations"
+    },
+    {
+      "id": "W15",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupAudienceImportService.swift",
+      "symbol": "func begin",
+      "table_or_marker": "im_v2.group_room_creation_drafts"
+    },
+    {
+      "id": "W16",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupInvitationStore.swift",
+      "symbol": "func create",
+      "table_or_marker": "im_v2.group_invite_links"
+    },
+    {
+      "id": "W16",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupInviteDirectory.swift",
+      "symbol": "func prepare",
+      "table_or_marker": "im_v2.group_invite_directory"
+    },
+    {
+      "id": "W17",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupInvitationStore.swift",
+      "symbol": "func approve",
+      "table_or_marker": "im_v2.group_join_requests"
+    },
+    {
+      "id": "W18",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupInviteCreationRecoveryWorker.swift",
+      "symbol": "func runOnce",
+      "table_or_marker": "V2GroupInviteCreationRecoveryWorker"
+    },
+    {
+      "id": "W18",
+      "path": "IMV2Server/Sources/IMV2Server/V2GroupJoinQuotaRecoveryWorker.swift",
+      "symbol": "func runOnce",
+      "table_or_marker": "V2GroupJoinQuotaRecoveryWorker"
+    },
+    {
+      "id": "W19",
+      "path": "IMV2Server/Sources/IMV2Server/V2ForwardMessagesService.swift",
+      "symbol": "func clientMessageID",
+      "table_or_marker": "im_v2.message_forward_operations"
+    },
+    {
+      "id": "W19",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteStore.swift",
+      "symbol": "func acceptForwardOwnerValidated",
+      "table_or_marker": "forwardOwnerSourceRoomID"
+    },
+    {
+      "id": "W20",
+      "path": "IMV2Server/Sources/IMV2Server/V2ForwardMessagesService.swift",
+      "symbol": "func replayedResults",
+      "table_or_marker": "SET result_message_id"
+    },
+    {
+      "id": "W21",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ForwardExportStore.swift",
+      "symbol": "message_forward_exports",
+      "table_or_marker": "im_v2.message_forward_delivery_jobs"
+    },
+    {
+      "id": "W22",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ForwardInboxStore.swift",
+      "symbol": "message_forward_inbox",
+      "table_or_marker": "im_v2.message_forward_inbox"
+    },
+    {
+      "id": "W22",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteStore.swift",
+      "symbol": "func importForwardExport",
+      "table_or_marker": "im_v2.message_forward_inbox"
+    },
+    {
+      "id": "W23",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ForwardMediaImportStore.swift",
+      "symbol": "message_forward_media_imports",
+      "table_or_marker": "im_v2.message_forward_media_imports"
+    },
+    {
+      "id": "W24",
+      "path": "IMV2Server/Sources/IMV2Server/V2RoutedMediaDownloadService.swift",
+      "symbol": "func downloadTarget",
+      "table_or_marker": "im_v2.media_download_grants"
+    },
+    {
+      "id": "W25",
+      "path": "IMV2Server/Sources/IMV2Server/V2ContentReviewWorker.swift",
+      "symbol": "func claimPending",
+      "table_or_marker": "im_v2.content_review_jobs"
+    },
+    {
+      "id": "W26",
+      "path": "IMV2Server/Sources/IMV2Server/V2RoomLogRetention.swift",
+      "symbol": "func trimRoomLogs",
+      "table_or_marker": "im_v2.room_events"
+    },
+    {
+      "id": "W27",
+      "path": "IMV2Server/Sources/IMV2Server/V2ControlPlaneHousekeepingWorker.swift",
+      "symbol": "func purgeTerminal",
+      "table_or_marker": "content_review_jobs"
+    },
+    {
+      "id": "W28",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MessageProjectionStateBodyCompactionWorker.swift",
+      "symbol": "func runOnce",
+      "table_or_marker": "message_projection_state"
+    },
+    {
+      "id": "W29",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomReadWatermark.swift",
+      "symbol": "v2InitializeNewRoomReadWatermarks",
+      "table_or_marker": "im_v2.room_read_receipts"
+    },
+    {
+      "id": "W30",
+      "path": "IMV2Server/Sources/IMV2Server/V2ModerationAuditRetentionWorker.swift",
+      "symbol": "func deleteExpiredAuditEntries",
+      "table_or_marker": "im_v2.moderation_audit_entries"
+    }
+  ]
+}

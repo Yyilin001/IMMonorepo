@@ -315,7 +315,7 @@ private struct GroupCreationFingerprintEnvelope: Encodable {
     }
 }
 
-private func groupCreationFingerprint(
+func groupCreationFingerprint(
     _ command: V2CreateGroupRoomCommand
 ) throws -> Data {
     let envelope = GroupCreationFingerprintEnvelope(
@@ -351,7 +351,7 @@ private struct StagedGroupCreationFingerprintEnvelope: Encodable {
     }
 }
 
-private func stagedGroupCreationFingerprint(
+func stagedGroupCreationFingerprint(
     _ command: V2StagedGroupRoomCommand
 ) throws -> Data {
     let envelope = StagedGroupCreationFingerprintEnvelope(

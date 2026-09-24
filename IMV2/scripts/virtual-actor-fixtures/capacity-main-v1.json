@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "status": "configuration-frozen-measurements-pending",
+  "mainRevision": "f1cdd78d6a21bf0ae23da627c0710c65115236aa",
+  "swiftImage": "swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6",
+  "postgresImage": "postgres:16-alpine",
+  "projectPrefix": "imv2-va-v1-capacity",
+  "machineEnvelope": {"cpus": 4, "memoryGiB": 16, "exclusiveSampling": true},
+  "measurement": {
+    "loaderWorkers": 1,
+    "latencyScope": "single-process-phase-samples",
+    "warmupSeconds": 120,
+    "steadySeconds": 300,
+    "cooldownSeconds": 60,
+    "roundOrder": ["main", "candidate", "candidate", "main", "main", "candidate"],
+    "minimumRunsPerRevision": 3,
+    "maximumMainRunCoefficientOfVariation": 0.10,
+    "metrics": ["acceptedCommandsPerSecond", "p95Milliseconds", "p99Milliseconds", "sqlCallsPerCommand", "batchSize", "cpuSecondsPerCommand", "peakRSSBytes", "maximumQueueDepth", "recoveryMilliseconds"]
+  },
+  "existingScenarios": [
+    {"id": "smoke", "path": "IMV2/load-scenarios/high-active-smoke.json", "sha256": "c40eee42aeb9250953d01df4edb8bc4918c6ab16b65b6b877af960d9710a4b41", "connections": 100, "role": "configuration and credential canary only"},
+    {"id": "multi-room-same-owner-write", "path": "IMV2/load-scenarios/direct-1500-message-only-900-server-saturation.json", "sha256": "ab74cd0d64d73040b7aba935cb2e0f33da32928fcdc806e3e55bf19d7e6bbfbe", "connections": 1500, "role": "write throughput; verify pair-to-owner map in evidence"},
+    {"id": "mixed-read-write", "path": "IMV2/load-scenarios/high-active-10000.json", "sha256": "64c11814d90effe550f55f1affa496a8ca710c2d6a2d7fb432a844c647ce7909", "connections": 10000, "role": "full capacity run only after isolated TLS stack is ready"}
+  ],
+  "pendingActorSpecificScenarios": [
+    "same-room-hot-write",
+    "cold-activation-idle-retirement",
+    "fault-recovery-peak"
+  ],
+  "thresholds": "C0 freezes numeric regressions after stable main runs and before any candidate measurement"
+}

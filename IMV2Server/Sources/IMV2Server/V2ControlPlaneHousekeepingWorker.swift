@@ -118,12 +118,20 @@ public enum V2ControlPlaneHousekeepingError: Error, Equatable, Sendable {
     case corruptPersistenceState
 }
 
+/// Transitional composition switch. The actor-owned mode leaves every
+/// room-owned table to a separately admitted, activation-fenced room turn.
+public enum V2HousekeepingRoomCleanupMode: Equatable, Sendable {
+    case legacyOwnerLocked
+    case actorOwned
+}
+
 /// 控制面维护的 PostgreSQL 实现。
 ///
 /// 它保留权威房间事件与消息，只删除有界的终态工作器簿记。
 /// 扇出相关行按从叶子到根的次序拆除，因此不会绕过任何外键栅栏或仍在进行的投递。
 public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepingStore {
     private let database: any Database
+    private let roomCleanupMode: V2HousekeepingRoomCleanupMode
 
     // Shared by startup readiness and transactional execution.
     static var housekeepingRotationPeriod: Int64 { Int64(10 * idempotencyTables.count) }
@@ -131,7 +139,11 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
     /// 组合数据库。
     ///
     /// - Parameter database: 存放终态簿记与控制面状态的数据库。
-    public init(database: any Database) { self.database = database }
+    public init(database: any Database,
+                roomCleanupMode: V2HousekeepingRoomCleanupMode = .legacyOwnerLocked) {
+        self.database = database
+        self.roomCleanupMode = roomCleanupMode
+    }
 
     /// 清理止于终态的簿记数据。
     ///
@@ -198,11 +210,14 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 where: "state = 'completed' AND completed_at <= ", order: "completed_at, media_id",
                 cutoff: cutoff, limit: budget.take()
             )
-            count += try await deleteSimple(
-                sql: sql, table: "content_review_jobs", identity: "message_id",
-                where: "state IN ('completed', 'superseded') AND completed_at <= ", order: "completed_at, message_id",
-                cutoff: cutoff, limit: budget.take(), roomOwned: true
-            )
+            let reviewBudget = budget.take()
+            if roomCleanupMode == .legacyOwnerLocked {
+                count += try await deleteSimple(
+                    sql: sql, table: "content_review_jobs", identity: "message_id",
+                    where: "state IN ('completed', 'superseded') AND completed_at <= ", order: "completed_at, message_id",
+                    cutoff: cutoff, limit: reviewBudget, roomOwned: true
+                )
+            }
             count += try await deleteSimple(
                 sql: sql, table: "public_profile_update_outbox", identity: "source_event_id",
                 where: "state = 'completed' AND completed_at <= ", order: "completed_at, source_event_id",
@@ -277,7 +292,8 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
         rotation: UInt,
         limit: Int
     ) async throws -> Int {
-        let tables = Self.idempotencyTables
+        let tables = roomCleanupMode == .legacyOwnerLocked
+            ? Self.idempotencyTables : Self.idempotencyTables.filter { !$0.roomOwned }
         let selectedCount = min(limit, tables.count)
         guard selectedCount > 0 else { return 0 }
         let start = Int(rotation % UInt(tables.count))
@@ -343,7 +359,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             """
     }
 
-    private struct IdempotencyTable: Sendable {
+    struct IdempotencyTable: Sendable {
         let table: String
         let timestamp: String
         let additionalPredicate: String
@@ -364,7 +380,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
     // message_forward_operations also owns the stable target client ID. With
     // no server-enforced forwarding expiry, deleting it makes an old forward
     // generate a new send identity and bypass the retained send completion.
-    private static let idempotencyTables: [IdempotencyTable] = [
+    static let idempotencyTables: [IdempotencyTable] = [
         .init(table: "direct_room_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
         .init(table: "user_relationship_operations", timestamp: "updated_at", additionalPredicate: ""),
         .init(table: "user_block_operations", timestamp: "updated_at", additionalPredicate: ""),

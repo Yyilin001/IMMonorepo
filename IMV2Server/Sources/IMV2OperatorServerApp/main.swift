@@ -150,6 +150,9 @@ enum IMV2OperatorServerApp {
                 userStateReplayStores[storage.shardID] = PostgresV2DurableWorkReplayStore(database: ownerDatabase)
                 forwardReplayStores[storage.shardID] = PostgresV2ForwardWorkReplayStore(database: ownerDatabase)
             }
+            // Operator replay only changes workflow queue state. Gateway's
+            // delivery worker executes source receipts and target imports via
+            // RoomRef; this process does not need a cluster client.
             let forwardReplay = try V2ForwardWorkOperatorReplayService(stores: forwardReplayStores,
                 operatorPrincipal: configuration.operatorPrincipal)
             let coLocatedControlBuckets = Set(configuration.userShardStorage.compactMap { storage in

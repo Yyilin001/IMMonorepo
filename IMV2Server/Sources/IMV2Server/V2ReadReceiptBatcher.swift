@@ -15,11 +15,16 @@ public protocol V2ReadReceiptAdmission: Sendable {
     ) async throws -> V2ReadReceiptOutcome
 }
 
+/// Read-only batch metrics. Holding this boundary grants no receipt admission.
+public protocol V2ReadReceiptBatchMetricsReading: Sendable {
+    func snapshot() async -> V2ReadReceiptBatcher.Snapshot
+}
+
 /// 面向单调递增已读游标的有界进程内微批处理。
 ///
 /// 该 actor 既不改变确认边界也不改变持久化语义：等待续期只会在其操作记录与结果游标
 /// 提交之后恢复。它的作用只是让相互独立的回执共享一次 PostgreSQL 事务与一条集合式校验语句。
-public actor V2ReadReceiptBatcher: V2ReadReceiptAdmission {
+public actor V2ReadReceiptBatcher: V2ReadReceiptAdmission, V2ReadReceiptBatchMetricsReading {
     /// 攒批配置。
     public struct Configuration: Equatable, Sendable {
         /// 单批最大请求数。

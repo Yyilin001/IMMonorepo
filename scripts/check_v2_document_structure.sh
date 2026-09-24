@@ -56,7 +56,9 @@ done < <(find "${repo_root}/docs/reviews" -maxdepth 1 -name '*.md' -type f -prin
 # 3. History stays history: every archived document must carry the history banner.
 while IFS= read -r -d '' document; do
   [[ "$(basename "${document}")" == "README.md" ]] && continue
-  if ! head -20 "${document}" | grep -q '历史归档'; then
+  # A short-circuiting grep can SIGPIPE head under pipefail on long lines.
+  # Read the bounded prefix in one process so a present banner cannot fail.
+  if ! awk 'NR <= 20 && /历史归档/ { found=1 } NR == 20 { exit } END { exit !found }' "${document}"; then
     printf 'archived document lacks the history banner: %s\n' "${document#"${repo_root}/"}" >&2
     status=1
   fi

@@ -232,6 +232,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 VALUES (\(bind: secondRoom), \(bind: senderUUID),
                         '并发回执群', \(bind: now))
                 """).run()
+            // Routed and local variants exercise the same two existing rooms.
+            // The routed writer also needs their control-side owner records.
+            try await sql.raw("""
+                INSERT INTO im_v2.room_owner_routes
+                    (room_id, room_shard_id, route_epoch, created_at, updated_at)
+                VALUES (\(bind: secondRoom), 'room-a', 0, \(bind: now), \(bind: now))
+                """).run()
             try await sql.raw("""
                 INSERT INTO im_v2.room_admission
                     (room_id, eligible_member_count, command_window_limit, shard_lease_id, shard_lease_generation)
