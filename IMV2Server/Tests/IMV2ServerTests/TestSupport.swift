@@ -57,7 +57,9 @@ struct V2DiscardingTelemetrySink: V2TelemetrySink {
 
 struct V2DiscardingForegroundGroupEventHintPublisher: V2ForegroundGroupEventHintSubmitting {
     func submitForegroundHint(_: V2GroupEventWake) {}
+    func submitForegroundDirectEvent(_: V2DirectRoomLiveEvent) {}
     func submitForegroundDirectMessage(_: V2AcceptedMessage) {}
+    func submitForegroundDirectMessage(_: V2AcceptedMessage, excludingConnectionID _: UUID?) {}
 }
 
 private struct V2UnsupportedGatewayTestDependency: Error,

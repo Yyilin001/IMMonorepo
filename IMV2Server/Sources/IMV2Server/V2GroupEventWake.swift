@@ -52,7 +52,6 @@ public protocol V2ForegroundGroupEventHintPublishing: Sendable {
     func publishForegroundHint(_ hint: V2GroupEventWake) async
     func publishForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) async
     func publishForegroundGroupEvents(_ events: [V2DirectRoomLiveEvent]) async
-    func publishForegroundDirectMessage(_ message: V2AcceptedMessage) async
 }
 
 /// 面向能够在不挂起的情况下完成前台私聊事件发布的发布方的可选进程本地加速。
@@ -86,51 +85,6 @@ public protocol V2ForegroundGroupEventHintSubmitting: Sendable {
         _ message: V2AcceptedMessage,
         excludingConnectionID: UUID?
     )
-}
-
-extension V2ForegroundGroupEventHintSubmitting {
-    public func submitForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) {
-        // Compatibility publishers retain the safe metadata-only wake. The
-        // concrete Gateway dispatcher overrides this method to preserve the
-        // already-authorized live payload and exact socket exclusion.
-        submitForegroundHint(.init(
-            roomID: event.roomID,
-            highWatermark: event.highWatermark
-        ))
-    }
-
-    public func submitForegroundDirectMessage(
-        _ message: V2AcceptedMessage,
-        excludingConnectionID _: UUID?
-    ) {
-        submitForegroundDirectMessage(message)
-    }
-}
-
-extension V2ForegroundGroupEventHintPublishing {
-    /// 面向尚未升级为可跨进程边界携带实时载荷的发布方的兼容回退实现。
-    ///
-    /// 正确性仍由元数据唤醒与持久游标拉取保证。
-    ///
-    /// - Parameter event: 待发布的私聊实时事件。
-    public func publishForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) async {
-        await publishForegroundHint(.init(roomID: event.roomID, highWatermark: event.highWatermark))
-    }
-
-    public func publishForegroundDirectMessage(_ message: V2AcceptedMessage) async {
-        guard let event = V2DirectRoomLiveEvent(message) else { return }
-        await publishForegroundDirectEvent(event)
-    }
-
-    /// 兼容发布方可以保留逐事件转发。
-    ///
-    /// 本地 Gateway 会通过即时批量契约覆盖该行为；
-    /// 尚未支持批量协议格式的远端 broker 仍然正确，只是效率较低。
-    ///
-    /// - Parameter events: 待发布的群组实时事件列表。
-    public func publishForegroundGroupEvents(_ events: [V2DirectRoomLiveEvent]) async {
-        for event in events { await publishForegroundDirectEvent(event) }
-    }
 }
 
 /// 把消息准入提交边界桥接到 Gateway 可选的混合群组前台加速器。
@@ -195,7 +149,6 @@ public final class V2CommittedHybridGroupEventObserver:
 /// 它按房间合并水位线，并刻意在 broker I/O 开始之前就从 `publishForegroundHint` 返回，
 /// 使发送方的接受响应不受可选的 NATS 连接或缓慢的本地套接字写入影响。
 public final class V2ForegroundGroupEventHintDispatcher:
-    V2ForegroundGroupEventHintPublishing,
     V2ForegroundGroupEventHintSubmitting,
     Sendable
 {
@@ -298,14 +251,6 @@ public final class V2ForegroundGroupEventHintDispatcher:
         let stream = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         signal = stream.stream
         signalContinuation = stream.continuation
-    }
-
-    public func publishForegroundHint(_ hint: V2GroupEventWake) async {
-        submitForegroundHint(hint)
-    }
-
-    public func publishForegroundDirectMessage(_ message: V2AcceptedMessage) async {
-        submitForegroundDirectMessage(message)
     }
 
     public func submitForegroundHint(_ hint: V2GroupEventWake) {
@@ -621,7 +566,7 @@ public final class V2ForegroundGroupEventHintDispatcher:
         guard let sink else { return false }
         for batch in groupEventBatches(events) {
             guard sink.publishForegroundGroupEventsImmediately(batch) else {
-                // The asynchronous compatibility path republishes the whole
+                // The regular asynchronous publication path republishes the whole
                 // ordered sequence. Foreground events are idempotent, so this
                 // safely repairs a partial transport-lifecycle miss.
                 return false
@@ -774,10 +719,5 @@ public struct V2LocalGroupEventWakePublisher:
         _ events: [V2DirectRoomLiveEvent]
     ) -> Bool {
         registry.submitForegroundGroupEvents(events)
-    }
-
-    public func publishForegroundDirectMessage(_ message: V2AcceptedMessage) async {
-        guard let event = V2DirectRoomLiveEvent(message) else { return }
-        await publishForegroundDirectEvent(event)
     }
 }
