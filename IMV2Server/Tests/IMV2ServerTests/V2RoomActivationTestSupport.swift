@@ -6,7 +6,8 @@ import IMV2Core
 
 /// Grants a fresh activation for one room turn, runs `body` under its token,
 /// then releases the lease. An activation still held by another in-flight
-/// test turn is waited out briefly rather than treated as a failure.
+/// test turn is waited out (up to about 20s under contention) rather than
+/// treated as a failure; production room actors serialize turns the same way.
 func withRoomActivation<Value: Sendable>(
     database: any Database,
     roomID: RoomID,
@@ -17,7 +18,7 @@ func withRoomActivation<Value: Sendable>(
     let leases = PostgresV2RoomActivationStore(database: database)
     let host = V2ActorHostIdentity(hostID: try .init("activation-test"), incarnationID: UUID())
     let owner = try V2RoomDataOwner(shardID: shardID, epoch: epoch)
-    for _ in 0..<500 {
+    for _ in 0..<2_000 {
         guard case .acquired(let lease) = try await leases.acquire(roomID: roomID, owner: owner,
             host: host, duration: try .init(10_000)) else {
             try await Task.sleep(for: .milliseconds(10))
@@ -76,3 +77,43 @@ func forwardSourceCommand(
 let forwardSourceCommandUnexpected: @Sendable (V2RoomForwardCommand, ContinuousClock.Instant) async throws -> V2RoomForwardResult = { _, _ in
     throw V2RoomCallFailure.notAccepted(.invalidRequest)
 }
+
+/// Room port for V2ActorInvitationCoordinator tests. Like RoomRef, each
+/// command or query runs the production room invitation executor under an
+/// activation of that room on its owner database.
+func invitationRoomPort(
+    control: any Database,
+    owner: @escaping @Sendable (RoomID) throws -> (database: any Database, shardID: String),
+    capacityProfile: V2CapacityProfile,
+    now: @escaping @Sendable () -> Date
+) -> V2ActorInvitationRoomPort {
+    let identities = PostgresV2GroupInvitationIdentityReader(database: control)
+    @Sendable func run(
+        _ roomID: RoomID,
+        _ body: @Sendable (V2RoomInvitationDomainExecutor) async throws -> V2RoomInvitationResult
+    ) async throws -> V2RoomInvitationResult {
+        let location = try owner(roomID)
+        return try await withRoomActivation(database: location.database, roomID: roomID,
+                                            shardID: location.shardID) { token in
+            try await body(V2RoomInvitationDomainExecutor(database: location.database, token: token,
+                identities: identities, capacityProfile: capacityProfile, now: now))
+        }
+    }
+    return .init(command: { command, _ in try await run(command.roomID) { try await $0.execute(command) } },
+                 query: { query, _ in try await run(query.roomID) { try await $0.execute(query) } })
+}
+
+/// Single-owner form of ``invitationRoomPort(control:owner:capacityProfile:now:)``.
+func invitationRoomPort(
+    control: any Database,
+    owner: any Database,
+    shardID: String = "room-a",
+    capacityProfile: V2CapacityProfile,
+    now: @escaping @Sendable () -> Date
+) -> V2ActorInvitationRoomPort {
+    invitationRoomPort(control: control, owner: { _ in (owner, shardID) },
+                       capacityProfile: capacityProfile, now: now)
+}
+
+/// A generous deadline for coordinator calls whose timing is not under test.
+func invitationTestDeadline() -> ContinuousClock.Instant { .now + .seconds(30) }

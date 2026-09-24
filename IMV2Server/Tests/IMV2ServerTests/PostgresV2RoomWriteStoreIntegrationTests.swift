@@ -7,6 +7,7 @@ import HTTPTypes
 import Darwin
 internal final class GroupJoinQuotaCrashBundleMarker: NSObject {}
 #endif
+import IMV2ActorContracts
 import IMV2Core
 import IMV2ServerHTTP
 import PostgresNIO
@@ -117,30 +118,43 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
 
 
 
-    @Test("routed submissions enforce twenty pending requests across two owner databases")
+    @Test("submissions enforce twenty pending requests across two owner databases")
     func groupJoinGlobalQuotaAcrossOwners() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { control, secondOwner, sql, secondSQL, secondRoom in
             let now = Date(timeIntervalSince1970: 1_750_000_000), applicant = UserID(uuid: UUID())
             for db in [sql, secondSQL] { try await db.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run() }
             try await sql.raw("INSERT INTO im_v2.public_user_profiles(user_id,public_handle,display_name,created_at,updated_at) VALUES (\(bind: applicant.uuidValue!), 'global_applicant', 'Applicant', \(bind: now), \(bind: now))").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: roomUUID),'room-a',0,\(bind: now),\(bind: now)), (\(bind: secondRoom.uuidValue!),'room-b',0,\(bind: now),\(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
-            let registry = try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-a", database: control, schema: "im_v2"), .init(shardID: "room-b", database: secondOwner, schema: "im_v2")])
-            let routed = V2RoutedGroupInvitationStore(controlDatabase: control, router: V2PostgresRoomShardRouter(database: control), owners: registry)
-            var requests: [V2GroupJoinSubmissionPersistenceRequest] = []
+            let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 100, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
+            // Production path: the control coordinator calls each room owner
+            // through a room turn; the first room's owner is the control database.
+            let port = invitationRoomPort(control: control, owner: { $0 == roomID ? (control, "room-a") : (secondOwner, "room-b") },
+                                          capacityProfile: profile, now: { now })
+            let coordinator = V2ActorInvitationCoordinator(controlDatabase: control, room: port,
+                secretIssuer: try V2GroupInviteSecretIssuer(rawKey: Data(repeating: 0x5a, count: 32)), now: { now })
+            var submissions: [V2ActorSubmitGroupJoinWire] = []
             for index in 0..<40 {
-                let room = index.isMultiple(of: 2) ? roomID : secondRoom, digest = Data(repeating: UInt8(index + 1), count: 32)
-                _ = try await routed.create(.init(inviteID: .init(uuid: UUID()), roomID: room, actorUserID: senderID, operationID: .init(uuid: UUID()), tokenDigest: digest, requestedLifetimeSeconds: 3600, expiresAt: now.addingTimeInterval(3600), maximumApprovedUses: 10, maximumActiveInvitesPerRoom: 20, createdAt: now))
-                requests.append(.init(requestID: .init(uuid: UUID()), applicantUserID: applicant, operationID: .init(uuid: UUID()), tokenDigest: digest, note: nil, createdAt: now, maximumPendingRequestsPerApplicant: 20, maximumPendingRequestsPerInvite: 100))
+                let room = index.isMultiple(of: 2) ? roomID : secondRoom
+                guard case .created(let link) = try await coordinator.create(.init(roomID: room, actorUserID: senderID,
+                    operationID: .init(uuid: UUID()), lifetime: 3600, maximumApprovedUses: 10), deadline: invitationTestDeadline()) else {
+                    throw V2GroupInvitationServiceError.corruptPersistenceState
+                }
+                submissions.append(.init(applicantUserID: applicant, operationID: .init(uuid: UUID()), secret: link.secret, note: nil))
             }
-            let seeded: [(Int, V2GroupJoinSubmissionPersistenceOutcome)] = [(0, try await routed.submit(requests[0])), (1, try await routed.submit(requests[1]))]
-            let concurrent = try await withThrowingTaskGroup(of: (Int, V2GroupJoinSubmissionPersistenceOutcome).self) { group in
-                for (index, request) in requests.enumerated().dropFirst(2) { group.addTask { (index, try await routed.submit(request)) } }
-                var results: [(Int, V2GroupJoinSubmissionPersistenceOutcome)] = []
+            @Sendable func submit(_ input: V2ActorSubmitGroupJoinWire) async throws -> V2ActorGroupJoinSubmissionOutcomeWire {
+                guard case .submission(let value) = try await coordinator.submitBySecret(input, deadline: invitationTestDeadline()) else {
+                    throw V2GroupInvitationServiceError.corruptPersistenceState
+                }
+                return value
+            }
+            let seeded: [(Int, V2ActorGroupJoinSubmissionOutcomeWire)] = [(0, try await submit(submissions[0])), (1, try await submit(submissions[1]))]
+            let concurrent = try await withThrowingTaskGroup(of: (Int, V2ActorGroupJoinSubmissionOutcomeWire).self) { group in
+                for (index, input) in submissions.enumerated().dropFirst(2) { group.addTask { (index, try await submit(input)) } }
+                var results: [(Int, V2ActorGroupJoinSubmissionOutcomeWire)] = []
                 for try await result in group { results.append(result) }
                 return results
             }
             let outcomes = seeded + concurrent
-            let accepted = outcomes.compactMap { index, value -> (Int, V2GroupJoinRequestRecord)? in
+            let accepted = outcomes.compactMap { index, value -> (Int, V2ActorGroupJoinRequestRecordWire)? in
                 if case .submitted(let record) = value { return (index, record) }; return nil
             }
             let limited = outcomes.filter { $0.1 == .rateLimited }
@@ -150,20 +164,24 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(localCount > 0 && remoteCount > 0 && localCount + remoteCount == 20)
             #expect(try await count("im_v2.group_join_quota_intents WHERE phase = 'tracking'", on: sql) == 20)
             let first = try #require(accepted.first), refused = try #require(limited.first)
-            guard case .alreadyPending = try await routed.submit(requests[first.0]) else { Issue.record("Expected alreadyPending during global quota lifecycle"); return }
-            let duplicate = V2GroupJoinSubmissionPersistenceRequest(requestID: .init(uuid: UUID()), applicantUserID: applicant,
-                operationID: .init(uuid: UUID()), tokenDigest: requests[first.0].tokenDigest, note: "duplicate operation",
-                createdAt: now, maximumPendingRequestsPerApplicant: 20, maximumPendingRequestsPerInvite: 100)
-            guard case .alreadyPending(let shared) = try await routed.submit(duplicate) else { Issue.record("Duplicate at full quota must return existing request"); return }
+            guard case .alreadyPending = try await submit(submissions[first.0]) else { Issue.record("Expected alreadyPending during global quota lifecycle"); return }
+            let duplicate = V2ActorSubmitGroupJoinWire(applicantUserID: applicant, operationID: .init(uuid: UUID()),
+                secret: submissions[first.0].secret, note: "duplicate operation")
+            guard case .alreadyPending(let shared) = try await submit(duplicate) else { Issue.record("Duplicate at full quota must return existing request"); return }
             #expect(shared.requestID == first.1.requestID)
-            _ = try await routed.cancel(roomID: first.1.roomID, requestID: first.1.requestID, applicantUserID: applicant, now: now)
-            guard case .cancelled(let replay) = try await routed.submit(duplicate) else { Issue.record("Cancelled duplicate must not create a new request"); return }
+            _ = try await coordinator.cancel(.init(roomID: first.1.roomID, requestID: first.1.requestID, applicantUserID: applicant), deadline: invitationTestDeadline())
+            guard case .cancelled(let replay) = try await submit(duplicate) else { Issue.record("Cancelled duplicate must not create a new request"); return }
             #expect(replay.requestID == first.1.requestID)
-            guard case .submitted = try await routed.submit(requests[refused.0]) else { Issue.record("Expected submitted during global quota lifecycle"); return }
+            guard case .submitted = try await submit(submissions[refused.0]) else { Issue.record("Expected submitted during global quota lifecycle"); return }
             let rejected = accepted[1].1, approved = accepted[2].1
-            guard case .rejected = try await routed.reject(roomID: rejected.roomID, requestID: rejected.requestID, reviewerUserID: senderID, operationID: .init(uuid: UUID()), now: now) else { Issue.record("Expected rejected during global quota lifecycle"); return }
-            let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 100, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
-            guard case .approved = try await routed.approve(roomID: approved.roomID, requestID: approved.requestID, reviewerUserID: senderID, operationID: .init(uuid: UUID()), capacityProfile: profile, eventID: .init(uuid: UUID()), now: now) else { Issue.record("Expected approved during global quota lifecycle"); return }
+            guard case .decided(.rejected) = try await coordinator.decide(.init(roomID: rejected.roomID, requestID: rejected.requestID,
+                reviewerUserID: senderID, operationID: .init(uuid: UUID()), decision: .reject), deadline: invitationTestDeadline()) else {
+                Issue.record("Expected rejected during global quota lifecycle"); return
+            }
+            guard case .decided(.approved) = try await coordinator.decide(.init(roomID: approved.roomID, requestID: approved.requestID,
+                reviewerUserID: senderID, operationID: .init(uuid: UUID()), decision: .approve), deadline: invitationTestDeadline()) else {
+                Issue.record("Expected approved during global quota lifecycle"); return
+            }
             #expect(try await count("im_v2.group_join_quota_intents WHERE phase IN ('held','tracking')", on: sql) == 18)
             let remainingA = try await count("im_v2.group_join_requests WHERE state = 'pending'", on: sql)
             let remainingB = try await count("im_v2.group_join_requests WHERE state = 'pending'", on: secondSQL)
