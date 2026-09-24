@@ -822,6 +822,14 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             }
         }
         guard let anchor else { return nil }
+        if configuration.maximumBatchSize == 1 {
+            // The first inactive room is the only eligible slot. Removing it
+            // through the normal path also returns shared pending capacity.
+            guard let removed = removePending(anchor.id) else { return nil }
+            let batch = [removed]
+            recordDequeued(batch)
+            return batch
+        }
         func compatible(_ item: Pending) -> Bool {
             switch (anchor.granted, item.granted) {
             case (nil, nil): true
