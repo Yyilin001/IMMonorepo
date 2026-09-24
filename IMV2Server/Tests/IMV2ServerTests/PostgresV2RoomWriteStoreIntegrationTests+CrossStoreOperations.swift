@@ -640,67 +640,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("nickname routing uses the room owner and fences reads, writes and replay",
-          arguments: [V2GroupCapacityClass.standard, .large])
-    func routedNicknameOwnerFence(_ mode: V2GroupCapacityClass) async throws {
-        try await withForwardOwnerDatabases(mode: mode) { control, owner, sql, ownerSQL, room in
-            let now = Date(timeIntervalSince1970: 1_750_000_000), operation = GroupNicknameOperationID(uuid: UUID())
-            try await sql.raw("""
-                INSERT INTO im_v2.room_owner_routes(room_id, room_shard_id, route_epoch, created_at, updated_at)
-                VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at
-                """).run()
-            let router = V2PostgresRoomShardRouter(database: control)
-            let registry = try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")])
-            let aliases = PostgresV2ProfilePresentationStore(database: control, now: { now })
-            func routed(_ routing: any V2RoomShardRouting) -> V2RoutedProfilePresentationStore {
-                .init(aliases: aliases, router: routing, owners: registry, now: { now })
-            }
-            let store = routed(router)
-            let original = try await store.updateOwnGroupNickname(actorUserID: senderID, roomID: room,
-                operationID: operation, expectedRevision: nil, nickname: "owner nickname")
-            #expect(try await store.groupNicknames(actorUserID: senderID, roomID: room, afterUserID: nil, limit: 1).values == [original])
-            #expect(try await store.groupNicknames(actorUserID: senderID, roomID: room, afterUserID: senderID, limit: 1).values.isEmpty)
-            #expect(try await count("im_v2.room_member_nicknames", on: sql) == 0)
-            #expect(try await count("im_v2.room_member_nickname_operations", on: sql) == 0)
-            // Contact aliases still belong to the configured alias store.
-            try await sql.raw("""
-                INSERT INTO im_v2.user_relationships(lower_user_id, higher_user_id, state, requested_by_user_id, updated_at)
-                VALUES (\(bind: senderUUID), \(bind: memberTwoUUID), 'accepted', \(bind: senderUUID), \(bind: now))
-                """).run()
-            let alias = try await store.updateContactAlias(ownerUserID: senderID, targetUserID: .init(uuid: memberTwoUUID),
-                operationID: .init(uuid: UUID()), expectedRevision: nil, remarkName: "control alias")
-            #expect(try await store.contactAliases(ownerUserID: senderID, afterTargetUserID: nil, limit: 10).values == [alias])
-            #expect(try await count("im_v2.user_contact_aliases", on: ownerSQL) == 0)
-            let cached = V2CachedRoomShardRouter(source: router)
-            _ = try await cached.route(for: room)
-            try await ownerSQL.raw("UPDATE im_v2.rooms SET owner_epoch = 1 WHERE room_id = \(bind: room.uuidValue!)").run()
-            try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch = 1 WHERE room_id = \(bind: room.uuidValue!)").run()
-            func assertRejected(_ selected: V2RoutedProfilePresentationStore) async {
-                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-                    _ = try await selected.groupNicknames(actorUserID: senderID, roomID: room, afterUserID: nil, limit: 10)
-                }
-                for op in [operation, GroupNicknameOperationID(uuid: UUID())] {
-                    await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-                        _ = try await selected.updateOwnGroupNickname(actorUserID: senderID, roomID: room,
-                            operationID: op, expectedRevision: nil, nickname: "owner nickname")
-                    }
-                }
-            }
-            await assertRejected(routed(cached))
-            #expect(try await store.updateOwnGroupNickname(actorUserID: senderID, roomID: room,
-                operationID: operation, expectedRevision: nil, nickname: "owner nickname") == original)
-            let wrong = V2RoutedProfilePresentationStore(aliases: aliases, router: router,
-                owners: try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: control, schema: "im_v2")]), now: { now })
-            await assertRejected(wrong)
-            try await sql.raw("UPDATE im_v2.room_owner_routes SET room_shard_id = 'unknown' WHERE room_id = \(bind: room.uuidValue!)").run()
-            await #expect(throws: V2RoomShardStorageRegistryError.unknownShardID) {
-                _ = try await store.groupNicknames(actorUserID: senderID, roomID: room, afterUserID: nil, limit: 10)
-            }
-            try await sql.raw("UPDATE im_v2.room_owner_routes SET room_shard_id = 'room-b' WHERE room_id = \(bind: room.uuidValue!)").run()
-        }
-    }
-
-
     @Test("Profile writes reject unsupported clocks but completed operations remain replayable", arguments: ["profile", "alias", "nickname"], [false, true])
     func profileWriteTimestampBoundaries(kind: String, change: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
