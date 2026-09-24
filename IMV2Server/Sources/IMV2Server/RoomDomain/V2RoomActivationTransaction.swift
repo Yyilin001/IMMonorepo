@@ -227,6 +227,12 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
             lifecycle.used = true
         }
         defer { lifecycle.withLock { $0.inUse = false } }
+        if roomIDs.count == 1, timeouts == configuredTimeouts {
+            try await requireSingleOwnerAndActivation(
+                roomID: roomIDs[0], expectedRoutes: expectedRoutes,
+                expectedKinds: expectedKinds, scope: scope)
+            return
+        }
         let orderedRooms = Set(roomIDs).sorted { $0.uuidString < $1.uuidString }
         guard !orderedRooms.isEmpty else { throw V2RoomActivationLeaseError.activationChanged }
         if let expectedRoutes,
@@ -301,6 +307,53 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
             guard let expiresAt = row.expiresAt, expiresAt > observed else {
                 throw V2RoomActivationLeaseError.leaseExpired
             }
+        }
+    }
+
+    /// A primary-key lookup has only one row, so this retains the same room
+    /// and lease lock order without constructing the multi-room lock plan.
+    private func requireSingleOwnerAndActivation(
+        roomID: UUID,
+        expectedRoutes: [UUID: V2RoomShardRoute]?,
+        expectedKinds: [UUID: String]?,
+        scope: V2RoomActivationWriteScope
+    ) async throws {
+        if let expectedRoutes, expectedRoutes[roomID] == nil {
+            throw V2RoomOwnerFenceError.ownerChanged
+        }
+        let room = try await sql.raw("""
+            SELECT room_id, room_shard_id, owner_epoch, room_kind FROM im_v2.rooms
+            WHERE room_id = \(bind: roomID) FOR NO KEY UPDATE
+            """).first(decoding: V2ConfiguredRoomOwnerRow.self)
+        // Preserve the collection path's error priority: kind, presence and
+        // selected route, then the immutable token and current lease.
+        if let room, let kind = expectedKinds?[roomID], kind != room.kind {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        guard let room, room.roomID == roomID else {
+            if expectedRoutes != nil { throw V2RoomOwnerFenceError.ownerChanged }
+            throw V2RoomActivationLeaseError.roomNotFound
+        }
+        if let route = expectedRoutes?[roomID],
+           (route.shardID != room.shardID || route.epoch != room.epoch) {
+            throw V2RoomOwnerFenceError.ownerChanged
+        }
+        let token = try scope.token(for: roomID)
+        guard room.shardID == token.owner.shardID,
+              room.epoch == token.owner.epoch else {
+            throw V2RoomActivationLeaseError.ownerChanged
+        }
+        let lease = try await sql.raw("""
+            SELECT activation_epoch, owner_shard_id, owner_epoch, host_id, host_incarnation_id, expires_at
+            FROM im_v2.room_activation_leases WHERE room_id = \(bind: roomID) FOR UPDATE
+            """).first(decoding: V2RoomActivationPersistenceRow.self)
+        // Observe the database clock only after both locks were acquired.
+        let observed = try await v2RoomActivationDatabaseClock(sql: sql)
+        guard let lease, lease.matches(token) else {
+            throw V2RoomActivationLeaseError.activationChanged
+        }
+        guard let expiresAt = lease.expiresAt, expiresAt > observed else {
+            throw V2RoomActivationLeaseError.leaseExpired
         }
     }
 
