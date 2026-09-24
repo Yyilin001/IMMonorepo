@@ -309,6 +309,82 @@ struct V2RoomClusterBridgeTests {
         try await fixture.system.shutdown().wait()
     }
 
+    @Test("cancelled caller leaves a dispatched inbound operation tracked through late completion")
+    func cancelledDispatchedCallFinishesPhysically() async throws {
+        let gate = RestoreGate()
+        let fixture = try await Fixture(executeGate: gate)
+        let caller = V2RoomClusterClient(system: fixture.system, signer: fixture.client,
+                                         trust: fixture.trust, limits: fixture.limits,
+                                         configuration: fixture.configuration)
+        var inFlight: Task<V2RoomResponse, any Error>?
+        var exerciseError: (any Error)?
+        do {
+            guard case .ready(let token) = try await fixture.host.activate(
+                roomID: fixture.room, owner: fixture.owner, deadline: .now + .seconds(3)
+            ) else {
+                Issue.record("expected ready")
+                throw V2ActorAuthenticationError.invalidConfiguration
+            }
+            try await caller.register(.init(
+                identity: fixture.identity, endpointID: fixture.endpoint.id,
+                address: "127.0.0.1", port: fixture.port,
+                accessibleShardIDs: ["allowed"], availableRooms: 2, isHealthy: true
+            ))
+            guard try await caller.lookup(token, deadline: .now + .seconds(3)) else {
+                Issue.record("expected physical room lookup")
+                throw V2ActorAuthenticationError.invalidConfiguration
+            }
+            let user = UserID(uuid: UUID())
+            let request = V2RoomRequest.messaging(.send(.init(
+                roomID: fixture.room, actorUserID: user,
+                clientMessageID: ClientMessageID(uuid: UUID()), text: "late-completion",
+                media: [], mentions: [], entities: [], replyTo: nil
+            )))
+            let call = Task {
+                try await caller.invoke(token, request: request, principal: .user(user),
+                                        deadline: .now + .seconds(3))
+            }
+            inFlight = call
+            try await gate.waitForEntry()
+            #expect(await fixture.inbound.inFlightRequestCount() == 1)
+            #expect(await caller.dispatchedCallCount() == 1)
+            #expect(await fixture.executionCount.snapshot() == 0)
+            call.cancel()
+            do {
+                _ = try await call.value
+                Issue.record("cancelled dispatched write returned success")
+            } catch {
+                #expect(error as? V2RoomCallFailure == .outcomeUnknown)
+            }
+            #expect(await caller.dispatchedCallCount() == 1)
+            #expect(await fixture.executionCount.snapshot() == 0)
+            #expect(!(await caller.quiesce(deadline: .now + .milliseconds(30))))
+            await gate.open()
+            try await waitUntil { await caller.dispatchedCallCount() == 0 }
+            #expect(await fixture.executionCount.snapshot() == 1)
+        } catch {
+            exerciseError = error
+        }
+
+        // Even a failure before gate entry must let a late inbound arrival
+        // finish before stopping the client and shutting down ClusterSystem.
+        await gate.openAndRemainOpen()
+        if let inFlight {
+            inFlight.cancel()
+            _ = try? await inFlight.value
+        }
+        let clientDrained = await caller.quiesce(deadline: .now + .seconds(3))
+        let hostDrained = await fixture.host.drain(deadline: .now + .seconds(3))
+        await fixture.inbound.stop()
+        var shutdownError: (any Error)?
+        do { try await fixture.system.shutdown().wait() }
+        catch { shutdownError = error }
+        if let exerciseError { throw exerciseError }
+        if let shutdownError { throw shutdownError }
+        #expect(clientDrained)
+        #expect(hostDrained.completed)
+    }
+
     @Test("replacement preserves a dispatched old-incarnation signed reply until completion")
     func replacementDrainsOldRPC() async throws {
         let gate = RestoreGate()
@@ -376,6 +452,7 @@ struct V2RoomClusterBridgeTests {
         let coordinator: V2ActorSigningIdentity
         let trust: V2ActorTrustStore
         let generation = UUID()
+        let executionCount: ExecutionCount
 
         init(restoreGate: RestoreGate? = nil, executeGate: RestoreGate? = nil,
              invalidationGate: RestoreGate? = nil,
@@ -408,6 +485,8 @@ struct V2RoomClusterBridgeTests {
                 maximumConcurrentReservations: 1,
                 maximumResolveAttempts: maximumResolveAttempts
             )
+            let count = ExecutionCount()
+            executionCount = count
             host = .init(
                 identity: identity, leaseStore: LeaseStore(), configuration: configuration,
                 budget: V2RoomCommandBudget(configuration: configuration), classify: { _ in .barrier },
@@ -415,6 +494,7 @@ struct V2RoomClusterBridgeTests {
                     .init(restore: { _ in if let restoreGate { await restoreGate.wait() } },
                           execute: { turn in
                               if let executeGate { await executeGate.wait() }
+                              await count.record()
                               return .committed(turn.items.map { _ in .recovery(.failure(.invalidRequest)) })
                           },
                           invalidateReservation: { _ in
@@ -500,10 +580,12 @@ struct V2RoomClusterBridgeTests {
 
     private actor RestoreGate {
         private var entered = false
+        private var remainOpen = false
         private var continuation: CheckedContinuation<Void, Never>?
 
         func wait() async {
             entered = true
+            if remainOpen { return }
             await withCheckedContinuation { continuation = $0 }
         }
 
@@ -516,5 +598,17 @@ struct V2RoomClusterBridgeTests {
         }
 
         func open() { continuation?.resume(); continuation = nil }
+
+        func openAndRemainOpen() {
+            remainOpen = true
+            open()
+        }
+    }
+
+    private actor ExecutionCount {
+        private var value = 0
+
+        func record() { value += 1 }
+        func snapshot() -> Int { value }
     }
 }

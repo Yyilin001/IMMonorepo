@@ -561,7 +561,6 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
                     ))
                     return
                 }
-                let operationTask = Task { try await operation() }
                 let timer = Task { [weak self] in
                     do { try await ContinuousClock().sleep(until: deadline) }
                     catch { return }
@@ -569,9 +568,14 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
                 }
                 dispatchedCalls[id] = .init(host: host, continuation: continuation, timer: timer,
                                              timeoutFailure: failure)
-                Task { [weak self] in
-                    let result = await operationTask.result
-                    await self?.completeDispatch(id: id, result: result)
+                // The physical call is registered before it can start. Its
+                // single task owns completion and retains this client until
+                // the operation really returns, even after the caller leaves.
+                Task { [self] in
+                    let result: Result<TransportReply, any Error>
+                    do { result = .success(try await operation()) }
+                    catch { result = .failure(error) }
+                    completeDispatch(id: id, result: result)
                 }
             }
         } onCancel: {
