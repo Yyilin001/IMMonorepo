@@ -30,10 +30,18 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let now = Date(timeIntervalSince1970: 1_750_000_000), applicant = UserID(uuid: UUID()), inviteID = GroupInviteID(uuid: UUID())
             try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
             try await sql.raw("INSERT INTO im_v2.public_user_profiles(user_id,public_handle,display_name,created_at,updated_at) VALUES (\(bind: applicant.uuidValue!), 'crash_quota', 'Applicant', \(bind: now), \(bind: now))").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b',0,\(bind: now),\(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
-            let routed = V2RoutedGroupInvitationStore(controlDatabase: control, router: V2PostgresRoomShardRouter(database: control), owners: try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")]))
-            let digest = Data(repeating: 35, count: 32), requestID = GroupJoinRequestID(uuid: UUID()), operation = GroupJoinRequestOperationID(uuid: UUID())
-            _ = try await routed.create(.init(inviteID: inviteID, roomID: room, actorUserID: senderID, operationID: .init(uuid: UUID()), tokenDigest: digest, requestedLifetimeSeconds: 3600, expiresAt: now.addingTimeInterval(3600), maximumApprovedUses: 10, maximumActiveInvitesPerRoom: 20, createdAt: now))
+            // Production path: the control coordinator with a room turn on the owner.
+            let clock = TestSequenceClock([now])
+            let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 100, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
+            let issuer = try V2GroupInviteSecretIssuer(rawKey: Data(repeating: 35, count: 32))
+            let coordinator = V2ActorInvitationCoordinator(controlDatabase: control,
+                room: invitationRoomPort(control: control, owner: owner, shardID: "room-b", capacityProfile: profile, now: { clock.now() }),
+                secretIssuer: issuer, policy: try V2GroupInvitationPolicy(maximumPendingRequestsPerApplicant: 1, maximumPendingRequestsPerInvite: 1),
+                makeUUID: { inviteID.uuidValue! }, now: { clock.now() })
+            let requestID = GroupJoinRequestID(uuid: UUID()), operation = GroupJoinRequestOperationID(uuid: UUID())
+            guard case .created(let link) = try await coordinator.create(.init(roomID: room, actorUserID: senderID, operationID: .init(uuid: UUID()),
+                lifetime: 3600, maximumApprovedUses: 10), deadline: invitationTestDeadline()) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+            let digest = issuer.digest(try link.secret.toDomain())
             let process = Process(), host = URL(fileURLWithPath: CommandLine.arguments[0])
             let binary = try #require(Bundle(for: GroupJoinQuotaCrashBundleMarker.self).executableURL)
             try #require(host.lastPathComponent == "swiftpm-testing-helper")
@@ -41,7 +49,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             process.arguments = ["--test-bundle-path", binary.path, binary.path, "--testing-library", "swift-testing", "--filter", "groupJoinQuotaCrashChild"]
             var environment = ProcessInfo.processInfo.environment
             environment["IMV2_JOIN_QUOTA_CRASH_STAGE"] = stage
-            let fields = ["room": room.rawValue, "invite": inviteID.rawValue, "applicant": applicant.rawValue, "request": requestID.rawValue, "operation": operation.rawValue]
+            let fields = ["room": room.rawValue, "invite": inviteID.rawValue, "applicant": applicant.rawValue, "request": requestID.rawValue,
+                          "operation": operation.rawValue, "digest": digest.base64EncodedString()]
             environment["IMV2_JOIN_QUOTA_CRASH_INPUT"] = String(decoding: try JSONSerialization.data(withJSONObject: fields), as: UTF8.self)
             process.environment = environment
             process.standardOutput = FileHandle.nullDevice
@@ -56,14 +65,20 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.group_join_quota_intents WHERE phase IN ('held','tracking')", on: sql) == 1)
             #expect(try await count("im_v2.group_join_requests", on: ownerSQL) == (stage == "reserved" ? 0 : 1))
             // A new process owner uses only durable rows, not the child's tasks or responses.
-            let worker = V2GroupJoinQuotaRecoveryWorker(controlDatabase: control, invitations: routed, now: { now.addingTimeInterval(61) })
+            clock.set([now.addingTimeInterval(61)])
+            let worker = V2GroupJoinQuotaRecoveryWorker(controlDatabase: control, coordinator: coordinator,
+                deadline: invitationTestDeadline, now: { now.addingTimeInterval(61) })
             let report = try await worker.runOnce(limit: 8)
             #expect(report.attempted == 1 && report.reconciled == 1 && report.deferred == 0)
             #expect(try await worker.runOnce(limit: 8).attempted == 0)
             #expect(try await count("im_v2.group_join_requests", on: ownerSQL) == 1)
             #expect(try await count("im_v2.group_join_submission_receipts", on: ownerSQL) == 1)
             #expect(try await count("im_v2.group_join_quota_intents WHERE phase IN ('held','tracking')", on: sql) == (["terminal", "approved", "rejected"].contains(stage) ? 0 : 1))
-            let replay = try await routed.submit(.init(requestID: requestID, applicantUserID: applicant, operationID: operation, tokenDigest: digest, note: nil, createdAt: now.addingTimeInterval(62), maximumPendingRequestsPerApplicant: 1, maximumPendingRequestsPerInvite: 1))
+            // Retrying the same operation replays its settled outcome, including
+            // terminal intents that must cross the actor wire.
+            clock.set([now.addingTimeInterval(62)])
+            guard case .submission(let replay) = try await coordinator.submitBySecret(.init(applicantUserID: applicant, operationID: operation,
+                secret: link.secret, note: nil), deadline: invitationTestDeadline()) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
             switch replay {
             case .cancelled: #expect(stage == "terminal")
             case .alreadyMember: #expect(stage == "approved")
@@ -90,20 +105,33 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let applicant = try UserID(#require(fields["applicant"])), requestID = try GroupJoinRequestID(#require(fields["request"]))
             let operation = try GroupJoinRequestOperationID(#require(fields["operation"])), now = Date(timeIntervalSince1970: 1_750_000_000)
             let quota = PostgresV2GroupJoinQuotaStore(database: control)
-            let request = V2GroupJoinSubmissionPersistenceRequest(requestID: requestID, applicantUserID: applicant, operationID: operation, tokenDigest: Data(repeating: 35, count: 32), note: nil, createdAt: now, maximumPendingRequestsPerApplicant: 1, maximumPendingRequestsPerInvite: 1)
+            let encodedDigest = try #require(fields["digest"])
+            let digest = try #require(Data(base64Encoded: encodedDigest))
+            let request = V2GroupJoinSubmissionPersistenceRequest(requestID: requestID, applicantUserID: applicant, operationID: operation, tokenDigest: digest, note: nil, createdAt: now, maximumPendingRequestsPerApplicant: 1, maximumPendingRequestsPerInvite: 1)
             guard case .reserved(let intent) = try await quota.reserve(request, roomID: room, inviteID: invite, now: now) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
             if stage != "reserved" {
-                let store = PostgresV2GroupInvitationStore(database: owner, identities: PostgresV2GroupInvitationIdentityReader(database: control), scope: .init(roomID: room.uuidValue!, route: try .init(shardID: "room-b", epoch: 0), inviteID: invite.uuidValue!))
-                let receipt = try await store.applyReservedSubmission(intent, now: now)
+                // The owner half runs as the room actor executes it; the process
+                // then dies before the control side finishes its bookkeeping.
+                let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 100, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
+                let port = invitationRoomPort(control: control, owner: owner, shardID: "room-b", capacityProfile: profile, now: { now })
+                guard case .reservedSubmission(let applied) = try await port.command(.submitReserved(.init(domain: intent)), invitationTestDeadline()) else {
+                    throw V2GroupInvitationServiceError.corruptPersistenceState
+                }
+                let receipt = try applied.toDomain()
                 if ["confirmed", "terminal", "approved", "rejected"].contains(stage) {
                     try await quota.resolve(intent, outcome: receipt.outcome, targetRequestID: receipt.targetRequestID, now: now)
                 }
-                if stage == "terminal" { _ = try await store.cancel(roomID: room, requestID: requestID, applicantUserID: applicant, now: now) }
+                if stage == "terminal" {
+                    guard case .cancelledRecord = try await port.command(.cancel(.init(roomID: room, requestID: requestID, applicantUserID: applicant)), invitationTestDeadline()) else {
+                        throw V2GroupInvitationServiceError.corruptPersistenceState
+                    }
+                }
                 if stage == "approved" {
-                    let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 100, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
-                    guard case .approved = try await store.approve(roomID: room, requestID: requestID, reviewerUserID: senderID, operationID: .init(uuid: UUID()), capacityProfile: profile, eventID: .init(uuid: UUID()), now: now) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+                    guard case .approval(.approved) = try await port.command(.decide(.init(roomID: room, requestID: requestID, reviewerUserID: senderID,
+                        operationID: .init(uuid: UUID()), decision: .approve)), invitationTestDeadline()) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
                 } else if stage == "rejected" {
-                    guard case .rejected = try await store.reject(roomID: room, requestID: requestID, reviewerUserID: senderID, operationID: .init(uuid: UUID()), now: now) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+                    guard case .rejection(.rejected) = try await port.command(.decide(.init(roomID: room, requestID: requestID, reviewerUserID: senderID,
+                        operationID: .init(uuid: UUID()), decision: .reject)), invitationTestDeadline()) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
                 }
             }
             kill(getpid(), SIGKILL)
