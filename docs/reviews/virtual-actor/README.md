@@ -1,42 +1,42 @@
 # Virtual Actor 实施与验证工件
 
-本目录保存执行计划的清单和可复现证据，不另立“当前系统状态”入口。整体目标仍是 [完整 Room Virtual Actor](../../../IMV2/docs/00-foundation/virtual-actor-parallel-plan.md)；只完成公共类型或通信探针不能标记实施完成。
+2026-09-24 按用户要求先完成功能、暂缓性能调优，**Room Virtual Actor 本轮功能落地已完成**。业务入口、生命周期与房间写者已接入；[#19 单 owner 故障批查询](g5-owner-fault-functional-evidence.md)和[最新冻结源码的完整 Linux/Vapor 5 回归](g5-linux-regression-evidence.md)通过。首次完整回归曾出现未定位的测试进程停滞，同产物隔离复现及第二次完整回归均通过；原失败与诊断保留，不称根因已修复。
 
-2026-09-24 用户调整了当前优先级：**先暂缓性能调优和相对性能验收，收口功能落地**。[#19 单 owner 故障下两类批查询的真实部分成功/恢复验证](g5-owner-fault-functional-evidence.md)已通过：健康项保留、失败项可重试，重启后恢复，无新增持久消息。功能接线审查未发现新的已确认缺口；本轮剩余工作是当前集成源码的完整 Linux/Vapor 5 回归和最终文档核对。下表仍保留原计划含性能项的完整 Gate 状态；CPU 预算超限保持为失败，未运行场景保持待验，不阻塞本轮功能收口。后续本机 JSON 排序优化 `224b3943` 只保存在独立分支，未集成、未验证，不作为当前候选的一部分。
+业务基线固定为 `f1cdd78d6a21bf0ae23da627c0710c65115236aa`（Vapor 5 beta.2 / Swift 6.4）；原工作目录未提交的 Distributed Actor 改动不参与。子代理统一 GPT-6 Sol / High。整体设计见[并行实施方案](../../../IMV2/docs/00-foundation/virtual-actor-parallel-plan.md)，当前行为以[房间 Virtual Actor 合同](../room-virtual-actor-contract.md)为准。
 
-业务基线固定为 f1cdd78d6a21bf0ae23da627c0710c65115236aa，计划提交为 8839f6709e961853d377a2b60ba7231c325fc6b4。原工作目录的未提交 Distributed Actor 改动不参与本次实施。子代理统一 GPT-6 Sol / High。
+## 功能实现与验证
 
-## 执行状态
+| 范围 | 当前结果与证据 |
+| --- | --- |
+| Swift / Vapor / DistributedCluster 兼容 | [固定 revision 的 Linux Release 双进程探针及 ServerApp 构建](p0-evidence.md)、[有界传输与真实 mTLS](p0-bounded-transport-evidence.md)通过；生产源码 `2772c846` 的七产品 Linux Release 也已通过，见[构建记录](g5-same-owner-performance.md#allocation-candidate-2772c846) |
+| 逻辑寻址与公共契约 | Contracts、Runtime、Cluster、Application 及 typed clients 已接线；业务使用 RoomID，由 Directory/RoomRef 处理物理位置。见[当前合同](../room-virtual-actor-contract.md)、[能力目录](capability-catalog.md)与[本机调用边界](r3-local-capability-evidence.md) |
+| 激活、恢复、回收与接管 | [真实 Host/PG 生命周期](g2-host-pg-lifecycle-evidence.md)、[双 Host 分区及旧实例恢复](g6-multihost-evidence.md)、[慢事务和队列排空](g5-host-pg-drain-evidence.md)、[实际应用 SIGTERM](g2-real-app-sigterm-evidence.md)通过 |
+| 远端调用与领域接线 | [caller-only Gateway → 独立 Host](g3-caller-only-gateway-evidence.md)、[远程共享合批](g3-remote-batch-evidence.md)、[Account/Operator Linux 应用栈](i1-application-smoke-harness.md)通过 |
+| 房间写者与后台工作 | [写者台账](writer-ledger.md)已逐项登记入口与持久边界；[维护/压缩竞态](d6-maintenance-evidence.md)、[取消与 retention/review/import 接管](g2-pg-cancellation-maintenance-evidence.md)通过。最新只读接线复核未发现新的已确认缺口 |
+| 故障与持久结果 | [成功 COMMIT 丢 ACK](g5-host-shared-ack-loss-evidence.md)、[数据库链路和真实停启](g5-database-edge-evidence.md)、[跨入口撤权](g5-cross-entry-disable-evidence.md)、[#19 部分 owner 查询和恢复](g5-owner-fault-functional-evidence.md)均有直接证据；其余分层边界见[故障入口](v1-fault-harness.md)及[审查处置](final-coverage-audit.md) |
+| 当前源码完整 Linux 回归 | 冻结 `ee142084` 的第二次无过滤运行通过：**1529 tests / 264 suites**，16 个必需 suite / 41 个指定 case 均实际启动并通过，vendor 与 7 项后置检查通过，退出及清理均为 0。见 [Linux 回归记录](g5-linux-regression-evidence.md)；首次停滞与所有历史失败仍保留 |
 
-| Gate | 当前证据 | 状态 |
-| --- | --- | --- |
-| G0：Swift 6.4 / Vapor 5 / DistributedCluster 兼容 | [固定 revision 的 Linux Release 双进程探针及 ServerApp 构建通过](p0-evidence.md)；[vendor 帧上限与真实 mTLS 超限头重跑通过](p0-bounded-transport-evidence.md)，其他依赖 pin 不变 | 已通过兼容性探针 |
-| G1：可编译完整公共契约与文件所有权 | 完整 wire/领域门面、Runtime/Cluster/Application 已编译并接线；[当前合同](../room-virtual-actor-contract.md)与文件归属已登记；[hot 与 same-owner 预算均已由三轮 main 实测冻结](v1-baseline-protocol.md)，mixed/cold/fault 三类预算仍待校准；same-owner 候选尚未验收 | 未完成 |
-| G2：真实双 host + PostgreSQL 激活/接管/排空 | [真实 SQL activation fence 与 Host 单元测试](r1-d1-progress-evidence.md)，以及[独立进程被杀后接管探针](g4-business-probe-evidence.md)通过；[双 Host 原生进程竞争与旧实例恢复](g6-multihost-evidence.md)也通过；Linux 双 Host、仅 Actor 网络分区及旧 token 拒绝也已通过；[真实 Host/PG 生命周期](g2-host-pg-lifecycle-evidence.md)与[慢事务排空](g5-host-pg-drain-evidence.md)通过；[真实 Linux 应用 busy SIGTERM](g2-real-app-sigterm-evidence.md)在最终版本通过：原 Gateway 保留、唯一持久效果、epoch 接管；修正探针期限与只读定位后，2 次重放在测试端共约 4 秒完成，零 gossip 解码/连接上限错误 | 慢事务与接管通过；满队列及 pending batch 排空真实 PG 原生 2/2、[冻结源码 Linux required run](g5-linux-regression-evidence.md)同 suite 2/2 通过，信号与 Host 状态证据仍分层 |
-| G3：真实远端 send/read 与领域合同 | [实际 Factory 与共享合批的 PostgreSQL 局部验证](i1-composition-progress-evidence.md)，以及[真实远端发送、日志、订阅与恢复](g4-business-probe-evidence.md)通过；[caller-only Gateway → 独立 Host 的 Linux TCP/HTTP 闭环](g3-caller-only-gateway-evidence.md)已通过；[独立 Host 的真实远程合批](g3-remote-batch-evidence.md)已通过：8 请求合为 4 原子批，序号/幂等/非成员拒绝同时验证；相对性能仍待验收 | 未完成 |
-| G4：全部房间写者、查询和后台迁移 | Gateway 与 Account 生产入口已接入；[维护与投影压缩竞态验证](d6-maintenance-evidence.md)通过；[完整 Linux 应用协议及 Account 房间 HTTP 闭环](i1-application-smoke-harness.md)已通过；[Host 取消与 retention/review/import 临界接管](g2-pg-cancellation-maintenance-evidence.md)原生真实 PG 4/4、[冻结源码 Linux required run](g5-linux-regression-evidence.md)同 suite 4/4 通过；[#19 单 owner 故障批查询](g5-owner-fault-functional-evidence.md)已通过 | 未完成 |
-| G5：故障矩阵、Linux checks、相对性能 | [Linux 客户端先启动与 Host 重启恢复](g5-linux-functional-evidence.md)通过；[旧冻结源码完整 Linux required run](g5-linux-regression-evidence.md)的 suite/cleanup 退出 0、离线重校验 1515 tests / 264 suites 通过，原 metadata 的解析失败仍保留；完整[故障矩阵](v1-fault-harness.md)仍在收口；[真实 Host 共享提交 ACK 丢失](g5-host-shared-ack-loss-evidence.md)和[独立数据库链路故障与真实 PG 重启恢复](g5-database-edge-evidence.md)已有 Linux 证据；[cached-local 候选正式 hot 六轮](g5-hot-performance-regression.md#cached-local-candidate-fb8a1047)按原 freeze 全部通过，历史 CPU 超限证据保留 | hot 已通过；[same-owner 两候选 CPU 超限](g5-same-owner-performance.md)，相对性能暂缓；#19 功能已通过，当前源码最终完整 Linux required run 待执行 |
+单项通过的验证层级以各证据文件为准，不将进程内测试、真实 PostgreSQL、独立进程和 Linux 应用栈混为同一等级。所有脚本只操作本次显式可丢弃资源；用户既有服务及全局 Docker context 保持不变。
 
-此前[事务上下文 SQL 复用](g5-sql-context-evidence.md)已集成并通过 10 项原生真实 PostgreSQL 聚焦测试，覆盖 hot 的实际单条发送路径。冻结候选 `812af24a` 的七产品 Linux Release 构建通过；正式 hot 复测 SQL 降至 22.109 calls/ACK，但 CPU 2.218297 ms/ACK 仍超过冻结 2.133047，门禁在第 2 轮后停止。上述完整 Linux 成功记录属于 `d5623259`；新生产源码的最终完整 Linux 验证仍待执行。
+## 暂缓的性能验收
 
-随后[仅限本机的缓存调用](r3-local-capability-evidence.md#仅限本机的缓存调用)已集成：可重试的 `RoomRef.call` 在 exact local capability 有效时省略重复 lookup，保持每次共享寻址的 owner 读取、严格等待者及远端确认。原生 Runtime 58/58、Cluster 35/35 通过，描述符替换、过期和逐出都不能让本机 hint 静默转成远端派发。冻结候选 `fb8a1047` 的七产品 Linux Release 已通过；[正式 hot 六轮](g5-hot-performance-regression.md#cached-local-candidate-fb8a1047)按原 freeze 以 main/candidate/candidate/main/main/candidate 顺序全部通过，每轮 52,500 ACK 与持久效果一致，零业务失败，驱动与最终 assessor 退出 0，私有资源全部清理。候选 CPU 为 2.110377 / 2.111085 / 2.093721 ms/ACK，距离 2.133047 上限的最小余量仅约 1%；main 吞吐 CV 为 0.0。末轮一个稳态 ACK 在 cooldown 到达，全程没有丢消息。same-owner 三轮 main 预算随后冻结，但[首候选 CPU 超限约 6.86%](g5-same-owner-performance.md)，该场比较已停止；四类相对性能、#19 与当前源码最终完整 Linux required run 仍未完成。hot 结果不代表生产 SLO。
+原方案 G1–G5 中包含性能预算和相对容量要求，**这些原始 Gate 尚未整体完成**。当前用户要求先完成功能，不把性能结果改写为通过，也不据此承诺生产 SLO。
 
-后续[减少临时分配的候选 `2772c846`](g5-same-owner-performance.md#allocation-candidate-2772c846)已冻结：单房间围栏、在途调用任务和单条出队三处改动的原生/真实 PG 回归合计 139/139、零跳过。首轮外置计数器误读参数化 Cluster 汇总的失败工件保留，前两套只做日志重验，其余 12 组另场运行。该候选的七产品 Linux Release 随后已通过，产物哈希与干净源码均独立复核；该候选随后在 same-owner 首轮候选样本再次触发 CPU 上限（1.640582 > 1.562289 ms/ACK），业务及其余指标通过；比较已停止，hot 未启动。新源码的 hot/same-owner 六轮、其余性能场景和最终完整 Linux checks 仍待完成，旧 `fb8a1047` 的 hot 通过不转记到新源码。
-
-## 核对出的基线差异
-
-- 数据 ownerEpoch 在 canonical schema 和 V2RoomShardRoute 中允许零，不能复用从一开始的 activationEpoch 类型。公共契约保持该区别。
-- 逻辑 shardID 沿用现有 trim 后非空的规则，不为内部 wire 类型增加新的字符限制。
-- DistributedCluster 的最新发布 tag 不能直接视为兼容当前依赖；实际 resolver 结果决定固定提交，不能降级 Vapor/ServiceLifecycle 绕过。
-- 早期 Linux 工作在显式 colima-imv2-vapor5 context 的任务资源中执行；容量校准与后续验证使用任务专用 colima-imv2-va-capacity VM。全局 context 及两个既有 VM 的用户服务保持不变，宿主 bind scratch/cache 复用依赖。
-
-各子包的实际命令、退出码与工件在交付后登记。未执行、进行中和已通过必须明确区分，不能用宿主构建替代 Linux Release 双进程证据。
-
-已完成的 [R2 FIFO/预约调度器测试](r2-scheduling-evidence.md)是局部运行时证据，不能替代 G2 的真实激活/接管验收。
+- [基线协议](v1-baseline-protocol.md)：hot 与 same-owner 预算已由三轮 main 实测冻结；mixed/cold/fault 的正式预算和比较仍待执行。
+- [hot 历史记录](g5-hot-performance-regression.md#cached-local-candidate-fb8a1047)：`fb8a1047` 六轮通过仅属于该冻结候选，不转记到当前 `2772c846`。
+- [same-owner 历史记录](g5-same-owner-performance.md)：两个候选的 CPU 超限仍记为失败；原阈值、工件和未执行轮次保持不变。
+- 当前源码的后续相对比较和调优暂缓；本机 JSON 排序优化 `224b3943` 仅保存在独立分支，未集成、未验证。
 
 ## 并行开发输入
 
-- [能力与完整方法签名目录](capability-catalog.md)：34 行能力分组与 219 个 DTO 的所属模块/字段记录；不是全部已经远程化。
-- [房间写者台账](writer-ledger.md)：30 个 writer 分组、38 个源符号/表的静态证据。逐项迁移后仍需补真实 fence 和运行测试证据。
-- [文件归属](file-ownership.md)：395 个既有与实施文件的唯一 owner；混合文件须先由 C0 抽取，再转交领域包。
-- 静态一致性检查：python3 scripts/check_v2_virtual_actor_inventory.py。该脚本检查文件、符号和清单一致性，不证明没有其他 writer 或已具备运行时覆盖。
+- [能力与方法签名目录](capability-catalog.md)：领域能力及 DTO 的所属模块。
+- [房间写者台账](writer-ledger.md)：W01–W30 的生产入口、fence 与合法控制域/投影例外。
+- [文件归属](file-ownership.md)：并行工作包的编辑边界。
+- 静态检查 `python3 scripts/check_v2_virtual_actor_inventory.py` 核对文件、符号及清单一致性；它不替代运行时证据。
+
+## 基线约束
+
+- 数据 ownerEpoch 在 canonical schema 和 route 中允许零，与从一开始的 activationEpoch 分开建模。
+- 逻辑 shardID 沿用 trim 后非空的规则；不额外收紧业务身份。
+- DistributedCluster 使用已验证的固定 revision，不靠降低 Vapor/ServiceLifecycle 版本绕过兼容问题。
+- Actor 换 Host 不等于房间迁移数据库；PostgreSQL 继续决定数据 owner、写入资格和持久结果。

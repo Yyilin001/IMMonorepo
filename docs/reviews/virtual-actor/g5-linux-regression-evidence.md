@@ -2,7 +2,53 @@
 
 这些记录来自固定 checkout、只读源码挂载、Swift 6.4 Jammy 与三个独立 PostgreSQL 16 实例。使用本任务专属 `colima-imv2-va-capacity` 的随机隔离资源，未使用或重建用户原有服务。客户端 Apple 平台代码未改，不把其他线程的原生测试日志纳入本记录。
 
-后续[事务上下文 SQL 复用](g5-sql-context-evidence.md)及[仅限本机缓存调用](r3-local-capability-evidence.md#仅限本机的缓存调用)已进入 `fb8a1047` 的完整 Linux 运行。该轮因一项排空测试的观察时点断言失败而退出 1，记录如下；最终全量通过仍待取得。下面 `d5623259` 的成功记录保留，不把它当成新 SQL 或缓存调用改动已通过全量验证。
+当前功能冻结源码 `ee142084` 已在第二次完整无过滤运行中通过。首次测试进程停滞、此前断言/脚本失败及旧源码成功记录均按原时点保留；不能混用不同运行拼出通过结论。按用户要求，相对性能验收继续暂缓。
+
+## 当前功能冻结源码的完整通过记录
+
+源码 `ee14208495e269f75b28decda66b2ed8d574a195` 的第二次完整运行位于 `/Users/yyl/.codex/virtual-actor-builds/final-linux-functional-closeout-ee142084-run02/`。使用原 `run-final-linux-gate-allocation.py`（SHA-256 `91e26ff39ce7eba211d42b6f04fe19ae9a15c3b5871cd45a0349f63572ce9dab`）、同一冻结源码和新的私有 Compose 项目 `imv2-va-final-functional-ee142084-r2`，没有过滤测试，也没有修改生产代码、测试断言或依赖来绕过首次停滞。
+
+| 测试目标 | 同一次 Linux 运行的最终通过汇总 |
+| --- | ---: |
+| Core | 129 tests / 41 suites |
+| Server | 1283 tests / 204 suites |
+| ActorRuntime | 58 tests / 5 suites |
+| ActorContracts | 20 tests / 8 suites |
+| ActorCluster | 36 tests / 5 suites |
+| ActorApplication | 3 tests / 1 suite |
+| 合计 | **1529 tests / 264 suites** |
+
+**16/16 个必需 suite、41/41 个指定 case** 均有实际 started/passed 事件，包含新增单房间 fence、单条出队、真实完成追踪和修正后的本机排空用例。PostgresNIO vendor 校验以及 protobuf、local environment、schema readiness、Prometheus、runtime env examples、文档链接、文档结构七项后置检查均通过。驱动、测试、配置解析、日志收集和资源清理退出码均为 **0**。
+
+原工作树始终干净，HEAD 保持指定 SHA，`Package.resolved` SHA-256 保持 `3af1e16190f46bdd8fad3de86c6b386dc196443291463355bf36edb62b7fd15c`。根集成另行读取 metadata/gate/有效 Compose，核对无过滤、全部精确用例与完整汇总，并独立检查项目容器、网络、卷均为空。最终交付在该冻结之上只同步验证和状态文档；生产代码、测试、脚本及依赖不变。
+
+首次停滞的回执序号用例在本次完整运行中十个参数全部完成，整个 suite 约 0.001 秒通过。该结果关闭了当前源码完整回归的缺口；**首次停滞的根因仍未确定**，同产物的隔离复现和本轮通过不能解释其原因，原始诊断仍在下节保留。按用户调整后的范围，本轮功能收口完成；原方案中性能相关 Gate 仍暂缓，不宣告生产容量或 SLO。
+
+| 工件 | SHA-256 |
+| --- | --- |
+| `metadata.json` | `9cc3d5c50d21a98fa299cf4b895e7a8b1f1c7eac32653067abb90534416f26e5` |
+| `suite.log` | `eb723609a2bfa96cff89fca800ef10b122e92816b921c7cb9626fbbbb26d1c62` |
+| `suite-gate.json` | `62546dd1b9ee78bb8b2d959957f8e3bbdd166b49ce1f67ebda0f98f92c7b9497` |
+| `effective-compose.json` | `18b67243f1ad562615238d93762256ebe8753c2df2c3f8545026bf979a0a5f28` |
+
+## 功能收口首次全量运行：Server 测试进程停滞
+
+冻结源码 `ee14208495e269f75b28decda66b2ed8d574a195` 的首次完整功能回归位于 `/Users/yyl/.codex/virtual-actor-builds/final-linux-functional-closeout-ee142084/`，驱动 `run-final-linux-gate-allocation.py` SHA-256 为 `91e26ff39ce7eba211d42b6f04fe19ae9a15c3b5871cd45a0349f63572ce9dab`。本轮无过滤，但 **Server target 未完成，整体退出 1**；不能登记为完整通过。
+
+Core 129 tests / 41 suites、Runtime 58 / 5、Contracts 20 / 8、Cluster 36 / 5、Application 3 / 1 通过。Server 的日志停在 `V2ReadReceiptServiceTests` 参数化用例中，最后观测为 `batched=true, sequence=1` 的 started 事件；参数没有逐项 passed 事件，不能由末行确定具体挂起的参数或 await 点。七项后置检查均未执行。
+
+该用例的服务与内存 spy 相对业务基线没有修改，没有数据库、显式锁或 continuation 等待；旧完整运行中同一组十个参数约 0.001 秒通过。现场持续数分钟无日志，测试进程仍在、CPU 接近零、PG 无相关业务连接。保存的 LLDB 全线程栈显示线程等待，未定位已挂起的 Swift task；镜像没有 `swift-inspect`，没有安装工具或据此猜定生产根因。诊断后仅针对本次停滞的 test runner 发送 TERM；宽限后进程仍未退出，再对该 PID 发送 KILL。外层脚本继续执行其余 targets，最后保留失败结果并清理资源。
+
+Compose 配置、日志收集和清理退出码均为 0；冻结 HEAD、工作树和依赖锁未变。后续须用同一测试产物隔离复现，并取得新的完整回归；单独 suite 通过不能替代这次未完成的 Server target。
+
+| 原始工件 | SHA-256 |
+| --- | --- |
+| `metadata.json` | `f6f1060b54673b2dcb020e9665ed0cfa361802d6fcd98f88a3bee6286aa0a8e8` |
+| `suite.log` | `98fc9089e544cd12b184746a207228e5890f768a3c205e8cc498c046061756b7` |
+| `suite-gate.json` | `dbb6912b96d7bf68dc1c0d52a61e25ce341c804631063a6eadcb765c981084eb` |
+| `server-stall-lldb-privileged.log` | `44aac67c164353cd457e8a43e4c64c843e2ca873513ece4fd83f04e910ed60e6` |
+
+随后在相同现成测试产物上使用 `--skip-build` 作两次有界、无网络的隔离复现：`V2ReadReceiptServiceTests` **2 tests / 1 suite** 通过，序号检查的十个参数均实际运行；相邻 `PushWakeWorker`、`ReadReceiptBatcher`、`ReadReceiptService` **9 tests / 3 suites** 也通过。没有数据库或编译参与，也没有修改生产或测试代码。两次日志分别在 `final-linux-receipt-minimal2-ee142084/suite.log`（SHA-256 `f230320fd5d6b9f798b83f469d604e3c9a4f0c15758873c146821b064473d73b`）和 `final-linux-receipt-three-suites-ee142084/suite.log`（`5ddf54351d4a4921929975a7c667db38cc09e7cc843fa7c8e4dff2e8244a0b5a`），均位于上述本机工件根目录，退出码均为 0。首次最小复现命令误用了镜像默认 ENTRYPOINT，未运行目标用例，其独立 `final-linux-receipt-minimal-ee142084` 退出 1 工件保留并排除。现有证据只说明隔离运行未复现停滞，根因仍未确定，不能称为修复；最终仍需新的完整回归。 两次复现的 `metadata.json` 分别为 `19fbe38ab2f4b0058c921ea9ed18a29e8c0789d4958778c1540de13fb3e7ace2`、`693d00d3b2c88a57469b5d7340596b2764db155285d76ccf853455bd99831886`，记录实际命令及 runner/动态库运行前后相同的哈希。
 
 ## Cached-local 候选完整运行：排空测试观察点失败
 

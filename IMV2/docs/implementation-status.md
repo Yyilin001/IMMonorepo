@@ -61,7 +61,7 @@
 | TLS gateway 与协议 | TLS 1.3、protocol 30 协商、帧/深度/队列/请求上限、原子设备会话认证、心跳与关闭 | 仓库内已实现；package 和本地 gateway 回归 | 生产证书轮换、入口拓扑与故障演练 |
 | 账户与设备凭据 | 独立 account service、密码 cost-12、跨副本限流、设备绑定 assertion、刷新/撤销/账号禁用 | 本机集成已验证 | WebAuthn RP verifier、challenge/counter store、生产 trusted-proxy 与审计审批 |
 | 公开身份与联系人 | required account kind、精确 handle 查询、资料更新、关系/屏蔽、按上下文资料读取、active roster 公开身份 | 仓库内已实现；HTTP/SQLite/PostgreSQL/iOS 测试 | 真机离线、多语言与人工无障碍验收 |
-| 房间 Virtual Actor | RoomID 逻辑引用、持久 lease/activation fence、恢复与有界 FIFO/回收；前台和房间后台写入接入 | 真 PG、双 Host 分区/接管及 Linux 应用栈证据见[验证状态](../../docs/reviews/virtual-actor/README.md) | G5 全故障矩阵与相对性能仍在验收；不代表生产批准 |
+| 房间 Virtual Actor | RoomID 逻辑引用、持久 lease/activation fence、恢复与有界 FIFO/回收；前台和房间后台写入接入 | 本轮功能收口完成；真 PG、双 Host 分区/接管、单 owner 批查询与当前源码完整 Linux 回归（1529 tests / 264 suites）见[验证状态](../../docs/reviews/virtual-actor/README.md) | 相对性能按用户要求暂缓；首次未复现的测试进程停滞及诊断保留，不代表生产容量批准 |
 | 私聊与普通群 | 公共内容统一房间日志；幂等命令、事务准入、按房间游标恢复；个人流承载个人状态 | PostgreSQL、ClientKit 与本机 TLS/App 分层证据见会话同步验收状态 | 全链路规模、故障与长稳态验收 |
 | 大群房间日志 | 公共内容使用房间日志；账号级变化通知与有界详细订阅分离，mention 仅作推送提示 | 仓库内覆盖与缓冲区回归 | 持续负载、故障与设备可见延迟报告 |
 | 群管理、邀请与审核 | 成员 seek pagination、角色权限、禁言、审计移除、公告、置顶、内容审核 lease 与受控 replay；审批式邀请链接、QR、撤销/次数/有效期、待审批分页与可恢复批准 | 仓库内已实现；域/HTTP/schema/Simulator 回归 | 真实双端邀请 E2E、链接滥用、生产密钥轮换、审核 provider、operator 访问与保留政策 |

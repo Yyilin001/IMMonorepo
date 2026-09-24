@@ -4,7 +4,7 @@
 
 ## 2026-09-24 集成后的差距处置
 
-用户已要求暂缓性能调优；本轮按功能范围收口。当前生产源码 `2772c846` 的 #19 真实故障验证已通过，功能接线复核未发现新的已确认缺口；最终无过滤 Linux 回归仍待完成。下方原始审查表保留历史缺口，当前判断以本节新增处置为准。
+用户已要求暂缓性能调优；本轮按功能范围收口。当前生产源码 `2772c846` 的 #19 真实故障验证已通过，功能接线复核未发现新的已确认缺口；包含该生产源码的冻结 `ee142084` 第二次完整 Linux 回归以 1529 tests / 264 suites 全部通过，本轮功能范围已收口。首次完整运行的测试进程停滞未能复现、根因仍未知，原始失败和诊断保持保留。下方原始审查表保留历史缺口，当前判断以本节新增处置为准。
 
 下表是对本次审查的后续处置；后文保留审查时的原始判断，以便核对当时证据，不能再把已关闭的条目当成当前缺陷。`d5623259` 的一次完整 Linux required run 已按[原日志与独立重校验](g5-linux-regression-evidence.md)登记；原外置 metadata 的 parser 误报仍保留，不把离线重校验说成重新运行。
 
@@ -23,7 +23,7 @@
 | #10/#21 取消和后台 writer 接管 | [真实 Host/Factory/PG 取消与 retention](g2-pg-cancellation-maintenance-evidence.md)通过：执行中的取消不早释 lease/许可，排队取消无持久写；后台 trimLog 持 fence 时第二 Host 不能接管，旧 token 在新 epoch 下被拒绝。随后在 `d4f173df` 加入 review/import 各自临界点屏障，同 suite 原生真实 PG 与[冻结源码 Linux required run](g5-linux-regression-evidence.md)均 **4/4** 通过：实际 worker 的失败 job 可重试、目标 import 的持久接收与终态唯一，新 epoch 重放保持原结果。 |
 | #20 跨入口禁用账号 | [真实 Linux 三入口应用栈](g5-cross-entry-disable-evidence.md)已通过：独立 Actor Host、caller-only Gateway、Account/Operator HTTP；两条旧 Gateway 会话在暖房间及 Operator 请求前仍活，禁用提交后被主动关闭，固定新操作无消息/完成记录，Host epoch 未变。此轮因主动关闭而未在禁用后实际派发房间命令；不等同于成员 revision 或媒体授权的同场实测。 |
 | #17 独立 owner/control DB 链路 | [真实双 Host、caller 与三个 PostgreSQL](g5-database-edge-evidence.md)通过：单独断开 Host A 到 control 或 owner-a，B 继续业务服务，A 在 control 故障期间持续续租、owner 失租后无持久写；恢复按原操作 ID 仅一次效果。同拓扑的 Linux 实际 PG 原容器停启也已通过：两个 Host 和 caller 保持同进程，owner-a 停库时 owner-b 继续写入；数据库恢复后旧状态保留、原 ID 重放唯一，租约安全换到新 epoch。容量 fault 仍只承担 #19 的部分 owner 查询。 |
-| #19、容量与 Linux required checks | [#19 真实 Linux/PG 部分 owner 查询](g5-owner-fault-functional-evidence.md)已通过：owner00 实际停启，两类查询均保留健康项并返回 retry，恢复后连续成功，零新增持久消息。容量功能 canary 不等于性能结论。[G5 Linux 回归记录](g5-linux-regression-evidence.md)保留初始失败与聚焦修正，另登记 `d5623259` 冻结源码的一次完整 required run：suite/cleanup 退出 0，1515 tests / 264 suites 及 11 重点 suite / 21 case 的 started/passed 由原日志离线重校验通过；原 metadata 的解析失败保留。其后 [cached-local 候选的 hot 六轮](g5-hot-performance-regression.md#cached-local-candidate-fb8a1047)在原 freeze 下全部通过，最终 assessor 与驱动退出 0，三轮 main 吞吐 CV 0.0、每轮 52,500 ACK=持久效果、私有资源清理完成；候选 CPU 最小余量仅约 1%。same-owner 三轮 main 预算随后冻结，但[首候选 CPU 超限约 6.86%](g5-same-owner-performance.md)，其业务对账及其他冻结指标通过，比较停在候选 02。相对性能已按用户要求暂缓，历史失败仍保留；当前源码最终 Linux required run 待执行，不据此宣称生产 SLO。 |
+| #19、容量与 Linux required checks | [#19 真实 Linux/PG 部分 owner 查询](g5-owner-fault-functional-evidence.md)通过：owner00 实际停启，两类查询均保留健康项并返回 retry，恢复后连续成功，零新增持久消息。[当前冻结 `ee142084` 的完整 Linux 回归](g5-linux-regression-evidence.md)第二次运行通过：1529 tests / 264 suites、16 个必需 suite / 41 case、vendor 与七项后置检查均通过，清理完成。首次完整运行停滞的原因未确定，其失败与同产物隔离复现记录保留。相对性能按用户要求暂缓，历史 CPU 超限仍为失败，不宣告原 G1–G5 含性能项整体完成或生产 SLO。 |
 
 ## G1–G4 可完成范围
 
