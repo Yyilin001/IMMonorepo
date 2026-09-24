@@ -65,7 +65,7 @@ swift test -j 2 --no-parallel --disable-automatic-resolution \
 
 退出码 0，Runtime **58 tests / 5 suites**、Cluster **35 tests / 5 suites** 全部通过。完整日志 `/Users/yyl/.codex/virtual-actor-builds/p0/local-cached-invoke/runtime-cluster-full-final.log` 的 SHA-256 为 `002b3e4c3a5bfc2b4adafc1c8055d97a84aab649a7be4ec58c29d73c8b154537`。Directory 的 16 项及 local capability 的 9 项均独立核对到 started/passed，不是只依赖总计。依赖锁仍为 `3af1e16190f46bdd8fad3de86c6b386dc196443291463355bf36edb62b7fd15c`，被测提交工作树干净。
 
-新增证据覆盖暖调用省略 lookup、公开 resolve/grouped read 仍确认、严格等待者取消不降级、predicate 暂停期间缓存替换、相同操作重定位、hinted unknown 的稳定 ID 重试及 no-auto-retry 的严格确认与不重放。真实 Node/Cluster fixture 覆盖 TTL 过期后重新认证定位、物理引用逐出后 lookup 恢复，以及本机 predicate 返回 true 后替换 descriptor 的竞态：首次本机派发只接受 `notAccepted(unavailable)` 或 `notAccepted(staleActivation)`，Host 执行零次，原 retry 路径重新读取 owner。local-only 超时调用继续被 drain 跟踪；远端 caller 明确拒绝本机 hint。
+新增证据覆盖暖调用省略 lookup、公开 resolve/grouped read 仍确认、严格等待者取消不降级、predicate 暂停期间缓存替换、相同操作重定位、hinted unknown 的稳定 ID 重试及 no-auto-retry 的严格确认与不重放。真实 Node/Cluster fixture 覆盖 TTL 过期后重新认证定位、物理引用逐出后 lookup 恢复，以及本机 predicate 返回 true 后替换 descriptor 的竞态：首次本机派发只接受 `notAccepted(unavailable)` 或 `notAccepted(staleActivation)`，Host 执行零次，原 retry 路径重新读取 owner。local-only 超时后的 Host 执行仍承担 drain 责任；通信调用在真实收到 unknown 回复后可以结束，两者分别计数。`60278c49` 的测试修正直接检查 Host 预算与精确 lease 在执行结束前保留、结束后归零，原生 Cluster 35/35 通过；原 Linux 失败与复验边界见[Linux 回归记录](g5-linux-regression-evidence.md#cached-local-候选完整运行排空测试观察点失败)。远端 caller 明确拒绝本机 hint。
 
 前面的编译错误日志和 `runtime-cluster-full-2.log` 保留。后者 Runtime 58 项通过、Cluster 35 项中 1 项断言失败：旧 descriptor 已删除时原前置 guard 返回 `notAccepted(unavailable)`，测试最初只接受 `staleActivation`。修正仅扩大到这两个确定未接纳的原有错误，仍拒绝 unknown；最终全套运行通过。此次未改持久层、未新增 PG 测试，也未用原生结果替代 Linux 验证。
 

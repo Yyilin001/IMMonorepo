@@ -14,6 +14,14 @@
 
 随后只修改该测试：保留 250 ms 调用期限，先有界等待 Client quiesce，再直接断言 Host 执行 gate 未放行、预算一项且字节数大于零、精确 token 的 lease 仍在、再次短 stop 仍未完成；放行后 stop 完成、执行恰一次、预算和 lease 归零。生产代码未改。原生 `swift test -j 2 --no-parallel --disable-automatic-resolution --build-path /Users/yyl/.codex/virtual-actor-builds/p0/credit-fence-native/.build --filter IMV2ActorClusterTests` 退出 0，35 tests / 5 suites 通过；LocalCapability 的九项均实际 started/passed，修复用例用时 0.325 秒。日志 `/Users/yyl/.codex/virtual-actor-builds/p0/local-drain-observation-native/cluster.log` SHA-256 为 `a1288555794460f0e1c729fe692fef7de7e9ec7eff140a85d320287bacdb99bc`。下一步是独立 Linux 聚焦复验及七项后置检查；最终无过滤的完整 Linux 运行仍待所有代码收口后执行，不能由本次原生通过推定完成。
 
+## 测试修复的 Linux 聚焦复验与文档脚本修复
+
+干净冻结 checkout `60278c4975f55b264a404cb3a0fe671fb77235ec` 的 Linux 聚焦复验保存在 `/Users/yyl/.codex/virtual-actor-builds/local-drain-focused-linux-60278c49/`。独立驱动 `run-local-drain-focused-linux.py` SHA-256 为 `0ff831b8b8347d1a8597f8012b022c08ad1602ae0e3eaae2b2517bab17bad3e6`，仅筛选 LocalCapability suite，九项均实际 started/passed，汇总 **9 tests / 1 suite**。vendor 校验和前六项后置检查通过，但第七项文档结构检查误报历史归档缺少标记，因此本轮仍为 **suite/驱动退出 1**，清理退出 0，冻结源码与依赖锁未变、无项目残留。`suite-gate.json` 的 `passed=true` 只说明要求的测试事件和七项检查的启动标记都在日志中；它必须与整体退出 1 一起读取，不能把“检查已启动”当成“检查通过”。原 `suite.log` SHA-256 为 `509c60073fb2c7e0d70b5362510e2c9995b98040bbaaed242b09e01e0a231d81`，`suite-gate.json` 为 `8c747d56cdf3612f12b53d67c810227218d1c1e798847393a74bef84996c8f1a`，`metadata.json` 为 `571755a73ce6d55f9fceeaa99186de8615498c92891a69dfdf7b9d46c7f8a30d`。
+
+归档文件第三行实际含有标记。旧 `head -20 | grep -q` 在 `pipefail` 下会因 grep 提前退出而令 head 收到 SIGPIPE，误判为缺标记。`scripts/check_v2_document_structure.sh` 改用单进程 awk 仅读取前 20 行，检查范围和拒绝规则保持不变。Linux 专项验证 `/Users/yyl/.codex/virtual-actor-builds/document-structure-pipefail-20260924-run03/` 实际确认：当前仓库通过；旧管道在长行 fixture 中返回 head=141/grep=0；新脚本接受长行中的标记及第 20 行标记，拒绝无标记及仅第 21 行有标记。六个执行标记均核对、进程退出 0、容器已移除；被测脚本 SHA-256 为 `c6f63dc8a9d8a4ac2779e5f8607a985765770adb2e1ffa7851e939ad74d2abda`。该专项的首个尝试误用了镜像入口而未执行检查；第二个尝试未接通 Docker stdin、虽退出 0 但实际没有执行命令，已由其 `execution-revalidation.json` 明确排除，不能作为通过证据。
+
+本轮修复只涉及测试、文档检查脚本和文档。`git diff --exit-code fb8a1047 60278c49 -- IMV2Server/Sources IMV2Server/Vendor IMV2Server/Package.swift IMV2Server/Package.resolved IMV2Core IMV2Compression IMV2/sql` 退出 0，因此已测 hot 和后续容量仍使用原 `fb8a1047` Release 产物；这不代表全量 Linux 已通过。最终完整无过滤运行安排在其余四类性能及必要生产修复收口后，原失败和分层复验工件均保留。
+
 ## 既有冻结源码的完整 required run
 
 冻结源码 `d56232592b05c94d6e933534a985159ec14ff673` 的一次完整 Linux 运行保存在 `/Users/yyl/.codex/virtual-actor-builds/final-linux-capability-d5623259/`。Swift 6.4 Jammy 以只读源码和 Git 元数据挂载执行 Core、Server、Contracts、Runtime、Cluster、Application 的全部测试及后置检查，使用独立的 control、primary、secondary PostgreSQL 16 和 NATS。原 `suite.log` 中完整 suite 退出码 **0**，Compose 配置、容器日志收集与项目清理也均退出 **0**；运行后 checkout HEAD 仍为指定 SHA、工作树干净、`Package.resolved` SHA-256 仍为 `3af1e16190f46bdd8fad3de86c6b386dc196443291463355bf36edb62b7fd15c`。有效 Compose 配置、镜像 ID 与 plugin SHA 保存在同目录的 `effective-compose.json`、`metadata.json`。

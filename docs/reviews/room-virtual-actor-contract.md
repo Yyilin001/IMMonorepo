@@ -56,6 +56,8 @@ Gateway 和 Account 必须配置 `IMV2_ROOM_ACTOR_CONFIGURATION_FILE`。JSON 引
 
 同进程调用可使用托管 Node 私有注入的本地入口，其身份绑定该次 Host incarnation、物理 endpoint 和 generation。首次会话仍验证签名 Hello/Grant；随后使用不可序列化、调用方不能构造的 Host capability，省去每次调用的签名、验签和 JSON 解码。权限、principal、session 期限、重放、shard、完整 activation token、调用期限及真实完成追踪仍与远端共用检查。请求和响应按原 JSON 编码规则各测量一次字节数，调用方与 Host 分别检查自身上限；远端继续使用签名包。旧入口关闭后拒绝新请求，已派发请求在真正完成前仍占用排空责任。
 
+通信调用与 Host 执行分别承担排空责任。Host 可在执行仍进行时向到期的调用者返回 `outcomeUnknown`；Client 在底层通信实际返回后可以清除 dispatch 记录，Host 的执行项、许可和精确 token 的租约仍保留至 executor 完成。Node 必须先完成 Host 排空，才能关闭其余通信和共享资源，不能用 Client 的在途计数为零推断房间执行已结束。
+
 Gateway 根据配置中的 hostID 选择托管房间或仅调用远端房间；Account 强制 caller-only。承担房间维护/审核 worker 的 caller 需要显式相应服务权限。Operator 继续独立工作流控制，不创建空置 Host。
 
 本地/测试配置生成示例：
