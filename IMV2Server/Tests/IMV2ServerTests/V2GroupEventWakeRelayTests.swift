@@ -41,8 +41,8 @@ struct V2GroupEventWakeRelayTests {
         // Enqueue before the runtime-owned worker begins to make the
         // coalescing contract deterministic; command handlers perform only a
         // bounded process-local submit and never await the publisher's I/O.
-        await dispatcher.publishForegroundHint(.init(roomID: roomID, highWatermark: 7))
-        await dispatcher.publishForegroundHint(.init(roomID: roomID, highWatermark: 9))
+        dispatcher.submitForegroundHint(.init(roomID: roomID, highWatermark: 7))
+        dispatcher.submitForegroundHint(.init(roomID: roomID, highWatermark: 9))
         let task = Task { await dispatcher.run() }
 
         #expect(await publisher.next() == .init(roomID: roomID, highWatermark: 9))
@@ -59,7 +59,7 @@ struct V2GroupEventWakeRelayTests {
             let roomID = try RoomID(
                 String(format: "00000000-0000-0000-0000-%012x", suffix)
             )
-            await dispatcher.publishForegroundHint(
+            dispatcher.submitForegroundHint(
                 .init(roomID: roomID, highWatermark: UInt64(suffix))
             )
         }
@@ -396,6 +396,14 @@ private actor ForegroundHintPublisherFake: V2ForegroundGroupEventHintPublishing 
         }
     }
 
+    func publishForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) {
+        publishForegroundHint(.init(roomID: event.roomID, highWatermark: event.highWatermark))
+    }
+
+    func publishForegroundGroupEvents(_ events: [V2DirectRoomLiveEvent]) {
+        for event in events { publishForegroundDirectEvent(event) }
+    }
+
     func next() async -> V2GroupEventWake {
         if !values.isEmpty { return values.removeFirst() }
         return await withCheckedContinuation { continuation in
@@ -422,6 +430,14 @@ private final class ImmediateForegroundHintPublisherFake:
 
     func publishForegroundHint(_: V2GroupEventWake) async {
         state.withLock { $0.asynchronousCount += 1 }
+    }
+
+    func publishForegroundDirectEvent(_: V2DirectRoomLiveEvent) async {
+        state.withLock { $0.asynchronousCount += 1 }
+    }
+
+    func publishForegroundGroupEvents(_ events: [V2DirectRoomLiveEvent]) async {
+        state.withLock { $0.asynchronousCount += events.count }
     }
 
     func publishForegroundDirectEventImmediately(_: V2DirectRoomLiveEvent) -> Bool {

@@ -598,7 +598,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 func deliver(_ export: V2ForwardExport) async throws -> V2ForwardTerminalReceipt? { nil }
             }
             let clock = TestSequenceClock([base])
-            let delivery = try V2ForwardDeliveryWorker(store: jobs, receipts: receipts, target: PendingTarget(), leaseDuration: 30, pendingDelay: 10, maximumConcurrency: 1, retryPolicy: .init(initialDelay: 2, maximumDelay: 2, maximumAttempts: 100, jitterFraction: 0), now: { clock.now() })
+            let delivery = try V2ForwardDeliveryWorker(store: jobs, receipts: receipts, target: PendingTarget(), sourceCommand: forwardSourceCommandUnexpected, deadline: { .now + .seconds(10) }, leaseDuration: 30, pendingDelay: 10, maximumConcurrency: 1, retryPolicy: .init(initialDelay: 2, maximumDelay: 2, maximumAttempts: 100, jitterFraction: 0), now: { clock.now() })
             for (index, invalid) in badDates.enumerated() {
                 let time = base.addingTimeInterval(100 + Double(index) * 40)
                 clock.set([time, time, invalid])
@@ -608,7 +608,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             for (index, delay) in [Double.leastNonzeroMagnitude, .greatestFiniteMagnitude].enumerated() {
                 let time = base.addingTimeInterval(430 + Double(index) * 20)
-                let invalidDelay = try V2ForwardDeliveryWorker(store: jobs, receipts: receipts, target: PendingTarget(), leaseDuration: 30, pendingDelay: delay, maximumConcurrency: 1, retryPolicy: .init(initialDelay: 2, maximumDelay: 2, maximumAttempts: 100, jitterFraction: 0), now: { time })
+                let invalidDelay = try V2ForwardDeliveryWorker(store: jobs, receipts: receipts, target: PendingTarget(), sourceCommand: forwardSourceCommandUnexpected, deadline: { .now + .seconds(10) }, leaseDuration: 30, pendingDelay: delay, maximumConcurrency: 1, retryPolicy: .init(initialDelay: 2, maximumDelay: 2, maximumAttempts: 100, jitterFraction: 0), now: { time })
                 let report = try await invalidDelay.runOnce(sourceShardID: "room-a", limit: 1)
                 #expect(report.retried == 1 && report.deferred == 0)
                 #expect(try await sourceSQL.raw("SELECT state = 'pending' AND next_attempt_at = \(bind: time.addingTimeInterval(2)) AS exists FROM im_v2.message_forward_delivery_jobs").first(decoding: ExistsRow.self)?.exists == true)

@@ -56,7 +56,7 @@ public actor V2ClientSessionBootstrapper {
     /// - Parameters:
     ///   - authSession: 设备凭据与认证代次所有者。
     ///   - localStoreBootstrapper: 负责安装绑定验证的数据库打开入口。
-    ///   - databaseURL: 未启用账号目录时的主库位置；启用时作为旧库迁移来源。
+    ///   - databaseURL: 未启用账号目录时的主库位置。
     ///   - accountStorageRoot: 可选账号目录根；提供后启用按账号分开的 store 管理。
     ///
     /// 构造不请求网络或打开数据库，首次实际会话操作时才执行。
@@ -64,7 +64,7 @@ public actor V2ClientSessionBootstrapper {
         self.authSession = authSession
         self.localStoreBootstrapper = localStoreBootstrapper
         self.databaseURL = databaseURL
-        accountStorage = accountStorageRoot.map { V2AccountLocalStoreOwner(root: $0, legacyDatabaseURL: databaseURL, bootstrapper: localStoreBootstrapper) }
+        accountStorage = accountStorageRoot.map { V2AccountLocalStoreOwner(root: $0, bootstrapper: localStoreBootstrapper) }
     }
 
     /// 查询账号目录模式下当前 store 的 scope。

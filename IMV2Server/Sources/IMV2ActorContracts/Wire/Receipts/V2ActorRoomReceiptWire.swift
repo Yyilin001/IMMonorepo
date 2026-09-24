@@ -112,15 +112,14 @@ public enum V2RoomReceiptCommand: Codable, Equatable, Sendable {
 }
 
 public enum V2RoomReceiptQuery: Codable, Equatable, Sendable {
-    /// Legacy combined room/user read. Production transport rejects this;
-    /// candidates must pass through authoritative control privacy filtering.
-    case readers(V2ActorReadReceiptReadersQueryWire)
+    /// Room-local reader candidates. The owner never returns a final reader
+    /// page; candidates must pass through authoritative control privacy filtering.
     case readerCandidates(V2ActorReadReceiptReadersQueryWire)
     public var roomID: RoomID {
-        switch self { case .readers(let value), .readerCandidates(let value): value.roomID }
+        switch self { case .readerCandidates(let value): value.roomID }
     }
     public var actorUserID: UserID {
-        switch self { case .readers(let value), .readerCandidates(let value): value.actorUserID }
+        switch self { case .readerCandidates(let value): value.actorUserID }
     }
     public var replayPolicy: V2RoomReplayPolicy { .readOnly }
 }

@@ -4,8 +4,8 @@ import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
-/// Terminal room job and operation cleanup. The control worker's actorOwned
-/// mode excludes these same tables, so each deletion has one physical owner.
+/// Terminal room job and operation cleanup. The control worker excludes these
+/// same tables, so each deletion has one physical owner.
 public struct PostgresV2RoomBookkeepingStore: Sendable {
     private let database: any Database
     private let timeouts: V2RoomActivationSQLTimeouts

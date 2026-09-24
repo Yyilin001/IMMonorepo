@@ -48,7 +48,7 @@ public struct V2ForwardDeliveryReport: Equatable, Sendable {
 public struct V2ForwardDeliveryWorker: Sendable {
     private let store: PostgresV2ForwardDeliveryStore
     private let receipts: PostgresV2ForwardReceiptStore
-    private var recordReceipt: @Sendable (V2ForwardTerminalReceipt, V2ForwardExport, Date) async throws -> Void
+    private let recordReceipt: @Sendable (V2ForwardTerminalReceipt, V2ForwardExport, Date) async throws -> Void
     private let target: any V2ForwardExportDelivering
     private let leaseDuration: TimeInterval
     private let deliveryTimeout: TimeInterval
@@ -57,12 +57,17 @@ public struct V2ForwardDeliveryWorker: Sendable {
     private let retryPolicy: V2DurableRetryPolicy
     private let now: @Sendable () -> Date
 
-    /// 组合投递存储、回执存储与目标边界。
+    /// 组合投递存储、回执读取、目标边界与源房间命令通道。
+    ///
+    /// 终态回执经源房间命令（RoomRef）在持有激活租约的房间回合内提交，
+    /// 本工作器从不直接写入源端回执。
     ///
     /// - Parameters:
     ///   - store: 投递任务存储。
-    ///   - receipts: 源端回执存储。
+    ///   - receipts: 源端回执存储，仅用于崩溃恢复时读取已提交回执。
     ///   - target: 目标归属投递实现。
+    ///   - sourceCommand: 向源房间提交转发命令的通道。
+    ///   - deadline: 每次源房间命令的截止时刻。
     ///   - leaseDuration: 租约时长秒数，需大于零且不超过 3600。
     ///   - deliveryTimeout: 单次投递超时秒数；为 `nil` 时取租约时长的八成。
     ///   - pendingDelay: 目标仍在处理时的延后重试间隔秒数。
@@ -72,24 +77,6 @@ public struct V2ForwardDeliveryWorker: Sendable {
     /// - Throws: 任一参数越界，或超时不小于租约时长时抛出
     ///   ``V2ForwardDeliveryError/invalidConfiguration``。
     public init(store: PostgresV2ForwardDeliveryStore, receipts: PostgresV2ForwardReceiptStore,
-                target: any V2ForwardExportDelivering, leaseDuration: TimeInterval = 300,
-                deliveryTimeout: TimeInterval? = nil, pendingDelay: TimeInterval = 1, maximumConcurrency: Int = 4,
-                retryPolicy: V2DurableRetryPolicy = .standard, now: @escaping @Sendable () -> Date = Date.init) throws {
-        let timeout = deliveryTimeout ?? leaseDuration * 0.8
-        guard leaseDuration.isFinite, leaseDuration > 0, leaseDuration <= 3_600,
-              timeout.isFinite, timeout > 0, timeout < leaseDuration,
-              pendingDelay.isFinite, pendingDelay > 0, (1...1_024).contains(maximumConcurrency)
-        else { throw V2ForwardDeliveryError.invalidConfiguration }
-        self.store = store; self.receipts = receipts; self.target = target
-        self.recordReceipt = { receipt, _, at in try await receipts.record(receipt, now: at) }
-        self.leaseDuration = leaseDuration; self.pendingDelay = pendingDelay
-        self.deliveryTimeout = timeout
-        self.maximumConcurrency = maximumConcurrency; self.retryPolicy = retryPolicy; self.now = now
-    }
-
-    /// The actor composition routes source receipt commits through RoomRef.
-    /// Legacy direct-store construction remains available during cutover.
-    public init(store: PostgresV2ForwardDeliveryStore, receipts: PostgresV2ForwardReceiptStore,
                 target: any V2ForwardExportDelivering,
                 sourceCommand: @escaping @Sendable (V2RoomForwardCommand, ContinuousClock.Instant) async throws -> V2RoomForwardResult,
                 deadline: @escaping @Sendable () -> ContinuousClock.Instant,
@@ -97,10 +84,15 @@ public struct V2ForwardDeliveryWorker: Sendable {
                 pendingDelay: TimeInterval = 1, maximumConcurrency: Int = 4,
                 retryPolicy: V2DurableRetryPolicy = .standard,
                 now: @escaping @Sendable () -> Date = Date.init) throws {
-        try self.init(store: store, receipts: receipts, target: target,
-                      leaseDuration: leaseDuration, deliveryTimeout: deliveryTimeout,
-                      pendingDelay: pendingDelay, maximumConcurrency: maximumConcurrency,
-                      retryPolicy: retryPolicy, now: now)
+        let timeout = deliveryTimeout ?? leaseDuration * 0.8
+        guard leaseDuration.isFinite, leaseDuration > 0, leaseDuration <= 3_600,
+              timeout.isFinite, timeout > 0, timeout < leaseDuration,
+              pendingDelay.isFinite, pendingDelay > 0, (1...1_024).contains(maximumConcurrency)
+        else { throw V2ForwardDeliveryError.invalidConfiguration }
+        self.store = store; self.receipts = receipts; self.target = target
+        self.leaseDuration = leaseDuration; self.pendingDelay = pendingDelay
+        self.deliveryTimeout = timeout
+        self.maximumConcurrency = maximumConcurrency; self.retryPolicy = retryPolicy; self.now = now
         self.recordReceipt = { receipt, export, _ in
             let input = V2ActorRecordForwardReceiptWire(
                 sourceRoomID: .init(uuid: export.intent.sourceRoomID),

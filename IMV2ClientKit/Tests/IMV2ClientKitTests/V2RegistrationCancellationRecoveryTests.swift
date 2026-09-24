@@ -35,35 +35,6 @@ struct V2RegistrationCancellationRecoveryTests {
         #expect(try await next.deviceID() != pending.deviceID)
     }
 
-    @Test("format 2 migration retains proof, pending lease and legacy archive atomically")
-    func proofMigration() async throws {
-        let persistence = DeviceRegistrationTestPersistence()
-        let store = V2DeviceRegistrationStore(persistence: persistence)
-        let lease = try await store.prepare(accountHandle: "first_account")
-        let pending = try #require(try await lease.load())
-        try await store.discardPendingRegistrations()
-        let next = try await store.prepare(accountHandle: "second_account")
-        let nextValue = try #require(try await next.load())
-        let currentData = try #require(try persistence.load())
-        var old = try #require(JSONSerialization.jsonObject(with: currentData) as? [String: Any])
-        old["version"] = 2
-        old["abandoned"] = [pending.operationID.uuidString: try JSONSerialization.jsonObject(with: JSONEncoder().encode(pending.cancellation))]
-        let bytes = try JSONSerialization.data(withJSONObject: old)
-        try persistence.save(bytes)
-        persistence.setFailure(.save)
-        await #expect(throws: V2DeviceCredentialRegistrationOperationStoreError.unavailable) { try await store.cancellationJobs() }
-        persistence.setFailure(nil)
-        #expect(try persistence.load() == bytes)
-        let reopened = V2DeviceRegistrationStore(persistence: persistence)
-        let job = try #require(try await reopened.cancellationJobs().first)
-        #expect(job.cancellation == pending.cancellation && job.attempts == 0)
-        #expect(job.pauseReason == nil)
-        #expect(try await reopened.prepare(accountHandle: "second_account").load() == nextValue)
-        let migratedData = try #require(try persistence.load())
-        let migrated = try #require(JSONSerialization.jsonObject(with: migratedData) as? [String: Any])
-        #expect(migrated["version"] as? Int == 3)
-    }
-
     @Test("paused retry preserves backoff jobs and stale completions cannot erase new progress")
     func retryAndCompare() async throws {
         let persistence = DeviceRegistrationTestPersistence()

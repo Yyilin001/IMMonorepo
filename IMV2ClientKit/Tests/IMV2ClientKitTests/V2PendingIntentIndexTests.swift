@@ -61,7 +61,6 @@ struct V2PendingIntentIndexTests {
             "v2_pending_conversation_states_terminal_cleanup_idx",
             "v2_pending_message_favorites_terminal_cleanup_idx",
             "v2_pending_group_capabilities_terminal_cleanup_idx",
-            "v2_pending_forward_messages_terminal_cleanup_idx",
             "v2_pending_social_commands_terminal_cleanup_idx",
             "v2_pending_group_room_creations_terminal_cleanup_idx",
             "v2_forward_message_plans_terminal_cleanup_idx",

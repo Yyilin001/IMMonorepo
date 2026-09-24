@@ -493,8 +493,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             // Age only replay receipts, then invoke the real maintenance path.
             let old = now.addingTimeInterval(-V2IdempotencyPolicy.minimumServerRetention - 1)
             try await sql.raw("UPDATE im_v2.group_permission_operations SET created_at = \(bind: old)").run()
+            // Permission receipts are room-owned: control cleanup leaves them to
+            // the activation-fenced room bookkeeping turn.
             let report = try await V2ControlPlaneHousekeepingWorker(store: PostgresV2ControlPlaneHousekeepingStore(database: resources.database(.psql)), now: { now }).runOnce(limit: 65_536)
-            #expect(report.purgedIdempotencyRows == 2)
+            #expect(report.purgedIdempotencyRows == 0)
+            #expect(try await count("im_v2.group_permission_operations", on: sql) == 2)
+            let roomReport = try await purgeRoomBookkeeping(database: resources.database(.psql), roomID: roomUUID, now: now)
+            #expect(roomReport.deletedOperationRows == 2)
             #expect(try await count("im_v2.group_permission_operations", on: sql) == 0)
             #expect(try await count("im_v2.group_role_policies", on: sql) == 2)
             #expect(try await baselineStore.readRolePolicyBaseline(roomID: roomID, actorUserID: senderID) == explicitBaseline)

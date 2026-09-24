@@ -1,6 +1,6 @@
 # 旧注册清理的账号验证与 HTTP 接线
 
-> 2026-09-20 当前范围：项目未上线，不保留历史兼容。旧设备注册取消 HTTP 入口已删除；本文中的旧入口不再可用。当前注册取消接口继续保留。 以下内容仅保留为历史记录。
+> **历史归档。** 2026-09-20 当前范围：项目未上线，不保留历史兼容。旧设备注册取消 HTTP 入口已删除；本文中的旧入口不再可用。当前注册取消接口继续保留。 以下内容仅保留为历史记录。
 
 日期：2026-09-07。B08 继续实施中。本批接通[服务端仲裁](legacy-registration-arbitration-contract.md)的真实账号入口；ClientKit 与 App 尚未消费此接口。
 
@@ -16,4 +16,4 @@ Account 生产入口将该路径加入既有持久地址限流，仍经过 trust
 
 首轮 HTTPS 扩展误把已取消设备再次签发的既有 403 合同写成 401。服务端已正确拒绝，修正测试预期后全链路通过；失败记录保留。没有生产迁移或部署，schema 30/protocol 27/SQLite 173/5 不变；仍需在启用清理前停止旧签发二进制。
 
-结果及当前源码哈希见[证据清单](../../docs/reviews/verification-records.md#20260907-legacy-registration-http)。本批没有新跑 App UI、Gateway、headless 或真机测试。
+结果及当前源码哈希见[证据清单](../verification-records.md#20260907-legacy-registration-http)。本批没有新跑 App UI、Gateway、headless 或真机测试。

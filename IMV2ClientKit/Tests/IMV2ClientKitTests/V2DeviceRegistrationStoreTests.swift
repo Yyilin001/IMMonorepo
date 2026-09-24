@@ -6,35 +6,6 @@ import Testing
 
 @Suite("Device registration lifecycle")
 struct V2DeviceRegistrationStoreTests {
-    @Test("legacy IDs remain archived instead of becoming fabricated cancellation authority")
-    func legacyMigration() async throws {
-        let persistence = DeviceRegistrationTestPersistence()
-        let oldDevice = UUID(), oldOperation = UUID()
-        let original = try JSONSerialization.data(withJSONObject: ["version": 1, "pending": [String(repeating: "a", count: 64):
-            ["deviceID": ["rawValue": oldDevice.uuidString], "operationID": oldOperation.uuidString]]])
-        try persistence.save(original)
-        persistence.setFailure(.save)
-        await #expect(throws: V2DeviceCredentialRegistrationOperationStoreError.unavailable) {
-            try await V2DeviceRegistrationStore(persistence: persistence).prepare(accountHandle: "account_a")
-        }
-        persistence.setFailure(nil)
-        #expect(try persistence.load() == original)
-        let store = V2DeviceRegistrationStore(persistence: persistence)
-        let prepared = try await store.prepare(accountHandle: "account_a")
-        let pending = try #require(try await prepared.load())
-        #expect(pending.deviceID.rawValue != oldDevice.uuidString)
-        #expect(pending.operationID != oldOperation)
-        #expect(try await store.legacyRecoveryCount() == 1)
-        #expect(try await store.pendingCancellations().isEmpty)
-        try await store.discardPendingRegistrations()
-        let reopened = V2DeviceRegistrationStore(persistence: persistence)
-        #expect(try await reopened.pendingCancellations() == [pending.cancellation])
-        try await reopened.completeCancellation(pending.cancellation)
-        #expect(try await reopened.legacyRecoveryCount() == 1)
-        let retained = String(decoding: try #require(try persistence.load()), as: UTF8.self)
-        #expect(retained.contains(oldDevice.uuidString) && retained.contains(oldOperation.uuidString))
-    }
-
     @Test("expiry rotates identity atomically while keeping original cancellation proof")
     func expiryRetainsCancellation() async throws {
         let start = Date()
@@ -139,7 +110,7 @@ struct V2DeviceRegistrationStoreTests {
         #expect(try persistence.load() == nil)
     }
 
-    @Test("corrupt and unsupported ledgers fail closed", arguments: [Data("not-json".utf8), Data(#"{"version":99,"pending":{}}"#.utf8)])
+    @Test("corrupt and unsupported ledgers fail closed", arguments: [Data("not-json".utf8), Data(#"{"version":1,"pending":{}}"#.utf8), Data(#"{"version":99,"pending":{}}"#.utf8)])
     func corruptLedger(data: Data) async throws {
         let persistence = DeviceRegistrationTestPersistence()
         try persistence.save(data)

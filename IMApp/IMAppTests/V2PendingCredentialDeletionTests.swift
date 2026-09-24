@@ -3,7 +3,7 @@ import Testing
 @testable import IMApp
 
 struct V2PendingCredentialDeletionTests {
-    @Test("退出记录跨实例恢复，完成记录阻止旧偏好标记复活")
+    @Test("退出记录跨实例恢复，完成后不再报告待删除")
     func persistsAndClearsDeletionIntent() async throws {
         let fixture = try DeletionFixture()
         defer { fixture.cleanup() }
@@ -13,8 +13,6 @@ struct V2PendingCredentialDeletionTests {
         let restored = fixture.store()
         #expect(try await restored.isPending())
         try await restored.clearPending()
-        // Simulate a stale preference surviving its asynchronous removal.
-        UserDefaults.standard.set(true, forKey: fixture.key)
         #expect(try await first.isPending() == false)
         #expect(try await fixture.store().isPending() == false)
         let object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: fixture.url)) as? [String: Any])
@@ -28,27 +26,6 @@ struct V2PendingCredentialDeletionTests {
             ?? (attributes[.protectionKey] as? String).map(FileProtectionType.init(rawValue:))
         #expect(protection == .complete)
         #endif
-    }
-
-    @Test("旧退出标记先迁移为文件记录，跨实例仍保持退出")
-    func legacyMarkerIsMigrated() async throws {
-        let fixture = try DeletionFixture()
-        defer { fixture.cleanup() }
-        UserDefaults.standard.set(true, forKey: fixture.key)
-        #expect(try await fixture.store().isPending())
-        #expect(UserDefaults.standard.bool(forKey: fixture.key) == false)
-        #expect(try await fixture.store().isPending())
-    }
-
-    @Test("迁移写入失败不丢失旧退出标记")
-    func failedMigrationRetainsLegacyIntent() async throws {
-        let fixture = try DeletionFixture()
-        defer { fixture.cleanup() }
-        UserDefaults.standard.set(true, forKey: fixture.key)
-        try Data().write(to: fixture.url)
-        let impossible = V2FilePendingCredentialDeletionStore(url: fixture.url.appending(path: "marker.json"), legacyKey: fixture.key)
-        await #expect(throws: (any Error).self) { _ = try await impossible.isPending() }
-        #expect(UserDefaults.standard.bool(forKey: fixture.key))
     }
 
     @Test("损坏或未知版本不能被当作没有退出意图", arguments: ["broken", "{\"version\":2,\"pending\":false}"])
@@ -81,10 +58,10 @@ struct V2PendingCredentialDeletionTests {
     @Test("同一数据库路径的不同 Keychain service 不共享退出记录")
     func keychainServicesHaveIndependentFiles() {
         let database = URL(fileURLWithPath: "/fixture/sync.sqlite")
-        let a = V2FilePendingCredentialDeletionStore.fileURL(databaseURL: database, legacyKey: "service-a")
-        let b = V2FilePendingCredentialDeletionStore.fileURL(databaseURL: database, legacyKey: "service-b")
+        let a = V2FilePendingCredentialDeletionStore.fileURL(databaseURL: database, serviceIdentifier: "service-a")
+        let b = V2FilePendingCredentialDeletionStore.fileURL(databaseURL: database, serviceIdentifier: "service-b")
         #expect(a != b)
-        #expect(a == V2FilePendingCredentialDeletionStore.fileURL(databaseURL: database, legacyKey: "service-a"))
+        #expect(a == V2FilePendingCredentialDeletionStore.fileURL(databaseURL: database, serviceIdentifier: "service-a"))
         #expect(a.deletingLastPathComponent() == database.deletingLastPathComponent())
         #expect(!a.lastPathComponent.contains("service-a"))
     }
@@ -93,19 +70,16 @@ struct V2PendingCredentialDeletionTests {
 private struct DeletionFixture {
     let root: URL
     let url: URL
-    let key: String
     init() throws {
         let id = UUID().uuidString
         root = FileManager.default.temporaryDirectory.appending(path: "im-deletion-marker-" + id)
         url = root.appending(path: "marker.json")
-        key = "V2PendingCredentialDeletionTests." + id
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
     func store() -> V2FilePendingCredentialDeletionStore {
-        .init(url: url, legacyKey: key)
+        .init(url: url)
     }
     func cleanup() {
-        UserDefaults.standard.removeObject(forKey: key)
         try? FileManager.default.removeItem(at: root)
     }
 }

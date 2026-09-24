@@ -19,10 +19,10 @@ public struct V2DeviceRegistrationCancellationJob: Codable, Equatable, Sendable 
     public let pauseReason: PauseReason?
 }
 
-/// 按账户作用域管理待注册身份、取消任务与历史注册恢复证据。
+/// 按账户作用域管理待注册身份与取消任务。
 ///
 /// 与安装身份和已建立的认证凭证分开持有。每次账本读改写通过同步存储完成，无挂起点；同一应用凭证命名空间应仅有一个所有者。
-/// 正常容量为 256 项，旧记录恢复允许额外预留一项取得新账户因子。
+/// 容量为 256 项。
 public actor V2DeviceRegistrationStore {
     /// 同步替换完整账本的存储边界。
     private let persistence: any V2DeviceRegistrationPersisting
@@ -56,7 +56,6 @@ public actor V2DeviceRegistrationStore {
     /// - Throws: 账户名无效、容量不足、取消材料构造或持久化错误。
     ///
     /// 相同作用域的过期操作先转入取消队列，再创建新的设备 UUID 与操作 UUID。不同账户不会覆盖彼此的待注册记录。
-    /// 总数为 256 且该作用域存在历史恢复记录时，允许使用第 257 项完成恢复；普通注册不能使用该预留位置。
     public func prepare(accountHandle: String) throws -> V2PreparedDeviceRegistration {
         let scope = try Self.scope(accountHandle)
         var ledger = try load()
@@ -67,9 +66,7 @@ public actor V2DeviceRegistrationStore {
             if let expired = ledger.pending.removeValue(forKey: scope) {
                 try abandon(expired.cancellation, in: &ledger)
             }
-            // One reserved entry lets a full legacy archive obtain a fresh
-            // factor and clean itself. Normal registration cannot use it.
-            guard ledger.count < 256 || (ledger.count == 256 && ledger.legacy[scope] != nil) else {
+            guard ledger.count < 256 else {
                 throw V2DeviceCredentialRegistrationOperationStoreError.capacityExceeded
             }
             registration = try .prepare(deviceID: DeviceID(makeUUID().uuidString), operationID: makeUUID(), now: now())
@@ -105,28 +102,6 @@ public actor V2DeviceRegistrationStore {
         var ledger = try load()
         guard ledger.abandoned[cancellation.operationID.uuidString]?.cancellation == cancellation else { return }
         ledger.abandoned[cancellation.operationID.uuidString] = nil
-        try save(ledger)
-    }
-
-    /// 读取仍待显式恢复的历史注册数量；账本读取可能先执行格式迁移。
-    public func legacyRecoveryCount() throws -> Int { try load().legacy.count }
-
-    /// 检查任务取消及精确待注册句柄仍有效后，读取该账户作用域的历史目标。
-    fileprivate func legacy(for registration: V2PendingDeviceCredentialRegistration, scope: String) throws -> V2LegacyDeviceRegistration? {
-        try Task.checkCancellation()
-        let ledger = try load()
-        guard ledger.pending[scope] == registration else { throw V2DeviceCredentialRegistrationOperationStoreError.malformedRecord }
-        return ledger.legacy[scope]
-    }
-
-    /// 检查取消、待注册句柄与历史目标一致后删除历史证据；历史记录已不存在时成功返回，其余身份不匹配报告 malformedRecord。
-    fileprivate func completeLegacy(_ legacy: V2LegacyDeviceRegistration, registration: V2PendingDeviceCredentialRegistration, scope: String) throws {
-        try Task.checkCancellation()
-        var ledger = try load()
-        guard ledger.pending[scope] == registration else { throw V2DeviceCredentialRegistrationOperationStoreError.malformedRecord }
-        guard let current = ledger.legacy[scope] else { return }
-        guard current == legacy else { throw V2DeviceCredentialRegistrationOperationStoreError.malformedRecord }
-        ledger.legacy[scope] = nil
         try save(ledger)
     }
 
@@ -200,7 +175,7 @@ public actor V2DeviceRegistrationStore {
     ///
     /// - Returns: 不含设备或证明的状态流；初始账本读取失败时以错误结束。
     ///
-    /// 初始读取与观察者注册处于同一 actor 执行段；pending 注册与 legacy 恢复记录不计入此队列状态。
+    /// 初始读取与观察者注册处于同一 actor 执行段；pending 注册不计入此队列状态。
     public func cancellationStatusUpdates() -> AsyncThrowingStream<V2DeviceRevocationQueueStatus, any Error> {
         let id = UUID()
         let stream = AsyncThrowingStream<V2DeviceRevocationQueueStatus, any Error>.makeStream(bufferingPolicy: .bufferingNewest(1))
@@ -263,42 +238,17 @@ public actor V2DeviceRegistrationStore {
         try save(ledger)
     }
 
-    /// 读取并校验账本，缺失时返回空版本 3 账本；版本 1 或 2 在读取中迁移并保存。
+    /// 读取并校验账本，缺失时返回空版本 3 账本。
     ///
-    /// 版本 3 验证总数最多 257、作用域格式、历史设备 UUID、取消任务键及有限重试时间。
-    /// 版本 2 的取消材料迁移为立即可执行任务；版本 1 只有身份而没有证明，保留为 legacy 证据，不为旧请求伪造取消权限。
-    /// - Throws: 格式或容量约束不满足时报告 malformedRecord，存储和迁移保存错误直接传播。
+    /// 验证总数最多 256、作用域格式、取消任务键及有限重试时间；其他版本或格式一律拒绝。
+    /// - Throws: 格式或容量约束不满足时报告 malformedRecord，存储错误直接传播。
     private func load() throws -> Ledger {
         guard let data = try persistence.load() else { return .init() }
-        if let ledger = try? JSONDecoder().decode(Ledger.self, from: data), ledger.version == 3,
-           ledger.count <= 257, ledger.pending.keys.allSatisfy(Self.validScope),
-           ledger.legacy.keys.allSatisfy(Self.validScope),
-           ledger.legacy.values.allSatisfy({ UUID(uuidString: $0.deviceID.rawValue) != nil }),
-           ledger.abandoned.allSatisfy({ $0.key == $0.value.cancellation.operationID.uuidString && $0.value.nextAttemptAt.timeIntervalSinceReferenceDate.isFinite }) {
-            return ledger
-        }
-        if let old = try? JSONDecoder().decode(ProofLedger.self, from: data), old.version == 2,
-           old.pending.count + old.abandoned.count + old.legacy.count <= 256,
-           old.pending.keys.allSatisfy(Self.validScope), old.legacy.keys.allSatisfy(Self.validScope),
-           old.legacy.values.allSatisfy({ UUID(uuidString: $0.deviceID.rawValue) != nil }),
-           old.abandoned.allSatisfy({ $0.key == $0.value.operationID.uuidString }) {
-            var upgraded = Ledger()
-            upgraded.pending = old.pending
-            upgraded.legacy = old.legacy
-            for cancellation in old.abandoned.values { try abandon(cancellation, in: &upgraded) }
-            try save(upgraded)
-            return upgraded
-        }
-        // Old IDs cannot be upgraded into authority over a request already
-        // sent. Keep them as explicit legacy recovery evidence and rotate.
-        guard let old = try? JSONDecoder().decode(LegacyLedger.self, from: data), old.version == 1,
-              old.pending.count <= 256, old.pending.keys.allSatisfy(Self.validScope),
-              old.pending.values.allSatisfy({ UUID(uuidString: $0.deviceID.rawValue) != nil })
+        guard let ledger = try? JSONDecoder().decode(Ledger.self, from: data), ledger.version == 3,
+              ledger.count <= 256, ledger.pending.keys.allSatisfy(Self.validScope),
+              ledger.abandoned.allSatisfy({ $0.key == $0.value.cancellation.operationID.uuidString && $0.value.nextAttemptAt.timeIntervalSinceReferenceDate.isFinite })
         else { throw V2DeviceCredentialRegistrationOperationStoreError.malformedRecord }
-        var upgraded = Ledger()
-        upgraded.legacy = old.pending
-        try save(upgraded)
-        return upgraded
+        return ledger
     }
 
     /// 保存完整版本化账本，三类记录均为空时删除项目；持久化成功后才通知调度及聚合状态观察者。
@@ -330,28 +280,13 @@ public actor V2DeviceRegistrationStore {
             .map { String(format: "%02x", $0) }.joined()
     }
 
-    /// 版本 3 账本，分别保存待注册操作、带重试状态的取消任务和旧版恢复证据。
+    /// 版本 3 账本，分别保存待注册操作和带重试状态的取消任务。
     private struct Ledger: Codable {
         var version = 3
         var pending: [String: V2PendingDeviceCredentialRegistration] = [:]
         var abandoned: [String: V2DeviceRegistrationCancellationJob] = [:]
-        var legacy: [String: LegacyRegistration] = [:]
-        var count: Int { pending.count + abandoned.count + legacy.count }
+        var count: Int { pending.count + abandoned.count }
     }
-    /// 版本 2 迁移输入，取消队列尚未包含重试次数、时间及暂停状态。
-    private struct ProofLedger: Decodable {
-        let version: Int
-        let pending: [String: V2PendingDeviceCredentialRegistration]
-        let abandoned: [String: V2DeviceRegistrationCancellation]
-        let legacy: [String: LegacyRegistration]
-    }
-    /// 版本 1 迁移输入，仅有历史设备及操作身份，不含可追溯的取消证明。
-    private struct LegacyLedger: Decodable {
-        let version: Int
-        let pending: [String: LegacyRegistration]
-    }
-    /// 账本历史恢复字段复用的旧注册目标类型。
-    private typealias LegacyRegistration = V2LegacyDeviceRegistration
 }
 
 /// 账户因子与凭证签发器共享的不可变注册句柄。
@@ -393,50 +328,6 @@ public struct V2PreparedDeviceRegistration: V2DeviceIdentityProvider, V2DeviceCr
     /// 条件完成当前句柄对应注册，旧句柄不会删除不同的后续记录。
     public func delete() async throws {
         try await owner.finish(registration, scope: scope)
-    }
-
-    /// 包装账户因子，在返回断言用于签发前先完成同作用域历史目标清理；不立即发起请求。
-    public func recoveringLegacyRegistration(using provider: any V2DeviceBoundAccountAssertionProvider,
-        client: any V2LegacyRegistrationCancellationClient) -> any V2DeviceBoundAccountAssertionProvider {
-        LegacyRecoveringAssertionProvider(lease: self, provider: provider, client: client)
-    }
-
-    /// 通过所有者核对当前句柄并读取历史恢复目标。
-    fileprivate func legacy() async throws -> V2LegacyDeviceRegistration? {
-        try await owner.legacy(for: registration, scope: scope)
-    }
-
-    /// 通过所有者核对当前句柄及目标后删除历史证据。
-    fileprivate func completeLegacy(_ legacy: V2LegacyDeviceRegistration) async throws {
-        try await owner.completeLegacy(legacy, registration: registration, scope: scope)
-    }
-}
-
-/// 在签发前完成旧注册清理的账户断言包装器，共享当前注册句柄。
-private struct LegacyRecoveringAssertionProvider: V2DeviceBoundAccountAssertionProvider {
-    /// 当前不可变注册句柄。
-    let lease: V2PreparedDeviceRegistration
-    /// 取得新账户因子的底层提供者。
-    let provider: any V2DeviceBoundAccountAssertionProvider
-    /// 执行精确历史注册取消的客户端。
-    let client: any V2LegacyRegistrationCancellationClient
-
-    /// 核对当前设备及句柄，取得账户断言后先取消已读取的历史目标并清除证据，最后返回同一断言；每个阶段检查取消，失败不继续签发。
-    func accountAssertion(for deviceID: DeviceID) async throws -> String {
-        try Task.checkCancellation()
-        guard try await lease.deviceID() == deviceID else { throw V2DeviceCredentialRegistrationOperationStoreError.malformedRecord }
-        let legacy = try await lease.legacy()
-        try Task.checkCancellation()
-        let assertion = try await provider.accountAssertion(for: deviceID)
-        try Task.checkCancellation()
-        _ = try await lease.deviceID()
-        if let legacy {
-            try await client.cancel(legacy, accountAssertion: assertion, assertionDeviceID: deviceID)
-            try Task.checkCancellation()
-            try await lease.completeLegacy(legacy)
-        }
-        try Task.checkCancellation()
-        return assertion
     }
 }
 

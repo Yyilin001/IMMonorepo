@@ -202,7 +202,6 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
         // any device credential is requested. Preserve those errors for the
         // app instead of presenting a misleading generic assertion failure.
         catch let error as V2AccountAuthenticationError { throw error }
-        catch let error as V2LegacyRegistrationCancellationError { throw error }
         catch let error as V2DeviceCredentialRegistrationOperationStoreError { throw error }
         catch { throw V2AccountAssertionCredentialProviderError.assertionUnavailable }
         try Task.checkCancellation()

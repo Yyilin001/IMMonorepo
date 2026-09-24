@@ -131,11 +131,6 @@ public struct V2GroupEventAvailabilityHint: Equatable, Sendable {
     /// 可选加速事件批次，可靠恢复仍以持久化游标为准。
     public let liveEvents: [V2ClientGroupEvent]
 
-    /// 兼容单事件调用者的视图；仅恰有一个事件时返回该事件，批量时返回 nil 以触发可靠补拉。
-    public var liveEvent: V2ClientGroupEvent? {
-        liveEvents.count == 1 ? liveEvents[0] : nil
-    }
-
     /// 保存连接或提示快照，不执行字段范围及跨字段一致性校验。
     ///
     /// - Parameters:
@@ -150,13 +145,6 @@ public struct V2GroupEventAvailabilityHint: Equatable, Sendable {
         self.roomID = roomID
         self.highWatermark = highWatermark
         self.liveEvents = liveEvents
-    }
-
-    /// 兼容单事件提示构造；非空事件包装为一元素数组，nil 转换为空数组，不验证水位关系。
-    public init(roomID: RoomID, highWatermark: UInt64, liveEvent: V2ClientGroupEvent?) {
-        self.roomID = roomID
-        self.highWatermark = highWatermark
-        liveEvents = liveEvent.map { [$0] } ?? []
     }
 
     /// 合并同房间提示，尽量保留有界且连续的加速事件。
@@ -931,8 +919,9 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
 
     /// 从可选加速载荷提取连续事件批次，失败时返回空数组而不使连接报错。
     ///
-    /// 优先使用批量字段，要求所有事件可构造、相邻序列连续且尾序列等于提示高水位。
-    /// 没有批量字段时兼容旧单事件格式。无效加速内容降级为普通唤醒，由可靠日志补拉恢复。
+    /// 群批量字段要求所有事件可构造、相邻序列连续且尾序列等于提示高水位。
+    /// 没有批量字段时读取私聊单事件字段，要求其序列等于提示高水位。
+    /// 无效加速内容降级为普通唤醒，由可靠日志补拉恢复。
     static func liveGroupEvents(from hint: IMV2GroupEventAvailable) -> [V2ClientGroupEvent] {
         if !hint.liveEvents.isEmpty {
             let events = hint.liveEvents.compactMap(Self.liveGroupEvent(from:))

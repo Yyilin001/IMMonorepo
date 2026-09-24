@@ -247,16 +247,16 @@ GRDB ValueObservation 可用于 index state 的异步状态流，显式选择有
 2026-09-07，B08 验收补充：[实际 App 两次进程中断恢复](../registration-process-interruption-contract.md)已完成，替代了该具体场景仅有组件重建的证据。下一步优先实现旧 format 1 注册档案的受认证清理/归属策略，再补其他退出与换号检查点及真机系统边界。已确认当前设备管理 revoke 接口要求现有账号凭据，旧 ID 本身不能成为新的取消权限；不得伪造旧证明或使用新账号权限清理其他账号。
 
 
-2026-09-07，B08 旧注册档案：已增加[服务端持久取消仲裁](../legacy-registration-arbitration-contract.md)，schema 30。下一步在新的设备绑定账号因子验证后提交旧档案清理，再允许新设备签发；ClientKit 需以完整旧档案 CAS 确认完成，HTTP 或本地写入失败仍保留。旧 ID 仅定位目标，不能当作撤销权限；未签发目标需要持久阻断，不能把普通设备撤销的 404 当作完成。
+2026-09-07，B08 旧注册档案：已增加[服务端持久取消仲裁](legacy-registration-arbitration-contract.md)，schema 30。下一步在新的设备绑定账号因子验证后提交旧档案清理，再允许新设备签发；ClientKit 需以完整旧档案 CAS 确认完成，HTTP 或本地写入失败仍保留。旧 ID 仅定位目标，不能当作撤销权限；未签发目标需要持久阻断，不能把普通设备撤销的 404 当作完成。
 
 
-2026-09-07，B08 旧档案 HTTP 已通过[真实账号验证与清理验收](../legacy-registration-http-contract.md)。接下来接通 ClientKit 严格空 204 完成判断、401 重新验证/404 保留档案/507 暂停，以及完整旧档案 CAS；App 在新设备账号因子成功后先清理旧档案，再签发新设备。密码只由一次性因子 provider 持有，清理与签发复用同一次因子结果；取消或旧 epoch 不能清除后来的本地档案。
+2026-09-07，B08 旧档案 HTTP 已通过[真实账号验证与清理验收](legacy-registration-http-contract.md)。接下来接通 ClientKit 严格空 204 完成判断、401 重新验证/404 保留档案/507 暂停，以及完整旧档案 CAS；App 在新设备账号因子成功后先清理旧档案，再签发新设备。密码只由一次性因子 provider 持有，清理与签发复用同一次因子结果；取消或旧 epoch 不能清除后来的本地档案。
 
 
-2026-09-07，B08 [ClientKit/App 旧档案恢复](../legacy-registration-client-recovery-contract.md)已接线：同一次因子结果先清理再签发，只有空 204 才在原 pending 租约与完整旧档案匹配时确认；失败保留。额外一个恢复位置解决 256 条旧档案满额时无法创建清理尝试的问题。后续补实际 App legacy 登录与进程中断检查点、档案永久冲突处理；不以分层 Keychain/HTTPS 证据替代这些场景。
+2026-09-07，B08 [ClientKit/App 旧档案恢复](legacy-registration-client-recovery-contract.md)已接线：同一次因子结果先清理再签发，只有空 204 才在原 pending 租约与完整旧档案匹配时确认；失败保留。额外一个恢复位置解决 256 条旧档案满额时无法创建清理尝试的问题。后续补实际 App legacy 登录与进程中断检查点、档案永久冲突处理；不以分层 Keychain/HTTPS 证据替代这些场景。
 
 
-2026-09-07 后续：[实际 App 的旧档案跨进程检查点](../legacy-registration-app-process-contract.md)已通过，覆盖清理提交后确认前的受控终止、真实 Keychain 重放、新登录及再次冷恢复。其他退出/换号检查点、旧二进制升级、真机系统行为及永久冲突/GC 仍开放。
+2026-09-07 后续：[实际 App 的旧档案跨进程检查点](legacy-registration-app-process-contract.md)已通过，覆盖清理提交后确认前的受控终止、真实 Keychain 重放、新登录及再次冷恢复。其他退出/换号检查点、旧二进制升级、真机系统行为及永久冲突/GC 仍开放。
 
 
 最新补充（2026-09-07，B01 服务端时钟）：[账号证明与 Gateway 时钟边界](../server-clock-integer-boundaries.md)已补检查；独立进程复现 NaN 转 Int64 fatal error 后，新增非有限值、有效期相加越界和不可用编码截止的拒绝。Hello 在状态变更前检查，心跳覆盖异步准入后再次失效并释放请求关联；凭据接口将时钟故障返回为空正文、不缓存的 503，修复前错误 401 的三条失败断言留档。最终服务端 **57 项 / 7 套件（6.387 秒）**、真实 HTTPS **5 项 / 2 套件（2.734 秒）**、App UI **2 项（64.268 秒）**、独立后台入口 **1 项（1.298 秒）**通过。数据库 **16|7|0|0|7**、注册取消记录 **17|16|2**，专用数据库根与模拟器已独立核实移除。见[证据](../../../docs/reviews/verification-records.md#20260907-server-clock-boundaries)。这不是远端可控时间戳攻击的证明；其余恢复 DTO、计数和时间消费者继续审计，B01 仍实施中，全部47项保持 **16 已验证、31 开放**。

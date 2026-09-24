@@ -118,20 +118,14 @@ public enum V2ControlPlaneHousekeepingError: Error, Equatable, Sendable {
     case corruptPersistenceState
 }
 
-/// Transitional composition switch. The actor-owned mode leaves every
-/// room-owned table to a separately admitted, activation-fenced room turn.
-public enum V2HousekeepingRoomCleanupMode: Equatable, Sendable {
-    case legacyOwnerLocked
-    case actorOwned
-}
-
 /// 控制面维护的 PostgreSQL 实现。
 ///
 /// 它保留权威房间事件与消息，只删除有界的终态工作器簿记。
 /// 扇出相关行按从叶子到根的次序拆除，因此不会绕过任何外键栅栏或仍在进行的投递。
+/// 房间自有的操作台账与审核任务不在此处删除，而是由持有激活租约的房间
+/// 维护回合（``PostgresV2RoomBookkeepingStore``）清理，每类删除只有一个物理归属。
 public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepingStore {
     private let database: any Database
-    private let roomCleanupMode: V2HousekeepingRoomCleanupMode
 
     // Shared by startup readiness and transactional execution.
     static var housekeepingRotationPeriod: Int64 { Int64(10 * idempotencyTables.count) }
@@ -139,10 +133,8 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
     /// 组合数据库。
     ///
     /// - Parameter database: 存放终态簿记与控制面状态的数据库。
-    public init(database: any Database,
-                roomCleanupMode: V2HousekeepingRoomCleanupMode = .legacyOwnerLocked) {
+    public init(database: any Database) {
         self.database = database
-        self.roomCleanupMode = roomCleanupMode
     }
 
     /// 清理止于终态的簿记数据。
@@ -210,14 +202,9 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 where: "state = 'completed' AND completed_at <= ", order: "completed_at, media_id",
                 cutoff: cutoff, limit: budget.take()
             )
-            let reviewBudget = budget.take()
-            if roomCleanupMode == .legacyOwnerLocked {
-                count += try await deleteSimple(
-                    sql: sql, table: "content_review_jobs", identity: "message_id",
-                    where: "state IN ('completed', 'superseded') AND completed_at <= ", order: "completed_at, message_id",
-                    cutoff: cutoff, limit: reviewBudget, roomOwned: true
-                )
-            }
+            // Review jobs are room-owned and purged by room actors. Keep their
+            // category slot so budget shares and the rotation period stay fixed.
+            _ = budget.take()
             count += try await deleteSimple(
                 sql: sql, table: "public_profile_update_outbox", identity: "source_event_id",
                 where: "state = 'completed' AND completed_at <= ", order: "completed_at, source_event_id",
@@ -292,8 +279,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
         rotation: UInt,
         limit: Int
     ) async throws -> Int {
-        let tables = roomCleanupMode == .legacyOwnerLocked
-            ? Self.idempotencyTables : Self.idempotencyTables.filter { !$0.roomOwned }
+        let tables = Self.idempotencyTables.filter { !$0.roomOwned }
         let selectedCount = min(limit, tables.count)
         guard selectedCount > 0 else { return 0 }
         let start = Int(rotation % UInt(tables.count))
@@ -307,7 +293,6 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                     FROM im_v2.\(unsafeRaw: descriptor.table) AS target
                     WHERE target.\(unsafeRaw: descriptor.timestamp) <= \(bind: cutoff)
                       \(unsafeRaw: descriptor.additionalPredicate)
-                      \(unsafeRaw: Self.roomCleanupPredicate(enabled: descriptor.roomOwned))
                     ORDER BY target.\(unsafeRaw: descriptor.timestamp), target.ctid
                     LIMIT \(bind: perTableLimit)
                     FOR UPDATE OF target SKIP LOCKED
@@ -328,15 +313,13 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
         where predicate: String,
         order: String,
         cutoff: Date,
-        limit: Int,
-        roomOwned: Bool = false
+        limit: Int
     ) async throws -> Int {
         try await sql.raw("""
             WITH candidates AS (
                 SELECT \(unsafeRaw: identity)
                 FROM im_v2.\(unsafeRaw: table) AS target
                 WHERE \(unsafeRaw: predicate)\(bind: cutoff)
-                  \(unsafeRaw: Self.roomCleanupPredicate(enabled: roomOwned))
                 ORDER BY \(unsafeRaw: order)
                 LIMIT \(bind: limit)
                 FOR UPDATE OF target SKIP LOCKED
@@ -346,17 +329,6 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             WHERE target.\(unsafeRaw: identity) = candidates.\(unsafeRaw: identity)
             RETURNING 1 AS value
             """).all(decoding: ControlHousekeepingDeletedRow.self).count
-    }
-
-    /// Room-owned cleanup must serialize with marker installation. Missing
-    /// local rooms are retained until migration retirement is explicitly proven.
-    private static func roomCleanupPredicate(enabled: Bool) -> String {
-        guard enabled else { return "" }
-        return """
-            AND (SELECT true FROM im_v2.rooms AS room
-                 WHERE room.room_id = target.room_id
-                 FOR SHARE OF room SKIP LOCKED)
-            """
     }
 
     struct IdempotencyTable: Sendable {

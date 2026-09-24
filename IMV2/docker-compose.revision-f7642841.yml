@@ -1,9 +1,0 @@
-services:
-  account:
-    image: imv2-server:direct-shard-admission-f7642841-linux
-
-  gateway:
-    image: imv2-server:direct-shard-admission-f7642841-linux
-
-  operator:
-    image: imv2-server:direct-shard-admission-f7642841-linux

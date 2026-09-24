@@ -14,17 +14,15 @@
 
 ## 已接入的生产启动与普通退出
 
-- `V2ClientSessionBootstrapper` 接收 `accountStorageRoot`，生产 App 使用 `<legacyDatabaseURL>.accounts`。每账号以 UserID 的 SHA-256 选择 catalog，catalog 内再以随机 UUID incarnation 选择文件目录。UserID 不作为任意路径组件使用。普通退出保留账号主库和未发送 outbox，重新登录通过新数据库对象打开原 scope；显式擦除仍是单独动作。
+- `V2ClientSessionBootstrapper` 接收 `accountStorageRoot`，生产 App 使用 `<databaseURL>.accounts`。每账号以 UserID 的 SHA-256 选择 catalog，catalog 内再以随机 UUID incarnation 选择文件目录。UserID 不作为任意路径组件使用。普通退出保留账号主库和未发送 outbox，重新登录通过新数据库对象打开原 scope；显式擦除仍是单独动作。
 - `V2AccountLocalStoreOwner` 串行所有 open/close transition，包括跨 actor await；同账号 20 个并发 open 共用一对 pool。切换账号先关闭原对象，迟到 close 使用调用者捕获的对象，不能按当前 userID 找到并关闭新 A。已关闭对象的 SQLite 读写失败。
-- 旧固定路径主库先验证安装绑定，再读取主库中已经保存的账号。即使首先登录的是 B，旧 A 数据也只迁入 A 的 scope，保留 A outbox；无账号归属的可信旧库不自动归给当前登录者。缺失/失效安装锚点仍按原导入策略丢弃不可信文件，暂不可用则保持原文件不动。
-- `legacy-import.json` 在移动文件前提交，绑定原账号和目标 incarnation。每次启动先恢复已提交的移动前缀，冲突或缺失主库失败，不覆盖目标主库。主库及其附属文件从已关闭的源句柄移动；旧全局 FTS 及其附属文件不导入，随后从已验证主库重建。
-- 删除旧 FTS 前，主库先持久标记索引 building，避免启动后错误复用 ready 状态。迁移中断后继续使用这个 building 状态，新的 indexer 再完成重建。
+- 项目未上线，不迁移旧固定路径主库：账号 scope 只从当前 schema 创建，旧全局主库及其 FTS 不读取、不导入。
 - App 新 runtime、stager、media downloader 使用 scope 中的主库和媒体路径，移除旧全局媒体路径生成函数。生产主库和搜索库的 iOS 文件保护继续对实际 scoped 路径执行；随机 E2E cleanup 同时清理它自己的 scoped root。
 - App signOut 先推进认证尝试代次并隐藏账号视图；restore 成功/失败与 activate 检查该代次。`discardAuthenticatedPresentation` 捕获当前 indexer/store，取消并等待 indexer，停止 runtime 后关闭精确 store 对象。runtime 的 public stop 取消任务、断开连接后等待启动任务和 owned loops 完全结束，避免仅 cancel/nil 后即认为数据库可关闭。
 
 ## 仍需完成的关闭条件
 
-1. 当前接线包含普通退出的双库关闭和生产迁移，但显式擦除仍需由完整账号生命周期拥有者驱动 retire → 停止接纳工作 → drain → completeCleanup。安装绑定失配的重建仍采用精确六文件集合，尚未把所有派生文件一起纳入目录 retire。
+1. 当前接线包含普通退出的双库关闭，但显式擦除仍需由完整账号生命周期拥有者驱动 retire → 停止接纳工作 → drain → completeCleanup。安装绑定失配的重建仍采用精确六文件集合，尚未把所有派生文件一起纳入目录 retire。
 2. 认证尝试代次阻止旧结果覆盖新 UI，不能替代 B08/B09 所需的完整 auth-session epoch。进程内凭据 IO 顺序、迟到账号 provider 和认证状态观察已补实现及测试；持久账号 checkpoint、离线 Push 撤销补偿和完整组合验收仍未完成。
 3. 旧全局 media-staging/media-cache 不再供新 runtime 使用，但旧目录的可靠删除、在途媒体操作取消/排空、迟到写回的账号/安装代次检查仍属于 D04，尚未完成。不能因为换了目录就声明旧正文或附件已从磁盘全部清除。
 4. 页面观察取消依赖旧视图移除，数据库关闭保证旧句柄不能继续写；仍需验证全部页面/下载任务的显式生命周期及受保护数据恢复，不只以任务取消为证明。
