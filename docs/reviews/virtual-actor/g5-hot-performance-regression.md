@@ -1,10 +1,24 @@
-# G5 hot candidates: functional pass, remaining CPU regression
+# G5 hot candidates: repeated performance validation
 
-Status: **performance failed; the latest SQL-context candidate passes SQL but still exceeds the frozen CPU limit**. Frozen main is `f1cdd78d6a21bf0ae23da627c0710c65115236aa`; the latest measured candidate is `812af24a319dbaaabcb66f0bd96d0c43bf95d2cc`. Earlier candidate results remain below. The hot operating point and thresholds were frozen before candidate sampling as recorded in the [baseline protocol](v1-baseline-protocol.md). Neither load nor thresholds are changed in response to these results.
+Status: **the cached-local campaign is incomplete; main 01 and candidate 02 passed**. Frozen main remains `f1cdd78d6a21bf0ae23da627c0710c65115236aa`; the latest measured candidate is `fb8a10478895f4b2d616f4bf7eb11eed51a84824`. Earlier failures remain below. The operating point and thresholds were frozen before candidate sampling in the [baseline protocol](v1-baseline-protocol.md) and remain unchanged.
 
-A later [same-process cached invocation change](r3-local-capability-evidence.md#仅限本机的缓存调用), frozen as `fb8a10478895f4b2d616f4bf7eb11eed51a84824`, has passed its native Runtime/Cluster suites and seven-product Linux Release build. Its fresh six-run formal hot comparison has started against the original freeze. No new candidate performance result is available yet; it does not change the measured failure below.
+## Cached-local candidate: first pair passes, repeated samples pending
 
-## Latest SQL-context candidate: two fewer SQL calls, CPU still over budget
+The [same-process cached invocation change](r3-local-capability-evidence.md#仅限本机的缓存调用) passed native Runtime/Cluster tests and all seven Linux Release products. Its fresh `capacity-formal-hot-cached-local-rate025-campaign` has completed main 01 and candidate 02. Both immutable runners passed correctness, formal eligibility and cleanup: 100 authenticated connections, 52,500 acknowledged and durable messages, zero workload failures, unchanged room cardinality. Candidate 03 is now running; all six prescribed samples are required for hot acceptance.
+
+| Steady metric | Main 01 | `fb8a1047` candidate 02 | Frozen limit | Candidate 02 result |
+| --- | --- | --- | --- | --- |
+| Acknowledgements/s | 125 | 125 | ≥112.5 | Pass |
+| p95 / p99 (ms) | 8 / 10 | 9 / 12 | ≤18 / ≤35 | Pass |
+| SQL calls / acknowledgement | 18.352720 | 22.115387 | ≤24.775092 | Pass |
+| Gateway CPU ms / acknowledgement | 1.426372 | 2.110377 | ≤2.133047 | Pass |
+| Sampled Gateway PID-1 peak RSS (bytes) | 76,529,664 | 96,448,512 | ≤345,440,256 | Pass |
+
+Candidate 02 CPU is exactly 2.1103771733333334 ms/ACK, leaving only about 1.06% below the frozen 2.13304732 limit. One passing candidate sample does not establish stability; the remaining candidate/main/main/candidate runs retain per-sample fail-stop. The final complete Linux run, the other four workloads and fault case #19 remain open.
+
+Evidence: `/Users/yyl/.codex/virtual-actor-builds/capacity-formal-hot-cached-local-rate025-campaign/assessment-01.json` SHA-256 `7d5a5671ed7e7cc725895f005c1d8b490f50a4a4140c3f78aadb9a4bd4589b60`; `assessment-02.json` SHA-256 `066acfea0589da38a88c01d414fed3f5d55c624b8947aed474b6370cffe1e85b`. Main 01 `result.json` SHA-256 is `3abc728b1f7f631e5acc31742cd2ab9269867778295b9161e4c79def9cc9fd0d`; candidate 02 is `662e47d8682ebf26cce48fe0a6d562ead706a0a2b61536daca9ee24f0d6f4a6d`. Both assessments report `passed=true` and no failures. No earlier failed artifact has been replaced or reclassified.
+
+## Earlier SQL-context candidate: two fewer SQL calls, CPU still over budget
 
 The [transaction-bound SQL reuse implementation](g5-sql-context-evidence.md) passed ten focused PostgreSQL tests and its seven-product Linux Release build. Its `capacity-formal-hot-sql-context-rate025-campaign` then completed main 01 and candidate 02. Both runners passed correctness, formal eligibility and cleanup: 100 authenticated connections, 52,500 acknowledged and durable messages, zero workload errors, unchanged room count. The outer assessor exited 1 on candidate CPU and stopped before runs 03–06, whose artifact directories do not exist.
 
