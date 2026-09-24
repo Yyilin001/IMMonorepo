@@ -56,13 +56,9 @@
 
 10项 App 成员目录/变更专项通过，包括6种失效/网络参数及3种异常分页参数，见[页面证据](verification-records.md#20260919-member-directory)。这是注入读取器的 App 状态测试，不等同生产名录裁剪或跨分片实测。
 
-ServerApp 已改用[成员名录路由](../../IMV2Server/Sources/IMV2Server/V2RoutedRoomMembershipDirectoryStore.swift)：
+成员名录由房间 Actor 提供：[房间查询执行器](../../IMV2Server/Sources/IMV2Server/RoomDomain/Queries/V2ActorRoomQueryExecutor.swift)在激活围栏读事务内调用 [`PostgresV2RoomMembershipDirectoryStore.list`](../../IMV2Server/Sources/IMV2Server/PostgresV2RoomMembershipDirectoryStore.swift)，房间归属由激活租约保证。
 
-- 从不缓存的控制面目录选择 owner，owner 内以共享房间锁核对 shard/epoch、当前成员资格及角色；候选用户和角色只取该 owner。
-- 公开身份、隐藏状态与账号停用从控制库有界批量读取，不使用 owner 内可能过期的公开资料副本。
-- 资料读取后再次核对 owner 的成员修订、资格和角色，最后复核控制面归属；权限撤销、归属变化或未配置 owner 都不回退到旧库。
-- 名录游标绑定房间、成员修订、owner shard/epoch和扫描边界。跨 owner/epoch 的旧游标触发 REVISION_CONFLICT，客户端从第一页重读。
-- 每次至多读取一页候选（100条，另取1条探测后页），隐藏/停用资料可产生空页，但候选游标继续推进；不为填满展示页无界扫描。
+2026-09-24：此前由控制面目录选 owner、从控制库批量读取公开身份、再复核 shard/epoch 的成员名录路由实现（`V2RoutedRoomMembershipDirectoryStore` 及 owner 候选分页 API）在生产中已无调用路径，已删除。
 
 [三库专项](verification-records.md#20260919-member-directory-routing)覆盖旧 owner 仍有副本、控制库资料与 owner 旧资料不一致、空日志且裁剪下界为100、迁移后旧游标拒绝、撤销、重新加入以及资料读取期间撤销。9项服务端/数据库测试与11项 App 状态测试通过。这是受控归属切换与读取验证，不是运行中完整 owner 数据搬迁或首次安装 App 整链验收。
 
