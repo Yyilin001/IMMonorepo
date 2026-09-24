@@ -213,37 +213,6 @@ public actor V2LocalStoreBootstrapper {
         }
     }
 
-    /// 为旧数据库迁移读取设备绑定，不为无绑定的历史库制造新归属。
-    ///
-    /// - Parameter databaseURL: 待检查的旧数据库位置，清理前须已关闭其文件。
-    /// - Returns: 绑定匹配时返回存储；绑定缺失、永久失效或数据库不匹配时清理并返回 nil。
-    /// - Throws: 绑定暂时不可用或清理、存储、数据库错误。
-    ///
-    /// 没有额外的文件存在性检查；有有效绑定时交给 GRDB 存储构造器打开该路径。
-    public func openTrustedLegacyStore(databaseURL: URL) async throws -> GRDBV2LocalSyncStore? {
-        let binding: V2LocalInstallationBinding
-        do {
-            guard let existing = try await bindingStore.load() else {
-                try eraseDatabaseArtifacts(at: databaseURL)
-                return nil
-            }
-            binding = existing
-        } catch let error as V2InstallationBindingStoreError {
-            switch error {
-            case .unavailable, .unexpectedStatus: throw V2LocalStoreBootstrapError.installationBindingUnavailable
-            case .malformedRecord, .permanentlyInvalidated:
-                try await bindingStore.delete()
-                try eraseDatabaseArtifacts(at: databaseURL)
-                return nil
-            }
-        }
-        do { return try GRDBV2LocalSyncStore(databaseURL: databaseURL, installationBinding: binding) }
-        catch V2ClientLocalStorageError.installationBindingMismatch {
-            try eraseDatabaseArtifacts(at: databaseURL)
-            return nil
-        }
-    }
-
     /// 通过 V2LocalDatabaseArtifacts 清理指定数据库的已关闭文件，传播文件错误，不在此关闭活跃连接。
     private func eraseDatabaseArtifacts(at databaseURL: URL) throws {
         try V2LocalDatabaseArtifacts(primary: databaseURL).removeClosedFiles()
