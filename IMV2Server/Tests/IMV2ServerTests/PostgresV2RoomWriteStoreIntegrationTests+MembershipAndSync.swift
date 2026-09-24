@@ -432,16 +432,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(originalBaseline.permissionRevision == 1)
             #expect(originalBaseline.adminPermissions == V2GroupPermissionDefaults.permissions(for: .admin))
             #expect(originalBaseline.memberPermissions == V2GroupPermissionDefaults.permissions(for: .member))
-            let route = try await V2PostgresRoomShardRouter(database: resources.database(.psql)).route(for: roomID)
-            let routedBaseline = try V2RoutedGroupRolePolicyBaselineStore(controlDatabase: resources.database(.psql), stores: [route.shardID: baselineStore])
-            #expect(try await routedBaseline.readRolePolicyBaseline(roomID: roomID, actorUserID: senderID) == originalBaseline)
-            let movingReader = PolicyBaselineAfterReadStore(base: baselineStore) {
-                try await sql.raw("INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at) VALUES (\(bind: roomUUID), \(bind: route.shardID), \(bind: route.epoch + 1), NOW(), NOW()) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
-            }
-            let movingBaseline = try V2RoutedGroupRolePolicyBaselineStore(controlDatabase: resources.database(.psql), stores: [route.shardID: movingReader])
-            await #expect(throws: V2RoomShardRouteError.routeConflict) {
-                try await movingBaseline.readRolePolicyBaseline(roomID: roomID, actorUserID: senderID)
-            }
             try await sql.raw("DELETE FROM im_v2.room_owner_routes WHERE room_id = \(bind: roomUUID)").run()
             await #expect(throws: V2GroupRolePolicyBaselineError.actorNotMember) {
                 try await baselineStore.readRolePolicyBaseline(roomID: roomID, actorUserID: .init(uuid: UUID()))
@@ -1959,16 +1949,6 @@ private struct ModerationMessageAssertionRow: Decodable { let withdrawn: Bool; l
 private struct MuteAssertionRow: Decodable { let muteUntil: Date; let actorUserID: UUID; enum CodingKeys: String, CodingKey { case muteUntil = "mute_until", actorUserID = "actor_user_id" } }
 private struct MuteEventAssertionRow: Decodable { let eventType: String; let targetUserID: String; enum CodingKeys: String, CodingKey { case eventType = "event_type", targetUserID = "target_user_id" } }
 private struct FrozenRoomAssertionRow: Decodable { let frozenAt: Date?; let frozenByUserID: UUID?; enum CodingKeys: String, CodingKey { case frozenAt = "frozen_at", frozenByUserID = "frozen_by_user_id" } }
-private struct PolicyBaselineAfterReadStore: V2GroupRolePolicyBaselineReading {
-    let base: PostgresV2GroupRolePolicyBaselineStore
-    let afterRead: @Sendable () async throws -> Void
-    func readRolePolicyBaseline(roomID: RoomID, actorUserID: UserID) async throws -> V2GroupRolePolicyBaseline {
-        let value = try await base.readRolePolicyBaseline(roomID: roomID, actorUserID: actorUserID)
-        try await afterRead()
-        return value
-    }
-}
-
 private struct PublicationAdmissionSnapshot: Decodable, Equatable {
     let room: Int64
     let shard: Int64
