@@ -127,7 +127,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 100, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
             // Production path: the control coordinator calls each room owner
             // through a room turn; the first room's owner is the control database.
-            let port = invitationRoomPort(control: control, owner: { $0 == roomID ? (control, "room-a") : (secondOwner, "room-b") },
+            let port = invitationRoomPort(control: control, owner: { $0 == roomID ? (control, "room-a", 0) : (secondOwner, "room-b", 0) },
                                           capacityProfile: profile, now: { now })
             let coordinator = V2ActorInvitationCoordinator(controlDatabase: control, room: port,
                 secretIssuer: try V2GroupInviteSecretIssuer(rawKey: Data(repeating: 0x5a, count: 32)), now: { now })
@@ -265,31 +265,42 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
 
 
 
-    @Test("cancellation uses current owner and control identity and fences stale epochs")
+    @Test("cancellation uses the room owner and control identity and fences stale owner epochs")
     func invitationCancellationRouting() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { control, owner, sql, ownerSQL, room in
             let now = Date(timeIntervalSince1970: 1_750_000_000), applicant = UserID(uuid: UUID())
             try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             try await sql.raw("INSERT INTO im_v2.public_user_profiles(user_id,public_handle,display_name,created_at,updated_at) VALUES (\(bind: applicant.uuidValue!), 'routed_cancel', 'Control Applicant', \(bind: now), \(bind: now))").run()
-            let routed = V2RoutedGroupInvitationStore(controlDatabase: control, router: V2PostgresRoomShardRouter(database: control), owners: try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")]))
-            let digest = Data(repeating: 23, count: 32)
-            _ = try await routed.create(.init(inviteID: .init(uuid: UUID()), roomID: room, actorUserID: senderID, operationID: .init(uuid: UUID()), tokenDigest: digest, requestedLifetimeSeconds: 3600, expiresAt: now.addingTimeInterval(3600), maximumApprovedUses: 2, maximumActiveInvitesPerRoom: 20, createdAt: now))
-            guard case .submitted(let request) = try await routed.submit(.init(requestID: .init(uuid: UUID()), applicantUserID: applicant, operationID: .init(uuid: UUID()), tokenDigest: digest, note: nil, createdAt: now, maximumPendingRequestsPerApplicant: 1, maximumPendingRequestsPerInvite: 1)) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+            let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 100, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
+            let issuer = try V2GroupInviteSecretIssuer(rawKey: Data(repeating: 23, count: 32))
+            func coordinator(epoch: Int64) -> V2ActorInvitationCoordinator {
+                .init(controlDatabase: control, room: invitationRoomPort(control: control, owner: owner, shardID: "room-b",
+                    epoch: epoch, capacityProfile: profile, now: { now }), secretIssuer: issuer, now: { now })
+            }
+            let current = coordinator(epoch: 0)
+            guard case .created(let link) = try await current.create(.init(roomID: room, actorUserID: senderID, operationID: .init(uuid: UUID()),
+                lifetime: 3600, maximumApprovedUses: 10), deadline: invitationTestDeadline()) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+            guard case .submission(.submitted(let request)) = try await current.submitBySecret(.init(applicantUserID: applicant,
+                operationID: .init(uuid: UUID()), secret: link.secret, note: nil), deadline: invitationTestDeadline()) else {
+                throw V2GroupInvitationServiceError.corruptPersistenceState
+            }
+            let cancel = V2ActorCancelGroupJoinWire(roomID: room, requestID: request.requestID, applicantUserID: applicant)
             try await ownerSQL.raw("UPDATE im_v2.rooms SET owner_epoch = 1 WHERE room_id = \(bind: room.uuidValue!)").run()
-            await #expect(throws: V2GroupInvitationServiceError.ownerChanged) {
-                _ = try await routed.cancel(roomID: room, requestID: request.requestID, applicantUserID: applicant, now: now)
+            // A room turn for the previous owner epoch cannot be granted.
+            await #expect(throws: V2RoomActivationLeaseError.ownerChanged) {
+                _ = try await current.cancel(cancel, deadline: invitationTestDeadline())
             }
             #expect(try await count("im_v2.group_join_requests WHERE state = 'pending'", on: ownerSQL) == 1)
-            try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch = 1 WHERE room_id = \(bind: room.uuidValue!)").run()
-            let result = try await routed.cancel(roomID: room, requestID: request.requestID, applicantUserID: applicant, now: now)
+            let moved = coordinator(epoch: 1)
+            guard case .cancelled(let result) = try await moved.cancel(cancel, deadline: invitationTestDeadline()) else {
+                throw V2GroupInvitationServiceError.corruptPersistenceState
+            }
             #expect(result.state == .cancelled && result.applicant.displayName == "Control Applicant")
-            #expect(try await routed.cancel(roomID: room, requestID: request.requestID, applicantUserID: applicant, now: now.addingTimeInterval(1)) == result)
+            #expect(try await moved.cancel(cancel, deadline: invitationTestDeadline()) == .cancelled(result))
             #expect(try await count("im_v2.group_join_requests", on: sql) == 0)
             #expect(try await count("im_v2.group_join_requests WHERE state = 'cancelled'", on: ownerSQL) == 1)
         }
     }
-
 
     @Test("applicant cancellation preserves decisions, releases quota, and serializes with approval", arguments: ["pending", "expired", "revoked", "approve-first", "reject-first", "race"])
     func invitationApplicantCancellation(_ scenario: String) async throws {

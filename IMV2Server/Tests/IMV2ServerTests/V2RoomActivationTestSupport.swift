@@ -83,7 +83,7 @@ let forwardSourceCommandUnexpected: @Sendable (V2RoomForwardCommand, ContinuousC
 /// activation of that room on its owner database.
 func invitationRoomPort(
     control: any Database,
-    owner: @escaping @Sendable (RoomID) throws -> (database: any Database, shardID: String),
+    owner: @escaping @Sendable (RoomID) throws -> (database: any Database, shardID: String, epoch: Int64),
     capacityProfile: V2CapacityProfile,
     now: @escaping @Sendable () -> Date
 ) -> V2ActorInvitationRoomPort {
@@ -94,7 +94,7 @@ func invitationRoomPort(
     ) async throws -> V2RoomInvitationResult {
         let location = try owner(roomID)
         return try await withRoomActivation(database: location.database, roomID: roomID,
-                                            shardID: location.shardID) { token in
+                                            shardID: location.shardID, epoch: location.epoch) { token in
             try await body(V2RoomInvitationDomainExecutor(database: location.database, token: token,
                 identities: identities, capacityProfile: capacityProfile, now: now))
         }
@@ -108,10 +108,11 @@ func invitationRoomPort(
     control: any Database,
     owner: any Database,
     shardID: String = "room-a",
+    epoch: Int64 = 0,
     capacityProfile: V2CapacityProfile,
     now: @escaping @Sendable () -> Date
 ) -> V2ActorInvitationRoomPort {
-    invitationRoomPort(control: control, owner: { _ in (owner, shardID) },
+    invitationRoomPort(control: control, owner: { _ in (owner, shardID, epoch) },
                        capacityProfile: capacityProfile, now: now)
 }
 
