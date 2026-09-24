@@ -2,6 +2,7 @@
 """No-Docker validation of the isolated capacity canary runner's input fences."""
 
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -9,12 +10,17 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from unittest.mock import patch
+
+from assess_v2_virtual_actor_capacity import read_run
+from virtual_actor_capacity_measurement import MeasurementFailure
 
 from test_v2_virtual_actor_capacity_canary import (
     CAPACITY_NOFILE, CanaryFailure, capture_detached_loader_open_file_limits,
     capture_pid1_open_file_limits, capture_project_diagnostics,
     capture_runtime_provenance, measurement_service_settings,
-    parse_pid1_open_file_limits,
+    formal_sampling_eligible, parse_args, parse_pid1_open_file_limits, result_mode,
     preserve_incomplete_measurement, set_capacity_open_file_limits,
 )
 
@@ -25,6 +31,70 @@ PREPARE = HERE / "prepare_v2_virtual_actor_capacity_fixture.py"
 
 
 class CanaryRunnerPreflightTests(unittest.TestCase):
+    def test_owner_fault_functional_cli_cannot_be_assessed_as_formal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, release, fixture, loader = (root / name for name in
+                                                ("source", "release", "fixture", "loader"))
+            for directory in (source, release, fixture, loader):
+                directory.mkdir()
+            build = root / "build-result.json"
+            loader_build = root / "loader-result.json"
+            freeze = root / "freeze.json"
+            for path in (build, loader_build, freeze):
+                path.write_text("{}\n")
+            base = [str(RUNNER), "--source-checkout", str(source), "--source-sha", "a" * 40,
+                    "--release-dir", str(release), "--build-result", str(build),
+                    "--loader-products-dir", str(loader), "--loader-build-result", str(loader_build),
+                    "--fixture-dir", str(fixture), "--layout", "mixed",
+                    "--docker-context", "test-isolated", "--artifact-dir", str(root / "evidence")]
+
+            def parsed(extra: list[str], *, layout: str = "mixed", separate_loader: bool = True):
+                command = base.copy()
+                command[command.index("--layout") + 1] = layout
+                if not separate_loader:
+                    offset = command.index("--loader-products-dir")
+                    del command[offset:offset + 4]
+                with patch.object(sys, "argv", command + extra), redirect_stderr(io.StringIO()):
+                    return parse_args()
+
+            functional = parsed(["--functional-owner-fault"])
+            self.assertEqual(functional.measurement_workload, "fault")
+            self.assertEqual(functional.measurement_connections, 100)
+            self.assertIsNone(functional.measurement_freeze_file)
+            self.assertEqual(result_mode(functional, {}), "owner-fault-functional")
+            self.assertFalse(formal_sampling_eligible(
+                functional, {}, {"matchesFormal4CPU16GiB": True}))
+            for extra in (["--canary-recovery"], ["--canary-connections", "100"],
+                          ["--measurement-workload", "fault"], ["--measurement-connections", "100"],
+                          ["--measurement-rate-scale", "0.5"],
+                          ["--measurement-freeze-file", str(freeze)], ["--legacy-loader-net-admin"]):
+                with self.subTest(extra=extra), self.assertRaises(SystemExit):
+                    parsed(["--functional-owner-fault", *extra])
+            for layout, separate_loader in (("hot", True), ("mixed", False)):
+                with self.subTest(layout=layout, separate_loader=separate_loader), self.assertRaises(SystemExit):
+                    parsed(["--functional-owner-fault"], layout=layout, separate_loader=separate_loader)
+
+            with self.assertRaises(SystemExit):
+                parsed(["--measurement-workload", "fault", "--measurement-connections", "100"])
+            formal = parsed(["--measurement-workload", "fault", "--measurement-connections", "100",
+                             "--measurement-freeze-file", str(freeze)])
+            self.assertEqual(result_mode(formal, {}), "measurement")
+            self.assertTrue(formal_sampling_eligible(
+                formal, {}, {"matchesFormal4CPU16GiB": True}))
+
+            run = root / "functional-run"
+            run.mkdir()
+            steady = run / "measurement-steady.json"
+            steady.write_text("{}\n")
+            result = {"passed": True, "mode": "owner-fault-functional",
+                      "formalSamplingEligible": False,
+                      "measurement": {"phaseFiles": {"steady": hashlib.sha256(
+                          steady.read_bytes()).hexdigest()}}}
+            (run / "result.json").write_text(json.dumps(result))
+            with self.assertRaises(MeasurementFailure):
+                read_run(run)
+
     def test_capacity_nofile_configuration_does_not_change_postgres(self) -> None:
         postgres = {"image": "postgres:16-alpine", "ulimits": {"nofile": {"soft": 1024, "hard": 2048}}}
         services = {"postgres": postgres.copy(), "gateway": {"image": "swift",

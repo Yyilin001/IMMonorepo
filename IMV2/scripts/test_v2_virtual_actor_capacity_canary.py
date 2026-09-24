@@ -248,6 +248,8 @@ def parse_args() -> argparse.Namespace:
                         help="explicit functional canary connections; default preserves the original small canary")
     parser.add_argument("--canary-recovery", action="store_true",
                         help="ten-second 100-connection send and two recovery-batch functional canary")
+    parser.add_argument("--functional-owner-fault", action="store_true",
+                        help="query-only two-owner stop/restart proof; never a formal capacity sample")
     parser.add_argument("--measurement-workload", choices=("hot", "same-owner", "mixed", "cold", "fault"),
                         help="opt-in 120/300/60 capacity run with explicit lifecycle/fault evidence")
     parser.add_argument("--measurement-connections", type=int)
@@ -255,6 +257,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--measurement-freeze-file", type=Path,
                         help="required for candidate runs; created from three stable frozen-main calibrations")
     args = parser.parse_args()
+    if args.functional_owner_fault:
+        if (args.layout != "mixed" or args.canary_recovery or args.canary_connections is not None or
+                args.measurement_workload is not None or args.measurement_connections is not None or
+                args.measurement_rate_scale != 1.0 or args.measurement_freeze_file is not None or
+                args.legacy_loader_net_admin):
+            parser.error("functional owner fault requires mixed layout and no canary, measurement, freeze or NET_ADMIN controls")
+        args.measurement_workload = "fault"
+        args.measurement_connections = 100
     for name in ("source_checkout", "release_dir", "fixture_dir"):
         path = getattr(args, name).expanduser().resolve()
         if not path.is_dir():
@@ -294,7 +304,9 @@ def parse_args() -> argparse.Namespace:
         required_layout = "mixed" if args.measurement_workload == "fault" else args.measurement_workload
         if required_layout != args.layout:
             parser.error("measurement workload must match fixture layout")
-        if args.source_sha != "f1cdd78d6a21bf0ae23da627c0710c65115236aa" and args.measurement_freeze_file is None:
+        if (not args.functional_owner_fault and
+                args.source_sha != "f1cdd78d6a21bf0ae23da627c0710c65115236aa" and
+                args.measurement_freeze_file is None):
             parser.error("candidate measurement requires a main calibration freeze file")
     elif args.measurement_connections is not None or args.measurement_rate_scale != 1.0:
         parser.error("measurement controls require measurement-workload")
@@ -309,6 +321,20 @@ def parse_args() -> argparse.Namespace:
         args.measurement_freeze_file = args.measurement_freeze_file.expanduser().resolve()
         require_regular(args.measurement_freeze_file, "measurement freeze file")
     return args
+
+
+def result_mode(args: argparse.Namespace, scenario_document: dict | None) -> str:
+    if args.functional_owner_fault:
+        return "owner-fault-functional"
+    if scenario_document is not None:
+        return "measurement"
+    return "recovery-canary" if args.canary_recovery else "canary"
+
+
+def formal_sampling_eligible(args: argparse.Namespace, scenario_document: dict | None,
+                             machine_envelope: dict) -> bool:
+    return (not args.functional_owner_fault and scenario_document is not None and
+            machine_envelope["matchesFormal4CPU16GiB"])
 
 
 def write_private(path: Path, contents: str) -> None:
@@ -719,7 +745,9 @@ def main() -> int:
                           connections_per_worker=args.measurement_connections,
                           harness_revision=harness["revision"], harness_files=harness["filesSHA256"])
     if args.preflight_only:
-        kind = "MEASUREMENT" if scenario_document else "RECOVERY_CANARY" if args.canary_recovery else "CANARY"
+        kind = ("OWNER_FAULT_FUNCTIONAL" if args.functional_owner_fault else
+                "MEASUREMENT" if scenario_document else
+                "RECOVERY_CANARY" if args.canary_recovery else "CANARY")
         print("VA_CAPACITY_" + kind +
               "_PREFLIGHT_OK source=" + args.source_sha + " layout=" + args.layout)
         return 0
@@ -751,7 +779,8 @@ def main() -> int:
         "ownerMembershipCounts": manifest["layouts"][args.layout]["ownerMembershipCounts"],
         "roomCount": manifest["layouts"][args.layout]["rooms"],
         "scenarioSHA256": sha256(scenario) if scenario_document is None else None,
-        "mode": "measurement" if scenario_document else ("recovery-canary" if args.canary_recovery else "canary"),
+        "mode": result_mode(args, scenario_document),
+        "formalSamplingEligible": False,
         "swiftImage": IMAGE, "postgresImage": POSTGRES_IMAGE,
         "legacyLoaderNETADMIN": args.legacy_loader_net_admin,
         "mainCalibrationFreezeSHA256": sha256(args.measurement_freeze_file)
@@ -982,9 +1011,10 @@ def main() -> int:
                       sort_keys=True) + "\n")
         result["runtimeProvenanceSHA256"] = sha256(run / "runtime-provenance.json")
         result["machineEnvelope"] = provenance["machineEnvelope"]
-        result["formalSamplingEligible"] = (scenario_document is not None and
-            provenance["machineEnvelope"]["matchesFormal4CPU16GiB"])
-        if scenario_document is not None and not provenance["machineEnvelope"]["matchesFormal4CPU16GiB"]:
+        result["formalSamplingEligible"] = formal_sampling_eligible(
+            args, scenario_document, provenance["machineEnvelope"])
+        if (scenario_document is not None and not args.functional_owner_fault and
+                not provenance["machineEnvelope"]["matchesFormal4CPU16GiB"]):
             raise MeasurementFailure("formal capacity measurement requires a 4 CPU / 16 GiB Docker host")
         if scenario_document is not None and any(
             settings["pg_stat_statements.track"] != "all"
@@ -1123,7 +1153,9 @@ def main() -> int:
             shutil.rmtree(private)
         result["finishedAt"] = time.time()
         write_private(run / "result.json", json.dumps(result, indent=2, sort_keys=True) + "\n")
-        print("VA_CAPACITY_" + ("MEASUREMENT" if scenario_document else "CANARY") +
+        kind = ("OWNER_FAULT_FUNCTIONAL" if args.functional_owner_fault else
+                "MEASUREMENT" if scenario_document else "CANARY")
+        print("VA_CAPACITY_" + kind +
               "_" + ("OK" if result["passed"] else "FAILED") + " evidence=" + str(run))
     return 0 if result["passed"] else 1
 
