@@ -516,35 +516,37 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 _ = try await store.recordOwnerValidated(command: command, ownerRoute: .init(shardID: "room-a", epoch: 99), now: now)
             }
             try await controlSQL.raw("""
-                INSERT INTO im_v2.room_owner_routes(room_id, room_shard_id, route_epoch, created_at, updated_at)
-                VALUES (\(bind: room.uuidValue!), 'room-a', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at
-                """).run()
-            try await controlSQL.raw("""
                 INSERT INTO im_v2.user_read_receipt_preferences(user_id, allows_direct_read_receipts, preference_revision, updated_at)
                 VALUES (\(bind: memberTwoUUID), false, 1, \(bind: now))
                 """).run()
-            let routed = try V2RoutedReadReceiptStore(router: V2PostgresRoomShardRouter(database: controlDB),
-                ownerStores: ["room-a": store], controlStore: PostgresV2ReadReceiptStore(database: controlDB))
-            let outcome: V2ReadReceiptOutcome
-            if batch {
-                let results = try await routed.recordBatch([.init(command: command, now: now)])
-                guard case .success(let result) = results.first else { throw CancellationError() }
-                outcome = result
-            } else { outcome = try await routed.record(command: command, now: now) }
-            guard case .recorded(let saved) = outcome else { throw CancellationError() }
-            #expect(try await routed.record(command: command, now: now) == .idempotent(saved))
-            let noChange = try V2RecordReadReceiptCommand(roomID: room, actorUserID: senderID,
-                operationID: .init(uuid: UUID()), readThroughRoomSequence: 1)
-            _ = try await routed.record(command: noChange, now: now)
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                for _ in 0..<8 {
-                    group.addTask {
-                        let concurrent = try V2RecordReadReceiptCommand(roomID: room, actorUserID: senderID,
-                            operationID: .init(uuid: UUID()), readThroughRoomSequence: 1)
-                        _ = try await routed.record(command: concurrent, now: now)
-                    }
+            // Production records receipts through the room actor: one
+            // activation turn, the owner store's activation-validated path.
+            try await withRoomActivation(database: ownerDB, roomID: room, shardID: "room-a") { token in
+                @Sendable func record(_ command: V2RecordReadReceiptCommand) async throws -> V2ReadReceiptOutcome {
+                    try await store.recordActivationValidated(command: command, token: token, now: now)
                 }
-                try await group.waitForAll()
+                let outcome: V2ReadReceiptOutcome
+                if batch {
+                    let results = try await store.recordBatchActivationValidated([.init(command: command, now: now)],
+                        scope: try .init(tokens: [token]))
+                    guard case .success(let result) = results.first else { throw CancellationError() }
+                    outcome = result
+                } else { outcome = try await record(command) }
+                guard case .recorded(let saved) = outcome else { throw CancellationError() }
+                #expect(try await record(command) == .idempotent(saved))
+                let noChange = try V2RecordReadReceiptCommand(roomID: room, actorUserID: senderID,
+                    operationID: .init(uuid: UUID()), readThroughRoomSequence: 1)
+                _ = try await record(noChange)
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    for _ in 0..<8 {
+                        group.addTask {
+                            let concurrent = try V2RecordReadReceiptCommand(roomID: room, actorUserID: senderID,
+                                operationID: .init(uuid: UUID()), readThroughRoomSequence: 1)
+                            _ = try await record(concurrent)
+                        }
+                    }
+                    try await group.waitForAll()
+                }
             }
             #expect(try await ownerSQL.raw("SELECT count(*) AS value FROM im_v2.user_state_event_outbox WHERE projection_kind IN ('own_read_watermark', 'direct_read_receipt')").first(decoding: CountRow.self)?.value == 2)
             #expect(try await ownerSQL.raw("SELECT count(*) AS value FROM im_v2.user_sync_log WHERE projection_kind IN ('own_read_watermark', 'direct_read_receipt')").first(decoding: CountRow.self)?.value == 0)

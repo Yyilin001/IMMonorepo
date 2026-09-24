@@ -1714,132 +1714,41 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             await #expect(throws: V2ReadReceiptStoreError.ownerChanged) { _ = try await ownerStore.recordGroupOwnerValidated(command: first.command, ownerRoute: stale, now: now) }
             let conflicting = try V2RecordReadReceiptCommand(roomID: room, actorUserID: first.command.actorUserID, operationID: first.command.operationID, readThroughRoomSequence: 2)
             #expect(try await ownerStore.recordGroupOwnerValidated(command: conflicting, ownerRoute: current, now: now) == .handled(.idempotencyConflict))
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 2, \(bind: now), \(bind: now)), (\(bind: missingRoom.uuidValue!), 'colocated', 2, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
-            let routed = try V2RoutedReadReceiptStore(router: V2PostgresRoomShardRouter(database: control), ownerStores: ["room-b": ownerStore, "colocated": ownerStore], controlStore: PostgresV2ReadReceiptStore(database: control), physicalStoreKeyByShard: ["room-b": "physical", "colocated": "physical"])
-            let routedResults = try await routed.recordBatch([first, missing, second])
-            #expect(routedResults[1] == .failure(.ownerChanged))
-            guard case .success(.idempotent) = routedResults[0], case .success(.idempotent) = routedResults[2] else { throw V2ReadReceiptStoreError.corruptPersistenceState }
-            let raced = try request(.init(uuid: memberTwoUUID), 2)
-            let races = try await withThrowingTaskGroup(of: V2ReadReceiptOutcome.self) { tasks in
-                for i in 0..<20 {
-                    tasks.addTask {
-                        if i.isMultiple(of: 2) { return try await routed.record(command: raced.command, now: now) }
-                        let values = try await routed.recordBatch([raced])
-                        switch try #require(values.first) { case .success(let value): return value; case .failure(let error): throw error }
+            // Production records receipts in one room-actor activation turn and
+            // filters owner reader candidates with current control privacy.
+            let controlStore = PostgresV2ReadReceiptStore(database: control)
+            try await withRoomActivation(database: owner, roomID: room, shardID: "room-b", epoch: 2) { token in
+                let replayed = try await ownerStore.recordBatchActivationValidated([first, second], scope: try .init(tokens: [token]))
+                guard case .success(.idempotent) = replayed[0], case .success(.idempotent) = replayed[1] else { throw V2ReadReceiptStoreError.corruptPersistenceState }
+                let raced = try request(.init(uuid: memberTwoUUID), 2)
+                let races = try await withThrowingTaskGroup(of: V2ReadReceiptOutcome.self) { tasks in
+                    for i in 0..<20 {
+                        tasks.addTask {
+                            if i.isMultiple(of: 2) { return try await ownerStore.recordActivationValidated(command: raced.command, token: token, now: now) }
+                            let values = try await ownerStore.recordBatchActivationValidated([raced], scope: try .init(tokens: [token]))
+                            switch try #require(values.first) { case .success(let value): return value; case .failure(let error): throw error }
+                        }
                     }
+                    var values: [V2ReadReceiptOutcome] = []
+                    for try await value in tasks { values.append(value) }
+                    return values
                 }
-                var values: [V2ReadReceiptOutcome] = []
-                for try await value in tasks { values.append(value) }
-                return values
+                #expect(races.filter { if case .recorded = $0 { true } else { false } }.count == 1)
+                #expect(races.filter { if case .idempotent = $0 { true } else { false } }.count == 19)
+                @Sendable func visibleReaders() async throws -> [UserID] {
+                    let page = try await ownerStore.readerCandidates(roomID: room, messageID: messageID, actorUserID: senderID, cursor: nil, pageSize: 10)
+                    let candidates = page.candidates.map(\.userID)
+                    let identities = try await controlStore.visibleReaderIdentities(actorUserID: senderID, candidateUserIDs: candidates)
+                    return candidates.filter { identities[$0] != nil }
+                }
+                #expect(Set(try await visibleReaders()) == [UserID(uuid: memberTwoUUID), UserID(uuid: memberThreeUUID)])
+                try await sql.raw("INSERT INTO im_v2.user_read_receipt_preferences(user_id, allows_group_read_receipts, updated_at) VALUES (\(bind: memberThreeUUID), false, \(bind: now)) ON CONFLICT(user_id) DO UPDATE SET allows_group_read_receipts=false").run()
+                #expect(try await visibleReaders() == [UserID(uuid: memberTwoUUID)])
             }
-            #expect(races.filter { if case .recorded = $0 { true } else { false } }.count == 1)
-            #expect(races.filter { if case .idempotent = $0 { true } else { false } }.count == 19)
-            let visible = try await routed.readers(roomID: room, messageID: messageID, actorUserID: senderID, cursor: nil, pageSize: 10)
-            #expect(Set(visible.readers.map(\.userID)) == [UserID(uuid: memberTwoUUID), UserID(uuid: memberThreeUUID)])
-            try await sql.raw("INSERT INTO im_v2.user_read_receipt_preferences(user_id, allows_group_read_receipts, updated_at) VALUES (\(bind: memberThreeUUID), false, \(bind: now)) ON CONFLICT(user_id) DO UPDATE SET allows_group_read_receipts=false").run()
-            let privatePage = try await routed.readers(roomID: room, messageID: messageID, actorUserID: senderID, cursor: nil, pageSize: 10)
-            #expect(privatePage.readers.map(\.userID) == [UserID(uuid: memberTwoUUID)])
             #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.read_receipt_operations").first(decoding: CountRow.self)?.value == 3)
             #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.public_user_profiles").first(decoding: CountRow.self)?.value == 0)
             #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.read_receipt_operations").first(decoding: CountRow.self)?.value == 0)
             print("PASS shared receipt owner batch \(mode): per-row epoch/shard/missing/domain errors; scalar/batch twenty retries commit once; control privacy retained")
-        }
-    }
-
-    @Test("read receipts and reader pages fence the selected room owner", arguments: [V2GroupCapacityClass.standard, .large], ["single", "batch", "readers"])
-    func routedReadReceiptOwnerEpochFence(_ mode: V2GroupCapacityClass, _ kind: String) async throws {
-        try await withForwardOwnerDatabases(mode: mode) { control, owner, sql, ownerSQL, room in
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let profile = try forwardImportTestProfile()
-            let send = V2SendMessageService(store: PostgresV2RoomWriteStore(database: owner), capacityProfile: profile,
-                limits: try .init(maxUTF8Bytes: 64), now: { now })
-            guard case .accepted(let message) = try await send.send(.init(roomID: room, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "original")) else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            try await ownerSQL.raw("DELETE FROM im_v2.public_user_profiles").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 1, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
-            let router = V2PostgresRoomShardRouter(database: control)
-            let operation = UUID()
-            @Sendable func run(_ route: any V2RoomShardRouting, on database: any Database, operationID: UUID) async throws -> String {
-                let ownerStore = PostgresV2ReadReceiptStore(database: database)
-                let routed = try V2RoutedReadReceiptStore(router: route, ownerStores: ["room-b": ownerStore, "colocated": ownerStore],
-                    controlStore: PostgresV2ReadReceiptStore(database: control), physicalStoreKeyByShard: ["room-b": "owner", "colocated": "owner"])
-                let command = try V2RecordReadReceiptCommand(roomID: room, actorUserID: .init(uuid: memberTwoUUID), operationID: .init(uuid: operationID), readThroughRoomSequence: message.roomSequence)
-                if kind == "readers" {
-                    _ = try await routed.readers(roomID: room, messageID: message.messageID, actorUserID: senderID, cursor: nil, pageSize: 10)
-                    return "read"
-                }
-                let outcome: V2ReadReceiptOutcome
-                if kind == "batch" {
-                    let values = try await routed.recordBatch([.init(command: command, now: now)])
-                    switch try #require(values.first) { case .success(let result): outcome = result; case .failure(let error): throw error }
-                } else { outcome = try await routed.record(command: command, now: now) }
-                switch outcome { case .recorded: return "changed"; case .idempotent: return "replay"; case .idempotencyConflict: return "conflict" }
-            }
-            let table = "read_receipt_operations"
-            let before = try await ownerSQL.raw("SELECT to_jsonb(x)::text AS value FROM im_v2.messages x WHERE message_id=\(bind: message.messageID.uuidValue!)").first(decoding: StringValueRow.self)?.value
-            let sequenceBefore = try await ownerSQL.raw("SELECT room_sequence AS value FROM im_v2.rooms WHERE room_id=\(bind: room.uuidValue!)").first(decoding: CountRow.self)?.value
-            await #expect(throws: V2ReadReceiptStoreError.ownerChanged) { _ = try await run(router, on: owner, operationID: operation) }
-            #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table)").first(decoding: CountRow.self)?.value == 0)
-            #expect(try await ownerSQL.raw("SELECT to_jsonb(x)::text AS value FROM im_v2.messages x WHERE message_id=\(bind: message.messageID.uuidValue!)").first(decoding: StringValueRow.self)?.value == before)
-            #expect(try await ownerSQL.raw("SELECT room_sequence AS value FROM im_v2.rooms WHERE room_id=\(bind: room.uuidValue!)").first(decoding: CountRow.self)?.value == sequenceBefore)
-            try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch=0 WHERE room_id=\(bind: room.uuidValue!)").run()
-            let cached = V2CachedRoomShardRouter(source: router)
-            _ = try await cached.route(for: room)
-            let outcomes = try await withThrowingTaskGroup(of: String.self) { tasks in
-                for _ in 0..<10 { tasks.addTask { try await run(router, on: owner, operationID: operation) } }
-                var values: [String] = []
-                for try await value in tasks { values.append(value) }
-                return values
-            }
-            #expect(kind == "readers" ? outcomes.allSatisfy { $0 == "read" } : (outcomes.filter { $0 == "changed" }.count == 1 && outcomes.filter { $0 == "replay" }.count == 9))
-            try await ownerSQL.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: room.uuidValue!)").run()
-            try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch=1 WHERE room_id=\(bind: room.uuidValue!)").run()
-            for op in [operation, UUID()] {
-                await #expect(throws: V2ReadReceiptStoreError.ownerChanged) { _ = try await run(cached, on: owner, operationID: op) }
-            }
-            #expect(try await run(router, on: owner, operationID: operation) == (kind == "readers" ? "read" : "replay"))
-            try await ownerSQL.raw("UPDATE im_v2.rooms SET room_shard_id='retired-room-b' WHERE room_id=\(bind: room.uuidValue!)").run()
-            await #expect(throws: V2ReadReceiptStoreError.ownerChanged) { _ = try await run(router, on: owner, operationID: operation) }
-            try await ownerSQL.raw("UPDATE im_v2.rooms SET room_shard_id='room-b' WHERE room_id=\(bind: room.uuidValue!)").run()
-            await #expect(throws: V2ReadReceiptStoreError.ownerChanged) { _ = try await run(router, on: control, operationID: operation) }
-            try await sql.raw("UPDATE im_v2.room_owner_routes SET room_shard_id='unregistered' WHERE room_id=\(bind: room.uuidValue!)").run()
-            await #expect(throws: V2RoomShardStorageRegistryError.unknownShardID) { _ = try await run(router, on: owner, operationID: operation) }
-            try await sql.raw("UPDATE im_v2.room_owner_routes SET room_shard_id='room-b' WHERE room_id=\(bind: room.uuidValue!)").run()
-            // This is an already committed operation. It must still wait for
-            // the room fence, and observe epoch changes while acquiring it.
-            let barrier = InviteImportTestBarrier()
-            let holder = Task {
-                try await owner.transaction { transaction in
-                    let locked = try #require(transaction as? any SQLDatabase)
-                    try await locked.raw("SELECT room_id FROM im_v2.rooms WHERE room_id=\(bind: room.uuidValue!) FOR UPDATE").run()
-                    await barrier.hold()
-                    try await locked.raw("UPDATE im_v2.rooms SET owner_epoch=2 WHERE room_id=\(bind: room.uuidValue!)").run()
-                }
-            }
-            await barrier.waitUntilHeld()
-            let replay = Task { try await run(router, on: owner, operationID: operation) }
-            do {
-                var waiting = false
-                for _ in 0..<1000 {
-                    waiting = try await ownerSQL.raw("SELECT COUNT(*) AS value FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%FOR SHARE%'").first(decoding: CountRow.self)?.value == 1
-                    if waiting { break }
-                    try await Task.sleep(for: .milliseconds(10))
-                }
-                #expect(waiting)
-                guard waiting else { throw TestConfigurationError.schemaAlreadyExists }
-                try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch=2 WHERE room_id=\(bind: room.uuidValue!)").run()
-                await barrier.release(); try await holder.value
-                await #expect(throws: V2ReadReceiptStoreError.ownerChanged) { _ = try await replay.value }
-            } catch {
-                await barrier.release(); _ = try? await holder.value; _ = try? await replay.value
-                throw error
-            }
-            #expect(try await run(router, on: owner, operationID: operation) == (kind == "readers" ? "read" : "replay"))
-            #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table)").first(decoding: CountRow.self)?.value == (kind == "readers" ? 0 : 1))
-            #expect(try await ownerSQL.raw("SELECT room_sequence AS value FROM im_v2.rooms WHERE room_id=\(bind: room.uuidValue!)").first(decoding: CountRow.self)?.value == sequenceBefore)
-            #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.public_user_profiles").first(decoding: CountRow.self)?.value == 0)
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table)").first(decoding: CountRow.self)?.value == 0)
         }
     }
 

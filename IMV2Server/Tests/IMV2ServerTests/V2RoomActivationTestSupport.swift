@@ -11,11 +11,12 @@ func withRoomActivation<Value: Sendable>(
     database: any Database,
     roomID: RoomID,
     shardID: String = "room-a",
+    epoch: Int64 = 0,
     _ body: (V2RoomActivationToken) async throws -> Value
 ) async throws -> Value {
     let leases = PostgresV2RoomActivationStore(database: database)
     let host = V2ActorHostIdentity(hostID: try .init("activation-test"), incarnationID: UUID())
-    let owner = try V2RoomDataOwner(shardID: shardID, epoch: 0)
+    let owner = try V2RoomDataOwner(shardID: shardID, epoch: epoch)
     for _ in 0..<500 {
         guard case .acquired(let lease) = try await leases.acquire(roomID: roomID, owner: owner,
             host: host, duration: try .init(10_000)) else {
