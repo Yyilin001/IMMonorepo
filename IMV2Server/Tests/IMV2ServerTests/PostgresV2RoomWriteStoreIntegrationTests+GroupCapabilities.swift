@@ -678,18 +678,18 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
                 }
                 let roomA = RoomID(uuid: roomUUID)
-                for (room, shard) in [(roomA, "room-a"), (roomB, "room-b")] {
-                    try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!),\(bind: shard),0,\(bind: now),\(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
-                }
-                let registry = try V2StaticRoomShardStorageRegistry(locations: [
-                    .init(shardID: "room-a", database: ownerA, schema: "im_v2"),
-                    .init(shardID: "room-b", database: ownerB, schema: "im_v2")
-                ])
-                let router = V2PostgresRoomShardRouter(database: control)
-                let routed = V2RoutedGroupInvitationStore(controlDatabase: control, router: router, owners: registry)
                 let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 10,    retryAfterSeconds: 3))
                 let issuer = try V2GroupInviteSecretIssuer(rawKey: Data(repeating: 0x81, count: 32))
-                let service = V2GroupInvitationService(store: routed, capacityProfile: profile, secretIssuer: issuer, now: { now })
+                // Production path: the account server's V2ActorGroupInvitationClient
+                // over the control coordinator, with a room turn on each owner.
+                // Room B's owner can move epoch or become unreachable.
+                let switchB = InvitationOwnerSwitch()
+                func client(_ roomBOwner: @escaping @Sendable () throws -> (database: any Database, shardID: String, epoch: Int64)) -> V2ActorGroupInvitationClient {
+                    let port = invitationRoomPort(control: control, owner: { $0 == roomA ? (ownerA, "room-a", 0) : try roomBOwner() },
+                                                  capacityProfile: profile, now: { now })
+                    return .init(coordinator: .init(controlDatabase: control, room: port, secretIssuer: issuer, now: { now }))
+                }
+                let service = client { (ownerB, "room-b", try switchB.current()) }
                 var completedApprovals: [V2DecideGroupJoinRequest] = []
                 for (room, ownerSQL) in [(roomA, sqlA), (roomB, sqlB)] {
                     let create = V2CreateGroupInviteRequest(roomID: room, actorUserID: actor, operationID: .init(uuid: UUID()), lifetime: 3600, maximumApprovedUses: 5)
@@ -742,28 +742,27 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 // Epoch checks precede even an exact previously committed decision.
                 let staleCreate = V2CreateGroupInviteRequest(roomID: roomB, actorUserID: actor, operationID: .init(uuid: UUID()), lifetime: 3600, maximumApprovedUses: 5)
                 let staleLink = try await service.create(staleCreate)
-                // Actual durable route and local epoch disagree: fail closed.
-                let cachedRouter = V2CachedRoomShardRouter(source: router)
-                _ = try await cachedRouter.route(for: roomB)
-                let cached = V2RoutedGroupInvitationStore(controlDatabase: control, router: cachedRouter, owners: registry)
-                try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch = 1 WHERE room_id = \(bind: roomB.uuidValue!)").run()
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) { _ = try await routed.activeInvites(roomID: roomB, actorUserID: actor, now: now) }
+                // Room B's owner moves to epoch 1. A turn for epoch 1 fails closed until
+                // the owner reaches it; a client still bound to epoch 0 then fails
+                // closed for every room-owned operation.
+                switchB.set(epoch: 1)
+                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await service.activeInvites(roomID: roomB, actorUserID: actor) }
                 try await sqlB.raw("UPDATE im_v2.rooms SET owner_epoch = 1 WHERE room_id = \(bind: roomB.uuidValue!)").run()
-                _ = try await routed.activeInvites(roomID: roomB, actorUserID: actor, now: now)
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) { _ = try await cached.activeInvites(roomID: roomB, actorUserID: actor, now: now) }
-                let cachedService = V2GroupInvitationService(store: cached, capacityProfile: profile, secretIssuer: issuer, now: { now })
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) { _ = try await cachedService.create(staleCreate) }
+                _ = try await service.activeInvites(roomID: roomB, actorUserID: actor)
+                let stale = client { (ownerB, "room-b", 0) }
+                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await stale.activeInvites(roomID: roomB, actorUserID: actor) }
+                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await stale.create(staleCreate) }
                 let completedApproval = try #require(completedApprovals.last)
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) { _ = try await cachedService.decide(completedApproval) }
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) { _ = try await cachedService.preview(secret: staleLink.secret, applicantUserID: applicant) }
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) { _ = try await cachedService.submit(.init(applicantUserID: rejectedApplicant, operationID: .init(uuid: UUID()), secret: staleLink.secret, note: nil)) }
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) { _ = try await cachedService.pendingRequests(roomID: roomB, reviewerUserID: actor, cursor: nil, pageSize: 100) }
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) { try await cachedService.revoke(inviteID: staleLink.inviteID, roomID: roomB, actorUserID: actor, operationID: .init(uuid: UUID())) }
+                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await stale.decide(completedApproval) }
+                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await stale.preview(secret: staleLink.secret, applicantUserID: applicant) }
+                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await stale.submit(.init(applicantUserID: rejectedApplicant, operationID: .init(uuid: UUID()), secret: staleLink.secret, note: nil)) }
+                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await stale.pendingRequests(roomID: roomB, reviewerUserID: actor, cursor: nil, pageSize: 100) }
+                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { try await stale.revoke(inviteID: staleLink.inviteID, roomID: roomB, actorUserID: actor, operationID: .init(uuid: UUID())) }
 
-                // A registry pointing to a different physical DB also fails, even
+                // A room turn on a different physical DB also fails closed, even
                 // though that database has a valid schema and other rooms.
-                let misplaced = V2RoutedGroupInvitationStore(controlDatabase: control, router: router, owners: try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: ownerA, schema: "im_v2")]))
-                await #expect(throws: V2GroupInvitationServiceError.ownerChanged) { _ = try await misplaced.activeInvites(roomID: roomB, actorUserID: actor, now: now) }
+                let misplaced = client { (ownerA, "room-b", 1) }
+                await #expect(throws: V2RoomActivationLeaseError.roomNotFound) { _ = try await misplaced.activeInvites(roomID: roomB, actorUserID: actor) }
                 try await sql.raw("UPDATE im_v2.public_user_profiles SET state = 'suspended' WHERE user_id = \(bind: actor.uuidValue!)").run()
                 await #expect(throws: V2GroupInvitationServiceError.permissionDenied) { _ = try await service.activeInvites(roomID: roomB, actorUserID: actor) }
                 try await sql.raw("UPDATE im_v2.public_user_profiles SET state = 'active' WHERE user_id = \(bind: actor.uuidValue!)").run()
@@ -783,12 +782,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     #expect(response.headers[.cacheControl] == "no-store")
                     #expect((try await response.body.string() ?? "").contains(roomB.rawValue))
                 }
-                try await sql.raw("UPDATE im_v2.room_owner_routes SET room_shard_id = 'unknown-owner' WHERE room_id = \(bind: roomB.uuidValue!)").run()
-                await #expect(throws: V2RoomShardStorageRegistryError.unknownShardID) { _ = try await service.activeInvites(roomID: roomB, actorUserID: actor) }
+                // An unreachable owner is unavailable to HTTP callers, without detail.
+                switchB.set(available: false, epoch: 1)
+                await #expect(throws: V2RoomCallFailure.notAccepted(.unavailable)) { _ = try await service.activeInvites(roomID: roomB, actorUserID: actor) }
                 try await app.testing { client in
                     let response = try await client.get(URI(string: "v2/group-invites?room_id=\(roomB.rawValue)"), headers: headers)
                     #expect(response.status == .serviceUnavailable)
-                    #expect(!(try await response.body.string() ?? "").contains("unknown-owner"))
+                    #expect(!(try await response.body.string() ?? "").contains("room-b"))
                 }
                 try await sql.raw("ALTER TABLE im_v2.group_invite_links ADD CONSTRAINT test_legacy_identity_fk FOREIGN KEY(created_by_user_id) REFERENCES im_v2.public_user_profiles(user_id) NOT VALID").run()
                 await #expect(throws: V2SchemaReadinessError.unavailableTable("im_v2.group_invite_links[control-identity]")) { try await V2SchemaReadiness.verify(database: control) }
@@ -798,7 +798,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await assertSQLSchemaGate(true, on: sql)
                 try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
                 try await app.shutdown(); try await resources.shutdown()
-                print("PASS routed invitations: mode=\(mode), two profile-free owners and independent control; create interruption/list/preview/submit/approve/reject/revoke; route/epoch/cache/identity/HTTP boundaries")
+                print("PASS actor invitations: mode=\(mode), two profile-free owners and independent control; create interruption/list/preview/submit/approve/reject/revoke; route/epoch/cache/identity/HTTP boundaries")
             } catch {
                 if let sql = resources.database(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
                 try? await app.shutdown(); try? await resources.shutdown()
