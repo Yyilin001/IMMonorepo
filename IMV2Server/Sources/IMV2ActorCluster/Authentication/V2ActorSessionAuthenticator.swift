@@ -177,8 +177,6 @@ public actor V2ActorSessionAuthenticator {
                 throw V2ActorAuthenticationError.forbidden
             case .forward:
                 guard call.principal == .service, peer.permissions.contains(.roomCoordination) else { throw V2ActorAuthenticationError.forbidden }
-            case .receiptQuery(.readers):
-                throw V2ActorAuthenticationError.forbidden
             case .maintenance:
                 guard call.principal == .service, peer.permissions.contains(.roomMaintenance) else { throw V2ActorAuthenticationError.forbidden }
             case .specialAccountAudit:

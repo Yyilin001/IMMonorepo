@@ -200,18 +200,14 @@ struct V2ActorAuthenticationTests {
         }
     }
 
-    @Test("owner readers cannot bypass current control privacy filtering")
+    @Test("owner receipt queries expose only candidates for control privacy filtering")
     func readersPrivacyBoundary() async throws {
         let fixture = try Fixture()
         let grant = try await fixture.open()
         let query = try V2ActorReadReceiptReadersQueryWire(roomID: fixture.token.roomID,
             messageID: .init(uuid: UUID()), actorUserID: fixture.user, cursor: nil, pageSize: 10)
-        await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant,
-                request: .receiptQuery(.readers(query))), maximumBytes: 10_000))
-        }
         _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant,
-            sequence: 2, request: .receiptQuery(.readerCandidates(query))), maximumBytes: 10_000))
+            request: .receiptQuery(.readerCandidates(query))), maximumBytes: 10_000))
     }
 
     @Test("wrong process incarnation, protocol and oversized payload fail before dispatch")

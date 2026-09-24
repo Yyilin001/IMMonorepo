@@ -22,7 +22,7 @@ struct V2ActorRoomReceiptContractTests {
         let reader = try V2ActorReadReceiptReadersQueryWire(roomID: room,
             messageID: MessageID("message-1"), actorUserID: user,
             cursor: "opaque", pageSize: 100)
-        let query = V2RoomReceiptQuery.readers(reader)
+        let query = V2RoomReceiptQuery.readerCandidates(reader)
         #expect(query.replayPolicy == .readOnly)
         #expect(try JSONDecoder().decode(V2RoomReceiptQuery.self,
             from: JSONEncoder().encode(query)) == query)

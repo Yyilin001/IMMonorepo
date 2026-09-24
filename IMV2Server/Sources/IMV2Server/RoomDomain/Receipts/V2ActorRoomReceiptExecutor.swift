@@ -61,8 +61,6 @@ public struct V2ActorRoomReceiptExecutor: Sendable {
         let reader = V2ActorRoomQueryExecutor(database: database, timeouts: timeouts)
         return try await reader.withFencedRead(roomIDs: [query.roomID], tokens: [token]) { transaction in
             switch query {
-            case .readers:
-                throw V2RoomCallFailure.notAccepted(.invalidRequest)
             case .readerCandidates(let wire):
                 do {
                     let page = try await store(transaction).readerCandidates(roomID: wire.roomID,
