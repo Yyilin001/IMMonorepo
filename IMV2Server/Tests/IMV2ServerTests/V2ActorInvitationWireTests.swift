@@ -106,6 +106,28 @@ struct V2ActorInvitationWireTests {
             nextCheckAt: wire.nextCheckAt, leaseToken: wire.leaseToken, leaseUntil: wire.leaseUntil,
             attemptCount: wire.attemptCount)
         #expect(throws: V2GroupInvitationServiceError.invalidRequest) { try bad.toDomain() }
+        // A retried operation whose request already ended is replayed with its
+        // persisted terminal (or denied) intent; the wire must round-trip it.
+        func settled(_ phase: V2GroupJoinQuotaPhase, _ outcome: V2GroupJoinQuotaOutcome?, target: UUID?) -> V2GroupJoinQuotaIntent {
+            .init(applicantUserID: intent.applicantUserID, operationID: intent.operationID, requestID: intent.requestID,
+                  roomID: intent.roomID, inviteID: intent.inviteID, tokenDigest: intent.tokenDigest, note: intent.note,
+                  maximumPendingPerInvite: 10, generation: 2, phase: phase, outcome: outcome, targetRequestID: target,
+                  createdAt: now, attemptCreatedAt: now, updatedAt: now, nextCheckAt: now,
+                  leaseToken: nil, leaseUntil: nil, attemptCount: 1)
+        }
+        let target = UUID()
+        for valid in [settled(.tracking, .pending, target: target), settled(.terminal, .cancelled, target: target),
+                      settled(.terminal, .approved, target: target), settled(.terminal, .rejected, target: target),
+                      settled(.terminal, .alreadyMember, target: nil), settled(.denied, .rateLimited, target: nil)] {
+            #expect(try roundTrip(V2ActorGroupJoinQuotaIntentWire(domain: valid)).toDomain() == valid)
+        }
+        for invalid in [settled(.terminal, .pending, target: target), settled(.terminal, .cancelled, target: nil),
+                        settled(.tracking, .pending, target: nil), settled(.denied, .approved, target: nil),
+                        settled(.held, .cancelled, target: nil)] {
+            #expect(throws: V2GroupInvitationServiceError.invalidRequest) {
+                try V2ActorGroupJoinQuotaIntentWire(domain: invalid).toDomain()
+            }
+        }
         let seed = V2GroupInviteCreatePersistenceRequest(inviteID: inviteID, roomID: roomID, actorUserID: actor,
             operationID: try GroupInviteOperationID("invite-op"), tokenDigest: Data(repeating: 2, count: 32),
             requestedLifetimeSeconds: 3600, expiresAt: now.addingTimeInterval(3600),

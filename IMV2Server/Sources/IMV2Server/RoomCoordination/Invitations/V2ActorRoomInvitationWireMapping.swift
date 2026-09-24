@@ -390,7 +390,8 @@ extension V2ActorGroupJoinQuotaIntentWire {
         guard let applicant = applicantUserID.uuidValue, let operation = operationID.uuidValue,
               let request = requestID.uuidValue, let room = roomID.uuidValue, let invite = inviteID.uuidValue,
               maximumPendingPerInvite > 0, generation > 0, attemptCount >= 0,
-              (phase == .held && outcome == nil) || (phase == .tracking && outcome == .pending),
+              Self.isPersistable(phase: phase, outcome: outcome, hasTarget: targetRequestID != nil,
+                                 hasLease: leaseToken != nil || leaseUntil != nil),
               note?.utf8.count ?? 0 <= 500,
               v2PostgresTimestampCanEncode(createdAt), v2PostgresTimestampCanEncode(attemptCreatedAt),
               v2PostgresTimestampCanEncode(updatedAt), v2PostgresTimestampCanEncode(nextCheckAt),
@@ -409,6 +410,24 @@ extension V2ActorGroupJoinQuotaIntentWire {
                      leaseToken: leaseToken, leaseUntil: leaseUntil, attemptCount: attemptCount)
     }
 }
+extension V2ActorGroupJoinQuotaIntentWire {
+    /// Mirrors group_join_quota_outcome_check and group_join_quota_lease_check.
+    /// Reservation replays a retried operation whose request already ended with
+    /// its terminal intent, so every persistable phase must cross the wire.
+    static func isPersistable(phase: V2ActorGroupJoinQuotaPhaseWire, outcome: V2ActorGroupJoinQuotaOutcomeWire?,
+                              hasTarget: Bool, hasLease: Bool) -> Bool {
+        guard !hasLease || phase == .held || phase == .tracking else { return false }
+        switch (phase, outcome) {
+        case (.held, nil): return !hasTarget
+        case (.tracking, .pending?): return hasTarget
+        case (.denied, .unavailable?), (.denied, .rateLimited?), (.denied, .permissionDenied?): return !hasTarget
+        case (.terminal, .approved?), (.terminal, .rejected?), (.terminal, .cancelled?): return hasTarget
+        case (.terminal, .alreadyMember?): return !hasTarget
+        default: return false
+        }
+    }
+}
+
 extension V2ActorGroupJoinOwnerSubmissionWire {
     init(domain: V2GroupJoinOwnerSubmission) {
         self.init(outcome: V2ActorGroupJoinQuotaOutcomeWire(rawValue: domain.outcome.rawValue)!,
