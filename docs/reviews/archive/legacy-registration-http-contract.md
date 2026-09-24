@@ -16,4 +16,4 @@ Account 生产入口将该路径加入既有持久地址限流，仍经过 trust
 
 首轮 HTTPS 扩展误把已取消设备再次签发的既有 403 合同写成 401。服务端已正确拒绝，修正测试预期后全链路通过；失败记录保留。没有生产迁移或部署，schema 30/protocol 27/SQLite 173/5 不变；仍需在启用清理前停止旧签发二进制。
 
-结果及当前源码哈希见[证据清单](../../docs/reviews/verification-records.md#20260907-legacy-registration-http)。本批没有新跑 App UI、Gateway、headless 或真机测试。
+结果及当前源码哈希见[证据清单](../verification-records.md#20260907-legacy-registration-http)。本批没有新跑 App UI、Gateway、headless 或真机测试。

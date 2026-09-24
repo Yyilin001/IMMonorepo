@@ -8,6 +8,7 @@
 | [2026-09-05-system-remediation-plan.md](2026-09-05-system-remediation-plan.md) | 整改开始时的执行方案与验收要求 | [问题状态表](../status.md) |
 | [2026-09-05-system-remediation-progress.md](2026-09-05-system-remediation-progress.md) | 逐批修复与当轮验证记录 | 各主题的[当前合同](../README.md) |
 | [2026-09-05-remediation-timeline.md](2026-09-05-remediation-timeline.md) | 原先追加在状态文档和实现状态文档正文里的"最新补充"段落 | [问题状态表](../status.md)、[当前实现与发布证据](../../../IMV2/docs/implementation-status.md) |
+| legacy-registration-{arbitration,http,client-recovery,app-process}-contract.md（[仲裁](legacy-registration-arbitration-contract.md)、[HTTP](legacy-registration-http-contract.md)、[客户端恢复](legacy-registration-client-recovery-contract.md)、[跨进程](legacy-registration-app-process-contract.md)） | 旧版（format-1）设备注册档案的清理合同；服务端入口与客户端恢复链路均已删除 | [注册身份与重新登录](../registration-lifecycle-contract.md) |
 
 ## 为什么单独存放
 

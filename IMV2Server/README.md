@@ -347,4 +347,3 @@ bash scripts/run_v2_postgres_integration.sh
 ```
 
 
-Legacy registration recovery uses `POST /v2/device-credentials/cancel-legacy-registration` on the Account listener. A freshly verified, new-device-bound account assertion authorizes cleanup of an old device only within that account. Only empty 204 confirms completion; 404 retains the unresolved target, 409 is a conflicting operation, 507 is the permanent ledger capacity boundary, and address throttling remains 429. See the [HTTP contract](../docs/reviews/legacy-registration-http-contract.md). ClientKit/App login integration is described in the [client recovery contract](../docs/reviews/legacy-registration-client-recovery-contract.md); old issuer processes must be drained before enabling cleanup.

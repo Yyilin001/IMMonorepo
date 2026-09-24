@@ -53,7 +53,6 @@
 | 凭据签发、替换与结果交接 | [签发与替换边界](credential-issuance-boundaries-contract.md)、[已收到结果的持久交接](received-credential-recovery-contract.md)、[原子交付撤销凭据](atomic-revocation-credential-issue-contract.md) | B08 |
 | 注册身份与重新登录 | [注册身份与重新登录](registration-lifecycle-contract.md) | B08 |
 | 注册取消与签发仲裁 | [服务端仲裁](registration-cancellation-contract.md)、[HTTP 边界](registration-cancellation-http-contract.md)、[自动取消与冷启动归属](registration-cancellation-runner-contract.md)、[进程中断恢复](registration-process-interruption-contract.md)、[签发前证明与 HTTP 绑定](proof-bound-issuance-contract.md) | B08 |
-| 旧注册档案清理 | [服务端取消仲裁](legacy-registration-arbitration-contract.md)、[账号验证与 HTTP 接线](legacy-registration-http-contract.md)、[客户端与 App 恢复](legacy-registration-client-recovery-contract.md)、[跨进程恢复](legacy-registration-app-process-contract.md) | B08 |
 | 设备撤销能力存储与兑换 | [存储与兑换合同](device-revocation-capability-storage-contract.md)、[HTTP 与 ClientKit 合同](device-revocation-capability-http-contract.md) | B08 |
 | 退出时的撤销交接与执行 | [持久交接](device-revocation-handoff-contract.md)、[独立执行与本地退出](device-revocation-runner-contract.md)、[状态与显式恢复](device-revocation-status-contract.md) | B08 |
 | 退出意图记录 | [可报错的退出意图记录](durable-sign-out-marker-contract.md) | B08 |

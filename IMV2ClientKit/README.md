@@ -100,9 +100,8 @@ aggregate cleanup status and manual retry with session revocation. Cold startup
 must call `recoverUnclaimed(ownedBy:)` before interactive registration: pending
 proofs matching an owned durable device are retired locally; unowned proofs
 are queued. Only server cancellation or expiry settles a queued proof.
-Legacy format-1 IDs are archived without fabricating proof;
-their server cleanup needs an explicit deployment/recovery policy. The generic
-device-only Keychain adapter retains unsupported old records and fails closed.
+The registration ledger accepts only the current format; any other stored
+format fails closed without being upgraded.
 
 The package contains framework-neutral WebAuthn building blocks, but the app
 does not expose them until the account service owns a complete challenge,
@@ -149,14 +148,3 @@ and real terminal server errors still require simulator/device and backend
 integration validation.
 
 
-For format-1 legacy archives, use the prepared lease's
-`recoveringLegacyRegistration(using:client:)` to wrap the fresh factor provider
-with `V2HTTPLegacyRegistrationCancellationClient`. The App uses this composition
-before new credential issuance. The same factor authorizes only its account's
-old device, and only empty 204 permits exact archive completion. Failures retain
-the archive; a new login attempt obtains a new factor and replays the original
-operation. Full pending-lease and archived-identity comparisons fence late
-completion. No password or account assertion is persisted. Format 3 retains a
-single extra recovery slot (maximum 257 entries) when 256 legacy entries would
-otherwise prevent recovery; ordinary registrations cannot consume that slot.
-See the [recovery contract](../docs/reviews/legacy-registration-client-recovery-contract.md).

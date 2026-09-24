@@ -263,12 +263,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             let keychainService = liveLocalAccountE2ETestScope?.keychainService(
                 basedOn: configuration.keychainService
             ) ?? configuration.keychainService
-            #if DEBUG
-            if startupMode.usesLiveLocalAccountE2ETestScope && startupMode != .uiTestingLiveLocalAccountCleanup {
-                try V2LegacyRegistrationE2EFixture.installIfRequested(baseService: configuration.keychainService,
-                    scope: liveLocalAccountE2ETestScope, arguments: ProcessInfo.processInfo.arguments)
-            }
-            #endif
             let refreshTransport = try V2HTTPDeviceCredentialAuthTransport(
                 refreshEndpoint: configuration.endpoint("v2/device-credentials/refresh")
             )
@@ -453,8 +447,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             let issuer = try V2HTTPAccountAssertionDeviceCredentialProvider(
                 issueEndpoint: configuration.endpoint("v2/device-credentials"),
-                assertionProvider: registration.recoveringLegacyRegistration(using: accountProvider,
-                    client: try V2HTTPLegacyRegistrationCancellationClient(endpoint: configuration.endpoint("v2/device-credentials/cancel-legacy-registration"))),
+                assertionProvider: accountProvider,
                 deviceIdentityProvider: registration,
                 operationStore: registration,
                 recovery: issuedCredentialRecovery,
@@ -521,19 +514,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             )
             route = .signedOut
             authenticationMessage = "账户服务暂不可用，请稍后重试。"
-        } catch let error as V2LegacyRegistrationCancellationError {
-            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
-            route = .signedOut
-            switch error {
-            case .authenticationRequired:
-                authenticationMessage = "登录验证已过期，请重新输入密码后重试。"
-            case .targetUnavailable, .conflict:
-                authenticationMessage = "旧登录记录暂时无法核实，已保留记录，请稍后重试。"
-            case .capacityExceeded:
-                authenticationMessage = "旧登录记录已达到服务端上限，暂时无法继续登录。"
-            default:
-                authenticationMessage = "旧登录尚未完成清理，记录已保留，请稍后重新登录。"
-            }
         } catch V2AccountAssertionCredentialProviderError.deviceIdentityUnavailable {
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
@@ -1216,9 +1196,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             try await V2KeychainDeviceCredentialRegistrationOperationStore(
                 service: localKeychainService
             ).delete()
-            #if DEBUG
-            try V2LegacyRegistrationE2EFixture.remove(baseService: configuration.keychainService, scope: liveLocalAccountE2ETestScope)
-            #endif
             try await V2KeychainInstallationBindingStore(service: localKeychainService).delete()
             try await pendingCredentialDeletionStore?.clearPending()
             try Self.eraseDatabaseArtifacts(at: localDatabaseURL)

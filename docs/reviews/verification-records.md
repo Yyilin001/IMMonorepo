@@ -464,25 +464,25 @@ bash scripts/verify_v2.sh
 
 - 日期：2026-09-07
 - 主题：legacy-app-process
-- 引用文档：3 份（`docs/reviews/archive/2026-09-05-remediation-timeline.md`, `docs/reviews/archive/2026-09-05-system-remediation-progress.md`, `docs/reviews/legacy-registration-app-process-contract.md`）
+- 引用文档：3 份（`docs/reviews/archive/2026-09-05-remediation-timeline.md`, `docs/reviews/archive/2026-09-05-system-remediation-progress.md`, `docs/reviews/archive/legacy-registration-app-process-contract.md`）
 
 ### 20260907-legacy-registration-arbitration
 
 - 日期：2026-09-07
 - 主题：legacy-registration-arbitration
-- 引用文档：3 份（`docs/reviews/archive/2026-09-05-remediation-timeline.md`, `docs/reviews/archive/2026-09-05-system-remediation-progress.md`, `docs/reviews/legacy-registration-arbitration-contract.md`）
+- 引用文档：3 份（`docs/reviews/archive/2026-09-05-remediation-timeline.md`, `docs/reviews/archive/2026-09-05-system-remediation-progress.md`, `docs/reviews/archive/legacy-registration-arbitration-contract.md`）
 
 ### 20260907-legacy-registration-client
 
 - 日期：2026-09-07
 - 主题：legacy-registration-client
-- 引用文档：3 份（`docs/reviews/archive/2026-09-05-remediation-timeline.md`, `docs/reviews/archive/2026-09-05-system-remediation-progress.md`, `docs/reviews/legacy-registration-client-recovery-contract.md`）
+- 引用文档：3 份（`docs/reviews/archive/2026-09-05-remediation-timeline.md`, `docs/reviews/archive/2026-09-05-system-remediation-progress.md`, `docs/reviews/archive/legacy-registration-client-recovery-contract.md`）
 
 ### 20260907-legacy-registration-http
 
 - 日期：2026-09-07
 - 主题：legacy-registration-http
-- 引用文档：3 份（`docs/reviews/archive/2026-09-05-remediation-timeline.md`, `docs/reviews/archive/2026-09-05-system-remediation-progress.md`, `docs/reviews/legacy-registration-http-contract.md`）
+- 引用文档：3 份（`docs/reviews/archive/2026-09-05-remediation-timeline.md`, `docs/reviews/archive/2026-09-05-system-remediation-progress.md`, `docs/reviews/archive/legacy-registration-http-contract.md`）
 
 ### 20260907-proof-bound-issuance
 
