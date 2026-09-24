@@ -36,3 +36,25 @@ Artifacts are under `/Users/yyl/.codex/virtual-actor-builds/`, with prefix `capa
 | Candidate 02 per-sample budget in `campaign/` | `3fad45af45eb788380974e0a4947d94df8f889e968c4c274b723035b8b4f3990` |
 
 Each budget filename is `budget-` followed by its full run directory name and `.json`. Independent offline verification matched both budget result hashes, recomputed their assessment, and checked both PID-1 evidence hashes against the result and measurement. No six-run assessment or final interleaved-main stability report exists for this stopped campaign. The earlier hot six-run pass remains scoped to its own workload; same-owner, mixed, cold, fault/#19 and the current-source full Linux gate remain incomplete.
+
+## Candidate-only CPU diagnostic
+
+A separate diagnostic retained candidate `fb8a1047`, harness `28244fdf`, common loader, fixture, 1,500 connections, 450 sends/s and full 120/300/60-second phases. Its external driver `run-same-owner-cpu-diagnostic-cached-local-fb8a1047.py` has SHA-256 `16bbab2f17d8674037750569b94ccd369c56ec6fc55b417cb3eebabbb102bb72`. It sampled Gateway PID 1 with `task-clock:u`, 49 Hz and DWARF call chains for 45 seconds, starting 20 seconds into steady state. Only the private profiler sidecar received `PERFMON`; Gateway and VM capabilities were unchanged. This is not a formal sample and does not replace the failed CPU assessment. No contemporaneous main profile was collected.
+
+The diagnostic driver and business runner exited 0, with all 1,500 connections authenticated and 189,000 acknowledged/durable messages, zero business failures and successful cleanup. The private project `imv2-va-cap-7a363f23729143d4` and all five sampler/report containers were removed. The measured profile wall interval was 46.417078 seconds; Gateway cgroup CPU was 36.668887 seconds, and PID 1 user/system CPU was 26.53/9.60 seconds. There were **1,269 user samples and zero lost samples**. The report abbreviates its sample count as `1K`; the copied analyzer now checks the exact record count against all 1,269 event headers in the offline script, rather than treating `1K` as 1,000. Both report event identities and lost counters are required.
+
+Sampled exclusive leaves include `swift_release` 4.33% and `swift_retain` 3.62%. Inclusive paths include JSON generic encoding 7.25%, PostgresNIO channel reads 13.87% and SQL-row decoding 5.67%; these overlap and cannot be summed. `swift_job_run` has 49.96% inclusive coverage because it parents task work, not because scheduling consumes that fraction. Unresolved exclusive leaves account for 21.11%, predominantly stripped libc (18.17%). Individual rounded exclusive rows sum to 100.99%, so the table is an approximate profile, not an exact cost decomposition. The inclusive report emitted six `addr2line` warnings, limiting source-line attribution; `task-clock:u` excludes the separately measured system CPU. This evidence supports investigating allocation and encoding/database paths but cannot assign the full formal CPU excess to one function or predict a precise saving.
+
+Private artifacts are under `/Users/yyl/.codex/virtual-actor-builds/capacity-same-owner-cpu-diagnostic-cached-local-fb8a1047/`:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `candidate/result.json` | `ec2aebce9d8a79e548de5ea1ce253a55eed30e660bf0f8cd059c338fc46c058d` |
+| `candidate-freeze-profile/perf.data` | `ff9480b560f574aaeacdecdb337603bc15ad285514d93adbfbc616a6b1d8f2a5` |
+| `candidate-freeze-profile/scope.json` | `ed5218345e59637f891287c892728a1f8d0f39b02de56bb9f1a2ffd5b427a6d2` |
+| `candidate-freeze-profile/symfs-manifest.json` | `9be0c5d32fee754beb2695cc5179f7697ec2243751fd55a48827356b666d2abd` |
+| `candidate-freeze-profile/perf-script-offline.txt` | `3a54a772e1137e9e8bcac9d8239a2c456a67c3a7b42040fe220948e38094f64d` |
+| `candidate-profile-summary-offline.json` | `77ec59aaeccfee2bf653382bb61cbc38f0c6d8df461caa4130303d5ac04a3cad` |
+| `analyze_cpu_profiles.py` | `23467c2ee92aa76cc997343bd472bff38639c996cb4df4675c8eaf149997e149` |
+
+The live Gateway and saved ELF both match Release SHA-256 `6e336cd3860777977789fa960770907e5b52efeda52e1ad154857ce091a5900d`; all eight saved DSO hashes were independently verified. Raw data and aggregate summaries remain private. The proposed small allocation optimizations must retain byte limits, command ordering, physical-call tracking, room/lease locks and the database clock check after lock acquisition. Their actual benefit remains subject to fresh formal comparisons under the original hot and same-owner freezes.
