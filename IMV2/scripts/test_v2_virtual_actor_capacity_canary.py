@@ -41,6 +41,7 @@ POSTGRES_IMAGE = "postgres:16-alpine"
 LAYOUTS = ("hot", "same-owner", "mixed", "cold")
 HEX64 = re.compile(r"[a-f0-9]{64}\Z")
 HEX40 = re.compile(r"[a-f0-9]{40}\Z")
+CAPACITY_NOFILE = 65_536
 
 
 class CanaryFailure(Exception):
@@ -316,6 +317,64 @@ def write_private(path: Path, contents: str) -> None:
         stream.write(contents)
 
 
+def set_capacity_open_file_limits(services: dict[str, dict]) -> None:
+    """Match the production server override without changing database limits."""
+    for name in ("gateway", "loader"):
+        services[name].setdefault("ulimits", {})["nofile"] = {
+            "soft": CAPACITY_NOFILE, "hard": CAPACITY_NOFILE}
+
+
+def measurement_service_settings(services: dict[str, dict]) -> dict[str, dict]:
+    """Whitelist resource settings without logging service environment or mounts."""
+    return {name: {"image": value.get("image"), "command": value.get("command"),
+                   "memLimit": value.get("mem_limit"), "pidsLimit": value.get("pids_limit"),
+                   "nofile": (value.get("ulimits") or {}).get("nofile")}
+            for name, value in services.items()}
+
+
+def parse_pid1_open_file_limits(contents: str) -> dict[str, object]:
+    """Parse exactly one numeric Linux /proc/1/limits open-file row."""
+    rows = [line for line in contents.splitlines() if line.startswith("Max open files")]
+    if len(rows) != 1:
+        raise CanaryFailure("PID 1 open-file limit row missing or duplicated")
+    match = re.fullmatch(r"Max open files\s+(\d+)\s+(\d+)\s+files\s*", rows[0])
+    if match is None:
+        raise CanaryFailure("PID 1 open-file limit row is invalid")
+    return {"soft": int(match.group(1)), "hard": int(match.group(2)), "rawLine": rows[0]}
+
+
+def capture_pid1_open_file_limits(*, run: Path, service: str, container_id: str,
+                                  command: list[str],
+                                  execute: object) -> str:
+    """Persist numeric PID 1 evidence before rejecting a mismatched limit."""
+    if not re.fullmatch(r"[a-f0-9]{64}", container_id):
+        raise CanaryFailure(f"{service} container identity unavailable for PID 1 limit check")
+    observed = parse_pid1_open_file_limits(execute(command + ["cat", "/proc/1/limits"],
+                                                   "open-file-limits.log", 15,
+                                                   record_stdout=False))
+    evidence = {"service": service, "containerID": container_id,
+                "pid": 1, "source": "/proc/1/limits", **observed}
+    path = run / f"{service}-open-file-limits.json"
+    write_private(path, json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+    if observed["soft"] != CAPACITY_NOFILE or observed["hard"] != CAPACITY_NOFILE:
+        raise CanaryFailure(f"{service} PID 1 open-file limit differs from 65536")
+    return sha256(path)
+
+
+def capture_detached_loader_open_file_limits(*, run: Path, docker: list[str],
+                                             loader_id: str, execute: object) -> str:
+    """A failed limit check must not leave the detached loader running."""
+    try:
+        return capture_pid1_open_file_limits(run=run, service="loader",
+            container_id=loader_id, command=docker + ["exec", loader_id], execute=execute)
+    except (CanaryFailure, subprocess.SubprocessError, OSError):
+        try:
+            execute(docker + ["rm", "-f", loader_id], "measurement-cleanup.log", 30)
+        except (CanaryFailure, subprocess.SubprocessError, OSError):
+            pass  # The enclosing project cleanup still runs.
+        raise
+
+
 def capture_runtime_provenance(*, docker: list[str], compose: list[str],
                                services: dict[str, str], manifest: dict,
                                layout: str, execute: object, psql: object) -> dict:
@@ -426,6 +485,8 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
                         "measurement-loader-start.log", 60).strip()
     if not re.fullmatch(r"[a-f0-9]{64}", loader_id):
         raise MeasurementFailure("detached loader ID unavailable")
+    loader_open_file_limits_hash = capture_detached_loader_open_file_limits(
+        run=run, docker=docker, loader_id=loader_id, execute=execute)
     containers = {**{name: execute(compose + ["ps", "-q", name], "measurement.log", 10).strip()
                      for name in services}, "gateway": gateway_id, "loader": loader_id}
     if any(not re.fullmatch(r"[a-f0-9]{64}", container) for container in containers.values()):
@@ -579,6 +640,9 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
             indent=2, sort_keys=True) + "\n")
         completed = True
         return {"scenario": scenario_detail, "loadReportSHA256": sha256(report_path),
+                "pid1OpenFileLimitsSHA256": {
+                    "gateway": sha256(run / "gateway-open-file-limits.json"),
+                    "loader": loader_open_file_limits_hash},
                 "phaseFiles": {name: sha256(run / f"measurement-{name}.json") for name in phase_results},
                 "snapshotSHA256": sha256(run / "measurement-snapshots.json"),
                 "nativeConnectionsAuthenticated": report.get("authenticated"),
@@ -843,6 +907,7 @@ def main() -> int:
                 {"type": "bind", "source": str(run), "target": "/run/va-artifacts"},
             ],
         }
+        set_capacity_open_file_limits(services)
         if args.legacy_loader_net_admin:
             # Diagnostic compatibility for the frozen main binary only. Its
             # socketOption(.tcp_nodelay) accidentally sets SO_DEBUG on Linux.
@@ -866,9 +931,7 @@ def main() -> int:
                                             "IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"}}
             write_private(run / "measurement-compose-settings.json", json.dumps({
                 "project": project, "databaseNames": db_names, "gatewayEnvironment": safe_environment,
-                "services": {name: {"image": value.get("image"), "command": value.get("command"),
-                                    "memLimit": value.get("mem_limit"), "pidsLimit": value.get("pids_limit")}
-                             for name, value in services.items()},
+                "services": measurement_service_settings(services),
                 "swiftImageID": result["swiftImageID"], "postgresImageID": result["postgresImageID"]},
                 indent=2, sort_keys=True) + "\n")
             result["measurementComposeSettingsSHA256"] = sha256(run / "measurement-compose-settings.json")
@@ -906,9 +969,15 @@ def main() -> int:
         phase = "gateway startup"
         execute(compose + ["up", "-d", "--wait", "--wait-timeout", "120", "gateway"], "startup.log", 180)
         phase = "runtime provenance"
+        gateway_id = execute(compose + ["ps", "-q", "gateway"], "open-file-limits.log", 15,
+                             record_stdout=False).strip()
+        capture_pid1_open_file_limits(run=run, service="gateway",
+            container_id=gateway_id, command=docker + ["exec", gateway_id], execute=execute)
         provenance = capture_runtime_provenance(
             docker=docker, compose=compose, services=db_names, manifest=manifest,
             layout=args.layout, execute=execute, psql=psql)
+        if provenance["projectContainers"]["gateway"]["containerID"] != gateway_id:
+            raise CanaryFailure("Gateway changed after PID 1 open-file limit check")
         write_private(run / "runtime-provenance.json", json.dumps(provenance, indent=2,
                       sort_keys=True) + "\n")
         result["runtimeProvenanceSHA256"] = sha256(run / "runtime-provenance.json")
@@ -1031,6 +1100,10 @@ def main() -> int:
         result["failureType"] = type(error).__name__
         result["failurePhase"] = phase
     finally:
+        for service in ("gateway", "loader"):
+            limit_file = run / f"{service}-open-file-limits.json"
+            if limit_file.is_file():
+                result.setdefault("pid1OpenFileLimitsSHA256", {})[service] = sha256(limit_file)
         incomplete = run / "measurement-incomplete-snapshots.json"
         if incomplete.is_file():
             result["incompleteMeasurementSnapshotsSHA256"] = sha256(incomplete)

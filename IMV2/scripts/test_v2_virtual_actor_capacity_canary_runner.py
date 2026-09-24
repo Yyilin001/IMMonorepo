@@ -11,8 +11,11 @@ import tempfile
 import unittest
 
 from test_v2_virtual_actor_capacity_canary import (
-    capture_project_diagnostics, capture_runtime_provenance,
-    preserve_incomplete_measurement,
+    CAPACITY_NOFILE, CanaryFailure, capture_detached_loader_open_file_limits,
+    capture_pid1_open_file_limits, capture_project_diagnostics,
+    capture_runtime_provenance, measurement_service_settings,
+    parse_pid1_open_file_limits,
+    preserve_incomplete_measurement, set_capacity_open_file_limits,
 )
 
 
@@ -22,6 +25,73 @@ PREPARE = HERE / "prepare_v2_virtual_actor_capacity_fixture.py"
 
 
 class CanaryRunnerPreflightTests(unittest.TestCase):
+    def test_capacity_nofile_configuration_does_not_change_postgres(self) -> None:
+        postgres = {"image": "postgres:16-alpine", "ulimits": {"nofile": {"soft": 1024, "hard": 2048}}}
+        services = {"postgres": postgres.copy(), "gateway": {"image": "swift",
+                    "ulimits": {"nproc": 4096}},
+                    "loader": {"image": "swift"}}
+        set_capacity_open_file_limits(services)
+        expected = {"soft": CAPACITY_NOFILE, "hard": CAPACITY_NOFILE}
+        self.assertEqual(services["gateway"]["ulimits"]["nofile"], expected)
+        self.assertEqual(services["loader"]["ulimits"]["nofile"], expected)
+        self.assertEqual(services["gateway"]["ulimits"]["nproc"], 4096)
+        self.assertEqual(services["postgres"], postgres)
+        services["gateway"]["environment"] = {"PASSWORD": "must-not-appear"}
+        listed = measurement_service_settings(services)
+        self.assertEqual(listed["gateway"]["nofile"], expected)
+        self.assertEqual(listed["loader"]["nofile"], expected)
+        self.assertEqual(listed["postgres"]["nofile"], postgres["ulimits"]["nofile"])
+        self.assertNotIn("environment", listed["gateway"])
+
+    def test_pid1_nofile_evidence_and_fail_closed_loader_cleanup(self) -> None:
+        row = "Max open files            65536                65536                files"
+        self.assertEqual(parse_pid1_open_file_limits("Limit Soft Limit Hard Limit Units\n" + row + "\n")["soft"],
+                         CAPACITY_NOFILE)
+        with self.assertRaises(CanaryFailure):
+            parse_pid1_open_file_limits("Limit Soft Limit Hard Limit Units\n")
+        with self.assertRaises(CanaryFailure):
+            parse_pid1_open_file_limits(row + "\n" + row + "\n")
+        with self.assertRaises(CanaryFailure):
+            parse_pid1_open_file_limits("Max open files unlimited unlimited files\n")
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary)
+            commands = []
+            def execute(command, log, timeout, record_stdout=True):
+                commands.append(command)
+                return row + "\n"
+            gateway_id = "b" * 64
+            evidence_hash = capture_pid1_open_file_limits(run=run, service="gateway",
+                container_id=gateway_id,
+                command=["docker", "exec", gateway_id], execute=execute)
+            self.assertEqual(commands, [["docker", "exec", gateway_id, "cat", "/proc/1/limits"]])
+            evidence = run / "gateway-open-file-limits.json"
+            self.assertEqual(hashlib.sha256(evidence.read_bytes()).hexdigest(), evidence_hash)
+            self.assertEqual(evidence.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(evidence.read_text())["hard"], CAPACITY_NOFILE)
+            self.assertEqual(json.loads(evidence.read_text())["containerID"], gateway_id)
+            loader = "a" * 64
+            for bad_output in ("Max open files 1024 65536 files\n", "no limit row\n"):
+                commands.clear()
+                def failing_execute(command, log, timeout, record_stdout=True):
+                    commands.append(command)
+                    return bad_output
+                with self.assertRaises(CanaryFailure):
+                    capture_detached_loader_open_file_limits(run=run, docker=["docker"],
+                        loader_id=loader, execute=failing_execute)
+                self.assertEqual(commands[-1], ["docker", "rm", "-f", loader])
+            self.assertEqual(json.loads((run / "loader-open-file-limits.json").read_text())["soft"], 1024)
+            self.assertEqual((run / "loader-open-file-limits.json").stat().st_mode & 0o777, 0o600)
+            commands.clear()
+            def failed_exec_and_cleanup(command, log, timeout, record_stdout=True):
+                commands.append(command)
+                if "exec" in command:
+                    raise subprocess.CalledProcessError(1, command)
+                raise CanaryFailure("cleanup unavailable")
+            with self.assertRaises(subprocess.CalledProcessError):
+                capture_detached_loader_open_file_limits(run=run, docker=["docker"],
+                    loader_id=loader, execute=failed_exec_and_cleanup)
+            self.assertEqual(commands[-1], ["docker", "rm", "-f", loader])
+
     def test_failure_artifacts_are_private_bounded_and_not_complete_phases(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             run = Path(temporary)
