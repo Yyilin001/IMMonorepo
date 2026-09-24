@@ -381,10 +381,6 @@ struct V2ActiveHybridGroupWake: Equatable, Sendable {
     let liveEvents: [V2ClientGroupEvent]
     let connectionID: UUID?
 
-    var liveEvent: V2ClientGroupEvent? {
-        liveEvents.count == 1 ? liveEvents[0] : nil
-    }
-
     init(
         roomID: String,
         highWatermark: UInt64,
@@ -395,13 +391,6 @@ struct V2ActiveHybridGroupWake: Equatable, Sendable {
         self.highWatermark = highWatermark
         self.liveEvents = liveEvents
         self.connectionID = connectionID
-    }
-
-    init(roomID: String, highWatermark: UInt64, liveEvent: V2ClientGroupEvent?) {
-        self.roomID = roomID
-        self.highWatermark = highWatermark
-        liveEvents = liveEvent.map { [$0] } ?? []
-        connectionID = nil
     }
 }
 

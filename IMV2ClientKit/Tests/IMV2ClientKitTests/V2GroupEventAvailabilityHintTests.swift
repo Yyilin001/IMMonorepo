@@ -6,11 +6,11 @@ import Testing
 @Suite("V2 group-event availability acceleration")
 struct V2GroupEventAvailabilityHintTests {
     @Test("unpersistable optional event sequences degrade to a metadata wake", arguments: [false, true], [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max])
-    func liveSequenceBounds(legacy: Bool, sequence: UInt64) {
+    func liveSequenceBounds(direct: Bool, sequence: UInt64) {
         var hint = IMV2GroupEventAvailable()
         hint.highWatermark = sequence
         let value = event(sequence: sequence, idSuffix: 601)
-        if legacy {
+        if direct {
             hint.sourceEventID = value.sourceEventID
             hint.roomSequence = sequence
             hint.projectionKind = value.projectionKind
