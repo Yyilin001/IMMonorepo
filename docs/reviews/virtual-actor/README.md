@@ -17,7 +17,7 @@
 
 最新[事务上下文 SQL 复用](g5-sql-context-evidence.md)已集成并通过 10 项原生真实 PostgreSQL 聚焦测试，覆盖 hot 的实际单条发送路径。冻结候选 `812af24a` 的七产品 Linux Release 构建通过；正式 hot 复测 SQL 降至 22.109 calls/ACK，但 CPU 2.218297 ms/ACK 仍超过冻结 2.133047，门禁在第 2 轮后停止。上述完整 Linux 成功记录属于 `d5623259`；新生产源码的最终完整 Linux 验证仍待执行。
 
-随后[仅限本机的缓存调用](r3-local-capability-evidence.md#仅限本机的缓存调用)已集成：可重试的 `RoomRef.call` 在 exact local capability 有效时省略重复 lookup，保持每次共享寻址的 owner 读取、严格等待者及远端确认。原生 Runtime 58/58、Cluster 35/35 通过，描述符替换、过期和逐出都不能让本机 hint 静默转成远端派发。冻结候选 `fb8a1047` 的七产品 Linux Release 已通过；使用原 hot 阈值的正式 main 01 与 candidate 02 已通过，候选 CPU 2.110377 ms/ACK 低于 2.133047 上限但仅约 1.06% 余量；六轮对比仍在执行，不能由首个候选样本宣告性能通过，最终全量 Linux 验证也仍待执行。
+随后[仅限本机的缓存调用](r3-local-capability-evidence.md#仅限本机的缓存调用)已集成：可重试的 `RoomRef.call` 在 exact local capability 有效时省略重复 lookup，保持每次共享寻址的 owner 读取、严格等待者及远端确认。原生 Runtime 58/58、Cluster 35/35 通过，描述符替换、过期和逐出都不能让本机 hint 静默转成远端派发。冻结候选 `fb8a1047` 的七产品 Linux Release 已通过；使用原 hot 阈值的正式 main 01 与 candidate 02–03 已通过，两个候选 CPU 分别为 2.110377 / 2.111085 ms/ACK，低于 2.133047 上限但仅约 1% 余量；剩余 main/main/candidate 仍待完成，不能提前宣告六轮性能通过，最终全量 Linux 验证也仍待执行。
 
 ## 核对出的基线差异
 

@@ -1,22 +1,24 @@
 # G5 hot candidates: repeated performance validation
 
-Status: **the cached-local campaign is incomplete; main 01 and candidate 02 passed**. Frozen main remains `f1cdd78d6a21bf0ae23da627c0710c65115236aa`; the latest measured candidate is `fb8a10478895f4b2d616f4bf7eb11eed51a84824`. Earlier failures remain below. The operating point and thresholds were frozen before candidate sampling in the [baseline protocol](v1-baseline-protocol.md) and remain unchanged.
+Status: **the cached-local campaign is incomplete; main 01 and candidates 02–03 passed**. Frozen main remains `f1cdd78d6a21bf0ae23da627c0710c65115236aa`; the latest measured candidate is `fb8a10478895f4b2d616f4bf7eb11eed51a84824`. Earlier failures remain below. The operating point and thresholds were frozen before candidate sampling in the [baseline protocol](v1-baseline-protocol.md) and remain unchanged.
 
-## Cached-local candidate: first pair passes, repeated samples pending
+## Cached-local candidate (`fb8a1047`)
 
-The [same-process cached invocation change](r3-local-capability-evidence.md#仅限本机的缓存调用) passed native Runtime/Cluster tests and all seven Linux Release products. Its fresh `capacity-formal-hot-cached-local-rate025-campaign` has completed main 01 and candidate 02. Both immutable runners passed correctness, formal eligibility and cleanup: 100 authenticated connections, 52,500 acknowledged and durable messages, zero workload failures, unchanged room cardinality. Candidate 03 is now running; all six prescribed samples are required for hot acceptance.
+The [same-process cached invocation change](r3-local-capability-evidence.md#仅限本机的缓存调用) passed native Runtime/Cluster tests and all seven Linux Release products. Its fresh `capacity-formal-hot-cached-local-rate025-campaign` has completed main 01 and candidates 02–03. All three immutable runners passed correctness, formal eligibility and cleanup: 100 authenticated connections, 52,500 acknowledged and durable messages, zero workload failures, unchanged room cardinality. Main 04 is now running; main 05 and candidate 06 remain. All six prescribed samples are required for hot acceptance.
 
-| Steady metric | Main 01 | `fb8a1047` candidate 02 | Frozen limit | Candidate 02 result |
-| --- | --- | --- | --- | --- |
-| Acknowledgements/s | 125 | 125 | ≥112.5 | Pass |
-| p95 / p99 (ms) | 8 / 10 | 9 / 12 | ≤18 / ≤35 | Pass |
-| SQL calls / acknowledgement | 18.352720 | 22.115387 | ≤24.775092 | Pass |
-| Gateway CPU ms / acknowledgement | 1.426372 | 2.110377 | ≤2.133047 | Pass |
-| Sampled Gateway PID-1 peak RSS (bytes) | 76,529,664 | 96,448,512 | ≤345,440,256 | Pass |
+| Sample | ACK/s | CPU ms/ACK | SQL calls/ACK | p95 / p99 ms | Peak PID-1 RSS bytes | Result |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Main 01 | 125 | 1.426372 | 18.352720 | 8 / 10 | 76,529,664 | Pass |
+| Candidate 02 | 125 | 2.110377 | 22.115387 | 9 / 12 | 96,448,512 | Pass |
+| Candidate 03 | 125 | 2.111085 | 22.112347 | 10 / 12 | 96,669,696 | Pass |
+| Main 04 | — | — | — | — | — | Running |
+| Main 05 | — | — | — | — | — | Pending |
+| Candidate 06 | — | — | — | — | — | Pending |
+| Frozen limits | ≥112.5 | ≤2.133047 | ≤24.775092 | ≤18 / ≤35 | ≤345,440,256 | Unchanged |
 
-Candidate 02 CPU is exactly 2.1103771733333334 ms/ACK, leaving only about 1.06% below the frozen 2.13304732 limit. One passing candidate sample does not establish stability; the remaining candidate/main/main/candidate runs retain per-sample fail-stop. The final complete Linux run, the other four workloads and fault case #19 remain open.
+Candidate CPU is exactly 2.1103771733333334 and 2.1110854133333332 ms/ACK, leaving about 1% below the frozen 2.13304732 limit. The two samples are close, but the six-run campaign is still incomplete; the remaining main/main/candidate runs retain per-sample fail-stop. The final complete Linux run, the other four workloads and fault case #19 remain open.
 
-Evidence: `/Users/yyl/.codex/virtual-actor-builds/capacity-formal-hot-cached-local-rate025-campaign/assessment-01.json` SHA-256 `7d5a5671ed7e7cc725895f005c1d8b490f50a4a4140c3f78aadb9a4bd4589b60`; `assessment-02.json` SHA-256 `066acfea0589da38a88c01d414fed3f5d55c624b8947aed474b6370cffe1e85b`. Main 01 `result.json` SHA-256 is `3abc728b1f7f631e5acc31742cd2ab9269867778295b9161e4c79def9cc9fd0d`; candidate 02 is `662e47d8682ebf26cce48fe0a6d562ead706a0a2b61536daca9ee24f0d6f4a6d`. Both assessments report `passed=true` and no failures. No earlier failed artifact has been replaced or reclassified.
+Evidence: `/Users/yyl/.codex/virtual-actor-builds/capacity-formal-hot-cached-local-rate025-campaign/assessment-01.json` SHA-256 `7d5a5671ed7e7cc725895f005c1d8b490f50a4a4140c3f78aadb9a4bd4589b60`; `assessment-02.json` SHA-256 `066acfea0589da38a88c01d414fed3f5d55c624b8947aed474b6370cffe1e85b`. Main 01 `result.json` SHA-256 is `3abc728b1f7f631e5acc31742cd2ab9269867778295b9161e4c79def9cc9fd0d`; candidate 02 is `662e47d8682ebf26cce48fe0a6d562ead706a0a2b61536daca9ee24f0d6f4a6d`. Candidate 03 `assessment-03.json` SHA-256 is `5fd098dd7547aad985d7b90eb4ddff4b6eb035d118fa366cc35e7ece15e06f5e`, with result SHA-256 `a34fd57a23dfff0d9825376ce36b0221dcf80098e2d987cdce7e9a59aadf4099`. All three assessments report `passed=true` and no failures. No earlier failed artifact has been replaced or reclassified.
 
 ## Earlier SQL-context candidate: two fewer SQL calls, CPU still over budget
 
