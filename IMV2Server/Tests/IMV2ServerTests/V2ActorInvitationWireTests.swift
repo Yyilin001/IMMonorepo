@@ -134,6 +134,18 @@ struct V2ActorInvitationWireTests {
             maximumApprovedUses: 8, maximumActiveInvitesPerRoom: 12, createdAt: now)
         let seedWire = V2ActorInviteCreatePersistenceWire(domain: seed)
         #expect(try roundTrip(seedWire).toDomain().persistedTimestamps == seed.persistedTimestamps)
+        // Every instant PostgreSQL stores must cross the wire, including ones
+        // far from 1970 where a Date step is coarser than a microsecond.
+        for instant in [1_750_000_000, 946_684_800 + 0.00000125, 946_684_800 - 0.00000125, 1_750_000_000.1234567,
+                        -210_866_803_200 + 10.223, 9_224_318_016_000 - 1000.223] {
+            let base = Date(timeIntervalSince1970: instant)
+            let request = V2GroupInviteCreatePersistenceRequest(inviteID: inviteID, roomID: roomID, actorUserID: actor,
+                operationID: try GroupInviteOperationID("invite-op"), tokenDigest: Data(repeating: 2, count: 32),
+                requestedLifetimeSeconds: 300, expiresAt: base.addingTimeInterval(300),
+                maximumApprovedUses: 8, maximumActiveInvitesPerRoom: 12, createdAt: base)
+            let decoded = try roundTrip(V2ActorInviteCreatePersistenceWire(domain: request)).toDomain()
+            #expect(decoded.persistedTimestamps == request.persistedTimestamps)
+        }
     }
 
 }

@@ -205,8 +205,14 @@ extension V2ActorInvitePersistedTimesWire {
         }
         let pair = V2GroupInviteCreationTimestamps(createdAt: try timestamp(createdAtMicroseconds),
                                                    expiresAt: try timestamp(expiresAtMicroseconds))
-        guard abs(pair.createdAt.date.timeIntervalSince(createdAt)) < 0.000002,
-              abs(pair.expiresAt.date.timeIntervalSince(expiresAt)) < 0.000002 else {
+        // The microsecond pair is authoritative. A Date agrees with it within
+        // 2µs, or within one Double step where that step is coarser (dates
+        // far from 1970 that PostgreSQL still stores exactly).
+        func agrees(_ value: V2PostgresTimestamp, _ date: Date) -> Bool {
+            let difference = abs(value.date.timeIntervalSince(date))
+            return difference < 0.000002 || difference <= date.timeIntervalSince1970.ulp
+        }
+        guard agrees(pair.createdAt, createdAt), agrees(pair.expiresAt, expiresAt) else {
             throw V2GroupInvitationServiceError.invalidRequest
         }
         return pair
