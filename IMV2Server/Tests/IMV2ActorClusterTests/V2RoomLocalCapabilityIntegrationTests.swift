@@ -86,12 +86,36 @@ struct V2RoomLocalCapabilityIntegrationTests {
             try await gate.waitForEntry()
             let first = try await fixture.node.stop(deadline: .now + .milliseconds(40))
             #expect(!first.completed)
+            #expect(first.remainingRooms == 1)
             do { _ = try await call.value; Issue.record("timed-out call appeared committed") }
             catch { #expect(error as? V2RoomCallFailure == .outcomeUnknown) }
-            let stillExecuting = await gate.hasPendingExecution()
-            let trackedCalls = await fixture.client.dispatchedCallCount()
-            #expect(stillExecuting)
-            #expect(trackedCalls == 1)
+            // The Host detaches the timed-out caller but owns the executing
+            // turn, permit and lease until the executor actually finishes.
+            // Once the inbound unknown reply has returned, the Client's
+            // physical dispatch is correctly allowed to leave its registry.
+            #expect(await fixture.client.quiesce(deadline: .now + .seconds(2)))
+            #expect(await fixture.client.dispatchedCallCount() == 0)
+            #expect(await gate.hasPendingExecution())
+            let heldBudget = await fixture.budget.snapshot()
+            #expect(heldBudget.commandCount == 1)
+            #expect(heldBudget.byteCount > 0)
+            let heldLease = try await fixture.leases.locate(roomID: fixture.room, owner: fixture.owner)
+            #expect(heldLease?.token == token)
+            let stillDraining = try await fixture.node.stop(deadline: .now + .milliseconds(40))
+            #expect(!stillDraining.completed)
+            #expect(stillDraining.remainingRooms == 1)
+
+            await gate.open()
+            let finished = try await fixture.node.stop(deadline: .now + .seconds(5))
+            #expect(finished.completed)
+            #expect(finished.remainingRooms == 0)
+            #expect(await fixture.executions.count() == 1)
+            let releasedBudget = await fixture.budget.snapshot()
+            #expect(releasedBudget.commandCount == 0)
+            #expect(releasedBudget.byteCount == 0)
+            let releasedLease = try await fixture.leases.locate(roomID: fixture.room, owner: fixture.owner)
+            #expect(releasedLease?.token == nil)
+            #expect(await fixture.client.dispatchedCallCount() == 0)
         }
     }
 
@@ -253,6 +277,8 @@ struct V2RoomLocalCapabilityIntegrationTests {
     private struct Fixture: Sendable {
         let node: V2RoomClusterNode
         let client: V2RoomClusterClient
+        let budget: V2RoomCommandBudget
+        let leases: LocalLeaseStore
         let descriptor: V2RoomClusterHostDescriptor
         let executions: ExecutionGate
         let identity: V2ActorHostIdentity
@@ -321,9 +347,13 @@ struct V2RoomLocalCapabilityIntegrationTests {
                 events: [try .init(sourceEventID: .init(uuid: UUID()), roomSequence: 1,
                                    projectionKind: "test", payload: Data(repeating: 7, count: 4_096))],
                 nextRoomSequence: 1, hasMore: false, logTrimmedThroughRoomSequence: 0)))
+            let leaseStore = LocalLeaseStore()
+            leases = leaseStore
+            let commandBudget = V2RoomCommandBudget(configuration: runtime)
+            budget = commandBudget
             let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: hostIdentity,
-                leaseStore: LocalLeaseStore(), configuration: runtime,
-                budget: V2RoomCommandBudget(configuration: runtime), classify: { _ in .barrier },
+                leaseStore: leaseStore, configuration: runtime,
+                budget: commandBudget, classify: { _ in .barrier },
                 factory: .init { _ in
                     .init(restore: { _ in }, execute: { turn in
                         await executionGate.waitIfClosed()

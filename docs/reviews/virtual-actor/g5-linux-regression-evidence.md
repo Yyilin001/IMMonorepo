@@ -2,7 +2,17 @@
 
 这些记录来自固定 checkout、只读源码挂载、Swift 6.4 Jammy 与三个独立 PostgreSQL 16 实例。使用本任务专属 `colima-imv2-va-capacity` 的随机隔离资源，未使用或重建用户原有服务。客户端 Apple 平台代码未改，不把其他线程的原生测试日志纳入本记录。
 
-后续[事务上下文 SQL 复用](g5-sql-context-evidence.md)已改变生产源码，并有 10 项原生真实 PostgreSQL 聚焦测试通过；再后的[仅限本机缓存调用](r3-local-capability-evidence.md#仅限本机的缓存调用)也通过原生 Runtime 58/58、Cluster 35/35。两项改动仍须在最终候选上取得完整 Linux required run。下面 `d5623259` 的成功记录保留，不把它当成新 SQL 或缓存调用改动已通过全量验证。
+后续[事务上下文 SQL 复用](g5-sql-context-evidence.md)及[仅限本机缓存调用](r3-local-capability-evidence.md#仅限本机的缓存调用)已进入 `fb8a1047` 的完整 Linux 运行。该轮因一项排空测试的观察时点断言失败而退出 1，记录如下；最终全量通过仍待取得。下面 `d5623259` 的成功记录保留，不把它当成新 SQL 或缓存调用改动已通过全量验证。
+
+## Cached-local 候选完整运行：排空测试观察点失败
+
+`fb8a10478895f4b2d616f4bf7eb11eed51a84824` 的本次完整运行保存在 `/Users/yyl/.codex/virtual-actor-builds/final-linux-cached-local-fb8a1047/`。驱动 `run-final-linux-gate-cached-local.py` SHA-256 为 `f719ab7872c726e9a4710503013e7b75f74f641b7b563a643898bcd1efd456e5`。Core 129 tests / 41 suites、Server 1280 / 204、Runtime 58 / 5、Contracts 20 / 8、Application 3 / 1 均通过；Cluster 35 tests / 5 suites 中 **34 项通过、1 项失败**。14 个必需 suite 中 13 个通过，37 个必需 case 中 36 个有 started/passed；包括新增 SQL 上下文与 Directory 的六项边界用例。PostgresNIO vendor 检查通过；七项后置检查因测试阶段失败均未执行。
+
+唯一失败是 `V2RoomLocalCapabilityIntegrationTests.localTimeoutAndDrain` 的 `trackedCalls == 1`，实际读到 0；执行 gate 仍关闭、调用返回 `outcomeUnknown`、首次 Node stop 未完成这些断言均通过。代码追踪表明 Host lane 的执行中 caller deadline 会先返回 `outcomeUnknown`，通信调用随之真实结束，Client 可以移除其 dispatch 记录；Host 的执行项、许可和 lease 则必须继续保留至 executor 完成。该测试把通信调用和 Host 执行的生命周期混同，不能把中间的 Client 计数强制固定为 1。修复应直接检查尚未完成的 Host 执行、许可、lease，以及放行后的排空和资源归零；不据此修改生产超时语义，也不将该失败轮改写成通过。
+
+本轮 suite/驱动退出 1、清理退出 0，专属容器、网络和卷均已清理；冻结源码、HEAD 和依赖锁保持不变。原 `suite.log` SHA-256 为 `813f312d005deef0313aac6c653984a8dbee7064c6c2c1d1af50ab7bb3bc9303`，`suite-gate.json` 为 `e5863a4243b4f8771bc51c79aff499d54d858645150c16051fb8670b31f4584a`，`metadata.json` 为 `48e57bdffa7563b7c2f848926ca2ea8f357816353fcffe8e3d6c32a93813b4de`。这些失败工件原样保留，后续验证使用新工件目录。
+
+随后只修改该测试：保留 250 ms 调用期限，先有界等待 Client quiesce，再直接断言 Host 执行 gate 未放行、预算一项且字节数大于零、精确 token 的 lease 仍在、再次短 stop 仍未完成；放行后 stop 完成、执行恰一次、预算和 lease 归零。生产代码未改。原生 `swift test -j 2 --no-parallel --disable-automatic-resolution --build-path /Users/yyl/.codex/virtual-actor-builds/p0/credit-fence-native/.build --filter IMV2ActorClusterTests` 退出 0，35 tests / 5 suites 通过；LocalCapability 的九项均实际 started/passed，修复用例用时 0.325 秒。日志 `/Users/yyl/.codex/virtual-actor-builds/p0/local-drain-observation-native/cluster.log` SHA-256 为 `a1288555794460f0e1c729fe692fef7de7e9ec7eff140a85d320287bacdb99bc`。下一步是独立 Linux 聚焦复验及七项后置检查；最终无过滤的完整 Linux 运行仍待所有代码收口后执行，不能由本次原生通过推定完成。
 
 ## 既有冻结源码的完整 required run
 
