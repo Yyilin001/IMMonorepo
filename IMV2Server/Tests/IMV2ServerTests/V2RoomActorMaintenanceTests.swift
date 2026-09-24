@@ -264,8 +264,7 @@ struct V2RoomActorMaintenanceTests {
                      resulting_room_sequence, recorded_at)
                 VALUES (\(bind: actor), \(bind: UUID()), \(bind: room), 1, 1, \(bind: oldDate))
                 """).run()
-            let control = PostgresV2ControlPlaneHousekeepingStore(database: database,
-                roomCleanupMode: .actorOwned)
+            let control = PostgresV2ControlPlaneHousekeepingStore(database: database)
             _ = try await control.purgeTerminal(now: now, retention: 7 * 86_400,
                 idempotencyRetention: V2IdempotencyPolicy.minimumServerRetention, limit: 1_000)
             #expect(try await maintenanceCount(sql, "im_v2.content_review_jobs") == 1)

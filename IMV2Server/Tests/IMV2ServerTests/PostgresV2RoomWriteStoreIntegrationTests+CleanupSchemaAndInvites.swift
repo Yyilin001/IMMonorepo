@@ -855,12 +855,18 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 store: PostgresV2ControlPlaneHousekeepingStore(database: resources.database(.psql)),
                 now: { now }
             ).runOnce(limit: 256)
-            #expect(controlReport.deletedRows == 4)
+            #expect(controlReport.deletedRows == 3)
             #expect(controlReport.deletedRows <= 256)
-            #expect(controlReport.purgedIdempotencyRows == 1)
+            #expect(controlReport.purgedIdempotencyRows == 0)
             #expect(controlReport.purgedExpiredConnectionLeaseRows == 1)
             #expect(controlReport.purgedExpiredCredentialReplayRows == 1)
             #expect(controlReport.purgedExpiredRefreshHistoryRows == 1)
+            // The direct-room receipt is room-owned: control cleanup leaves it
+            // to the activation-fenced room bookkeeping turn.
+            #expect(try await count("im_v2.direct_room_operations", on: sql) == 1)
+            let roomReport = try await purgeRoomBookkeeping(
+                database: resources.database(.psql), roomID: roomUUID, now: now)
+            #expect(roomReport.deletedOperationRows == 1 && roomReport.deletedReviewJobs == 0)
             #expect(try await count("im_v2.room_events", on: sql) == 1)
             #expect(try await count("im_v2.direct_room_operations", on: sql) == 0)
             #expect(try await count("im_v2.user_live_presence_leases", on: sql) == 0)
@@ -1143,19 +1149,23 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let old = now.addingTimeInterval(-V2IdempotencyPolicy.minimumServerRetention - 1)
             try await sql.raw("UPDATE im_v2.room_membership_operations SET created_at = \(bind: old)").run()
             let expectedReceipt = try #require(try await sql.raw("SELECT row_to_json(m)::text AS value FROM im_v2.room_membership_operations m WHERE actor_user_id = \(bind: senderUUID) AND operation_id = \(bind: decisionOperation.uuidValue!)").first(decoding: StringValueRow.self)).value
+            // Membership receipts are room-owned: control cleanup must leave
+            // them all, and the room bookkeeping turn applies the evidence rule.
             let worker = V2ControlPlaneHousekeepingWorker(store: PostgresV2ControlPlaneHousekeepingStore(database: resources.database(.psql)), now: { now })
-            let report = try await worker.runOnce(limit: 65_536)
-            #expect(report.purgedIdempotencyRows == 2)
+            #expect(try await worker.runOnce(limit: 65_536).purgedIdempotencyRows == 0)
+            #expect(try await count("im_v2.room_membership_operations", on: sql) == 3)
+            let report = try await purgeRoomBookkeeping(database: resources.database(.psql), roomID: roomUUID, now: now)
+            #expect(report.deletedOperationRows == 2)
             #expect(try await count("im_v2.room_membership_operations", on: sql) == 1)
             let retainedReceipt = try await sql.raw("SELECT row_to_json(m)::text AS value FROM im_v2.room_membership_operations m WHERE actor_user_id = \(bind: senderUUID) AND operation_id = \(bind: decisionOperation.uuidValue!)").first(decoding: StringValueRow.self)?.value
             #expect(retainedReceipt == expectedReceipt)
-            #expect(try await worker.runOnce(limit: 65_536).purgedIdempotencyRows == 0)
+            #expect(try await purgeRoomBookkeeping(database: resources.database(.psql), roomID: roomUUID, now: now).deletedOperationRows == 0)
             if state == "approved" {
                 let replay = try await store.approve(roomID: roomID, requestID: submitted.requestID, reviewerUserID: senderID, operationID: decisionOperation, capacityProfile: profile, eventID: .init(uuid: UUID()), now: now)
                 #expect(replay == first)
             }
             #expect(try await count("im_v2.room_events", on: sql) == 3)
-            print("Approval evidence retention: state=\(state), purged=\(report.purgedIdempotencyRows), exactReceiptRetained=\(retainedReceipt == expectedReceipt) after applicant left")
+            print("Approval evidence retention: state=\(state), purged=\(report.deletedOperationRows), exactReceiptRetained=\(retainedReceipt == expectedReceipt) after applicant left")
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await resources.shutdown()
         } catch {

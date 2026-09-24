@@ -981,7 +981,7 @@ enum IMV2ServerApp {
                     invoker: V2RoomRefMaintenanceInvoker(directory: actorDirectory), callTimeout: callTimeout.duration)
             }
             let controlPlaneHousekeepingWorker = V2ControlPlaneHousekeepingWorker(
-                store: PostgresV2ControlPlaneHousekeepingStore(database: maintenanceDatabase, roomCleanupMode: .actorOwned),
+                store: PostgresV2ControlPlaneHousekeepingStore(database: maintenanceDatabase),
                 idempotencyRetention: TimeInterval(configuration.idempotencyRetentionSeconds)
             )
             let pushWakeWorker: V2PushWakeWorker?
