@@ -28,17 +28,16 @@ enum V2PendingCredentialDeletionError: Error { case invalidRecord }
 
 /// 基于文件的待删除凭据标记存储。
 ///
-/// 在调用方可以删除凭据之前，必须先完成原子文件替换与显式刷盘；
-/// 已清除的记录对旧的 `UserDefaults` 标记具有权威性，即使偏好删除尚未刷盘。
+/// 在调用方可以删除凭据之前，必须先完成原子文件替换与显式刷盘。
 actor V2FilePendingCredentialDeletionStore: V2PendingCredentialDeletionStoring {
     /// 由数据库地址与服务标识派生标记文件地址。
     ///
     /// - Parameters:
     ///   - databaseURL: 设备本地数据库地址。
-    ///   - legacyKey: 旧版偏好键，用于派生稳定的服务标识哈希。
+    ///   - serviceIdentifier: 存储域标识，只用于派生稳定的哈希文件名，不以明文出现在路径中。
     /// - Returns: 标记文件地址。
-    static func fileURL(databaseURL: URL, legacyKey: String) -> URL {
-        let serviceHash = SHA256.hash(data: Data(legacyKey.utf8)).map { String(format: "%02x", $0) }.joined()
+    static func fileURL(databaseURL: URL, serviceIdentifier: String) -> URL {
+        let serviceHash = SHA256.hash(data: Data(serviceIdentifier.utf8)).map { String(format: "%02x", $0) }.joined()
         return databaseURL.appendingPathExtension("credential-deletion-" + serviceHash + ".json")
     }
     private struct Record: Codable {
@@ -46,24 +45,17 @@ actor V2FilePendingCredentialDeletionStore: V2PendingCredentialDeletionStoring {
         let pending: Bool
     }
     private let url: URL
-    private let defaults: UserDefaults
-    private let legacyKey: String
 
     /// 构造标记存储。
     ///
-    /// - Parameters:
-    ///   - url: 标记文件地址。
-    ///   - defaults: 读取旧版标记的偏好存储。
-    ///   - legacyKey: 旧版偏好键。
-    init(url: URL, defaults: UserDefaults = .standard, legacyKey: String) {
+    /// - Parameter url: 标记文件地址。
+    init(url: URL) {
         self.url = url
-        self.defaults = defaults
-        self.legacyKey = legacyKey
     }
 
     /// 查询是否存在待完成的凭据删除。
     ///
-    /// 标记文件缺失时会回退检查旧版偏好键：若旧标记为真则立即迁移为文件标记并返回真。
+    /// 标记文件缺失表示没有待完成的删除。
     ///
     /// - Returns: 存在待删除标记时为 `true`。
     /// - Throws: 文件读取失败（非「不存在」）或记录版本不受支持时抛出
@@ -71,11 +63,7 @@ actor V2FilePendingCredentialDeletionStore: V2PendingCredentialDeletionStoring {
     func isPending() throws -> Bool {
         let data: Data
         do { data = try Data(contentsOf: url) }
-        catch CocoaError.fileReadNoSuchFile {
-            guard defaults.bool(forKey: legacyKey) else { return false }
-            try markPending()
-            return true
-        }
+        catch CocoaError.fileReadNoSuchFile { return false }
         let record: Record
         do { record = try JSONDecoder().decode(Record.self, from: data) }
         catch { throw V2PendingCredentialDeletionError.invalidRecord }
@@ -95,8 +83,7 @@ actor V2FilePendingCredentialDeletionStore: V2PendingCredentialDeletionStoring {
 
     /// 原子写入标记并同步落盘。
     ///
-    /// 写入会先确保受管目录存在、采用原子替换、应用设备本地存储保护策略并显式刷盘，
-    /// 最后才清除旧版偏好键，避免出现「文件已清除但旧标记仍在」的中间态。
+    /// 写入会先确保受管目录存在、采用原子替换、应用设备本地存储保护策略并显式刷盘。
     ///
     /// - Parameter pending: 目标标记取值。
     /// - Throws: 目录准备、文件写入或刷盘失败时抛出。
@@ -107,6 +94,5 @@ actor V2FilePendingCredentialDeletionStore: V2PendingCredentialDeletionStoring {
         let file = try FileHandle(forWritingTo: url)
         defer { try? file.close() }
         try file.synchronize()
-        defaults.removeObject(forKey: legacyKey)
     }
 }

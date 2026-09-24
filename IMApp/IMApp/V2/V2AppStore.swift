@@ -287,8 +287,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             localDatabaseURL = databaseURL
             self.liveLocalAccountE2ETestScope = liveLocalAccountE2ETestScope
             pendingCredentialDeletionStore = V2FilePendingCredentialDeletionStore(
-                url: V2FilePendingCredentialDeletionStore.fileURL(databaseURL: databaseURL, legacyKey: keychainService + ".pending-credential-deletion"),
-                legacyKey: keychainService + ".pending-credential-deletion"
+                url: V2FilePendingCredentialDeletionStore.fileURL(databaseURL: databaseURL, serviceIdentifier: keychainService + ".pending-credential-deletion")
             )
             self.bootstrapper = V2ClientSessionBootstrapper(
                 authSession: authSession,
@@ -1199,7 +1198,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             try await V2KeychainInstallationBindingStore(service: localKeychainService).delete()
             try await pendingCredentialDeletionStore?.clearPending()
             try Self.eraseDatabaseArtifacts(at: localDatabaseURL)
-            let deletionMarker = V2FilePendingCredentialDeletionStore.fileURL(databaseURL: localDatabaseURL, legacyKey: localKeychainService + ".pending-credential-deletion")
+            let deletionMarker = V2FilePendingCredentialDeletionStore.fileURL(databaseURL: localDatabaseURL, serviceIdentifier: localKeychainService + ".pending-credential-deletion")
             if FileManager.default.fileExists(atPath: deletionMarker.path) { try FileManager.default.removeItem(at: deletionMarker) }
             let scopedRoot = localDatabaseURL.appendingPathExtension("accounts")
             if FileManager.default.fileExists(atPath: scopedRoot.path) { try FileManager.default.removeItem(at: scopedRoot) }
