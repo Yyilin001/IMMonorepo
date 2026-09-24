@@ -2,6 +2,7 @@ import FluentKit
 import Foundation
 import IMV2ActorContracts
 import IMV2Core
+import Synchronization
 @testable import IMV2Server
 
 /// Grants a fresh activation for one room turn, runs `body` under its token,
@@ -118,3 +119,17 @@ func invitationRoomPort(
 
 /// A generous deadline for coordinator calls whose timing is not under test.
 func invitationTestDeadline() -> ContinuousClock.Instant { .now + .seconds(30) }
+
+/// Test-controlled owner availability and epoch for an invitation room port,
+/// standing in for a RoomRef whose owner is unreachable or has moved.
+final class InvitationOwnerSwitch: Sendable {
+    private let state: Mutex<(available: Bool, epoch: Int64)>
+    init(epoch: Int64 = 0) { state = Mutex((true, epoch)) }
+    func set(available: Bool = true, epoch: Int64) { state.withLock { $0 = (available, epoch) } }
+    /// Throws like an unavailable room call when the owner is switched off.
+    func current() throws -> Int64 {
+        let value = state.withLock { $0 }
+        guard value.available else { throw V2RoomCallFailure.notAccepted(.unavailable) }
+        return value.epoch
+    }
+}

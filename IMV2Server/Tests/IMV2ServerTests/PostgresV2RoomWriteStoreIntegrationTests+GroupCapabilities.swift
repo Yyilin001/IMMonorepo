@@ -6,6 +6,7 @@ import HTTPTypes
 #if os(macOS)
 import Darwin
 #endif
+import IMV2ActorContracts
 import IMV2Core
 import IMV2ServerHTTP
 import PostgresNIO
@@ -767,48 +768,69 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let actor = UserID(uuid: senderUUID)
             try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
             try await ownerSQL.raw("DELETE FROM im_v2.public_user_profiles").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
-            let routed = V2RoutedGroupInvitationStore(controlDatabase: control, router: V2PostgresRoomShardRouter(database: control), owners: try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")]))
             let directory = PostgresV2GroupInviteDirectory(database: control)
-            func candidate(_ byte: UInt8, lifetime: Int) -> V2GroupInviteCreatePersistenceRequest {
-                .init(inviteID: .init(uuid: UUID()), roomID: room, actorUserID: actor, operationID: .init(uuid: UUID()), tokenDigest: Data(repeating: byte, count: 32), requestedLifetimeSeconds: lifetime, expiresAt: now.addingTimeInterval(Double(lifetime)), maximumApprovedUses: 5, maximumActiveInvitesPerRoom: 1, createdAt: now)
+            let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 100, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
+            let policy = try V2GroupInvitationPolicy(maximumActiveInvitesPerRoom: 1)
+            let issuer = try V2GroupInviteSecretIssuer(rawKey: Data(repeating: 0x31, count: 32))
+            let clock = TestSequenceClock([now])
+            // Production path: control coordinator plus a room turn on the owner.
+            let coordinator = V2ActorInvitationCoordinator(controlDatabase: control,
+                room: invitationRoomPort(control: control, owner: owner, shardID: "room-b", capacityProfile: profile, now: { clock.now() }),
+                secretIssuer: issuer, policy: policy, now: { clock.now() })
+            func invite(_ operation: GroupInviteOperationID, lifetime: Int) -> V2ActorCreateGroupInviteWire {
+                .init(roomID: room, actorUserID: actor, operationID: operation, lifetime: TimeInterval(lifetime), maximumApprovedUses: 5)
             }
-            let first = candidate(0x31, lifetime: 300)
-            _ = try await routed.create(first)
-            let second = candidate(0x32, lifetime: 3600)
-            await #expect(throws: V2GroupInvitationServiceError.rateLimited) { _ = try await routed.create(second) }
-            let expired = candidate(0x33, lifetime: 300)
+            func create(_ input: V2ActorCreateGroupInviteWire) async throws -> V2ActorGroupInviteLinkWire {
+                guard case .created(let link) = try await coordinator.create(input, deadline: invitationTestDeadline()) else {
+                    throw V2GroupInvitationServiceError.corruptPersistenceState
+                }
+                return link
+            }
+            func digest(_ operation: GroupInviteOperationID) throws -> Data {
+                issuer.digest(try issuer.secret(actorUserID: actor, operationID: operation))
+            }
+            func recovery(at time: Date) -> V2GroupInviteCreationRecoveryWorker {
+                .init(jobs: directory, coordinator: coordinator, deadline: invitationTestDeadline, policy: policy, now: { time })
+            }
+            let firstOperation = GroupInviteOperationID(uuid: UUID()), secondOperation = GroupInviteOperationID(uuid: UUID())
+            _ = try await create(invite(firstOperation, lifetime: 300))
+            await #expect(throws: V2GroupInvitationServiceError.rateLimited) { _ = try await create(invite(secondOperation, lifetime: 3600)) }
+            // A prepared intent whose owner creation never happened.
+            let expired = V2GroupInviteCreatePersistenceRequest(inviteID: .init(uuid: UUID()), roomID: room, actorUserID: actor,
+                operationID: .init(uuid: UUID()), tokenDigest: Data(repeating: 0x33, count: 32), requestedLifetimeSeconds: 300,
+                expiresAt: now.addingTimeInterval(300), maximumApprovedUses: 5, maximumActiveInvitesPerRoom: 1, createdAt: now)
             _ = try await directory.prepare(expired)
-            #expect(try await directory.resolve(tokenDigest: second.tokenDigest) == nil)
+            #expect(try await directory.resolve(tokenDigest: digest(secondOperation)) == nil)
             let later = now.addingTimeInterval(301)
-            #expect(try await routed.create(first.evaluated(at: later)).state == .expired)
+            clock.set([later])
+            #expect(try await create(invite(firstOperation, lifetime: 300)).state == .expired)
             // The final job update fails after directory UPDATE; the whole
             // control transaction must roll back publication while owner survives.
             try await sql.raw("CREATE FUNCTION im_v2.fail_invite_job_completion() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN IF NEW.state = 'completed' THEN RAISE EXCEPTION 'test finalize job failure'; END IF; RETURN NEW; END;$$").run()
             try await sql.raw("CREATE TRIGGER test_invite_job_completion BEFORE UPDATE ON im_v2.group_invite_creation_recovery FOR EACH ROW EXECUTE FUNCTION im_v2.fail_invite_job_completion()").run()
-            let policy = try V2GroupInvitationPolicy(maximumActiveInvitesPerRoom: 1)
-            let report = try await V2GroupInviteCreationRecoveryWorker(jobs: directory, invitations: routed, policy: policy, now: { later }).runOnce()
+            let report = try await recovery(at: later).runOnce()
             #expect(report.attempted == 2 && report.deferred == 1 && report.paused == 1)
-            #expect(try await directory.resolve(tokenDigest: second.tokenDigest) == nil)
+            #expect(try await directory.resolve(tokenDigest: digest(secondOperation)) == nil)
             #expect(try await directory.resolve(tokenDigest: expired.tokenDigest) == nil)
             #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_links").first(decoding: CountRow.self)?.value == 2)
             try await sql.raw("DROP TRIGGER test_invite_job_completion ON im_v2.group_invite_creation_recovery").run()
             try await sql.raw("DROP FUNCTION im_v2.fail_invite_job_completion()").run()
-            let beforeDue = try await V2GroupInviteCreationRecoveryWorker(jobs: directory, invitations: routed, policy: policy, now: { later }).runOnce()
-            #expect(beforeDue.attempted == 0)
+            #expect(try await recovery(at: later).runOnce().attempted == 0)
             // No new authority is needed to finalize an already committed,
             // matching owner receipt after the original creator is suspended.
             try await sql.raw("UPDATE im_v2.public_user_profiles SET state='suspended' WHERE user_id=\(bind: actor.uuidValue!)").run()
             let retryTime = later.addingTimeInterval(15)
-            let recovered = try await V2GroupInviteCreationRecoveryWorker(jobs: PostgresV2GroupInviteDirectory(database: control), invitations: routed, policy: policy, now: { retryTime }).runOnce()
+            clock.set([retryTime])
+            let recovered = try await recovery(at: retryTime).runOnce()
             #expect(recovered.completed == 1 && recovered.attempted == 1)
-            #expect(try await directory.resolve(tokenDigest: second.tokenDigest)?.inviteID == second.inviteID)
-            let value = try await routed.create(second.evaluated(at: retryTime))
-            #expect(value.createdAt == now && value.expiresAt == second.expiresAt && value.state == .active)
+            let published = try #require(try await directory.resolve(tokenDigest: digest(secondOperation)))
+            let value = try await create(invite(secondOperation, lifetime: 3600))
+            #expect(published.inviteID == value.inviteID)
+            #expect(value.createdAt == now && value.expiresAt == now.addingTimeInterval(3600) && value.state == .active)
             #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_links").first(decoding: CountRow.self)?.value == 2)
             #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_creation_recovery WHERE state='completed'").first(decoding: CountRow.self)?.value == 2)
             #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_creation_recovery WHERE state='paused' AND last_error_code='creation_expired'").first(decoding: CountRow.self)?.value == 1)
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_directory WHERE operation_id = \(bind: second.operationID.uuidValue!) AND ready_at = \(bind: retryTime)").first(decoding: CountRow.self)?.value == 1)
+            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_directory WHERE operation_id = \(bind: secondOperation.uuidValue!) AND ready_at = \(bind: retryTime)").first(decoding: CountRow.self)?.value == 1)
             print("PASS creation recovery clock: expired links no longer count, original expiry unchanged, never-created expired intent paused, owner survives control rollback, current ready_at")
         }
     }
@@ -820,13 +842,30 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let actor = UserID(uuid: senderUUID)
             try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
             try await ownerSQL.raw("DELETE FROM im_v2.public_user_profiles").run()
-            try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
-            let routed = V2RoutedGroupInvitationStore(controlDatabase: control, router: V2PostgresRoomShardRouter(database: control), owners: try V2StaticRoomShardStorageRegistry(locations: [.init(shardID: "room-b", database: owner, schema: "im_v2")]))
             let directory = PostgresV2GroupInviteDirectory(database: control)
-            func candidate(_ byte: UInt8) -> V2GroupInviteCreatePersistenceRequest {
-                .init(inviteID: .init(uuid: UUID()), roomID: room, actorUserID: actor, operationID: .init(uuid: UUID()), tokenDigest: Data(repeating: byte, count: 32), requestedLifetimeSeconds: 3600, expiresAt: now.addingTimeInterval(3600), maximumApprovedUses: 5, maximumActiveInvitesPerRoom: 20, createdAt: now)
+            let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 100, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
+            let issuer = try V2GroupInviteSecretIssuer(rawKey: Data(repeating: 0x41, count: 32))
+            let clock = TestSequenceClock([now])
+            // RoomRef stand-in: the owner can become unreachable or move epoch.
+            let ownerSwitch = InvitationOwnerSwitch()
+            let coordinator = V2ActorInvitationCoordinator(controlDatabase: control,
+                room: invitationRoomPort(control: control, owner: { _ in (owner, "room-b", try ownerSwitch.current()) },
+                                         capacityProfile: profile, now: { clock.now() }),
+                secretIssuer: issuer, now: { clock.now() })
+            func recovery(at time: Date) -> V2GroupInviteCreationRecoveryWorker {
+                clock.set([time])
+                return .init(jobs: directory, coordinator: coordinator, deadline: invitationTestDeadline, now: { time })
             }
-            for byte in [UInt8(0x41), UInt8(0x42)] { _ = try await directory.prepare(candidate(byte)) }
+            // Intents carry the digest the coordinator issues for their operation,
+            // so foreground creation and recovery converge on one binding.
+            func candidate() throws -> V2GroupInviteCreatePersistenceRequest {
+                let operation = GroupInviteOperationID(uuid: UUID())
+                return .init(inviteID: .init(uuid: UUID()), roomID: room, actorUserID: actor, operationID: operation,
+                    tokenDigest: issuer.digest(try issuer.secret(actorUserID: actor, operationID: operation)),
+                    requestedLifetimeSeconds: 3600, expiresAt: now.addingTimeInterval(3600), maximumApprovedUses: 5,
+                    maximumActiveInvitesPerRoom: 20, createdAt: now)
+            }
+            for _ in 0..<2 { _ = try await directory.prepare(candidate()) }
             let claimTime = now.addingTimeInterval(30)
             async let firstBatch = directory.claim(limit: 1, now: claimTime, lease: 60, maximumActiveInvitesPerRoom: 20)
             async let secondBatch = directory.claim(limit: 1, now: claimTime, lease: 60, maximumActiveInvitesPerRoom: 20)
@@ -840,43 +879,52 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let old = try #require(originals.first { $0.intent.request.operationID == reclaimed.intent.request.operationID })
             #expect(old.claimToken != reclaimed.claimToken && reclaimed.attemptCount == 2)
             #expect(try await !directory.fail(old, reason: .permissionDenied, retryAt: nil, now: reclaimedAt))
-            async let foreground = routed.create(reclaimed.intent.request.evaluated(at: reclaimedAt))
-            async let recovery: Void = routed.resumeCreation(reclaimed.intent, now: reclaimedAt)
-            _ = try await (foreground, recovery)
+            // Foreground creation and recovery race on the same operation.
+            clock.set([reclaimedAt])
+            let request = reclaimed.intent.request
+            async let foreground = coordinator.create(.init(roomID: room, actorUserID: actor, operationID: request.operationID,
+                lifetime: TimeInterval(request.requestedLifetimeSeconds), maximumApprovedUses: request.maximumApprovedUses),
+                deadline: invitationTestDeadline())
+            async let resumed: Void = coordinator.resumeCreation(reclaimed.intent, evaluatedAt: reclaimedAt, deadline: invitationTestDeadline())
+            _ = try await (foreground, resumed)
             #expect(try await !directory.fail(reclaimed, reason: .dependencyUnavailable, retryAt: reclaimedAt.addingTimeInterval(15), now: reclaimedAt))
             // Current identity must still authorize creation without an owner
             // receipt. Pausing records no invitation and does not guess success.
             try await sql.raw("UPDATE im_v2.public_user_profiles SET state='suspended' WHERE user_id = \(bind: actor.uuidValue!)").run()
-            let denied = try await V2GroupInviteCreationRecoveryWorker(jobs: directory, invitations: routed, now: { reclaimedAt }).runOnce()
+            let denied = try await recovery(at: reclaimedAt).runOnce()
             #expect(denied.paused == 1 && denied.completed == 0)
             #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_links").first(decoding: CountRow.self)?.value == 1)
             try await sql.raw("UPDATE im_v2.public_user_profiles SET state='active' WHERE user_id = \(bind: actor.uuidValue!)").run()
-            let transient = candidate(0x43)
+            let transient = try candidate()
             _ = try await directory.prepare(transient)
-            try await sql.raw("UPDATE im_v2.room_owner_routes SET room_shard_id='unknown-owner' WHERE room_id=\(bind: room.uuidValue!)").run()
+            // An unreachable owner is a transient dependency: back off, never pause.
+            ownerSwitch.set(available: false, epoch: 0)
             let retryNow = now.addingTimeInterval(100)
-            let deferred = try await V2GroupInviteCreationRecoveryWorker(jobs: directory, invitations: routed, now: { retryNow }).runOnce()
+            let deferred = try await recovery(at: retryNow).runOnce()
             #expect(deferred.deferred == 1)
-            #expect(try await V2GroupInviteCreationRecoveryWorker(jobs: directory, invitations: routed, now: { retryNow }).runOnce().attempted == 0)
-            try await sql.raw("UPDATE im_v2.room_owner_routes SET room_shard_id='room-b', route_epoch=1 WHERE room_id=\(bind: room.uuidValue!)").run()
+            #expect(try await recovery(at: retryNow).runOnce().attempted == 0)
+            // A room turn for an epoch the owner has not reached is refused and deferred.
+            ownerSwitch.set(epoch: 1)
             try await sql.raw("UPDATE im_v2.group_invite_creation_recovery SET attempt_count=1000 WHERE operation_id=\(bind: transient.operationID.uuidValue!)").run()
             let epochTime = retryNow.addingTimeInterval(15)
-            let changed = try await V2GroupInviteCreationRecoveryWorker(jobs: directory, invitations: routed, now: { epochTime }).runOnce()
+            let changed = try await recovery(at: epochTime).runOnce()
             #expect(changed.deferred == 1)
             try await ownerSQL.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: room.uuidValue!)").run()
             #expect(try await sql.raw("SELECT attempt_count AS value FROM im_v2.group_invite_creation_recovery WHERE operation_id=\(bind: transient.operationID.uuidValue!)").first(decoding: CountRow.self)?.value == 1000)
             let availableAt = epochTime.addingTimeInterval(900)
-            #expect(try await V2GroupInviteCreationRecoveryWorker(jobs: directory, invitations: routed, now: { availableAt }).runOnce().completed == 1)
-            let cancelled = candidate(0x44)
+            #expect(try await recovery(at: availableAt).runOnce().completed == 1)
+            let cancelled = try candidate()
             _ = try await directory.prepare(cancelled)
             await #expect(throws: CancellationError.self) {
                 _ = try await V2GroupInviteCreationRecoveryWorker(jobs: directory, invitations: CancelledInviteCreationResumer(), now: { availableAt }).runOnce()
             }
             #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_creation_recovery WHERE state='claimed'").first(decoding: CountRow.self)?.value == 1)
             let restartTime = availableAt.addingTimeInterval(61)
-            #expect(try await V2GroupInviteCreationRecoveryWorker(jobs: PostgresV2GroupInviteDirectory(database: control), invitations: routed, now: { restartTime }).runOnce().completed == 1)
+            clock.set([restartTime])
+            #expect(try await V2GroupInviteCreationRecoveryWorker(jobs: PostgresV2GroupInviteDirectory(database: control), coordinator: coordinator,
+                deadline: invitationTestDeadline, now: { restartTime }).runOnce().completed == 1)
             #expect(try await directory.resolve(tokenDigest: cancelled.tokenDigest)?.inviteID == cancelled.inviteID)
-            let conflicting = candidate(0x45)
+            let conflicting = try candidate()
             _ = try await directory.prepare(conflicting)
             // A legacy/corrupt owner binding is evidence to quarantine, never
             // permission to overwrite a token and make the intent succeed.
@@ -885,7 +933,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 INSERT INTO im_v2.group_invite_links(invite_id,room_id,created_by_user_id,creation_operation_id,token_digest,requested_lifetime_seconds,expires_at,maximum_approved_uses,created_at)
                 VALUES (\(bind: conflicting.inviteID.uuidValue!),\(bind: room.uuidValue!),\(bind: actor.uuidValue!),\(bind: conflicting.operationID.uuidValue!),\(bind: wrongDigest),3600,\(bind: conflicting.expiresAt),5,\(bind: now))
                 """).run()
-            #expect(try await V2GroupInviteCreationRecoveryWorker(jobs: directory, invitations: routed, now: { restartTime }).runOnce().paused == 1)
+            #expect(try await recovery(at: restartTime).runOnce().paused == 1)
             #expect(try await directory.resolve(tokenDigest: conflicting.tokenDigest) == nil)
             #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_links WHERE creation_operation_id=\(bind: conflicting.operationID.uuidValue!) AND token_digest=\(bind: wrongDigest)").first(decoding: CountRow.self)?.value == 1)
             try await V2SchemaReadiness.verify(database: control)
