@@ -60,10 +60,14 @@ part of this refactor.
   with a borrowed transaction connection. The Store still owns ordered
   preflight, owner/activation fencing, mismatch diagnosis, transaction commit,
   and post-commit credit finalization.
+- Fast direct room-log append SQL and its row decoder now live in a direct
+  write-path component. The Store still constructs validated inputs, acquires
+  ordered operation locks, checks owner routes, owns the transaction, and
+  finalizes credits after commit.
 - The non-PostgresNIO SQL fallback remains behavior-neutral but is not exercised
   by native PostgreSQL tests. Do not count those tests as fallback coverage.
 
-Still to extract: scalar acceptance, direct room-log fast/ordinary writes,
+Still to extract: scalar acceptance, ordinary direct room-log writes,
 forwarded acceptance, remaining preflight/row decoders, and larger integration
 test fixtures. The complete PostgreSQL suite and CI Linux build remain release
 gates for the finished decomposition.
