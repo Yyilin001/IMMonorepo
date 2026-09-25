@@ -88,7 +88,9 @@ part of this refactor.
   subsequent acceptance effects.
 - Forward-source version/reference validation and message-media locking now
   share a transaction-borrowing media acceptance component. Forward inbox
-  transitions and commit/finalization ordering remain in the Store.
+  preflight, acceptance, and completion stages now live in a borrowed-
+  transaction extension. The Store still owns the three transaction boundaries,
+  authorization coordination, and post-commit cache/credit finalization.
 - The non-PostgresNIO SQL fallback remains behavior-neutral but is not exercised
   by native PostgreSQL tests. Do not count those tests as fallback coverage.
 
@@ -99,7 +101,11 @@ recovery, authorization-proof, and eight SIGKILL recovery cases. The suite
 stays serialized because tests reuse schema names. The CI Linux build has not
 yet been run for the finished decomposition.
 
-Still to extract: forward inbox acceptance stages, remaining shared/path row
-decoders, and larger integration test fixtures.
+After the forward inbox stage extraction, the four focused PostgreSQL tests
+covering 21 owner-fence, acceptance/recovery, rejection, and direct-finalization
+cases passed, as did all eight direct/forward authorization SIGKILL cases.
+
+Still to extract: remaining shared/path row decoders and larger integration
+test fixtures.
 Repeat the complete PostgreSQL suite and CI Linux build before declaring the
 finished decomposition verified.
