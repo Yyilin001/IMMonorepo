@@ -48,3 +48,22 @@ reviewable without changing their persistence contract or public store API.
 
 No schema migration, public protocol change, or deployment topology change is
 part of this refactor.
+
+## Implementation status
+
+- Shared integration fixtures are isolated in
+  `PostgresV2RoomWriteStoreIntegrationFixtures.swift`.
+- The ordered operation-lock statement and conditional hybrid-group statement
+  are separate compilation units; their SQL text and statement names remain
+  unchanged.
+- The hybrid-group batch append now executes through a write-path component
+  with a borrowed transaction connection. The Store still owns ordered
+  preflight, owner/activation fencing, mismatch diagnosis, transaction commit,
+  and post-commit credit finalization.
+- The non-PostgresNIO SQL fallback remains behavior-neutral but is not exercised
+  by native PostgreSQL tests. Do not count those tests as fallback coverage.
+
+Still to extract: scalar acceptance, direct room-log fast/ordinary writes,
+forwarded acceptance, remaining preflight/row decoders, and larger integration
+test fixtures. The complete PostgreSQL suite and CI Linux build remain release
+gates for the finished decomposition.

@@ -2,9 +2,55 @@ import Foundation
 import IMV2Core
 import NIOCore
 import PostgresNIO
+import SQLKit
 
-// The Store executes this statement on its borrowed transaction connection.
-// Neither this input nor the statement owns transaction, fence, or credit state.
+// Executes on the Store's borrowed transaction connection. It does not own
+// owner fencing, mismatch diagnosis, credit finalization, or transaction commit.
+enum PlainHybridGroupConditionalWritePath {
+    static func execute(
+        _ ordered: [OrderedRoomWriteRequest],
+        acquisitions: [V2ShardAdmissionCommandCreditPool.Acquisition],
+        snapshotsByRoomID: [UUID: V2HybridGroupShardCreditSnapshotCache.Entry],
+        sql: any SQLDatabase
+    ) async throws -> [PlainHybridGroupConditionalAllocationRow] {
+        guard let postgres = sql as? any PostgresDatabase,
+              ordered.count == acquisitions.count,
+              !ordered.isEmpty
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+
+        let inputs = try zip(ordered, acquisitions).map { item, acquisition in
+            guard case .granted(_, let effectiveShardState) = acquisition,
+                  let lease = effectiveShardState.lease,
+                  let leaseID = UUID(uuidString: lease.id.rawValue),
+                  let generation = Int64(exactly: lease.generation),
+                  let snapshot = snapshotsByRoomID[item.roomID],
+                  snapshot.capacityProfileID == item.request.capacityProfile.id
+            else { throw V2AtomicRoomWriteBatchError(reason: .admissionState) }
+            return try PlainHybridGroupConditionalAppendInput(
+                item: item,
+                snapshot: snapshot,
+                expectedShardLeaseID: leaseID,
+                expectedShardGeneration: generation
+            )
+        }
+        let statement = try PlainHybridGroupConditionalAppendStatement(inputs: inputs)
+        return try await postgres.withConnection { connection in
+            connection.eventLoop.makeFutureWithTask {
+                let rows = try await connection.execute(
+                    statement,
+                    logger: connection.logger
+                )
+                var decoded: [PlainHybridGroupConditionalAllocationRow] = []
+                decoded.reserveCapacity(inputs.count)
+                for try await row in rows {
+                    decoded.append(row)
+                }
+                return decoded
+            }
+        }.get()
+    }
+}
+
 struct PlainHybridGroupConditionalAppendInput: Sendable {
     let ordinal: Int
     let roomID: UUID
