@@ -280,11 +280,9 @@ public struct PostgresV2GroupMessagingStore:
             }
             switch (input.audience, identityValidation) {
             case (.inline, .controlDatabaseManifest):
-                // The routed coordinator can reach this capability only with
-                // the immutable audience returned by the durable control
-                // intent. Repeating identity lookups here would require a
-                // synchronously replicated global profile database and would
-                // reintroduce a cross-store race.
+                // 路由协调器只有携带持久化控制意图返回的不可变受众集合，
+                // 才能使用此能力。若在此重复查询身份，就需要同步复制的
+                // 全局资料数据库，并会重新引入跨存储竞态。
                 break
 
             case (.inline(let requestedMembers, _), .ownerDatabase):
@@ -378,7 +376,7 @@ public struct PostgresV2GroupMessagingStore:
 
             let createdRoomID = try groupUUID(roomID)
             let createdEventID = try groupUUID(eventID)
-            // Responses and projections use the persisted precision. Other writes keep the original Date.
+            // 响应和投影使用持久化后的时间精度；其他写入保留原始 Date。
             guard let timestamp = try await sql.raw("""
                 INSERT INTO im_v2.rooms
                     (room_id, room_kind, room_shard_id, room_sequence, membership_revision,
@@ -391,8 +389,7 @@ public struct PostgresV2GroupMessagingStore:
                 throw V2GroupMessagingStoreError.corruptPersistenceState
             }
             let createdAtMilliseconds = try v2GatewayMilliseconds(timestamp.createdAt)
-            // Co-located creation publishes its route atomically. A control
-            // manifest is published only by the control intent's finalizer.
+            // 同址创建会原子发布路由。控制清单只由控制意图的收尾逻辑发布。
             if case .ownerDatabase = identityValidation {
                 try await sql.raw("""
                     INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at)
@@ -438,11 +435,10 @@ public struct PostgresV2GroupMessagingStore:
                     """).run()
             }
 
-            // Every active member of a room created in this transaction is a
-            // first-time member, so the room head (including the room.created
-            // event) is their common read watermark. Without it each initial
-            // member would start with one unread event, and the retention
-            // floor would be pinned at zero.
+            // 此事务创建的房间中，每位活跃成员都是首次加入；
+            // 因此包含 room.created 事件的房间日志头，是他们共同的已读水位。
+            // 若不设置，初始成员各自都会有一条未读事件，
+            // 保留下界也会被固定在零。
             try await v2InitializeNewRoomReadWatermarks(
                 roomID: createdRoomID, now: now, sql: sql
             )
@@ -470,9 +466,8 @@ public struct PostgresV2GroupMessagingStore:
                 WHERE event.event_id = \(bind: createdEventID) AND member.left_revision IS NULL
                 """).run()
 
-            // Reserve after the private bulk rows are prepared. Rejection
-            // still rolls the transaction back, while the shared shard row is
-            // not locked throughout the potentially large set-based inserts.
+            // 准备好私有批量记录后再预留。拒绝仍会回滚整个事务；
+            // 共享分片记录不会在可能很大的集合式插入期间一直被锁定。
             guard let lease = try await sql.raw("""
                 SELECT lease_id, generation, valid_until, command_window_limit,
                        command_window_used

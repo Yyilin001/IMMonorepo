@@ -30,7 +30,7 @@ public struct V2UserStateEvent: Equatable, Sendable {
             createdAt: V2PostgresTimestamp(date: createdAt))
     }
 
-    /// Keep the database timestamp intact when forwarding a committed source event.
+    /// 转发已提交的源事件时，保持数据库时间戳不变。
     init(sourceEventID: EventID, userID: UserID, kind: V2UserStateEventKind, payload: Data,
          createdAt: V2PostgresTimestamp) throws {
         guard payload.count <= 256 * 1024,

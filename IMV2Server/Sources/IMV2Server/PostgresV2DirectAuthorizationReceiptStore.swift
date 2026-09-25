@@ -2,8 +2,8 @@ import FluentKit
 import Foundation
 import SQLKit
 
-/// One durable control authorization attempt. Generations never expire merely
-/// because a connection or caller disappeared.
+/// 一次持久化的控制侧授权尝试。连接或调用方消失本身
+/// 不会让授权代次过期。
 struct V2DirectAuthorizationAttempt: Equatable, Sendable {
     let roomID: UUID
     let senderID: UUID
@@ -35,9 +35,9 @@ struct V2DirectAuthorizationReceipt: Equatable, Sendable {
     let eventID: UUID?
 }
 
-/// Room-owned terminal proof. This primitive is not yet the control grant
-/// coordinator: callers must create the durable control obligation before using
-/// it and must keep the owner transaction open through the message write.
+/// 房间所有者持有的终态证明。此基础组件不是控制侧授权协调器：
+/// 调用方使用前须先创建持久化控制义务，
+/// 并在消息写入期间保持所有者事务开启。
 struct PostgresV2DirectAuthorizationReceiptStore: Sendable {
     let schema: String
 
@@ -46,8 +46,8 @@ struct PostgresV2DirectAuthorizationReceiptStore: Sendable {
         self.schema = schema
     }
 
-    /// Nil permits this exact attempt to proceed in this transaction. A terminal
-    /// receipt is replayed without reopening authorization or updating its time.
+    /// 返回 nil 表示允许此次精确尝试在事务内继续。
+    /// 终态回执直接重放，不重新开启授权，也不更新时间。
     func prepare(_ attempt: V2DirectAuthorizationAttempt, transaction: any Database) async throws -> V2DirectAuthorizationReceipt? {
         if let receipt = try await checkAttempt(attempt, transaction: transaction) { return receipt }
         let sql = try transactionSQL(transaction)
@@ -55,8 +55,8 @@ struct PostgresV2DirectAuthorizationReceiptStore: Sendable {
         return nil
     }
 
-    /// Only the operation lock: callers that also lock a forward source must
-    /// retain their existing sorted room-lock order before validating the owner.
+    /// 此处只获取操作锁；还需锁定转发源的调用方，
+    /// 校验所有者前须保持既有的房间锁排序顺序。
     func checkAttempt(_ attempt: V2DirectAuthorizationAttempt, transaction: any Database) async throws -> V2DirectAuthorizationReceipt? {
         try attempt.validate()
         let sql = try transactionSQL(transaction)
@@ -70,8 +70,8 @@ struct PostgresV2DirectAuthorizationReceiptStore: Sendable {
             guard row.matches(attempt) else { throw V2DirectAuthorizationReceiptError.identityConflict }
             return row.receipt
         }
-        // Changing generations must never change the immutable command,
-        // even when a caller presents a different route or retry context.
+        // 切换授权代次绝不能改变不可变命令，
+        // 即使调用方提供了不同路由或重试上下文。
         if let prior = try await sql.raw("""
             SELECT * FROM \(unsafeRaw: schema).direct_authorization_receipts
             WHERE room_id = \(bind: attempt.roomID) AND sender_user_id = \(bind: attempt.senderID)
@@ -86,8 +86,8 @@ struct PostgresV2DirectAuthorizationReceiptStore: Sendable {
         return nil
     }
 
-    /// Read an immutable committed proof after the complete owner operation has
-    /// returned. Absence is not an abort and must leave the control grant held.
+    /// 完整的所有者操作返回后，读取不可变的已提交证明。
+    /// 证明缺失不等于已中止，控制侧授权许可必须继续保留。
     func committedReceipt(_ attempt: V2DirectAuthorizationAttempt, database: any Database) async throws -> V2DirectAuthorizationReceipt? {
         try attempt.validate()
         guard let sql = database as? any SQLDatabase else { throw V2DirectAuthorizationReceiptError.invalidAttempt }
@@ -117,8 +117,8 @@ struct PostgresV2DirectAuthorizationReceiptStore: Sendable {
         }
     }
 
-    /// Called in the message transaction after its durable accepted/denied
-    /// result. It cannot manufacture a committed proof from callback success.
+    /// 消息事务产生持久化的接受或拒绝结果后调用。
+    /// 不能仅凭回调成功就制造已提交证明。
     func finish(_ attempt: V2DirectAuthorizationAttempt, now: Date, transaction: any Database) async throws -> V2DirectAuthorizationReceipt {
         guard let receipt = try await finishIfPresent(attempt, now: now, transaction: transaction) else {
             throw V2DirectAuthorizationReceiptError.missingCompletion
@@ -126,8 +126,8 @@ struct PostgresV2DirectAuthorizationReceiptStore: Sendable {
         return receipt
     }
 
-    /// Admission misses have no durable message result. Keep the control grant
-    /// held for retry/recovery instead of inventing a business denial.
+    /// 准入未通过时没有持久化消息结果。保留控制侧授权许可
+    /// 供重试或恢复使用，不虚构业务拒绝。
     func finishIfPresent(_ attempt: V2DirectAuthorizationAttempt, now: Date, transaction: any Database) async throws -> V2DirectAuthorizationReceipt? {
         guard v2PostgresTimestampCanEncode(now) else { throw V2DirectAuthorizationReceiptError.invalidAttempt }
         if let existing = try await prepare(attempt, transaction: transaction) {
@@ -140,9 +140,8 @@ struct PostgresV2DirectAuthorizationReceiptStore: Sendable {
         return completion
     }
 
-    /// Revocation uses the SAME operation lock as message acceptance. If no
-    /// committed result exists, the durable aborted row bars a late callback.
-    /// Absence alone is never returned as cancellation proof.
+    /// 撤销与消息接受使用同一把操作锁。若不存在已提交结果，
+    /// 持久化的中止记录会阻止迟到回调。仅凭记录缺失绝不返回取消证明。
     func abort(_ attempt: V2DirectAuthorizationAttempt, now: Date, database: any Database) async throws -> V2DirectAuthorizationReceipt {
         guard v2PostgresTimestampCanEncode(now) else { throw V2DirectAuthorizationReceiptError.invalidAttempt }
         return try await database.transaction { transaction in
@@ -197,7 +196,7 @@ struct PostgresV2DirectAuthorizationReceiptStore: Sendable {
     }
 }
 
-/// Keep this key identical to the typed-array/JSON batch statement key.
+/// 此键须与有类型数组或 JSON 批次语句使用的键完全一致。
 func v2AcquireMessageOperationLock(roomID: UUID, senderID: UUID, clientMessageID: UUID, sql: any SQLDatabase) async throws {
     let key = "v2-message-operation:" + roomID.uuidString.lowercased() + ":" + senderID.uuidString.lowercased() + ":" + clientMessageID.uuidString.lowercased()
     try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()

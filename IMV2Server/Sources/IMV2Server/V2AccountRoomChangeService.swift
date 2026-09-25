@@ -5,15 +5,15 @@ public protocol V2AccountRoomChangesStarting: Sendable {
     func startAccountRoomChanges(connectionID: UUID, userID: UserID) async throws -> String
 }
 
-/// Local wakes are delivered directly through the connection registry.
+/// 本地唤醒直接通过连接注册表投递。
 public struct V2LocalRoomChangeInterest: V2GroupEventWakeInterestManaging {
     public init() {}
     public func activate(roomID: RoomID) async throws { try Task.checkCancellation() }
     public func deactivate(roomID: RoomID) async {}
 }
 
-/// Owns live account coverage, bounded wake processing and one writer per
-/// connection. Room notifications are hints; durable content remains in room logs.
+/// 负责实时账号覆盖、有界唤醒处理及每条连接的单一写者。
+/// 房间通知只是提示；持久化内容仍保存在房间日志中。
 public actor V2AccountRoomChangeService {
     public enum Failure: Error, Equatable, Sendable { case closed, staleConnection }
     typealias Ticket = V2AccountRoomCoverageIndex.Ticket
@@ -74,7 +74,7 @@ public actor V2AccountRoomChangeService {
         return ticket
     }
 
-    /// Called only after the Ready response has been written to the connection.
+    /// 仅在 Ready 响应写入连接后调用。
     func resume(_ ticket: Ticket) {
         guard let session = current(ticket) else { return }
         session.ready = true
@@ -97,8 +97,8 @@ public actor V2AccountRoomChangeService {
                 guard index.contains(entry, userID: ticket.userID) else { continue }
                 let interest = account.interests[entry.roomID] ?? interests.manager(for: .account(UUID()))
                 account.interests[entry.roomID] = interest
-                // A removed/rejoined room receives a new scope. Old cleanup
-                // cannot cancel the replacement demand across an await.
+                // 房间移除后重新加入时会获得新的作用域。
+                // 旧的清理操作不能跨越 await 取消替代的订阅需求。
                 try await interest.activate(roomID: entry.roomID)
                 guard current(ticket) != nil, accounts[ticket.userID] === account, !account.recovering else {
                     if accounts[ticket.userID] !== account {
@@ -113,8 +113,8 @@ public actor V2AccountRoomChangeService {
         }
     }
 
-    /// Personal discovery events may name rooms behind the directory cursor.
-    /// Re-read current authorization, then install before scheduling a head read.
+    /// 个人发现事件可能提及目录游标之后的房间。
+    /// 重新读取当前授权，然后在安排日志头读取前安装订阅。
     func refreshMemberships(_ changes: [V2AccountRoomMembershipChange], ticket: Ticket) async throws {
         guard let account = accounts[ticket.userID], current(ticket) != nil, !account.recovering else {
             throw Failure.staleConnection
@@ -141,7 +141,7 @@ public actor V2AccountRoomChangeService {
                 if revision > 0 {
                     try index.revoke(userID: ticket.userID, roomID: room, revision: revision)
                 }
-                // A newer installation may have won while the state read waited.
+                // 状态读取等待期间，较新的安装操作可能已先完成。
                 if !index.candidates(roomID: room).contains(where: { $0.userID == ticket.userID }),
                    let interest = account.interests.removeValue(forKey: room) {
                     await interest.deactivate(roomID: room)
@@ -157,7 +157,7 @@ public actor V2AccountRoomChangeService {
         for entry in entries { notify(roomID: entry.roomID) }
     }
 
-    /// No task is created per wake. Repeated rooms merge before authorization reads.
+    /// 不为每次唤醒创建任务；重复房间在授权读取前合并。
     public func notify(roomID: RoomID) {
         guard !closed else { return }
         guard !pendingRooms.contains(roomID) else { return }
@@ -171,7 +171,7 @@ public actor V2AccountRoomChangeService {
         if wakeTask == nil { wakeTask = Task { await self.processWakes() } }
     }
 
-    /// Core broker reconnect cannot replay wakes lost during the outage.
+    /// Core 消息代理重连无法重放故障期间丢失的唤醒。
     public func invalidateCoverage() {
         for user in Array(accounts.keys) { invalidate(userID: user) }
     }
@@ -188,8 +188,8 @@ public actor V2AccountRoomChangeService {
             await remove(session)
             await drain?.value
         }
-        // A writer may already have detached the session while releasing its
-        // interests. Unregister still owns waiting for that exact lifecycle.
+        // 写者释放订阅意向时可能已经分离会话。
+        // 注销流程仍须等待该精确生命周期结束。
         if let cleanup = cleanups[ticket.connectionID], cleanup.ticket == ticket {
             await cleanup.task.value
         }
@@ -248,16 +248,16 @@ public actor V2AccountRoomChangeService {
             let sent = await session.send(notification)
             guard current(session.ticket) === session else { break }
             if !sent || notification.isResyncBoundary {
-                // A resync boundary also closes this epoch to release stale
-                // authorization and broker interest before the next recovery.
+                // 重新同步边界也会关闭此纪元，
+                // 在下次恢复前释放过期授权和消息代理订阅意向。
                 await remove(session)
                 await session.close()
                 return
             }
         }
         session.drain = nil
-        // Enqueue may have raced with an empty read while this drain still
-        // existed. Recheck after clearing the task to prevent a lost wakeup.
+        // 此排空任务尚在运行时，入队可能与空读取竞速。
+        // 清除任务后再次检查，防止丢失唤醒。
         if !Task.isCancelled, index.hasPending(ticket: session.ticket) { kick(session) }
     }
 

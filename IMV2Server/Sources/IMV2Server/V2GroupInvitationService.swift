@@ -174,8 +174,8 @@ public struct V2StoredGroupInvite: Equatable, Sendable {
     public let maximumApprovedUses: Int
     public let approvedUseCount: Int
     public let createdAt: Date
-    // Keep the immutable database binding when an owner receipt is adopted
-    // into the control directory. Date is only its public representation.
+    // 将所有者回执接入控制目录时，保留不可变的数据库绑定。
+    // Date 只是其公开表示。
     var persistedTimestamps: V2GroupInviteCreationTimestamps? = nil
 }
 

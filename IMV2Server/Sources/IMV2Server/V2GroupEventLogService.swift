@@ -190,10 +190,9 @@ protocol V2PreparedGroupEventLogStore: V2GroupEventLogStore {
     ) async throws -> V2PreparedGroupEventPullResult
 }
 
-// Pull is deliberately independent from user-sync ACKs. Hybrid rooms retain a
-// durable local room cursor; standard rooms use it only as a foreground
-// preview and keep user-sync as the acknowledgement authority. Retries are
-// idempotent because projections key on source event ID.
+// 拉取有意与用户同步 ACK 独立。混合房间保留持久化本地房间游标；
+// 标准房间只将其作为前台预览，仍由用户同步负责确认。
+// 投影按源事件 ID 建键，因此重试具备幂等性。
 /// 房间事件日志服务。
 ///
 /// 拉取刻意独立于用户同步确认：混合大群使用持久化的房间游标，
@@ -348,10 +347,9 @@ public struct V2GroupEventLogService: Sendable {
     ///
     /// - Parameter event: 已提交的实时事件。
     func recordCommittedDirectRoomLogEvent(_ event: V2DirectRoomLiveEvent) async {
-        // Do not make the acceptance/foreground path wait for the cache
-        // actor's LRU mutation. The cache already owns a bounded, room-sharded
-        // mailbox whose writer preserves per-lane order; a mailbox miss or
-        // overflow merely sends the later authorized pull to PostgreSQL.
+        // 不要让接受或前台路径等待缓存 Actor 修改 LRU。
+        // 缓存已有按房间分片的有界邮箱，其写者保持每条通道内的顺序；
+        // 邮箱未命中或溢出只会让后续已授权的拉取转向 PostgreSQL。
         directRoomLogEventCache?.enqueueCommittedPlainDirectEvent(event)
     }
 

@@ -3,8 +3,8 @@ import IMV2ActorContracts
 import IMV2ActorRuntime
 import IMV2Core
 
-/// Room-owned receipt, log, directory and recovery operations. User-owned
-/// receipt preferences and user-room enumeration stay at their own ports.
+/// 房间所有者负责的回执、日志、目录和恢复操作。
+/// 用户自有的回执偏好与用户房间枚举仍使用各自端口。
 public struct V2RoomRefQueryClient: Sendable,
     V2GatewayRoomMembershipDirectoryHandling, V2GroupRolePolicyBaselineReading,
     V2RoomStateReading, V2RoomLatestVisibleReading {
@@ -87,8 +87,8 @@ public struct V2RoomRefQueryClient: Sendable,
         }
     }
 
-    /// Subscription interest registration and notification delivery are a
-    /// separate Gateway lifecycle; this proves eligibility and reads the head.
+    /// 订阅意向登记与通知投递属于独立的 Gateway 生命周期；
+    /// 此处只证明资格并读取日志头。
     public func subscribeEligibility(roomID: RoomID, actorUserID: UserID) async throws -> V2GroupEventSubscription {
         let query = V2ActorRoomLogSubscribeWire(roomID: roomID, actorUserID: actorUserID)
         guard case .roomLog(let result) = try await caller.call(.roomLog(.subscribe(query)), actor: actorUserID) else {
@@ -200,7 +200,7 @@ public struct V2RoomRefQueryClient: Sendable,
     }
 }
 
-/// Room receipts and user preferences have different physical authorities.
+/// 房间回执与用户偏好分别由不同物理节点负责。
 public struct V2RoomRefReadReceiptClient: V2GatewayReadReceiptHandling {
     private let rooms: V2RoomRefQueryClient
     private let preferences: V2ReadReceiptService

@@ -133,7 +133,7 @@ public struct V2StagedGroupRoomCommand: Equatable, Sendable {
         capacityClass: V2GroupCapacityClass,
         stagedMemberCount: Int
     ) throws {
-        // Reuse the public command's exact title normalization contract.
+        // 复用公开命令的精确标题规范化契约。
         let validated = try V2CreateGroupRoomCommand(
             actorUserID: actorUserID,
             operationID: operationID,
@@ -236,9 +236,8 @@ public struct V2GroupMessagingService: Sendable {
         initialMemberUserIDs: [UserID]
     ) async throws -> V2CreateGroupRoomOutcome {
         let initialMemberCount = initialMemberUserIDs.count + 1
-        // Validate untrusted membership input before evaluating capacity.  A
-        // malformed request must not be reclassified as an apparent limit
-        // rejection merely because it also has a large submitted array.
+        // 评估容量前先校验不可信的成员输入。
+        // 格式错误的请求即使提交了大型数组，也不能被重新分类为容量拒绝。
         let provisionalMode = deliveryPolicy.capacityClass(forInitialMemberCount: initialMemberCount) ?? .large
         let command = try V2CreateGroupRoomCommand(
             actorUserID: actorUserID,
@@ -252,8 +251,8 @@ public struct V2GroupMessagingService: Sendable {
         else {
             return .memberLimitReached
         }
-        // `V2CreateGroupRoomCommand` canonicalizes and validates the member
-        // list, so its count is the authority after duplicate/owner checks.
+        // `V2CreateGroupRoomCommand` 会规范化并校验成员列表，
+        // 因此完成重复项和所有者检查后，应以其计数为准。
         guard command.allMemberUserIDs.count == initialMemberCount,
               deliveryPolicy.acceptsInitialMemberCount(command.allMemberUserIDs.count, mode: capacityClass)
         else { throw V2GroupMessagingPolicyError.invalidInitialMembership }

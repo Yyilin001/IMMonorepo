@@ -5,7 +5,7 @@ import IMV2Core
 public enum V2ActorServiceIDTag: V2IdentifierTag {}
 public typealias V2ActorServiceID = V2Identifier<V2ActorServiceIDTag>
 
-/// Permissions come from the local trust map. No request can declare its role.
+/// 权限来自本地信任映射；请求不能自行声明角色。
 public enum V2ActorServicePermission: String, Codable, Hashable, Sendable {
     case roomMaintenance
     case userRoomCalls
@@ -19,10 +19,9 @@ public enum V2ActorCallPrincipal: Codable, Equatable, Sendable {
     case service
 }
 
-/// Cryptographic bytes are an encoding of the closed typed body below, not a
-/// string-dispatched business payload. Receivers bound bytes, verify the exact
-/// signature, then decode the expected body type; no JSON re-encoding is used
-/// to verify a signature received from another platform.
+/// 加密字节是下方封闭类型消息体的编码，而非按字符串分发的业务载荷。
+/// 接收方先限制字节长度并验证原始签名，再解码为预期的消息体类型；
+/// 验证其他平台发来的签名时，不会重新编码 JSON。
 public struct V2ActorSignedPacket: Codable, Equatable, Sendable {
     public let signerID: V2ActorServiceID
     public let body: Data
@@ -74,7 +73,7 @@ public enum V2ActorRPCRequest: Codable, Equatable, Sendable {
 }
 
 public enum V2ActorRPCResponse: Codable, Equatable, Sendable {
-    /// Physical references stay inside Cluster; Runtime's RoomRef sees tokens.
+    /// 物理引用只保留在 Cluster 内；Runtime 的 RoomRef 只接触令牌。
     case ready(token: V2RoomActivationToken, physicalReference: Data)
     case occupied(V2RoomActivationLease)
     case result(V2RoomResponse)

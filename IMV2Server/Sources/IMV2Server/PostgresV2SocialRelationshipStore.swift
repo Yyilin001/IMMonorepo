@@ -165,8 +165,8 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
             }
             try await appendBlockProjection(userID: actorID, sequence: actorSequence, targetID: targetID, isBlocked: isBlocked, sourceEventID: operationID, updatedAtMilliseconds: updatedAtMilliseconds, now: now, sql: sql)
             if relationshipWasRemoved {
-                // The target observes only an ordinary relation removal; it
-                // cannot distinguish it from a user-initiated unfriend.
+                // 目标方只观察到普通的关系移除，
+                // 无法将其与用户主动解除好友区分开。
                 guard let targetSequence = sequences[targetID]?.firstSequence else {
                     throw V2SocialRelationshipStoreError.corruptPersistenceState
                 }
@@ -177,9 +177,8 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
         }
         switch outcome {
         case .changed, .idempotent:
-            // A block may have also removed the relationship. Querying both
-            // kinds is safe: the forwarder mirrors only rows actually written
-            // by this source event for the named user.
+            // 拉黑可能也移除了关系。查询两种类别是安全的：
+            // 转发器只镜像此源事件为指定用户实际写入的记录。
             try await deliverProjection(users: [command.actorUserID, command.targetUserID], operationID: command.operationID.rawValue, kinds: ["user_block", "relationship"])
         case .idempotencyConflict:
             break
@@ -188,8 +187,8 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
     }
 
     private func lockOperation(actor: UUID, operation: UUID, kind: String, sql: any SQLDatabase) async throws {
-        // Pair locks protect relationship state; this lock protects the
-        // actor-scoped replay record before checking state or the clock.
+        // 关系锁保护关系状态；此锁在检查状态或时钟前，
+        // 保护操作者范围内的重放记录。
         let key = "v2-social-operation:" + kind + ":" + actor.uuidString.lowercased() + ":" + operation.uuidString.lowercased()
         try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
     }
@@ -202,10 +201,9 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
         pair: (lower: UUID, higher: UUID, lockKey: String),
         sql: any SQLDatabase
     ) async throws {
-        // Active colocated rooms keep their revision fence. Frozen source
-        // copies are immutable: configured destination sends read the control
-        // policy directly, so revocation must not depend on changing that copy.
-        // Take the room lock before the pair lock, matching owner writes.
+        // 活跃的同址房间保留其修订围栏。冻结的源副本不可变：
+        // 配置的目标发送会直接读取控制策略，因此撤销不能依赖修改该副本。
+        // 与所有者写入一致，先取得房间锁，再取得关系锁。
         guard try await sql.raw("""
             WITH writable_room AS MATERIALIZED (
                 SELECT room.room_id FROM im_v2.rooms room

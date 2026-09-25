@@ -52,8 +52,7 @@ public struct V2LocalFilesystemForwardMediaCopier: V2ForwardMediaObjectCopying {
         try Task.checkCancellation()
         if let digest = lease.copiedDigest,
            try await target.verifyForwardImportedObject(mediaID: lease.targetMediaID, byteCount: manifest.byteCount, digest: digest) {
-            // A copy acknowledged before the scanner crashed is independent
-            // of subsequent source-provider availability.
+            // 扫描器崩溃前已确认的复制结果，不依赖后续源提供方是否可用。
             return try .init(byteCount: manifest.byteCount, digest: digest)
         }
         guard let source = sources[lease.export.intent.sourceShardID] else { throw V2ForwardMediaCopyError.sourceUnavailable }
@@ -61,8 +60,8 @@ public struct V2LocalFilesystemForwardMediaCopier: V2ForwardMediaObjectCopying {
         guard let expiry = v2PostgresFutureTimestamp(now: now(), interval: 600) else {
             throw V2ForwardMediaCopyError.invalidReceipt
         }
-        // Export commit already authorized this independent copy. Do not
-        // redeem a user's download grant, which rechecks mutable membership.
+        // 导出提交已授权此次独立复制。不要使用会重新检查
+        // 可变成员关系的用户下载授权。
         let download = try await source.issueDownloadTarget(mediaID: sourceID, expiresAt: expiry)
         let object = try await source.downloadedObject(mediaID: sourceID, targetURL: download.url)
         guard object.byteCount == manifest.byteCount else { throw V2ForwardMediaCopyError.byteCountMismatch }
@@ -70,8 +69,8 @@ public struct V2LocalFilesystemForwardMediaCopier: V2ForwardMediaObjectCopying {
         let upload = try await target.beginUploadedObject(mediaID: lease.targetMediaID, targetURL: uploadTarget.url,
                                                         contentType: manifest.contentType, declaredByteCount: manifest.byteCount)
         do {
-            // Own and drain the detached file-I/O task on every path; the
-            // staging file is discarded only after its writer has stopped.
+            // 所有路径都须持有并等待独立的文件 I/O 任务结束；
+            // 写者停止后才可丢弃暂存文件。
             let transfer = Task.detached(priority: .utility) {
                 try ForwardMediaFileIO.copy(from: object.fileURL, to: upload.fileURL, byteCount: manifest.byteCount)
             }

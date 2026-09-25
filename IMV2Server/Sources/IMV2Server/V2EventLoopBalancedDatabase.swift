@@ -107,9 +107,8 @@ public final class V2EventLoopBalancedDatabase: Database, SQLDatabase, Sendable 
     public func transaction<T>(
         _ closure: @escaping @Sendable (any Database) -> EventLoopFuture<T>
     ) -> EventLoopFuture<T> {
-        // Fluent's legacy witness does not require `T: Sendable`; returning
-        // the selected handle's future preserves that API without asserting an
-        // invalid cross-EventLoop Sendable guarantee for an arbitrary `T`.
+        // Fluent 的旧版协议实现不要求 `T: Sendable`；返回选定句柄的 future
+        // 可保持该 API，同时避免对任意 `T` 错误地声明跨 EventLoop 的 Sendable 保证。
         nextEntry().database.transaction(closure)
     }
 

@@ -114,8 +114,8 @@ public struct V2ConfiguredContentReviewer: V2ContentReviewing {
         if reviewTerms.contains(where: text.contains) {
             return try .reviewRequired(.init(category: "configured_policy", severity: 2, confidence: 1))
         }
-        // Media is already blocked from reference until its malware scan is
-        // available. Semantic media/OCR adapters can return a verdict later.
+        // 恶意软件扫描结果出来前，媒体已禁止被引用。
+        // 媒体语义或 OCR 适配器可稍后给出结论。
         return .clear
     }
 
@@ -220,23 +220,23 @@ public struct V2ContentReviewReport: Equatable, Sendable {
     public let releasedCount: Int
 }
 
-/// Only the trusted-safety room capability may apply a review verdict. Job
-/// claiming, provider calls, and retry bookkeeping remain worker-owned.
+/// 只有可信安全服务的房间能力可应用审核结论。
+/// 任务认领、提供方调用和重试簿记仍由工作器负责。
 public protocol V2ContentReviewSafetyApplying: Sendable {
     func apply(_ request: V2TrustedSafetyModeration) async throws -> V2ModerationOutcome
 }
 
 extension V2TrustedSafetyModerationService: V2ContentReviewSafetyApplying {}
 
-/// Production adapter for the already typed D2 trusted-safety command. The
-/// inbound service-role gate and room turn enforce authorization and the full
-/// activation fence; a transport failure is propagated for durable job retry.
+/// 已定义类型的 D2 可信安全命令的生产适配器。
+/// 入站服务角色检查与房间轮次负责授权和完整激活围栏；
+/// 传输失败会向外传播，供持久化任务重试。
 public struct V2RoomContentReviewSafetyApplicator: V2ContentReviewSafetyApplying {
     private let invoke: @Sendable (V2RoomRequest, ContinuousClock.Instant) async throws -> V2RoomResponse
     private let callTimeout: Duration
 
-    /// The composition layer supplies a service-principal RoomRef call. This
-    /// module intentionally does not depend on IMV2ActorRuntime.
+    /// 组合层提供服务主体的 RoomRef 调用。
+    /// 此模块有意不依赖 IMV2ActorRuntime。
     public init(callTimeout: Duration = .seconds(10),
                 invoke: @escaping @Sendable (V2RoomRequest, ContinuousClock.Instant) async throws -> V2RoomResponse) {
         precondition(callTimeout > .zero)
@@ -314,15 +314,12 @@ public struct V2ContentReviewWorker: Sendable {
                     let outcome = try await moderation.apply(request)
                     switch outcome {
                     case .applied, .idempotent:
-                        // The authoritative transaction already fenced the
-                        // exact reviewed revision. Its own tombstone must not
-                        // make this job look like an unrelated superseding
-                        // withdrawal on the validation below.
+                        // 权威事务已对精确审核修订设置围栏。
+                        // 它自身的墓碑不能让下方校验误以为此任务被无关的后续撤回取代。
                         appliedRedaction = true
                     case .messageAlreadyRedacted:
-                        // This opaque outcome also represents a revision
-                        // conflict. Re-check the original revision so stale
-                        // evidence never closes a newer edit's job.
+                        // 此不透明结果也可能表示修订冲突。
+                        // 重新检查原始修订，防止过期证据关闭较新编辑的任务。
                         guard try await validate(lease) else {
                             resolved += 1
                             continue
@@ -351,8 +348,8 @@ public struct V2ContentReviewWorker: Sendable {
                     try await store.scheduleRetry(lease, disposition: disposition, now: failureTime)
                     released += 1
                 } catch {
-                    // Continue the bounded batch, but do not report a failed
-                    // persistence operation as a successfully released lease.
+                    // 继续处理有界批次，但不能将失败的持久化操作
+                    // 报告为已成功释放租约。
                     retryFailure = retryFailure ?? error
                 }
             }
@@ -604,8 +601,8 @@ public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
         }
     }
 
-    /// Keep the source room stable through task and derived-result writes.
-    /// This is a database fence, not cancellation of an in-flight reviewer.
+    /// 写入任务和派生结果期间保持源房间稳定。
+    /// 这是数据库围栏，不会取消执行中的审核者。
     private func lockReviewRoom(_ lease: V2ContentReviewLease, sql: any SQLDatabase) async throws {
         guard try await sql.raw("""
             SELECT room_id FROM im_v2.rooms

@@ -285,10 +285,9 @@ public actor V2GatewayByteStream {
     private let registry: V2DeviceConnectionRegistry
     private nonisolated let foregroundTransport = V2GatewayForegroundTransport()
     private var registeredIdentity: V2AuthenticatedConnection?
-    // A revocation worker must not advance its durable cursor until the
-    // transport confirms the local channel has closed. The handler therefore
-    // bridges the NIO close future into this actor rather than merely
-    // scheduling a best-effort close.
+    // 传输确认本地通道关闭前，撤销工作器不能推进持久化游标。
+    // 因此处理器将 NIO 关闭 future 桥接进此 Actor，
+    // 而不只是安排一次尽力而为的关闭。
     private var deviceRevocationHandler: (@Sendable () async -> Void)?
     private var outboundWriter: (@Sendable (Data) async -> Void)?
     private var requiredNotificationWriter: (@Sendable (Data) async -> Bool)?
@@ -385,22 +384,19 @@ public actor V2GatewayByteStream {
                     try await registry.accountRoomChangesReadyWritten(connectionID: connectionID, epoch: ready.connectionEpoch)
                 }
                 if let rejection = exchange.terminalAuthenticationError {
-                    // The awaited transport write must finish before the
-                    // existing failure path closes the channel. Stop here so
-                    // coalesced commands cannot run after a failed login.
+                    // 等待中的传输写入须在既有失败路径关闭通道前结束。
+                    // 此处停止，防止合并的命令在登录失败后继续执行。
                     throw rejection
                 }
             }
-            // A full decode quantum can leave a valid complete frame behind.
-            // The NIO owner schedules one continuation before it consumes a
-            // later TCP chunk, retaining per-connection wire order. A trailing
-            // partial frame costs at most one empty drain and remains buffered
-            // for the next actual transport read.
+            // 一次完整的解码配额可能留下有效的完整帧。
+            // NIO 所有者在消费后续 TCP 数据块前安排一次续处理，
+            // 保持单连接的线路顺序。末尾的不完整帧至多造成一次空排空，
+            // 并继续留在缓冲区，等待下一次实际传输读取。
             return inbound.count == frameLimits.maximumFramesPerAppend && decoder.hasBufferedBytes
         } catch {
-            // A framing failure may leave an invalid prefix buffered. Session
-            // closure fences further commands, but resetting the parser also
-            // prevents a later receive from rethrowing stale framing data.
+            // 分帧失败可能在缓冲区留下无效前缀。会话关闭会阻止后续命令；
+            // 重置解析器还可防止之后的接收再次抛出过期的分帧数据。
             decoder = .init(limits: frameLimits)
             await unregisterAuthenticatedDevice()
             await session.close()
@@ -631,8 +627,8 @@ public actor V2GatewayByteStream {
         await outboundWriter(bytes)
     }
 
-    /// Success acknowledges the transport write, not client persistence.
-    /// A false result requires the notification owner to stop draining.
+    /// 成功只确认传输写入，不代表客户端已持久化。
+    /// 返回 false 时，通知所有者必须停止排空。
     func sendAccountRoomNotification(_ notification: V2AccountRoomNotification) async -> Bool {
         guard let identity = registeredIdentity, let writer = requiredNotificationWriter,
               !transportClosed, let contract = await session.authenticatedFrameContract(),

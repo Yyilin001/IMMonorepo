@@ -1,7 +1,7 @@
 import Foundation
 import IMV2Core
 
-/// Entry points before a room exists. Generated IDs, placement, clocks and capacity policy belong to the coordinator.
+/// 房间创建前的入口。生成的 ID、放置位置、时钟和容量策略由协调者负责。
 public struct V2ActorOpenDirectRoomWire: Codable, Equatable, Sendable {
     public let actorUserID: UserID
     public let operationID: DirectRoomOperationID
@@ -139,7 +139,7 @@ public enum V2ActorRoomCreationResult: Codable, Equatable, Sendable {
     case cancelled
 }
 
-/// Internal control-to-owner bootstrap identity. Never accepted as an unauthenticated gateway command.
+/// 控制域发往所有者的内部引导身份；不得将其作为未经认证的网关命令接受。
 public struct V2ActorGroupCreationIntentWire: Codable, Equatable, Sendable {
     public let actorUserID: UserID
     public let operationID: GroupRoomOperationID
@@ -184,7 +184,7 @@ public enum V2ActorRoomCreationErrorWire: String, Codable, Error, Equatable, Sen
     case invalidRoomShard, invalidInitialMembership
 }
 
-/// Internal coordinator-to-owner bootstrap; placement and IDs are frozen before dispatch.
+/// 协调者发往所有者的内部引导操作；放置位置和 ID 在派发前固定。
 public struct V2ActorDirectBootstrapWire: Codable, Equatable, Sendable {
     public let command: V2ActorOpenDirectRoomWire
     public let roomID: RoomID
@@ -237,7 +237,7 @@ public enum V2ActorRoomBootstrapCommand: Codable, Equatable, Sendable {
     public var retryPolicy: V2RoomReplayPolicy { .durableIdempotent }
 }
 
-/// Frozen staged audience, including whether the control relation was materialized.
+/// 已固定的待处理受众，包括控制关系是否已实体化。
 public struct V2ActorGroupAudienceImportWire: Codable, Equatable, Sendable {
     public let actorUserID: UserID
     public let operationID: GroupRoomOperationID

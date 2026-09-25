@@ -125,10 +125,9 @@ public struct V2PostgresAccountDisableService: V2AccountDisabling, Sendable {
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2AccountDisableError.unavailable }
             let occurredAt = now()
-            // Credential issue/refresh uses this same lock before it returns
-            // any credential. The ordering guarantees either a newly-issued
-            // credential is revoked by this transaction or issuance observes
-            // the disabled state and returns none.
+            // 凭据签发和刷新在返回凭据前使用同一把锁。
+            // 此顺序保证：新签发的凭据要么被本事务撤销，
+            // 要么签发过程看到账号已禁用而不返回凭据。
             try await lockOperation(sql, operationID: command.operationID)
             try await lockAccountState(sql, userID: userUUID)
 
@@ -188,9 +187,8 @@ public struct V2PostgresAccountDisableService: V2AccountDisabling, Sendable {
                        candidate.account_kind, updated.revision
                 FROM candidate LEFT JOIN updated ON TRUE
                 """).first(decoding: DisabledProfileRow.self) {
-                // An eligible profile must actually be suspended. A missing
-                // revision distinguishes exhausted counters from no profile
-                // transition being necessary.
+                // 符合条件的资料必须实际被停用。修订号缺失时须区分
+                // 计数器耗尽与无需变更资料状态的情形。
                 guard let revision = profile.revision else { throw V2AccountDisableError.unavailable }
                 try await sql.raw("""
                     INSERT INTO im_v2.public_profile_update_outbox
@@ -203,11 +201,11 @@ public struct V2PostgresAccountDisableService: V2AccountDisabling, Sendable {
                             \(bind: revision), \(bind: occurredAt), \(bind: occurredAt))
                     """).run()
             }
-            // The durable gateway worker consumes this per-device stream on
-            // every gateway replica and closes already-authenticated sockets.
+            // 持久化网关工作器在每个网关副本上消费这条逐设备事件流，
+            // 并关闭已认证的套接字。
             try await sql.raw("INSERT INTO im_v2.device_revocation_events (user_id, device_id, created_at) SELECT user_id, device_id, \(bind: occurredAt) FROM im_v2.auth_devices WHERE user_id = \(bind: userUUID) ON CONFLICT (device_id) DO NOTHING").run()
-            // Keep native time binds above, while returning exactly the
-            // committed receipt time that a later replay will decode.
+            // 保留上方的原生时间绑定，同时返回后续重放
+            // 会解码出的确切已提交回执时间。
             return .disabled(disabledAt: persisted.disabledAt)
         }
     }

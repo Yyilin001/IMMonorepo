@@ -1,8 +1,8 @@
 import Foundation
 import IMV2Core
 
-/// Gateway event-log reads enter the room through RoomRef. The optional cache
-/// receives post-commit hints only; it cannot authorize or satisfy these reads.
+/// 网关通过 RoomRef 进入房间读取事件日志。可选缓存只接收提交后提示；
+/// 它既不能授权，也不能直接满足这些读取。
 public struct V2RoomRefGroupEventLogClient: Sendable, V2GatewayGroupEventLogHandling {
     private let service: V2GroupEventLogService
 

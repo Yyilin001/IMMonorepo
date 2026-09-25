@@ -133,13 +133,11 @@ public final class V2DirectRoomLogEventCache: Sendable {
                       actorLeftRevision == nil || actorLeftRevision! > event.membershipRevision
                 else { return nil }
             }
-            // The durable high-watermark can advance after this immutable
-            // cache candidate was captured. A shorter contiguous page is
-            // still complete for the returned cursor range; advertise
-            // `hasMore` and let the client continue instead of rebuilding the
-            // same events through the substantially heavier durable query.
-            // An empty candidate while the room has advanced is still
-            // rejected above because it cannot move the caller's cursor.
+            // 捕获不可变缓存候选后，持久高水位可能继续推进。
+            // 较短的连续页面对返回的游标范围仍是完整的；
+            // 设置 `hasMore` 让客户端继续拉取，避免通过开销大得多的
+            // 持久查询重建同一批事件。若房间已推进而候选为空，
+            // 上方仍会拒绝，因为它无法推进调用方的游标。
             return try? .init(
                 roomID: roomID,
                 events: events.map(\.entry),
@@ -170,9 +168,8 @@ public final class V2DirectRoomLogEventCache: Sendable {
     private let lanes: [Lane]
 
     public init(configuration: Configuration) {
-        // Every shard must be able to retain one room at the configured
-        // per-room depth. Otherwise splitting a small test/development budget
-        // could evict a room before it ever forms a contiguous page.
+        // 每个分片都必须能以配置的单房间深度保留至少一个房间。
+        // 否则拆分较小的测试或开发预算时，房间还未形成连续页面就可能被淘汰。
         let perRoomCapacity = min(
             configuration.maximumEvents,
             configuration.maximumEventsPerRoom
@@ -327,12 +324,10 @@ public final class V2DirectRoomLogEventCache: Sendable {
     ) async -> Candidate? {
         precondition(pageSize > 0)
         let lane = lane(for: roomID)
-        // A post-commit hint can reach a foreground client before the owned
-        // cache runner has consumed its mailbox signal. Materialize the
-        // already-committed bounded batch before declaring a coverage miss;
-        // otherwise the pull unnecessarily executes the much heavier durable
-        // event reconstruction query. Authorization is deliberately still
-        // performed by the caller after this identity-free candidate exists.
+        // 提交后提示可能先到达前台客户端，此时缓存写者尚未消费邮箱信号。
+        // 在判定覆盖缺失前，先物化已提交的有界批次；否则拉取操作会
+        // 无谓地执行开销更大的持久事件重建查询。
+        // 无身份信息的候选形成后，授权仍由调用方执行。
         await Self.materializePending(lane)
         return await lane.cache.candidate(
             roomID: roomID,
@@ -730,15 +725,14 @@ private actor V2DirectRoomLogEventCacheShard {
         )
         if room.firstEventIndex < room.events.count,
            prepared.entry.roomSequence < room.events[room.firstEventIndex].entry.roomSequence {
-            // A retry older than the retained sliding window cannot improve
-            // any future cursor page. The durable log still covers it.
+            // 早于保留滑动窗口的重试无法改善未来任何游标页面；
+            // 持久化日志仍覆盖该事件。
             touch(roomKey)
             return
         }
-        // Committed room sequences are monotonic in the common path. Append
-        // that case without scanning or sorting the retained room window.
-        // Retries and rare cross-task reordering use a logarithmic lookup and
-        // preserve the same duplicate-consistency fence as before.
+        // 常规路径中已提交的房间序号单调递增，可直接追加，
+        // 无须扫描或排序保留的房间窗口。重试及罕见的跨任务乱序
+        // 使用对数时间查询，并保留原有的重复一致性围栏。
         var lowerBound = room.firstEventIndex
         var upperBound = room.events.count
         while lowerBound < upperBound {

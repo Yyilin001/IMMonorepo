@@ -365,7 +365,7 @@ public enum V2RoomWriteStoreError: Error, Equatable, Sendable {
     case replyTargetNotFound
 }
 
-/// Only the admission metrics surface. Consumers cannot accept a message.
+/// 只暴露准入指标；消费方不能据此接受消息。
 public protocol V2SendMessageBatchMetricsReading: Sendable {
     /// 读取准入队列与处理状态的观测快照，不构成持久化提交证明。
     func snapshot() async -> V2SendMessageAdmissionBatcher.Snapshot

@@ -128,9 +128,8 @@ public struct V2PostgresAccountEdgeClientRateLimiter: V2AccountEdgeClientRateLim
         }
         let maximumBeforeCharge = policy.maximumRequests - cost
         let saturatedCount = policy.maximumRequests + 1
-        // The unique-key conflict row lock is the serialization boundary. A
-        // saturated sentinel records denial without consuming an advisory
-        // lock, SELECT FOR UPDATE, and a separate UPDATE round trip.
+        // 唯一键冲突产生的行锁是串行化边界。达到上限时用哨兵值记录拒绝，
+        // 无需咨询锁、SELECT FOR UPDATE 或单独的 UPDATE 往返。
         guard let row = try await sql.raw("""
             INSERT INTO im_v2.account_edge_client_rate_limits AS rate
                 (client_key, window_started_at, request_count, updated_at)

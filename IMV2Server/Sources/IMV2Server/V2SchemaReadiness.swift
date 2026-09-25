@@ -28,10 +28,9 @@ public enum V2SchemaReadiness {
         guard schema.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil else {
             throw V2SchemaReadinessError.unavailableTable(schema)
         }
-        // Fluent's pinned connection advertises inTransaction even when the
-        // caller only requested withConnection, so transaction() would skip
-        // BEGIN and SET LOCAL would have no effect. Restore that pinned
-        // session explicitly; an ordinary pool handle uses a real transaction.
+        // 即使调用方只请求 withConnection，Fluent 固定的连接也会报告
+        // inTransaction，因此 transaction() 会跳过 BEGIN，SET LOCAL 也不会生效。
+        // 须显式恢复这个固定会话；普通连接池句柄则使用真正的事务。
         if database.inTransaction {
             guard let sql = database as? any SQLDatabase else {
                 throw V2SchemaReadinessError.unsupportedDatabase
@@ -50,9 +49,9 @@ public enum V2SchemaReadiness {
             }
             return
         }
-        // pg_get_constraintdef/pg_get_indexdef omit schema qualifiers when the
-        // schema is on search_path. SET LOCAL confines catalog rendering to
-        // readiness and PostgreSQL restores the path on commit or rollback.
+        // schema 位于 search_path 时，pg_get_constraintdef 和 pg_get_indexdef
+        // 会省略 schema 限定符。SET LOCAL 只在就绪检查期间改变目录呈现；
+        // PostgreSQL 会在提交或回滚时恢复路径。
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2SchemaReadinessError.unsupportedDatabase
@@ -1060,9 +1059,9 @@ public enum V2SchemaReadiness {
                 "\(schema).message_projection_states[room-event-storage]"
             )
         }
-        // Plain direct-room appends may use `messages` as the durable event
-        // source. Require the current sequence invariant so an incomplete
-        // schema fails startup instead of silently omitting room events.
+        // 普通私聊房间追加可能将 `messages` 作为持久化事件源。
+        // 必须验证当前序号不变量，使不完整 schema 在启动时失败，
+        // 而不是悄然遗漏房间事件。
         guard let directMessageEventSourceContract = try await sql.raw("""
             SELECT
                 COUNT(*) FILTER (
@@ -1120,11 +1119,10 @@ public enum V2SchemaReadiness {
                 "\(schema).messages[direct-event-source]"
             )
         }
-        // Compact hybrid-group accepts are materialized by the same message
-        // row contract, but they additionally require a transactional wake so
-        // connected members learn the new room high-watermark. A missing or
-        // disabled statement trigger would make durable messages discoverable
-        // only by polling, so fail startup before enabling that writer.
+        // 紧凑混合群组接受也遵循同一消息记录契约，
+        // 但还需要事务性唤醒，让在线成员获知新的房间高水位。
+        // 若语句触发器缺失或被禁用，持久化消息只能靠轮询发现；
+        // 因此启用该写入器前应让启动失败。
         guard let hybridGroupMessageWakeContract = try await sql.raw("""
             SELECT EXISTS (
                 SELECT 1

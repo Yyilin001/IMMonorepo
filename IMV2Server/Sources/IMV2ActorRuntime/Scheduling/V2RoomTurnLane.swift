@@ -1,19 +1,18 @@
 import Foundation
 import IMV2ActorContracts
 
-/// Only contiguous send requests may share a turn. Every other capability is a
-/// barrier, including reads: an await in a handler never admits a second turn.
+/// 只有连续的发送请求可共享一个轮次。其他所有能力（包括读取）都是屏障：
+/// 处理器中的 await 不会因此放入第二个轮次。
 public enum V2RoomTurnSchedulingClass: Sendable {
     case send
     case barrier
 }
 
-/// Local, runtime-created execution authority. It is never decoded from RPC.
+/// 由本地运行时创建的执行权限，绝不从 RPC 解码得来。
 public struct V2RoomTurnContext: Sendable {
     public let token: V2RoomActivationToken
     public let turnID: UUID
-    /// A shared database batcher consumes the remaining part of this budget;
-    /// it must not begin another independent batching delay.
+    /// 共享数据库批处理器使用此预算的剩余部分，不能再启动独立的批处理等待。
     public let batchDeadline: ContinuousClock.Instant
 }
 
@@ -38,9 +37,8 @@ public struct V2RoomTurnLaneSnapshot: Sendable {
     public var isIdle: Bool { queuedCount == 0 && executingCount == 0 && unresolvedCount == 0 && !hasReservation }
 }
 
-/// This scheduler is generic over a closed, typed request family; it does not
-/// dispatch method names or accept an arbitrary payload bag. Decode always uses
-/// the exact immutable bytes charged to the host's admission budget.
+/// 此调度器面向封闭且有类型的请求集合，不按方法名分发，
+/// 也不接受任意载荷集合。解码始终使用已计入宿主准入预算的确切不可变字节。
 public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
     public typealias Execute = @Sendable (V2RoomTurn<Request>) async -> V2RoomTransactionCompletion<[Response]>
 
@@ -87,7 +85,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             guard !Task.isCancelled else { throw V2RoomCallFailure.notAccepted(.cancelled) }
             guard clock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
             let permit = try await budget.acquire(roomID: token.roomID, encodedRequest: encodedRequest)
-            // Admission awaited another actor. Recheck every local condition.
+            // 准入曾等待另一个 Actor；须重新检查全部本地条件。
             guard phase == .ready, !Task.isCancelled, clock.now < deadline else {
                 let failure = phase != .ready ? rejection() : V2RoomCallFailure.notAccepted(
                     Task.isCancelled ? .cancelled : .deadlineExceeded
@@ -127,15 +125,14 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         }
     }
 
-    /// Atomically closes admission. Already accepted requests keep their place
-    /// and lease until completion; the hosting lifecycle owns the drain deadline.
+    /// 原子地关闭准入。已接受的请求保留位置和租约直至完成；
+    /// 排空截止时间由宿主生命周期负责。
     public func beginDrain() {
         if phase == .ready { phase = .draining }
     }
 
-    /// Enqueues a barrier from a coordinator running outside ordinary turns.
-    /// The deadline covers both waiting and holding; a granted expiry never
-    /// silently unlocks the same activation for subsequent commands.
+    /// 将普通轮次之外的协调器屏障入队。截止时间覆盖等待和持有阶段；
+    /// 已获准的屏障到期时，不会悄然解锁同一激活供后续命令使用。
     public func reserve(requestID: UUID, deadline: ContinuousClock.Instant) async throws -> V2RoomReservation {
         let grant = V2RoomReservation(token: token, requestID: requestID, reservationID: UUID())
         return try await withTaskCancellationHandler {
@@ -173,8 +170,8 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         }
     }
 
-    /// Required acknowledgement before dispatch. Late or forged grants fail;
-    /// a caller cannot start SQL after a reservation expired or was retired.
+    /// 分发前必须确认。迟到或伪造的授权会失败；
+    /// 预留过期或退役后，调用方不能启动 SQL。
     public func markReservationDispatched(_ grant: V2RoomReservation) throws {
         guard phase == .ready || phase == .draining,
               reservation?.entry.reservationGrant == grant,
@@ -184,8 +181,8 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         reservation?.dispatched = true
     }
 
-    /// A coordinator can safely abandon a grant only before dispatch. Once
-    /// acknowledged, it must report a durable completion or retire both rooms.
+    /// 协调器只能在分发前安全地放弃授权。一旦确认，
+    /// 必须报告持久化完成结果，或将两个房间都退役。
     @discardableResult
     public func abortReservation(_ grant: V2RoomReservation) async -> Bool {
         guard let held = reservation, held.entry.reservationGrant == grant,
@@ -199,8 +196,8 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         return true
     }
 
-    /// Hosting first updates/invalidates executor state while this barrier is
-    /// still held, then completes it. External callers cannot skip that step.
+    /// 宿主在仍持有屏障时先更新或失效化执行器状态，然后完成屏障。
+    /// 外部调用方不能跳过此步骤。
     @discardableResult
     func finishReservation(_ grant: V2RoomReservation, completion: V2RoomReservationCompletion) async -> Bool {
         guard let held = reservation, held.entry.reservationGrant == grant,
@@ -229,8 +226,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         )
     }
 
-    /// Lease loss closes admission independently of the business consumer. An
-    /// already dispatched transaction retains its completion and charged permit.
+    /// 租约丢失会独立于业务消费方关闭准入。已分发的事务仍保有完成结果和已扣的许可。
     public func loseLease() async {
         guard phase != .stopped, phase != .uncertain else { return }
         phase = .uncertain
@@ -239,8 +235,8 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         await onUncertain(token)
     }
 
-    /// Only Hosting may call this after the old token is fenced out in the DB
-    /// and its executor has stopped. Never frees an executing transaction.
+    /// 仅宿主可在旧令牌被数据库围栏排除且其执行器停止后调用。
+    /// 绝不释放仍在执行的事务。
     func completeRetirement() async -> Bool {
         guard executing.isEmpty else { return false }
         phase = .stopped
@@ -266,13 +262,12 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
     private func consume() async {
         while phase == .ready || phase == .draining {
             guard !queue.isEmpty else { break }
-            // Grant already queued contiguous sends immediately. The shared
-            // physical-owner batcher owns the only collection delay, bounded
-            // by the first request's original admission time. Sleeping here
-            // first would consume that window before other rooms can join it.
+            // 立即放行已排队的连续发送请求。共享的物理所有者批处理器
+            // 负责唯一的收集等待，且受首条请求原始准入时间限制。
+            // 若此处先等待，其他房间尚未加入时就会耗尽该窗口。
             guard phase == .ready || phase == .draining else { break }
-            // A timer callback may not have run yet. Do not dispatch an expired
-            // request simply because the executor won the scheduling race.
+            // 计时器回调可能尚未运行。不能只因执行器赢得调度竞争，
+            // 就分发已过期的请求。
             while let entry = queue.first, entry.deadline <= clock.now {
                 await withdraw(entry.id, reason: .deadlineExceeded)
             }
@@ -336,7 +331,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             }
             if reason == .leaseLost || reason == .staleActivation { uncertain = true }
         case .outcomeUnknown, .committed:
-            // A malformed executor result cannot be aligned to callers safely.
+            // 格式错误的执行器结果无法安全地与调用方逐一对应。
             uncertain = true
             for entry in entries {
                 entry.timer.cancel()
@@ -361,15 +356,15 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             entry.reservationContinuation?.resume(throwing: V2RoomCallFailure.notAccepted(reason))
             await budget.release(entry.permit)
         } else if let index = executing.firstIndex(where: { $0.id == id }) {
-            // Detach the caller, not the SQL. Keep the permit and the exclusive
-            // turn until the executor reports the actual transaction result.
+            // 只让调用方退出，不中断 SQL。保留许可和独占轮次，
+            // 直到执行器报告实际事务结果。
             let continuation = executing[index].continuation
             executing[index].continuation = nil
             executing[index].timer.cancel()
             continuation?.resume(throwing: V2RoomCallFailure.outcomeUnknown)
         } else if reservation?.entry.id == id {
-            // After a grant was returned, coordinator loss is conservative:
-            // retire this epoch even if its dispatch acknowledgement was lost.
+            // 授权返回后若协调器失联，须采取保守处理：
+            // 即使分发确认丢失，也要退役此纪元。
             phase = .uncertain
             quarantineReservation()
             await rejectQueued(reason: .leaseLost)

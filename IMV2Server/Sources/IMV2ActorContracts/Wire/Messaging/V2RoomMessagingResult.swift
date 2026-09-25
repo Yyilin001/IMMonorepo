@@ -190,7 +190,7 @@ public enum V2ActorMessageReactionResultWire: Codable, Equatable, Sendable {
     case unavailable(V2ActorAdmissionUnavailableWire)
 }
 
-/// Result discriminator mirrors the command family without erasing business fields.
+/// 结果判别项与命令类型集合对应，同时保留业务字段。
 public enum V2RoomMessagingResult: Codable, Equatable, Sendable {
     case failure(V2ActorMessagingErrorWire)
     case send(V2ActorSendMessageResultWire)

@@ -79,10 +79,9 @@ struct PostgresV2SnapshotResetStager {
         guard retainedFloor <= checkpointBase else {
             throw V2SyncStoreError.snapshotCheckpointUnavailable
         }
-        // Serialize all automatic artifacts for one user/profile, not merely
-        // one exact checkpoint. A still-valid older base at/above the retained
-        // floor can serve a newly reconnecting device; normal incremental
-        // sync catches it up after snapshot ACK.
+        // 串行化同一用户和配置的所有自动产物，不只针对精确检查点。
+        // 仍有效且不低于保留下界的旧基准可服务新重连的设备；
+        // 快照 ACK 后，常规增量同步会让设备追上最新状态。
         let artifactLock = "v2-snapshot-artifact:\(userID.uuidString):\(capabilityProfile)"
         try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: artifactLock), 0))").run()
         let artifact: SnapshotResetArtifactRow
@@ -101,12 +100,10 @@ struct PostgresV2SnapshotResetStager {
             LIMIT 1
             FOR UPDATE
             """).first(decoding: SnapshotResetArtifactRow.self) {
-            // A late-arriving device receives a full capability lifetime.
-            // Keep the shared immutable payload alive for at least as long as
-            // its newest assignment instead of inheriting the first device's
-            // nearly-expired deadline.
-            // Compare native timestamps so Date decoding cannot hide an
-            // extension or round a longer existing deadline backwards.
+            // 迟到的设备应获得完整的能力有效期。共享不可变载荷至少要存活到
+            // 最新分配到期，而不能沿用首台设备即将过期的截止时间。
+            // 比较原生时间戳，避免 Date 解码隐藏延长操作，
+            // 或将既有的较长截止时间向前舍入。
             try await sql.raw("""
                 UPDATE \(unsafeRaw: table(schema, "sync_snapshot_artifacts"))
                 SET expires_at = \(bind: assignmentExpiresAt)

@@ -3,8 +3,8 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// Executes only the room-owned half of invitation workflows under one granted turn.
-/// Secret issuance, digest lookup and global quota remain control-domain work.
+/// 在已授权的一个执行轮次内，仅处理邀请工作流中归属房间的部分。
+/// 密钥签发、摘要查找和全局额度仍由控制域负责。
 public struct V2RoomInvitationDomainExecutor: Sendable {
     private let database: any Database
     private let token: V2RoomActivationToken
@@ -38,7 +38,7 @@ public struct V2RoomInvitationDomainExecutor: Sendable {
                               inviteID: command.inviteIDForOwnerBinding)
         switch command {
         case .create:
-            // User creation first needs a durable control intent and a fixed digest.
+            // 创建用户前，必须先有持久的控制意图和固定的摘要。
             throw V2GroupInvitationServiceError.invalidRequest
         case .commitCreation(let request):
             let created = try await owner.create(request.toDomain())

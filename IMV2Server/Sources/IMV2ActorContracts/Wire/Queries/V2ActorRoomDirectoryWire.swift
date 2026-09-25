@@ -8,7 +8,7 @@ public enum V2ActorRoomDirectoryWireError: Error, Equatable, Sendable {
     case invalidIdentity
 }
 
-/// Explicit mirror avoids treating synthesized V2PublicHandle decoding as validation.
+/// 显式镜像，避免将自动生成的 V2PublicHandle 解码误当作校验。
 public struct V2ActorPublicIdentityWire: Codable, Equatable, Sendable {
     public let userID: UserID
     public let handle: String
@@ -153,7 +153,7 @@ public struct V2ActorUserRoomDirectoryEntryWire: Codable, Equatable, Sendable {
     }
 }
 
-/// User/control coordinator query; it is deliberately outside V2RoomDirectoryQuery.
+/// 用户／控制域协调者查询；有意不归入 V2RoomDirectoryQuery。
 public struct V2ActorUserRoomDirectoryQueryWire: Codable, Equatable, Sendable {
     public let actorUserID: UserID
     public let cursor: String?
@@ -186,7 +186,7 @@ public struct V2ActorUserRoomDirectoryPageWire: Codable, Equatable, Sendable {
     }
 }
 
-/// Physical-store scan progress is distinct from visible entries.
+/// 物理存储的扫描进度与可见条目分别记录。
 public struct V2ActorUserRoomDirectorySliceWire: Codable, Equatable, Sendable {
     public let entries: [V2ActorUserRoomDirectoryEntryWire]
     public let scannedThrough: RoomID?
@@ -196,7 +196,7 @@ public struct V2ActorUserRoomDirectorySliceWire: Codable, Equatable, Sendable {
     }
 }
 
-/// User/control enumeration errors stay with the coordinator operation.
+/// 用户／控制域枚举错误归属于协调操作。
 public enum V2ActorUserRoomDirectoryResultWire: Codable, Equatable, Sendable {
     case page(V2ActorUserRoomDirectoryPageWire)
     case failure(V2ActorRoomRecoveryReadErrorWire)

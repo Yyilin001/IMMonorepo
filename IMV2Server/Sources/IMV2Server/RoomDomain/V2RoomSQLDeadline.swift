@@ -1,9 +1,8 @@
 import FluentKit
 import Foundation
 
-/// Carries a granted call's absolute SQL budget across domain layers. This is
-/// scheduling context only: it never supplies or substitutes an activation
-/// token, owner fence, or authorization decision.
+/// 在领域层间传递获准调用的绝对 SQL 时间预算。
+/// 它只属于调度上下文，绝不提供或替代激活令牌、所有者围栏或授权决定。
 enum V2RoomSQLDeadline {
     @TaskLocal static var current: ContinuousClock.Instant?
     static let maximumTransactionDuration: Duration = .seconds(10)
@@ -21,8 +20,8 @@ enum V2RoomSQLDeadline {
         return try await $current.withValue(selected, operation: operation)
     }
 
-    /// A batcher selects work from several callers. It must replace the
-    /// inherited task context with the earliest deadline in that selection.
+    /// 批处理器从多个调用方选取工作，须将继承的任务上下文
+    /// 替换为本次选取中最早的截止时间。
     nonisolated(nonsending) static func withSelectedDeadline<Value: Sendable>(
         _ deadline: ContinuousClock.Instant?,
         _ operation: () async throws -> Value
@@ -31,9 +30,8 @@ enum V2RoomSQLDeadline {
     }
 }
 
-/// Only room-scoped call sites opt in. A direct token-scoped store call gets a
-/// fixed ten-second budget; an admitted call uses the earlier host deadline.
-/// Legacy control calls retain Fluent's transaction implementation.
+/// 仅房间范围内的调用点启用此机制。直接按令牌调用存储时使用固定的十秒预算；
+/// 已获准调用使用更早的宿主截止时间。旧控制侧调用保留 Fluent 事务实现。
 func v2WithRoomScopedTransaction<Value: Sendable>(
     database: any Database,
     timeouts: V2RoomActivationSQLTimeouts = .default,

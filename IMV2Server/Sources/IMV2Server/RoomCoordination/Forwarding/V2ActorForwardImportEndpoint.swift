@@ -1,8 +1,8 @@
 import Foundation
 import IMV2ActorContracts
 
-/// Durable target delivery calls the same RoomRef import capability as the
-/// foreground coordinator. Media byte copying retains its own work lease.
+/// 持久化目标投递与前台协调器调用同一个 RoomRef 导入能力。
+/// 媒体字节复制保有独立工作租约。
 public struct V2ActorForwardImportEndpoint: V2ForwardExportDelivering {
     private let inbox: PostgresV2ForwardInboxStore
     private let media: V2ForwardMediaImportWorker?
@@ -22,11 +22,10 @@ public struct V2ActorForwardImportEndpoint: V2ForwardExportDelivering {
         var outcome = try await importOnce(export)
         if outcome == .pending(.media) {
             guard let media else { throw V2ForwardDeliveryError.targetUnavailable }
-            // Media copy is an independent leased workflow: its inbox/media
-            // rows carry exact export, owner epoch, claim, object and upload
-            // identities. Copy readiness grants no message acceptance. Always
-            // return through a fresh RoomRef import turn after the copy, so
-            // target membership and activation are checked again.
+            // 媒体复制是独立的租约工作流：其收件箱与媒体记录携带精确的
+            // 导出、所有者纪元、认领、对象和上传身份。
+            // 复制就绪不授予消息接受权限。复制后必须通过新的 RoomRef 导入轮次返回，
+            // 以重新检查目标成员关系和激活。
             switch try await media.runOnce(exportID: export.intent.exportID) {
             case .ready, .rejected: outcome = try await importOnce(export)
             case .paused: throw V2ForwardDeliveryError.mediaPaused

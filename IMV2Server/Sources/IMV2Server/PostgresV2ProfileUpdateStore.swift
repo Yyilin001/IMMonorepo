@@ -55,9 +55,8 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2ProfileUpdateError.corruptPersistenceState
             }
-            // Serialize both the ledger read and the mutation on this row.
-            // A concurrent retry must see the operation committed by the
-            // writer it waited for, before checking revisions or the clock.
+            // 在此记录上串行化台账读取与修改。并发重试在检查修订号或时钟前，
+            // 必须看到它等待的写入方已提交的操作。
             let current = try await activeProfile(userID: actorID, sql: sql)
             if let operation = try await operation(actorID: actorID, operationID: operationID, sql: sql) {
                 guard operation.matches(command: command) else {
@@ -66,10 +65,9 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
                 guard operation.resultRevision > 0 else {
                     throw V2ProfileUpdateError.corruptPersistenceState
                 }
-                // A later operation may already have advanced this profile.
-                // Returning that current authoritative view is safer than
-                // replaying the old state, while the operation ledger still
-                // guarantees this retry creates no second source event.
+                // 后续操作可能已经推进此资料。返回当前权威视图
+                // 比重放旧状态更安全；操作台账仍保证此次重试
+                // 不会创建第二个源事件。
                 return .idempotent(current)
             }
 
@@ -206,8 +204,8 @@ private struct ProfileOperationRow: Decodable {
     }
 
     func matches(command: V2ProfileUpdateCommand) -> Bool {
-        // Older writers validated the normalized name but recorded raw input.
-        // Keep those operations replayable under the same name semantics.
+        // 旧写入方校验规范化名称，但记录原始输入。
+        // 保持这些操作在相同名称语义下可重放。
         let normalizedName = requestedDisplayName.precomposedStringWithCanonicalMapping
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return expectedRevision > 0 && UInt64(expectedRevision) == command.expectedRevision.rawValue &&

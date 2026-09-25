@@ -170,8 +170,8 @@ public actor V2ShardAdmissionCommandCreditPool {
   func acquire(_ requests: [BatchRequest]) async throws -> [Acquisition] {
     precondition(requests.count <= 128)
     guard !requests.isEmpty else { return [] }
-    // Reject every invalid clock before a prefix can reserve credits or a
-    // cleanup pass can discard a different request's live reservation.
+    // 在此前的请求预留额度，或清理过程丢弃其他请求的有效预留前，
+    // 先拒绝所有无效时钟值。
     guard requests.allSatisfy({ request in
       v2PostgresTimestampCanEncode(request.now)
         && request.shardState.lease.map { v2PostgresTimestampCanEncode($0.validUntil) } == true
@@ -219,9 +219,8 @@ public actor V2ShardAdmissionCommandCreditPool {
       }
       return acquisitions
     } catch {
-      // A throwing suffix must not strand process-local in-flight tokens from
-      // an already granted prefix. Durable reservations remain conservatively
-      // charged, exactly like the scalar rollback path.
+      // 后续请求抛错时，不能遗留此前已获准请求的进程内执行中令牌。
+      // 持久化预留仍保守地保持扣费，与逐条回滚路径一致。
       for (acquisition, request) in zip(acquisitions, requests) {
         guard case .granted(let token, _) = acquisition else { continue }
         release(token, now: request.now)
@@ -254,8 +253,8 @@ public actor V2ShardAdmissionCommandCreditPool {
     for token in tokens { commit(token) }
   }
 
-  /// An unknown COMMIT can have spent this shard credit. Keep the durable
-  /// debit, without refunding it or counting an unconfirmed commit.
+  /// 结果不明的 COMMIT 可能已消耗此分片额度。
+  /// 保留持久化扣费，不退还，也不计为已确认提交。
   func discard(_ token: Token) {
     guard tokenKeys.removeValue(forKey: token.id) != nil,
           var entry = credits[token.key] else { return }
@@ -277,8 +276,8 @@ public actor V2ShardAdmissionCommandCreditPool {
     else { return }
     entry.inFlight.remove(token.id)
     if !v2PostgresTimestampCanEncode(now) {
-      // The transaction already rolled back. Without a usable clock, retire
-      // only its token and leave unrelated credits for a later valid check.
+      // 事务已回滚。没有可用时钟时只退役其令牌，
+      // 无关额度留待之后有效的检查处理。
       expiredCreditsDiscarded += 1
       credits[token.key] = entry
     } else if entry.validUntil > now {
@@ -401,9 +400,8 @@ public actor V2ShardAdmissionCommandCreditPool {
         if case .rateLimited = rejection { capacityRejections += 1 }
         return rejection
       }
-      // Another caller can resume first while this actor awaits the shared
-      // reservation task. Never reinstall the same grant or reset tokens that
-      // have already been issued from it.
+      // 此 Actor 等待共享预留任务时，其他调用方可能先恢复。
+      // 绝不能重新安装同一授权，或重置已从中签发的令牌。
       if credits[key]?.reservationID != grant.id {
         credits[key] = .init(
           reservationID: grant.id,

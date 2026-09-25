@@ -121,9 +121,9 @@ public actor V2SyncWakeCoalescer: V2LiveSyncNotifier {
             return
         }
         guard pending.count + inFlight.count < maximumTrackedUsers else {
-            // Hints are explicitly lossy; clients recover through cursor pull.
-            // Count every bounded-capacity drop, including while an earlier
-            // flush is still in flight, so operators can see the real pressure.
+            // 提示本来就允许丢失；客户端通过游标拉取恢复。
+            // 统计每次容量受限导致的丢弃，包括上一轮刷新仍在进行时，
+            // 以便运维人员看到真实压力。
             droppedNotifications = saturatingIncrement(droppedNotifications)
             return
         }

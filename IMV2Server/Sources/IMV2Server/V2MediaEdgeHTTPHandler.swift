@@ -70,8 +70,7 @@ public struct V2MediaEdgeHTTPHandler: Sendable {
                 expectedByteCount: target.expectedByteCount
             )
         } catch {
-            // Provider values must never reach an HTTP response if they fail
-            // the stable contract validation.
+            // 服务商返回值若未通过稳定契约校验，绝不能进入 HTTP 响应。
             throw V2MediaEdgeHTTPHandlerError.invalidProviderTarget
         }
     }

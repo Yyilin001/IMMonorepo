@@ -389,9 +389,9 @@ private struct MediaPresentationWire: Codable {
     }
 }
 
-// The immutable projection format uses floor rounding, including before 1970.
-// SQL event writers share this conversion so their payload cannot disagree
-// with the typed projection and falsely fail the immutable-content fence.
+// 不可变投影格式使用向下取整，1970 年之前的时间也一样。
+// SQL 事件写入器共用此转换，避免载荷与类型化投影不一致，
+// 从而错误触发不可变内容栅栏。
 /// 计算已接受消息的投影毫秒时间戳。
 ///
 /// 优先使用消息自带的投影时间戳，缺失时回落到创建时刻。

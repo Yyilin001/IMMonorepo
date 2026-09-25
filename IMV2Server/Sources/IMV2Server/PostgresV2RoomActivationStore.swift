@@ -4,9 +4,9 @@ import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
-/// Durable actor placement in the room's actual owner database. A resolver
-/// must supply that owner database; this store never routes through a control
-/// database or treats a host process as the data owner.
+/// Actor 的持久化位置位于房间实际所有者数据库中。
+/// 解析器必须提供该数据库；此存储绝不经控制数据库路由，
+/// 也不把宿主进程当作数据所有者。
 public struct PostgresV2RoomActivationStore: V2RoomActivationLeaseStore {
     private let database: any Database
     private let schema: String
@@ -43,9 +43,8 @@ public struct PostgresV2RoomActivationStore: V2RoomActivationLeaseStore {
             let sql = try activationSQL(transaction)
             try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
             try await v2LockRoomActivationOwner(roomID: roomUUID, owner: owner, sql: sql, schema: schema)
-            // The rooms lock serializes first insert as well as all successors.
-            // A second row lock covers external readers and is acquired before
-            // sampling database time.
+            // 房间锁串行化首次插入及所有后续操作。
+            // 第二把行锁覆盖外部读取方，并在采样数据库时间前取得。
             let row = try await activationRow(roomID: roomUUID, sql: sql)
             let observed = try await v2RoomActivationDatabaseClock(sql: sql)
             if let row, let existing = try row.lease(roomID: roomID, observedAt: observed),

@@ -4,8 +4,8 @@ import NIOCore
 import PostgresNIO
 import SQLKit
 
-// Borrows the Store's transaction connection; ordering, locks, and authorization
-// remain on that connection. The Store owns the transaction and final reservation.
+// 借用 Store 的事务连接；排序、加锁与授权都在该连接上完成。
+// 事务与最终预留由 Store 负责。
 enum PlainHybridGroupPreflight {
     /// 普通混合群组发送的集合式权威预检。
     ///
@@ -30,10 +30,9 @@ enum PlainHybridGroupPreflight {
                 nowPostgresMicroseconds: try roomWritePostgresMicroseconds(item.request.now)
             )
         }
-        // Production uses a named statement with typed column arrays. The
-        // authorization graph and lock order below are unchanged; this only
-        // removes per-batch JSON encoding/parsing and lets each physical
-        // foreground connection reuse PostgreSQL's prepared plan.
+        // 生产环境使用有类型列数组的命名语句。
+        // 下方的授权关系与加锁顺序不变；此处只省去逐批 JSON 编解码，
+        // 并让每条前台物理连接复用 PostgreSQL 预处理计划。
         if let postgres = sql as? any PostgresDatabase {
             let statement = try PlainHybridGroupBatchPreflightStatement(inputs: input)
             let rows = try await postgres.withConnection { connection in

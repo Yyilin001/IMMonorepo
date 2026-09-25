@@ -3,14 +3,14 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// Constructed by the authenticated service lane, not by a decoded room command.
+/// 由已认证的服务通道构造，而非由解码后的房间命令构造。
 public struct V2ActorTrustedSafetyAuthority: Sendable {
     let safetyActorUserID: UserID
     init(safetyActorUserID: UserID) { self.safetyActorUserID = safetyActorUserID }
 }
 
-/// Concrete D2 room-domain executor. The caller selects the physical owner database;
-/// every store transaction rechecks this exact granted token before replay or mutation.
+/// 具体的 D2 房间领域执行器。调用方选定物理所有者数据库；
+/// 每个存储事务在重放或修改前，都重新检查此精确获准令牌。
 public struct V2RoomAdministrationDomainExecutor: Sendable {
     private let database: any Database
     private let token: V2RoomActivationToken
@@ -48,7 +48,7 @@ public struct V2RoomAdministrationDomainExecutor: Sendable {
         guard token.roomID == roomID else { throw V2RoomActivationLeaseError.activationChanged }
     }
 
-    /// The user lane never accepts a trusted-safety variant, even if decoded from a valid envelope.
+    /// 用户通道绝不接受可信安全服务分支，即使它来自有效信封。
     public func executeUser(_ command: V2RoomAdministrationCommand) async throws -> V2RoomAdministrationResult {
         try requireRoom(command.roomID)
         switch command {
@@ -106,7 +106,7 @@ public struct V2RoomAdministrationDomainExecutor: Sendable {
         }
     }
 
-    /// The cluster's service-role gate must provide this authority independently of the wire.
+    /// Cluster 的服务角色检查必须独立于线路数据提供此权限。
     public func executeTrustedSafety(
         _ request: V2ActorTrustedSafetyWire,
         authority: V2ActorTrustedSafetyAuthority

@@ -26,9 +26,9 @@ public enum V2RedactedHTTPMiddlewareConfiguration {
 /// 模板可让日志基数保持有界，并避免持久化标识符。
 private struct V2RedactedRouteLoggingMiddleware: Middleware {
     func respond(to request: Request, chainingTo next: any Responder) async throws -> Response {
-        // Successful request-per-line logging is diagnostic, not an
-        // operational event. Keeping it below the production info threshold
-        // avoids synchronous formatting and log-pipeline pressure at high QPS.
+        // 成功请求的逐条日志用于诊断，并非运维事件。
+        // 将其保持在生产环境 info 级别以下，可避免高 QPS 时的
+        // 同步格式化与日志流水线压力。
         Logger.current.debug("HTTP request", metadata: request.v2RedactedHTTPMetadata)
         return try await next.respond(to: request)
     }
@@ -49,9 +49,9 @@ private struct V2RedactedErrorMiddleware: Middleware {
             var headers: HTTPFields
             if let abort = error as? any AbortError {
                 status = abort.status
-                // Decoder and dependency errors may conform to AbortError and
-                // carry field names or implementation details in `reason`.
-                // The public contract is status based and deliberately stable.
+                // 解码器与依赖错误可能符合 AbortError，
+                // 并在 `reason` 中携带字段名或实现细节。
+                // 公开契约只基于状态码，且有意保持稳定。
                 reason = abort.status.reasonPhrase
                 headers = abort.headers
             } else {

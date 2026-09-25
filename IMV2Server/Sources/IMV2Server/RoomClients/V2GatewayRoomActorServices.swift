@@ -2,9 +2,8 @@ import Foundation
 import IMV2ActorContracts
 import IMV2ActorRuntime
 
-/// One gateway-facing composition for all existing-room capabilities. Every
-/// member uses the same directory and finite call budget; creation is a
-/// separate control-domain coordinator because the room does not exist yet.
+/// 面向网关的现有房间能力组合。所有成员共用同一目录和有限的调用预算；
+/// 创建操作交由独立的控制域协调者处理，因为此时房间尚不存在。
 public struct V2GatewayRoomActorServices: Sendable {
     let messaging: V2RoomRefMessagingClient
     let administration: V2RoomRefAdministrationClient
@@ -31,6 +30,6 @@ public struct V2GatewayRoomActorServices: Sendable {
 }
 
 extension V2RoomRefReadReceiptClient {
-    // The physical host owns receipt write admission and its SQL batcher.
+    // 物理宿主负责回执写入准入及其 SQL 批处理器。
     var managesForegroundWriteAdmission: Bool { true }
 }

@@ -5,8 +5,8 @@ import IMV2ActorRuntime
 import IMV2Core
 import SQLKit
 
-/// One value per configured physical owner. Pool handles, credit caches and
-/// batchers are shared across activations; they are not allocated per room.
+/// 每个配置的物理所有者对应一个值。连接池句柄、额度缓存和批处理器
+/// 在多个激活间共享，不按房间分配。
 public struct V2RoomServerOwnerResources: Sendable {
     let database: any Database
     let writes: PostgresV2RoomWriteStore
@@ -65,8 +65,8 @@ public struct V2RoomServerOwnerResources: Sendable {
     }
 }
 
-/// The server owns concrete domain handlers. Runtime owns scheduling and
-/// lifecycle, and Cluster owns authentication/transport; neither imports Server.
+/// Server 持有具体的领域处理器；Runtime 负责调度与生命周期，
+/// Cluster 负责认证与传输。后两者都不导入 Server。
 public struct V2RoomServerActivationFactory: Sendable {
     private let owners: [String: V2RoomServerOwnerResources]
     private let safetyActorUserID: UserID?
@@ -93,9 +93,9 @@ public struct V2RoomServerActivationFactory: Sendable {
     }
 }
 
-/// No membership, policy, content or cursor snapshot is used as permanent
-/// authority here. Recovery rebuilds handlers and validates the durable room;
-/// each operation reads its current facts under its own activation fence.
+/// 此处不将成员关系、策略、内容或游标快照当作永久权限依据。
+/// 恢复会重建处理器并校验持久化房间；
+/// 每项操作都在自身激活围栏下读取当前事实。
 private actor V2RoomServerActivation {
     private let token: V2RoomActivationToken
     private let resources: V2RoomServerOwnerResources?
@@ -140,8 +140,8 @@ private actor V2RoomServerActivation {
               zip(turn.items, turn.items.dropFirst()).allSatisfy({ pair in pair.0.ordinal < pair.1.ordinal }) else {
             return .rolledBack(.invalidRequest)
         }
-        // The lane only groups contiguous sends. Refuse an invalid turn before
-        // entering any store, rather than partially executing mixed barriers.
+        // 通道只合并连续的发送请求。进入任何存储前先拒绝无效轮次，
+        // 避免部分执行混合的屏障。
         guard turn.items.count == 1 || turn.items.allSatisfy({ $0.request.canShareSendTurn }) else {
             return .rolledBack(.invalidRequest)
         }
@@ -171,8 +171,8 @@ private actor V2RoomServerActivation {
                             batchDeadline: turn.context.batchDeadline, callDeadline: item.deadline)
                     }
                 } else {
-                    // Send, receipt and recovery each acquire once per actual SQL
-                    // batch, possibly shared by multiple granted room turns.
+                    // 发送、回执和恢复操作各自针对实际 SQL 批次获取一次许可；
+                    // 多个获准房间轮次可能共享同一批次。
                     response = try await dispatch(item.request, handlers: handlers, resources: resources,
                         batchDeadline: turn.context.batchDeadline, callDeadline: item.deadline)
                 }
@@ -308,8 +308,8 @@ private extension V2RoomRequest {
     }
 }
 
-/// Only explicit proof of no accepted business write becomes rollback. Driver,
-/// cancellation and post-COMMIT failures conservatively retire the whole turn.
+/// 只有明确证明没有业务写入被接受，才可判定为回滚。
+/// 驱动、取消和 COMMIT 后的故障都会保守地退役整个轮次。
 func v2RoomDomainCompletion<Value: Sendable>(_ error: any Error) -> V2RoomTransactionCompletion<Value> {
     if let failure = error as? V2RoomCallFailure {
         switch failure {

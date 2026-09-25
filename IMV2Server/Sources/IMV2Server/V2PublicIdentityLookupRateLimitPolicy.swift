@@ -21,8 +21,8 @@ public struct V2PublicIdentityLookupRateLimitPolicy: Equatable, Sendable {
     ///   - window: 限流窗口长度。
     /// - Throws: 次数非正、过大或窗口无法表示时抛出 `invalidPolicy`。
     public init(maximumQueries: Int, window: TimeInterval) throws {
-        // PostgreSQL stores query_count as a signed 32-bit integer. Reserve
-        // one value above the budget as the saturated/denied sentinel.
+        // PostgreSQL 以有符号 32 位整数存储 query_count。
+        // 在预算之上保留一个值，作为达到上限／拒绝的哨兵值。
         guard maximumQueries > 0,
               maximumQueries < Int(Int32.max),
               v2RateLimitDurationIsRepresentable(window)

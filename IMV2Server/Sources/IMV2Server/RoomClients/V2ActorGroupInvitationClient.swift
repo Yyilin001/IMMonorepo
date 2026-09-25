@@ -2,8 +2,8 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// Account HTTP's domain contract. The old service and the actor-backed
-/// control coordinator preserve the same public invitation outcomes.
+/// 账户 HTTP 的领域契约。旧服务与基于 Actor 的控制域协调者
+/// 保持相同的公开邀请结果。
 public protocol V2GroupInvitationHandling: Sendable {
     func create(_ request: V2CreateGroupInviteRequest) async throws -> V2GroupInviteLink
     func activeInvites(roomID: RoomID, actorUserID: UserID) async throws -> [V2GroupInviteLink]
@@ -20,8 +20,8 @@ public protocol V2GroupInvitationHandling: Sendable {
 
 extension V2GroupInvitationService: V2GroupInvitationHandling {}
 
-/// Unknown-room token and quota work remains in the control coordinator;
-/// every room-owned preflight, mutation and query uses its RoomRef port.
+/// 未知房间的令牌与额度处理留在控制域协调者；
+/// 每项归属房间的预检、修改和查询都使用对应的 RoomRef 端口。
 public struct V2ActorGroupInvitationClient: V2GroupInvitationHandling {
     private let coordinator: V2ActorInvitationCoordinator
     private let callTimeout: Duration

@@ -217,10 +217,9 @@ public final class V2GatewayTransportMetrics: V2GatewayTransportMetricsRecorder,
     }
 
     private let storage = Mutex(Storage())
-    // The foreground frame path can submit hundreds of thousands of local
-    // recipient frames per second. Relaxed atomics keep metrics from becoming
-    // a global mutex on that path; these counters publish observations only
-    // and protect no application state.
+    // 前台帧路径每秒可提交数十万条本地接收方帧。
+    // 使用宽松内存序的原子计数，避免指标成为此路径的全局互斥锁；
+    // 这些计数器只发布观测值，不保护应用状态。
     private let foregroundFramesSubmitted = Atomic<UInt64>(0)
     private let foregroundBytesSubmitted = Atomic<UInt64>(0)
     private let foregroundRecoveryFramesQueued = Atomic<UInt64>(0)
@@ -556,8 +555,8 @@ public enum V2GatewayTelemetryRejection: String, CaseIterable, Hashable, Sendabl
     }
 }
 
-// Swift 6.4 Linux Release crashes while an async composite sink records the
-// inline event layout. Keep this indirect until that toolchain path is fixed.
+// Swift 6.4 的 Linux Release 构建中，异步组合接收端记录内联事件布局时会崩溃。
+// 在工具链修复前保留此间接调用。
 public indirect enum V2TelemetryEvent: Equatable, Sendable {
     /// 跟踪 ID 用于关联单条网关命令，且不标识任何用户、设备、房间、消息、令牌或协议载荷。
     case gatewayCommand(

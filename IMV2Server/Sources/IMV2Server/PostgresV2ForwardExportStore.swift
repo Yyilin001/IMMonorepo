@@ -30,7 +30,7 @@ public struct PostgresV2ForwardExportStore: Sendable {
         self.activationScope = nil
     }
 
-    /// Bind both new exports and immutable replay to the granted source turn.
+    /// 将新导出和不可变重放都绑定到获准的源房间轮次。
     public func usingActivationToken(_ token: V2RoomActivationToken) throws -> Self {
         var scoped = self
         scoped.activationScope = try .init(tokens: [token])
@@ -76,8 +76,8 @@ public struct PostgresV2ForwardExportStore: Sendable {
         return export
     }
 
-    /// Read the original envelope or terminal receipt in one database snapshot.
-    /// A receipt committed after the service preflight must not require content.
+    /// 在同一数据库快照中读取原始信封或终态回执。
+    /// 服务预检后才提交的回执不应再要求读取内容。
     func prepareForDelivery(
         actorUserID: UserID, operationID: MessageForwardOperationID, source: V2ForwardMessageReference,
         sourceRoute: V2RoomShardRoute, targetRoomID: RoomID, targetRoute: V2RoomShardRoute, now: Date
@@ -106,9 +106,9 @@ public struct PostgresV2ForwardExportStore: Sendable {
             classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ForwardExportError.corruptPersistenceState }
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
-            // One pair mutex, then one source room. Never lock a remote target.
-            // Competing retries with a different claimed source room cannot
-            // create two copies or bypass the original source binding.
+            // 先取得一把关系互斥锁，再锁定一个源房间；绝不锁远端目标。
+            // 声称来自不同源房间的竞争性重试，不能创建两份副本
+            // 或绕过原始源绑定。
             let key = "v2-forward-export:\(actor):\(operation):\(message):\(target)"
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
             try await activationScope?.require([sourceRoom], sql: sql)
@@ -143,8 +143,8 @@ public struct PostgresV2ForwardExportStore: Sendable {
                       export.intent.sourceRoomID == sourceRoom,
                       export.intent.sourceRevision == source.revision.signedValue
                 else { throw V2ForwardExportError.idempotencyConflict }
-                // Original routing epochs are immutable evidence. Retries
-                // must not regrant from changed source facts or rewrite this envelope.
+                // 原始路由纪元是不可变证据。重试不能依据变化后的源事实
+                // 重新授权，也不能改写此信封。
                 return .export(export)
             }
             guard let room = try await sql.raw("""
@@ -167,8 +167,8 @@ public struct PostgresV2ForwardExportStore: Sendable {
             guard content.revision == source.revision.signedValue else { throw V2ForwardExportError.sourceChanged }
             let entities = try JSONDecoder().decode([V2MessageEntity].self, from: Data(content.entitiesJSON.utf8))
             try V2RichMessageContent.validate(text: content.text, entities: entities)
-            // Lock every reference, including revoked ones. Filtering revoked
-            // rows in SQL would silently turn an attachment message into text.
+            // 锁定所有引用，包括已撤销的引用。
+            // 若在 SQL 中过滤已撤销记录，带附件的消息会悄然变成纯文本。
             let references = try await sql.raw("""
                 SELECT media_id, ordinal, revoked_at FROM im_v2.message_media_references
                 WHERE message_id = \(bind: message) ORDER BY media_id FOR SHARE
@@ -179,9 +179,9 @@ public struct PostgresV2ForwardExportStore: Sendable {
             guard v2PostgresTimestampCanEncode(now) else { throw V2ForwardExportError.corruptPersistenceState }
             let currentTime = try V2PostgresTimestamp(date: now)
             var mediaByID: [UUID: V2ForwardExportMedia] = [:]
-            // All media users follow UUID order. Retention uses SKIP LOCKED;
-            // it either expires first (and we reject) or sees this export pin
-            // on its next pass after the export transaction commits.
+            // 所有媒体使用方都按 UUID 顺序加锁。保留期清理使用 SKIP LOCKED；
+            // 要么先将媒体标记为过期并导致此处拒绝，
+            // 要么在导出事务提交后的下一轮看到这份导出固定引用。
             for reference in references {
                 guard let media = try await sql.raw("""
                     SELECT media_id, upload_session_id, content_type, byte_count, state, expires_at
@@ -201,8 +201,8 @@ public struct PostgresV2ForwardExportStore: Sendable {
                 guard let item = mediaByID[reference.mediaID] else { throw V2ForwardExportError.corruptPersistenceState }
                 return item
             }
-            // Only outstanding delivery consumes a queue slot. A terminal
-            // receipt is immutable; replay never reserves or repins it again.
+            // 只有未完成的投递占用队列槽位。终态回执不可变；
+            // 重放不会再次预留槽位或固定媒体引用。
             let slots = try await sql.raw("""
                 SELECT export.export_id FROM im_v2.message_forward_exports AS export
                 WHERE export.source_room_id = \(bind: sourceRoom)

@@ -74,8 +74,8 @@ public struct PostgresV2MessageEditStore: V2MessageEditStore, V2OwnerValidatedMe
     /// - Throws: 房间或消息不存在、发起者非作者、房间冻结、账号或角色不可用、
     ///   已达禁言状态或持久化失败时抛出。
     private func edit(command: V2EditMessageCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageEditOutcome {
-        // Reuse the control identity boundary before borrowing an owner
-        // transaction. An edit has one actor, so both snapshot IDs name it.
+        // 借用所有者事务前复用控制侧身份边界。
+        // 编辑只有一位操作者，因此两个快照 ID 都指向该操作者。
         let identity = try await identities.snapshot(actorUserID: command.actorUserID, targetUserID: command.actorUserID)
         guard identity.actorUserID == command.actorUserID,
               identity.targetUserID == command.actorUserID
@@ -114,10 +114,9 @@ public struct PostgresV2MessageEditStore: V2MessageEditStore, V2OwnerValidatedMe
             )
             guard let message = try await sql.raw("SELECT room_id, sender_user_id, content_revision, withdrawn_at FROM im_v2.messages WHERE message_id = \(bind: messageID) FOR UPDATE").first(decoding: EditMessageRow.self), message.roomID == roomID else { throw V2MessageEditStoreError.messageNotFound }
             guard message.senderUserID == actorID else { throw V2MessageEditStoreError.actorNotAuthor }
-            // A tombstone is terminal for content mutation. Check it before the
-            // revision fence so an edit captured before a concurrent withdrawal
-            // observes the durable terminal state rather than looking like a
-            // potentially retryable stale-write conflict.
+            // 墓碑是内容修改的终态。在检查修订围栏前先检查它，
+            // 使并发撤回前捕获的编辑看到持久化终态，
+            // 而不是被误认为可能可重试的过期写入冲突。
             guard message.withdrawnAt == nil else { return .alreadyWithdrawn }
             guard try editUnsigned(message.contentRevision) == command.expectedMessageRevision else { return .revisionConflict(current: try editUnsigned(message.contentRevision)) }
             let acceptance = try await v2MessageAcceptanceFact(messageID: messageID, roomID: roomID, sql: sql)
@@ -146,15 +145,14 @@ public struct PostgresV2MessageEditStore: V2MessageEditStore, V2OwnerValidatedMe
             )
             guard previousProjectionState.originEventID == acceptance.eventID else { throw V2MessageEditStoreError.corruptPersistenceState }
             let replacementJSON = try V2MessageEditReplacement(state: editedProjectionState, acceptance: acceptance).encodedJSON()
-            // Use PostgreSQL's decoded timestamp for the fresh response and event
-            // payload. Keep the original clock for every storage binding.
+            // 新响应和事件载荷使用 PostgreSQL 解码后的时间戳；
+            // 所有存储绑定仍使用原始时钟值。
             guard let timestamp = try await sql.raw("UPDATE im_v2.rooms SET room_sequence = \(bind: nextSequence) WHERE room_id = \(bind: roomID) RETURNING \(bind: now)::timestamptz AS created_at").first(decoding: EditCommittedTimestampRow.self) else { throw V2MessageEditStoreError.corruptPersistenceState }
             let createdAtMilliseconds = try v2GatewayMilliseconds(timestamp.createdAt)
             try await sql.raw("UPDATE im_v2.messages SET text_body = \(bind: command.text), rich_entities = '[]'::jsonb, content_revision = \(bind: nextRevision) WHERE message_id = \(bind: messageID)").run()
             if contentReviewMode.enqueuesJobs {
-                // A review verdict is valid only for the exact content revision.
-                // Replacing a claimed job clears its lease in this same edit
-                // transaction, so an old worker can only mark itself superseded.
+                // 审核结论只对精确内容修订有效。在同一编辑事务中替换已认领任务时，
+                // 会清除其租约，因此旧工作器只能将自身标记为已被取代。
                 try await sql.raw("""
                     INSERT INTO im_v2.content_review_jobs
                         (message_id, room_id, expected_content_revision, state, decision, claim_token, lease_expires_at, retry_count, created_at, completed_at)

@@ -158,8 +158,8 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
 
     private func validatedLeaseExpiry(now: Date) throws -> Date {
         let expiry = now.addingTimeInterval(onlineLease)
-        // Wire truncation moves negative Unix timestamps toward the future.
-        // It cannot prove that the durable lease interval survived encoding.
+        // 线路协议截断会把负的 Unix 时间戳向未来方向移动，
+        // 因此无法证明持久化租约间隔在编码后仍得到保留。
         guard v2PostgresTimestampPrecedes(now, expiry),
               let milliseconds = try? v2GatewayMilliseconds(expiry),
               Double(milliseconds) > now.timeIntervalSince1970 * 1_000 else {
@@ -194,14 +194,12 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             }
             let user = try liveActivityUUID(identity.userID)
             let device = try liveActivityUUID(identity.deviceID)
-            // All contenders for one user take the same first lock; the
-            // device lock then serializes the narrower limit without a
-            // user/device lock-order cycle.
+            // 同一用户的所有竞争者都先取得同一把锁；
+            // 设备锁再串行化更窄的限制，避免用户锁与设备锁形成顺序循环。
             try await lockConnectionIdentity(user: user, device: device, sql: sql)
-            // `auth_devices.device_id` is globally unique and the lease has a
-            // composite owner foreign key, so this device can only occur under
-            // `user`. Keeping the predicate user-only lets PostgreSQL use the
-            // existing `(user_id, expires_at)` index.
+            // `auth_devices.device_id` 全局唯一，租约又有复合所有者外键，
+            // 因此此设备只能属于 `user`。查询条件只限定用户，
+            // 使 PostgreSQL 可使用既有的 `(user_id, expires_at)` 索引。
             try await sql.raw("""
                 DELETE FROM im_v2.user_live_presence_leases
                 WHERE expires_at <= \(bind: now)
@@ -288,8 +286,8 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             throw V2LiveActivityStoreError.corruptPersistenceState
         }
 
-        // A connection can have at most one renewal in a physical batch. If a
-        // caller races duplicate heartbeats, the newest observed time wins.
+        // 同一连接在一个物理批次中最多续租一次。
+        // 若调用方并发发出重复心跳，以最新观测时间为准。
         var unique: [UUID: V2LivePresenceLeaseRenewalRequest] = [:]
         unique.reserveCapacity(requests.count)
         var rejected: [UUID: V2LivePresenceLeaseRefresh] = [:]
@@ -311,9 +309,8 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
                 updatedAt: request.now
             )
         }
-        // Native Date arrays use the same microsecond encoding as scalar
-        // renewals. Converting floating Unix seconds with to_timestamp can
-        // round across a lease's strict expiry boundary.
+        // 原生 Date 数组与逐条续租使用相同的微秒编码。
+        // 通过 to_timestamp 转换浮点 Unix 秒，可能舍入越过租约的严格过期边界。
         let query: SQLQueryString = """
             WITH requested AS MATERIALIZED (
                 SELECT *
@@ -380,10 +377,9 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             let user = try liveActivityUUID(identity.userID)
             let device = try liveActivityUUID(identity.deviceID)
             try await lockConnectionIdentity(user: user, device: device, sql: sql)
-            // The caller's authenticated identity remains authoritative even
-            // if this lease expired and another replica already deleted it.
-            // Matching both owner fields also prevents an obsolete lifecycle
-            // from deleting a colliding connection ID owned by another user.
+            // 即使租约已过期且被其他副本删除，调用方经认证的身份仍是权威。
+            // 同时匹配两个所有者字段，还可防止旧生命周期删除
+            // 属于其他用户、但连接 ID 碰撞的记录。
             try await sql.raw("""
                 DELETE FROM im_v2.user_live_presence_leases
                 WHERE connection_id = \(bind: connectionID)

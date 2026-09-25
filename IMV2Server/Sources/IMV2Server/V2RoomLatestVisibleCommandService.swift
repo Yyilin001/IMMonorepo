@@ -2,7 +2,7 @@ import Foundation
 import IMV2Core
 import SwiftProtobuf
 
-/// Bounds the serialized envelope, including explicit deferred results.
+/// 限制序列化后信封的大小，包括显式的延后结果。
 public struct V2RoomLatestVisibleCommandService: Sendable {
     private let reader: any V2RoomLatestVisibleReading
     private let maximumResponseBytes: Int

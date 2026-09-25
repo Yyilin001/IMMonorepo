@@ -1,7 +1,7 @@
 import Foundation
 import IMV2Core
 
-/// Stable identities are deliberately distinct even though each uses a textual ID.
+/// 虽然都使用文本 ID，稳定身份仍有意保持不同类型。
 public enum V2ActorAdministrationOperationIdentity: Equatable, Sendable {
     case membership(MembershipOperationID)
     case pinned(PinnedMessageOperationID)
@@ -61,7 +61,7 @@ public struct V2ActorRolePermissionsWire: Codable, Equatable, Sendable {
     public let actorUserID: UserID
     public let operationID: GroupPermissionOperationID
     public let role: V2RoomMembershipRole
-    /// Canonical writers sort by raw value; readers reject duplicates before domain mapping.
+    /// 规范写入方按原始值排序；读取方在映射到领域模型前拒绝重复项。
     public let permissions: [V2GroupPermission]
     public let expectedRevision: UInt64
 
@@ -97,7 +97,7 @@ public struct V2ActorModerationWire: Codable, Equatable, Sendable {
     public let messageID: MessageID?
     public let expectedMessageRevision: UInt64?
     public let muteUntil: Date?
-    /// A string mirror is required: Core's synthesized reason-code decoder skips validation.
+    /// 必须显式定义字符串镜像：Core 自动生成的原因码解码器会跳过校验。
     public let reasonCode: String
 
     public init(roomID: RoomID, actorUserID: UserID, operationID: ModerationOperationID,
@@ -110,8 +110,8 @@ public struct V2ActorModerationWire: Codable, Equatable, Sendable {
     }
 }
 
-/// The trusted lane has no caller-supplied user identity. Service-role authorization
-/// must be checked by the future transport/executor before invoking its store.
+/// 可信通道不接收调用方提供的用户身份。
+/// 将来的传输或执行器调用存储前，必须检查服务角色授权。
 public struct V2ActorTrustedSafetyWire: Codable, Equatable, Sendable {
     public let roomID: RoomID
     public let operationID: ModerationOperationID
@@ -154,7 +154,7 @@ public struct V2ActorGroupNicknamesQueryWire: Codable, Equatable, Sendable {
     }
 }
 
-/// Event IDs, clock values and capacity profile are deliberately executor-owned.
+/// 事件 ID、时钟值和容量配置有意由执行器负责。
 public enum V2RoomAdministrationCommand: Codable, Equatable, Sendable {
     case membership(V2ActorMembershipChangeWire)
     case pinned(V2ActorPinnedMessageWire)
@@ -178,7 +178,7 @@ public enum V2RoomAdministrationCommand: Codable, Equatable, Sendable {
         }
     }
 
-    /// Nil is reserved for the separately authorized trusted service lane.
+    /// nil 保留给另行授权的可信服务通道。
     public var actorUserID: UserID? {
         switch self {
         case .membership(let value): value.actorUserID

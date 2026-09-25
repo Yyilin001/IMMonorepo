@@ -3,8 +3,8 @@ import IMV2ActorContracts
 import IMV2ActorRuntime
 import IMV2Core
 
-/// Contact aliases remain in the user store; only the room-scoped nickname
-/// operations cross the authenticated room capability.
+/// 联系人别名仍保存在用户存储中；只有房间范围内的昵称操作
+/// 会通过已认证的房间能力。
 public struct V2RoomRefProfilePresentationClient: V2ProfilePresentationManaging {
     private let aliases: any V2ProfilePresentationManaging
     private let caller: V2RoomRefUserCaller

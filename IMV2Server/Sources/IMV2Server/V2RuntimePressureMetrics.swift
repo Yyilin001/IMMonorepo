@@ -105,7 +105,7 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     public let preparedGroupEventPageCache: V2PreparedGroupEventPageCache.Snapshot?
     /// 心跳租约续期的合并与数据库批处理统计，不使用连接或用户标识作为标签。
     public let livePresenceRenewals: V2LivePresenceRenewalBatcher.Snapshot?
-    /// Local Actor host and directory pressure; caller-only nodes omit host fields.
+/// 本地 Actor 宿主与目录的负载指标；仅作调用方的节点不包含宿主字段。
     public let roomActors: V2RoomRuntimeMetricsSnapshot?
 
     /// 从各组件的观测构造聚合值，不执行采集、不清零计数，也不校验组件间的一致性。

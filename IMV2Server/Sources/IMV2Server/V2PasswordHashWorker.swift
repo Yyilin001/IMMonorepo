@@ -28,7 +28,7 @@ public enum V2PasswordHashPolicy {
     /// Argon2 算法版本号。
     public static let algorithmVersion: UInt32 = 19
 
-    // Fixed public verifier for equal-cost rejection; it never represents an account.
+    // 用于等成本拒绝的固定公开校验值；它不代表任何账户。
     /// 等代价拒绝使用的固定公开校验串，不对应任何真实账号。
     public static let dummyDigest = "$argon2id$v=19$m=65536,t=3,p=1$aW0tdjItZHVtbXktc2FsdA$9tW2aGVfIp/L14eL1G4XTaY+ksHcPZCQLoqjvLwIkq8"
 
@@ -219,8 +219,8 @@ public actor V2PasswordHashWorker: V2PasswordHashing {
         let candidate = supported ? digest : V2PasswordHashPolicy.dummyDigest
         let primitive = self.primitive
         let matches = try await run { try primitive.verify(password, created: candidate) }
-        // Legacy bcrypt cannot establish full-input identity. Never rehash or
-        // issue an assertion based on its truncated/NUL-equivalent verifier.
+        // 旧版 bcrypt 无法确认完整输入的身份。绝不能根据其截断或
+        // 与 NUL 等价的校验结果重新计算哈希或签发断言。
         return supported && matches
     }
 
@@ -249,7 +249,7 @@ public actor V2PasswordHashWorker: V2PasswordHashing {
     public func shutdown() async throws {
         if let shutdownTask { return try await shutdownTask.value }
         let pool = self.pool
-        // Retained solely to let concurrent shutdown callers join the same drain.
+        // 仅用于让并发关闭调用方等待同一次排空操作。
         let task = Task { try await pool.shutdownGracefully() }
         shutdownTask = task
         try await task.value

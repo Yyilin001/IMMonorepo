@@ -59,9 +59,8 @@ public struct PostgresV2ForwardReceiptStore: Sendable {
                 try match(prior, receipt: receipt)
                 return
             }
-            // Serialize quota release with new exports, and fence an old
-            // source worker after ownership has changed. Exact terminal replay
-            // above remains valid without reauthorizing the original message.
+            // 将配额释放与新导出串行化；所有权改变后阻止旧源工作器继续写入。
+            // 上方的精确终态重放仍有效，无须重新授权原始消息。
             guard let room = try await sql.raw("""
                 SELECT room_shard_id, owner_epoch FROM im_v2.rooms
                 WHERE room_id = \(bind: original.sourceRoomID) FOR NO KEY UPDATE
@@ -92,8 +91,8 @@ public struct PostgresV2ForwardReceiptStore: Sendable {
         }
     }
 
-    /// Replay a terminal pair without loading its content envelope. The export
-    /// identity remains authoritative; a changed source binding is a conflict.
+    /// 无须加载内容信封即可重放终态配对。导出身份仍是权威；
+    /// 源绑定改变属于冲突。
     func terminalStatus(actor: UserID, operation: MessageForwardOperationID,
                         source: V2ForwardMessageReference, target: RoomID) async throws -> V2ForwardImportOutcome? {
         guard let actorID = actor.uuidValue, let operationID = operation.uuidValue,

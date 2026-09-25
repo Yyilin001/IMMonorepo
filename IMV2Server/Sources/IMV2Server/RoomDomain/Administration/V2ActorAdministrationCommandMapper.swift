@@ -172,7 +172,7 @@ extension V2ActorTrustedSafetyWire {
 }
 
 extension V2ActorGroupNicknameUpdateWire {
-    /// Validates input before passing the existing parameter-style API to a remote executor.
+    /// 在把既有的参数式 API 调用传给远程执行器前，先校验输入。
     public func validateForDomain() throws {
         guard let initialRevision = V2ProfileRevision(rawValue: 1) else {
             throw V2RevisionValidationError.outOfRange

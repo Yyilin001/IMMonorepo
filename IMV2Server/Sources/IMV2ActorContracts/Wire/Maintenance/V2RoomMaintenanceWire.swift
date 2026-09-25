@@ -1,8 +1,8 @@
 import Foundation
 import IMV2Core
 
-/// Maintenance is a service-only room turn. Its work is retried by scanning
-/// durable state again, not by inventing a per-request operation identity.
+/// 维护是仅供服务使用的房间轮次。重试时重新扫描持久化状态，
+/// 不为每条请求虚构操作标识。
 public enum V2RoomMaintenanceCommand: Codable, Equatable, Sendable {
     case trimLog(V2ActorRoomLogTrimWire)
     case purgeBookkeeping(V2ActorRoomBookkeepingPurgeWire)

@@ -3,8 +3,8 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// The room-side receipt adapter. Only its activation-fenced entry points may
-/// be called by a physical RoomActor turn; user preferences remain control-side.
+/// 房间侧回执适配器。物理 RoomActor 轮次只能调用
+/// 受激活围栏保护的入口；用户偏好仍属控制侧。
 public struct V2ActorRoomReceiptExecutor: Sendable {
     private let database: any Database
     private let projectionDelivery: any V2UserShardProjectionDelivering
@@ -27,9 +27,9 @@ public struct V2ActorRoomReceiptExecutor: Sendable {
                     command: wire.commandValue(), token: token, now: ingressAt, timeouts: timeouts)
                 return .record(.init(outcome))
             } catch V2ReadReceiptStoreError.ownerChanged {
-                // The optimized receipt store reports a per-item owner error.
-                // At this scalar room boundary it is stale activation authority,
-                // so the directory must invalidate and resolve the location.
+                // 优化后的回执存储报告逐项所有者错误。
+                // 在此逐条房间边界，它表示激活权限已过期，
+                // 因此目录必须让位置失效并重新解析。
                 throw V2RoomActivationLeaseError.activationChanged
             } catch let error as V2ReadReceiptStoreError {
                 return .recordFailure(.init(error))

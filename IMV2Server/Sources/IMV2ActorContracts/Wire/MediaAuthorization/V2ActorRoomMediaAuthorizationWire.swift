@@ -1,8 +1,8 @@
 import Foundation
 import IMV2Core
 
-/// Room-only visibility input. Device/account authority is checked by media
-/// control at issuance and exchange; it is never asserted by the caller here.
+/// 仅用于房间可见性的输入。媒体控制在签发和交换时检查设备／账户权限；
+/// 此处不由调用方声明这项权限。
 public struct V2ActorMessageMediaVisibilityWire: Codable, Equatable, Sendable {
     public let roomID: RoomID
     public let messageID: MessageID
@@ -28,7 +28,7 @@ public enum V2RoomMediaAuthorizationQuery: Codable, Equatable, Sendable {
     public var retryPolicy: V2RoomReplayPolicy { .readOnly }
 }
 
-/// The versioned room fact used to compare issue/redeem authorization reads.
+/// 用于比较签发与兑现授权读取结果的版本化房间事实。
 public struct V2ActorMessageMediaVisibilitySnapshotWire: Codable, Equatable, Sendable {
     public let roomID: RoomID
     public let messageID: MessageID

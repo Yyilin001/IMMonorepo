@@ -464,8 +464,8 @@ extension PostgresV2PushDeviceEndpointStore: V2PushEndpointIntentStoring {
 
     public func publishIntent(actorUserID: UserID, deviceID: DeviceID, version: V2PushIntentVersion, intent: V2PushEndpointIntent, now: Date) async throws {
         let user = try endpointUUID(actorUserID), device = try endpointUUID(deviceID)
-        // Authenticate equality with a separate derived key. Neither provider
-        // material nor a plain token hash is persisted in the intent receipt.
+        // 使用单独派生的密钥验证相等性。意图回执中既不持久化
+        // 服务商凭据材料，也不持久化普通令牌哈希。
         struct Canonical: Encodable {
             let device: UUID
             let enabled: Bool

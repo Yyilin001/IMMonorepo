@@ -2,8 +2,8 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// Sealed bootstrap exception: an uncreated room has no activation lease yet.
-/// The caller selects this existing owner by its fixed shard identity, never by resolving an unknown room.
+/// 封闭的启动例外：尚未创建的房间还没有激活租约。
+/// 调用方通过固定分片标识选定现有所有者，绝不通过解析未知房间来选择。
 public struct V2RoomBootstrapDomainExecutor: Sendable {
     private let shardID: String
     private let direct: any V2DirectMessagingStore

@@ -1,14 +1,14 @@
 import Foundation
 import IMV2Core
 
-/// Sensitive bearer material is only present on the coordinator lane, never in owner commands.
+/// 敏感的持有者凭据材料只出现在协调器通道中，绝不进入所有者命令。
 public struct V2ActorInviteSecretWire: Codable, Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     public let rawValue: String
     public init(rawValue: String) { self.rawValue = rawValue }
     public var description: String { "<redacted-group-invite-secret>" }
     public var debugDescription: String { description }
 }
-/// SHA-256 of a bearer secret. Its type prevents mixing it with the secret itself.
+/// 持有者密钥的 SHA-256 摘要；其类型可防止与密钥本身混用。
 public struct V2ActorInviteTokenDigestWire: Codable, Equatable, Sendable {
     public let bytes: Data
     public init(bytes: Data) { self.bytes = bytes }
@@ -116,7 +116,7 @@ public struct V2ActorPendingGroupJoinsQueryWire: Codable, Equatable, Sendable {
         self.roomID = roomID; self.reviewerUserID = reviewerUserID; self.cursor = cursor; self.pageSize = pageSize
     }
 }
-/// Invoked only after the coordinator resolves a digest to this room and checks readiness.
+/// 仅在协调器将摘要解析到此房间并确认就绪后调用。
 public struct V2ActorResolvedInvitePreviewQueryWire: Codable, Equatable, Sendable {
     public let roomID: RoomID
     public let inviteID: GroupInviteID
@@ -153,7 +153,7 @@ public enum V2RoomInvitationQuery: Codable, Equatable, Sendable {
     public var retryPolicy: V2RoomReplayPolicy { .readOnly }
 }
 
-/// Gateway-facing unknown-room operations remain on the control coordinator.
+/// 面向网关的未知房间操作仍由控制协调器处理。
 public struct V2ActorInvitePreviewBySecretWire: Codable, Equatable, Sendable {
     public let applicantUserID: UserID
     public let secret: V2ActorInviteSecretWire
@@ -315,7 +315,7 @@ public enum V2ActorInvitationErrorWire: String, Codable, Error, Equatable, Senda
     case directoryConflict, ownerResultMismatch
 }
 
-/// Exact PostgreSQL timestamp binding for cross-shard invite creation receipts.
+/// 跨分片邀请创建回执使用精确的 PostgreSQL 时间戳绑定。
 public struct V2ActorInvitePersistedTimesWire: Codable, Equatable, Sendable {
     public let createdAtMicroseconds: Int64
     public let expiresAtMicroseconds: Int64
@@ -325,7 +325,7 @@ public struct V2ActorInvitePersistedTimesWire: Codable, Equatable, Sendable {
     }
 }
 
-/// Fixed control intent transferred to the owner. The gateway cannot choose any of these seeds.
+/// 传给所有者的固定控制意图；网关不能选择其中任何初始值。
 public struct V2ActorInviteCreatePersistenceWire: Codable, Equatable, Sendable {
     public let inviteID: GroupInviteID
     public let roomID: RoomID
@@ -374,7 +374,7 @@ public struct V2ActorStoredGroupInviteWire: Codable, Equatable, Sendable {
         self.maximumApprovedUses = maximumApprovedUses; self.approvedUseCount = approvedUseCount; self.createdAt = createdAt; self.persistedTimes = persistedTimes
     }
 }
-/// Quota reservation and digest resolution are performed before this owner input is made.
+/// 构造此所有者输入前，已完成配额预留和摘要解析。
 public struct V2ActorJoinSubmissionPersistenceWire: Codable, Equatable, Sendable {
     public let requestID: GroupJoinRequestID
     public let applicantUserID: UserID
@@ -427,7 +427,7 @@ public enum V2ActorGroupJoinDecisionPreparationOutcomeWire: Codable, Equatable, 
     case decisionConflict, inviteExhausted
 }
 
-/// Control-reserved global quota intent sent only to the resolved room owner.
+/// 控制侧预留的全局配额意图只发送给已解析出的房间所有者。
 public enum V2ActorGroupJoinQuotaPhaseWire: String, Codable, Equatable, Sendable {
     case held, tracking, denied, terminal
 }

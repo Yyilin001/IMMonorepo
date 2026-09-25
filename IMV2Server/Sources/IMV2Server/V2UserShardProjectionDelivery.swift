@@ -199,10 +199,9 @@ public struct V2PostgresUserShardProjectionDelivery: V2UserShardProjectionDelive
                 userID: userID, sourceEventID: sourceEventID, projectionKind: row.projectionKind,
                 payloadJSON: row.payloadJSON, createdAt: row.createdAt.date, persistedCreatedAt: row.createdAt
             )
-            // A single source event can carry a profile projection plus an
-            // invalidation. The wake hint must cover the last
-            // delivered sequence, otherwise a client could stop just before
-            // the invalidation and retain stale profile data.
+            // 单条源事件可能同时携带资料投影和失效通知。
+            // 唤醒提示必须覆盖最后已投递的序号，
+            // 否则客户端可能在失效通知前停止拉取，保留过期资料。
             liveSequence = max(liveSequence ?? 0, sequence)
 
         }
@@ -331,7 +330,7 @@ private struct ProjectionSourceRow: Decodable {
     let sequence: Int64
     let projectionKind: String
     let payloadJSON: String
-    // Preserve the source's database value through both allocation and delivery.
+    // 在分配与投递两个阶段都保留源数据库的原始值。
     let createdAt: V2PostgresTimestamp
     enum CodingKeys: String, CodingKey {
         case sequence = "user_sync_sequence"

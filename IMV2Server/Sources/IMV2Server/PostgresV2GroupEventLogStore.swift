@@ -47,11 +47,10 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
               let actorUUID = UUID(uuidString: actorUserID.rawValue)
         else { throw V2GroupEventLogError.corruptPersistenceState }
 
-        // Inspect only local coverage before spending a database round trip on
-        // the cache path. A candidate contains no identity and is never
-        // returned without the same fresh durable membership fence as before.
-        // A definite local miss therefore goes straight to the complete,
-        // authorization-bearing query below instead of paying two SQL calls.
+        // 在缓存路径花费数据库往返前，只检查本地覆盖情况。
+        // 候选项不含身份信息；未经过与此前相同的最新持久化成员围栏，
+        // 就绝不返回候选项。因此明确的本地未命中会直接进入下方
+        // 包含授权检查的完整查询，避免付出两次 SQL 调用的开销。
         if let directRoomLogEventCache,
            let candidate = await directRoomLogEventCache.candidate(
                roomID: roomID,
@@ -266,9 +265,8 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
                 payload: payload
             )
         }
-        // An exhausted snapshot has checked the complete tail, including
-        // authorized sequence gaps. Never advertise that tail as consumed
-        // while another visible (or incomplete-authority) row remains.
+        // 已耗尽的快照检查过完整尾部，包括已授权范围内的序号缺口。
+        // 仍有可见记录或权限尚未确认的记录时，不能宣称该尾部已消费完。
         let trimmedThrough = try groupEventUnsigned(room.trimmedThroughRoomSequence)
         let next = hasMore
             ? (entries.last?.roomSequence ?? afterRoomSequence)
@@ -315,9 +313,8 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
             actorUserID: actorUUID,
             sql: sql
         ) else {
-            // Preserve the complete durable query's public missing-room and
-            // membership error mapping. No prepared payload is reachable
-            // without the fresh row above.
+            // 保持完整持久查询对外的房间缺失和成员错误映射。
+            // 没有上方的最新记录，就无法访问已准备的载荷。
             return .page(try await pull(
                 roomID: roomID,
                 actorUserID: actorUserID,
@@ -340,8 +337,8 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
         case .eventTooLarge:
             return .eventTooLarge
         case .miss:
-            // A cache eviction, gap, or membership-epoch mismatch after the
-            // probe is a normal race. The durable query remains authoritative.
+            // 探测后发生缓存淘汰、缺口或成员纪元不匹配，是正常竞态。
+            // 持久化查询仍是权威。
             return .page(try await pull(
                 roomID: roomID,
                 actorUserID: actorUserID,

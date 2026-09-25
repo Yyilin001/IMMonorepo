@@ -114,8 +114,8 @@ public struct PostgresV2MediaDownloadSessionStore: V2MediaDownloadSessionStore {
         let authorization = V2PostgresMediaVisibilityAuthorization.predicate(
             mediaID: "download_grant.media_id", requesterUserID: identity.userID, deviceID: identity.deviceID
         )
-        // Provider I/O has finished. Re-evaluate the same authorization while
-        // consuming this exact live lease; a lost claim must not return a URL.
+        // 提供方 I/O 已完成。消耗此精确的有效租约时重新校验同一授权；
+        // 若声明已失效，就不能返回 URL。
         guard try await sql.raw("""
             UPDATE im_v2.media_download_grants AS download_grant
             SET state = 'consumed', redeemed_at = \(bind: now), claim_token = NULL, lease_expires_at = NULL

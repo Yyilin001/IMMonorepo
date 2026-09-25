@@ -3,9 +3,9 @@ import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
-/// Executes already granted room reads against one physical owner database.
-/// A grant is checked again under the database fence in the same transaction
-/// as the authoritative query; a host's cached ready state is not authority.
+/// 在单个物理所有者数据库上执行已获准的房间读取。
+/// 授权会在与权威查询相同的事务中、数据库围栏下再次校验；
+/// 宿主缓存的就绪状态不是权限依据。
 public struct V2ActorRoomQueryExecutor: Sendable {
     private let database: any Database
     private let timeouts: V2RoomActivationSQLTimeouts
@@ -17,8 +17,8 @@ public struct V2ActorRoomQueryExecutor: Sendable {
 
     public func log(_ query: V2RoomLogQuery, token: V2RoomActivationToken) async throws -> V2RoomLogQueryResult {
         try await withFencedRead(roomIDs: [query.roomID], tokens: [token]) { transaction in
-            // Deliberately omit the optional process event cache. The durable
-            // membership and cursor query is the read authority for the turn.
+            // 有意不使用可选的进程事件缓存。持久化成员关系与游标查询
+            // 才是此轮读取的权威依据。
             let store = PostgresV2GroupEventLogStore(database: transaction)
             switch query {
             case .pull(let request):
@@ -57,8 +57,8 @@ public struct V2ActorRoomQueryExecutor: Sendable {
         }
     }
 
-    /// `tokens` must match the query's exact room set. The existing recovery
-    /// stores then run one collection SQL statement, not one call per room.
+    /// `tokens` 必须与查询的精确房间集合一致。
+    /// 随后既有恢复存储只执行一条集合 SQL 语句，而非每房间一次调用。
     public func recovery(_ query: V2RoomRecoveryQuery, tokens: [V2RoomActivationToken]) async throws -> V2RoomRecoveryResult {
         try await withFencedRead(roomIDs: query.roomIDs, tokens: tokens) { transaction in
             do {

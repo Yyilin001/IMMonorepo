@@ -3,8 +3,8 @@ import DistributedCluster
 import Foundation
 import IMV2ActorContracts
 
-/// A fixed deployment entry. The receptionist only supplies candidate ActorIDs;
-/// it cannot grant host identity, service role, shard access or capacity.
+/// 固定的部署条目。接待员只提供候选 ActorID，
+/// 不能授予宿主身份、服务角色、分片访问权或容量。
 public struct V2RoomDiscoveryPeer: Sendable {
     public let hostID: V2ActorHostID
     public let serviceID: V2ActorServiceID
@@ -57,8 +57,8 @@ public struct V2RoomDiscoveryConfiguration: Sendable {
     }
 }
 
-/// A fresh challenge prevents replay of an old host advertisement after a
-/// process restart. The signed endpoint and beacon must belong to one node.
+/// 新的挑战值可防止进程重启后重放旧的宿主通告。
+/// 已签名的端点和信标必须属于同一节点。
 public struct V2RoomDiscoveryAdvertisement: Codable, Sendable {
     public static let version = 1
     public let version: Int
@@ -82,8 +82,8 @@ public struct V2RoomDiscoveryAdvertisement: Codable, Sendable {
     }
 }
 
-/// One local publisher per ClusterSystem. It is checked in under a key derived
-/// from the configured stable host ID, never once per room activation.
+/// 每个 ClusterSystem 只有一个本地发布者，使用由配置的稳定宿主 ID
+/// 推导出的键登记，绝非每次房间激活都登记一次。
 public actor V2RoomDiscoveryPublisherState {
     private var accepting = true
 
@@ -130,8 +130,8 @@ public struct V2RoomDiscoverySnapshot: Sendable {
     public let isStopped: Bool
 }
 
-/// One polling task and bounded, tracked probes. The vendor's
-/// GuestListing uses an unbounded AsyncStream, so it is deliberately unused.
+/// 使用一个轮询任务和数量有界、可追踪的探测。
+/// 供应商的 GuestListing 使用无界 AsyncStream，因此这里有意不采用。
 public actor V2RoomClusterDiscovery {
     private let system: ClusterSystem
     private let client: V2RoomClusterClient
@@ -186,7 +186,7 @@ public actor V2RoomClusterDiscovery {
         for peer in configuration.peers {
             guard accepting, !Task.isCancelled else { return }
             let found = await system.receptionist.lookup(V2RoomDiscoveryBeacon.key(for: peer.hostID))
-            // Check cardinality before sorting, probing, or creating a child task.
+            // 在排序、探测或创建子任务前先检查数量上限。
             guard found.count <= configuration.maximumCandidatesPerHost else {
                 oversizedLookups &+= 1
                 await markUnhealthy(peer)
@@ -235,8 +235,8 @@ public actor V2RoomClusterDiscovery {
             } else {
                 await markUnhealthy(peer)
                 await downFailedNodeIfSafe(peer)
-                // Cluster.Node includes a process incarnation. Rejoin the
-                // configured endpoint when the old process disappears.
+                // Cluster.Node 包含进程实例标识。旧进程消失后，
+                // 重新加入配置的端点。
                 if ContinuousClock.now >= nextJoinAllowed[peer.hostID, default: .now] {
                     system.cluster.join(host: peer.address, port: peer.port)
                     nextJoinAllowed[peer.hostID] = .now + .seconds(5)
@@ -273,9 +273,8 @@ public actor V2RoomClusterDiscovery {
         )
     }
 
-    /// A timed-out caller leaves the real remote-call task in this bounded
-    /// registry until it actually exits. No new poll can hide a hung call by
-    /// starting unbounded replacement tasks.
+    /// 调用方超时后，真实的远程调用任务仍留在此有界注册表中，直至实际退出。
+    /// 新的轮询不能通过无限创建替代任务掩盖卡住的调用。
     private func boundedAdvertisement(_ beacon: V2RoomDiscoveryBeacon,
                                       challenge: UUID) async throws -> V2ActorSignedPacket {
         guard probes.count < configuration.maximumConcurrentProbes else {
@@ -287,9 +286,8 @@ public actor V2RoomClusterDiscovery {
             let operation = Task { [weak self] in
                 let result: Result<V2ActorSignedPacket, any Error>
                 do {
-                    // Keep the transport's own bound slightly beyond the
-                    // waiting caller's deadline so timeout never makes the
-                    // still-running RPC disappear from the registry.
+                    // 传输自身的截止时间略晚于等待中的调用方，
+                    // 避免超时让仍在运行的 RPC 从注册表中消失。
                     result = .success(try await RemoteCall.with(
                         timeout: transportTimeout) {
                         try await beacon.advertise(challenge)
@@ -341,9 +339,8 @@ public actor V2RoomClusterDiscovery {
               let verifiedAt = lastVerifiedAt[peer.hostID],
               verifiedAt.duration(to: .now) >= configuration.failedHostGrace,
               await client.suspendUnreachableHost(descriptor.identity) else { return }
-        // This retires only Cluster's old physical association after a grace
-        // period with no authenticated response or outstanding application
-        // work. It never releases or steals a room's DB activation lease.
+        // 只有在宽限期内既无已认证响应、也无未完成应用工作时，
+        // 才退役 Cluster 的旧物理关联。绝不会释放或抢占房间的数据库激活租约。
         failedNodesDowned[peer.hostID] = oldNode
         system.cluster.down(member: .init(node: oldNode, status: .up))
         system.cluster.join(host: peer.address, port: peer.port)
@@ -355,8 +352,8 @@ public actor V2RoomClusterDiscovery {
         var stillPending: [RetiredNode] = []
         for retired in pendingDown {
             if await client.retiredIdentityIsDrained(retired.identity) {
-                // Construct the exact old Node identity. The endpoint-only
-                // overload could accidentally down its new incarnation.
+                // 构造旧 Node 的精确标识。仅凭端点的重载方法
+                // 可能意外地把新实例标记为下线。
                 system.cluster.down(member: .init(node: retired.node, status: .up))
             } else {
                 stillPending.append(retired)

@@ -69,8 +69,8 @@ public struct PostgresV2ForwardMediaImportStore: Sendable {
             }
             let currentTime = try V2PostgresTimestamp(date: now)
             let export = try inbox.export
-            // Check current target permissions before spending object I/O.
-            // Acceptance repeats this check after all files become ready.
+            // 在执行对象存储 I/O 前检查当前目标权限。
+            // 所有文件就绪后，接受阶段会重复此检查。
             guard try await sql.raw("SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: export.intent.targetRoomID) FOR UPDATE").first() != nil else { throw V2ForwardInboxError.targetNotFound }
             try await v2AssertForwardInboxOwner(.init(export: export, mediaIDs: []), sql: sql)
             guard let actor = try await sql.raw("""

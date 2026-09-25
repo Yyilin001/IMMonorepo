@@ -21,9 +21,8 @@ public struct V2RoomActivationDrainResult: Sendable {
     public let remainingRooms: Int
 }
 
-/// Owns bounded activation, lease renewal and retirement for one process
-/// incarnation. Every callback is checked against a local generation and the
-/// complete database token before it can mutate a room entry.
+/// 负责一个进程实例的有界激活、租约续期和退役。
+/// 每个回调在修改房间条目前，都要与本地代次和完整数据库令牌核对。
 public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Sendable> {
     private let identity: V2ActorHostIdentity
     private let leaseStore: any V2RoomActivationLeaseStore
@@ -77,17 +76,16 @@ public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Senda
         )
     }
 
-    /// A local receptionist may reconcile strong actor references against this
-    /// bounded authoritative set. The complete token prevents stale callbacks
-    /// from deleting a replacement activation.
+    /// 本地接待组件可依据此有界权威集合核对 Actor 的强引用。
+    /// 完整令牌可防止过期回调删除替代的激活实例。
     public func readyTokens() -> [V2RoomActivationToken] {
         entries.values.compactMap { entry in
             entry.phase == .ready && isSafe(entry) ? entry.token : nil
         }
     }
 
-    /// One local observer receives a bounded, coalesced change signal and then
-    /// reconciles `readyTokens()`. Slow observers cannot block renewal or SQL.
+    /// 单个本地观察者接收有界且合并后的变更信号，随后核对 `readyTokens()`。
+    /// 缓慢的观察者不能阻塞续期或 SQL。
     public func changes() -> AsyncStream<UInt64> {
         changeObserver?.continuation.finish()
         let id = UUID()
@@ -251,9 +249,8 @@ public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Senda
         return aborted
     }
 
-    /// A duplicate completion never invalidates executor state twice. The
-    /// barrier stays held until invalidation finishes; only then can the lane
-    /// finish and admit the next turn.
+    /// 重复的完成通知不会让执行器状态失效两次。屏障一直保持到失效操作结束；
+    /// 之后通道才可完成并接受下一轮次。
     public func finishReservation(
         _ grant: V2RoomReservation,
         completion: V2RoomReservationCompletion
@@ -273,8 +270,8 @@ public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Senda
                                                    generation: entry.generation, token: grant.token) }
             return false
         }
-        // Caller cancellation cannot abbreviate executor invalidation or turn
-        // an unknown SQL outcome into a safe barrier release.
+        // 调用方取消不能缩短执行器失效流程，
+        // 也不能把结果不明的 SQL 转成可安全释放的屏障。
         let invalidation = Task.detached { await executor.invalidateReservation(grant) }
         await invalidation.value
         guard entries[grant.token.roomID] === entry,
@@ -289,8 +286,8 @@ public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Senda
         return finished
     }
 
-    /// Closes admission before yielding to any lane. Accepted calls and
-    /// reservations retain their lease until their transaction finishes.
+    /// 在向任何通道让出执行权前关闭准入。已接受的调用和预留
+    /// 继续持有租约，直到其事务结束。
     public func beginDrain() async {
         guard accepting else { return }
         accepting = false
@@ -358,8 +355,8 @@ public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Senda
             case .acquired(let lease):
                 guard lease.token.roomID == roomID, lease.token.owner == entry.owner,
                       lease.token.host == identity else {
-                    // Even a broken store response owns a possibly committed
-                    // token. Keep capacity and retry its conditional release.
+                    // 即使存储响应损坏，也可能持有已提交的令牌。
+                    // 保留容量，并重试按条件释放。
                     entry.token = lease.token
                     entry.lease = lease
                     beginRetirement(entry, uncertain: true)
@@ -390,7 +387,7 @@ public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Senda
                         token: lease.token, configuration: configuration, budget: budget,
                         classify: classify, execute: executor.execute,
                         onUncertain: { [weak self] token in
-                            // Never await retirement from the lane consumer.
+                            // 通道消费方绝不等待退役完成。
                             await self?.scheduleLeaseLoss(roomID: token.roomID,
                                                           generation: generation, token: token)
                         }
@@ -410,8 +407,8 @@ public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Senda
         } catch {
             guard entries[roomID] === entry else { return }
             if error as? V2RoomActivationLeaseError == .outcomeUnknown {
-                // A committed lease may exist but there is no returned token
-                // to restore or release. It remains occupied until DB expiry.
+                // 可能已有提交的租约，却没有返回令牌可供恢复或释放。
+                // 该租约会保持占用直到数据库判定过期。
                 finishPending(entry, result: .failure(V2RoomCallFailure.outcomeUnknown))
                 return
             }
@@ -456,9 +453,8 @@ public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Senda
         return true
     }
 
-    /// A DB observation gives a duration, never a local-wall-clock expiry.
-    /// Starting at the beginning of the DB call includes network and lock wait
-    /// conservatively in the elapsed time.
+    /// 数据库观测只提供时长，不提供本地墙上时钟的过期时刻。
+    /// 从数据库调用开始计时，会保守地将网络与等锁时间计入已用时长。
     private func safetyDeadline(_ lease: V2RoomActivationLease,
                                 callStartedAt: ContinuousClock.Instant) -> ContinuousClock.Instant? {
         let milliseconds = Int64((lease.expiresAt.timeIntervalSince(lease.databaseObservedAt) * 1_000).rounded(.down))

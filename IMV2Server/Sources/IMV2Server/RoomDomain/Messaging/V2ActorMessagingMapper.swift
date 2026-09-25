@@ -2,7 +2,7 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// Structural checks made before invoking domain constructors with preconditions.
+/// 在调用带前置条件的领域构造器前执行结构检查。
 public enum V2ActorMessagingMappingError: Error, Equatable, Sendable {
     case invalidSequence
     case invalidMembershipRevision
@@ -71,7 +71,7 @@ public extension V2ActorSendMessageWire {
                   entities: value.entities, replyTo: value.replyTo)
     }
 
-    /// Local executor supplies its own text budget. Caller must still authenticate actorUserID.
+    /// 本地执行器自行提供文本预算；调用方仍须认证 actorUserID。
     func toAuthenticated(limits: V2MessageCommandLimits) throws -> V2AuthenticatedSendMessage {
         let targets = mentions.map { $0.toDomain() }
         _ = try V2SendMessageCommand(roomID: roomID, senderUserID: actorUserID,

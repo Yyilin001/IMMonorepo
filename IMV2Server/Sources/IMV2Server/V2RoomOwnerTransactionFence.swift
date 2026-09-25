@@ -6,9 +6,9 @@ import SQLKit
 /// 房间归属栅栏校验错误。
 public enum V2RoomOwnerFenceError: Error, Equatable, Sendable { case ownerChanged }
 
-/// PostgreSQL 16 cannot bound an entire transaction with transaction_timeout.
-/// These LOCAL limits bound each lock wait, statement, and idle interval. The
-/// caller must also give the enclosing business operation a finite deadline.
+/// PostgreSQL 16 无法用 transaction_timeout 限制整个事务。
+/// 这些 LOCAL 限制分别约束锁等待、语句和空闲间隔；
+/// 调用方还必须为外围业务操作设置有限的截止时间。
 public struct V2RoomActivationSQLTimeouts: Sendable, Equatable {
     public let lockMilliseconds: Int
     public let statementMilliseconds: Int
@@ -27,10 +27,10 @@ public struct V2RoomActivationSQLTimeouts: Sendable, Equatable {
     public static let `default` = try! Self()
 }
 
-/// Set inside the same transaction that acquires the room fence.
+/// 在获取房间围栏的同一事务中设置。
 func v2SetRoomActivationSQLTimeouts(_ timeouts: V2RoomActivationSQLTimeouts, sql: any SQLDatabase) async throws {
-    // All three LOCAL settings take effect before the next lock or business
-    // statement. One round trip preserves the same transaction-scoped limits.
+    // 三项 LOCAL 设置均在下一次加锁或业务语句前生效。
+    // 一次往返即可维持相同的事务范围限制。
     try await sql.raw("""
         SELECT set_config('lock_timeout', \(bind: "\(timeouts.lockMilliseconds)ms"), true),
                set_config('statement_timeout', \(bind: "\(timeouts.statementMilliseconds)ms"), true),
@@ -38,8 +38,8 @@ func v2SetRoomActivationSQLTimeouts(_ timeouts: V2RoomActivationSQLTimeouts, sql
         """).run()
 }
 
-/// Existing owner-only path remains for V1 callers until every business writer
-/// passes a concrete activation token. It does not grant virtual actor authority.
+/// 在所有业务写入方都传入具体激活令牌前，为 V1 调用方保留既有的
+/// 仅所有者路径。它不会授予虚拟 Actor 权限。
 func v2RequireRoomOwner(roomID: UUID, route: V2RoomShardRoute, sql: any SQLDatabase, schema: String = "im_v2") async throws {
     v2PreconditionSQLSchema(schema)
     guard let room = try await sql.raw("""
@@ -49,20 +49,17 @@ func v2RequireRoomOwner(roomID: UUID, route: V2RoomShardRoute, sql: any SQLDatab
     else { throw V2RoomOwnerFenceError.ownerChanged }
 }
 
-/// Business writes call this inside their owner transaction, after any credit
-/// refill/pre-reservation transaction has committed and before replay or writes.
-/// A separate room-credit reservation must bind its available balance to this
-/// same activation token; the business transaction rechecks admission window,
-/// lease generation, and credit identity after this fence. Never wait for a
-/// refill on another connection while holding a business fence, and never
-/// transfer old-token credit to a successor. This helper does not reserve or
-/// refund credit and does not, by itself, cover legacy writer call sites.
-/// The room lock is NO KEY UPDATE, compatible with the credit reserve's KEY
-/// SHARE. All rooms are locked in canonical UUID order; validation occurs only after
-/// the final lock, against the database clock at that point. Holding the locks
-/// through commit means a newly committed activation epoch excludes any later
-/// commit from an old token. An old transaction that held its fence first may
-/// commit before the successor acquires its epoch.
+/// 业务写入在其所有者事务内调用此方法：先等额度补充或预留事务提交，
+/// 再于重放或写入前执行。独立的房间额度预留必须把可用余额绑定到同一激活令牌；
+/// 业务事务通过此围栏后，会重新检查准入窗口、租约代次和额度身份。
+/// 持有业务围栏时，绝不能在另一连接上等待额度补充，
+/// 也不能把旧令牌的额度转给后继令牌。
+/// 此辅助方法既不预留也不退还额度，单靠它也无法覆盖旧写入调用点。
+/// 房间锁使用 NO KEY UPDATE，与额度预留的 KEY SHARE 兼容。
+/// 所有房间按规范 UUID 顺序加锁；仅在取得最后一把锁后，
+/// 才按当时的数据库时钟进行校验。锁一直持有到提交，
+/// 因而新提交的激活纪元会排除旧令牌的后续提交。
+/// 若旧事务先取得围栏，仍可在后继实例取得其纪元前提交。
 func v2RequireRoomActivations(
     tokens: [V2RoomActivationToken],
     sql: any SQLDatabase,
@@ -89,8 +86,8 @@ func v2RequireRoomActivations(
             """).first(decoding: V2RoomActivationPersistenceRow.self)
         activationRows.append((token, row))
     }
-    // A lock wait may cross expiry. Never use now()/CURRENT_TIMESTAMP, which
-    // PostgreSQL fixes at transaction start.
+    // 锁等待可能跨过过期时刻。不能使用 PostgreSQL 固定在事务开始时的
+    // now()/CURRENT_TIMESTAMP。
     let observed = try await v2RoomActivationDatabaseClock(sql: sql)
     for (token, row) in activationRows {
         guard let row, row.matches(token) else { throw V2RoomActivationLeaseError.activationChanged }

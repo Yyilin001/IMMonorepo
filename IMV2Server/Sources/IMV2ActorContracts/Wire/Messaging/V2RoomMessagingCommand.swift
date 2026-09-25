@@ -1,7 +1,7 @@
 import Foundation
 import IMV2Core
 
-/// Room messaging operations carry identity, never server-generated event IDs or clocks.
+/// 房间消息操作携带身份，不携带服务器生成的事件 ID 或时钟。
 public enum V2ActorMentionTargetWire: Codable, Equatable, Sendable {
     case user(UserID)
     case everyone
@@ -88,7 +88,7 @@ public struct V2ActorReactionMessageWire: Codable, Equatable, Sendable {
     }
 }
 
-/// Discriminator for the D1 room-scoped command family.
+/// D1 房间范围命令族的判别字段。
 public enum V2RoomMessagingCommand: Codable, Equatable, Sendable {
     case send(V2ActorSendMessageWire)
     case edit(V2ActorEditMessageWire)
@@ -119,6 +119,6 @@ public enum V2RoomMessagingCommand: Codable, Equatable, Sendable {
         case .reaction(let value): .reaction(value.operationID)
         }
     }
-    /// All four operations have a persisted, scoped idempotency identity.
+    /// 四种操作都具有持久化、限定范围的幂等身份。
     public var retryPolicy: V2RoomReplayPolicy { .durableIdempotent }
 }

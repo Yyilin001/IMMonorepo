@@ -41,7 +41,9 @@ def launch(label):
     wait(lambda:'IM V2 metrics listener bound' in (DIR/(label+'.log')).read_text(),20)
 def stop(sig):
     global process,output
-    process.send_signal(sig);code=process.wait(timeout=15);process=None;output.close();return code
+    # A blocked room Actor may use its 60-second drain window after Gateway
+    # workers finish; 15 seconds incorrectly treats a valid graceful stop as a hang.
+    process.send_signal(sig);code=process.wait(timeout=90);process=None;output.close();return code
 room,sender,recipient=[str(uuid.uuid4()) for _ in range(3)]
 sender,recipient=sorted([sender,recipient])
 def seed():

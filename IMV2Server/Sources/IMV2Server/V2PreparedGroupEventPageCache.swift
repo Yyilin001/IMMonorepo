@@ -222,11 +222,10 @@ public final class V2PreparedGroupEventPageCache: Sendable {
         precondition(key.protocolVersion >= 21)
         let wantsCompressed = compression == .zlib
         let shard = shards[Self.shardIndex(for: key, count: shards.count)]
-        // Encoding a cold representation inside its shard is intentional:
-        // the first caller becomes the single-flight producer while followers
-        // for the same immutable page wait and then hit. Independent shards
-        // continue in parallel, avoiding both duplicate serialization and the
-        // process-wide mutex that a hot group can otherwise monopolize.
+        // 有意在分片内部编码未预热的表示：首位调用方成为单飞生产者，
+        // 同一不可变页面的后续调用方等待后命中缓存。
+        // 独立分片继续并行，既避免重复序列化，
+        // 也避免热群组独占进程级互斥锁。
         let representation = try shard.state.withLock { state -> Representation in
             if let node = state.nodes[key],
                let cached = wantsCompressed ? node.compressed : node.plain {

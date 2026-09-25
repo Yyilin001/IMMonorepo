@@ -7,18 +7,15 @@ import PostgresNIO
 import SQLKit
 import Synchronization
 
-/// One room transaction attempt with a monotonic total deadline. The caller
-/// supplies the already selected owner database; retry remains a separate
-/// decision after this attempt has completely settled.
+/// 单次房间事务尝试使用单调时钟计算总截止时间。调用方提供已选定的
+/// 所有者数据库；本次尝试完全结束后，再单独决定是否重试。
 ///
-/// PostgreSQL 16 has no transaction_timeout. LOCAL SQL limits still bound each
-/// individual wait or statement; this watchdog closes only the borrowed
-/// physical connection when the total deadline expires. This call
-/// does not complete until the body, watchdog, and any
-/// close have settled. A caller timeout therefore cannot release a live SQL
-/// transaction into the pool or run later statements on its connection.
-/// The body must not issue transaction-control SQL or retry an aborted
-/// transaction on this borrowed handle; retries need a fresh invocation.
+/// PostgreSQL 16 没有 transaction_timeout。LOCAL SQL 限制仍约束每次等待
+/// 或语句；总截止时间到达时，看门狗只关闭借用的物理连接。
+/// 方法会等待主体、看门狗及可能的关闭操作全部结束。因此调用方超时后，
+/// 不会把仍活动的 SQL 事务放回连接池，也不会在其连接上执行后续语句。
+/// 主体不能在借用的连接上执行事务控制 SQL，或重试已中止的事务；
+/// 重试必须重新调用此方法。
 func v2WithRoomActivationTransaction<Value: Sendable>(
     database: any Database,
     deadline: ContinuousClock.Instant,
@@ -32,9 +29,8 @@ func v2WithRoomActivationTransaction<Value: Sendable>(
     }
 }
 
-/// The context is minted only after BEGIN and the first LOCAL timeout setting.
-/// It owns the exact borrowed SQL handle; callers cannot substitute a pooled
-/// connection when using its combined room fence.
+/// 只在执行 BEGIN 和首次设置 LOCAL 超时后创建上下文。
+/// 它持有实际借用的 SQL 连接；使用其组合房间围栏时，调用方不能替换为池中其他连接。
 func v2WithRoomActivationTransactionWithContext<Value: Sendable>(
     database: any Database,
     deadline: ContinuousClock.Instant,
@@ -60,14 +56,14 @@ private func v2WithRoomActivationTransactionCore<Value: Sendable>(
         throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
     }
     let state = V2RoomPhysicalTransactionState()
-    // Start before borrowing: an exhausted pool must not reset the absolute
-    // budget. This task is joined before the public call can return.
+    // 在借用连接前启动：连接池耗尽不能重置绝对时间预算。
+    // 公开调用返回前必须等待此任务结束。
     let watchdog = Task<Void, Never> {
         do {
             try await Task.sleep(until: deadline, clock: .continuous)
             state.stop(.deadline)
         } catch is CancellationError {
-            // Completed operation cancels the timer.
+            // 操作完成后取消计时器。
         } catch {
             state.stop(.deadline)
         }
@@ -78,8 +74,8 @@ private func v2WithRoomActivationTransactionCore<Value: Sendable>(
               let sql = borrowed as? any SQLDatabase else {
             return borrowed.eventLoop.makeFailedFuture(V2RoomWriteStoreError.corruptPersistenceState)
         }
-        // Fluent's borrowed wrapper reports inTransaction=true. Calling its
-        // `transaction` method would skip BEGIN, so drive the explicit controls.
+        // Fluent 的借用包装器报告 inTransaction=true；调用其 `transaction`
+        // 方法会跳过 BEGIN，因此这里显式控制事务。
         return postgres.withConnection { physical in
             physical.eventLoop.makeFutureWithTask {
                 state.install(connection: physical)
@@ -90,9 +86,9 @@ private func v2WithRoomActivationTransactionCore<Value: Sendable>(
             }
         }
     }
-    // EventLoopFuture.get() deliberately does not propagate Task cancellation
-    // into the future's makeFutureWithTask body. Signal the tracked physical
-    // connection directly, then still await that future before releasing it.
+    // EventLoopFuture.get() 有意不把 Task 取消传给 future 的
+    // makeFutureWithTask 主体。直接通知被跟踪的物理连接，
+    // 并在释放前继续等待该 future 完成。
     let outcome: Result<Value, any Error>
     do {
         outcome = .success(try await withTaskCancellationHandler {
@@ -127,7 +123,7 @@ private func v2ExecuteBorrowedRoomTransaction<Value: Sendable>(
     }
     do {
         try await control.beginTransaction().get()
-        // No operation advisory or room lock precedes these LOCAL limits.
+        // 这些 LOCAL 限制必须先于操作咨询锁和房间锁设置。
         try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
         let context = needsContext
             ? V2ConfiguredRoomFenceContext(sql: sql, timeouts: timeouts, state: state) : nil
@@ -147,8 +143,8 @@ private func v2ExecuteBorrowedRoomTransaction<Value: Sendable>(
             state.confirmCommit()
             return value
         } catch {
-            // PostgreSQL proves a deadlock/serialization rollback even at
-            // deferred COMMIT. Every other missing COMMIT ACK is ambiguous.
+            // 即使 COMMIT 被延后，PostgreSQL 也能证明死锁或序列化冲突已回滚。
+            // 其他未收到 COMMIT 确认的情况都属于结果不明。
             if v2PostgresFailureDisposition(error) == .retryTransaction {
                 state.confirmRollback()
                 throw error
@@ -165,8 +161,7 @@ private func v2ExecuteBorrowedRoomTransaction<Value: Sendable>(
             try await control.rollbackTransaction().get()
             state.confirmRollback()
         } catch {
-            // COMMIT was never sent. Only a settled physical close proves
-            // this transaction cannot subsequently be committed.
+            // COMMIT 从未发出。只有物理连接关闭完成，才能证明事务之后不会提交。
             state.stop(.rollbackFailure)
             try await state.settleClose()
         }
@@ -175,19 +170,17 @@ private func v2ExecuteBorrowedRoomTransaction<Value: Sendable>(
             throw state.rollbackFailure
         }
         if v2PostgresFailureDisposition(error) == .unavailable {
-            // A SQL lock/statement timeout happened before COMMIT and this
-            // transaction's ROLLBACK was acknowledged. Preserve that proof
-            // for the room turn instead of reporting an unknown outcome.
+            // SQL 锁或语句在 COMMIT 前超时，且该事务的 ROLLBACK 已获确认。
+            // 为房间轮次保留这一证明，不将结果报告为未知。
             throw V2RoomCallFailure.rolledBack(.unavailable)
         }
         throw error
     }
 }
 
-/// Internal transaction-bound authority for the combined room lock and fence.
-/// Only the physical transaction can construct it. The active-use guard makes
-/// an escaped or concurrently used context fail closed rather than borrowing a
-/// connection after its enclosing transaction has returned.
+/// 组合房间锁与围栏所用的内部事务绑定权限。只有物理事务能创建它。
+/// 活动使用检查确保逃逸或并发使用的上下文以安全方式失败，
+/// 而不是在外围事务返回后重新借用连接。
 final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
     private struct Lifecycle: Sendable {
         var active = true
@@ -208,10 +201,9 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
         lifecycle = Mutex(Lifecycle())
     }
 
-    /// This one-shot operation uses only the SQL handle that the enclosing
-    /// physical transaction supplied. The transaction body must await all
-    /// its SQL before returning; invalidate closes an improperly outstanding
-    /// operation instead of allowing COMMIT and later reuse.
+    /// 此一次性操作只使用外围物理事务提供的 SQL 连接。
+    /// 事务主体返回前必须等待所有 SQL 完成；若仍有未结束的操作，
+    /// invalidate 会关闭连接，避免 COMMIT 和后续复用。
     func requireSelectedOwnersAndActivations(
         roomIDs: [UUID],
         expectedRoutes: [UUID: V2RoomShardRoute]?,
@@ -240,9 +232,8 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
             throw V2RoomOwnerFenceError.ownerChanged
         }
         if timeouts != configuredTimeouts {
-            // The optimization is valid only for the exact LOCAL policy the
-            // transaction installed. A different policy takes the complete
-            // original fence after setting its limits before the first lock.
+            // 此优化只适用于事务设置的确切 LOCAL 策略。
+            // 其他策略会在首次加锁前设置限制，然后执行完整的原始围栏检查。
             try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
         }
         let roomIDsJSON = String(decoding: try JSONEncoder().encode(
@@ -252,8 +243,8 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
             WHERE room_id IN (SELECT value::uuid FROM jsonb_array_elements_text(\(bind: roomIDsJSON)::jsonb))
             ORDER BY room_id FOR NO KEY UPDATE
             """).all(decoding: V2ConfiguredRoomOwnerRow.self)
-        // Preserve the ordinary writer's error priority: kind before route
-        // row-count/owner, then the exact activation token and lease.
+        // 保持普通写入路径的错误优先级：先检查类型，再检查路由行数和所有者，
+        // 最后检查精确激活令牌及租约。
         if let expectedKinds,
            rows.contains(where: { row in
                expectedKinds[row.roomID].map { $0 != row.kind } ?? false
@@ -283,8 +274,8 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
             return (room, token)
         }
         if timeouts != configuredTimeouts {
-            // Full default path: it re-applies LOCAL limits and independently
-            // locks/verifies room rows, then leases and DB clock.
+            // 完整默认路径：重新设置 LOCAL 限制，独立加锁并校验房间记录，
+            // 再检查租约和数据库时钟。
             try await v2RequireRoomActivations(tokens: orderedTokens.map { $0.1 },
                                                sql: sql, timeouts: timeouts)
             return
@@ -297,8 +288,8 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
                 """).first(decoding: V2RoomActivationPersistenceRow.self)
             leases.append((token, row))
         }
-        // clock_timestamp must run after every room and lease lock; a wait
-        // can cross expiry, whereas now() is fixed at transaction start.
+        // clock_timestamp 必须在取得所有房间锁和租约锁后调用；
+        // 等锁期间可能越过过期时间，而 now() 固定在事务开始时。
         let observed = try await v2RoomActivationDatabaseClock(sql: sql)
         for (token, row) in leases {
             guard let row, row.matches(token) else {
@@ -310,8 +301,8 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
         }
     }
 
-    /// A primary-key lookup has only one row, so this retains the same room
-    /// and lease lock order without constructing the multi-room lock plan.
+    /// 主键查询最多返回一行，因此无须构造多房间加锁方案，
+    /// 也能保持相同的房间锁与租约锁顺序。
     private func requireSingleOwnerAndActivation(
         roomID: UUID,
         expectedRoutes: [UUID: V2RoomShardRoute]?,
@@ -325,8 +316,8 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
             SELECT room_id, room_shard_id, owner_epoch, room_kind FROM im_v2.rooms
             WHERE room_id = \(bind: roomID) FOR NO KEY UPDATE
             """).first(decoding: V2ConfiguredRoomOwnerRow.self)
-        // Preserve the collection path's error priority: kind, presence and
-        // selected route, then the immutable token and current lease.
+        // 保持集合路径的错误优先级：类型、记录是否存在及选定路由，
+        // 然后才是不可变令牌和当前租约。
         if let room, let kind = expectedKinds?[roomID], kind != room.kind {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
@@ -347,7 +338,7 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
             SELECT activation_epoch, owner_shard_id, owner_epoch, host_id, host_incarnation_id, expires_at
             FROM im_v2.room_activation_leases WHERE room_id = \(bind: roomID) FOR UPDATE
             """).first(decoding: V2RoomActivationPersistenceRow.self)
-        // Observe the database clock only after both locks were acquired.
+        // 取得两把锁后才读取数据库时钟。
         let observed = try await v2RoomActivationDatabaseClock(sql: sql)
         guard let lease, lease.matches(token) else {
             throw V2RoomActivationLeaseError.activationChanged

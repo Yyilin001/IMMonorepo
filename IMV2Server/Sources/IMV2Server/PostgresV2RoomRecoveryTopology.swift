@@ -3,8 +3,8 @@ import FluentKit
 import Foundation
 import SQLKit
 
-/// Combines deployment identity with a transactionally updated routing fence.
-/// Use the control database, not an owner replica or a cached routing snapshot.
+/// 将部署身份与事务更新的路由栅栏结合起来。
+/// 使用控制数据库，不使用所有者副本或缓存的路由快照。
 public struct PostgresV2RoomRecoveryTopology: V2RoomRecoveryTopologyReading {
     private let database: any Database
     private let schema: String
@@ -22,7 +22,7 @@ public struct PostgresV2RoomRecoveryTopology: V2RoomRecoveryTopologyReading {
         self.database = database
         self.schema = schema
         self.stores = stores
-        // Length-delimited encoding prevents ambiguous configuration identities.
+        // 长度限定编码可避免配置身份产生歧义。
         let encoded = try JSONEncoder().encode(orderedStoreIdentities)
         self.configurationDigest = SHA256.hash(data: encoded).map { String(format: "%02x", $0) }.joined()
     }

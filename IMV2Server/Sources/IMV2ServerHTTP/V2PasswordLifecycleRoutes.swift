@@ -5,8 +5,8 @@ import Vapor
 import HTTPTypes
 import RoutingKit
 
-/// Public factor endpoints protected by the trusted edge proof and shared address budget.
-/// Password-bearing operations additionally consume the canonical account's attempt budget.
+/// 公开的认证因素接口受可信边缘证明和共享地址限额保护。
+/// 涉及密码的操作还会消耗规范账号的尝试次数限额。
 public struct V2PasswordLifecycleRoutes: Sendable {
     private let service: any V2PasswordLifecycleManaging
     public init(service: any V2PasswordLifecycleManaging) { self.service = service }

@@ -304,15 +304,14 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
                 guard try await sql.raw("SELECT 1 FROM im_v2.account_password_credentials WHERE user_id = \(bind: userUUID) AND credential_revision = \(bind: revision)").first() != nil else { return .deviceUnavailable }
             }
             guard !(try await isAccountDisabled(sql, userID: userUUID)) else { return .deviceUnavailable }
-            // Special accounts are operated only through the trusted service
-            // boundary. Never mint a client/device credential that could make
-            // one available to the public gateway.
+            // 特殊账号只可通过可信服务边界操作。
+            // 绝不能签发可让它通过公共网关使用的客户端或设备凭据。
             guard !(try await isSpecialAccount(sql, userID: userUUID)) else { return .deviceUnavailable }
             try await lock(sql, key: "register:" + deviceUUID.uuidString)
 
             let existingDevice = try await sql.raw("SELECT user_id, revoked_at, session_expires_at FROM im_v2.auth_devices WHERE device_id = \(bind: deviceUUID) FOR UPDATE").first(decoding: DeviceRow.self)
-            // Locks may have waited across a clock correction. Keep this
-            // fresh observation authoritative and validate it before binding.
+            // 等锁期间可能发生时钟校正。以此次新观测为权威，
+            // 并在绑定前校验它。
             let issuedAt = now()
             guard v2PostgresTimestampCanEncode(issuedAt) else { throw V2DeviceCredentialServiceError.unavailable }
             if let cancellation, try await !V2PostgresDeviceRegistrationCancellationService.permitsIssuance(sql, request: cancellation, at: issuedAt) {
@@ -355,8 +354,8 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
                 try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, display_name, platform, last_active_at, created_at, session_expires_at) VALUES (\(bind: userUUID), \(bind: deviceUUID), \(bind: metadata.displayName), \(bind: metadata.platform), \(bind: issuedAt), \(bind: issuedAt), \(bind: sessionExpiresAt))").run()
             } else {
                 let maximumDeadline = issuedAt.addingTimeInterval(maximumSessionLifetime)
-                // PostgreSQL LEAST ignores NULL. If the unused upper bound is
-                // outside its range, retain the existing native session limit.
+                // PostgreSQL 的 LEAST 会忽略 NULL。若未使用的上界超出其范围，
+                // 则保留现有的原生会话限制。
                 let sessionLimit = v2PostgresTimestampCanEncode(maximumDeadline) ? maximumDeadline : nil
                 try await sql.raw("UPDATE im_v2.auth_devices SET display_name = \(bind: metadata.displayName), platform = \(bind: metadata.platform), last_active_at = GREATEST(last_active_at, \(bind: issuedAt)), session_expires_at = LEAST(session_expires_at, \(bind: sessionLimit)::timestamptz) WHERE user_id = \(bind: userUUID) AND device_id = \(bind: deviceUUID)").run()
             }
@@ -398,8 +397,8 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
             }
             try await lock(sql, key: "refresh:" + deviceUUID.uuidString)
             let device = try await sql.raw("SELECT user_id, revoked_at, session_expires_at FROM im_v2.auth_devices WHERE device_id = \(bind: deviceUUID) FOR UPDATE").first(decoding: DeviceRow.self)
-            // Re-observe after every lock that can delay the expiry decision;
-            // the same fresh time drives the response and all rotation writes.
+            // 每取得一把可能延迟过期判断的锁后，都重新读取时间；
+            // 响应和所有轮换写入使用同一新观测值。
             issuedAt = now()
             guard v2PostgresTimestampCanEncode(issuedAt) else { throw V2DeviceCredentialServiceError.unavailable }
             guard let device,
@@ -415,9 +414,8 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
                       prior.userID == userUUID,
                       prior.requestRefreshHMAC == incomingRefreshHMAC
                 else {
-                    // An operation-ID collision does not prove possession or
-                    // reuse by itself. A separately retained consumed digest
-                    // may still prove that this value belongs to the family.
+                    // 操作 ID 冲突本身不能证明凭据持有或重复使用。
+                    // 单独保留的已消耗摘要仍可能证明该值属于同一凭据族。
                     if try await isConsumedRefreshCredential(
                         sql,
                         userID: userUUID,
@@ -434,8 +432,8 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
                     return .terminalRejection
                 }
                 guard prior.replayExpiresAt > issuedAt else {
-                    // The digest is known to have rotated this family, but the
-                    // bounded encrypted response is no longer replayable.
+                    // 已知此摘要触发过该凭据族的轮换，
+                    // 但有界加密响应已无法重放。
                     try await revokeDevice(sql, userID: userUUID, deviceID: deviceUUID, at: issuedAt)
                     return .terminalRejection
                 }
@@ -454,9 +452,8 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
                     deviceID: deviceUUID,
                     refreshHMAC: incomingRefreshHMAC
                 ) {
-                    // Rotation history is the proof required to classify this
-                    // request as refresh-token reuse. Unknown random values
-                    // remain a uniform, state-preserving rejection.
+                    // 判定请求重复使用刷新令牌，需要轮换历史作为证据。
+                    // 未知随机值仍统一拒绝，且不改变状态。
                     try await revokeDevice(sql, userID: userUUID, deviceID: deviceUUID, at: issuedAt)
                 }
                 return .terminalRejection
@@ -526,11 +523,10 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
     }
 
     private func revokeDevice(_ sql: any SQLDatabase, userID: UUID, deviceID: UUID, at now: Date) async throws {
-        // Anchor every mutation to an authoritative user/device row. An
-        // unknown or mismatched device must be a terminal no-op: inserting a
-        // revocation event for it violates the event foreign key, while
-        // revoking a refresh session by device ID alone could affect another
-        // account when the request carries the wrong user ID.
+        // 每次修改都必须锚定权威的用户与设备记录。设备未知或不匹配时，
+        // 须以终态无操作结束：为其插入撤销事件会违反事件外键；
+        // 若请求携带错误的用户 ID，仅凭设备 ID 撤销刷新会话
+        // 还可能影响其他账号。
         try await sql.raw("""
             WITH revoked_device AS MATERIALIZED (
                 UPDATE im_v2.auth_devices

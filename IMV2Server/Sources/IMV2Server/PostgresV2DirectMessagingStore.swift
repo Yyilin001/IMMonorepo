@@ -43,9 +43,8 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
             let actorID = try directUUID(command.actorUserID)
             let targetID = try directUUID(command.targetUserID)
             let operationID = try directUUID(command.operationID)
-            // The operation is scoped to the actor, independently of the
-            // target pair. Serialize its lookup before taking a pair lock so
-            // concurrent retries observe the committed room and timestamp.
+            // 操作只限定于操作者，与目标关系无关。取得关系锁前先串行化查询，
+            // 使并发重试能够看到已提交的房间和时间戳。
             let operationLockKey = "v2-direct-room-operation:" + actorID.uuidString.lowercased() + ":" + operationID.uuidString.lowercased()
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: operationLockKey), 0))").run()
             if let existing = try await sql.raw("SELECT target_user_id, room_id, created_at FROM im_v2.direct_room_operations WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)").first(decoding: DirectOperationRow.self) {
@@ -60,11 +59,9 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
             let activeAccountCount = try await sql.raw("SELECT COUNT(*)::int AS value FROM im_v2.public_user_profiles AS profile WHERE (profile.user_id = \(bind: actorID) OR profile.user_id = \(bind: targetID)) AND profile.state = 'active' AND NOT EXISTS (SELECT 1 FROM im_v2.account_disables AS disabled WHERE disabled.user_id = profile.user_id)").first(decoding: DirectCountRow.self)?.value ?? 0
             guard activeAccountCount == 2 else { return .unavailable }
             if let existingPair = try await sql.raw("SELECT pair.room_id, pair.created_at, room.capacity_profile_id FROM im_v2.direct_room_pairs AS pair INNER JOIN im_v2.rooms AS room ON room.room_id = pair.room_id WHERE pair.lower_user_id = \(bind: pair.lower) AND pair.higher_user_id = \(bind: pair.higher) FOR SHARE OF room").first(decoding: DirectPairRow.self) {
-                // A direct pair is globally unique and its room keeps the
-                // immutable capacity profile selected at creation. Do not
-                // return a room that this deployment cannot subsequently
-                // write; callers can retry after the intended profile is
-                // restored in a fresh deployment configuration.
+                // 私聊关系在全局唯一，其房间保留创建时选定的不可变容量配置。
+                // 不能返回当前部署随后无法写入的房间；调用方可在新的部署配置
+                // 恢复预期容量配置后重试。
                 guard existingPair.capacityProfileID == capacityProfile.id else {
                     return .unavailable
                 }
@@ -83,10 +80,8 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
             guard profiles.count == 2,
                   let targetProfile = profiles.first(where: { $0.userID == targetID })
             else { throw V2DirectMessagingStoreError.corruptPersistenceState }
-            // Room creation only observes the immutable lease fence; it does
-            // not mutate the shard pool. Shared row locks let independent
-            // pairs create rooms concurrently while still fencing lease
-            // replacement, which requires an exclusive row lock.
+            // 房间创建只检查不可变的租约围栏，不修改分片池。
+            // 共享行锁允许独立关系并发创建房间，同时仍能阻止需要独占行锁的租约替换。
             guard let lease = try await sql.raw("SELECT lease_id, generation, valid_until FROM im_v2.shard_admission_pools WHERE room_shard_id = \(bind: roomShardID) AND capacity_profile_id = \(bind: capacityProfile.id) FOR SHARE").first(decoding: DirectShardLeaseRow.self), lease.validUntil > now else {
                 return .unavailable
             }
@@ -95,11 +90,9 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
                 INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at)
                 VALUES (\(bind: createdRoomID), \(bind: roomShardID), 0, \(bind: now), \(bind: now))
                 """).run()
-            // Opening a room immediately projects the target's profile to the
-            // actor. Persist that producer-side fact beside the pair so later
-            // sends do not have to rediscover it by scanning compacted and
-            // uncompacted sync history. The projection and marker share this
-            // transaction, so neither can survive without the other.
+            // 打开房间时会立即向操作者投影目标的资料。将该生产端事实与关系一同
+            // 持久化，后续发送便无须扫描已压缩和未压缩的同步历史重新发现它。
+            // 投影与标记共用此事务，因此两者不会单独存活。
             try await sql.raw("""
                 INSERT INTO im_v2.direct_room_pairs
                     (lower_user_id, higher_user_id, room_id, created_at,
@@ -110,9 +103,8 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
                 """).run()
             try await sql.raw("INSERT INTO im_v2.user_direct_send_policy_versions (user_id) VALUES (\(bind: actorID)), (\(bind: targetID)) ON CONFLICT (user_id) DO NOTHING").run()
             try await sql.raw("INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision) VALUES (\(bind: createdRoomID), \(bind: actorID), 'member', 1), (\(bind: createdRoomID), \(bind: targetID), 'member', 1)").run()
-            // A direct room starts at room_sequence 0, so this is a no-op until
-            // the first event exists. Keeping the call here means both members
-            // share the same watermark rule as every other join path.
+            // 私聊房间的 room_sequence 从零开始，因此首个事件出现前此调用无效果。
+            // 保留该调用，使双方成员遵循与其他加入路径相同的水位规则。
             try await v2InitializeNewRoomReadWatermarks(
                 roomID: createdRoomID, now: now, sql: sql
             )
@@ -137,8 +129,8 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
             let actorID = try directUUID(command.actorUserID)
             let operationID = try directUUID(command.operationID)
             let requested = command.permission == .allow
-            // Serialize the replay lookup with this account's preference
-            // transition, including when the policy revision is exhausted.
+            // 将重放查询与该账号的偏好状态转换串行化，
+            // 即使策略修订号已耗尽也一样。
             let lockKey = "v2-stranger-message-preference:" + actorID.uuidString.lowercased()
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             if let existing = try await sql.raw("SELECT allows_stranger_messages, updated_at FROM im_v2.stranger_message_preference_operations WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)").first(decoding: DirectPreferenceOperationRow.self) {
@@ -207,8 +199,8 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
     }
 
     private func insertOperation(actorID: UUID, operationID: UUID, targetID: UUID, roomID: UUID, sql: any SQLDatabase) async throws -> DirectOperationRow {
-        // Copy the pair's native timestamp without decoding and re-encoding it.
-        // Both new-room and existing-room responses then use the committed receipt.
+        // 直接复制关系的原生时间戳，不进行解码和重新编码。
+        // 新房间与既有房间的响应因此都使用已提交回执。
         guard let persisted = try await sql.raw("""
             INSERT INTO im_v2.direct_room_operations (actor_user_id, operation_id, target_user_id, room_id, created_at)
             SELECT \(bind: actorID), \(bind: operationID), \(bind: targetID), pair.room_id, pair.created_at
@@ -234,9 +226,9 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
 
     private func appendDirectRoomProfileProjection(recipientID: UUID, roomID: UUID, profile: DirectPublicProfileRow, sourceEventID: UUID, createdAt: Date, sql: any SQLDatabase) async throws {
         guard profile.revision > 0, v2PostgresTimestampCanEncode(profile.updatedAt) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
-        // All room-event payloads use Foundation's canonical UUID spelling.
-        // Do not let PostgreSQL's UUID-to-text conversion make direct-profile
-        // records lexically differ from messages for the same room.
+        // 所有房间事件载荷均使用 Foundation 的规范 UUID 字符串形式。
+        // 不能让 PostgreSQL 的 UUID 转文本结果，使同一房间的私聊资料记录
+        // 与消息在字符串形式上不一致。
         let wireRoomID = roomID.uuidString
         let wireTargetUserID = profile.userID.uuidString
         try await sql.raw("INSERT INTO im_v2.user_state_event_outbox (user_id, source_event_id, projection_kind, payload, created_at, next_attempt_at, source_room_id) VALUES (\(bind: recipientID), \(bind: sourceEventID), 'direct_room_profile', jsonb_build_object('room_id', \(bind: wireRoomID), 'target_user_id', \(bind: wireTargetUserID), 'public_handle', \(bind: profile.publicHandle), 'display_name', \(bind: profile.displayName), 'account_kind', \(bind: profile.accountKind), 'revision', \(bind: profile.revision), 'room_created_at_ms', (SELECT floor(extract(epoch FROM created_at) * 1000)::bigint FROM im_v2.rooms WHERE room_id = \(bind: roomID)), 'updated_at_ms', \(bind: Int64(profile.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: createdAt), \(bind: createdAt), \(bind: roomID))").run()

@@ -2,21 +2,21 @@ import FluentKit
 import Foundation
 import SQLKit
 
-/// Reclaims source envelopes only after durable receipt and delivery completion.
+/// 仅在持久回执和投递都完成后回收来源信封。
 public struct PostgresV2ForwardExportCompactor: Sendable {
     public static let retentionSeconds: TimeInterval = 7 * 24 * 60 * 60
     private let database: any Database
 
     public init(database: any Database) { self.database = database }
 
-    /// Keeps operation identity, digest, routing, media IDs and receipt indefinitely.
+    /// 永久保留操作身份、摘要、路由、媒体 ID 和回执。
     public func runOnce(now: Date = Date(), limit: Int = 128) async throws -> Int {
         guard (1...1_024).contains(limit) else { throw V2ForwardDeliveryError.invalidConfiguration }
         let cutoff = now.addingTimeInterval(-Self.retentionSeconds)
         guard v2PostgresTimestampCanEncode(now), v2PostgresTimestampCanEncode(cutoff),
               let sql = database as? any SQLDatabase else { throw V2ForwardExportError.corruptPersistenceState }
-        // Primary-key scalar probes keep historical receipts out of the candidate join.
-        // Each probe returns at most one row; a missing row is NULL and cannot qualify.
+        // 通过主键标量探测，避免把历史回执纳入候选集合的连接。
+        // 每次探测最多返回一行；缺失行是 NULL，不符合筛选条件。
         return try await sql.raw("""
             WITH candidates AS (
                 SELECT export.export_id FROM im_v2.message_forward_exports AS export

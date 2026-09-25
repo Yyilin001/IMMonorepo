@@ -6,8 +6,8 @@ import IMV2Core
 ///
 /// 返回 `nil` 只表示目标侧的持久化工作仍未完成，绝不表示已拒绝、已完成或可以释放源端置顶占用。
 public protocol V2ForwardExportDelivering: Sendable {
-    // Implementations must propagate cancellation and bound underlying I/O;
-    // the worker cancels and drains this call before releasing its claim.
+    // 实现必须传播取消并限制底层 I/O 时长；
+    // 工作器释放认领前会取消并等待此调用结束。
     func deliver(_ export: V2ForwardExport) async throws -> V2ForwardTerminalReceipt?
 }
 
@@ -153,8 +153,8 @@ public struct V2ForwardDeliveryWorker: Sendable {
                 throw V2ForwardDeliveryError.timedOut
             }
             defer { group.cancelAll() }
-            // The optional result is itself meaningful: unwrap only the
-            // group's outer optional, preserving a pending nil from target.
+            // 可选结果本身具有语义：只解开组的外层可选值，
+            // 保留目标方返回的待处理 nil。
             guard let result = try await group.next() else { throw V2ForwardDeliveryError.targetUnavailable }
             return result
         }
@@ -175,7 +175,7 @@ public struct V2ForwardDeliveryWorker: Sendable {
         do {
             try Task.checkCancellation()
             guard try await store.isCurrent(lease, now: now()) else { return .superseded }
-            // Recover a crash after source receipt commit without target I/O.
+            // 源回执提交后若崩溃，无须目标 I/O 即可恢复。
             if try await receipts.status(exportID: lease.export.intent.exportID) != nil {
                 return try await store.complete(lease, now: now()) ? .completed : .superseded
             }
@@ -197,9 +197,9 @@ public struct V2ForwardDeliveryWorker: Sendable {
             throw CancellationError()
         } catch {
             let time = now()
-            // mediaPaused is an explicit policy decision and must stay a pause;
-            // every other failure is classified so transient dependency errors
-            // keep retrying instead of waiting for an operator.
+            // mediaPaused 是明确的策略决定，必须保持暂停；
+            // 其他失败会分类处理，使暂时性的依赖故障继续重试，
+            // 而非等待运维人员介入。
             let disposition: V2DurableRetryDisposition = error as? V2ForwardDeliveryError == .mediaPaused
                 ? .pause : retryPolicy.disposition(
                     attempt: lease.attempt,

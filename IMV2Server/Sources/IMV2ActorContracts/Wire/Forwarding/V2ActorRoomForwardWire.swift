@@ -1,8 +1,8 @@
 import Foundation
 import IMV2Core
 
-/// One independently committed source/target pair. Dispatch requires the
-/// coordinator's canonical two-room reservation, never an ordinary room turn.
+/// 一对分别提交的源与目标。分发必须使用协调器规范的双房间预留，
+/// 不能使用普通房间轮次。
 public struct V2ActorForwardPairWire: Codable, Equatable, Sendable {
     public let actorUserID: UserID
     public let operationID: MessageForwardOperationID
@@ -18,8 +18,8 @@ public struct V2ActorForwardPairWire: Codable, Equatable, Sendable {
     }
 }
 
-/// Trusted coordinator's source-room export request. Source placement comes
-/// from the active token; the target route is a durable control selection.
+/// 可信协调器的源房间导出请求。源位置来自有效令牌；
+/// 目标路由是持久化的控制侧选择。
 public struct V2ActorPrepareForwardExportWire: Codable, Equatable, Sendable {
     public let actorUserID: UserID
     public let operationID: MessageForwardOperationID
@@ -37,7 +37,7 @@ public struct V2ActorPrepareForwardExportWire: Codable, Equatable, Sendable {
     }
 }
 
-/// Only a trusted delivery worker can present this target-derived receipt.
+/// 只有可信投递工作器才能提交此目标方生成的回执。
 public struct V2ActorRecordForwardReceiptWire: Codable, Equatable, Sendable {
     public let sourceRoomID: RoomID
     public let actorUserID: UserID
@@ -52,7 +52,7 @@ public struct V2ActorRecordForwardReceiptWire: Codable, Equatable, Sendable {
     }
 }
 
-/// Trusted target import: its digest binds the exact canonical export bytes.
+/// 可信目标导入：其摘要绑定精确的规范导出字节。
 public struct V2ActorForwardExportWire: Codable, Equatable, Sendable {
     public let payload: Data
     public let digest: Data
@@ -179,8 +179,8 @@ public enum V2RoomForwardResult: Codable, Equatable, Sendable {
     case imported(V2ActorForwardImportOutcomeWire)
 }
 
-/// Business failures only. Lease/owner changes and uncertain SQL completion
-/// travel through the runtime failure envelope and cannot become a rejection.
+/// 仅表示业务失败。租约或所有者变更、SQL 完成结果不明
+/// 由运行时失败信封传递，不能转成业务拒绝。
 public enum V2ActorForwardFailureWire: Codable, Equatable, Sendable {
     case export(V2ActorForwardExportFailureWire)
     case inbox(V2ActorForwardInboxFailureWire)

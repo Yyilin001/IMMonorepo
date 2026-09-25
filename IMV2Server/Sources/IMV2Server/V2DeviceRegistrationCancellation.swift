@@ -94,8 +94,8 @@ public struct V2PostgresDeviceRegistrationCancellationService: V2DeviceRegistrat
                 else { throw V2DeviceSessionServiceError.malformedPersistence }
                 let occurredAt = now()
                 guard v2PostgresTimestampCanEncode(occurredAt) else { throw V2DeviceSessionServiceError.unavailable }
-                // EXTRACT returns numeric: compare the exact grace period
-                // without a Date round trip or overflowing a SQL timestamp.
+                // EXTRACT 返回 numeric：直接比较精确宽限期，
+                // 避免 Date 往返或 SQL 时间戳溢出。
                 guard let deadline = try await sql.raw("SELECT EXTRACT(EPOCH FROM session_expires_at) + 600 > EXTRACT(EPOCH FROM \(bind: occurredAt)::timestamptz) AS is_open FROM im_v2.auth_devices WHERE user_id=\(bind: userID) AND device_id=\(bind: Self.device(request))").first(decoding: Deadline.self) else {
                     throw V2DeviceSessionServiceError.malformedPersistence
                 }
@@ -169,8 +169,8 @@ public struct V2PostgresDeviceRegistrationCancellationService: V2DeviceRegistrat
     static func bindIssuedSession(_ sql: any SQLDatabase, request: V2DeviceRegistrationCancellation,
                                   userID: UUID, at now: Date) async throws {
         guard v2PostgresTimestampCanEncode(now) else { throw V2DeviceSessionServiceError.unavailable }
-        // The proof lock excludes cancellation and duplicate binding until the
-        // credentials, replay envelope, and this record commit together.
+        // 凭据、重放信封与此记录一同提交前，
+        // 证明锁会阻止取消和重复绑定。
         try await sql.raw("""
             INSERT INTO im_v2.device_registration_cancellations
                 (request_digest, device_id, operation_id, issue_before, created_at,
@@ -196,7 +196,7 @@ public struct V2PostgresDeviceRegistrationCancellationService: V2DeviceRegistrat
     private static func admitsNewRequest(_ request: V2DeviceRegistrationCancellation, at now: Date) throws -> Bool {
         guard v2PostgresTimestampCanEncode(now) else { throw V2DeviceSessionServiceError.unavailable }
         guard v2PostgresTimestampPrecedes(now, request.issueBefore) else { return false }
-        // Limits unauthenticated pre-issuance tombstones and clock errors.
+        // 限制未认证的签发前墓碑和时钟错误。
         guard request.issueBefore.timeIntervalSince(now) <= 86_400 else { throw V2DeviceSessionServiceError.invalidRequest }
         return true
     }

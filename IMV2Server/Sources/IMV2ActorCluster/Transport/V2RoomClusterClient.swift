@@ -29,9 +29,9 @@ public struct V2RoomClusterHostDescriptor: Sendable {
     }
 }
 
-/// Remote calls use signed Cluster packets. A node-minted local port may skip
-/// per-call signatures only after the same signed session admission and while
-/// the exact local endpoint and host incarnation remain current.
+/// 远程调用使用已签名的 Cluster 报文。节点创建的本地端口只有在完成
+/// 相同的签名会话准入后，且本地端点和宿主实例仍精确匹配时，
+/// 才可省略逐次调用签名。
 public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
     private let system: ClusterSystem
     private let signer: V2ActorSigningIdentity
@@ -86,8 +86,8 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         self.localPort = localPort
     }
 
-    /// A restart publishes a new incarnation and ActorID. Existing dispatched
-    /// calls and granted reservations keep their old identity until settled.
+    /// 重启会发布新的实例标识和 ActorID。已分发的调用及获准的预留
+    /// 在结算前继续保留旧身份。
     public func register(_ descriptor: V2RoomClusterHostDescriptor) throws {
         try installDiscovered(descriptor)
         system.cluster.join(host: descriptor.address, port: descriptor.port)
@@ -98,7 +98,7 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         pruneReservations()
         if let current = descriptors[descriptor.identity] {
             guard current.endpointID == descriptor.endpointID else {
-                // A new physical ActorID requires a new host incarnation.
+                // 新的物理 ActorID 要求新的宿主实例标识。
                 throw V2RoomCallFailure.notAccepted(.staleActivation)
             }
             descriptors[descriptor.identity] = descriptor
@@ -112,8 +112,8 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         for old in previous {
             let oldDescriptor = descriptors.removeValue(forKey: old)
             suspendedHosts.remove(old)
-            // Cancellation need not stop a native hello. Keep its Task in
-            // `handshakes` until finishHandshake observes the real result.
+            // 取消不一定会停止原生握手。在 finishHandshake 观察到实际结果前，
+            // 将其 Task 保留在 `handshakes` 中。
             handshakes[old]?.cancel()
             failHandshakeWaiters(host: old, reason: .staleActivation)
             if let oldDescriptor, hasRetiredWork(old) {
@@ -143,9 +143,8 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         finishStopIfIdle()
     }
 
-    /// A timed-out caller stops waiting; its already dispatched RPC remains
-    /// tracked until the native/remote invocation actually returns. An
-    /// incomplete result keeps Cluster resources alive for a later stop retry.
+    /// 调用方超时后停止等待；已分发的 RPC 仍被追踪，直到原生或远程调用实际返回。
+    /// 结果未完成时保留 Cluster 资源，供之后重试停止操作。
     public func quiesce(deadline: ContinuousClock.Instant) async -> Bool {
         stop()
         while !isQuiescent && ContinuousClock.now < deadline {
@@ -230,9 +229,8 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         }
     }
 
-    /// A read-only hint for a retryable RoomRef.call. The authenticated invoke
-    /// still rechecks the session, capability, replay window, bound token and
-    /// host activation; this does not dispatch an RPC.
+    /// 供可重试 RoomRef.call 使用的只读提示。已认证调用仍会复查会话、
+    /// 能力、重放窗口、绑定令牌和宿主激活；此方法不会分发 RPC。
     public func canInvokeCachedLocally(_ token: V2RoomActivationToken) async -> Bool {
         cachedLocalInvocation(for: token) != nil
     }
@@ -411,8 +409,8 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         if requireCachedLocal && localInvocation == nil {
             throw V2RoomCallFailure.notAccepted(.staleActivation)
         }
-        // A hinted call cannot open a remote hello or fall back to a signed
-        // packet if its exact local capability disappeared.
+        // 若精确的本地能力已消失，提示调用不能开启远程握手，
+        // 也不能回退为签名报文调用。
         let session: Session
         if let localInvocation { session = localInvocation.session }
         else { session = try await self.session(for: descriptor, deadline: deadline) }
@@ -496,8 +494,8 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
             }
         } catch let failure as V2RoomCallFailure { throw failure }
         catch {
-            // Activation also writes the lease. Once either write-capable RPC
-            // starts, network failure cannot prove it did not commit.
+            // 激活也会写入租约。任一可写 RPC 开始后，
+            // 网络故障都不能证明它没有提交。
             throw transportFailure(for: request)
         }
         do {
@@ -511,9 +509,8 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
                 response = try trust.verifyLocalReply(reply, for: call, from: port.identity,
                                                       maximumBytes: limits.maximumReplyBytes)
             }
-            // A replacement does not invalidate an already dispatched call's
-            // correctly signed reply. Its old token cannot authorise a new
-            // activation, but the caller must receive its actual outcome.
+            // 节点替换不会使已分发调用的正确签名响应失效。
+            // 旧令牌不能授权新激活，但调用方必须收到实际结果。
             return response
         }
         catch let failure as V2RoomCallFailure { throw failure }
@@ -568,9 +565,8 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
                 }
                 dispatchedCalls[id] = .init(host: host, continuation: continuation, timer: timer,
                                              timeoutFailure: failure)
-                // The physical call is registered before it can start. Its
-                // single task owns completion and retains this client until
-                // the operation really returns, even after the caller leaves.
+                // 物理调用在启动前就完成登记。唯一的任务负责结算，
+                // 并在操作实际返回前持有此客户端，即使调用方已经退出。
                 Task { [self] in
                     let result: Result<TransportReply, any Error>
                     do { result = .success(try await operation()) }
@@ -771,15 +767,15 @@ public actor V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscovering {
         pinnedReservations.keys.contains(where: { $0.host == host })
     }
 
-    /// The discovery owner may down an old exact Cluster.Node only after its
-    /// native/remote calls, hello, and reservation grants have settled.
+    /// 发现组件的所有者只有在旧 Cluster.Node 的原生或远程调用、
+    /// 握手及预留授权均已结算后，才可将其标记为下线。
     public func retiredIdentityIsDrained(_ host: V2ActorHostIdentity) -> Bool {
         pruneReservations()
         return descriptors[host] == nil && !hasRetiredWork(host)
     }
 
-    /// Atomically prevents a new RPC from racing the discovery owner's exact
-    /// old-Node retirement. A later authenticated advertisement can reopen it.
+    /// 原子地阻止新 RPC 与发现组件所有者对旧节点的精确退役竞速。
+    /// 后续经认证的通告可以重新开放该节点。
     public func suspendUnreachableHost(_ host: V2ActorHostIdentity) -> Bool {
         pruneReservations()
         guard descriptors[host] != nil, !hasRetiredWork(host) else { return false }

@@ -4,11 +4,11 @@ import NIOCore
 import NIOPosix
 import Synchronization
 
-/// Owns Fluent drivers and the thread pool used by them.
+/// 持有 Fluent 驱动及其使用的线程池。
 ///
-/// The caller chooses whether this object also owns the EventLoopGroup. A
-/// borrowed group remains alive after `shutdown()` so an HTTP server sharing it
-/// can finish its own drain before the caller closes the group.
+/// 调用方决定此对象是否也持有 EventLoopGroup。
+/// 借用的组在 `shutdown()` 后仍保持运行，使共享它的 HTTP 服务端
+/// 能先完成排空，再由调用方关闭该组。
 public final class V2DatabaseResources: Sendable {
     public let databases: Databases
     public let logger: Logger
@@ -34,8 +34,8 @@ public final class V2DatabaseResources: Sendable {
         databases = Databases(threadPool: threadPool, on: eventLoopGroup)
     }
 
-    /// Returns one handle on the next EventLoop, for short-lived setup work.
-    /// Long-lived stores should use `V2EventLoopDatabasePool` instead.
+    /// 返回下一个 EventLoop 上的一个句柄，供短期配置工作使用。
+    /// 长期存活的存储应改用 `V2EventLoopDatabasePool`。
     public func database(_ identifier: DatabaseID? = nil) -> any Database {
         guard let database = databases.database(
             identifier,
@@ -47,8 +47,8 @@ public final class V2DatabaseResources: Sendable {
         return database
     }
 
-    /// Close database drivers before the thread pool and any owned EventLoopGroup.
-    /// Call after requests and workers that use a database have drained.
+    /// 先关闭数据库驱动，再关闭线程池及自身持有的 EventLoopGroup。
+    /// 使用数据库的请求与工作器排空后再调用。
     public func shutdown() async throws {
         let task = shutdownTask.withLock { current in
             if let current { return current }

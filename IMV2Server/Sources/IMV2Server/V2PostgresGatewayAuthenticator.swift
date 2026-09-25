@@ -19,9 +19,8 @@ public enum V2GatewayAuthenticationError: Error, Equatable, Sendable {
 /// 由组装层从密钥管理或环境配置注入；数据库查找使用摘要，不把原始访问令牌作为持久化查询键。
 /// 内部保存不可变字节，仅在同步摘要计算时创建 Crypto 密钥值。
 public struct V2AccessTokenHMACKey: Sendable {
-    // Crypto's SymmetricKey is not Sendable. Retain immutable byte material
-    // (which is Sendable) and build the short-lived Crypto value only at the
-    // synchronous digest boundary.
+    // Crypto 的 SymmetricKey 不符合 Sendable。保留符合 Sendable 的不可变字节，
+    // 只在同步摘要计算边界创建短期 Crypto 值。
     /// 不可变密钥字节，不应输出到日志或诊断响应。
     private let rawBytes: Data
 
@@ -47,7 +46,7 @@ public struct V2AccessTokenHMACKey: Sendable {
         self.rawBytes = rawBytes
     }
 
-    /// Verify a stored hex digest through Crypto's authentication-code comparison.
+    /// 通过 Crypto 的认证码比较方法验证已存储的十六进制摘要。
     func matches(_ digest: String, value: String) -> Bool {
         guard digest.utf8.count == 64 else { return false }
         let chars = Array(digest)
@@ -155,9 +154,8 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
         guard let userID = try? UserID(row.userID.uuidString) else {
             throw V2GatewayAuthenticationError.corruptPersistenceState
         }
-        // This timestamp is presentation metadata, not authentication state.
-        // The local gate removes repeated no-op UPDATE round trips; PostgreSQL's
-        // predicate remains the cross-replica correctness boundary.
+        // 此时间戳是展示元数据，不是认证状态。本地门控可省去重复的
+        // 无效果 UPDATE 往返；PostgreSQL 条件仍是跨副本正确性边界。
         if let activityCutoff = v2PostgresPastTimestamp(now: observedAt, interval: 60),
            await activityWriteGate.shouldWrite(deviceID: deviceID, at: observedAt) {
             try? await database.raw("""
@@ -204,8 +202,8 @@ public actor V2DeviceActivityWriteGate {
     /// 放行时先推进本地截止时间，后续数据库失败不会自动撤销该推进。时钟回拨可能延长已有截止时间前的抑制期。
     /// 无效时间不会覆盖原有截止时间，避免影响时钟恢复后的处理。
     public func shouldWrite(deviceID: DeviceID, at now: Date) -> Bool {
-        // A broken clock must not replace the next eligible write with an
-        // unusable deadline that continues suppressing activity after recovery.
+        // 时钟故障不能用不可用的截止时间替代下一次合格写入，
+        // 否则恢复后仍会持续抑制活动记录。
         guard let nextWriteAt = v2PostgresFutureTimestamp(now: now, interval: interval) else {
             return false
         }

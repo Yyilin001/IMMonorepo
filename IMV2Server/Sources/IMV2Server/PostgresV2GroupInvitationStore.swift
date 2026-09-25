@@ -28,7 +28,7 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
         self.activationScope = nil
     }
 
-    /// Room actor operations bind every read, replay and mutation to one granted turn.
+    /// 房间 Actor 操作将每次读取、重放和修改绑定到同一获准轮次。
     init(database: any Database, identities: any V2GroupInvitationIdentityReading,
          activationToken: V2RoomActivationToken, inviteID: GroupInviteID? = nil) throws {
         guard let room = activationToken.roomID.uuidValue else {
@@ -193,8 +193,8 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
                 LIMIT 1
                 """).first(decoding: GroupInvitePreviewRow.self) else { return .unavailable }
             try validateInvite(invite: row.inviteID, room: row.roomID)
-            // Existing members and existing applications may still inspect a link
-            // after its approval allowance becomes full; only new submissions stop.
+            // 审批额度用满后，现有成员和已有申请仍可查看链接；
+            // 只有新申请会停止。
             if row.requestID == nil && !row.isAlreadyMember {
                 let hasCapacity = try await sql.raw("""
                     SELECT approved_use_count < maximum_approved_uses AS value
@@ -237,8 +237,8 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
         guard v2PostgresTimestampCanEncode(request.createdAt), v2PostgresTimestampCanEncode(evaluatedAt) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
         let currentTime = try V2PostgresTimestamp(date: evaluatedAt)
         if scope == nil {
-            // Discover the immutable room binding before locking the invite.
-            // Keep the same room -> invite order as approval and revocation.
+            // 锁定邀请前先查明不可变的房间绑定。
+            // 保持与审批和撤销相同的房间 -> 邀请加锁顺序。
             guard let binding = try await sql.raw("""
                 SELECT room_id FROM im_v2.group_invite_links WHERE token_digest = \(bind: request.tokenDigest)
                 """).first(decoding: GroupInviteRoomBinding.self) else { return .unavailable }
@@ -336,9 +336,8 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
         operationID: GroupJoinDecisionOperationID, capacityProfile: V2CapacityProfile,
         eventID: EventID, now: Date
     ) async throws -> V2GroupJoinApprovalPersistenceOutcome {
-        // The applicant ID is immutable business input. Read it without an
-        // owner transaction, snapshot control identities, then recheck the ID
-        // under the real room/request locks before adding any member.
+        // 申请人 ID 是不可变业务输入。先在所有者事务外读取它，
+        // 获取控制侧身份快照；加入成员前，再在实际房间锁和请求锁下复查该 ID。
         let applicant = try await requestByID(groupInviteUUID(requestID), sql: groupInviteSQL(database))?.applicantUserID
         var identityIDs: Set<UserID> = [reviewerUserID]
         if let applicant { identityIDs.insert(.init(uuid: applicant)) }
@@ -350,16 +349,16 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
                 let sql = try groupInviteSQL(transaction)
                 let room = try groupInviteUUID(roomID), reviewer = try groupInviteUUID(reviewerUserID)
                 let operation = try groupInviteUUID(operationID), request = try groupInviteUUID(requestID)
-                // Use the membership operation's lock namespace before taking
-                // the room lock. Ordinary adds/removes use the same order.
+                // 在获取房间锁前先使用成员操作的锁命名空间。
+                // 普通成员添加和移除也采用相同顺序。
                 try await advisoryLock(sql, value: reviewer.uuidString + ":" + operation.uuidString)
                 try await fence(room: room, sql: sql)
                 if let prior = try await requestByDecision(reviewer: reviewer, operation: operation, sql: sql) {
                     guard prior.roomID == room, prior.requestID == request, prior.state == "approved" else { return .conflict }
                     return .approved(prior)
                 }
-                // An independently committed member add is not proof that this
-                // request was approved, even if its actor/target happen to match.
+                // 独立提交的成员添加不能证明此请求已获批准，
+                // 即使操作者和目标恰好相同。
                 guard try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.room_membership_operations WHERE actor_user_id = \(bind: reviewer) AND operation_id = \(bind: operation)) AS value").first(decoding: GroupInviteBooleanRow.self)?.value == false else { return .conflict }
                 let revision = try await authorize(room: room, actor: reviewer, actorIsActive: actorIsActive, lockMembership: true, sql: sql)
                 guard let value = try await requestByID(request, lock: true, sql: sql), value.roomID == room else { throw V2GroupInvitationServiceError.requestNotFound }
@@ -370,8 +369,7 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
                 }
                 guard let invite = try await inviteByID(value.inviteID, lock: true, sql: sql) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
                 guard invite.approvedUseCount < invite.maximumApprovedUses else { return .memberLimitReached }
-                // Revocation/expiration blocks new submissions; already pending
-                // requests retain the review policy established by ADR-019.
+                // 撤销或过期会阻止新申请；已待审的请求继续遵循 ADR-019 规定的审核策略。
                 guard value.applicantUserID == applicant else { return .unavailable }
                 guard v2PostgresTimestampCanEncode(now) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
                 try value.validateResponseTimes()
@@ -396,7 +394,7 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
                 case .unavailable: return .unavailable
                 case .targetAlreadyMember, .idempotencyConflict, .targetNotMember: return .conflict
                 case .idempotent, .revisionConflict:
-                    // Both locks are held and the operation was absent above.
+                    // 此时两把锁均已持有，且上方确认该操作尚不存在。
                     throw V2GroupInvitationServiceError.corruptPersistenceState
                 }
                 try await sql.raw("UPDATE im_v2.group_invite_links SET approved_use_count = approved_use_count + 1 WHERE invite_id = \(bind: invite.inviteID)").run()
@@ -428,8 +426,8 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
             classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil) { transaction in
             let sql = try groupInviteSQL(transaction)
             let applicant = try groupInviteUUID(applicantUserID), room = try groupInviteUUID(roomID)
-            // Submission uses this lock too: quota release and a subsequent
-            // submission observe one serial order within this owner database.
+            // 提交也使用这把锁：额度释放与后续提交在此所有者数据库中
+            // 遵循同一串行顺序。
             try await advisoryLock(sql, value: "group-join-applicant:" + applicant.uuidString)
             try await fence(room: room, sql: sql)
             guard let value = try await requestByID(try groupInviteUUID(requestID), lock: true, sql: sql),
@@ -488,8 +486,8 @@ public struct PostgresV2GroupInvitationStore: V2GroupInvitationStore {
     private func authorize(room: UUID, actor: UUID, actorIsActive: Bool, lockMembership: Bool, sql: any SQLDatabase) async throws -> UInt64 {
         guard actorIsActive else { throw V2GroupInvitationServiceError.permissionDenied }
         if lockMembership {
-            // Lock the room before any member row, as membership.change does.
-            // A separate statement makes the order independent of join plans.
+            // 与 membership.change 一样，先锁房间，再锁任何成员记录。
+            // 单独执行语句，使顺序不依赖查询连接方案。
             try await sql.raw("SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: room) FOR NO KEY UPDATE").run()
         }
         let lock = lockMembership ? " FOR UPDATE OF membership" : ""
@@ -566,8 +564,8 @@ private struct GroupInviteRow: Decodable {
         creationOperationID = try values.decode(UUID.self, forKey: .creationOperationID)
         tokenDigest = try values.decode(Data.self, forKey: .tokenDigest)
         requestedLifetimeSeconds = try values.decode(Int.self, forKey: .requestedLifetimeSeconds)
-        // Preserve the public error contract when exact timestamp decoding
-        // rejects a non-finite or otherwise invalid stored deadline.
+        // 精确时间戳解码拒绝非有限或其他无效的已存截止时间时，
+        // 保持公开错误契约不变。
         do { expiresAt = try values.decode(V2PostgresTimestamp.self, forKey: .expiresAt) }
         catch { throw V2GroupInvitationServiceError.corruptPersistenceState }
         maximumApprovedUses = try values.decode(Int.self, forKey: .maximumApprovedUses)
@@ -695,8 +693,8 @@ private extension PostgresV2GroupInvitationStore {
             SELECT room_shard_id, owner_epoch FROM im_v2.rooms
             WHERE room_id = \(bind: room) \(unsafeRaw: shared ? "FOR SHARE" : "FOR UPDATE")
             """).first(decoding: InvitationOwnerRow.self) else {
-            // Local callers retain their domain-specific not-found response;
-            // scoped callers must reject a missing selected owner.
+            // 本地调用方保留领域专属的未找到响应；
+            // 限定所有者的调用方必须拒绝缺失的选定所有者。
             if scope == nil { return }
             throw V2GroupInvitationServiceError.ownerChanged
         }
@@ -761,8 +759,8 @@ private func validateGroupInviteCreationClock(_ request: V2GroupInviteCreatePers
     return timestamps
 }
 
-/// Authoritative observation from an immutable owner receipt. Request outcomes
-/// may advance to their terminal state; negative admission outcomes never change.
+/// 来自不可变所有者回执的权威观测。请求结果可推进到终态；
+/// 准入拒绝结果永不改变。
 struct V2GroupJoinOwnerSubmission: Sendable {
     let outcome: V2GroupJoinQuotaOutcome
     let targetRequestID: UUID?
@@ -800,8 +798,8 @@ extension PostgresV2GroupInvitationStore {
             } else if intent.generation != 1 {
                 throw V2GroupInvitationServiceError.conflict
             }
-            // Global capacity was reserved in control. The ordinary local path
-            // retains its own limit; reserved submissions use the global slot.
+            // 全局容量已在控制侧预留。普通本地路径仍使用自身上限；
+            // 已预留的提交使用全局槽位。
             let request = V2GroupJoinSubmissionPersistenceRequest(
                 requestID: .init(uuid: intent.requestID), applicantUserID: .init(uuid: intent.applicantUserID),
                 operationID: .init(uuid: intent.operationID), tokenDigest: intent.tokenDigest, note: intent.note,
@@ -840,8 +838,8 @@ extension PostgresV2GroupInvitationStore {
         }
     }
 
-    /// Hydration is separate from the commit proof. Missing profile data or a
-    /// lost response cannot erase the receipt or prevent recovery from reading it.
+    /// 补全数据与提交证明相互独立。配置数据缺失或响应丢失
+    /// 都不能抹掉回执，也不能阻止恢复流程读取它。
     func reservedSubmissionResponse(_ intent: V2GroupJoinQuotaIntent, observed: V2GroupJoinOwnerSubmission) async throws -> V2GroupJoinSubmissionPersistenceOutcome {
         switch observed.outcome {
         case .unavailable: return .unavailable

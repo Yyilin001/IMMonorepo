@@ -59,13 +59,12 @@ public struct PostgresV2GroupEventWakeStore: V2GroupEventWakeStore {
                 WHERE wake.room_id = candidates.room_id
                 """).run()
 
-            // This deliberately is a second READ COMMITTED statement. A
-            // message transaction that committed before the lease lock became
-            // ours is now visible here. A transaction that is still appending
-            // must update the leased outbox row before it can commit, which
-            // replaces this revision and preserves another wake. Reading the
-            // room counter in the claim UPDATE's original statement snapshot
-            // would leave a narrow lost-watermark race after lock waits.
+            // 这里有意执行第二条 READ COMMITTED 语句。
+            // 在我方取得租约锁前已提交的消息事务，此时已可见。
+            // 仍在追加的事务提交前必须更新已租用的发件箱记录，
+            // 从而替换此修订并保留另一次唤醒。
+            // 若在认领 UPDATE 的原始语句快照中读取房间计数器，
+            // 等锁后会留下一个狭窄的水位丢失竞态。
             return try await sql.raw("""
                 SELECT wake.room_id,
                        GREATEST(wake.target_room_sequence, room.room_sequence)
@@ -105,8 +104,8 @@ public struct PostgresV2GroupEventWakeStore: V2GroupEventWakeStore {
               let roomID = UUID(uuidString: lease.wake.roomID.rawValue),
               lease.revision <= UInt64(Int64.max)
         else { throw V2GroupEventWakeStoreError.corruptPersistenceState }
-        // Revision fencing is intentional: an UPSERT that observed a newer
-        // event changes revision/state before this delete can run.
+        // 修订围栏是有意设置的：观察到较新事件的 UPSERT
+        // 会在此删除运行前改变修订号和状态。
         try await sql.raw("""
             DELETE FROM im_v2.group_event_wake_outbox AS wake
             WHERE room_id = \(bind: roomID)
@@ -144,8 +143,8 @@ public struct PostgresV2GroupEventWakeStore: V2GroupEventWakeStore {
               AND \(roomWritable(skipLocked: false))
             """).run()
     }
-    // Keep the room lock until the queue mutation commits. Claiming skips
-    // busy rooms; terminal/retry callbacks wait and recheck the durable marker.
+    // 队列修改提交前一直持有房间锁。认领会跳过繁忙房间；
+    // 终态与重试回调会等待，并重新检查持久化标记。
     private func roomWritable(skipLocked: Bool) -> SQLQueryString {
         """
         (SELECT true FROM im_v2.rooms AS room

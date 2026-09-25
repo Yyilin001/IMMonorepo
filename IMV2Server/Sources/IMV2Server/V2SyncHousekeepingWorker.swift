@@ -184,10 +184,9 @@ public struct PostgresV2SyncHousekeepingStore: V2SyncHousekeepingStore {
                 FOR UPDATE SKIP LOCKED
                 """).all(decoding: SyncHousekeepingSnapshotRow.self).map(\.snapshotID)
 
-            // A later device can extend the shared artifact's lifetime without
-            // extending an earlier device's assignment. Recover that device at
-            // its own deadline while retaining the payload for other devices.
-            // Lock artifacts first, as the builder and expired-artifact path do.
+            // 后来的设备可延长共享产物的存续期，而不延长较早设备的分配。
+            // 在该设备自身的截止时间恢复它，同时为其他设备保留载荷。
+            // 与构建器和过期产物路径一致，先锁定产物。
             let remaining = limit - resetCandidates.count
             if remaining > 0 {
                 let sharedSnapshots = try await sql.raw("""
@@ -286,9 +285,8 @@ public struct PostgresV2SyncHousekeepingStore: V2SyncHousekeepingStore {
                       AND state IN ('expired', 'failed') AND expires_at <= \(bind: now)
                     """).run()
             }
-            // An effect is removable only after the projector has materialized
-            // it and incremental replay no longer retains the source row.
-            // The current projection version remains authoritative.
+            // 只有投影器已物化副作用，且增量重放不再保留源记录后，
+            // 才能移除它。当前投影版本仍是权威。
             let projectionEffects = try await sql.raw("""
                 WITH candidates AS (
                     SELECT effect.ctid

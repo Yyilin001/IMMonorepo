@@ -325,18 +325,16 @@ public struct V2PostgresDeviceRevocationEventStore: V2DeviceRevocationEventStore
             throw V2GatewayAuthenticationError.corruptPersistenceState
         }
         guard v2PostgresTimestampCanEncode(now) else {
-            // A restart preserves its durable cursor without writing a time.
+            // 重启会保留持久化游标，不写入时间。
             guard try await cursorExists(nodeID: nodeID, on: sql) else {
                 throw V2GatewayAuthenticationError.corruptPersistenceState
             }
             return
         }
-        // `ON CONFLICT DO NOTHING` is intentional. Replacing an existing
-        // cursor here could make two accidentally duplicated node IDs skip a
-        // revocation which only the older process still needs to close.
-        // PostgreSQL evaluates this insert from one statement snapshot: an
-        // event committed after that snapshot remains above the watermark and
-        // is consumed normally once the listener is bound.
+        // 有意使用 `ON CONFLICT DO NOTHING`。若在此替换既有游标，
+        // 两个意外重复的节点 ID 可能跳过仍需旧进程关闭的撤销事件。
+        // PostgreSQL 基于同一语句快照执行此插入：
+        // 快照后提交的事件仍高于水位，监听器绑定后会正常消费。
         try await sql.raw("""
             INSERT INTO im_v2.gateway_worker_cursors (worker_name, node_id, last_event_id, updated_at)
             SELECT \(bind: workerName), \(bind: nodeID), COALESCE(MAX(event_id), 0), \(bind: now)

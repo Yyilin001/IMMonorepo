@@ -20,9 +20,9 @@ enum V2AccountRoomNotification: Equatable, Sendable {
     }
 }
 
-/// Connection-owned queue; it contains no membership or authorization cache.
-/// Callers must authorize offers and stop the connection when an extracted
-/// frame cannot be delivered. Extraction transfers ownership to that writer.
+/// 连接持有的队列，不包含成员关系或授权缓存。
+/// 调用方须为提交内容授权；提取出的帧无法投递时须停止连接。
+/// 提取操作将帧的所有权转移给写者。
 struct V2AccountRoomChangeBuffer: Sendable {
     let epoch: UUID
     private let maximumPendingRooms: Int
@@ -44,7 +44,7 @@ struct V2AccountRoomChangeBuffer: Sendable {
     var hasOutput: Bool { phase == .resyncPending || !pending.isEmpty }
     var requiresRestart: Bool { phase != .accepting }
 
-    /// The limit bounds unsent changes, never the number of joined rooms.
+    /// 上限约束未发送的变更数量，不约束已加入的房间数量。
     mutating func offer(roomID: RoomID, highWatermark: UInt64) throws {
         guard roomID.uuidValue != nil, highWatermark <= UInt64(Int64.max) else {
             throw V2RoomRecoveryReadError.invalidRequest
@@ -62,16 +62,16 @@ struct V2AccountRoomChangeBuffer: Sendable {
         order.append(roomID)
     }
 
-    /// Remove unsent metadata without allocating a wire sequence. Remove its
-    /// FIFO slot too, so a later rejoin starts behind already pending rooms.
+    /// 移除未发送的元数据，不分配线路序号。
+    /// 同时移除其 FIFO 槽位，使之后重新加入的房间排在已待处理房间之后。
     mutating func revoke(roomID: RoomID) {
         guard pending.removeValue(forKey: roomID) != nil else { return }
         order = order.dropFirst(offset).filter { $0 != roomID }
         offset = 0
     }
 
-    /// Broker gaps, authorization uncertainty and overflow share an explicit
-    /// recovery boundary. No more change frames are emitted in this epoch.
+    /// 消息代理缺口、授权结果不明和溢出共用明确的恢复边界。
+    /// 此纪元不再发送变更帧。
     mutating func invalidate() {
         guard phase == .accepting else { return }
         phase = .resyncPending
@@ -93,8 +93,8 @@ struct V2AccountRoomChangeBuffer: Sendable {
         let roomID = order[offset]
         offset += 1
         let watermark = pending.removeValue(forKey: roomID)!
-        // FIFO is by first pending change, so a hot room cannot keep moving
-        // cold rooms behind it. Compact consumed storage with amortized cost.
+        // FIFO 顺序取决于首次待处理变更，热房间不能不断把冷房间挤到后面。
+        // 以摊还成本压缩已消费的存储。
         if offset >= order.count / 2 {
             order.removeFirst(offset)
             offset = 0

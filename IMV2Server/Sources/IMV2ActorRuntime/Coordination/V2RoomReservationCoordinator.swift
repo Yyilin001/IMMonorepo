@@ -2,8 +2,8 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// Runtime/transport adapter for the coordinator. Each operation must honor its
-/// monotonic deadline; the remote implementation sends only a remaining budget.
+/// 协调器的运行时与传输适配器。每次操作都必须遵守单调截止时间；
+/// 远程实现只发送剩余时间预算。
 public struct V2RoomReservationOperations: Sendable {
     let reserve: @Sendable (RoomID, UUID, ContinuousClock.Instant) async throws -> V2RoomReservation
     let markDispatched: @Sendable (V2RoomReservation, ContinuousClock.Instant) async throws -> Void
@@ -23,8 +23,8 @@ public struct V2RoomReservationOperations: Sendable {
     }
 }
 
-/// At most one source-target pair is held by each call. Canonical acquisition
-/// prevents A->B / B->A cycles without expanding the business atomicity scope.
+/// 每次调用最多持有一对源与目标。按规范顺序获取，
+/// 可防止 A->B 与 B->A 形成循环，而不扩大业务原子性范围。
 public actor V2RoomReservationCoordinator {
     private let operations: V2RoomReservationOperations
     private let configuration: V2RoomRuntimeConfiguration
@@ -42,7 +42,7 @@ public actor V2RoomReservationCoordinator {
         execute: @Sendable ([V2RoomReservation]) async -> V2RoomTransactionCompletion<Value>
     ) async throws -> Value {
         guard V2RoomTurnScope.roomID == nil else {
-            // An ordinary turn may never wait for another room's turn.
+            // 普通轮次绝不能等待另一房间的轮次。
             throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
         guard inFlight < configuration.maximumConcurrentReservations else {
@@ -60,16 +60,16 @@ public actor V2RoomReservationCoordinator {
             for roomID in rooms {
                 try checkBeforeDispatch(deadline)
                 let grant = try await operations.reserve(roomID, requestID, deadline)
-                // A mismatched response never becomes write authority.
+                // 不匹配的响应绝不能成为写入权限。
                 guard grant.token.roomID == roomID, grant.requestID == requestID else {
-                    // It might belong to someone else's attempt. Never release
-                    // it; our possibly granted request expires at its holder.
+                    // 它可能属于其他调用方的尝试，绝不能释放。
+                    // 我方可能已获准的请求会在持有方过期。
                     throw V2RoomCallFailure.notAccepted(.staleActivation)
                 }
                 grants.append(grant)
             }
-            // Different owner epochs are valid for two rooms on the same DB;
-            // different physical owners use the existing durable forward flow.
+            // 同一数据库中的两个房间可以有不同的所有者纪元；
+            // 不同物理所有者则使用既有持久化转发流程。
             guard Set(grants.map { $0.token.owner.shardID }).count == 1 else {
                 throw V2RoomCallFailure.notAccepted(.invalidRequest)
             }
@@ -80,16 +80,16 @@ public actor V2RoomReservationCoordinator {
             }
             try checkBeforeDispatch(deadline)
         } catch {
-            // SQL has not run. Even a lost dispatch acknowledgement can be
-            // completed as rolled back; unmarked grants are safely aborted.
+            // SQL 尚未执行。即使分发确认丢失，也可将结果确认为已回滚；
+            // 未标记的授权可安全中止。
             await abandon(grants, markingStarted: markingStarted)
             if let failure = error as? V2RoomCallFailure,
                case .notAccepted = failure { throw failure }
             throw V2RoomCallFailure.notAccepted(.unavailable)
         }
 
-        // From here, cancellation/timeout must be classified by the actual
-        // transaction owner. This closure cannot throw an ambiguous DB error.
+        // 从这里开始，取消和超时必须由实际事务所有者分类。
+        // 此闭包不能抛出结果不明的数据库错误。
         let completion = await execute(grants)
         switch completion {
         case .committed(let value):
@@ -124,8 +124,8 @@ public actor V2RoomReservationCoordinator {
                     if markingStarted,
                        await operations.finish(grant, .rolledBack, deadline) { return }
                     _ = await operations.abort(grant, deadline)
-                    // Unreachable holders retain the barrier until safe epoch
-                    // retirement. Failure never authorizes a local TTL unlock.
+                    // 无法联系的持有方会保留屏障，直到纪元安全退役。
+                    // 故障绝不授权按本地 TTL 解锁。
                 }
             }
         }
@@ -139,8 +139,8 @@ public actor V2RoomReservationCoordinator {
                 group.addTask { _ = await operations.finish(grant, completion, deadline) }
             }
         }
-        // A lost notification does not change a known committed SQL result.
-        // Its holder stays closed and retires when its bounded grant expires.
+        // 通知丢失不会改变已知的 SQL 提交结果。
+        // 持有方继续关闭，并在有界授权过期时退役。
     }
 }
 

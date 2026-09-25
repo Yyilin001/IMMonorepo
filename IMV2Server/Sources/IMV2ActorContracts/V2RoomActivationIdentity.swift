@@ -1,7 +1,7 @@
 import Foundation
 import IMV2Core
 
-/// Values rejected before they can enter the runtime or a wire request.
+/// 在进入运行时或线路请求前即被拒绝的值。
 public enum V2ActorContractError: Error, Equatable, Sendable {
     case invalidEpoch
     case invalidShardID
@@ -10,7 +10,7 @@ public enum V2ActorContractError: Error, Equatable, Sendable {
     case invalidConfiguration(String)
 }
 
-/// A positive epoch that can be stored without truncation in PostgreSQL bigint.
+/// 可无截断地存入 PostgreSQL bigint 的正纪元值。
 public struct V2ActorEpoch: Hashable, Comparable, Codable, Sendable {
     public let rawValue: Int64
 
@@ -31,10 +31,10 @@ public struct V2ActorEpoch: Hashable, Comparable, Codable, Sendable {
     public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
 }
 
-/// Database placement is independent of the process hosting a room.
+/// 数据库位置与宿主房间的进程相互独立。
 public struct V2RoomDataOwner: Hashable, Codable, Sendable {
     public let shardID: String
-    /// Existing room-owner epochs include zero; activation epochs start at one.
+    /// 既有房间所有者纪元允许零；激活纪元从一开始。
     public let epoch: Int64
 
     public init(shardID: String, epoch: Int64) throws {
@@ -59,9 +59,9 @@ public struct V2RoomDataOwner: Hashable, Codable, Sendable {
 public enum V2ActorHostIDTag: V2IdentifierTag {}
 public typealias V2ActorHostID = V2Identifier<V2ActorHostIDTag>
 
-/// A stable host label plus a fresh identity for every process start.
+/// 稳定的宿主标签，加上每次进程启动生成的新身份。
 ///
-/// A reused address or label never gives the restarted process its old lease.
+/// 复用地址或标签不会让重启后的进程重新获得旧租约。
 public struct V2ActorHostIdentity: Hashable, Codable, Sendable {
     public let hostID: V2ActorHostID
     public let incarnationID: UUID
@@ -72,10 +72,9 @@ public struct V2ActorHostIdentity: Hashable, Codable, Sendable {
     }
 }
 
-/// The entire value is compared when renewing, releasing, or fencing a write.
+/// 续期、释放或为写入设置围栏时，比较整个值。
 ///
-/// Constructing this value does not grant authority. The room database must
-/// validate it while holding the transaction fence through commit.
+/// 构造此值不会授予权限。房间数据库必须在持有事务围栏直至提交期间校验它。
 public struct V2RoomActivationToken: Hashable, Codable, Sendable {
     public let roomID: RoomID
     public let owner: V2RoomDataOwner
@@ -94,10 +93,10 @@ public struct V2RoomActivationToken: Hashable, Codable, Sendable {
         self.host = host
     }
 
-    /// Only compares generations for the same logical room.
+    /// 只比较同一逻辑房间的代次。
     ///
-    /// Equal epochs with another host identity are not "newer"; they indicate
-    /// conflicting observations that the resolver must settle against the DB.
+    /// 纪元相同但宿主身份不同，不表示“更新”；
+    /// 这代表互相冲突的观测，解析器须依据数据库裁定。
     public func isNewer(than other: Self) -> Bool {
         guard roomID == other.roomID else { return false }
         if owner.epoch != other.owner.epoch { return owner.epoch > other.owner.epoch }
@@ -106,7 +105,7 @@ public struct V2RoomActivationToken: Hashable, Codable, Sendable {
     }
 }
 
-/// A database observation, not a client-clock authorization check.
+/// 这是数据库观测，不是依据客户端时钟的授权检查。
 public struct V2RoomActivationLease: Equatable, Codable, Sendable {
     public let token: V2RoomActivationToken
     public let databaseObservedAt: Date
@@ -136,7 +135,7 @@ public struct V2RoomActivationLease: Equatable, Codable, Sendable {
     private enum CodingKeys: String, CodingKey { case token, databaseObservedAt, expiresAt }
 }
 
-/// A strictly positive bounded duration suitable for wire and configuration use.
+/// 严格为正且有界的时长，可用于线路协议与配置。
 public struct V2ActorMilliseconds: Hashable, Comparable, Codable, Sendable {
     public static let maximum: Int64 = 3_600_000
     public let rawValue: Int64

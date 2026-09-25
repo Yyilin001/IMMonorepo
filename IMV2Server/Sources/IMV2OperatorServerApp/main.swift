@@ -18,19 +18,29 @@ import Vapor
 @main
 enum IMV2OperatorServerApp {
     static func main() async {
-        LoggingSystem.bootstrap(StreamLogHandler.standardError)
+        do { try V2ServiceLogging.bootstrap() }
+        catch {
+            fputs("Invalid IM_V2_LOG_LEVEL; expected a swift-log level.\n", stderr)
+            exit(EXIT_FAILURE)
+        }
         let logger = Logger(label: "imv2.operator")
         do {
             try await withLogger(logger) { _ in try await run(logger: logger) }
         } catch {
-            logger.error("IM V2 operator startup or shutdown failed")
+            logger.error("IM V2 operator startup or shutdown failed", metadata:
+                V2SafeLogMetadata.failure(error, stage: "operator_lifecycle"))
             exit(EXIT_FAILURE)
         }
     }
 
     private static func run(logger: Logger) async throws {
         V2ProcessTerminationSignal.install()
-        let configuration = try V2OperatorReplayRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
+        let configuration: V2OperatorReplayRuntimeConfiguration
+        do {
+            configuration = try V2OperatorReplayRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
+        } catch {
+            throw V2StagedOperationalError(stage: "operator_configuration", error: error)
+        }
         let applicationEventLoops = MultiThreadedEventLoopGroup(
             numberOfThreads: configuration.databasePolicy.eventLoopThreads
         )
@@ -41,9 +51,10 @@ enum IMV2OperatorServerApp {
         } catch {
             try? await resources.shutdown()
             try? await applicationEventLoops.shutdownGracefully()
-            throw error
+            throw V2StagedOperationalError(stage: "operator_http_application", error: error)
         }
         V2RedactedHTTPMiddlewareConfiguration.install(on: app)
+        var stage = "operator_composition"
         do {
             resources.databases.use(
                 try postgresDatabaseConfiguration(
@@ -69,9 +80,9 @@ enum IMV2OperatorServerApp {
             }
             let database: any Database = controlPool.database
             try await V2SchemaReadiness.verify(database: database)
-            // Resolution never borrows from reservation or policy-writer pools.
-            // Control acknowledgement and owner abort can share this dedicated
-            // physical pool: each transaction finishes before the next begins.
+            // 解析操作不借用预留连接池或策略写入连接池。
+            // 控制回执与归属方中止操作可共用此专用物理连接池：
+            // 每笔事务结束后才开始下一笔。
             var authorizationResolutionDatabases: [String: any Database] = [:]
             for (index, url) in configuration.directAuthorizationResolutionDatabaseURLs.enumerated() {
                 let id = DatabaseID(string: "operator-authorization-resolution-\(index)")
@@ -150,9 +161,8 @@ enum IMV2OperatorServerApp {
                 userStateReplayStores[storage.shardID] = PostgresV2DurableWorkReplayStore(database: ownerDatabase)
                 forwardReplayStores[storage.shardID] = PostgresV2ForwardWorkReplayStore(database: ownerDatabase)
             }
-            // Operator replay only changes workflow queue state. Gateway's
-            // delivery worker executes source receipts and target imports via
-            // RoomRef; this process does not need a cluster client.
+            // Operator 重放只改变工作流队列状态。Gateway 的投递 worker
+            // 通过 RoomRef 执行来源回执和目标导入；此进程无需集群客户端。
             let forwardReplay = try V2ForwardWorkOperatorReplayService(stores: forwardReplayStores,
                 operatorPrincipal: configuration.operatorPrincipal)
             let coLocatedControlBuckets = Set(configuration.userShardStorage.compactMap { storage in
@@ -189,6 +199,7 @@ enum IMV2OperatorServerApp {
                     capabilityProfile: configuration.capabilityProfile
                 )
             ).register(on: app)
+            stage = "operator_http_runtime"
             try await V2HTTPService.withRunning(app, logger: logger,
                 waitForShutdown: V2ProcessTerminationSignal.wait) { shutdown in
             logger.notice("IM V2 durable-work operator service bound", metadata: [
@@ -197,6 +208,7 @@ enum IMV2OperatorServerApp {
             ])
                 await shutdown.wait()
             }
+            stage = "operator_shutdown"
             try await app.shutdown()
             try await resources.shutdown()
             try await applicationEventLoops.shutdownGracefully()
@@ -204,7 +216,7 @@ enum IMV2OperatorServerApp {
             try? await app.shutdown()
             try? await resources.shutdown()
             try? await applicationEventLoops.shutdownGracefully()
-            throw error
+            throw V2StagedOperationalError(stage: stage, error: error)
         }
     }
 }

@@ -1,8 +1,8 @@
 import Foundation
 import IMV2Core
 
-// Keep durable direct-policy decoding and cache projections beside the direct
-// acceptance path, without changing the Store's transaction or cache timing.
+// 将持久化私聊策略解码与缓存投影放在私聊接受路径旁，
+// 不改变 Store 的事务或缓存更新时间。
 struct DirectMessagePolicySnapshotRow: Decodable {
     let recipientUserID: UUID
     let senderProfileVisibleToRecipient: Bool

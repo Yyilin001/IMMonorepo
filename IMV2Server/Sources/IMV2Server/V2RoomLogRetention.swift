@@ -77,8 +77,8 @@ public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
         self.database = database
     }
 
-    /// Discovery is a read-only hint. It grants no permission to trim; each
-    /// room candidate must enter a separately admitted room maintenance turn.
+    /// 发现结果只是只读提示，不授予裁剪权限；
+    /// 每个候选房间都必须单独进入获准的房间维护轮次。
     public func scanCandidateRoomIDs(limit: Int) async throws -> [RoomID] {
         guard (1...1_000).contains(limit) else { throw V2RoomWriteStoreError.corruptPersistenceState }
         guard !isTrimming else { return [] }
@@ -105,9 +105,9 @@ public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
         return rows.map { RoomID(uuid: $0.roomID) }
     }
 
-    /// Apply one admitted room's trim under its exact activation. The floor
-    /// computation, floor update, and trigger-authorized delete share the
-    /// fenced transaction; an old host cannot commit after a new epoch.
+    /// 在房间的精确激活下执行已获准的裁剪。下界计算、下界更新
+    /// 和触发器授权的删除共用受围栏保护的事务；
+    /// 新纪元出现后，旧宿主不能再提交。
     public func trimRoomLog(
         token: V2RoomActivationToken, mode: V2RoomLogRetentionMode,
         window: TimeInterval, now: Date,
@@ -273,7 +273,7 @@ private func roomLogRetentionCandidates(
 private func trimRoomLogCandidate(
     _ candidate: RoomLogRetentionCandidateRow, sql: any SQLDatabase
 ) async throws -> (trimmed: Bool, deletedEvents: Int) {
-    // Sequences start at one; a floor <= 1 cannot remove a real event.
+    // 序号从一开始；下界不大于一时不能删除真实事件。
     guard candidate.floorSequence > 1,
           candidate.floorSequence > candidate.trimmedThrough else { return (false, 0) }
     let advanced = try await sql.raw("""
@@ -285,13 +285,11 @@ private func trimRoomLogCandidate(
         RETURNING room_id
         """).first(decoding: RoomLogTrimmedRow.self) != nil
     guard advanced else { return (false, 0) }
-    // Lock *every* state whose source event will be removed, including states
-    // that are still inline in this statement's snapshot. A compactor may be
-    // concurrently changing an inline state to room_event: filtering only
-    // room_event here could skip its uncommitted update and delete the event.
-    // Updating every referenced row waits for that writer and restores the
-    // inline payload after its commit. A later compactor skips our locked row
-    // and, after commit, cannot find the deleted source event.
+    // 锁定来源事件将被删除的每项状态，包括此语句快照中仍内联的状态。
+    // 压缩器可能正并发地把内联状态改为 room_event；若只过滤 room_event，
+    // 就可能跳过尚未提交的更新并删除事件。
+    // 更新每条被引用的记录会等待该写入方，并在其提交后恢复内联载荷。
+    // 后续压缩器会跳过我们锁定的记录，提交后也找不到已删除的源事件。
     try await sql.raw("""
         UPDATE im_v2.message_projection_states AS state
         SET payload = CASE WHEN state.payload_storage = 'room_event'
@@ -303,7 +301,7 @@ private func trimRoomLogCandidate(
           AND event.room_id = state.room_id
           AND event.room_sequence < \(bind: candidate.floorSequence)
         """).run()
-    // The trigger independently checks that only below-floor rows are deleted.
+    // 触发器会独立检查，确保只删除低于下界的记录。
     try await sql.raw("SET LOCAL im_v2.retention_trim = 'on'").run()
     let removed = try await sql.raw("""
         WITH removed AS (

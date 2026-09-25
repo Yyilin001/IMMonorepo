@@ -126,9 +126,9 @@ public final class V2AuthenticatedGatewayCommandRateLimiter: V2AuthenticatedGate
         monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
     ) {
         precondition(shardCount > 0)
-        // Small policy fixtures and deliberately tiny deployments retain one
-        // lane. Production-sized maps gain parallelism without creating a
-        // shard whose budget cannot hold one user and one device atomically.
+        // 小型策略测试配置和刻意缩小的部署保留单通道。
+        // 生产规模的映射可获得并行性，同时不会创建预算不足以
+        // 原子容纳一个用户和一台设备的分片。
         let effectiveShardCount = min(
             shardCount,
             max(1, policy.maximumTrackedIdentities / 1_024)
@@ -154,8 +154,8 @@ public final class V2AuthenticatedGatewayCommandRateLimiter: V2AuthenticatedGate
     public func admit(identity: V2AuthenticatedConnection, cost: Int, now: Date) async -> Bool {
         guard cost >= 0 else { return false }
         guard cost > 0 else { return true }
-        // Match the session's clock contract before charging buckets or
-        // changing LRU state, independently of the monotonic refill clock.
+        // 扣减限流桶或修改 LRU 状态前，先满足会话的时钟契约；
+        // 这与单调补充时钟相互独立。
         guard (try? v2GatewayMilliseconds(now)) != nil else { return false }
         return await shards[shardIndex(for: identity.userID)].admit(
             identity: identity,
@@ -215,18 +215,17 @@ private actor V2AuthenticatedGatewayCommandRateLimiterShard {
         identityCapacity: Int,
         monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant
     ) {
-        // Rates are already represented as Double for refill arithmetic.
-        // Reconstructing the policy via Int would trap for accepted values
-        // such as Int.max, which rounds up when converted to Double.
+        // 补充速率已用 Double 表示。若经由 Int 重建策略，
+        // 对 Int.max 等已接受的值可能崩溃，因为转换为 Double 时会向上舍入。
         self.policy = policy
         self.identityCapacity = identityCapacity
         self.monotonicNow = monotonicNow
     }
 
     func admit(identity: V2AuthenticatedConnection, cost: Int) -> Bool {
-        // Sample inside the lane so queued requests share actor execution
-        // order. Wall-clock adjustments must neither replenish credits early
-        // nor stall normal refill until an earlier timestamp is reached again.
+        // 在通道内采样，使已排队请求遵循 Actor 执行顺序。
+        // 墙上时钟调整既不能提前补充额度，
+        // 也不能让正常补充停滞直到时间重新到达旧时间戳。
         let now = monotonicNow()
         var device = refilled(
             devices[identity.deviceID],

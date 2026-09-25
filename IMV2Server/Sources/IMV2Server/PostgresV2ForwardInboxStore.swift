@@ -61,7 +61,7 @@ public struct PostgresV2ForwardInboxStore: Sendable {
         self.activationScope = nil
     }
 
-    /// Bind receive, including an existing-export replay, to the exact target turn.
+    /// 将接收操作（包括既有导出的重放）绑定到精确的目标轮次。
     public func usingActivationToken(_ token: V2RoomActivationToken) throws -> Self {
         var scoped = self
         scoped.activationScope = try .init(tokens: [token])
@@ -94,10 +94,9 @@ public struct PostgresV2ForwardInboxStore: Sendable {
             guard let sql = transaction as? any SQLDatabase else { throw V2ForwardInboxError.corruptPersistenceState }
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             if activationScope == nil, try await matchesExisting(export, sql: sql) { return }
-            // Check existing immutable bindings before taking any room lock.
-            // The quota mutex serializes new receipts for this target. Only a
-            // new binding takes SHARE through insertion, fencing epoch changes
-            // without waiting on an existing inbox held by acceptance.
+            // 获取任何房间锁前，先检查既有的不可变绑定。
+            // 配额互斥锁串行化此目标的新回执。只有新绑定才会通过插入取得 SHARE 锁，
+            // 从而阻止纪元变化，无须等待接受阶段持有的既有收件箱。
             let key = "v2-forward-inbox-room:\(intent.targetRoomID)"
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
             try await activationScope?.require([intent.targetRoomID], sql: sql)
@@ -342,9 +341,8 @@ func v2RejectForwardInbox(_ row: ForwardInboxRow, code: String, now: Date, sql: 
 /// - Throws: 归属不一致时抛出 ``V2ForwardInboxError/ownerChanged``。
 func v2AssertForwardInboxOwner(_ authorization: ForwardInboxAuthorization, sql: any SQLDatabase) async throws {
     let intent = authorization.export.intent
-    // Acceptance calls after message-operation and room locks; completion
-    // calls after the inbox lock. Retain the owner through the caller's commit,
-    // including when a stale caller attempts to use another owner or epoch.
+    // 接受阶段在取得消息操作锁和房间锁后调用；完成阶段在取得收件箱锁后调用。
+    // 所有者须保持到调用方提交，即使过期调用方试图使用其他所有者或纪元。
     guard let room = try await sql.raw("""
         SELECT room_shard_id, owner_epoch FROM im_v2.rooms WHERE room_id = \(bind: intent.targetRoomID) FOR NO KEY UPDATE
         """).first(decoding: ForwardInboxOwnerRow.self),

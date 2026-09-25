@@ -263,8 +263,8 @@ public final class V2ForegroundGroupEventHintDispatcher:
             if state.pending[hint.roomID] == nil,
                state.pending.count >= maximumPendingRooms,
                let bufferedRoom = state.pending.keys.first {
-                // Hints are deliberately lossy and durable cursor pulls are
-                // the recovery path. Keep the newest bounded room set.
+                // 提示允许丢失，持久化游标拉取才是恢复路径。
+                // 保留数量有界的最新房间集合。
                 state.pending.removeValue(forKey: bufferedRoom)
             }
             state.pending[hint.roomID] = .init(
@@ -300,10 +300,9 @@ public final class V2ForegroundGroupEventHintDispatcher:
             submitGroupEvents([event])
             return
         }
-        // The production single-Gateway publisher performs only immutable
-        // frame preparation and bounded per-connection mailbox appends. Do it
-        // before touching the shared fallback mailbox, avoiding one global
-        // lock, AsyncStream signal and executor hop for every accepted DM.
+        // 生产环境的单 Gateway 发布器只负责准备不可变帧，
+        // 并向各连接有界邮箱追加。先完成这些操作，再接触共享回退邮箱，
+        // 避免每条已接受的私聊消息都触发一次全局锁、AsyncStream 信号和执行器跳转。
         if immediateDirectEventPublisher?.publishForegroundDirectEventImmediately(event) == true {
             return
         }
@@ -413,9 +412,8 @@ public final class V2ForegroundGroupEventHintDispatcher:
         }
         if state.pending[event.roomID]!.groupEvents.count
             >= maximumPendingGroupEventsPerRoom {
-            // The process-local accelerator remains bounded. Only a room
-            // that outgrows its entire multi-frame backlog is degraded; an
-            // ordinary burst is split into ordered frames by the drain.
+            // 进程内加速器保持有界。只有房间的积压超过整个多帧容量时才降级；
+            // 普通突发流量会在排空时拆成有序帧。
             state.pending[event.roomID] = .init(
                 wake: .init(
                     roomID: event.roomID,
@@ -432,8 +430,8 @@ public final class V2ForegroundGroupEventHintDispatcher:
                 late: late, degraded: true
             )
         }
-        // Mutate the dictionary-owned Array in place. Copying the value out
-        // forces Array COW on every event and makes a hot room quadratic.
+        // 原地修改字典持有的 Array。若先复制取出该值，
+        // 每条事件都会触发 Array 写时复制，使热房间的开销呈平方增长。
         state.pending[event.roomID]!.appendGroupEvent(
             event,
             outOfOrder: outOfOrder
@@ -454,9 +452,8 @@ public final class V2ForegroundGroupEventHintDispatcher:
             if groupBatchDelay > .zero {
                 try? await v2Sleep(for: groupBatchDelay)
             }
-            // Quiet rooms retain the base latency. A room that has already
-            // accumulated enough events gets exactly one bounded extension,
-            // reducing per-recipient TLS flushes without an unbounded wait.
+            // 安静房间保持基础延迟。事件已累积到一定数量的房间
+            // 恰好获得一次有界延长，减少逐接收方 TLS 刷新，且不会无限等待。
             let shouldExtendGroupBatch = state.withLock { state in
                 groupBatchExtensionDelay > .zero
                     && state.pending.values.contains {
@@ -473,10 +470,9 @@ public final class V2ForegroundGroupEventHintDispatcher:
                 return batch
             }
 
-            // A later room event is only placed in a subsequent drain after
-            // this one has completed. Within a drain, rooms are independent:
-            // clients still require exact cursor continuity and fall back to
-            // the durable log for a duplicate, a gap, or a dropped hint.
+            // 后续房间事件只会在本次排空完成后进入下一轮排空。
+            // 同一轮内各房间相互独立：客户端仍要求游标精确连续；
+            // 遇到重复、缺口或丢失的提示时回退到持久化日志。
             var lowerBound = 0
             while lowerBound < batch.count {
                 if Task.isCancelled { return }
@@ -566,9 +562,8 @@ public final class V2ForegroundGroupEventHintDispatcher:
         guard let sink else { return false }
         for batch in groupEventBatches(events) {
             guard sink.publishForegroundGroupEventsImmediately(batch) else {
-                // The regular asynchronous publication path republishes the whole
-                // ordered sequence. Foreground events are idempotent, so this
-                // safely repairs a partial transport-lifecycle miss.
+                // 常规异步发布路径会重新发布整个有序序列。
+                // 前台事件具备幂等性，因此可安全修复部分传输生命周期未命中。
                 return false
             }
             recordPublishedGroupBatch(batch)

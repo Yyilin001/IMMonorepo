@@ -302,10 +302,9 @@ public final class V2TLSGatewayServer {
         let channel = try await ServerBootstrap(group: acceptorGroup, childGroup: group)
             .serverChannelOption(ChannelOptions.backlog, value: listenBacklog)
             .serverChannelOption(ChannelOptions.maxMessagesPerRead, value: acceptBatchSize)
-            // After an abrupt process exit, accepted TCP sockets can remain
-            // in TIME_WAIT.  Allow the replacement process to reclaim the
-            // listener immediately without permitting two live listeners to
-            // bind the same address.
+            // 进程突然退出后，已接受的 TCP 套接字可能仍处于 TIME_WAIT。
+            // 允许替代进程立即重新取得监听地址，
+            // 同时不允许两个仍活动的监听器绑定同一地址。
             .serverChannelOption(
                 ChannelOptions.socketOption(.so_reuseaddr),
                 value: 1
@@ -317,10 +316,9 @@ public final class V2TLSGatewayServer {
                 }
                 let lease = V2GatewayConnectionLease(admission: admission)
                 childChannels.insert(channel)
-                // This closure is already invoked on the child EventLoop.
-                // Both handlers are deliberately loop-confined and therefore
-                // must use NIO's synchronous pipeline view rather than the
-                // cross-concurrency `ChannelHandler & Sendable` overload.
+                // 此闭包已在子 EventLoop 上调用。两个处理器都有意限制在该循环内，
+                // 因而须使用 NIO 的同步流水线视图，
+                // 而非跨并发域的 `ChannelHandler & Sendable` 重载。
                 return channel.eventLoop.makeCompletedFuture {
                     try channel.pipeline.syncOperations.addHandler(V2GatewayConnectionLeaseHandler(
                         lease: lease,

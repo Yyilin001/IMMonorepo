@@ -130,8 +130,8 @@ public struct V2ForwardMediaImportWorker: Sendable {
     ///   ``V2ForwardInboxError/corruptPersistenceState``；其余错误来自存储实现。
     public func runOnce(exportID: UUID) async throws -> V2ForwardMediaImportOutcome {
         guard let lease = try await store.claim(exportID: exportID, now: now(), leaseDuration: leaseDuration) else {
-            // A previous process may have paused and lost its response. Report
-            // durable state so source delivery cannot poll it forever as idle.
+            // 上一个进程可能已经暂停并丢失响应。报告持久状态，
+            // 避免来源投递一直将其视为空闲并轮询。
             return try await store.hasPausedImport(exportID: exportID) ? .paused : .idle
         }
         do {
@@ -145,8 +145,8 @@ public struct V2ForwardMediaImportWorker: Sendable {
             guard try await store.complete(lease, receipt: copied, result: result, now: now()) else { return .superseded }
             return result == .passed ? .ready : .rejected
         } catch is CancellationError {
-            // Do not purge: a newer lease may already have installed or used
-            // the same stable target object. Cancellation releases only ours.
+            // 不要清除：更新的租约可能已安装或使用同一个稳定目标对象。
+            // 取消时只释放当前操作持有的资源。
             _ = try? await store.retry(lease, disposition: .retry(at: now()), now: now())
             throw CancellationError()
         } catch V2ForwardMediaCopyError.contentConflict {

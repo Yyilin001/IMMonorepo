@@ -2,8 +2,8 @@ import IMV2ActorContracts
 import IMV2ActorRuntime
 import IMV2Core
 
-/// Shared by source preparation, receipt workers and target import delivery.
-/// No caller handles an ActorID, owner address or activation epoch.
+/// 供来源准备、回执工作器和目标导入投递共用。
+/// 调用方无需处理 ActorID、所有者地址或激活纪元。
 public struct V2RoomRefForwardPort: Sendable {
     private let directory: V2RoomDirectory
     public init(directory: V2RoomDirectory) { self.directory = directory }
@@ -31,8 +31,8 @@ public extension V2ActorForwardPairPort {
                     return .committed(try await executor.execute(pair,
                         activationTokens: grants.map(\.token), deadline: deadline))
                 } catch {
-                    // Known pair business rejections are independent results;
-                    // an unrelated target can still complete its own pair.
+                    // 已知的房间对业务拒绝是彼此独立的结果；
+                    // 无关目标仍可完成它自己的房间对操作。
                     if let code = v2ActorForwardPairBusinessFailure(error) {
                         return .committed(.init(sourceMessageID: pair.source.messageID,
                             targetRoomID: pair.targetRoomID, messageID: nil,

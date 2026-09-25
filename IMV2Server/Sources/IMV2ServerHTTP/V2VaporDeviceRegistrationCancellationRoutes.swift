@@ -48,9 +48,8 @@ public struct V2VaporDeviceRegistrationCancellationRoutes: Sendable {
     /// - 成功返回 204；幂等/过期/不可重放分别返回 204/410。
     public func register(on routes: any RoutesBuilder) {
         routes.on(.post, "v2", "device-credentials", "cancel-registration", maxBodySize: "1kb") { request async -> Response in
-            // Vapor's collect limit applies to a live stream; an in-memory
-            // request body is already collected and is returned without a
-            // second size check. Enforce the same 1 KB contract in both cases.
+            // Vapor 的收集大小限制只适用于实时流；内存中的请求正文已经收集完毕，
+            // 返回时不会再次检查大小。两种情况都要执行相同的 1 KB 限制。
             do {
                 let body = try await request.body.collect()
                 guard (body?.count ?? 0) <= 1_024 else { return Self.response(.contentTooLarge) }

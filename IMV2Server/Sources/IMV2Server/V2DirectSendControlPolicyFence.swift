@@ -3,9 +3,9 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Control facts only. Room reply markers, membership and quota remain owner facts.
-/// A volatile value is valid only inside the locking transaction. Persisted facts
-/// may be used outside it only with their exact durable authorization attempt.
+/// 这里只处理控制侧事实。房间回复标记、成员关系和配额仍属所有者事实。
+/// 易变值只在持锁事务内有效；持久化事实只有绑定精确的持久化授权尝试后，
+/// 才可在事务外使用。
 struct V2DirectSendControlPolicy: Codable, Equatable, Sendable {
     let sender: V2DirectSendControlAccount
     let recipient: V2DirectSendControlAccount
@@ -39,7 +39,7 @@ struct V2DirectSendControlPair: Hashable, Sendable {
     }
 }
 
-/// Read control facts under ordered policy locks for durable grant reservation.
+/// 在有序策略锁下读取控制侧事实，供持久化授权预留使用。
 struct V2DirectSendControlPolicyFence: Sendable {
     let database: any Database
     let schema: String
@@ -50,8 +50,8 @@ struct V2DirectSendControlPolicyFence: Sendable {
         self.schema = schema
     }
 
-    /// Persist authorization obligations in this transaction, then commit before
-    /// starting owner work. Control locks alone do not survive connection loss.
+    /// 在此事务中持久化授权义务，并在启动所有者工作前提交。
+    /// 仅靠控制侧锁无法跨越连接丢失。
     func withLockedPolicies<Result: Sendable>(
         pairs: [V2DirectSendControlPair],
         operation: @escaping @Sendable (any Database, [V2DirectSendControlPair: V2DirectSendControlPolicy]) async throws -> Result
@@ -69,7 +69,7 @@ struct V2DirectSendControlPolicyFence: Sendable {
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2DirectSendControlPolicyError.nonSQLDatabase
             }
-            // Match actual writers' exact lock names; never nest per-pair scopes.
+            // 与实际写入方的精确锁名称一致；绝不嵌套逐关系作用域。
             for user in users {
                 let key = "account-state:" + user.uuidString
                 try await sql.raw("SELECT pg_advisory_xact_lock_shared(hashtextextended(\(bind: key), 0))").run()

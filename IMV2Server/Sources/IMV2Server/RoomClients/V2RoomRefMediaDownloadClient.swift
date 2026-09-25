@@ -4,8 +4,8 @@ import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
-/// Message downloads use a fresh room turn for visibility. The owner database
-/// stores only the scoped provider grant; it is not consulted for room facts.
+/// 消息下载通过新的房间轮次检查可见性。所有者数据库只存储
+/// 限定范围的提供方授权，不用于查询房间事实。
 public struct V2RoomRefMediaDownloadClient: V2MediaDownloadTargetResolving {
     private let local: V2MediaEdgeDownloadService
     private let rooms: any V2RoomShardRouting
@@ -57,8 +57,8 @@ public struct V2RoomRefMediaDownloadClient: V2MediaDownloadTargetResolving {
         let sessions = try V2MediaProviderSessionService(store: store, provider: owner.provider, now: now)
         let target = try await sessions.exchangeDownload(actorUserID: actorUserID,
             deviceID: deviceID, downloadSessionID: grant.downloadSessionID)
-        // Provider signing may await network or storage. A granted snapshot is
-        // not a standing authorization after that wait.
+        // 提供方签名可能等待网络或存储。等待结束后，
+        // 此前获准的快照不能继续充当有效授权。
         try await guardrail.recheck(snapshot)
         let returnedAt = now()
         guard v2PostgresTimestampCanEncode(returnedAt) else {
@@ -167,8 +167,9 @@ private struct RoomRefMediaGuard: Sendable {
     }
 }
 
-/// Only the scoped grant lifecycle touches owner SQL. RoomRef and control
-/// checks finish before every owner transaction, so no SQL lock spans a room turn.
+/// 只有限定范围的授权生命周期会访问所有者 SQL。
+/// RoomRef 与控制侧检查在每次所有者事务前结束，
+/// 因此没有 SQL 锁跨越房间轮次。
 private struct RoomRefMediaSessions: V2MediaDownloadSessionStore {
     let owner: any Database
     let context: RoomRefMediaContext

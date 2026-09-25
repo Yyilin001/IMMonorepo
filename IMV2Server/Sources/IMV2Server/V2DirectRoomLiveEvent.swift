@@ -151,11 +151,9 @@ struct V2GroupRoomLiveEventDraft: Equatable, Sendable {
         self.message = message
         self.sourceEventID = sourceEventID
         self.membershipRevision = membershipRevision
-        // A group batch must have one byte-identical representation and one
-        // audience for every socket. The sender may already have advanced its
-        // local cursor from the acceptance ACK and will simply skip the
-        // duplicate entry; per-event connection exclusion would destroy the
-        // encode-once property.
+        // 群组批次必须对每个套接字使用字节完全相同的表示和同一受众。
+        // 发送方可能已根据接受确认推进本地游标，因此会跳过重复条目；
+        // 若按事件排除连接，就无法做到只编码一次。
         self.excludedConnectionID = nil
     }
 

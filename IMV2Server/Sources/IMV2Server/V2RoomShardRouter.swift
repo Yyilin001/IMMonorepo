@@ -202,9 +202,9 @@ public struct V2PostgresRoomShardRouter: V2DirectRoomShardRouting {
         else { throw V2RoomShardRouteError.corruptPersistenceState }
         let pair = canonicalPair(actor, target)
         let lockKey = roomOwnerDirectRouteLockKey(pair)
-        // This is intentionally a short control-plane fence around direct
-        // room creation only. Existing-room sends use `route(for:)` and never
-        // hold a control transaction while their owner transaction runs.
+        // 此控制侧围栏有意只短暂覆盖私聊房间创建。
+        // 既有房间的发送使用 `route(for:)`，所有者事务运行时
+        // 不会同时持有控制侧事务。
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomShardRouteError.corruptPersistenceState
@@ -317,9 +317,9 @@ private struct DirectRouteRow: Decodable {
 struct CanonicalDirectPair: Sendable {
     let lower: UUID
     let higher: UUID
-    // This is a control-directory fence. Keep its advisory-lock namespace
-    // distinct from PostgresV2DirectMessagingStore's owner-store pair lock;
-    // otherwise a co-located deployment would wait on its own open transaction.
+    // 这是控制目录围栏。咨询锁命名空间须与
+    // PostgresV2DirectMessagingStore 的所有者存储关系锁区分开；
+    // 否则同址部署会等待自身尚未结束的事务。
 }
 
 /// 以规范 UUID 文本顺序排列用户对，不在此处检查两个用户是否相同。
@@ -339,8 +339,8 @@ private func roomRouteUUIDJSON(_ values: [UUID]) throws -> String {
 /// - Parameter pair: 已按规范顺序排列的用户对。
 /// - Returns: 以 `room-route:` 开头、使用冒号分隔的小写 UUID 文本，不含 PostgreSQL 不接受的空字节。
 func roomOwnerDirectRouteLockKey(_ pair: CanonicalDirectPair) -> String {
-    // PostgreSQL text parameters cannot contain a NUL byte. UUIDs have a fixed
-    // textual form, so colon delimiters are unambiguous here and keep this
-    // namespace separate from the owner-store direct-pair lock.
+    // PostgreSQL 文本参数不能包含 NUL 字节。UUID 的文本形式固定，
+    // 因此冒号分隔符在此不会歧义，也能让此命名空间
+    // 与所有者存储的私聊关系锁区分开。
     "room-route:" + pair.lower.uuidString.lowercased() + ":" + pair.higher.uuidString.lowercased()
 }

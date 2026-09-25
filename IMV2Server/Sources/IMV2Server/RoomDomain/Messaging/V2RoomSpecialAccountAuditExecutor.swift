@@ -1,8 +1,8 @@
 import Foundation
 import IMV2ActorContracts
 
-/// The service-role check lives at the authenticated boundary. This executor
-/// binds its room authority independently of all fields supplied in the packet.
+/// 服务角色检查位于认证边界。此执行器独立于报文提供的所有字段
+/// 绑定其房间权限。
 public struct V2RoomSpecialAccountAuditExecutor: Sendable {
     private let token: V2RoomActivationToken
     private let store: PostgresV2SpecialAccountMessagingStore

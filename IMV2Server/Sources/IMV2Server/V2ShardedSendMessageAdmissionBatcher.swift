@@ -52,8 +52,8 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
                   actorGrantedStoreFactory: factory)
     }
 
-    /// Test injection exercises the same shared-capacity and lane routing as
-    /// production without requiring a PostgreSQL connection for every case.
+    /// 测试注入点复用生产环境的共享容量与通道路由逻辑，
+    /// 无须每个测试都连接 PostgreSQL。
     convenience init(
         store: any V2AtomicRoomWriteBatchStore,
         configuration: V2SendMessageAdmissionBatcher.Configuration,
@@ -108,9 +108,9 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
                     maximumDelay: configuration.maximumDelay,
                     adaptiveDelayPolicy: adaptivePolicy,
                     maximumInFlightBatches: inFlight,
-                    // The shared capacity below owns the process-wide bound.
-                    // Retain the same value here for configuration invariants
-                    // and diagnostics; a lane no longer gets a hard slice.
+                    // 下方的共享容量负责进程级上限。
+                    // 此处保留同一数值供配置不变量和诊断使用；
+                    // 通道不再拥有固定的容量切片。
                     maximumPendingRequests: configuration.maximumPendingRequests,
                     maximumTrackedActivations: configuration.maximumTrackedActivations
                 ),
@@ -140,8 +140,8 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
         )].accept(ownedRequest)
     }
 
-    /// An entire granted turn stays on the room's stable lane. The source
-    /// actor validates the token and preserves each result's original index.
+    /// 整个获准轮次留在房间的稳定通道上。
+    /// 源 Actor 校验令牌，并保留各结果的原始索引。
     public func acceptGrantedTurn(
         _ sends: [V2PreparedActorSend],
         batchDeadline: ContinuousClock.Instant,
@@ -223,8 +223,8 @@ public final class V2ShardedSendMessageAdmissionBatcher: V2SendMessageAdmission,
     ///   - divisor: 除数。
     /// - Returns: 向上取整的结果。
     private static func ceilingDivide(_ value: Int, by divisor: Int) -> Int {
-        // Inputs are positive. Adding the divisor first can overflow even
-        // though both the threshold and its per-lane result are representable.
+        // 输入均为正数。即使阈值与各通道结果都可表示，
+        // 先加除数仍可能溢出。
         (value / divisor) + (value % divisor == 0 ? 0 : 1)
     }
 }

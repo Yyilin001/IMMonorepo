@@ -287,8 +287,8 @@ public actor V2CachedDurableWorkMetricsSource: V2DurableWorkMetricsSource {
 
     public func durableWorkMetricsSnapshot() async -> V2DurableWorkMetricsSnapshot {
         let requestedAt = now()
-        // Preserve the server-clock availability contract without allowing
-        // wall-clock corrections to change cache or fallback elapsed ages.
+        // 保持服务端时钟的可用性契约，同时不让墙上时钟校正
+        // 改变缓存或回退数据的已流逝时长。
         guard requestedAt.timeIntervalSince1970.isFinite else { return .unavailable }
         let requestedInstant = monotonicNow()
         if let cached {
@@ -322,8 +322,8 @@ public actor V2CachedDurableWorkMetricsSource: V2DurableWorkMetricsSource {
             let elapsed = fallback.loadedAt.duration(to: monotonicNow())
             guard now().timeIntervalSince1970.isFinite, elapsed >= .zero,
                   let age = Int(exactly: elapsed.components.seconds) else {
-                // Do not advertise stale values as fresh by clamping an
-                // unrepresentable age to zero or to an arbitrary maximum.
+                // 不能把无法表示的数据年龄钳制到零或任意最大值，
+                // 从而将过期数据伪装为新鲜数据。
                 return refreshed.reportingUnavailable(lastSuccessfulRefreshAgeSeconds: nil)
             }
             return fallback.snapshot.reportingUnavailable(
@@ -337,8 +337,8 @@ public actor V2CachedDurableWorkMetricsSource: V2DurableWorkMetricsSource {
             if snapshot.isAvailable { lastKnownGood = (snapshot, loadedAt) }
             cached = (snapshot, loadedAt)
         } else {
-            // Recovery may land inside the old cache's interval. Force a new
-            // refresh instead of presenting that older success after failure.
+            // 恢复可能落在旧缓存的有效间隔内。此时强制重新刷新，
+            // 不在故障后继续展示较早的成功值。
             cached = nil
         }
         refreshTask = nil
@@ -371,7 +371,7 @@ private func v2LoadDurableWorkMetrics(
                 try await v2Sleep(for: timeout)
                 race.resolve(.timedOut)
             } catch {
-                // The source won and cancelled this timer.
+                // 数据源先完成，并取消了此计时器。
             }
         }
         race.install(tasks: [sourceTask, timeoutTask])
@@ -487,9 +487,8 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
         guard let sql = database as? any SQLDatabase else {
             throw V2DurableWorkMetricsError.sqlUnavailable
         }
-        // PostgreSQL cannot infer a type for a bare NULL bind in `NULL IS
-        // NULL`. Bind an explicit Boolean scope flag instead, while keeping
-        // the node bind typed by its comparison to the text column.
+        // PostgreSQL 无法为 `NULL IS NULL` 中单独绑定的 NULL 推断类型。
+        // 改为绑定显式的布尔作用域标记；节点绑定仍由它与文本列的比较确定类型。
         let includesGatewayRevocationMetrics = gatewayNodeID != nil
         let scopedGatewayNodeID = gatewayNodeID ?? ""
         guard let row = try await sql.raw("""
@@ -756,9 +755,8 @@ public struct PostgresV2DurableWorkMetricsSource: V2DurableWorkMetricsSource {
         do {
             return try await loadDurableWorkMetrics()
         } catch {
-            // /metrics stays scrapeable when PostgreSQL is unavailable; the
-            // availability gauge is the explicit alerting signal. Error text
-            // must not escape as a metric label or response body.
+            // PostgreSQL 不可用时，/metrics 仍可被抓取；
+            // 可用性测量值是明确的告警信号。错误文本不能泄漏为指标标签或响应体。
             return .unavailable
         }
     }

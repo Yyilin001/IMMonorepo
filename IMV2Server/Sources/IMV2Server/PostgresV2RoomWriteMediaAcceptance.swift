@@ -2,8 +2,7 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-// Validates source-version authority and locks media on the caller's
-// transaction connection before scalar message persistence.
+// 在逐条消息持久化前，使用调用方事务连接校验源版本权限并锁定媒体。
 enum RoomWriteMediaAcceptance {
     static func presentations(
         command: V2SendMessageCommand,
@@ -17,8 +16,8 @@ enum RoomWriteMediaAcceptance {
         if let importedForward {
             let exact = try importedForward.command(limits: .init(maxUTF8Bytes: max(importedForward.export.intent.text.utf8.count, 1)))
             guard command == exact else { throw V2ForwardInboxError.idempotencyConflict }
-            // Imported files are separate target-owned objects. An inbox
-            // mapping does not grant access to arbitrary source media IDs.
+            // 导入的文件是目标方单独拥有的对象。
+            // 收件箱映射不授予访问任意源媒体 ID 的权限。
             mediaAuthority = .ownedBy(senderID)
         } else if let forwarded = command.forwardedFrom {
             guard let sourceMessageID = UUID(uuidString: forwarded.messageID.rawValue),
@@ -38,8 +37,8 @@ enum RoomWriteMediaAcceptance {
                   source.text == command.text,
                   try JSONDecoder().decode([V2MessageEntity].self, from: Data(source.entitiesJSON.utf8)) == command.entities
             else { throw V2RoomWriteStoreError.actorNotEligible }
-            // A forward may only reuse an attachment from the exact
-            // source message; attribution is not a general media grant.
+            // 转发只能复用精确源消息中的附件；
+            // 来源归属信息不是通用媒体授权。
             let sourceReferences = try await sql.raw("""
                 SELECT media_id, ordinal, revoked_at FROM im_v2.message_media_references
                 WHERE message_id = \(bind: sourceMessageID)
@@ -72,9 +71,8 @@ enum RoomWriteMediaAcceptance {
         case .ownedBy(let ownerID):
             "media.owner_user_id = \(bind: ownerID)"
         case .forwardedFrom(let sourceMessageID):
-            // The caller has locked and authorized this exact source/version
-            // and its complete reference set. A later-hop sender need not own
-            // the original asset; the active source reference is the grant.
+            // 调用方已锁定并授权此精确源和版本及其完整引用集合。
+            // 后续转发者无须拥有原始资产；有效的源引用即构成授权。
             """
             EXISTS (
                 SELECT 1 FROM im_v2.message_media_references AS source_reference

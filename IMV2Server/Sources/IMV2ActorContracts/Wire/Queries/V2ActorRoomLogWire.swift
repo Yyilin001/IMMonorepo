@@ -49,8 +49,8 @@ public struct V2ActorRoomLogSubscribeWire: Equatable, Codable, Sendable {
     }
 }
 
-/// Payload is the existing canonical encoded room event, not an arbitrary RPC
-/// operation. Event identity, ordering and projection kind remain explicit.
+/// 载荷是现有的规范编码房间事件，不是任意 RPC 操作。
+/// 事件身份、顺序和投影类型均保持显式。
 public struct V2ActorRoomLogEntryWire: Equatable, Codable, Sendable {
     public let sourceEventID: EventID
     public let roomSequence: UInt64
@@ -163,8 +163,8 @@ public enum V2RoomLogQuery: Equatable, Codable, Sendable {
         }
     }
 
-    /// Subscribe here only observes eligibility/watermarks. Host interest
-    /// registration is a separately versioned lifecycle operation.
+    /// 此处订阅只观察资格与水位。宿主关注注册是单独
+    /// 版本化的生命周期操作。
     public var replayPolicy: V2RoomReplayPolicy { .readOnly }
 }
 

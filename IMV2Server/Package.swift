@@ -153,6 +153,10 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
             ]
         ),
+        .testTarget(
+            name: "IMV2ServerAppTests",
+            dependencies: ["IMV2ServerApp"]
+        ),
         .executableTarget(
             name: "IMV2AccountServerApp",
             dependencies: [

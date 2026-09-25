@@ -38,11 +38,20 @@ scrape 只在锁内复制值快照，Prometheus 文本在锁外渲染。因此�
 绝不能挂到公开媒体边缘或 realtime TLS 端口。
 
 结构化命令日志与精确指标是两个不同合同。低于慢命令阈值的成功命令按
-`IM_V2_COMMAND_FAST_SUCCESS_SAMPLE_PERMILLE` 采样；慢命令、拒绝和失败不走该采样，但按封闭的
+`IM_V2_COMMAND_SUCCESS_LOG_SAMPLE_PERMILLE` 采样；慢命令、拒绝和失败不走该采样，但按封闭的
 `(command, outcome, rejection)` 结果键由 `IM_V2_COMMAND_DIAGNOSTIC_LOG_MAX_PER_SECOND` 限制
 日志 burst，默认每键每秒 20 条。该限制只保护日志 I/O，不能用日志条数计算请求量；请求量、结果和
 累计延迟必须读 Prometheus 精确 counter。排障时可以在受控短窗口提高限制，但不能通过无限打印诊断
 日志制造新的 Gateway 瓶颈。
+
+三个服务端进程通过 `IM_V2_LOG_LEVEL` 调整首方 `imv2.` logger 的级别，
+默认 `info`；其他依赖库仍保持 `info`，避免为排障打开其可能含敏感细节的调试输出。
+启用 `debug` 后，HTTP 成功请求会记录方法和路由模板，不记录原始路径或查询串。
+配置值不合法时进程拒绝启动。生命周期与后台工作器故障记录固定的
+`stage`、`error_code`、`error_type`，工作器额外记录 `worker`；
+`error_type` 来自编译期类型，日志不写入 `Error` 的描述文本。
+后台工作器共用 `IM V2 background worker failed; retrying` 事件，
+按固定的 `worker` 字段区分故障来源，而不是依赖不同的自然语言消息做检索。
 
 同一私有 endpoint 还会在每次抓取时读取进程内
 `V2DeviceConnectionRegistry` 的只读快照，并输出两个无标签 Gauge：

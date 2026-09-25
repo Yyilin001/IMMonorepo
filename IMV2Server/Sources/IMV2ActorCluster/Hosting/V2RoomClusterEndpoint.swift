@@ -5,8 +5,7 @@ import IMV2ActorContracts
 import IMV2ActorRuntime
 import IMV2Core
 
-/// The only distributed entry point before a room has an activation. Its
-/// ActorID is distributed out of band by authenticated configuration.
+/// 房间激活前唯一的分布式入口。其 ActorID 通过已认证的配置带外分发。
 public distributed actor V2RoomHostEndpoint {
     public typealias ActorSystem = ClusterSystem
     private let service: V2RoomClusterInboundService
@@ -25,9 +24,9 @@ public distributed actor V2RoomHostEndpoint {
     }
 }
 
-/// One physical distributed actor exists per locally ready activation. Its
-/// identity has no authority after the exact token retires, even if a remote
-/// process still retains this ActorID.
+/// 每个本地就绪的激活对应一个物理分布式 Actor。
+/// 精确令牌退役后，其身份不再拥有权限，
+/// 即使远程进程仍保留该 ActorID。
 public distributed actor V2RoomClusterActor {
     public typealias ActorSystem = ClusterSystem
     private let token: V2RoomActivationToken
@@ -45,9 +44,9 @@ public distributed actor V2RoomClusterActor {
     }
 }
 
-/// Remote packets and node-minted local capabilities share permission, replay,
-/// shard, recipient, session, deadline and exact-activation checks. Cluster
-/// membership is never an authorization fact.
+/// 远程报文与节点创建的本地能力共用权限、重放、分片、接收方、
+/// 会话、截止时间和精确激活检查。
+/// Cluster 成员关系绝不构成授权事实。
 public actor V2RoomClusterInboundService {
     private let identity: V2ActorHostIdentity
     private let host: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>
@@ -179,8 +178,8 @@ public actor V2RoomClusterInboundService {
         catch let leaseError as V2RoomActivationLeaseError where leaseError == .roomNotFound {
             response = .failure(.notAccepted(.notFound))
         } catch {
-            // An invocation might already have entered SQL. Never invent a
-            // rollback or a definitely-not-accepted result from this catch.
+            // 调用可能已进入 SQL。不能依据此处捕获的错误
+            // 虚构回滚或确定未被接受的结果。
             if case .lookup = request { response = .failure(.notAccepted(.unavailable)) }
             else { response = .failure(.outcomeUnknown) }
         }

@@ -47,16 +47,14 @@ public struct V2VaporMediaEdgeRoutes: Sendable {
                     throw Abort(.serviceUnavailable)
                 }
             } catch is V2MediaStoreError {
-                // Do not distinguish a non-existent object from one this
-                // authenticated caller may no longer access.
+                // 不要区分对象不存在与已认证调用方不再有权访问该对象。
                 throw Abort(.notFound)
             } catch is V2MediaDownloadSessionStoreError {
                 throw Abort(.notFound)
             } catch is V2MediaProviderSessionError {
                 throw Abort(.serviceUnavailable)
             } catch {
-                // Provider and database implementation failures must not
-                // surface their detail or object identifiers to clients.
+                // 服务商和数据库实现故障，不得向客户端暴露详情或对象标识。
                 throw Abort(.serviceUnavailable)
             }
             return try makeNoStoreJSONResponse(target)

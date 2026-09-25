@@ -153,9 +153,8 @@ public actor V2RoutedGroupEventWakeStore: V2GroupEventWakeStore {
                 if firstError == nil { firstError = error }
             }
         }
-        // A partial owner outage must not strand leases already acquired from
-        // healthy owners. Return those leases now; the round-robin start moves
-        // on the next pass and the failed owner remains independently durable.
+        // 部分所有者故障不能阻滞从健康所有者取得的租约。立即返回这些租约；
+        // 下一轮会移动轮询起点，而故障所有者的状态仍独立持久保存。
         if successfulOwnerCount == 0, let firstError { throw firstError }
         guard leases.count <= limit else {
             throw V2GroupEventWakeStoreError.corruptPersistenceState

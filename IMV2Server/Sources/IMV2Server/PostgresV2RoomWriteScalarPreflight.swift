@@ -3,8 +3,8 @@ import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
-// Loads the scalar acceptance snapshot on the Store's borrowed transaction
-// connection. Owner fencing, final reservation, and commit remain in the Store.
+// 在 Store 借用的事务连接上加载逐条接受快照。
+// 所有者围栏、最终预留和提交仍由 Store 负责。
 enum ScalarMessagePreflight {
     /// 一次事务范围内的读取，同时加载房间、幂等结果、房间准入、发送者成员关系与单聊策略。
     ///
@@ -26,13 +26,11 @@ enum ScalarMessagePreflight {
         cachedDirectPolicy: V2DirectSendPolicyCache.Entry?,
         sql: any SQLDatabase
     ) async throws -> MessageAcceptanceContextRow {
-        // A cached sender reply marker is only a performance hint. The
-        // durable direct-pair and policy-version rows remain locked until the
-        // message transaction commits, so a block or preference change either
-        // precedes this decision (revision mismatch -> database evaluation)
-        // or follows this accepted message. `senderHasReplied` is monotonic;
-        // a cache hit lets steady-state sends use compatible shared locks
-        // instead of the exclusive locks needed by a first reply-marker write.
+        // 缓存的发送方回复标记只是性能提示。持久化私聊关系与策略版本记录
+        // 会一直锁定到消息事务提交，因此拉黑或偏好变更要么发生在此次决策前
+        // （修订不匹配时回到数据库校验），要么发生在消息被接受后。
+        // `senderHasReplied` 单调变化；缓存命中让稳定状态的发送
+        // 使用兼容的共享锁，而非首次写入回复标记所需的独占锁。
         let directPairLockClause = cachedDirectPolicy?.senderHasReplied == true
             ? "FOR SHARE OF pair"
             : "FOR UPDATE OF pair"

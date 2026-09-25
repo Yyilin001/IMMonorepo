@@ -97,8 +97,8 @@ public struct V2OperatorReplayRuntimeConfiguration: Sendable {
         userShardStorage = try V2UserShardStorageConfiguration.parseRegistryJSON(
             Self.required("IM_V2_USER_SHARD_STORES_JSON", environment: environment)
         )
-        // Without a room registry, personal-event and forward replay have no
-        // configured source owner and never fall back to the control database.
+        // 没有房间注册表时，个人事件和转发重放都没有已配置的来源所有者，
+        // 也绝不回退到控制数据库。
         if let raw = environment.value(for: "IM_V2_ROOM_SHARD_STORES_JSON") {
             roomShardStorage = try V2RoomShardStorageConfiguration.parseRegistryJSON(raw)
         } else { roomShardStorage = [] }

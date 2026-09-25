@@ -143,8 +143,7 @@ public struct V2VaporDurableWorkOperatorReplayRoutes: Sendable {
             } catch is V2DurableWorkReplayValidationError {
                 throw Abort(.badRequest)
             } catch {
-                // Database and unexpected implementation failures never
-                // disclose row identity or exception text on the operator API.
+                // 数据库和意外的实现故障，不得通过运维接口泄露行身份或异常文本。
                 throw Abort(.serviceUnavailable)
             }
             var response = Response(status: .ok, headers: [.cacheControl: "no-store", .v2Pragma: "no-cache"])
@@ -170,8 +169,7 @@ public struct V2VaporDurableWorkOperatorReplayRoutes: Sendable {
             } catch is V2DurableWorkReplayValidationError {
                 throw Abort(.badRequest)
             } catch {
-                // Database and unexpected implementation failures never
-                // disclose row identity or exception text on the operator API.
+                // 数据库和意外的实现故障，不得通过运维接口泄露行身份或异常文本。
                 throw Abort(.serviceUnavailable)
             }
             return try noStoreJSON(.init(result))

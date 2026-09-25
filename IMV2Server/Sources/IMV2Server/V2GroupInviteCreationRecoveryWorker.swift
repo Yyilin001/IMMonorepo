@@ -128,8 +128,8 @@ public struct V2GroupInviteCreationRecoveryWorker: Sendable {
             guard let claim = try await jobs.claim(limit: 1, now: now(), lease: 60, maximumActiveInvitesPerRoom: policy.maximumActiveInvitesPerRoom).first else { break }
             report.attempted += 1
             let resumedAt = now()
-            // Validate the attempt clock before business-error classification.
-            // Preparing the resumed intent needs a representable recovery date.
+            // 分类业务错误前先校验尝试时钟。
+            // 准备恢复的意图需要可表示的恢复日期。
             guard v2PostgresFutureTimestamp(now: resumedAt, interval: 30) != nil else {
                 throw V2GroupInviteDirectoryError.invalidRequest
             }
@@ -138,16 +138,16 @@ public struct V2GroupInviteCreationRecoveryWorker: Sendable {
                 try await invitations.resumeCreation(claim.intent, now: resumedAt)
                 report.completed += 1
             } catch is CancellationError {
-                // An interrupted/uncertain owner call retains the lease; the
-                // next process will retry the exact durable creation operation.
+                // 中断或结果不明的所有者调用会保留租约；
+                // 下一进程将重试精确的持久化创建操作。
                 throw CancellationError()
             } catch {
                 let reason = classify(error)
                 let current = now()
                 guard v2PostgresTimestampCanEncode(current) else { throw V2GroupInviteDirectoryError.invalidRequest }
                 let shouldPause = reason == .permissionDenied || reason == .creationExpired || reason == .conflictingEvidence
-                // Transient dependencies recover automatically, however long
-                // they were unavailable. Saturated attempts cannot overflow.
+                // 暂时不可用的依赖无论故障持续多久，恢复后都会自动重试。
+                // 饱和的尝试计数不会溢出。
                 let delay = min(900.0, 15.0 * pow(2.0, Double(min(max(1, claim.attemptCount), 7) - 1)))
                 let retryAt: Date?
                 if shouldPause { retryAt = nil }

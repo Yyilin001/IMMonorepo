@@ -4,8 +4,8 @@ import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
-/// Runs only after the host has granted the maintenance room turn. No scanner
-/// observation is accepted as authority to write the physical owner database.
+/// 仅在宿主批准维护房间轮次后运行。
+/// 扫描器的观测不能作为写入物理所有者数据库的权限依据。
 public struct V2ActorRoomMaintenanceExecutor: Sendable {
     private let retention: PostgresV2RoomLogRetentionStore
     private let bookkeeping: PostgresV2RoomBookkeepingStore
@@ -40,8 +40,8 @@ public struct V2ActorRoomMaintenanceExecutor: Sendable {
     }
 }
 
-/// A scanner is only a hint source. Its selected rooms are individually
-/// admitted through the service-only room capability by the invoking adapter.
+/// 扫描器只提供提示。调用适配器会通过仅供服务使用的房间能力，
+/// 对所选房间分别执行准入。
 public protocol V2RoomMaintenanceScanning: Sendable {
     func retentionCandidates(limit: Int) async throws -> [RoomID]
     func bookkeepingCandidates(limit: Int) async throws -> [RoomID]
@@ -52,9 +52,9 @@ public protocol V2RoomMaintenanceInvoking: Sendable {
                 deadline: ContinuousClock.Instant) async throws -> V2RoomMaintenanceResult
 }
 
-/// One instance per physical owner database. The bookkeeping scan visits all
-/// local rooms in bounded key order because no new eligibility index/schema
-/// is needed; the per-room command checks terminal predicates under fence.
+/// 每个物理所有者数据库对应一个实例。簿记扫描按有界键顺序访问
+/// 所有本地房间，无须新增资格索引或 schema；
+/// 逐房间命令会在围栏下检查终态条件。
 public actor PostgresV2RoomMaintenanceScanner: V2RoomMaintenanceScanning {
     private let database: any Database
     private let retention: PostgresV2RoomLogRetentionStore
@@ -112,8 +112,8 @@ public struct V2RoomActorMaintenanceReport: Equatable, Sendable {
     }
 }
 
-/// Dispatches one command per candidate. A failed room is retried by a later
-/// scan; healthy rooms in the same bounded pass still make progress.
+/// 每个候选房间分发一条命令。失败房间由后续扫描重试；
+/// 同一轮有界处理中的健康房间仍能推进。
 public struct V2RoomActorMaintenanceWorker: Sendable {
     private let scanner: any V2RoomMaintenanceScanning
     private let invoker: any V2RoomMaintenanceInvoking

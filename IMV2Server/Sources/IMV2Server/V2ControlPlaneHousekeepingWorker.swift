@@ -127,7 +127,7 @@ public enum V2ControlPlaneHousekeepingError: Error, Equatable, Sendable {
 public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepingStore {
     private let database: any Database
 
-    // Shared by startup readiness and transactional execution.
+    // 供启动就绪检查与事务执行共用。
     static var housekeepingRotationPeriod: Int64 { Int64(10 * idempotencyTables.count) }
 
     /// 组合数据库。
@@ -166,8 +166,8 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2ControlPlaneHousekeepingError.corruptPersistenceState
             }
-            // A durable transaction slot avoids clock/cadence aliasing and
-            // serializes concurrent maintainers. Failed cleanup rolls it back.
+            // 持久化事务槽位避免时钟与执行节奏产生周期重合，
+            // 并串行化并发维护者。清理失败时会回滚该槽位。
             guard let slot = try await sql.raw("""
                 SELECT rotation AS value FROM im_v2.control_housekeeping_cursor
                 WHERE singleton = TRUE FOR UPDATE
@@ -181,11 +181,9 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 UPDATE im_v2.control_housekeeping_cursor SET rotation = \(bind: next)
                 WHERE singleton = TRUE
                 """).run()
-            // `limit` is a transaction-wide row budget, not a per-table
-            // multiplier. Divide it fairly across every cleanup class so a
-            // single pass has predictable lock/WAL cost and, when the budget
-            // covers all categories, cold tables do not starve behind a
-            // continuously busy work table.
+            // `limit` 是整个事务的行数预算，而非每张表各用一次的乘数。
+            // 将其公平分配给各清理类别，使单轮锁与 WAL 开销可预测；
+            // 预算足以覆盖全部类别时，冷表也不会被持续繁忙的工作表饿死。
             var budget = ControlHousekeepingDeletionBudget(
                 total: limit,
                 categoryCount: 10,
@@ -202,8 +200,8 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 where: "state = 'completed' AND completed_at <= ", order: "completed_at, media_id",
                 cutoff: cutoff, limit: budget.take()
             )
-            // Review jobs are room-owned and purged by room actors. Keep their
-            // category slot so budget shares and the rotation period stay fixed.
+            // 审核任务归房间所有，由房间 Actor 清理。
+            // 保留其类别槽位，使预算份额和轮转周期保持固定。
             _ = budget.take()
             count += try await deleteSimple(
                 sql: sql, table: "public_profile_update_outbox", identity: "source_event_id",
@@ -232,9 +230,9 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 cutoff: cutoff, limit: budget.take()
             )
 
-            // Authentication replay rows contain encrypted bearer material;
-            // their own replay expiry is the deletion boundary, independent
-            // of the longer command-idempotency window.
+            // 认证重放记录包含加密的持有者凭据材料；
+            // 删除边界由记录自身的重放过期时间决定，
+            // 与更长的命令幂等窗口无关。
             let credentialReplays = try await deleteSimple(
                 sql: sql, table: "device_credential_operations", identity: "ctid",
                 where: "replay_expires_at <= ", order: "replay_expires_at, ctid",
@@ -253,8 +251,8 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             let idempotencyRows = try await purgeIdempotencyResults(
                 sql: sql,
                 cutoff: idempotencyCutoff,
-                // With a sub-category budget, advance the inner table
-                // rotation once per outer cycle to avoid modulo aliasing.
+                // 使用子类别预算时，每个外层周期只推进一次内部表轮转，
+                // 避免取模产生周期重合。
                 rotation: limit < 10 ? rotation / 10 : rotation,
                 limit: budget.take()
             )
@@ -345,21 +343,19 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
         }
     }
 
-    // Do not add message_send_completions here: sends have no server-enforced
-    // expiry fence, and source visibility also depends on their immutable
-    // accepted membership revision. The generic retention minimum proves
-    // neither replay expiry nor the end of that authorization dependency.
-    // message_forward_operations also owns the stable target client ID. With
-    // no server-enforced forwarding expiry, deleting it makes an old forward
-    // generate a new send identity and bypass the retained send completion.
+    // 不要在此加入 message_send_completions：发送没有服务端强制的过期围栏，
+    // 源可见性还取决于接受时不可变的成员关系修订号。通用最短保留期
+    // 既不能证明重放已过期，也不能证明该授权依赖已结束。
+    // message_forward_operations 还持有稳定的目标客户端 ID。
+    // 若没有服务端强制的转发过期时间，删除它会让旧转发生成新的发送标识，
+    // 绕过已保留的发送完成记录。
     static let idempotencyTables: [IdempotencyTable] = [
         .init(table: "direct_room_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
         .init(table: "user_relationship_operations", timestamp: "updated_at", additionalPredicate: ""),
         .init(table: "user_block_operations", timestamp: "updated_at", additionalPredicate: ""),
         .init(table: "stranger_message_preference_operations", timestamp: "updated_at", additionalPredicate: ""),
-        // Approval decisions retain their exact membership result even after
-        // the applicant leaves. Match the operation identity so inconsistent
-        // bindings do not cause evidence to be purged.
+        // 即使申请人离开，审批决定仍保留精确的成员关系结果。
+        // 匹配操作标识，避免绑定不一致时误删证据。
         .init(table: "room_membership_operations", timestamp: "created_at", additionalPredicate: "AND NOT EXISTS (SELECT 1 FROM im_v2.group_join_requests AS request WHERE request.decided_by_user_id = target.actor_user_id AND request.decision_operation_id = target.operation_id)", roomOwned: true),
         .init(table: "media_upload_operations", timestamp: "created_at", additionalPredicate: ""),
         .init(table: "message_withdrawal_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
@@ -388,8 +384,8 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
 private struct ControlHousekeepingRotationRow: Decodable { let value: Int64 }
 private struct ControlHousekeepingDeletedRow: Decodable { let value: Int }
 
-/// Divides the row budget without multiplication or addition near Int.max.
-/// Small budgets rotate across categories instead of always serving the prefix.
+/// 分配行数预算时避免在接近 Int.max 的位置进行乘加运算。
+/// 小预算会在各类别间轮转，而非总是先服务前面的类别。
 struct ControlHousekeepingDeletionBudget {
     private let base: Int
     private let extra: Int

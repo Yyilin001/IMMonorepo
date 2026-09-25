@@ -4,9 +4,8 @@ import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
-// Runs only with the Store's borrowed transaction. The Store still opens the
-// transaction, owns authorization receipt completion, and finalizes caches and
-// command credits strictly after commit.
+// 仅在 Store 借用的事务中运行。事务仍由 Store 开启；
+// Store 负责完成授权回执，并严格在提交后结算缓存和命令额度。
 extension PostgresV2RoomWriteStore {
     func acceptInTransaction(
         command: V2SendMessageCommand,
@@ -67,18 +66,17 @@ extension PostgresV2RoomWriteStore {
             guard controlScopeRoomKinds == nil || controlScopeRoomKinds?[roomID] == room.kind else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
-            // Every accepted public message uses the room log. Historical
-            // deployment selectors must never restore per-user fanout writes.
+            // 每条已接受的公开消息都使用房间日志。
+            // 历史部署选择项绝不能恢复逐用户扇出写入。
             let usesDirectRoomLog = room.kind == "direct"
 
-            // An accepted inbox is still live work until its terminal marker.
-            // Fence it before message replay can resume post-commit effects.
+            // 已接受的收件箱在写入终态标记前仍是活动工作。
+            // 消息重放恢复提交后副作用之前，必须先将其围栏隔离。
             if let importedForward { try await v2AssertForwardInboxOwner(importedForward, sql: sql) }
 
-            // A completed command must replay its canonical result even if a
-            // later membership change removes the sender. Otherwise a lost
-            // acceptance response becomes an observable false rejection and
-            // clients cannot safely retain their immutable operation ID.
+            // 已完成的命令必须重放其规范结果，即使后续成员关系变化移除了发送者。
+            // 否则，丢失的接受响应会变成可观察的错误拒绝，
+            // 客户端也无法安全地保留不可变操作 ID。
             switch try loadedContext.existingOperation() {
             case .accepted(let receipt, let fingerprint):
                 if fingerprint == command.fingerprint {
@@ -156,14 +154,11 @@ extension PostgresV2RoomWriteStore {
             try await assertReplyTarget(command.replyTo, roomID: roomID, actorID: senderID, sql: sql)
             let roomState = try room.commandState(roomID: command.roomID, admission: admission)
             let shardState = try shard.admissionState()
-            // The complete path owns a foreground PostgreSQL transaction and
-            // may already hold room, membership and policy locks. Never call
-            // the process credit actor here: a refill borrows from the same
-            // bounded pool and can deadlock when every foreground connection
-            // is waiting for that nested acquisition. Warm plain sends reserve
-            // credits before their transaction in the conditional fast path;
-            // this cold/rich path uses the exact conditional SQL reservation
-            // below as its final statement instead.
+            // 完整路径持有前台 PostgreSQL 事务，可能已取得房间、成员和策略锁。
+            // 此处绝不能调用进程额度 Actor：补充额度会从同一个有界连接池借用连接；
+            // 若所有前台连接都在等待这次嵌套获取，就会死锁。
+            // 已预热的普通发送在条件快速路径中于事务前预留额度；
+            // 此未预热或复杂路径则将下方精确的条件 SQL 预留作为最后一条语句。
             let shardStateForReduction = shardState
             let result: V2SendMessageAcceptanceResult
             // 房间日志是权威副本：不预留任何逐用户投递成本，被 @ 的成员只收到通知。
@@ -183,10 +178,8 @@ extension PostgresV2RoomWriteStore {
                     )
                 )
             }
-            // Do this only after the generic admission reducer accepts. A
-            // capacity rejection returns normally from this transaction, so
-            // consuming the stranger window earlier would be a silent quota
-            // loss despite no accepted message.
+            // 只在通用准入归约器接受后执行。容量拒绝会从此事务正常返回；
+            // 若提前消耗陌生人额度窗口，即使没有消息被接受也会悄然损失配额。
             if let directContext, directContext.requiresStrangerQuota {
                 try await consumeDirectMessageQuota(
                     senderID: senderID,
@@ -198,10 +191,8 @@ extension PostgresV2RoomWriteStore {
             }
             let loadedDirectPolicyCacheEntry = loadedContext.directPolicyCacheEntry()
             var updatedDirectPolicyCacheEntry = loadedDirectPolicyCacheEntry
-            // The reply marker is monotonic. Once a sender has an accepted
-            // message we no longer issue a no-op UPDATE for every later send.
-            // The actual value comes from the transaction snapshot, never
-            // from the process-local cache.
+            // 回复标记单调变化。发送者已有接受的消息后，后续每次发送
+            // 不再执行无效果的 UPDATE。实际值取自事务快照，绝不取自进程内缓存。
             var replyMarkerAdvanced = false
             if let directContext, !directContext.senderHasReplied {
                 replyMarkerAdvanced = try await markDirectSenderHasReplied(
@@ -277,12 +268,10 @@ extension PostgresV2RoomWriteStore {
                     )
                 }
             }
-            // Keep the contended shard counter update as the final, narrow
-            // statement. Folding this lock into the large data-modifying CTE
-            // made the complete write graph wait behind one of nine shared
-            // shard rows and multiplied foreground connection occupancy.
-            // A rejection still throws inside this transaction, so all prior
-            // message and room-event writes roll back atomically.
+            // 将竞争激烈的分片计数器更新保留为最后一条、范围很窄的语句。
+            // 若将这把锁并入大型数据修改 CTE，完整写入流程会等待九条共享分片记录之一，
+            // 并成倍增加前台连接占用。拒绝仍在此事务内抛出，
+            // 因而此前的消息与房间事件写入会原子回滚。
             try await reserveShardAdmission(
                 shardReservation,
                 room: room,

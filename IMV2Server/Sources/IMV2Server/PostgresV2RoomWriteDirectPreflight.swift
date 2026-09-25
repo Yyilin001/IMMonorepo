@@ -2,8 +2,8 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-// Executes the authoritative direct room-log preflight on the Store's
-// borrowed transaction connection. The Store owns fencing and commit.
+// 在 Store 借用的事务连接上执行权威私聊房间日志预检。
+// 围栏检查与提交由 Store 负责。
 enum PlainDirectRoomLogPreflight {
     /// 单聊房间日志预检的批量变体。
     ///

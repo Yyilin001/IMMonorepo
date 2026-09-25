@@ -7,8 +7,8 @@ public struct V2GroupJoinQuotaRecoveryReport: Equatable, Sendable {
     public var deferred = 0
 }
 
-/// Bounded recovery of reserved submissions and their terminal quota release.
-/// Transport failures retain capacity and retry the same immutable owner attempt.
+/// 有界恢复已预留的提交，并在终态释放其额度。
+/// 传输失败时保留容量，并重试同一个不可变的所有者尝试。
 public struct V2GroupJoinQuotaRecoveryWorker: Sendable {
     private let jobs: PostgresV2GroupJoinQuotaStore
     private let resume: @Sendable (V2GroupJoinQuotaIntent, Date) async throws -> Void
@@ -34,8 +34,8 @@ public struct V2GroupJoinQuotaRecoveryWorker: Sendable {
                 try await resume(intent, now())
                 report.reconciled += 1
             } catch is CancellationError {
-                // A lost/uncertain response is not permission to free the slot.
-                // Lease expiry lets a replacement worker replay the owner receipt.
+                // 响应丢失或结果不确定，并不意味着可以释放配额槽位。
+                // 租约到期后，接替的工作器可以重放所有者回执。
                 throw CancellationError()
             } catch {
                 try await jobs.deferClaim(intent, now: now())

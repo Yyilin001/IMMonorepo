@@ -33,8 +33,8 @@ public struct V2RoutedContentReviewWorker: Sendable {
     ///   ``V2RoutedContentReviewWorkerError/allOwnersFailed(_:)``。
     public func runOnce(limitPerOwner: Int) async throws
         -> V2ContentReviewReport {
-        // Each owner report is bounded by its claim limit. Validate the total
-        // before starting work so aggregation cannot overflow after side effects.
+        // 每个所有者的报告都受领取上限约束。工作开始前校验总量，
+        // 避免产生副作用后汇总结果溢出。
         guard limitPerOwner > 0, limitPerOwner <= Int.max / workers.count else {
             throw V2ContentReviewWorkerError.invalidLimit
         }

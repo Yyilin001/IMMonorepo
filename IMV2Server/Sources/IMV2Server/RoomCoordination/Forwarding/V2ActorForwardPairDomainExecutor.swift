@@ -5,8 +5,8 @@ import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
-/// Same-owner pair execution. The caller has already acquired the canonical
-/// source/target reservation; this type never tries to reserve another turn.
+/// 同一所有者上的双房间执行。调用方已取得规范的来源／目标预留；
+/// 此类型不会再次尝试预留执行轮次。
 public struct V2ActorForwardPairDomainExecutor: Sendable {
     private let database: any Database
     private let write: PostgresV2RoomWriteStore
@@ -96,8 +96,8 @@ public struct V2ActorForwardPairDomainExecutor: Sendable {
             targetRoomID: pair.targetRoomID, messageID: nil, roomSequence: nil, errorCode: code))
     }
 
-    /// Read-only observation may race; prepareLedger is the authoritative
-    /// fenced check. Existing legacy random IDs are retained on replay.
+    /// 只读观察可能存在竞争；prepareLedger 才是具有权威性的栅栏检查。
+    /// 重放时保留现有的旧版随机 ID。
     private func existingClientID(_ key: ForwardPairIdentity,
                                   scope: V2RoomActivationWriteScope) async throws -> UUID? {
         try await v2WithRoomScopedTransaction(database: database) { transaction in

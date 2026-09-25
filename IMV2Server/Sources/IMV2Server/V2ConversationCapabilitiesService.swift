@@ -117,8 +117,8 @@ public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitie
             if let prior = try await sql.raw("SELECT room_id, pinned_at, archived_at, mute_until, updated_at, mute_until IS NOT DISTINCT FROM \(bind: command.muteUntil) AS mute_matches FROM im_v2.user_room_preference_operations WHERE actor_user_id = \(bind: actor) AND operation_id = \(bind: operation)").first(decoding: ConversationStateRow.self) {
                 guard prior.roomID == room, (prior.pinnedAt != nil) == command.isPinned, (prior.archivedAt != nil) == command.isArchived else { return .idempotencyConflict }
                 guard v2PostgresTimestampCanEncode(prior.updatedAt), prior.muteUntil.map(v2PostgresTimestampCanEncode) ?? true else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }
-                // Compare in PostgreSQL so retries use the same microsecond
-                // quantization as the original bound parameter.
+                // 在 PostgreSQL 中比较，使重试采用与原始绑定参数
+                // 相同的微秒量化方式。
                 guard prior.muteMatches else { return .idempotencyConflict }
                 return .idempotent(try prior.value())
             }
@@ -181,8 +181,8 @@ public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitie
     }
 
     private func lockOperation(actor: UUID, operation: UUID, kind: String, sql: any SQLDatabase) async throws {
-        // Lock the ledger identity before reading it. Room/state locks alone
-        // cannot make a concurrent retry observe a newly committed operation.
+        // 读取前先锁定台账身份。单靠房间锁或状态锁，
+        // 不能保证并发重试看见新提交的操作。
         let key = "personal-preference:" + kind + ":" + actor.uuidString + ":" + operation.uuidString
         try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
     }
@@ -192,8 +192,8 @@ public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitie
         let member = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.room_memberships WHERE room_id = \(bind: room) AND user_id = \(bind: actor) AND joined_revision <= \(bind: revision) AND (left_revision IS NULL OR left_revision > \(bind: revision))) AS value").first(decoding: CapabilityBooleanRow.self)?.value ?? false
         guard member else { throw V2ConversationCapabilitiesStoreError.actorNotMember }
     }
-    // Bind the original clock to storage; decoded response dates may lose another
-    // microsecond if encoded again. Payload timestamps use the committed value.
+    // 向存储绑定原始时钟值；响应日期解码后若重新编码，可能再损失一微秒。
+    // 载荷时间戳使用已提交值。
     private func appendStateProjection(actor: UUID, source: UUID, value: V2ConversationState, now: Date, sql: any SQLDatabase) async throws { let sequence = try await nextSequence(actor: actor, sql: sql); try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: actor), \(bind: sequence), \(bind: source), 'conversation_state', jsonb_build_object('room_id', \(bind: value.roomID.rawValue), 'is_pinned', \(bind: value.isPinned), 'is_archived', \(bind: value.isArchived), 'mute_until_ms', \(bind: value.muteUntil.map { Int64($0.timeIntervalSince1970 * 1_000) } ?? 0), 'updated_at_ms', \(bind: Int64(value.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: now))").run() }
     private func appendFavoriteProjection(actor: UUID, source: UUID, value: V2MessageFavorite, now: Date, sql: any SQLDatabase) async throws { let sequence = try await nextSequence(actor: actor, sql: sql); try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: actor), \(bind: sequence), \(bind: source), 'message_favorite', jsonb_build_object('room_id', \(bind: value.roomID.rawValue), 'message_id', \(bind: value.messageID.rawValue), 'is_favorited', \(bind: value.isFavorited), 'updated_at_ms', \(bind: Int64(value.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: now))").run() }
     private func nextSequence(actor: UUID, sql: any SQLDatabase) async throws -> Int64 { guard let result = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: actor), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 WHERE im_v2.user_sync_sequences.next_sequence < \(bind: Int64.max) RETURNING next_sequence").first(decoding: CapabilitySyncRow.self)?.sequence else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }; return result }

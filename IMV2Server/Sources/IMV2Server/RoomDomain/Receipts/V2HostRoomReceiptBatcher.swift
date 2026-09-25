@@ -2,8 +2,8 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// One already admitted room turn. This value carries scheduling context, not
-/// authority beyond the exact activation token granted by the host.
+/// 一个已获准的房间轮次。此值只携带调度上下文，
+/// 不提供超出宿主授予的精确激活令牌的权限。
 struct V2GrantedRoomReceiptTurn: Sendable {
     let command: V2RoomReceiptCommand
     let token: V2RoomActivationToken
@@ -12,8 +12,8 @@ struct V2GrantedRoomReceiptTurn: Sendable {
     let ingressAt: Date
 }
 
-/// One batcher belongs to one physical owner. It groups independently granted
-/// turns without acquiring a second RoomRef while holding a SQL transaction.
+/// 每个批处理器只属于一个物理所有者。它合并分别获准的轮次，
+/// 持有 SQL 事务时不会再获取第二个 RoomRef。
 public actor V2HostRoomReceiptBatcher: V2ReadReceiptBatchMetricsReading {
     private struct OperationKey: Hashable, Sendable {
         let actorUserID: UserID
@@ -67,8 +67,8 @@ public actor V2HostRoomReceiptBatcher: V2ReadReceiptBatchMetricsReading {
         }
     }
 
-    // A deterministic executor seam permits queue, admission and cancellation
-    // tests without weakening the production activation-fenced initializer.
+    // 确定性的执行器接入点允许测试队列、准入和取消，
+    // 同时不削弱生产环境受激活围栏保护的初始化器。
     init(configuration: V2ReadReceiptBatcher.Configuration,
          databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
          execute: @escaping @Sendable (V2ActorReadReceiptRecordBatchWire, V2RoomActivationWriteScope, [Date]) async throws -> V2ActorReadReceiptRecordBatchResultWire) {
@@ -113,8 +113,8 @@ public actor V2HostRoomReceiptBatcher: V2ReadReceiptBatchMetricsReading {
 
     private func cancelPending(_ id: UUID) {
         guard let item = pending.removeValue(forKey: id) else {
-            // A dispatched batch owns the DB work until it has settled. The
-            // cancelled caller still receives the known result or uncertainty.
+            // 已分发批次持有数据库工作，直到结果结算。
+            // 取消的调用方仍会收到已知结果或结果不明状态。
             return
         }
         cancelledPendingRequests = Self.saturatingIncrement(cancelledPendingRequests)
@@ -187,8 +187,8 @@ public actor V2HostRoomReceiptBatcher: V2ReadReceiptBatchMetricsReading {
     }
 
     private func cancelInFlight(_ batchID: UUID) {
-        // Cancellation wakes DB admission or closes the borrowed PostgreSQL
-        // connection. The worker remains tracked until that work has settled.
+        // 取消会唤醒数据库准入，或关闭借用的 PostgreSQL 连接。
+        // 工作结算前，工作器仍保持追踪状态。
         inFlight[batchID]?.work.cancel()
     }
 
@@ -247,10 +247,9 @@ public actor V2HostRoomReceiptBatcher: V2ReadReceiptBatchMetricsReading {
             var tokens: [RoomID: V2RoomActivationToken] = [:]
             for item in selected { tokens[item.turn.token.roomID] = item.turn.token }
             let scope = try V2RoomActivationWriteScope(tokens: Array(tokens.values))
-            // The existing store handles group rows in one SQL transaction,
-            // then direct-room rows in further transactions. If it throws,
-            // an earlier row may already be durable. Only a complete result
-            // vector proves individual outcomes for this selection.
+            // 既有存储先在一个 SQL 事务中处理群组记录，
+            // 再用后续事务处理私聊房间记录。若抛错，较早的记录可能已持久化；
+            // 只有完整的结果序列才能证明本次选取中各项的结果。
             let results: V2ActorReadReceiptRecordBatchResultWire
             do { results = try await execute(batch, scope, selected.map(\.turn.ingressAt)) }
             catch { throw V2RoomCallFailure.outcomeUnknown }

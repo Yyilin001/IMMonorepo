@@ -22,7 +22,7 @@ public struct PostgresV2RoomMembershipStore:
         activationScope = nil
     }
 
-    /// Room actor writes require this fixed activation authority for every replay and mutation.
+    /// 房间 Actor 的每次重放与修改都要求这份固定的激活权限。
     public init(database: any Database, activationScope: V2RoomActivationWriteScope) {
         self.database = database
         self.activationScope = activationScope
@@ -135,13 +135,12 @@ public struct PostgresV2RoomMembershipStore:
         if activationScope != nil {
             try await v2SetRoomActivationSQLTimeouts(.default, sql: sql)
         }
-        // An advisory lock serializes the absent-row case for this exact
-        // durable operation key. Hash collisions can only add contention,
-        // never merge two operation records.
+        // 咨询锁会串行化此精确持久化操作键的记录缺失情形。
+        // 哈希碰撞只会增加竞争，不会合并两条操作记录。
         try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: operationLockKey), 0))").run()
         if let activationScope { try await activationScope.require([roomID], sql: sql) }
-        // The operation lock precedes the room lock, matching approval and
-        // recovery. Fence even successful replays before consulting receipts.
+        // 先获取操作锁，再获取房间锁，与审批和恢复路径一致。
+        // 即使是成功重放，也要先通过围栏，再读取回执。
         let fencedRoom: MembershipRoomRow?
         if activationScope == nil, let ownerRoute {
             guard let value = try await sql.raw("""
@@ -152,7 +151,7 @@ public struct PostgresV2RoomMembershipStore:
             else { throw V2RoomMembershipStoreError.ownerChanged }
             fencedRoom = value
         } else {
-            // Room-local composition validates membership in its write transaction.
+            // 房间本地组合层会在写入事务中校验成员资格。
             fencedRoom = nil
         }
         if let prior = try await sql.raw("""
@@ -249,8 +248,7 @@ public struct PostgresV2RoomMembershipStore:
             else { return .memberLimitReached }
         case .remove:
             guard let currentTarget else { return .targetNotMember }
-            // V2 starts with one non-transferable owner; removing it would
-            // leave the group without an authorization authority.
+            // V2 初始只有一位不可转让的所有者；移除它会让群组失去授权权威。
             guard currentTarget.role != "owner" else { throw V2RoomMembershipStoreError.actorNotOwner }
             nextEligibleCount = admission.eligibleMemberCount - 1
         }
@@ -282,7 +280,7 @@ public struct PostgresV2RoomMembershipStore:
         let nextSequence = room.roomSequence + 1
         let eventUUID = try membershipUUID(eventID)
 
-        // Decode at the same precision as the operation/event writes; keep their original Date bindings.
+        // 以与操作和事件写入相同的精度解码；保持原始 Date 绑定。
         guard let timestamp = try await sql.raw("""
             UPDATE im_v2.rooms SET room_sequence = \(bind: nextSequence), membership_revision = \(bind: nextRevision)
             WHERE room_id = \(bind: roomID)
@@ -306,10 +304,8 @@ public struct PostgresV2RoomMembershipStore:
         switch command.action {
         case .add:
             try await sql.raw("INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision) VALUES (\(bind: roomID), \(bind: targetID), 'member', \(bind: nextRevision))").run()
-            // Content committed before this join is not visible to the new
-            // member, so it must not count as unread; the initial watermark
-            // also keeps the room-log retention floor from being pinned at
-            // zero by a member who has never opened the room.
+            // 加入前提交的内容对新成员不可见，因此不能计入未读数。
+            // 初始水位也防止从未打开房间的成员把房间日志保留下界固定在零。
             try await v2InitializeJoinedMemberReadWatermark(
                 roomID: roomID, userID: targetID, now: now, sql: sql
             )

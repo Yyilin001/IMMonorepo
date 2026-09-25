@@ -3,8 +3,8 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// Sealed source/target workflow commands under one already granted room turn.
-/// Same-owner pairs enter only through the two-room reservation executor.
+/// 在已授权的房间执行轮次内处理封闭的来源／目标工作流命令。
+/// 同一所有者上的房间对只能通过双房间预留执行器进入。
 public struct V2RoomForwardDomainExecutor: Sendable {
     private let token: V2RoomActivationToken
     private let exports: PostgresV2ForwardExportStore
@@ -22,8 +22,8 @@ public struct V2RoomForwardDomainExecutor: Sendable {
         self.now = now
     }
 
-    /// Production import binding: the write store fences receive, replay,
-    /// admission, acceptance, and completion to this exact target activation.
+    /// 生产环境的导入绑定：写入存储将接收、重放、准入、接受和完成
+    /// 全部限定到这个确切的目标激活。
     public init(database: any Database, token: V2RoomActivationToken,
                 write: PostgresV2RoomWriteStore, capacityProfile: V2CapacityProfile,
                 limits: V2MessageCommandLimits,

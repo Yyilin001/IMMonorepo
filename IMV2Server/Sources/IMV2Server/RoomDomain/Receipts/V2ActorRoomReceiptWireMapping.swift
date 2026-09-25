@@ -120,7 +120,7 @@ public extension V2ActorReadReceiptBatchItemResultWire {
 }
 
 public extension V2ActorReadReceiptRecordBatchWire {
-    /// Executor stamps ingress time locally; it never accepts timestamps as wire authority.
+    /// 执行器在本地记录接收时间，绝不以线路传入的时间戳为权威。
     func recordRequests(now: Date) throws -> [V2ReadReceiptRecordRequest] {
         guard now.timeIntervalSince1970.isFinite else { throw V2ActorRoomReceiptWireError.invalidRequest }
         return try requests.map { try .init(command: $0.commandValue(), now: now) }

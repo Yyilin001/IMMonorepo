@@ -39,8 +39,8 @@ public struct PostgresV2GroupInviteDirectory: V2GroupInviteDirectory, V2GroupInv
         else { throw V2GroupInviteDirectoryError.invalidRequest }
         return try await database.transaction { transaction in
             let sql = try directorySQL(transaction)
-            // All unique collisions are handled deliberately, including two
-            // different operations proposing the same token or invite ID.
+            // 明确处理所有唯一约束冲突，包括两个不同操作提出
+            // 相同令牌或邀请 ID 的情况。
             try await sql.raw("""
                 INSERT INTO im_v2.group_invite_directory
                     (actor_user_id, operation_id, invite_id, room_id, token_digest,
@@ -140,8 +140,8 @@ public struct PostgresV2GroupInviteDirectory: V2GroupInviteDirectory, V2GroupInv
         return try await database.transaction { transaction in
             let sql = try directorySQL(transaction)
             var result: [V2GroupInviteCreationRecoveryClaim] = []
-            // Each branch follows its own due-time partial index. Reclaim dead
-            // processes first; no broad OR scan or sorting an entire backlog.
+            // 每个分支使用各自按到期时间建立的部分索引。先回收失活进程；
+            // 不进行宽泛的 OR 扫描，也不对全部积压任务排序。
             for (state, dateColumn) in [("claimed", "lease_expires_at"), ("pending", "next_attempt_at")] {
                 let remaining = limit - result.count
                 if remaining == 0 { break }

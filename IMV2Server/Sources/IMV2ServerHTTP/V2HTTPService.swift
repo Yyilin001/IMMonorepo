@@ -4,12 +4,12 @@ import Logging
 import ServiceLifecycle
 import Vapor
 
-/// Owns the HTTP task scope. Database and worker resources belong to the caller
-/// and outlive this scope, including streamed response completion.
+/// 持有 HTTP 任务作用域。数据库与工作器资源归调用方所有，
+/// 存续期长于此作用域，包括流式响应结束之后。
 public enum V2HTTPService {
     public enum Failure: Error, Sendable { case unexpectedServerExit }
 
-    /// A process signal or listener failure asks the role to drain its work.
+    /// 进程信号或监听器故障会要求该角色排空工作。
     public actor ShutdownRequest {
         private var requested = false
         private var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
@@ -45,18 +45,17 @@ public enum V2HTTPService {
         fileprivate func beginHTTPShutdown() { stoppingHTTP = true }
     }
 
-    /// Listener addresses have already passed the role's runtime validation.
-    /// Generic HOSTNAME/PORT or CLI options must not override that boundary.
+    /// 监听地址已通过该角色的运行时校验。
+    /// 通用 HOSTNAME/PORT 环境变量或 CLI 选项不能覆盖这一边界。
     public static func makeApplication(host: String, port: Int) async throws -> Application {
         try await Application(.production,
             configuration: .init(address: .hostname(host, port: port)),
             configReader: ConfigReader(provider: InMemoryProvider(values: [:])))
     }
 
-    /// Keeps the role operation on its caller's task. In particular, the NIO TLS
-    /// server's mutable lifecycle owner is not sent into an unrelated task.
-    /// The optional signal wait must return when cancelled. This scope never
-    /// installs an additional process signal handler.
+    /// 让该角色的操作留在调用方任务中。尤其不会把 NIO TLS 服务端的
+    /// 可变生命周期所有者传入无关任务。可选的信号等待必须在取消时返回；
+    /// 此作用域不会额外安装进程信号处理器。
     public static func withRunning(
         _ application: Application,
         logger: Logger,
@@ -64,7 +63,7 @@ public enum V2HTTPService {
         waitForShutdown: (@Sendable () async -> Void)? = nil,
         operation: (ShutdownRequest) async throws -> Void
     ) async throws {
-        // A failed boot hook cannot publish a listening address.
+        // 启动钩子失败时不能发布监听地址。
         try await application.boot()
         var configuration = ServiceGroupConfiguration(
             services: [.init(service: application, serviceName: "IM V2 HTTP")],
@@ -98,9 +97,8 @@ public enum V2HTTPService {
                 }
                 var listening = false
                 do {
-                    // Observe either readiness or service failure. A server
-                    // that exits before binding must not leave this task parked
-                    // solely on listeningAddress.
+                    // 同时观察就绪和服务故障。服务端若在绑定前退出，
+                    // 不能让此任务只因等待 listeningAddress 而一直挂起。
                     guard try await serverTasks.next() != nil else {
                         throw Failure.unexpectedServerExit
                     }
@@ -113,8 +111,8 @@ public enum V2HTTPService {
                 } catch {
                     await stop.request()
                     if listening {
-                        // Let accepted requests and response streams drain while
-                        // the caller still owns their database and file resources.
+                        // 趁调用方仍持有数据库和文件资源时，
+                        // 排空已接受的请求与响应流。
                         await stop.beginHTTPShutdown()
                         await services.triggerGracefulShutdown()
                     } else {

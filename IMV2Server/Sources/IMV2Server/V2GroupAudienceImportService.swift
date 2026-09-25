@@ -203,9 +203,8 @@ public struct V2GroupAudienceImportService: Sendable {
         case .created(let room), .idempotent(let room):
             try await store.complete(actorUserID: actorUserID, operationID: operationID, roomID: room.roomID, policy: policy, now: now())
         case .idempotencyConflict, .invalidMembers, .memberLimitReached:
-            // The underlying operation is terminal and no room was returned;
-            // this frozen audience must not consume the actor's permanent
-            // draft quota. Transient outcomes retain it for exact retry.
+            // 底层操作已进入终态且未返回房间；这份冻结的受众
+            // 不能占用发起者的永久草稿配额。暂时性结果则保留它供精确重试。
             try await store.discardFrozen(actorUserID: actorUserID, operationID: operationID, now: now())
         case .rateLimited, .unavailable:
             break
@@ -267,9 +266,8 @@ public struct V2GroupAudienceImportService: Sendable {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                // The claim's timestamp provides a bounded retry delay. Do
-                // not let this one draft prevent later claimed work from
-                // advancing in the same maintenance pass.
+                // 认领时间戳提供有界重试延迟。
+                // 不要让这一份草稿阻止同轮维护中后续已认领的工作继续推进。
                 failedCount += 1
             }
         }
@@ -518,18 +516,17 @@ public struct PostgresV2GroupAudienceImportStore: V2GroupAudienceImportStore {
         guard v2PostgresTimestampCanEncode(now), v2PostgresTimestampCanEncode(cutoff) else {
             throw V2GroupAudienceImportError.corruptPersistenceState
         }
-        // A positive interval can disappear at Date or PostgreSQL precision.
-        // The claimed timestamp must be newer than the encoded cutoff, or a
-        // second worker can immediately claim the same draft again.
+        // 正的时间间隔可能因 Date 或 PostgreSQL 精度而消失。
+        // 认领时间戳必须晚于编码后的截止点，
+        // 否则第二个工作器可能立即再次认领同一草稿。
         let epoch = Date(timeIntervalSince1970: 946_684_800)
         guard (cutoff.timeIntervalSince(epoch) * 1_000_000).rounded(.towardZero)
                 < (now.timeIntervalSince(epoch) * 1_000_000).rounded(.towardZero) else {
             throw V2GroupAudienceImportError.corruptPersistenceState
         }
-        // Claim by advancing `updated_at` inside the same statement. The
-        // recovery worker can then safely run on multiple processes: a crash
-        // after this claim simply makes the frozen draft eligible again after
-        // the next interval, while concurrent workers skip the fresh claim.
+        // 在同一语句中推进 `updated_at` 完成认领。
+        // 恢复工作器于是可安全地在多个进程中运行：认领后若崩溃，
+        // 冻结草稿会在下个间隔后重新可认领；并发工作器则会跳过新近认领的草稿。
         let rows = try await sql.raw("""
             WITH candidates AS (
                 SELECT ctid

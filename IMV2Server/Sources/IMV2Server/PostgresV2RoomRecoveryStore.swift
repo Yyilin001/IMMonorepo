@@ -3,7 +3,7 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Identity-indexed recovery reads. Neither endpoint reads a global activity ranking.
+/// 按身份索引的恢复读取；两个入口都不读取全局活动排名。
 public struct PostgresV2RoomRecoveryStore: V2RoomStateReading, V2UserRoomDirectoryReading {
     private let database: any Database
     private let schema: String
@@ -21,10 +21,10 @@ public struct PostgresV2RoomRecoveryStore: V2RoomStateReading, V2UserRoomDirecto
               roomIDs.allSatisfy({ $0.uuidValue != nil }) else { throw V2RoomRecoveryReadError.invalidRequest }
         guard let sql = database as? any SQLDatabase else { throw V2RoomRecoveryReadError.corruptPersistence }
         let ids = Array(Set(roomIDs.compactMap(\.uuidValue)))
-        // A single statement snapshot binds authorization, owner, head and counters.
-        // The lateral OFFSET 0 keeps membership lookup parameterized by each
-        // requested room. It preserves all matches so duplicates still fail
-        // decoding validation instead of being silently hidden by LIMIT 1.
+        // 单条语句快照绑定授权、所有者、日志头和计数器。
+        // 横向查询中的 OFFSET 0 使成员关系查询仍按每个请求房间参数化。
+        // 它保留全部匹配，使重复项在解码校验时报错，
+        // 而非被 LIMIT 1 悄然隐藏。
         let rows = try await sql.raw("""
             SELECT room.room_id, room.owner_epoch, member.joined_revision,
                    room.room_sequence AS head, room.log_trimmed_through_room_sequence AS trimmed,

@@ -213,9 +213,9 @@ public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, S
                 """).first(decoding: ResetCursorRow.self) else {
                 throw V2DeviceSnapshotResetError.malformedPersistence
             }
-            // Recheck only after serializing on the device cursor so
-            // concurrent retries for the same operation ID are idempotent
-            // rather than reported as a second pending reset.
+            // 只有在设备游标上完成串行化后才复查，
+            // 使同一操作 ID 的并发重试保持幂等，
+            // 而非被报告为第二次待处理重置。
             if let existing = try await existing(
                 operationID: command.operationID, userID: userUUID,
                 deviceID: deviceUUID, schema: location.schema, sql: sql
@@ -229,8 +229,8 @@ public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, S
                     throw V2DeviceSnapshotResetError.unavailable
                 }
             }
-            // Failed/expired builds deliberately have no live assignment, but
-            // the immutable artifact still reserves the operation ID.
+            // 构建失败或过期时有意不保留有效分配，
+            // 但不可变产物仍占用操作 ID。
             if try await artifactExists(
                 operationID: command.operationID, schema: location.schema, sql: sql
             ) {
@@ -239,8 +239,8 @@ public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, S
             guard cursor.state == "ready" else {
                 throw V2DeviceSnapshotResetError.resetAlreadyPending
             }
-            // Replaying an existing assignment only reports durable state.
-            // Require a usable clock and a new deadline when creating one.
+            // 重放既有分配只报告持久化状态。
+            // 创建新分配时须有可用时钟和新的截止时间。
             guard let expiresAt = v2PostgresFutureTimestamp(now: currentTime, interval: capabilityLifetime) else {
                 throw V2DeviceSnapshotResetError.unavailable
             }
@@ -254,8 +254,8 @@ public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, S
             guard !overflow, generation > 1 else {
                 throw V2DeviceSnapshotResetError.malformedPersistence
             }
-            // A user with no sync events still needs a checkpoint row; the
-            // builder intentionally uses that row as its bounded claim/fence.
+            // 没有同步事件的用户仍需要检查点记录；
+            // 构建器有意将该记录用作有界认领和围栏。
             try await sql.raw("""
                 INSERT INTO \(unsafeRaw: location.schema).user_projection_checkpoints
                     (user_id, projected_sequence, updated_at)
@@ -269,9 +269,8 @@ public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, S
                 FOR UPDATE
                 """).first(decoding: ResetWatermarkRow.self)?.value ?? 0
             guard projectedSequence >= watermark else {
-                // The background projector will catch up; a later retry with
-                // the same operation ID remains safe because nothing has
-                // been staged yet.
+                // 后台投影器会追上进度；尚未暂存任何内容，
+                // 因此之后沿用同一操作 ID 重试仍安全。
                 throw V2DeviceSnapshotResetError.unavailable
             }
             let initialDigest = V2SnapshotV3Digest.initial(baseSequence: UInt64(watermark), capabilityProfile: capabilityProfile)

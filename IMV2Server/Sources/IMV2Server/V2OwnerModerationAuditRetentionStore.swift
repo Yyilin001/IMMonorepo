@@ -1,9 +1,9 @@
 import Foundation
 
-/// Audit copies live beside their room owner, but are not room recovery or
-/// idempotency authority. Expiry deletes no moderation operation or event.
-/// Visit physical owners with one shared row budget and rotate the first
-/// owner so a busy or failing database cannot starve every subsequent owner.
+/// 审计副本与房间所有者存放在一起，但不承担房间恢复或幂等性权威。
+/// 过期清理不会删除任何管理操作或事件。
+/// 访问物理所有者时共用一个行数预算，并轮换起始所有者，
+/// 避免繁忙或故障数据库使后续所有者始终得不到处理。
 public actor V2OwnerModerationAuditRetentionStore: V2ModerationAuditRetentionStore {
     private let owners: [any V2ModerationAuditRetentionStore]
     private var nextOwner = 0

@@ -21,8 +21,8 @@ public struct PostgresV2UserStateEventProjector: V2UserStateEventProjecting {
         try await projectResolved(event).sequence
     }
 
-    /// The source payload remains the deduplication identity. A retry returns the
-    /// first committed projection, even when the caller now resolves different policy.
+    /// 来源载荷始终用作去重身份。重试会返回首次提交的投影，
+    /// 即使调用方此时解析出不同的策略也一样。
     func projectResolved(_ event: V2UserStateEvent, projectionPayload: Data? = nil) async throws -> V2UserStateEventProjection {
         let payload: String
         if let projectionPayload {
@@ -40,7 +40,7 @@ public struct PostgresV2UserStateEventProjector: V2UserStateEventProjecting {
         }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2UserStateEventError.corruptPersistenceState }
-            // Serialize each user’s receipt allocation, including their first event.
+            // 对每个用户的回执分配串行化，包括其首个事件。
             try await sql.raw("""
                 INSERT INTO \(unsafeRaw: table("user_projection_checkpoints")) (user_id, projected_sequence, updated_at)
                 VALUES (\(bind: user), 0, clock_timestamp()) ON CONFLICT (user_id) DO NOTHING
@@ -128,7 +128,7 @@ private struct UserStateEventSequenceRow: Decodable { let sequence: Int64 }
 private struct UserStateEventOccupantRow: Decodable { let matches: Bool }
 
 
-/// A committed target result, including the immutable first policy resolution.
+/// 已提交的目标结果，包含不可变的首次策略解析结果。
 struct V2UserStateEventProjection: Sendable {
     let sequence: UInt64
     let payloadJSON: String

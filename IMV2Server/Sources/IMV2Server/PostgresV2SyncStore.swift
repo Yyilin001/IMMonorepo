@@ -107,8 +107,8 @@ public struct PostgresV2SyncStore: V2SyncStore {
                 )
             }
             guard cursor.state == "ready" else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            // Pending resets only report their existing assignment. A new
-            // deadline is required when issuing capabilities or staging a reset.
+            // 待处理的重置只报告其既有分配。
+            // 签发能力或暂存重置时须设置新的截止时间。
             guard let expiresAt = v2PostgresFutureTimestamp(now: now, interval: capabilityLifetime) else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
@@ -132,9 +132,9 @@ public struct PostgresV2SyncStore: V2SyncStore {
                 FOR SHARE
                 """).first(decoding: SyncRetentionRow.self)?.compactedThroughSequence ?? 0
             if requireSnapshot {
-                // An empty account has no sync-log trigger to initialize its
-                // checkpoint. Base zero is valid before its first event; an
-                // acknowledged nonzero cursor is fenced by the floor below.
+                // 空账号没有同步日志触发器来初始化检查点。
+                // 首个事件前基准值为零有效；已确认的非零游标
+                // 由下方的压缩下界保护。
                 try await sql.raw("""
                     INSERT INTO \(unsafeRaw: table("user_projection_checkpoints")) (user_id, projected_sequence, updated_at)
                     SELECT \(bind: userUUID), 0, \(bind: now)
@@ -174,16 +174,15 @@ public struct PostgresV2SyncStore: V2SyncStore {
             for candidate in candidates {
                 let candidateBytes = v2EncodedSyncBatchRecordFieldBytes(candidate)
                 guard candidateBytes <= maximumEncodedRecordsBytes else {
-                    // Preserve a sendable prefix. The oversized record stays
-                    // at the head of the next page and must not be skipped.
+                    // 保留可发送的前缀。超大的记录留在下一页开头，不能跳过。
                     guard !records.isEmpty else { throw V2SyncStoreError.syncRecordTooLarge }
                     break
                 }
                 guard encodedRecordsBytes <= maximumEncodedRecordsBytes - candidateBytes else {
                     break
                 }
-                // Validate the entire returned prefix before issuing its
-                // capabilities. Unsent look-ahead rows belong to a later pull.
+                // 签发能力前校验返回的整个前缀。
+                // 尚未发送的预读记录属于后续拉取。
                 let (expectedSequence, overflow) = previousSequence.addingReportingOverflow(1)
                 guard !overflow, expectedSequence > 0,
                       candidate.sequence == UInt64(expectedSequence) else {
@@ -423,12 +422,10 @@ public struct PostgresV2SyncStore: V2SyncStore {
                cursor.completedSnapshotGeneration == generation,
                cursor.completedSnapshotBaseSequence == base
             {
-                // The first ACK has already committed the generation fence.
-                // Replaying the exact authenticated ACK is a success without
-                // moving the cursor again. This remains true if an operator
-                // has already staged the next generation: a client may have
-                // crashed after the first server commit but before its local
-                // shadow activation.
+                // 首次 ACK 已提交代次围栏。精确重放已认证的 ACK
+                // 可直接视为成功，无须再次移动游标。即使运维操作已暂存下一代次，
+                // 这一规则仍成立：客户端可能在服务端首次提交后、
+                // 本地影子状态激活前崩溃。
                 return
             }
             guard cursor.state == "reset_pending" else { throw V2SyncStoreError.noResetPending }

@@ -46,9 +46,8 @@ public struct V2AccountEdgeClientRateLimitPolicy: Equatable, Sendable {
     /// 上限刻意留出一个哨兵值：库中请求数按有符号 32 位整数存储，
     /// 这样可在不溢出、不额外查询的前提下表示一次超预算尝试。
     public init(maximumRequests: Int, window: TimeInterval) throws {
-        // PostgreSQL stores request_count as a signed 32-bit integer. Keep one
-        // sentinel value above the configured budget so an over-budget
-        // attempt can be represented without an overflow or a second query.
+        // PostgreSQL 以有符号 32 位整数存储 request_count。
+        // 在配置的预算之上保留一个哨兵值，使超额请求无需溢出或二次查询即可表示。
         guard maximumRequests > 0,
               maximumRequests < Int(Int32.max),
               v2RateLimitDurationIsRepresentable(window)

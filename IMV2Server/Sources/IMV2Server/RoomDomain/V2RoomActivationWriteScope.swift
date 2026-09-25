@@ -3,9 +3,9 @@ import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
-/// Immutable authority for one already granted turn, or a bounded collection of
-/// granted turns on the same physical owner. This never resolves a room or
-/// acquires another turn while a transaction holds room locks.
+/// 对一个已授权执行轮次，或同一物理所有者上有界的一组执行轮次，
+/// 提供不可变权限。事务持有房间锁期间，此对象不解析房间，
+/// 也不获取其他执行轮次。
 public struct V2RoomActivationWriteScope: Sendable {
     private let byRoom: [UUID: V2RoomActivationToken]
 

@@ -25,7 +25,7 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
         self.activationScope = nil
     }
 
-    /// Used only for the fixed room actor turn; all nickname reads and writes recheck the full token.
+    /// 仅用于固定的房间 Actor 轮次；所有昵称读写都会重新校验完整令牌。
     public init(database: any Database, activationScope: V2RoomActivationWriteScope,
                 now: @escaping @Sendable () -> Date = Date.init) {
         self.database = database

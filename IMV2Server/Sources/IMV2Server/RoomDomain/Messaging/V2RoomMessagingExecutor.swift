@@ -2,15 +2,15 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// Prepared exactly once after a send obtains its room turn. A host batcher may
-/// combine these values, retaining the token, generated IDs and server clock.
+/// 发送取得房间轮次后只准备一次。宿主批处理器可合并这些值，
+/// 同时保留令牌、生成的 ID 和服务端时刻。
 public struct V2PreparedActorSend: Sendable {
     public let token: V2RoomActivationToken
     public let request: V2RoomWriteRequest
 }
 
-/// Concrete D1 implementation. The room runtime supplies serialization and
-/// lifecycle; every store independently fences SQL with this exact token.
+/// 具体的 D1 实现。房间运行时负责串行化和生命周期；
+/// 每个存储都独立使用此精确令牌为 SQL 设置围栏。
 public struct V2RoomMessagingExecutor: Sendable {
     public let token: V2RoomActivationToken
     private let writes: PostgresV2RoomWriteStore
@@ -82,8 +82,8 @@ public struct V2RoomMessagingExecutor: Sendable {
             }
         } catch {
             if let failure = V2ActorMessagingErrorWire(domainError: error) { return .failure(failure) }
-            // Unknown commit, expired authority, and driver failures are not
-            // business results. The enclosing turn must retain their evidence.
+            // 提交结果不明、权限过期和驱动故障都不是业务结果。
+            // 外围轮次必须保留相关证据。
             throw error
         }
     }
@@ -102,9 +102,9 @@ public struct V2RoomMessagingExecutor: Sendable {
         }
     }
 
-    /// The enclosing room lane has already admitted and ordered every send.
-    /// Preparation fixes generated IDs and server time before the host batcher
-    /// can combine this turn with other rooms on the same physical shard.
+    /// 外围房间通道已准入并排序所有发送请求。
+    /// 宿主批处理器将此轮次与同一物理分片上的其他房间合并前，
+    /// 准备阶段会固定生成的 ID 和服务端时刻。
     public func executeGrantedSendTurn(
         _ sends: [V2ActorSendMessageWire],
         batchDeadline: ContinuousClock.Instant,

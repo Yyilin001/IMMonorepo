@@ -2,17 +2,17 @@ import FluentKit
 import Logging
 import NIOCore
 
-/// Errors constructing one database handle per EventLoop.
+/// 为每个 EventLoop 构造数据库句柄时可能出现的错误。
 public enum V2EventLoopDatabasePoolError: Error, Equatable, Sendable {
     case emptyEventLoopSet
     case databaseNotRegistered
     case duplicateEventLoop
 }
 
-/// Retains a Fluent database handle for each configured EventLoop.
+/// 为每个已配置的 EventLoop 持有一个 Fluent 数据库句柄。
 ///
-/// Long-lived stores use `database` to distribute independent operations over
-/// the configured loops. Transactions and sessions stay on their selected handle.
+/// 长期存活的存储通过 `database` 将独立操作分布到已配置的事件循环。
+/// 事务和会话始终使用各自选定的句柄。
 public struct V2EventLoopDatabasePool: Sendable {
     public let database: V2EventLoopBalancedDatabase
     public let eventLoopDatabases: [any Database]

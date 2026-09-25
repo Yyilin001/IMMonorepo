@@ -43,8 +43,8 @@ enum V2DirectAuthorizationRevocationScope: Sendable {
     case pair(UUID, UUID)
 }
 
-/// The row is also its recovery job. A lease expires; a held authorization does
-/// not. Transport failure never releases it and never creates a new generation.
+/// 此记录本身也是恢复任务。租约会过期，已持有的授权不会。
+/// 传输故障既不释放授权，也不创建新代次。
 struct PostgresV2DirectAuthorizationIntentStore: Sendable {
     let database: any Database
     let schema: String
@@ -54,9 +54,9 @@ struct PostgresV2DirectAuthorizationIntentStore: Sendable {
         self.database = database; self.schema = schema
     }
 
-    /// Only a fresh foreground request may renew a durably aborted attempt.
-    /// Batch reservations, policy facts and recovery jobs commit atomically.
-    /// The returned grants must never be used before this method returns.
+    /// 只有新的前台请求可重启已持久化中止的尝试。
+    /// 批量预留、策略事实和恢复任务原子提交。
+    /// 此方法返回前，绝不能使用返回的授权许可。
     func reserve(_ requests: [V2DirectAuthorizationRequest], now: Date) async throws -> [V2DirectAuthorizationGrant] {
         guard !requests.isEmpty, requests.count <= 128,
               Set(requests.map(\.operationKey)).count == requests.count,
@@ -77,8 +77,8 @@ struct PostgresV2DirectAuthorizationIntentStore: Sendable {
                         guard prior.attempt.recipientID == request.recipientID, prior.attempt.fingerprint == request.fingerprint else {
                             throw V2DirectAuthorizationIntentError.identityConflict
                         }
-                        // Retry the original owner, epoch, generation and facts.
-                        // Do not silently transplant an uncertain attempt.
+                        // 沿用原始所有者、纪元、代次和事实重试。
+                        // 不得悄然迁移结果不明的尝试。
                         if prior.receipt?.disposition != .aborted {
                             byKey[request.operationKey] = prior
                             continue
@@ -123,8 +123,8 @@ struct PostgresV2DirectAuthorizationIntentStore: Sendable {
             }
     }
 
-    /// Only the exact owner terminal proof settles a generation. Late workers
-    /// cannot release a newer attempt or replace a different terminal result.
+    /// 只有精确的所有者终态证明才能结算某个代次。
+    /// 迟到的工作器不能释放较新的尝试，也不能替换其他终态结果。
     @discardableResult
     func resolve(_ attempt: V2DirectAuthorizationAttempt, receipt: V2DirectAuthorizationReceipt, now: Date) async throws -> Bool {
         try attempt.validate()
@@ -152,9 +152,9 @@ struct PostgresV2DirectAuthorizationIntentStore: Sendable {
         }
     }
 
-    /// The caller must already hold the control policy's exclusive lock. This
-    /// bounded read does not lock intent rows while owner I/O runs: resolution
-    /// on a separate control connection must survive a failed revocation txn.
+    /// 调用方必须已持有控制策略独占锁。所有者 I/O 期间，
+    /// 此有界读取不锁定意图记录：独立控制连接上的解析操作
+    /// 必须在撤销事务失败后仍能保留结果。
     func held(in scope: V2DirectAuthorizationRevocationScope, limit: Int, transaction: any Database) async throws -> [V2DirectAuthorizationGrant] {
         guard transaction.inTransaction, (1...128).contains(limit) else { throw V2DirectAuthorizationIntentError.invalidRequest }
         let predicate: SQLQueryString
@@ -212,9 +212,9 @@ struct PostgresV2DirectAuthorizationIntentStore: Sendable {
             """).run()
     }
 
-    /// Locate a previously bound operation for terminal replay. This never
-    /// reserves, renews or changes its policy; callers still need an exact owner
-    /// proof before acknowledging an unresolved generation.
+    /// 查找此前已绑定的操作，供终态重放使用。
+    /// 此方法既不预留、续期，也不修改策略；确认未解决的代次前，
+    /// 调用方仍须取得精确的所有者证明。
     func existing(roomID: UUID, senderID: UUID, clientMessageID: UUID) async throws -> V2DirectAuthorizationGrant? {
         let sql = try sqlDatabase(database)
         return try await sql.raw("""

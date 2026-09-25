@@ -1,8 +1,8 @@
 import Foundation
 import IMV2Core
 
-/// A personal event is a discovery hint; positive authorization is always
-/// re-read from the current room owner before installing online coverage.
+/// 个人事件仅是发现提示；建立在线覆盖前，始终向当前房间所有者
+/// 重新读取明确的授权结果。
 struct V2AccountRoomMembershipChange: Sendable {
     let roomID: RoomID
     let removedThrough: UInt64?
@@ -12,7 +12,7 @@ struct V2AccountRoomMembershipChange: Sendable {
         var record = IMV2SyncRecord()
         record.projectionKind = item.key.projectionKind
         record.payload = item.payload
-        // The snapshot folds membership changes into the current room row.
+        // 快照将成员关系变更折叠到当前房间行中。
         if record.projectionKind == "room" {
             struct Event: Decodable {
                 let eventType: String

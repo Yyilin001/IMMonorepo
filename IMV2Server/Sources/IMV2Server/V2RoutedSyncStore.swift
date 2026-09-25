@@ -143,10 +143,9 @@ public struct V2RoutedSyncStore: V2SyncStore, Sendable {
     ) async throws -> Result {
         try await routeFence.withCurrentRoute(for: userID) { route, fencedDatabase in
             var location = try registry.location(for: route.bucket)
-            // A co-located shard must use the fence transaction's database
-            // handle. Opening a second pooled connection while the first
-            // holds the route lock can self-deadlock in one-connection
-            // deployments and would not share the transaction boundary.
+            // 同位置的分片必须使用栅栏事务的数据库句柄。当第一条连接持有
+            // 路由锁时再打开第二条池连接，在单连接部署中可能发生自死锁，
+            // 而且第二条连接也不共享事务边界。
             if coLocatedControlBuckets.contains(route.bucket) {
                 location = try .init(
                     bucket: location.bucket, database: fencedDatabase,

@@ -15,7 +15,7 @@ public protocol V2ReadReceiptAdmission: Sendable {
     ) async throws -> V2ReadReceiptOutcome
 }
 
-/// Read-only batch metrics. Holding this boundary grants no receipt admission.
+/// 只读批处理指标。持有此接口并不获得回执准入权限。
 public protocol V2ReadReceiptBatchMetricsReading: Sendable {
     func snapshot() async -> V2ReadReceiptBatcher.Snapshot
 }
@@ -189,8 +189,7 @@ public actor V2ReadReceiptBatcher: V2ReadReceiptAdmission, V2ReadReceiptBatchMet
 
     private func cancel(_ pendingID: UUID) {
         guard let pending = pendingByID.removeValue(forKey: pendingID) else {
-            // Once dispatched, the durable operation is allowed to finish;
-            // cancelling it could leave an unknown commit outcome.
+            // 持久操作一旦派发，就允许其完成；取消可能导致提交结果未知。
             return
         }
         cancelledPendingRequests &+= 1

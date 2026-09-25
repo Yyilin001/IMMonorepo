@@ -174,8 +174,7 @@ public actor V2RoomAdmissionCommandCreditPool {
   ///   - now: 提交时刻。
   public func recordNormalAdmissionCommit(roomID: UUID, now: Date) {
     guard v2PostgresTimestampCanEncode(now) else { return }
-    // Heat measures elapsed process time. Wall-clock corrections must not
-    // restart or prolong this optimization window.
+    // 热度按进程已流逝时间衡量。墙上时钟校正不能重启或延长此优化窗口。
     let observed = monotonicNow()
     if var heat = heatByRoom[roomID],
        heat.lastCommittedAt.duration(to: observed) >= .zero,
@@ -246,8 +245,8 @@ public actor V2RoomAdmissionCommandCreditPool {
         if case .rateLimited = rejection { capacityRejections += 1 }
         return rejection
       }
-      // More than one command may await the same database reservation. Never
-      // reinstall a grant after a resumed sibling has spent from it.
+      // 多条命令可能等待同一次数据库预留。某条恢复的并行命令已消耗额度后，
+      // 绝不能重新安装该授权。
       if credits[key]?.reservationID != grant.id {
         credits[key] = .init(
           reservationID: grant.id,
@@ -280,8 +279,8 @@ public actor V2RoomAdmissionCommandCreditPool {
   func acquire(_ requests: [BatchRequest]) async throws -> [Acquisition] {
     precondition(requests.count <= 128)
     guard !requests.isEmpty else { return [] }
-    // Reject every invalid clock before a prefix can reserve credits or a
-    // cleanup pass can discard a different request's live reservation.
+    // 在此前的请求预留额度，或清理过程丢弃其他请求的有效预留前，
+    // 先拒绝所有无效时钟值。
     guard requests.allSatisfy({ request in
       v2PostgresTimestampCanEncode(request.now)
         && request.shardState.lease.map { v2PostgresTimestampCanEncode($0.validUntil) } == true
@@ -334,8 +333,8 @@ public actor V2RoomAdmissionCommandCreditPool {
     for token in tokens { commit(token) }
   }
 
-  /// A dispatched transaction may have spent this credit. Forget its local
-  /// handle without making it reusable or reporting a confirmed commit.
+  /// 已分发的事务可能已消耗此额度。只忘记本地句柄，
+  /// 不将额度重新变为可用，也不报告已确认提交。
   func discard(_ token: Token) {
     guard tokenKeys.removeValue(forKey: token.id) != nil,
           var entry = credits[token.key] else { return }
@@ -344,8 +343,8 @@ public actor V2RoomAdmissionCommandCreditPool {
     expiredCreditsDiscarded += 1
   }
 
-  /// Called when an activation is permanently retired, after its executor has
-  /// stopped. Its unspent balance is never transferred to a successor epoch.
+  /// 激活永久退役且执行器停止后调用。
+  /// 未用余额绝不转移到后继纪元。
   func retire(activation: V2RoomActivationToken) {
     for (key, entry) in credits where key.activation == activation {
       expiredCreditsDiscarded += entry.available + entry.inFlight.count
@@ -383,8 +382,8 @@ public actor V2RoomAdmissionCommandCreditPool {
     else { return }
     entry.inFlight.remove(token.id)
     if !v2PostgresTimestampCanEncode(now) {
-      // The transaction already rolled back. Without a usable clock, retire
-      // only its token and leave unrelated credits for a later valid check.
+      // 事务已经回滚。没有可用时钟时只退役其令牌，
+      // 无关额度留待之后有效的检查处理。
       expiredCreditsDiscarded += 1
       credits[token.key] = entry
     } else if entry.validUntil > now {
@@ -495,8 +494,8 @@ public actor V2RoomAdmissionCommandCreditPool {
     batchSize: Int
   ) async throws -> Int? {
     if let activation = key.activation {
-      // This independent refill must finish BEFORE the business transaction
-      // takes its room fence. Both transactions validate the same token.
+      // 此独立额度补充必须在业务事务取得房间围栏之前完成。
+      // 两个事务会校验同一令牌。
       return try await v2WithPostgresTransactionRetry(database: database,
           classifyCommitFailure: true) { transaction in
         guard let sql = transaction as? any SQLDatabase else {
@@ -515,9 +514,8 @@ public actor V2RoomAdmissionCommandCreditPool {
   private static func reserveBatchSQL(
     sql: any SQLDatabase, key: Key, batchSize: Int
   ) async throws -> Int? {
-    // The caller may already hold FOR NO KEY UPDATE while awaiting this
-    // independent reservation. KEY SHARE remains compatible with that lock,
-    // but serializes against exclusive room updates.
+    // 等待独立预留时，调用方可能已持有 FOR NO KEY UPDATE。
+    // KEY SHARE 与该锁兼容，但会与独占的房间更新串行化。
     return try await sql.raw(
       """
       WITH writable_room AS MATERIALIZED (

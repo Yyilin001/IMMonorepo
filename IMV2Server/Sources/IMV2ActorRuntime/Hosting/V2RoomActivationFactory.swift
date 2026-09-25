@@ -1,8 +1,8 @@
 import Foundation
 import IMV2ActorContracts
 
-/// One executor belongs to one activation token. The factory creates an
-/// un-restored executor so Hosting can close it if restore fails partway through.
+/// 一个执行器只对应一个激活令牌。工厂创建尚未恢复的执行器，
+/// 使宿主在恢复中途失败时能够关闭它。
 public struct V2RoomActivationExecutor<Request: Decodable & Sendable, Response: Sendable>: Sendable {
     public let restore: @Sendable (ContinuousClock.Instant) async throws -> Void
     public let execute: V2RoomTurnLane<Request, Response>.Execute

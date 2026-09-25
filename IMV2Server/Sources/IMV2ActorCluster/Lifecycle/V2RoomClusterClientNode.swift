@@ -4,8 +4,8 @@ import IMV2ActorContracts
 import IMV2ActorRuntime
 import NIOSSL
 
-/// A calling process owns its own Cluster transport. It never constructs a
-/// dummy room host, lease store, or activation executor.
+/// 调用方进程持有自己的 Cluster 传输。
+/// 绝不构造虚假的房间宿主、租约存储或激活执行器。
 public struct V2RoomClusterClientNodeConfiguration: Sendable {
     public let name: String
     public let host: String
@@ -80,8 +80,8 @@ public actor V2RoomClusterClientNode {
         return client
     }
 
-    /// Transport readiness is distinct from the current number of hosts.
-    /// Missing hosts remain unavailable without becoming write authority.
+    /// 传输就绪与当前宿主数量是两个不同状态。
+    /// 缺失的宿主继续不可用，不会因此获得写入权限。
     public func readiness() async -> Bool {
         guard system != nil, let discovery else { return false }
         return await discovery.snapshot().completedPolls > 0
@@ -91,8 +91,8 @@ public actor V2RoomClusterClientNode {
         await discovery?.snapshot()
     }
 
-    /// Returns false while an uncooperative native/remote RPC is still live.
-    /// The ClusterSystem remains owned by this node for a later stop retry.
+    /// 不配合取消的原生或远程 RPC 仍在运行时返回 false。
+    /// 此节点继续持有 ClusterSystem，供之后重试停止操作。
     public func stop(deadline: ContinuousClock.Instant) async throws -> Bool {
         guard let system else { return true }
         await discovery?.stop()

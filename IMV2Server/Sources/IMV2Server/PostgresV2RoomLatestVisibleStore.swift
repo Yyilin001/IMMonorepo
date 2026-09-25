@@ -13,8 +13,8 @@ public protocol V2RoomLatestVisibleReading: Sendable {
     func latestVisible(roomIDs: [RoomID], actorUserID: UserID) async throws -> [RoomID: V2RoomLatestVisibleResult]
 }
 
-/// Bounded ID reads. A single SQL snapshot binds message revision, membership,
-/// owner and head; a newer edit cannot leak into a snapshot bearing an older head.
+/// 有界 ID 读取。单个 SQL 快照同时绑定消息版本、成员关系、所有者和头部；
+/// 较新的编辑不会泄漏到带有较旧头部的快照中。
 public struct PostgresV2RoomLatestVisibleStore: V2RoomLatestVisibleReading {
     private let database: any Database
     private let schema: String
@@ -26,7 +26,7 @@ public struct PostgresV2RoomLatestVisibleStore: V2RoomLatestVisibleReading {
         self.database = database; self.schema = schema
     }
 
-    /// Shared by execution-plan integration tests so they measure the production query.
+    /// 供执行计划集成测试复用，以便测量生产环境使用的查询。
     static func latestVisibleQuery(schema: String, ids: [UUID], actor: UUID) -> SQLQueryString {
         """
             SELECT room.room_id, room.owner_epoch, member.joined_revision, room.room_sequence AS head,

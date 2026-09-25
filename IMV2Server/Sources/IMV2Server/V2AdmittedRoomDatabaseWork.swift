@@ -1,8 +1,8 @@
 import Foundation
 import IMV2ActorContracts
 
-/// Acquires only at the physical SQL boundary. A Gateway or Account caller
-/// never holds this permit while waiting for a RoomRef or a room reservation.
+/// 仅在物理 SQL 边界获取许可。Gateway 或 Account 调用方等待 RoomRef
+/// 或房间预留时，绝不持有该许可。
 func v2WithAdmittedRoomDatabaseWork<Value: Sendable>(
     _ admission: V2DatabaseWorkAdmissionController?,
     workClass: V2DatabaseWorkClass,

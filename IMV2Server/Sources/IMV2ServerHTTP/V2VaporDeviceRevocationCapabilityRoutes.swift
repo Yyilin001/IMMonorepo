@@ -54,8 +54,8 @@ public struct V2VaporDeviceRevocationCapabilityRoutes: Sendable {
     /// 挂载 `POST /v2/device-credentials/revoke`。
     public func register(on routes: any RoutesBuilder) {
         routes.on(.post, "v2", "device-credentials", "revoke", maxBodySize: "1kb") { request async -> Response in
-            // Live streams honor maxBodySize during collect; an already
-            // buffered body is returned as-is, so check its size explicitly.
+            // 实时流在收集时遵守 maxBodySize；已缓冲的正文会原样返回，
+            // 因此必须显式检查其大小。
             do {
                 let body = try await request.body.collect()
                 guard (body?.count ?? 0) <= 1_024 else { return Self.response(.contentTooLarge) }

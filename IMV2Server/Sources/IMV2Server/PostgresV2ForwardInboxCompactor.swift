@@ -2,16 +2,16 @@ import FluentKit
 import Foundation
 import SQLKit
 
-/// Reclaims terminal inbox body copies while preserving identity, digest and outcome.
-/// Seven days is a diagnostic grace period, not an idempotency expiration window.
+/// 回收终态收件箱的正文副本，同时保留身份、摘要和结果。
+/// 七天是诊断宽限期，不是幂等性过期窗口。
 public struct PostgresV2ForwardInboxCompactor: Sendable {
     public static let retentionSeconds: TimeInterval = 7 * 24 * 60 * 60
     private let database: any Database
 
     public init(database: any Database) { self.database = database }
 
-    /// Runs one atomic bounded batch. Concurrent cleaners skip each other's locks.
-    /// Pending and accepted inboxes retain their bodies, including paused imports.
+    /// 原子执行一个有界批次；并发清理器跳过彼此锁定的记录。
+    /// 待处理和已接受的收件箱保留正文，包括已暂停的导入。
     public func runOnce(now: Date = Date(), limit: Int = 128) async throws -> Int {
         guard (1...1_024).contains(limit) else { throw V2ForwardDeliveryError.invalidConfiguration }
         let cutoff = now.addingTimeInterval(-Self.retentionSeconds)

@@ -132,7 +132,7 @@ public enum V2ActorModerationOutcomeWire: Codable, Equatable, Sendable {
     case unavailable(V2ActorAdmissionUnavailableWire)
 }
 
-/// Explicit mirror: Core's synthesized presentation decoder bypasses nickname validation.
+/// 显式镜像：Core 自动生成的展示信息解码器会绕过昵称校验。
 public struct V2ActorGroupMemberPresentationWire: Codable, Equatable, Sendable {
     public let roomID: RoomID
     public let userID: UserID

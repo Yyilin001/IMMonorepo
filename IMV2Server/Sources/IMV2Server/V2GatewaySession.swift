@@ -347,8 +347,7 @@ public actor V2GatewaySession {
             )
 
         case .authenticate(let request):
-            // Reject an unusable clock before reserving handshake state or
-            // starting the asynchronous adapter operation.
+            // 预留握手状态或启动异步适配器操作前，先拒绝不可用的时钟。
             _ = try currentServerTime()
             try state.receiveAuthenticate(frame)
             guard !request.accessToken.isEmpty else { throw V2GatewaySessionError.invalidAuthenticatePayload }
@@ -363,10 +362,9 @@ public actor V2GatewaySession {
                     deviceID: deviceID
                 )
             } catch V2GatewayAuthenticationError.unauthenticated {
-                // A bare EOF looks like a retryable network failure to the
-                // client. Flush a correlated rejection before closing. Only
-                // a conclusive credential rejection takes this path; database
-                // failures must never tell the client to delete credentials.
+                // 单独的 EOF 在客户端看来像可重试网络故障。
+                // 关闭前先发送关联请求的拒绝响应。只有明确的凭据拒绝进入此路径；
+                // 数据库故障绝不能让客户端删除凭据。
                 state.close()
                 var response = IMV2Envelope()
                 response.requestID = envelope.requestID
@@ -514,9 +512,8 @@ public actor V2GatewaySession {
                           prepared.frame.command == .groupEventPage
                     else { throw V2GatewaySessionError.unsupportedCommand }
                     preparedFrame = prepared.frame
-                    // Lifecycle bookkeeping never inspects a pull response.
-                    // Retain only its public cursor summary here; the actual
-                    // client frame contains the complete shared event page.
+                    // 生命周期簿记不会检查拉取响应。此处只保留公开的游标摘要；
+                    // 实际客户端帧包含完整的共享事件页面。
                     response = IMV2Envelope()
                     response.groupEventPage = .init()
                     response.groupEventPage.roomID = prepared.roomID.rawValue
@@ -555,8 +552,8 @@ public actor V2GatewaySession {
             try state.completeResponse(requestID: envelope.requestID)
             return .init(envelope: response, frame: encoded)
         } catch {
-            // The handler has not produced a response, so release the request
-            // correlation before the connection decides whether to retry/close.
+            // 处理器尚未生成响应；在连接决定重试或关闭前，
+            // 先释放请求关联信息。
             try? state.completeResponse(requestID: envelope.requestID)
             throw error
         }
@@ -583,7 +580,7 @@ public actor V2GatewaySession {
     private func commandAdmissionCost(for envelope: IMV2Envelope) -> Int {
         switch envelope.body {
         case .heartbeat:
-            // Liveness cannot be starved by a client's own foreground work.
+            // 客户端自身的前台工作不能饿死存活性检查。
             return 0
         case .forwardMessages(let request):
             let combinations = request.sources.count * request.targetRoomIds.count

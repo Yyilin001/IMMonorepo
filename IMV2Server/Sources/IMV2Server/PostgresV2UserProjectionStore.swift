@@ -90,9 +90,8 @@ public struct PostgresV2UserProjectionStore: Sendable {
                         \(bind: record.payloadJSON)::jsonb, \(bind: createdAt))
                 ON CONFLICT DO NOTHING
                 """).run()
-            // The ordered row may already have been compacted after a prior
-            // successful mirror. The stable semantic result is the durable
-            // source for exact retry validation in either case.
+            // 排序行可能在先前镜像成功后已被压缩。无论如何，
+            // 稳定的语义结果才是精确校验重试的持久来源。
             guard let mirrored = try await sql.raw("""
                 SELECT user_sync_sequence, payload::text AS payload_json
                 FROM \(unsafeRaw: table("user_projection_effects"))

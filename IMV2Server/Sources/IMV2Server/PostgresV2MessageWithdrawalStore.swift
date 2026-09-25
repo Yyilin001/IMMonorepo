@@ -154,8 +154,8 @@ public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore, V2Owne
                 revision: withdrawalUnsigned(nextMessageRevision)
             )
 
-            // Use PostgreSQL's decoded timestamp for the fresh response and event
-            // payload. Keep the original clock for every storage binding.
+            // 新响应和事件载荷使用 PostgreSQL 解码后的时间戳；
+            // 所有存储绑定仍使用原始时钟值。
             guard let timestamp = try await sql.raw("UPDATE im_v2.rooms SET room_sequence = \(bind: nextRoomSequence) WHERE room_id = \(bind: roomID) RETURNING \(bind: now)::timestamptz AS created_at").first(decoding: WithdrawalCommittedTimestampRow.self) else { throw V2MessageWithdrawalStoreError.corruptPersistenceState }
             let createdAtMilliseconds = try v2GatewayMilliseconds(timestamp.createdAt)
             try await sql.raw("""

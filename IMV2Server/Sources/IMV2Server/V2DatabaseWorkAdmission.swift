@@ -406,9 +406,8 @@ public actor V2DatabaseWorkAdmissionController {
                 enqueue(waiterID, workClass: workClass, deadline: deadline, continuation: continuation)
             }
         } onCancel: {
-            // Cancellation handlers are synchronous. This bounded task only
-            // forwards one message to the owning actor and has no independent
-            // lifecycle or side effect.
+            // 取消处理器是同步的。此有界任务只向所属 Actor 转发一条消息，
+            // 没有独立生命周期或副作用。
             Task { await self.cancel(waiterID) }
         }
     }
@@ -562,8 +561,8 @@ public actor V2DatabaseWorkAdmissionController {
         switch workClass {
         case .foregroundWrite:
             guard foregroundInFlight < foregroundCapacity else { return false }
-            // A write keeps its own reservation. Above it, write work can use
-            // otherwise idle peer capacity only while no peer is queued.
+            // 写入保留自身的预留容量。超出该份额后，
+            // 只有其他类别没有排队时，才可借用其空闲容量。
             return foregroundWrite.inFlight < policy.maximumForegroundWriteInFlight ||
                 !hasQueuedForegroundPeer(of: .foregroundWrite)
         case .foregroundControlWrite:
@@ -572,8 +571,7 @@ public actor V2DatabaseWorkAdmissionController {
                 !hasQueuedForegroundPeer(of: .foregroundControlWrite)
         case .interactiveRead:
             guard foregroundInFlight < foregroundCapacity else { return false }
-            // Symmetric borrowing prevents a large send burst from leaving
-            // room-log recovery permanently under-provisioned.
+            // 对称借用可防止大量发送突发流量让房间日志恢复长期容量不足。
             return interactiveRead.inFlight < policy.maximumInteractiveReadInFlight ||
                 !hasQueuedForegroundPeer(of: .interactiveRead)
         case .sync:

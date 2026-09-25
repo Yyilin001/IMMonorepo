@@ -2,8 +2,8 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// Already-granted send turns only. The gateway cannot use this contract to
-/// admit a new room command or manufacture a successful receipt.
+/// 仅用于已获准的发送轮次。网关不能用此契约
+/// 准入新的房间命令，或制造成功回执。
 public protocol V2ActorGrantedSendBatching: Sendable {
     func acceptGrantedTurn(_ sends: [V2PreparedActorSend],
                            batchDeadline: ContinuousClock.Instant,
@@ -22,9 +22,9 @@ extension V2SendMessageAdmissionBatcher: V2ActorGrantedSendBatching {
     }
 }
 
-/// Maps a complete admitted room turn to one bounded batcher admission and
-/// back to ordered typed results. A SQL partition can commit before another
-/// rolls back, so mixed durable outcomes stop the whole turn as unknown.
+/// 将完整获准的房间轮次映射为一次有界批处理准入，
+/// 再还原成有序的类型化结果。一个 SQL 分区可能先于另一分区回滚而提交，
+/// 因此混合的持久化结果会让整个轮次以结果未知结束。
 public struct V2ActorGrantedSendBatchAdapter: Sendable {
     private let batcher: any V2ActorGrantedSendBatching
 
@@ -32,8 +32,8 @@ public struct V2ActorGrantedSendBatchAdapter: Sendable {
         self.batcher = batcher
     }
 
-    /// Hosting calls this only after the executor is closed or fenced. It
-    /// releases the exact token's bounded quarantine slot.
+    /// 宿主只在执行器关闭或被围栏排除后调用此方法。
+    /// 它释放精确令牌占用的有界隔离槽位。
     public func retire(_ token: V2RoomActivationToken) async {
         await batcher.retireActivation(token)
     }
@@ -52,8 +52,8 @@ public struct V2ActorGrantedSendBatchAdapter: Sendable {
         } catch is CancellationError {
             throw V2RoomCallFailure.notAccepted(.cancelled)
         }
-        // If every selected SQL attempt has a proved rollback, the whole
-        // granted turn can report that fact without retiring its activation.
+        // 若每次选定的 SQL 尝试都有回滚证明，
+        // 整个获准轮次即可报告这一事实，无须退役激活。
         let rollbackFailures = results.compactMap { result -> V2RoomCallFailure? in
             guard case .failure(let error) = result,
                   let failure = error as? V2RoomCallFailure else { return nil }
@@ -65,9 +65,9 @@ public struct V2ActorGrantedSendBatchAdapter: Sendable {
         if rollbackFailures.count == results.count, let first = rollbackFailures.first {
             throw first
         }
-        // A driver failure or unknown SQL commit is not a typed business
-        // rejection. Do not return partial successes as a committed turn when
-        // any participant may have an unresolved durable result.
+        // 驱动故障或结果不明的 SQL 提交不是类型化业务拒绝。
+        // 只要任一参与项的持久化结果仍未确定，
+        // 就不能将部分成功结果作为已提交轮次返回。
         for result in results {
             if case .failure(let error) = result,
                error is V2RoomTransactionOutcomeUnknown ||

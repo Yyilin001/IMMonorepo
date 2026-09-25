@@ -88,8 +88,8 @@ public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimit
               let blockedUntil = row.blockedUntil
         else { return nil }
         guard blockedUntil.microseconds > current.microseconds else { return nil }
-        // Subtract whole seconds and remainders separately: the complete
-        // PostgreSQL timestamp span can overflow an Int64 microsecond delta.
+        // 整秒与余数分开相减：PostgreSQL 的完整时间戳跨度
+        // 可能使 Int64 微秒差溢出。
         let scale: Int64 = 1_000_000
         let seconds = blockedUntil.microseconds / scale - current.microseconds / scale
         let remainder = blockedUntil.microseconds % scale - current.microseconds % scale
@@ -147,16 +147,15 @@ public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimit
                 throw V2PasswordLoginRateLimitError.unavailable
             }
             let isCurrentWindow = existing.map { existing in
-                // Preserve an existing window during a backward clock
-                // correction. A positive full-range delta may overflow.
+                // 时钟向后校正时保留既有窗口。
+                // 跨完整取值范围的正时间差可能溢出。
                 if observed.microseconds < existing.windowStartedAt.microseconds { return true }
                 let (elapsed, overflow) = observed.microseconds.subtractingReportingOverflow(existing.windowStartedAt.microseconds)
                 return !overflow && elapsed < windowMicroseconds
             } ?? false
-            // This limiter count is a threshold, not a revision or operation
-            // identity. Keep a saturated denial at the SQL integer ceiling;
-            // an expired lockout in the same window must not overflow the
-            // column and roll back the new lockout and its audit.
+            // 此限流计数是阈值，不是修订号或操作标识。
+            // 拒绝计数在 SQL 整数上界饱和；同一窗口中已过期的锁定
+            // 不能使列溢出，进而回滚新的锁定及其审计记录。
             let nextFailureCount = isCurrentWindow
                 ? min(existing!.failureCount, Int(Int32.max) - 1) + 1 : 1
             let windowStartedAt = isCurrentWindow ? existing!.windowStartedAt : observed
@@ -164,8 +163,8 @@ public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimit
                 ? current.addingTimeInterval(policy.lockout)
                 : nil
             guard v2PostgresTimestampCanEncode(current),
-                  // A positive duration can disappear in Date or microsecond
-                  // encoding. Never persist an already-elapsed lockout.
+                  // 正时长可能在 Date 或微秒编码时消失。
+                  // 绝不持久化已经结束的锁定。
                   blockedUntil.map({ expiry in
                       guard v2PostgresTimestampPrecedes(current, expiry),
                             let encoded = try? V2PostgresTimestamp(date: expiry) else { return false }
@@ -247,8 +246,8 @@ private struct AttemptRow: Decodable {
 /// - Returns: 数据库给出的当前时刻。
 /// - Throws: 查询无结果时抛出 ``V2PasswordLoginRateLimitError/unavailable``。
 private func databaseNow<Value: Decodable>(on sql: any SQLDatabase) async throws -> Value {
-    // CURRENT_TIMESTAMP is fixed at transaction start, before an advisory
-    // lock may have waited. Account for the attempt using time observed now.
+    // CURRENT_TIMESTAMP 固定在事务开始时，早于可能发生的咨询锁等待。
+    // 须用当前观测时间计算此次尝试。
     guard let row = try await sql.raw("SELECT clock_timestamp() AS current").first(decoding: TimestampRow<Value>.self) else {
         throw V2PasswordLoginRateLimitError.unavailable
     }

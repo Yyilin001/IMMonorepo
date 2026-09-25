@@ -21,9 +21,9 @@ func v2PostgresTimestampCanEncode(_ date: Date) -> Bool {
 ///
 /// 仅能放入 `Int64` 不足以证明数据库接受该时间；本方法进一步检查数据库的有限值边界。
 func v2PostgresTimestampMicrosecondsCanEncode(_ offset: Int64) -> Bool {
-    // PostgreSQL datatype/timestamp.h: IS_VALID_TIMESTAMP uses these finite
-    // bounds. An offset fitting Int64 can still be rejected by PostgreSQL,
-    // notably before 4713 BC or near the upper endpoint.
+    // PostgreSQL 的 datatype/timestamp.h 中，IS_VALID_TIMESTAMP 使用这些有限边界。
+    // 即使偏移量可放入 Int64，PostgreSQL 仍可能拒绝，尤其是公元前 4713 年以前
+    // 或接近上界的时间。
     return offset >= -211_813_488_000_000_000 && offset < 9_223_371_331_200_000_000
 }
 

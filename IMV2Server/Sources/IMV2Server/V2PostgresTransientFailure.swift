@@ -101,8 +101,8 @@ func v2WithPostgresTransactionRetry<Result: Sendable>(
     }
 }
 
-/// The optional context exists only for a room-deadline transaction after
-/// BEGIN and LOCAL timeout setup. Legacy transactions keep their old path.
+/// 可选上下文只在设置 BEGIN 和 LOCAL 超时后的房间截止事务中存在。
+/// 旧事务继续使用既有路径。
 func v2WithPostgresTransactionRetryWithRoomContext<Result: Sendable>(
     database: any Database,
     maximumRetryCount: Int = 2,
@@ -127,8 +127,8 @@ private func v2WithPostgresTransactionRetryCore<Result: Sendable>(
 ) async throws -> Result {
     precondition(maximumRetryCount >= 0)
     var retryCount = 0
-    // Fix one absolute budget before the first attempt; retries borrow a new
-    // connection without ever extending the original room SQL deadline.
+    // 首次尝试前固定绝对时间预算；重试会借用新连接，
+    // 但绝不延长原始房间 SQL 截止时间。
     let roomDeadline = useRoomDeadline ? V2RoomSQLDeadline.boundedTransactionDeadline() : nil
     while true {
         try Task.checkCancellation()
@@ -152,10 +152,9 @@ private func v2WithPostgresTransactionRetryCore<Result: Sendable>(
                 try await attempt.body { try await operation(transaction, nil) }
             }
         } catch {
-            // The physical-deadline primitive already proved rollback versus
-            // missing COMMIT ACK. The legacy Fluent path still needs the
-            // body-return heuristic, which would misclassify a settled close
-            // just before COMMIT as unknown.
+            // 物理截止时间基础组件已能区分已证明回滚与 COMMIT 确认缺失。
+            // 旧 Fluent 路径仍需依赖主体返回的启发式判断；
+            // 它会把 COMMIT 前刚完成的关闭误判为结果未知。
             let error = roomDeadline == nil && classifyCommitFailure
                 ? attempt.classify(error) : error
             let disposition = v2PostgresFailureDisposition(error)
@@ -168,8 +167,7 @@ private func v2WithPostgresTransactionRetryCore<Result: Sendable>(
                 throw error
             }
             retryCount += 1
-            // Short randomized backoff prevents opposing requests from
-            // immediately rebuilding the same wait-for graph.
+            // 短暂的随机退避可防止相互竞争的请求立即重建同一等待关系图。
             let lowerNanoseconds = UInt64(retryCount) * 2_000_000
             let upperNanoseconds = UInt64(retryCount) * 8_000_000
             try await Task.sleep(

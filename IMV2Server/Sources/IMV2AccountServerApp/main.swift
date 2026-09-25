@@ -17,20 +17,31 @@ import Vapor
 @main
 enum IMV2AccountServerApp {
     static func main() async {
-        LoggingSystem.bootstrap(StreamLogHandler.standardError)
+        do { try V2ServiceLogging.bootstrap() }
+        catch {
+            fputs("Invalid IM_V2_LOG_LEVEL; expected a swift-log level.\n", stderr)
+            exit(EXIT_FAILURE)
+        }
         let logger = Logger(label: "imv2.account")
         do {
             try await withLogger(logger) { _ in try await run(logger: logger) }
         } catch {
-            logger.error("IM V2 account startup or shutdown failed")
+            logger.error("IM V2 account startup or shutdown failed", metadata:
+                V2SafeLogMetadata.failure(error, stage: "account_lifecycle"))
             exit(EXIT_FAILURE)
         }
     }
 
     private static func run(logger: Logger) async throws {
         V2ProcessTerminationSignal.install()
-        let configuration = try V2AccountRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
-        let localMediaConfiguration = try V2LocalFilesystemMediaRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
+        let configuration: V2AccountRuntimeConfiguration
+        let localMediaConfiguration: V2LocalFilesystemMediaRuntimeConfiguration?
+        do {
+            configuration = try V2AccountRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
+            localMediaConfiguration = try V2LocalFilesystemMediaRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
+        } catch {
+            throw V2StagedOperationalError(stage: "account_configuration", error: error)
+        }
         let applicationEventLoops = MultiThreadedEventLoopGroup(
             numberOfThreads: configuration.databasePolicy.eventLoopThreads
         )
@@ -41,12 +52,13 @@ enum IMV2AccountServerApp {
         } catch {
             try? await resources.shutdown()
             try? await applicationEventLoops.shutdownGracefully()
-            throw error
+            throw V2StagedOperationalError(stage: "account_http_application", error: error)
         }
         V2RedactedHTTPMiddlewareConfiguration.install(on: app)
         let runtimeTasks = RuntimeTaskSupervisor()
         let passwordWorker = V2PasswordHashWorker()
         var roomActor: V2RoomActorApplication?
+        var stage = "account_composition"
         do {
             resources.databases.use(
                 try postgresDatabaseConfiguration(
@@ -117,7 +129,7 @@ enum IMV2AccountServerApp {
                     } catch is CancellationError {
                         break
                     } catch {
-                        logger.error("IM V2 account-edge rate-limit retention failed; retrying")
+                        V2ServiceLogging.logWorkerFailure(logger, worker: "account_edge_rate_limit_retention", error: error)
                     }
                     do {
                         try await v2Sleep(for: .seconds(60))
@@ -126,8 +138,8 @@ enum IMV2AccountServerApp {
                     }
                 }
             }
-            // Keep one pool per physical owner for lease resolution and
-            // scoped media grants; room commands always use RoomRef.
+            // 每个物理归属方保留一个连接池，用于租约解析和限定范围的媒体授权；
+            // 房间命令始终通过 RoomRef 执行。
             var accountStorageDatabases: [String: any Database] = [configuration.databaseURL: database]
             for url in Set(configuration.roomShardStorage.map(\.databaseURL)) where accountStorageDatabases[url] == nil {
                 let identifier = DatabaseID(string: "account-owner-\(accountStorageDatabases.count)")
@@ -225,9 +237,8 @@ enum IMV2AccountServerApp {
                         } catch is CancellationError {
                             break
                         } catch {
-                            // This local scanner is deliberately diagnostic
-                            // only; never include IDs, paths, or bytes here.
-                            logger.error("IM V2 local media maintenance worker failed; retrying")
+                            // 此本地扫描器仅用于诊断；这里不得记录标识符、路径或字节内容。
+                            V2ServiceLogging.logWorkerFailure(logger, worker: "local_media_maintenance_worker", error: error)
                         }
                         do {
                             try await v2Sleep(for: .milliseconds(200))
@@ -295,7 +306,7 @@ enum IMV2AccountServerApp {
                             logger.warning("IM V2 invite creation recovery deferred", metadata: ["deferred": "\(report.deferred)"])
                         }
                     } catch is CancellationError { break }
-                    catch { logger.error("IM V2 invite creation recovery failed; retrying") }
+                    catch { V2ServiceLogging.logWorkerFailure(logger, worker: "invite_creation_recovery", error: error) }
                     do { try await v2Sleep(for: .seconds(5)) } catch { break }
                 }
             }
@@ -310,7 +321,7 @@ enum IMV2AccountServerApp {
                             logger.warning("IM V2 join quota recovery deferred", metadata: ["deferred": "\(report.deferred)"])
                         }
                     } catch is CancellationError { break }
-                    catch { logger.error("IM V2 join quota recovery failed; retrying") }
+                    catch { V2ServiceLogging.logWorkerFailure(logger, worker: "join_quota_recovery", error: error) }
                     do { try await v2Sleep(for: .seconds(5)) } catch { break }
                 }
             }
@@ -331,39 +342,46 @@ enum IMV2AccountServerApp {
                     policy: configuration.passwordLoginRateLimit
                 )
             ).register(on: app)
+            stage = "account_http_runtime"
             try await V2HTTPService.withRunning(app, logger: logger,
                 waitForShutdown: V2ProcessTerminationSignal.wait) { shutdown in
                 logger.notice("IM V2 account service bound", metadata: ["host": "\(configuration.listener.host)", "port": "\(configuration.listener.port)"])
                 await shutdown.wait()
             }
+            stage = "account_shutdown"
             await runtimeTasks.cancelAndWait(logger: logger)
             try await passwordWorker.shutdown()
             try await app.shutdown()
             guard try await actor.stop(deadline: .now + actor.configuration.drainTimeout.duration) else {
-                logger.critical("IM V2 account room actor drain exceeded its shutdown deadline")
+                logger.critical("IM V2 account room actor drain exceeded its shutdown deadline",
+                    metadata: V2SafeLogMetadata.drainTimeout(stage: "account_actor_shutdown"))
                 exit(EXIT_FAILURE)
             }
             roomActor = nil
             try await resources.shutdown()
             try await applicationEventLoops.shutdownGracefully()
         } catch {
+            logger.error("IM V2 account lifecycle failed; cleaning up", metadata:
+                V2SafeLogMetadata.failure(error, stage: stage))
             await runtimeTasks.cancelAndWait(logger: logger)
             try? await passwordWorker.shutdown()
             try? await app.shutdown()
             if let roomActor {
                 do {
                     guard try await roomActor.stop(deadline: .now + roomActor.configuration.drainTimeout.duration) else {
-                        logger.critical("IM V2 account room actor drain incomplete; retaining database resources")
+                        logger.critical("IM V2 account room actor drain incomplete; retaining database resources",
+                            metadata: V2SafeLogMetadata.drainTimeout(stage: "account_actor_failure_drain"))
                         exit(EXIT_FAILURE)
                     }
                 } catch {
-                    logger.critical("IM V2 account room actor shutdown failed; retaining database resources")
+                    logger.critical("IM V2 account room actor shutdown failed; retaining database resources",
+                        metadata: V2SafeLogMetadata.failure(error, stage: "account_actor_failure_drain"))
                     exit(EXIT_FAILURE)
                 }
             }
             try? await resources.shutdown()
             try? await applicationEventLoops.shutdownGracefully()
-            throw error
+            throw V2StagedOperationalError(stage: stage, error: error)
         }
     }
 }
@@ -410,7 +428,8 @@ private actor RuntimeTaskSupervisor {
         tasks.removeAll(keepingCapacity: false)
         for task in ownedTasks { task.cancel() }
         guard await v2WaitForTaskDrain(ownedTasks, timeout: .seconds(30)) else {
-            logger.critical("IM V2 account task drain exceeded its shutdown deadline")
+            logger.critical("IM V2 account task drain exceeded its shutdown deadline",
+                metadata: V2SafeLogMetadata.drainTimeout(stage: "account_worker_shutdown"))
             exit(EXIT_FAILURE)
         }
     }

@@ -109,8 +109,8 @@ public struct V2MediaService: Sendable {
         let instant = now()
         let command = try V2RequestMediaUploadCommand(actorUserID: actorUserID, operationID: operationID, mediaID: mediaID, contentType: contentType, byteCount: byteCount, limits: limits)
         let grant = try await store.requestUpload(command, deviceID: deviceID, expiresAt: instant.addingTimeInterval(limits.temporaryLifetime), now: instant)
-        // The store validates a new deadline after checking durable replay.
-        // Validate the persisted result using the clock after that await.
+        // 存储在检查持久重放后校验新截止时间。
+        // 等待完成后，使用当时的时钟校验持久化结果。
         guard grant.mediaID == mediaID, v2PostgresTimestampPrecedes(now(), grant.expiresAt) else { throw V2MediaServiceError.invalidGrant }
         return grant
     }

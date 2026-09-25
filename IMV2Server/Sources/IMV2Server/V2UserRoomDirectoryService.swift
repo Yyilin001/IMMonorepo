@@ -7,7 +7,7 @@ public struct V2UserRoomDirectoryPage: Sendable {
     public let topologyGeneration: String
 }
 
-/// Physical stores must be deduplicated and ordered consistently within a generation.
+/// 同一代次内，物理存储必须去重并保持一致的排序。
 public struct V2RoomRecoveryTopology: Sendable {
     public let generation: String
     public let stores: [any V2UserRoomDirectoryReading]
@@ -21,7 +21,7 @@ public struct V2RoomRecoveryTopology: Sendable {
 }
 
 public protocol V2RoomRecoveryTopologyReading: Sendable {
-    /// Generation changes whenever a scan could miss a room moved across physical stores.
+    /// 只要扫描可能漏掉跨物理存储迁移的房间，代次就会变化。
     func topology() async throws -> V2RoomRecoveryTopology
 }
 
@@ -50,7 +50,7 @@ public struct V2UserRoomDirectoryService: Sendable {
             index = 0
             after = nil
         }
-        // One physical-store request per page, including empty filtered pages.
+        // 每页只请求一次物理存储，过滤后为空的页也一样。
         let slice = try await topology.stores[index].rooms(actorUserID: actorUserID, after: after, limit: pageSize)
         guard slice.entries.count <= pageSize,
               Set(slice.entries.map(\.roomID)).count == slice.entries.count,

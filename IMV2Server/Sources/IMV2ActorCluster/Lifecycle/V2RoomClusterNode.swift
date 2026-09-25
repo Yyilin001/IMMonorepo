@@ -4,8 +4,8 @@ import IMV2ActorContracts
 import IMV2ActorRuntime
 import NIOSSL
 
-/// Minted only by the node that owns this exact inbound actor and physical
-/// endpoint. A receptionist match or shared ClusterSystem is not authority.
+/// 只由拥有此精确入站 Actor 和物理端点的节点创建。
+/// 接待组件匹配或共享 ClusterSystem 都不构成权限。
 struct V2RoomLocalPort: Sendable {
     let identity: V2ActorHostIdentity
     let endpointID: ClusterSystem.ActorID
@@ -30,8 +30,8 @@ public struct V2RoomClusterNodeConfiguration: Sendable {
     public let allowedShards: Set<String>
     public let serviceShardAccess: [V2ActorServiceID: Set<String>]
 
-    /// TLS materials and a private trust root are required even when a local
-    /// caller resolves the endpoint in its own ClusterSystem.
+    /// 即使本地调用方在自己的 ClusterSystem 中解析端点，
+    /// 仍须提供 TLS 材料和私有信任根。
     public init(name: String, host: String, port: Int, tls: TLSConfiguration,
                 threadPoolSize: Int, allowedShards: Set<String>,
                 serviceShardAccess: [V2ActorServiceID: Set<String>]) throws {
@@ -55,8 +55,8 @@ public struct V2RoomClusterNodeConfiguration: Sendable {
     }
 }
 
-/// Owns a ClusterSystem and its separately allocated transport threads. App
-/// EventLoopGroups are never borrowed; shutdown waits for room drain first.
+/// 持有 ClusterSystem 及其单独分配的传输线程。
+/// 绝不借用应用的 EventLoopGroup；关闭时先等待房间排空。
 public actor V2RoomClusterNode {
     private let configuration: V2RoomClusterNodeConfiguration
     private let identity: V2ActorHostIdentity
@@ -96,13 +96,13 @@ public actor V2RoomClusterNode {
         var settings = ClusterSystemSettings(name: configuration.name, host: configuration.host,
                                              port: configuration.port, tls: configuration.tls)
         settings.threadPoolSize = configuration.threadPoolSize
-        // Membership is discovery only. A peer timeout must not make this
-        // process relinquish (or claim) a DB-fenced room activation.
+        // 集群成员关系只用于发现。对等节点超时不能让本进程
+        // 放弃或认领受数据库围栏保护的房间激活。
         settings.downingStrategy = .none
         settings.onDownAction = .none
-        // The distributed Codable serializer base64-encodes SignedPacket.body
-        // again. Twice the signed-body ceiling leaves bounded room for that
-        // expansion, ActorID/call metadata and protobuf framing.
+        // 分布式 Codable 序列化器会再次对 SignedPacket.body 进行 base64 编码。
+        // 将签名消息体上限翻倍，可为这次膨胀、ActorID、调用元数据
+        // 和 protobuf 分帧留出有界空间。
         settings.maximumInboundFrameBytes = try ClusterInboundFrameLimit(
             bytes: max(authenticationLimits.maximumRequestBytes,
                        authenticationLimits.maximumReplyBytes) * 2 + 65_536
@@ -159,9 +159,9 @@ public actor V2RoomClusterNode {
         return client
     }
 
-    /// Starts a bounded, signed watcher for the configured physical hosts.
-    /// The caller passes a client made by this node and retains its logical
-    /// RoomDirectory separately from discovery state.
+    /// 为配置的物理宿主启动有界且经签名的观察器。
+    /// 调用方传入此节点创建的客户端，并将逻辑 RoomDirectory
+    /// 与发现状态分开保留。
     public func startDiscovery(client: V2RoomClusterClient,
                                configuration: V2RoomDiscoveryConfiguration) async throws -> V2RoomClusterDiscovery {
         let clientID = ObjectIdentifier(client)
@@ -193,8 +193,8 @@ public actor V2RoomClusterNode {
         return await host.drain(deadline: deadline)
     }
 
-    /// An incomplete drain leaves Cluster and DB access alive. The caller may
-    /// retry stop after the executing SQL/restore has actually finished.
+    /// 排空未完成时保留 Cluster 和数据库访问。
+    /// 正在执行的 SQL 或恢复操作实际结束后，调用方可重试停止。
     public func stop(deadline: ContinuousClock.Instant) async throws -> V2RoomActivationDrainResult {
         let result = await drain(deadline: deadline)
         guard result.completed else { return result }

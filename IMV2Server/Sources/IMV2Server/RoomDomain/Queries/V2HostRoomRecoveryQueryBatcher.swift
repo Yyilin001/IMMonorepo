@@ -2,16 +2,16 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// A read turn has already passed host admission for exactly one room. The
-/// batch deadline is the original monotonic batching cutoff; the call deadline
-/// is the separately granted end-to-end deadline. The caller releases its turn.
+/// 读取轮次已通过宿主对单个房间的准入。批次截止时间是原始的
+/// 单调时钟聚合截止点；调用截止时间则是另行授予的端到端期限。
+/// 调用方负责释放自己的轮次。
 public struct V2GrantedRoomReadTurn: Sendable {
     public let token: V2RoomActivationToken
     public let actorUserID: UserID
     public let batchDeadline: ContinuousClock.Instant
     public let callDeadline: ContinuousClock.Instant
 
-    // Construct only in IMV2Server after runtime admission grants this room.
+    // 只在运行时准入批准该房间后，由 IMV2Server 构造。
     init(token: V2RoomActivationToken, actorUserID: UserID,
          batchDeadline: ContinuousClock.Instant, callDeadline: ContinuousClock.Instant) {
         self.token = token
@@ -28,9 +28,8 @@ public enum V2HostRoomRecoveryBatchError: Error, Equatable, Sendable {
     case corruptResult
 }
 
-/// One instance belongs to one physical owner database. It only groups turns
-/// already granted by the host, so it never waits for admission to a second
-/// room while the first room's SQL fence is held.
+/// 每个实例只对应一个物理所有者数据库。它只合并宿主已批准的轮次，
+/// 因此持有第一个房间的 SQL 围栏时，不会等待第二个房间的准入。
 public actor V2HostRoomRecoveryQueryBatcher {
     public struct Configuration: Sendable, Equatable {
         public let maximumItems: Int
@@ -89,8 +88,8 @@ public actor V2HostRoomRecoveryQueryBatcher {
         self.databaseWorkAdmission = databaseWorkAdmission
     }
 
-    // Deterministic phase barriers for admission/capacity tests; production
-    // construction always supplies the activation-fenced executor above.
+    // 为准入和容量测试提供确定性的阶段屏障；
+    // 生产构造始终提供上方受激活围栏保护的执行器。
     init(configuration: Configuration,
          databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
          execute: @escaping @Sendable (V2RoomRecoveryQuery, [V2RoomActivationToken]) async throws -> V2RoomRecoveryResult) {
@@ -126,8 +125,8 @@ public actor V2HostRoomRecoveryQueryBatcher {
     }
 
     private func encodedByteCount(_ turn: V2GrantedRoomReadTurn) -> Int {
-        // Every token is Codable. Include the query/user wrapper as well as
-        // token bytes; a failed encode is rejected as an oversized item.
+        // 每个令牌都可编码。大小计算同时包含查询与用户包装和令牌字节；
+        // 编码失败按项目过大拒绝。
         guard let tokenBytes = try? JSONEncoder().encode(turn.token) else { return Int.max }
         return tokenBytes.count + turn.actorUserID.rawValue.utf8.count + 64
     }
@@ -151,9 +150,8 @@ public actor V2HostRoomRecoveryQueryBatcher {
             let overLimit = queued.count >= configuration.maximumItems ||
                 queued.reduce(0, { $0 + $1.byteCount }) + item.byteCount > configuration.maximumBytes
             if differentEpoch || overLimit {
-                // flush cannot remove the old queue when every in-flight slot
-                // is occupied. Reject the new item rather than merge epochs
-                // or exceed the queue's item/byte limits.
+                // 所有执行中槽位被占满时，刷新操作无法移除旧队列。
+                // 应拒绝新项目，而非合并不同纪元或超出队列的数量与字节上限。
                 guard inFlightCount < configuration.maximumInFlightBatches else {
                     item.continuation.resume(throwing: V2HostRoomRecoveryBatchError.busy)
                     return
@@ -174,8 +172,7 @@ public actor V2HostRoomRecoveryQueryBatcher {
         generations[key] = generation
         let deadline = pending[key]!.map { min($0.turn.batchDeadline, $0.turn.callDeadline) }.min()!
         scheduled[key] = Task {
-            // Wait only until the original earliest cutoff; never create a
-            // fresh batching window from the enqueue time.
+            // 只等待至原始的最早截止点，绝不从入队时间重新开始一个批次窗口。
             do { try await ContinuousClock().sleep(until: deadline) }
             catch { return }
             flushIfCurrent(key, generation: generation)

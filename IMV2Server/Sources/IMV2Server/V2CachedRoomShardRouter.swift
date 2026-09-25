@@ -57,8 +57,8 @@ public final class V2CachedRoomShardRouter: V2DirectRoomShardRouting, Sendable {
         let base = capacity / count
         let remainder = capacity % count
         self.source = source
-        // Partition the configured budget exactly, without a ceiling-division
-        // addition that can overflow or allocate extra entries in every bucket.
+        // 精确拆分配置预算，避免向上取整所需的加法溢出，
+        // 或让每个桶额外分配条目。
         buckets = (0 ..< count).map { Bucket(capacity: base + ($0 < remainder ? 1 : 0)) }
         self.lifetime = max(.seconds(1), lifetime)
         self.now = now
@@ -145,8 +145,8 @@ public final class V2CachedRoomShardRouter: V2DirectRoomShardRouting, Sendable {
             let completion = try await operation(route)
             return (result: (value: completion.result, roomID: completion.roomID, route: route), roomID: completion.roomID)
         }
-        // The owner callback can succeed before the control directory fails.
-        // Publish a route only after that outer transaction also commits.
+        // 控制目录失败前，所有者回调可能已成功。
+        // 只有外围事务也提交后才发布路由。
         if let roomID = committed.roomID {
             insert(committed.route, for: roomID)
         }
@@ -160,8 +160,7 @@ public final class V2CachedRoomShardRouter: V2DirectRoomShardRouting, Sendable {
         return bucket.state.withLock { state in
             guard let entry = state.entries[roomID] else { return nil }
             guard entry.expiresAt > now else {
-                // Keep its epoch while a refresh is in flight. The entry is
-                // still subject to the same bucket capacity and eviction.
+                // 刷新执行期间保留其纪元。该条目仍受相同的桶容量和淘汰规则约束。
                 return nil
             }
             return entry.route
@@ -183,17 +182,15 @@ public final class V2CachedRoomShardRouter: V2DirectRoomShardRouting, Sendable {
         let expiresAt = observedAt + lifetime
         let bucket = bucket(for: roomID)
         return bucket.state.withLock { state in
-            // Directory reads can finish out of order. An older result must
-            // neither replace a newer hint nor extend its expiration, even
-            // when that hint has expired while this read was in flight.
+            // 目录读取可能乱序完成。较旧结果既不能替换较新的提示，
+            // 也不能延长其过期时间，即使读取期间该提示已经过期。
             if let existing = state.entries[roomID], existing.route.epoch > route.epoch {
                 return existing.route
             }
             if state.entries[roomID] == nil,
                state.entries.count >= bucket.capacity {
-                // Routes are uniformly distributed IDs and every bucket is
-                // bounded. Arbitrary replacement avoids a serialized global
-                // LRU mutation on this very high-frequency lookup path.
+                // 路由 ID 均匀分布，且每个桶有界。
+                // 任意替换可避免在高频查询路径上串行修改全局 LRU。
                 state.entries.remove(at: state.entries.startIndex)
             }
             state.entries[roomID] = .init(

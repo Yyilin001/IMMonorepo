@@ -83,8 +83,7 @@ public struct V2HMACAccountAssertionIssuer: V2DeviceBoundAccountAssertionVerifie
         let issuedAt = now()
         let issuedMilliseconds = issuedAt.timeIntervalSince1970 * 1_000
         let expiry = issuedAt.addingTimeInterval(lifetime).timeIntervalSince1970 * 1_000
-        // A signed deadline must not extend the configured lifetime when
-        // the server clock is before the Unix epoch.
+        // 服务器时钟早于 Unix 纪元时，签名截止时间不得延长配置的有效期。
         guard Int64(exactly: issuedMilliseconds.rounded(.towardZero)) != nil,
               let expiresAtMilliseconds = Int64(exactly: expiry.rounded(.down)),
               Double(expiresAtMilliseconds) > issuedMilliseconds

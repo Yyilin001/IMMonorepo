@@ -3,8 +3,8 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// Control-domain room creation. Only bootstrap uses explicit fixed placement;
-/// after persistence, all ordinary room capabilities use RoomRef activation.
+/// 控制域房间创建。只有引导操作使用显式固定的放置位置；
+/// 持久化后，所有普通房间能力都通过 RoomRef 激活。
 public struct V2ActorRoomCreationCoordinator: Sendable {
     private let directRoutes: any V2DirectRoomShardRouting
     private let directSelector: V2DirectRoomShardRouter
@@ -75,7 +75,7 @@ public struct V2ActorRoomCreationCoordinator: Sendable {
         }
     }
 
-    /// The existing finalizing ledger is replayed through the same typed owner bootstrap port.
+    /// 通过同一个类型化所有者引导端口重放现有的待完成账本。
     public func recoverFinalizing(limit: Int,
                                   deadline: ContinuousClock.Instant) async throws -> V2GroupAudienceRecoveryReport {
         try await audienceService(deadline: deadline).recoverFinalizing(limit: limit)

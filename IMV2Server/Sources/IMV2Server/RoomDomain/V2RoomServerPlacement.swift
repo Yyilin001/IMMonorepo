@@ -2,8 +2,8 @@ import FluentKit
 import IMV2ActorContracts
 import IMV2Core
 
-/// The control directory resolves existing identities only. An unknown room
-/// never falls through to a creation path or a newly hashed owner.
+/// 控制目录只解析已有身份。未知房间不会落入创建路径，
+/// 也不会被分配给重新计算哈希所得的所有者。
 public struct V2RoomServerOwnerResolver: V2RoomDataOwnerResolving {
     private let router: any V2RoomShardRouting
 
@@ -19,8 +19,8 @@ public struct V2RoomServerOwnerResolver: V2RoomDataOwnerResolving {
     }
 }
 
-/// Selects only locally configured database handles. Full owner/activation
-/// verification still happens in the chosen physical database transaction.
+/// 仅选择本地配置的数据库句柄。完整的所有者与激活校验
+/// 仍在选定的物理数据库事务中进行。
 public struct V2RoomServerLeaseStore: V2RoomActivationLeaseStore {
     private let stores: [String: PostgresV2RoomActivationStore]
 

@@ -62,10 +62,9 @@ struct V2NATSInboundFrameParser {
         )
         self.invalidMessagePolicy = invalidMessagePolicy
         self.maximumPayloadBytes = maximumPayloadBytes
-        // A NIO read may coalesce several complete NATS messages. Bound the
-        // aggregate parser allocation while allowing four legal frames to be
-        // consumed without falsely treating their combined read as one
-        // oversized payload.
+        // 一次 NIO 读取可能合并多条完整 NATS 消息。
+        // 限制解析器的总分配量，同时允许消费四个合法帧，
+        // 不把它们合并后的读取误判为单条过大的载荷。
         maximumBufferedBytes = max(
             64 * 1_024,
             maximumPayloadBytes * 4 + 1_024
@@ -89,9 +88,9 @@ struct V2NATSInboundFrameParser {
         }
         var outputs: [Output] = []
         var consumedBytes = 0
-        // One network read may contain hundreds of NATS control lines and
-        // messages. Advancing a cursor and compacting once avoids Data's
-        // repeated prefix shift turning that read into quadratic copying.
+        // 一次网络读取可能包含数百条 NATS 控制行和消息。
+        // 推进游标并只压缩一次，可避免 Data 反复移动前缀，
+        // 使处理开销随数据量呈平方增长。
         defer {
             if consumedBytes > 0, consumedBytes <= pending.count {
                 pending.removeFirst(consumedBytes)

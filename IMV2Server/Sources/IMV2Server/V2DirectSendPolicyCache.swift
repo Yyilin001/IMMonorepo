@@ -397,8 +397,8 @@ public actor V2DirectSendPolicyCache {
 }
 
 
-// Control facts must be refreshed inside the control transaction on every use;
-// owner revision numbers only fence reply/projection and owner-local structure.
+// 每次使用控制域事实，都必须在控制域事务中刷新；
+// 所有者版本号只为回复／投影及所有者本地结构设置栅栏。
 extension V2DirectSendPolicyCache.Entry {
     func applyingControlPolicy(_ control: V2DirectSendControlPolicy) -> Self {
         .init(recipientID: recipientID, directPairRevision: directPairRevision,

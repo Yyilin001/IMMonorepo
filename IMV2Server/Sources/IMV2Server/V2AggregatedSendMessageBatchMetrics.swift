@@ -1,8 +1,8 @@
 import Foundation
 
-/// Shared counter aggregation for lane and physical-owner snapshots.
+/// 对通道与物理所有者快照进行共享计数聚合。
 enum V2SendMessageBatchSnapshotAggregator {
-    /// Aggregate child lanes, including snapshots that already contain lanes.
+    /// 聚合子通道，包括本身已包含通道信息的快照。
     ///
     /// - Parameter snapshots: 各通道快照。
     /// - Returns: 聚合后的快照。
@@ -85,16 +85,16 @@ enum V2SendMessageBatchSnapshotAggregator {
     }
 }
 
-/// Read-only metrics over all configured physical-owner admission batchers.
-/// This type cannot accept a message or claim an admission slot.
+/// 对所有已配置物理所有者准入批处理器的只读指标。
+/// 此类型不能接受消息或认领准入槽位。
 public struct V2AggregatedSendMessageBatchMetrics: V2SendMessageBatchMetricsReading {
     public static let maximumOwners = 256
     public static let maximumConcurrentSnapshots = 8
 
     private let owners: [any V2SendMessageBatchMetricsReading]
 
-    /// Supply each physical owner once. The bound matches the configured
-    /// maximum room-shard count; no owner identity becomes a metric label.
+    /// 每个物理所有者只提供一次。上限与配置的最大房间分片数一致；
+    /// 所有者身份不会成为指标标签。
     public init(owners: [any V2SendMessageBatchMetricsReading]) {
         precondition(!owners.isEmpty && owners.count <= Self.maximumOwners)
         self.owners = owners

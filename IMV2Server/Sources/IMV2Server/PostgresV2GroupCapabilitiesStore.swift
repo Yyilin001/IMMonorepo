@@ -186,8 +186,8 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2Owne
             let expectedRevision = try groupSigned(command.expectedRevision)
             if let prior = try await sql.raw("SELECT room_id, expected_revision, resulting_revision, role, permissions::text AS permissions_json, room_sequence FROM im_v2.group_permission_operations WHERE actor_user_id = \(bind: ids.actor) AND operation_id = \(bind: ids.operation)").first(decoding: GroupPermissionOperationRow.self) {
                 let value = try prior.value(roomID: command.roomID)
-                // PostgreSQL jsonb::text adds formatting and does not preserve
-                // the request encoder's spelling. Idempotency binds the set.
+                // PostgreSQL 的 jsonb::text 会添加格式，且不保留请求编码器的原始写法。
+                // 幂等性绑定的是集合本身。
                 guard prior.roomID == ids.room, prior.expectedRevision == expectedRevision, prior.role == command.role.rawValue, value.permissions == command.permissions else { return .idempotencyConflict }
                 return .idempotent(value)
             }
@@ -197,8 +197,8 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2Owne
             guard context.room.groupPermissionRevision < Int64.max else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let revision = context.room.groupPermissionRevision + 1
             let committed = try await commit(room: ids.room, context: context, actor: ids.actor, eventID: eventID, eventType: "group.role_permissions_changed", payload: try groupPayload(["event_type": "group.role_permissions_changed", "room_id": ids.room.uuidString, "role": command.role.rawValue, "permissions": command.permissions.map(\.rawValue).sorted(), "revision": revision, "actor_user_id": ids.actor.uuidString]), now: now, sql: sql)
-            // Current policy identity outlives the operation replay window,
-            // including when the permission set has no materialized rows.
+            // 当前策略身份的存续期超过操作重放窗口，
+            // 即使权限集合没有物化记录也是如此。
             try await sql.raw("INSERT INTO im_v2.group_role_policies (room_id, role) VALUES (\(bind: ids.room), \(bind: command.role.rawValue)) ON CONFLICT (room_id, role) DO NOTHING").run()
             try await sql.raw("DELETE FROM im_v2.group_role_permissions WHERE room_id = \(bind: ids.room) AND role = \(bind: command.role.rawValue)").run()
             for permission in command.permissions { try await sql.raw("INSERT INTO im_v2.group_role_permissions (room_id, role, permission) VALUES (\(bind: ids.room), \(bind: command.role.rawValue), \(bind: permission.rawValue))").run() }
@@ -261,8 +261,8 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2Owne
             guard context.room.membershipRevision < Int64.max else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let membershipRevision = context.room.membershipRevision + 1
             let committed = try await commit(room: ids.room, context: context, actor: ids.actor, eventID: eventID, eventType: "group.member_role_changed", payload: try groupPayload(["event_type": "group.member_role_changed", "room_id": ids.room.uuidString, "target_user_id": targetID.uuidString, "role": command.role.rawValue, "membership_revision": membershipRevision, "actor_user_id": ids.actor.uuidString]), now: now, sql: sql)
-            // Membership history is revisioned. Close the active row and add
-            // a new active interval so historical room-event visibility remains correct.
+            // 成员关系历史按修订记录。关闭当前有效记录并加入新的有效区间，
+            // 以保持历史房间事件的可见性正确。
             try await sql.raw("UPDATE im_v2.room_memberships SET left_revision = \(bind: membershipRevision) WHERE room_id = \(bind: ids.room) AND user_id = \(bind: targetID) AND joined_revision = \(bind: target.joinedRevision)").run()
             try await sql.raw("INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision, left_revision) VALUES (\(bind: ids.room), \(bind: targetID), \(bind: command.role.rawValue), \(bind: membershipRevision), NULL)").run()
             try await sql.raw("UPDATE im_v2.rooms SET membership_revision = \(bind: membershipRevision) WHERE room_id = \(bind: ids.room)").run()
@@ -337,15 +337,15 @@ private func commit(room: UUID, context: GroupContext, actor: UUID, eventID: Eve
     guard let lease = context.nextShard.lease, context.room.roomSequence < Int64.max, let event = UUID(uuidString: eventID.rawValue) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
     let sequence = context.room.roomSequence + 1
     guard let leaseID = UUID(uuidString: lease.id.rawValue) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
-    // Decode the original clock through PostgreSQL during the existing sequence
-    // update. Responses and payloads use that canonical value; storage keeps the
-    // original Date so another encoding cannot discard an additional microsecond.
+    // 在既有序号更新期间通过 PostgreSQL 解码原始时钟值。
+    // 响应和载荷使用该规范值；存储仍保留原始 Date，
+    // 避免再次编码损失额外一微秒。
     guard let timestamp = try await sql.raw("UPDATE im_v2.rooms SET room_sequence = \(bind: sequence) WHERE room_id = \(bind: room) RETURNING \(bind: now)::timestamptz AS created_at").first(decoding: GroupCommittedTimestampRow.self) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
     let createdAtMilliseconds = try v2GatewayMilliseconds(timestamp.createdAt)
     try await sql.raw("UPDATE im_v2.room_admission SET command_window_used = \(bind: context.nextRoom.commandWindow.used), shard_lease_id = \(bind: leaseID), shard_lease_generation = \(bind: try groupSigned(lease.generation)) WHERE room_id = \(bind: room)").run()
     try await sql.raw("UPDATE im_v2.shard_admission_pools SET command_window_used = \(bind: lease.commandWindow.used) WHERE room_shard_id = \(bind: context.room.roomShardID) AND capacity_profile_id = \(bind: context.room.capacityProfileID) AND lease_id = \(bind: leaseID) AND generation = \(bind: try groupSigned(lease.generation))").run()
-    // Assign the source version under the same room lock as the append.
-    // Personal-state projection preserves this payload but assigns its own cursor.
+    // 在追加操作使用的同一房间锁下分配源版本。
+    // 个人状态投影保留此载荷，但自行分配游标。
     try await sql.raw("INSERT INTO im_v2.room_events (event_id, room_id, room_sequence, event_type, actor_user_id, payload, committed_membership_revision, created_at) VALUES (\(bind: event), \(bind: room), \(bind: sequence), \(bind: eventType), \(bind: actor), \(bind: payload)::jsonb || jsonb_build_object('room_sequence', \(bind: sequence), 'server_created_at_ms', \(bind: createdAtMilliseconds)), \(bind: context.room.membershipRevision), \(bind: now))").run()
     return .init(sequence: sequence, eventID: event, createdAt: timestamp.createdAt)
 }

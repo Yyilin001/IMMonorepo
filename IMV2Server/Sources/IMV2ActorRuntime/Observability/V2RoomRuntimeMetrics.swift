@@ -1,5 +1,5 @@
-/// Bounded process-local observations. No room, host or operation identity is
-/// exported, and component samples do not form a transactional snapshot.
+/// 有界的进程内观测数据。不导出房间、宿主或操作标识；
+/// 各组件样本也不构成事务一致的快照。
 public struct V2RoomRuntimeMetricsSnapshot: Equatable, Sendable {
     public let host: V2RoomActivationHostSnapshot?
     public let commands: V2RoomCommandBudgetSnapshot?

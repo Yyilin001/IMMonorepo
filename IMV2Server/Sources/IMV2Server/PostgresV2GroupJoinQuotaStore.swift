@@ -3,8 +3,8 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Control-plane ledger paired with durable per-attempt owner receipts;
-/// a timeout, missing response, or expired worker lease is never release evidence.
+/// 控制侧台账与逐次尝试的持久化所有者回执配对；
+/// 超时、响应缺失或工作器租约过期都不能作为释放额度的证据。
 struct PostgresV2GroupJoinQuotaStore: Sendable {
     let database: any Database
     let schema: String
@@ -19,8 +19,8 @@ struct PostgresV2GroupJoinQuotaStore: Sendable {
         self.schema = schema
     }
 
-    /// Only a fresh user submission retries a definitively denied attempt.
-    /// Recovery replays the stored generation, never calls reserve to renew it.
+    /// 只有用户发起的新提交才会重试已明确拒绝的尝试。
+    /// 恢复流程重放已存代次，绝不调用 reserve 为其续期。
     func reserve(_ request: V2GroupJoinSubmissionPersistenceRequest, roomID: RoomID, inviteID: GroupInviteID,
                  now: Date) async throws -> V2GroupJoinQuotaReservation {
         guard let applicant = request.applicantUserID.uuidValue, let operation = request.operationID.uuidValue,
@@ -32,9 +32,9 @@ struct PostgresV2GroupJoinQuotaStore: Sendable {
         return try await database.transaction { transaction in
             let sql = try quotaSQL(transaction)
             try await lock(applicant, sql: sql)
-            // At most two edges: a fresh duplicate may point at a denied
-            // operation which later joins an already confirmed request. A
-            // confirmed request never becomes denied or changes its binding.
+            // 最多两条关联边：新的重复请求可能指向已拒绝的操作，
+            // 而该操作随后关联到已确认的请求。已确认请求不会变为拒绝，
+            // 也不会改变绑定。
             var canonical = operation
             var visited: Set<UUID> = [operation]
             while let alias = try await sql.raw("""
@@ -53,8 +53,8 @@ struct PostgresV2GroupJoinQuotaStore: Sendable {
             if let prior {
                 guard prior.roomID == room, prior.inviteID == invite, prior.tokenDigest == request.tokenDigest,
                       canonical != operation || prior.note == request.note else { throw V2GroupInvitationServiceError.conflict }
-                // Service retries generate fresh request IDs/times. They must not
-                // rewrite the identity or restart an uncertain owner operation.
+                // 服务重试会生成新的请求 ID 和时间，
+                // 不能重写身份，也不能重启结果不明的所有者操作。
                 if prior.phase != .denied { return .reserved(prior) }
             }
             if let active = try await sql.raw("""
@@ -65,8 +65,8 @@ struct PostgresV2GroupJoinQuotaStore: Sendable {
                 guard active.roomID == room, active.tokenDigest == request.tokenDigest else {
                     throw V2GroupInvitationServiceError.conflict
                 }
-                // Do not attach a previously denied operation to another
-                // uncertain attempt: both could be denied and rebind in a cycle.
+                // 不要把此前被拒绝的操作关联到另一项结果不明的尝试；
+                // 两者都可能被拒绝并循环重新绑定。
                 if prior != nil, active.phase == .held { return .limited }
                 try await bindAlias(applicant: applicant, operation: canonical, target: active.operationID,
                     room: room, invite: invite, digest: request.tokenDigest,
@@ -116,9 +116,9 @@ struct PostgresV2GroupJoinQuotaStore: Sendable {
         }
     }
 
-    /// Apply only an authoritative owner receipt or a terminal observation bound
-    /// to that receipt's request. Callers must not translate transport errors here.
-    /// Stale generations and late nonterminal observations cannot free a new slot.
+    /// 只应用权威所有者回执，或绑定到该回执请求的终态观测。
+    /// 调用方不得在此转换传输错误。过期代次和迟到的非终态观测
+    /// 不能释放新的槽位。
     @discardableResult
     func resolve(_ intent: V2GroupJoinQuotaIntent, outcome: V2GroupJoinQuotaOutcome,
                  targetRequestID: UUID?, now: Date) async throws -> Bool {
@@ -154,8 +154,8 @@ struct PostgresV2GroupJoinQuotaStore: Sendable {
         }
     }
 
-    /// The ledger row is itself the durable recovery job, created atomically
-    /// with the slot. Claims expire; reservations do not.
+    /// 台账记录本身就是持久化恢复任务，与槽位原子创建。
+    /// 认领会过期，预留不会。
     func claim(limit: Int, now: Date, lease: TimeInterval = 30) async throws -> [V2GroupJoinQuotaIntent] {
         guard (1...100).contains(limit), let until = v2PostgresFutureTimestamp(now: now, interval: lease) else {
             throw V2GroupInvitationServiceError.invalidRequest
@@ -212,8 +212,8 @@ struct PostgresV2GroupJoinQuotaStore: Sendable {
                            room: UUID, invite: UUID, digest: Data, note: String?,
                            now: Date, sql: any SQLDatabase) async throws {
         guard operation != target else { throw V2GroupInvitationServiceError.corruptPersistenceState }
-        // Caller holds the applicant lock and has already followed any alias.
-        // An existing intent at this operation can only be definitively denied.
+        // 调用方持有申请人锁，且已追踪所有别名。
+        // 此操作已有的意图只能是已明确拒绝的状态。
         try await sql.raw("""
             INSERT INTO \(unsafeRaw: schema).group_join_quota_aliases
                 (applicant_user_id, operation_id, canonical_operation_id, room_id, invite_id, token_digest, note, created_at)

@@ -98,11 +98,10 @@ public struct V2RoomShardStorageConfiguration: Codable, Equatable, Sendable {
         let normalizedShard = shardID.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedURL = databaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedShard.isEmpty, !normalizedURL.isEmpty,
-              // Room-owner stores currently qualify every canonical table as
-              // `im_v2.*`. Accepting another schema would pass readiness but
-              // silently execute hot-path SQL against the wrong location.
-              // Keep the topology honest until those stores receive the same
-              // schema-aware SQL boundary already used by user shards.
+              // 房间归属存储目前将所有规范表限定在 `im_v2.*`。
+              // 若接受其他 Schema，就绪性检查虽会通过，热路径 SQL 却会悄然访问错误位置。
+              // 在这些存储获得与用户分片相同的 Schema 感知 SQL 边界前，
+              // 必须保持拓扑配置与实际访问位置一致。
               schema == "im_v2"
         else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ROOM_SHARD_STORES_JSON") }
         self.shardID = normalizedShard
@@ -193,7 +192,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let databasePolicy: V2PostgresRuntimePolicy
     public let databaseWorkloadPoolBudget: V2PostgresWorkloadPoolBudget
     public let databaseWorkloadPoolIsolationEnabled: Bool
-    /// Independent authoritative direct-send pool; matches foreground per-loop capacity.
+    /// 独立的权威私聊发送连接池；容量与每个 EventLoop 的前台连接池相匹配。
     public let directSendControlConnectionsPerEventLoop: Int
     public let directAuthorizationResolutionDatabaseURLs: [String]
     /// 每个事件循环允许的数据库连接数。
@@ -860,8 +859,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             directRoomLogAppendMaximumPendingRequests =
                 parsedDirectRoomLogAppendMaximumPending
         } else {
-            // Retain the pre-existing bound unless a deployment explicitly
-            // sizes the message-request staging queue for measured bursts.
+            // 除非部署根据实测突发量显式调整消息请求暂存队列，
+            // 否则保留已有上限。
             directRoomLogAppendMaximumPendingRequests =
                 foregroundWriteDatabaseWorkMaximumQueued
         }
@@ -886,8 +885,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             directRoomLogAppendBatchMaximumInFlightBatches =
                 parsedDirectRoomLogAppendBatchMaximumInFlight
         } else {
-            // Preserve the pre-existing application wiring exactly unless an
-            // operator deliberately opts in to a measured override.
+            // 除非操作员主动选择经测量的覆盖值，否则保持原有应用组装不变。
             directRoomLogAppendBatchMaximumInFlightBatches = min(
                 8,
                 foregroundWriteDatabaseWorkLimit
@@ -916,10 +914,9 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS", environment: environment
         ) ?? "2"
         guard let parsedDirectRoomLogAppendBatchDelay = Int(rawDirectRoomLogAppendBatchDelay),
-              // A bounded high-activity profile may trade a small, explicit
-              // amount of queueing for fewer room-log transactions.  Keep a
-              // hard interactive ceiling: this is not a general retry or
-              // backoff knob and must never grow without a latency review.
+              // 有界的高活跃配置可以用少量明确的排队换取更少的房间日志事务。
+              // 交互请求仍须有硬上限；这不是通用重试或退避参数，
+              // 未完成延迟审查前不得提高。
               (1 ... 25).contains(parsedDirectRoomLogAppendBatchDelay)
         else {
             throw V2GatewayRuntimeConfigurationError.invalid(
@@ -1211,17 +1208,15 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             guard projectionPoolCapacity > 1,
                   maximumProjectionLanesPerPhysicalStore <= projectionPoolCapacity
             else {
-                // Every unique schema owns its own projector lanes and one
-                // snapshot-artifact builder. They share the physical pool
-                // when several logical stores use the same database URL.
+                // 每个独立 Schema 拥有自己的投影通道和一个快照工件构建器。
+                // 多个逻辑存储使用同一数据库 URL 时，共享物理连接池。
                 throw V2GatewayRuntimeConfigurationError.invalid(
                     "IM_V2_USER_PROJECTION_CONCURRENCY/IM_V2_DATABASE_PROJECTION_CONNECTIONS_PER_EVENT_LOOP"
                 )
             }
         } else {
-            // Admission must end before Fluent's pool wait. Keep the two
-            // admitted lanes within the one shared physical pool; the
-            // remaining connections stay available to durable workers.
+            // 准入必须在等待 Fluent 连接池之前完成。
+            // 两个获准通道共用一个物理连接池，其余连接留给持久 worker。
             guard foregroundWriteDatabaseWorkLimit + foregroundControlWriteDatabaseWorkLimit +
                     interactiveReadDatabaseWorkLimit +
                     syncDatabaseWorkLimit <=
@@ -1245,7 +1240,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                 databaseWorkloadPoolIsolationEnabled
                     ? databaseWorkloadPoolBudget.totalConnectionsPerEventLoop
                     : databasePolicy.maximumConnectionsPerEventLoop,
-            // Route, reservation and resolution pools never borrow foreground connections.
+            // 路由、预留和解析连接池均不借用前台连接。
             additionalConnections: dedicatedConnections
         )
         strangerMessagePolicy = try .init(

@@ -118,8 +118,8 @@ public struct PostgresV2UserStateEventOutbox: V2UserStateEventOutbox {
             """).run()
     }
 
-    // Lock the explicitly owned room through the queue mutation. Control events
-    // remain independent even when their payload happens to mention this room.
+    // 修改队列期间锁定明确拥有的房间。即使载荷提及该房间，
+    // 控制事件仍保持独立。
     private func sourceRoomWritable(skipLocked: Bool) -> SQLQueryString {
         """
         (work.source_room_id IS NULL OR (

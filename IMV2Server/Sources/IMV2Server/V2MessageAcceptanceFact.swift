@@ -32,10 +32,9 @@ enum V2MessageAcceptanceFactError: Error, Sendable {
 /// - Throws: 完成记录缺失、房间序号非正或与消息行不一致、成员修订为负时抛出
 ///   ``V2MessageAcceptanceFactError/unavailable``。
 func v2MessageAcceptanceFact(messageID: UUID, roomID: UUID, sql: any SQLDatabase) async throws -> V2MessageAcceptanceFact {
-    // Follow the existing completion primary key via the already indexed
-    // message row. No message-id scan or new hot-write index is required.
-    // Completion owns the accepted membership revision for both supported
-    // room-log storage forms.
+    // 通过已有索引的消息行查找现有完成记录的主键。
+    // 无需扫描消息 ID，也无需新增高频写入索引。
+    // 两种受支持的房间日志存储形式，都由完成记录持有已接受的成员版本。
     guard let row = try await sql.raw(v2MessageAcceptanceFactQuery(
         messageID: "\(bind: messageID)", roomID: "\(bind: roomID)"
     )).first(decoding: MessageAcceptanceFactRow.self),

@@ -89,9 +89,8 @@ public actor V2DeviceConnectionRegistry {
 
     @discardableResult
     public func register(_ stream: V2GatewayByteStream, connectionID: UUID, identity: V2AuthenticatedConnection) async throws -> Bool {
-        // A connection ID is one lifecycle token, not an idempotency key.
-        // Accepting a duplicate while the first registration is suspended
-        // would let a different stream inherit its identity and lease.
+        // 连接 ID 是单次生命周期的令牌，不是幂等键。
+        // 首次注册挂起期间若接受重复 ID，另一条流就可能继承其身份和租约。
         if identityByConnection[connectionID] != nil { return false }
         guard (streamsByDevice[identity.deviceID]?.count ?? 0) < connectionAdmissionPolicy.maximumConnectionsPerDevice,
               (streamsByUser[identity.userID]?.count ?? 0) < connectionAdmissionPolicy.maximumConnectionsPerUser
@@ -112,9 +111,9 @@ public actor V2DeviceConnectionRegistry {
             )
         } catch {
             rollbackRegistration(connectionID: connectionID, identity: identity, lifecycle: lifecycle)
-            // A storage or pool failure is not a connection-limit decision.
-            // Preserve the original error so transport telemetry can identify
-            // the failing dependency instead of reporting a false quota hit.
+            // 存储或连接池故障并非连接数限制决策。
+            // 保留原始错误，让传输遥测能够定位故障依赖，
+            // 而不是错误报告配额已满。
             throw error
         }
         guard lifecycleByConnection[connectionID] == lifecycle else {
@@ -133,11 +132,10 @@ public actor V2DeviceConnectionRegistry {
             return false
         }
         guard allowsOnlinePresence else {
-            // The durable row is also the cross-replica authenticated
-            // connection-admission lease.  Presence privacy controls whether
-            // that lease is observable, not whether it exists.  Dropping it
-            // here would let users who hide presence bypass global per-user
-            // and per-device connection limits.
+            // 持久化记录也是跨副本的已认证连接准入租约。
+            // 在线状态隐私只控制该租约是否可见，不控制它是否存在。
+            // 若在此删除租约，隐藏在线状态的用户就能绕过全局的
+            // 单用户和单设备连接数限制。
             return true
         }
         await routePresence(targetUserID: identity.userID, isOnline: true, expiresAt: expiresAt)
@@ -191,17 +189,15 @@ public actor V2DeviceConnectionRegistry {
             }
             await removeTypingSubscription(connectionID: connectionID)
         }
-        // A later registration may have reused the ID while the broker
-        // teardown awaited. Its new lease must not be deleted by this older
-        // continuation.
+        // 消息代理拆除等待期间，后续注册可能复用了该 ID。
+        // 旧续体不能删除新注册的租约。
         guard lifecycleByConnection[connectionID] == nil else { return }
         guard let remainsOnline = await removePresenceLease(
             identity: identity,
             connectionID: connectionID
         ) else {
-            // A failed cross-replica query cannot prove the user offline.
-            // The short database lease will converge without emitting a
-            // misleading global transition during the outage.
+            // 跨副本查询失败不能证明用户离线。
+            // 短期数据库租约会自行收敛，无须在故障期间发出误导性的全局状态转换。
             return
         }
         if !remainsOnline, lifecycleByConnection[connectionID] == nil {
@@ -687,10 +683,8 @@ public actor V2DeviceConnectionRegistry {
         if allowsOnlinePresence {
             return await refreshLivePresence(connectionID: connectionID)
         } else {
-            // Keep every connection-admission lease alive.  Database reads
-            // and refresh broadcasts both apply the privacy preference, so
-            // the lease remains invisible while still enforcing caps across
-            // gateway replicas.
+            // 保持每份连接准入租约有效。数据库读取与刷新广播
+            // 都会应用隐私偏好，因此租约虽不可见，仍可在网关副本间限制连接数。
             guard lifecycleByConnection[connectionID] == lifecycle else { return false }
             await routePresence(targetUserID: identity.userID, isOnline: false, expiresAt: Date())
             return lifecycleByConnection[connectionID] == lifecycle
@@ -716,8 +710,8 @@ public actor V2DeviceConnectionRegistry {
     }
 
     private func compensateStalePresence(connectionID: UUID, identity: V2AuthenticatedConnection) async {
-        // A newer lifecycle may have deliberately reused this UUID and now
-        // owns the database row. The stale continuation must not delete it.
+        // 较新的生命周期可能有意复用此 UUID，并已拥有数据库记录。
+        // 过期续体不能删除它。
         guard lifecycleByConnection[connectionID] == nil else { return }
         guard let remainsOnline = await removePresenceLease(
             identity: identity,
@@ -1172,8 +1166,8 @@ extension V2DeviceConnectionRegistry: V2AccountRoomChangesStarting {
     }
 
     func refreshAccountRoomMemberships(connectionID: UUID, batch: IMV2SyncBatch) async throws {
-        // Connections that have not started account coverage retain ordinary
-        // personal sync behavior. Once started, discovery installs before reply.
+        // 尚未开始账号覆盖的连接保留普通个人同步行为。
+        // 一旦开始，发现结果会先于响应安装。
         guard let ticket = accountChangeTickets[connectionID], let service = accountChangeService else { return }
         let changes = try batch.records.compactMap { try V2AccountRoomMembershipChange.decode($0, userID: ticket.userID) }
         for start in stride(from: 0, to: changes.count, by: 100) {

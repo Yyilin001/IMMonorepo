@@ -1,9 +1,9 @@
 import Foundation
 import IMV2Core
 
-/// Ephemeral account membership is shared by its connections. This index is
-/// only a routing candidate source; database authorization precedes enqueue.
-// Non-Sendable: exclusively owned by V2AccountRoomChangeService.
+/// 账号的临时成员关系由其连接共享。此索引只提供路由候选项；
+/// 入队前仍须完成数据库授权。
+// 非 Sendable：仅由 V2AccountRoomChangeService 持有。
 final class V2AccountRoomCoverageIndex {
     struct Ticket: Equatable, Sendable {
         let userID: UserID
@@ -24,8 +24,8 @@ final class V2AccountRoomCoverageIndex {
         let ownerEpoch: UInt64
     }
 
-    // Never escapes its owning service. Reference storage avoids copying a large
-    // membership dictionary for every bounded directory page or connection.
+    // 绝不逃逸出所属服务。使用引用存储，避免每个有界目录页面
+    // 或每条连接都复制大型成员关系字典。
     private final class Account {
         let epoch = UUID()
         var connections: Set<UUID> = []
@@ -65,7 +65,7 @@ final class V2AccountRoomCoverageIndex {
         connections[ticket.connectionID]?.ticket == ticket
     }
 
-    /// Returns globally inactive rooms so the owner can release broker interest.
+    /// 返回全局已无活动连接的房间，供所有者释放消息代理订阅意向。
     func end(_ ticket: Ticket) -> Set<RoomID> {
         guard isCurrent(ticket) else { return [] }
         connections.removeValue(forKey: ticket.connectionID)
@@ -89,8 +89,8 @@ final class V2AccountRoomCoverageIndex {
         let ownerEpoch: UInt64
     }
 
-    /// Install only owner-validated directory entries. The caller must await
-    /// broker activation before returning the corresponding page to the client.
+    /// 只安装经所有者校验的目录条目。调用方须等待消息代理激活，
+    /// 再向客户端返回对应页面。
     func install(_ entries: [V2UserRoomDirectoryEntry], ticket: Ticket) throws -> Set<RoomID> {
         try install(entries.map { Entry(roomID: $0.roomID,
             viewerMembershipRevision: $0.viewerMembershipRevision, ownerEpoch: $0.ownerEpoch) }, ticket: ticket)
@@ -128,8 +128,8 @@ final class V2AccountRoomCoverageIndex {
         }
     }
 
-    /// A state read binds current authorization and head in one owner snapshot.
-    /// A membership/owner mismatch requires recovery rather than using the cache.
+    /// 状态读取在同一所有者快照中绑定当前授权和日志头。
+    /// 成员关系或所有者不匹配时须恢复，不能使用缓存。
     func enqueueAuthorized(_ state: V2RoomSynchronizationState, candidate: Candidate) throws {
         guard state.roomID == candidate.roomID else { throw V2RoomRecoveryReadError.corruptPersistence }
         guard let account = accounts[candidate.userID], account.epoch == candidate.accountEpoch,
@@ -145,7 +145,7 @@ final class V2AccountRoomCoverageIndex {
         }
     }
 
-    /// Negative membership facts fence late directory and state responses.
+    /// 成员资格不存在的事实会阻止迟到的目录与状态响应生效。
     func revoke(userID: UserID, roomID: RoomID, revision: UInt64) throws {
         guard revision > 0, revision <= UInt64(Int64.max) else { throw V2RoomRecoveryReadError.invalidRequest }
         guard let account = accounts[userID] else { return }
@@ -154,9 +154,9 @@ final class V2AccountRoomCoverageIndex {
         account.rooms.removeValue(forKey: roomID)
         usersByRoom[roomID]?.remove(userID)
         if usersByRoom[roomID]?.isEmpty == true { usersByRoom.removeValue(forKey: roomID) }
-        // A durable membership removal is a known fact, not a transport gap.
-        // Preserve other rooms and the epoch so consuming its personal event
-        // does not create a reconnect/replay loop.
+        // 持久化成员移除是已知事实，而非传输缺口。
+        // 保留其他房间和当前纪元，避免消费其个人事件时
+        // 触发重连与重放循环。
         for id in account.connections { connections[id]?.buffer.revoke(roomID: roomID) }
     }
 

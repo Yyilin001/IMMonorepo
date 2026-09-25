@@ -75,7 +75,7 @@ public struct PostgresV2ForwardWorkReplayStore: V2ForwardWorkReplayStore {
                     RETURNING true AS value
                     """).first(decoding: ReplayForwardBool.self) != nil
             case .media:
-                // Match import locking: inbox -> room -> import job.
+        // 与导入加锁顺序一致：收件箱 -> 房间 -> 导入任务。
                 guard let inbox = try await sql.raw("""
                     SELECT target_room_id, target_shard_id, target_epoch, state
                     FROM im_v2.message_forward_inbox WHERE export_id = \(bind: command.exportID) FOR UPDATE

@@ -6,7 +6,7 @@ public enum V2ActorRoomRecoveryWireError: Error, Equatable, Sendable {
     case invalidResult
 }
 
-/// One bounded collection read, preserving the existing SQL batch boundary.
+/// 一次有界集合读取，保持既有 SQL 批次边界。
 public struct V2ActorRoomRecoveryBatchQueryWire: Codable, Equatable, Sendable {
     public static let maximumRoomCount = 100
     public let roomIDs: [RoomID]
@@ -28,7 +28,7 @@ public struct V2ActorRoomRecoveryBatchQueryWire: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey { case roomIDs, actorUserID }
 }
 
-/// All fields are from one authorized room snapshot; owner epoch zero remains valid.
+/// 所有字段来自同一个已授权房间快照；所有者纪元为零仍是有效值。
 public struct V2ActorRoomSynchronizationStateWire: Codable, Equatable, Sendable {
     public let roomID: RoomID
     public let ownerEpoch: UInt64

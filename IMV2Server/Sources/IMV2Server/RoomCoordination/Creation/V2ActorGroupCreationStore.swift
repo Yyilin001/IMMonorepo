@@ -2,8 +2,8 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// Typed bootstrap dispatch supplied by the composition root. It selects a fixed
-/// shard, never looks up an unknown room or calls an ordinary RoomRef.
+/// 由组合根提供的类型化引导派发。它选择固定分片，
+/// 不查找未知房间，也不调用普通的 RoomRef。
 public struct V2ActorCreationBootstrapPort: Sendable {
     public let execute: @Sendable (V2ActorRoomBootstrapCommand, ContinuousClock.Instant) async throws -> V2ActorRoomCreationResult
     public let stage: @Sendable (V2ActorGroupCreationIntentWire, V2ActorGroupCreationManifestPageWire,
@@ -17,8 +17,8 @@ public struct V2ActorCreationBootstrapPort: Sendable {
     }
 }
 
-/// A control intent fixes placement, room/event IDs, fingerprint and audience
-/// before a bootstrap can touch the owner. Recovery repeats this identical flow.
+/// 控制意图在引导操作触及所有者之前，固定放置位置、房间／事件 ID、指纹和受众。
+/// 恢复时重复执行相同流程。
 struct V2ActorGroupCreationStore: V2GroupMessagingStore, V2StagedGroupMessagingStore {
     let intents: any V2GroupRoomCreationIntentStore
     let selector: V2GroupRoomShardSelector

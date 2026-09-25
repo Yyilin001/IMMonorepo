@@ -40,9 +40,8 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     /// 必须先排空它们再处理后续 TCP 分片，才能保持应答先进先出。
     private var needsFrameDrain = false
     private var closed = false
-    // `V2GatewayByteStream` is an actor, so installing its channel callbacks
-    // crosses an async boundary. Never let an authenticate frame register in
-    // the live-device registry before the revocation-close callback exists.
+    // `V2GatewayByteStream` 是 Actor，安装通道回调会跨越异步边界。
+    // 撤销关闭回调尚未就绪前，绝不能让认证帧在在线设备注册表中登记。
     private var callbacksReady = false
     private var lastInboundAt: NIODeadline?
     private var idleCheck: Scheduled<Void>?
@@ -130,8 +129,8 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                     }
                 }
             }, outboundWriter: { bytes in
-                // Await the one event-loop hop so a hot notifier cannot queue
-                // an unbounded number of closures while this channel stalls.
+                // 等待这次事件循环跳转，防止通道停滞期间高频通知者
+                // 排入无界数量的闭包。
                 await withCheckedContinuation { continuation in
                     eventLoop.execute {
                         defer { continuation.resume() }
@@ -279,16 +278,17 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                     needsFrameDrain: needsFrameDrain
                 )
             } catch {
-                // The public protocol intentionally closes after a malformed
-                // or invalid request. Keep the client-facing behavior opaque,
-                // but retain the server-side error class for operations; the
-                // closure counter alone cannot distinguish a bad frame from a
-                // configuration or lifecycle regression.
+                // 公开协议规定请求格式错误或无效时关闭连接。
+                // 对客户端保持不透明；服务端只记录固定分类和错误类型，
+                // 不输出可能包含协议载荷、连接地址或凭据的异常描述。
+                let closeReason = v2GatewayClosureReason(for: error)
+                var metadata = V2SafeLogMetadata.failure(error, stage: "gateway_transport")
+                metadata["closure_reason"] = "\(closeReason.rawValue)"
                 logger.warning(
                     "gateway request processing failed",
-                    metadata: ["error": "\(String(reflecting: error))"]
+                    metadata: metadata
                 )
-                outcome = .failure(reason: v2GatewayClosureReason(for: error))
+                outcome = .failure(reason: closeReason)
             }
             eventLoop.execute {
                 boundHandler.value.completeProcessing(
@@ -361,8 +361,8 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         if context.channel.isWritable {
             write(frame, promise: promise, context: context)
         } else if pendingResponseWrite == nil {
-            // The stream awaits this promise before dispatching another frame,
-            // so a stalled channel retains at most one complete response.
+            // 流在分发下一帧前会等待此 promise，
+            // 因此停滞通道至多保留一个完整响应。
             pendingResponseWrite = .init(frame: frame, promise: promise)
         } else {
             promise.fail(V2GatewayTransportWriteError.responseAlreadyPending)
@@ -810,9 +810,8 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
         guard let batch = result.0 else { return }
         let buffer: ByteBuffer
         if batch.frames.count == 1 {
-            // The common group-broadcast path writes the shared immutable COW
-            // storage directly. Reader-index changes are value-local; a true
-            // byte mutation in a downstream handler detaches automatically.
+            // 常规群组广播路径直接写入共享的不可变写时复制存储。
+            // 读索引变化只影响本地值；下游处理器真正修改字节时会自动分离存储。
             buffer = batch.frames[0]
         } else {
             var combined = channel.allocator.buffer(capacity: batch.bytes)
@@ -892,7 +891,7 @@ struct V2GatewayInboundQueue {
     }
 }
 
-/// Accessed only through NIOLoopBound on its owning event loop.
+/// 只能在所属事件循环上通过 NIOLoopBound 访问。
 private final class V2RequiredNotificationCompletion {
     private var continuation: CheckedContinuation<Bool, Never>?
     init(_ continuation: CheckedContinuation<Bool, Never>) { self.continuation = continuation }

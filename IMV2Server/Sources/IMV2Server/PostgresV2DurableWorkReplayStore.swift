@@ -99,8 +99,8 @@ public struct PostgresV2DurableWorkReplayStore: V2DurableWorkReplayStore {
                 guard let targetUserID, let projectionKind = command.target.projectionKind else {
                     throw V2DurableWorkReplayStoreError.corruptPersistenceState
                 }
-                // Source ownership is immutable; lock the room before mutating
-                // the event. A failed fence also rolls back the audit reservation.
+                // 来源归属不可变；修改事件前先锁定房间。
+                // 栅栏检查失败时也会回滚审计预留。
                 guard let source = try await sql.raw("""
                     SELECT source_room_id
                     FROM im_v2.user_state_event_outbox
@@ -128,8 +128,8 @@ public struct PostgresV2DurableWorkReplayStore: V2DurableWorkReplayStore {
                     RETURNING source_event_id
                     """).first(decoding: ReplayTargetRow.self) != nil
             case .contentReview:
-                // Lock the room before the job, matching review workers. The
-                // enclosing transaction also rolls back the audit reservation.
+                // 与审核工作器一样，在处理任务前先锁定房间。
+                // 外层事务也会回滚审计预留。
                 guard try await sql.raw("""
                     SELECT room.room_id
                     FROM im_v2.rooms AS room

@@ -1,8 +1,8 @@
 import Foundation
 import IMV2Core
 
-/// Wire boundary for recovery reads. Authentication and admission belong to
-/// the gateway; only its authenticated user identity is accepted here.
+/// 恢复读取的线路边界。认证和准入由网关负责；
+/// 这里只接受网关已认证的用户身份。
 public protocol V2RoomRecoveryCommandHandling: Sendable {
     func list(_ request: IMV2UserRoomDirectoryList, actorUserID: UserID) async throws -> IMV2Envelope
     func batch(_ request: IMV2RoomLatestVisibleBatch, actorUserID: UserID) async throws -> IMV2Envelope

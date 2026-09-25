@@ -10,8 +10,8 @@ public enum V2RoomActorApplicationConfigurationError: Error, Equatable, Sendable
     case invalidConfiguration
 }
 
-/// Process-local identity and an explicit deployment trust map. No discovery
-/// result may expand the configured set of services, hosts or database shards.
+/// 进程本地身份和明确的部署信任映射。
+/// 发现结果不得扩展已配置的服务、Host 或数据库分片集合。
 public struct V2RoomActorApplicationConfiguration: Sendable {
     public let name: String
     public let address: String
@@ -27,12 +27,12 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
     public let runtime: V2RoomRuntimeConfiguration
     public let authentication: V2ActorAuthenticationLimits
 
-    /// The required JSON file refers to PEM files and a raw 32-byte signing-key
-    /// file. Secret material and the deployment document are never logged.
-    /// The host's collection window covers its configured send/receipt delays;
-    /// individual batchers still use their own shorter or adaptive delay.
-    /// A nil role lets a Gateway use the validated deployment document to
-    /// select host or caller mode. Caller-only applications pass false.
+    /// 必需的 JSON 文件引用 PEM 文件及包含 32 字节原始数据的签名密钥文件。
+    /// 密钥材料和部署文档均不得写入日志。
+    /// Host 的收集窗口覆盖配置的发送和回执延迟；
+    /// 各批处理器仍使用自身较短或自适应的延迟。
+    /// 角色为 nil 时，Gateway 根据已验证的部署文档选择 Host 或调用方模式；
+    /// 仅作为调用方的应用传入 false。
     public init(environment: any V2RuntimeEnvironment, hostsRooms: Bool?,
                 configuredShardIDs: Set<String>, batchWaitMilliseconds: Int64 = 2) throws {
         guard let path = environment.value(for: "IMV2_ROOM_ACTOR_CONFIGURATION_FILE"),
@@ -142,8 +142,8 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         self.authentication = try .init(maximumRequestBytes: runtime.maximumRequestBytes)
     }
 
-    /// DistributedCluster sends the peer address as SNI. NIOSSL rejects IP
-    /// literals in that field; reject them before creating a live transport.
+    /// DistributedCluster 将对端地址作为 SNI 发送。NIOSSL 不接受该字段中的
+    /// IP 字面量，因此在创建活动传输前予以拒绝。
     private static func isDNSName(_ address: String) -> Bool {
         guard (1...253).contains(address.utf8.count),
               address.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) ||

@@ -1,7 +1,7 @@
 import Foundation
 
-/// A grant is scoped to one activation and one coordinator attempt. It conveys
-/// no database write authority without the transaction's activation fence.
+/// 授权仅适用于一次激活和一次协调尝试。没有事务的激活栅栏时，
+/// 它不授予数据库写入权限。
 public struct V2RoomReservation: Hashable, Codable, Sendable {
     public let token: V2RoomActivationToken
     public let requestID: UUID
@@ -14,8 +14,8 @@ public struct V2RoomReservation: Hashable, Codable, Sendable {
     }
 }
 
-/// Only a coordinator that received dispatch acknowledgements from every room
-/// may start SQL. Unknown completion retires every participating activation.
+/// 只有收到每个房间派发确认的协调者才能开始执行 SQL。
+/// 完成状态未知时，所有参与的激活都要退役。
 public enum V2RoomReservationCompletion: String, Codable, Sendable {
     case committed
     case rolledBack

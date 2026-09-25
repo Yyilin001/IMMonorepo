@@ -1,5 +1,5 @@
-/// Bounded scheduling configuration. Defaults are engineering starting limits,
-/// not a production capacity claim; operators may lower them after measurement.
+/// 有界调度配置。默认值只是工程起始上限，并不代表生产容量承诺；
+/// 运维人员可在测量后下调。
 public struct V2RoomRuntimeConfiguration: Equatable, Sendable {
     public let maximumActiveRooms: Int
     public let maximumConcurrentRestores: Int

@@ -2,8 +2,8 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// The composition root implements this port with R2's canonical reservation
-/// coordinator, then invokes the pair domain executor with the two exact tokens.
+/// 组合入口使用 R2 的规范预留协调器实现此端口，
+/// 然后以两个精确令牌调用双房间领域执行器。
 public struct V2ActorForwardPairPort: Sendable {
     public let execute: @Sendable (V2ActorForwardPairWire, ContinuousClock.Instant) async throws -> V2ActorForwardMessageResultWire
 
@@ -12,8 +12,8 @@ public struct V2ActorForwardPairPort: Sendable {
     }
 }
 
-/// Coordinates up to 100x10 independent pairs. A pending cross-owner target
-/// never cancels its siblings; no pair expands the reservation beyond two rooms.
+/// 协调最多 100×10 对独立房间。跨所有者目标待处理时
+/// 不会取消其他配对；任何配对的预留范围都不超过两个房间。
 public struct V2ActorForwardingCoordinator: V2ForwardMessagesHandling {
     private let router: any V2RoomShardRouting
     private let physicalKeys: [String: String]
@@ -98,9 +98,9 @@ public struct V2ActorForwardingCoordinator: V2ForwardMessagesHandling {
                   let targetKey = physicalKeys[targetRoute.shardID] else {
                 throw V2RoomShardStorageRegistryError.unknownShardID
             }
-            // R2 and the SQL scope require one exact owner shard identity.
-            // Distinct logical owners sharing a database still use durable
-            // export/inbox; a physical-key match alone grants no pair turn.
+            // R2 和 SQL 作用域要求精确的所有者分片身份。
+            // 共享数据库的不同逻辑所有者仍使用持久化导出与收件箱；
+            // 仅物理键匹配不足以授予双房间轮次。
             if sourceKey == targetKey && sourceRoute.shardID == targetRoute.shardID {
                 let wire = try await pair.execute(.init(actorUserID: actor,
                     operationID: operation, source: source, targetRoomID: target), operationDeadline)

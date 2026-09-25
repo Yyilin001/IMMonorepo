@@ -50,9 +50,9 @@ final class V2SharedSendMessagePendingCapacity: Sendable {
     }
 }
 
-/// One owner-wide budget for exact activation identities across all send lanes.
-/// A token remains reserved after its last SQL request finishes because
-/// the owner's credit pool can retain unused credits until exact retirement.
+/// 所有发送通道共享一份所有者级的精确激活标识预算。
+/// 最后一次 SQL 请求完成后，令牌仍保持预留，因为所有者的额度池
+/// 可保留未用额度，直至该精确标识被正式退役。
 final class V2SharedSendMessageActivationCapacity: Sendable {
     private let maximum: Int
     private let tokens = Mutex<Set<V2RoomActivationToken>>([])
@@ -64,8 +64,8 @@ final class V2SharedSendMessageActivationCapacity: Sendable {
 
     func tryReserve(_ token: V2RoomActivationToken) -> Bool {
         tokens.withLock { reserved in
-            // A room always routes to one lane. Its actor holds this slot until
-            // all pending/in-flight requests finish or exact retirement clears it.
+            // 一个房间始终路由到同一通道。该通道的 Actor 持有此槽位，
+            // 直到所有待处理或执行中的请求结束，或精确退役将其清除。
             precondition(!reserved.contains(token), "activation reserved twice")
             guard reserved.count < maximum else { return false }
             reserved.insert(token)
@@ -231,9 +231,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         /// 必须对它单独设界：把数据库准入移到批次边界，
         /// 不能等于用一个无界队列替换一个原本有界的队列。
         public let maximumPendingRequests: Int
-        /// Upper bound for activation identities retained by this batcher.
-        /// Granted lanes keep a completed identity until the hosting executor
-        /// closes its credit pool and explicitly retires that exact token.
+        /// 此批处理器保留的激活标识上限。获准通道会保留已完成的标识，
+        /// 直到宿主执行器关闭额度池并明确退役该精确令牌。
         public let maximumTrackedActivations: Int
 
         public init(
@@ -244,8 +243,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             maximumPendingRequests: Int = 1_024,
             maximumTrackedActivations: Int = 16_384
         ) {
-            // One preserves deployments with append batching disabled: the
-            // granted path still fences each write, but never merges requests.
+            // 取值为一时兼容禁用追加批处理的部署：获准路径仍为每次写入设置围栏，
+            // 但不会合并请求。
             precondition((1 ... 128).contains(maximumBatchSize))
             precondition(maximumDelay > .zero)
             precondition((1 ... 128).contains(maximumInFlightBatches))
@@ -271,9 +270,9 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     /// 每次更新邻居链接都会复制整个请求并对那些字段做 retain/release。
     /// 该节点在仍被链接时绝不会离开本 actor，
     /// 因此就地修改两个链接能在不产生这些热路径 ARC 开销的前提下，保持相同的所有权与 FIFO 契约。
-    // Once dequeued, the actor clears both mutable links before handing the
-    // node to a child task. No linked node crosses isolation and no detached
-    // node is mutated, which makes this narrow unchecked conformance safe.
+    // 出队后，Actor 会先清除两个可变链接，再将节点交给子任务。
+    // 已链接的节点不会跨越隔离边界，已脱链的节点也不会再被修改，
+    // 因而此处范围受限的非检查式遵循是安全的。
     private final class Pending: @unchecked Sendable {
         let id: UInt64
         let request: V2RoomWriteRequest
@@ -438,7 +437,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         publishesCommittedGroupEvents = committedMessageObserver != nil
     }
 
-    /// Internal injection keeps the granted-turn batch selection testable without PostgreSQL.
+    /// 内部注入点使获准轮次的批次选择无需 PostgreSQL 即可测试。
     init(
         store: any V2AtomicRoomWriteBatchStore,
         configuration: Configuration,
@@ -528,17 +527,15 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 }
             }
         } onCancel: {
-            // Cancellation handlers cannot await the actor. This task only
-            // asks the owner to remove a request that has not started a
-            // durable write; it has no detached business side effect.
+            // 取消处理器不能等待 Actor。此任务只请求所有者移除尚未开始
+            // 持久化写入的请求，不会产生脱离所有者的业务副作用。
             Task { await self.cancelPendingRequest(pendingID) }
         }
     }
 
-    /// Enqueues one already-granted room turn without an intervening actor hop.
-    /// The returned vector preserves each durable result even when a later SQL
-    /// partition of the same turn fails. Caller cancellation after acceptance
-    /// cannot revoke a write that may already be executing.
+    /// 无需额外跨越 Actor 边界，即可将一个已获准的房间轮次入队。
+    /// 即使同轮次后续 SQL 分区失败，返回的结果序列仍保留各项持久化结果。
+    /// 接受后调用方的取消不能撤销可能已开始执行的写入。
     public func acceptGrantedTurn(
         _ sends: [V2PreparedActorSend],
         batchDeadline: ContinuousClock.Instant,
@@ -637,11 +634,10 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         }
     }
 
-    /// Called after the hosting executor has closed or fenced its token and
-    /// stopped admitting new calls. Queued work is completed as unknown;
-    /// executing SQL retains the slot until it ends. The host must enforce
-    /// post-close admission because settled token state is removed to keep
-    /// this batcher's identity table bounded.
+    /// 宿主执行器关闭或围栏化令牌并停止接受新调用后，调用此方法。
+    /// 已排队的工作以结果未知结束；执行中的 SQL 会保留槽位直至完成。
+    /// 宿主必须在关闭后拦截新调用，因为为保持标识表有界，
+    /// 此处会移除已结算的令牌状态。
     public func retireActivation(_ token: V2RoomActivationToken) {
         guard trackedActivations[token] != nil else { return }
         retiringActivations.insert(token)
@@ -728,8 +724,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         case .highActivity: highActivityDelayFlushes &+= 1
         case .granted: break
         case nil:
-            // A cancelled timer cannot safely initiate a second batch. This
-            // guard also keeps a stale task from corrupting diagnostics.
+            // 已取消的计时器不能安全地启动第二批次。
+            // 此检查也防止过期任务污染诊断信息。
             return
         }
         scheduledDelay = nil
@@ -760,15 +756,14 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
               recentArrivalInstants[recentArrivalHead] < cutoff {
             recentArrivalHead += 1
         }
-        // Once the threshold is met, older in-window samples no longer alter
-        // the decision. Retaining only the most recent threshold keeps memory
-        // bounded even if a gateway is intentionally driven very hard.
+        // 达到阈值后，窗口内更早的样本不再影响决策。
+        // 只保留最近的阈值数量，即使网关承受刻意施加的高负载，内存也保持有界。
         let maximumSamples = policy.minimumRequestsInWindow
         let retainedCount = recentArrivalInstants.count - recentArrivalHead
         if retainedCount > maximumSamples {
             recentArrivalHead += retainedCount - maximumSamples
         }
-        // Bound stale storage without shifting the array on every arrival.
+        // 限制过期数据占用，避免每次到达都移动数组元素。
         if recentArrivalHead >= 256,
            recentArrivalHead * 2 >= recentArrivalInstants.count {
             recentArrivalInstants.removeFirst(recentArrivalHead)
@@ -777,14 +772,11 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
     }
 
     private func startAvailableBatchesIfPossible() {
-        // A request that arrives while the preceding batch is executing has
-        // already installed the normal/adaptive flush timer.  Completing the
-        // preceding batch must not bypass that timer and immediately drain an
-        // underfilled successor: doing so makes the effective aggregation
-        // window equal to database latency instead of the configured bound.
-        // A full batch still cancels its timer in `accept` and starts without
-        // delay, so this guard never withholds work that has reached the hard
-        // batching threshold.
+        // 前一批次执行期间到达的请求已设置常规或自适应刷新计时器。
+        // 前一批次完成时，不能绕过计时器立即处理尚未装满的后续批次；
+        // 否则实际聚合窗口会变成数据库延迟，而非配置的上限。
+        // 满批次仍会在 `accept` 中取消计时器并立即启动，
+        // 因此此检查不会延迟达到硬性批处理阈值的工作。
         guard flushTask == nil || pendingCount >= configuration.maximumBatchSize
         else { return }
         while inFlightBatchCount < configuration.maximumInFlightBatches {
@@ -823,8 +815,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         }
         guard let anchor else { return nil }
         if configuration.maximumBatchSize == 1 {
-            // The first inactive room is the only eligible slot. Removing it
-            // through the normal path also returns shared pending capacity.
+            // 第一个未处于活动状态的房间是唯一可选槽位。
+            // 通过常规路径移除它时，也会归还共享的待处理容量。
             guard let removed = removePending(anchor.id) else { return nil }
             let batch = [removed]
             recordDequeued(batch)
@@ -844,7 +836,7 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         var seenRoomIDs = activeRoomIDs
         selected.reserveCapacity(configuration.maximumBatchSize)
 
-        // Fairness pass: pick at most one command per inactive room first.
+        // 公平性遍历：先从每个非活动房间至多选取一条命令。
         var cursor = pendingHeadID
         while let itemID = cursor,
               let item = pendingByID[itemID],
@@ -856,10 +848,9 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 selected.append(removed)
             }
         }
-        // Hot-room pass: after every selected room has had an opportunity to
-        // enter this transaction, fill spare capacity only with commands for
-        // those rooms.  Keeping commands for a newly seen room in
-        // `remaining` gives it first-pass priority in the next transaction.
+        // 热房间遍历：所有已选房间都有机会进入此事务后，
+        // 只用这些房间的命令填充剩余容量。新出现房间的命令留在
+        // `remaining` 中，以便在下一个事务的首轮遍历中获得优先权。
         guard selected.count < configuration.maximumBatchSize else { return selected }
         let batchRoomIDs = Set(selected.map(\.request.command.roomID))
         let selectedTokens = Dictionary(uniqueKeysWithValues: selected.compactMap { item in
@@ -942,9 +933,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 return
             }
             if batch.count == 1 {
-                // A single request cannot satisfy the atomic-store contract.
-                // Dispatch it directly instead of deliberately paying for an
-                // exception-driven fallback on every underfilled timer flush.
+                // 单条请求不满足原子存储的批处理契约，应直接分发，
+                // 避免每次计时器刷新未装满的批次时都通过异常进行回退。
                 results = await acceptIndividually(batch, store: batchStore)
                 disposition = .singleton
             } else {
@@ -1028,9 +1018,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         partitions: [V2AtomicRoomWriteBatchPartition?],
         store: any V2AtomicRoomWriteBatchStore
     ) async -> PartitionedExecution {
-        // Partition classification is advisory. If one room receives mixed
-        // hints, a repeated-room partition must not leap over an earlier
-        // scalar command from that same admitted turn.
+        // 分区分类仅供参考。若同一房间得到混合提示，
+        // 重复房间的分区不能越过同一获准轮次中更早的逐条命令。
         var firstIndexByRoom: [RoomID: Int] = [:]
         var mixedRooms: Set<RoomID> = []
         for (index, pending) in batch.enumerated() {
@@ -1052,11 +1041,9 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         var preclassifiedRequestCount = 0
         var remainingIndices = Array(batch.indices)
 
-        // First collect opt-in partitions across all duplicate-room waves.
-        // Equal-room requests cannot straddle two real routes, but keep the
-        // selection partition-local so an advisory classifier bug still
-        // falls back at the authoritative store boundary instead of merging
-        // incompatible SQL graphs.
+        // 先收集所有重复房间轮次中主动参与的分区。同一房间的请求不能跨越
+        // 两条实际路径，但选取仍限制在分区内，使参考分类器出错时，
+        // 能在权威存储边界回退，而不是合并不兼容的 SQL 执行图。
         var repeatedRoomPartitions: [V2AtomicRoomWriteBatchPartition] = []
         for partition in safePartitions.compactMap({ $0 }) where
             !repeatedRoomPartitions.contains(partition)
@@ -1096,9 +1083,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
             }
             remainingIndices = deferredIndices
 
-            // Retain first-seen partition order instead of relying on
-            // Dictionary iteration. This keeps lock acquisition and test
-            // behaviour deterministic across processes and Swift versions.
+            // 保留分区首次出现的顺序，不依赖 Dictionary 的遍历顺序。
+            // 这样加锁和测试行为在不同进程及 Swift 版本间保持确定。
             var orderedPartitions: [V2AtomicRoomWriteBatchPartition] = []
             var indicesByPartition: [V2AtomicRoomWriteBatchPartition: [Int]] = [:]
             var individualIndices: [Int] = []
@@ -1164,9 +1150,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 disposition: .atomicCommitted(requestCount: batch.count)
             )
         } catch let batchError as V2AtomicRoomWriteBatchError {
-            // A retry that removes an isolated middle item would execute a
-            // later command in the same room first. Scalar fallback now
-            // preserves the original order per room.
+            // 若重试时剔除中间的单独请求，同房间后续命令可能先执行。
+            // 逐条回退现在会保留每个房间的原始顺序。
             if Set(batch.map(\.request.command.roomID)).count != batch.count {
                 return .init(
                     results: await acceptIndividually(batch, store: store),
@@ -1181,9 +1166,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                 let compatibleIndices = batch.indices.filter {
                     !isolatedSet.contains($0)
                 }
-                // Retrying one remaining request atomically is impossible and
-                // provides no batching benefit. In that degenerate case the
-                // existing scalar fallback remains the bounded behavior.
+                // 仅剩一条请求时无法以批次原子方式重试，也没有批处理收益。
+                // 此退化情形继续使用既有的有界逐条回退。
                 if compatibleIndices.count >= 2 {
                     let compatibleExecution = await executeAtomic(
                         compatibleIndices.map { batch[$0] }, store: store
@@ -1221,9 +1205,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                     )
                 }
             }
-            // The transaction rolled back before committing anything. Only
-            // this compatible subset retries individually; requests rejected
-            // by the advisory classifier are already using that same path.
+            // 事务在提交任何内容前已回滚。仅此兼容子集逐条重试；
+            // 被参考分类器排除的请求本就使用同一路径。
             return .init(
                 results: await acceptIndividually(batch, store: store),
                 disposition: .fallback(
@@ -1359,9 +1342,9 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
                   Self.requiresRetirement(error) else { return nil as V2RoomActivationToken? }
             return token
         })
-        // A proved rollback is safe only when the entire granted turn has the
-        // same proof. Earlier partitions may have committed, and later queued
-        // items must not start after a mixed turn becomes outcome-unknown.
+        // 只有整个获准轮次都有相同的回滚证明时，才能安全地认定已回滚。
+        // 较早的分区可能已经提交；混合轮次一旦结果未知，
+        // 后续已排队的项目不得启动。
         for (pending, result) in zip(batch, resolvedResults) {
             guard let granted = pending.granted,
                   case .failure(let error) = result,
@@ -1417,11 +1400,10 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
         case .singleton:
             singletonDispatches &+= 1
         }
-        // This actor still owns every room in `roomIDs` here. Submit the
-        // committed batch before request continuations can resume and before
-        // the next batch for one of those rooms can begin. That preserves the
-        // durable room-sequence order across the post-commit acceleration
-        // boundary instead of asking independently resumed handlers to race.
+        // 此时该 Actor 仍拥有 `roomIDs` 中的所有房间。
+        // 须在请求续体恢复以及任一房间的下一批次启动前，提交已持久化的批次。
+        // 这样能在提交后加速边界上保留持久化的房间序号顺序，
+        // 无需让独立恢复的处理器竞速。
         if let committedMessageObserver {
             committedMessageObserver.observeCommittedMessages(
                 resolvedResults.compactMap { result in
@@ -1594,9 +1576,8 @@ public actor V2SendMessageAdmissionBatcher: V2SendMessageAdmission {
 
     private func cancelPendingRequest(_ pendingID: UInt64) {
         guard let removed = removePending(pendingID) else {
-            // The batch is already executing. Its durable operation keeps the
-            // normal at-least-once/idempotent semantics; it cannot safely be
-            // cancelled after dequeue.
+            // 批次已经执行。其持久化操作保持正常的至少一次和幂等语义；
+            // 出队后无法安全取消。
             return
         }
         cancelledPendingRequests &+= 1

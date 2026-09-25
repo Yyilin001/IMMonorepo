@@ -264,10 +264,9 @@ public struct PostgresV2GroupRoomCreationIntentStore:
                 return .idempotent(intent)
             }
 
-            // This snapshot is the command's global-identity linearization
-            // point. Disabled/inactive users never enter the durable manifest;
-            // retries reuse the exact already-validated set rather than
-            // trusting another client payload or an owner-local stale cache.
+            // 此快照是命令的全局身份线性化点。禁用或不活跃的用户
+            // 绝不进入持久化清单；重试复用已精确校验的集合，
+            // 不信任另一份客户端载荷或所有者本地的过期缓存。
             let activeMemberCount = try await sql.raw("""
                 WITH requested AS (
                     SELECT value::uuid AS user_id
@@ -307,9 +306,8 @@ public struct PostgresV2GroupRoomCreationIntentStore:
                           room_shard_id, route_epoch,
                           request_fingerprint, audience_member_count, state
                 """).first(decoding: IntentRow.self) else {
-                // The operation key is advisory-locked. A missing returned
-                // row therefore means a generated-ID uniqueness collision
-                // with another operation, not an ordinary retry.
+                // 操作键已被咨询锁保护。因此未返回记录表示生成的 ID
+                // 与另一操作发生唯一性冲突，而非普通重试。
                 throw V2GroupRoomCreationIntentStoreError.routeConflict
             }
             try await sql.raw("""

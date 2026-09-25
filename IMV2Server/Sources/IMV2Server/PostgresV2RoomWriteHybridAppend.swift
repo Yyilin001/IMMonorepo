@@ -4,8 +4,8 @@ import NIOCore
 import PostgresNIO
 import SQLKit
 
-// Executes on the Store's borrowed transaction connection. It does not own
-// owner fencing, admission credit finalization, or transaction commit.
+// 在 Store 借用的事务连接上执行。不负责所有者围栏、
+// 准入额度结算或事务提交。
 enum PlainHybridGroupWritePath {
     /// 用单条语句持久化紧凑的混合群组已接受事件。
     ///
@@ -29,13 +29,11 @@ enum PlainHybridGroupWritePath {
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let expected = Int64(inputs.count)
         let expectedRooms = Int64(Set(inputs.map(\.roomID)).count)
-        // The production PostgreSQL path binds typed arrays to a named
-        // statement. The former JSON recordset encoded the complete batch in
-        // Swift, parsed it again in PostgreSQL and replanned this invariant
-        // write graph for every transaction. Typed arrays retain the same
-        // one-statement atomicity and cardinality fences while avoiding that
-        // duplicate serialization work. Keep the JSON branch for SQL test
-        // doubles that do not expose PostgresNIO connections.
+        // 生产 PostgreSQL 路径通过命名语句绑定有类型数组。
+        // 旧的 JSON 记录集先在 Swift 中编码完整批次，再由 PostgreSQL 解析，
+        // 且每次事务都重新规划固定的写入流程。有类型数组保持相同的
+        // 单语句原子性与结果数量围栏，同时避免重复序列化。
+        // 对不暴露 PostgresNIO 连接的 SQL 测试替身保留 JSON 分支。
         if let postgres = sql as? any PostgresDatabase {
             let statement = try PlainHybridGroupAppendStatement(inputs: inputs)
             let mutation = try await postgres.withConnection { connection in

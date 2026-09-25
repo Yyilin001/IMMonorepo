@@ -1,8 +1,8 @@
 import Foundation
 import IMV2Core
 
-/// Server-principal input for the separate post-send room audit writer.
-/// It is not a public Gateway command; the executor supplies the audit clock.
+/// 独立的发送后房间审计写入器所用的服务器主体输入。
+/// 它不是公开的网关命令；审计时钟由执行器提供。
 public struct V2ActorSpecialAccountMessageWire: Codable, Equatable, Sendable {
     public let stableAccountKey: String
     public let servicePrincipal: String
@@ -46,7 +46,7 @@ public struct V2ActorResolvedSpecialAccountWire: Codable, Equatable, Sendable {
     }
 }
 
-/// Audit writer receives the exact accepted outcome; no fresh timestamp is authoritative on wire.
+/// 审计写入器接收确切的已接受结果；线路上新生成的时间戳不具权威性。
 public struct V2ActorSpecialAccountAuditWire: Codable, Equatable, Sendable {
     public let request: V2ActorSpecialAccountMessageWire
     public let account: V2ActorResolvedSpecialAccountWire

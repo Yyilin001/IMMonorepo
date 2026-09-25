@@ -32,9 +32,8 @@ public struct PostgresV2ReadReceiptStore:
         try await record(command: command, ownerRoute: Optional(ownerRoute), activationScope: nil, timeouts: .default, now: now)
     }
 
-    /// The virtual-actor path. Every transaction, including an idempotent
-    /// replay, checks the exact activation after taking the canonical room
-    /// lock and before inspecting an operation record.
+    /// 虚拟 Actor 路径。每个事务（包括幂等重放）都会先获取规范房间锁，
+    /// 再检查精确激活，最后才查看操作记录。
     public func recordActivationValidated(
         command: V2RecordReadReceiptCommand, token: V2RoomActivationToken,
         now: Date, timeouts: V2RoomActivationSQLTimeouts = .default
@@ -109,7 +108,7 @@ public struct PostgresV2ReadReceiptStore:
                             readThroughRoomSequence: receiptUnsigned(prior.resultingSequence),
                             recordedAt: prior.recordedAt)), nil, nil)
                     }
-                    // Match the operation write's timestamp precision even when the read cursor does not advance.
+                    // 即使已读游标未推进，也要匹配操作写入的时间戳精度。
                     guard let room = try await sql.raw("SELECT room_sequence, membership_revision, \(bind: now)::timestamptz AS recorded_at FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReceiptRoomRow.self) else { throw V2ReadReceiptStoreError.roomNotFound }
                     guard room.roomSequence >= 0, Int64(command.readThroughRoomSequence) <= room.roomSequence else { throw V2ReadReceiptStoreError.roomSequenceNotFound }
                     let member = try await sql.raw("SELECT 1 AS exists FROM im_v2.room_memberships WHERE room_id = \(bind: roomID) AND user_id = \(bind: userID) AND joined_revision <= \(bind: room.membershipRevision) AND (left_revision IS NULL OR left_revision > \(bind: room.membershipRevision))").first(decoding: ReceiptExistsRow.self)
@@ -256,8 +255,8 @@ public struct PostgresV2ReadReceiptStore:
         }
         let validIndices = requests.indices.filter { v2PostgresTimestampCanEncode(requests[$0].now) }
         if validIndices.count != requests.count {
-            // Preserve the batch's duplicate-operation contract before removing
-            // invalid clock samples. Only valid dates may reach SQL/JSON encoding.
+            // 移除无效时钟样本前，先保持批次的重复操作契约。
+            // 只有有效日期才能进入 SQL 或 JSON 编码。
             let keys = try requests.map { request in
                 GroupReceiptOperationKey(userID: try receiptUUID(request.command.actorUserID),
                                          operationID: try receiptUUID(request.command.operationID))
@@ -280,9 +279,9 @@ public struct PostgresV2ReadReceiptStore:
             operationID: $0.operationID
         ) })
         guard operationKeys.count == inputs.count else {
-            // The process batcher keeps concurrent retries in different
-            // waves. Rejecting an invalid direct caller here avoids duplicate
-            // primary-key rows and preserves scalar replay semantics.
+            // 进程批处理器将并发重试放在不同轮次。
+            // 此处拒绝无效的直接调用方，可避免主键记录重复，
+            // 并保持逐条路径的重放语义。
             throw V2ReadReceiptStoreError.invalidRequest
         }
         let attempt = V2RoomTransactionAttempt()
@@ -297,9 +296,9 @@ public struct PostgresV2ReadReceiptStore:
                             throw V2ReadReceiptStoreError.corruptPersistenceState
                         }
                         let tokens = try Set(inputs.map(\.roomID)).map { try activationScope.token(for: $0) }
-                        // Preserve per-item ownerChanged without weakening successful
-                        // rows: the exact tokens are checked after all canonical locks
-                        // and before any advisory lock or replay read.
+                        // 保留逐项 ownerChanged 结果而不放宽成功记录：
+                        // 取得所有规范锁后、读取任何咨询锁或重放记录前，
+                        // 会检查精确令牌。
                         activationValidity = try await receiptActivationValidities(tokens: tokens,
                             sql: sql, timeouts: timeouts)
                     } else {
@@ -316,8 +315,8 @@ public struct PostgresV2ReadReceiptStore:
                         connection.eventLoop.makeFutureWithTask {
                             var owners: [UUID: ReceiptSharedOwnerRow] = [:]
                             if validatedActivation == nil {
-                                // Legacy owner-route callers also lock rooms first, in
-                                // canonical order, before touching operation locks.
+                                // 旧的所有者路由调用方也先按规范顺序锁定房间，
+                                // 然后才接触操作锁。
                                 let roomRows = try await connection.execute(GroupReceiptBatchRoomLockStatement(roomIDs: inputs.map(\.roomID)), logger: connection.logger)
                                 for try await room in roomRows { owners[room.roomID] = room }
                             }
@@ -339,7 +338,7 @@ public struct PostgresV2ReadReceiptStore:
                                     let route = ownerRoutes[index]
                                     validatedInputs[index].ownerIsValid = actual?.shardID == route.shardID && actual?.epoch == route.epoch
                                 } else {
-                                    // Missing rooms retain the established per-item domain result.
+                                    // 房间缺失时保留既有的逐项领域结果。
                                     validatedInputs[index].ownerIsValid = true
                                 }
                             }
@@ -441,9 +440,8 @@ public struct PostgresV2ReadReceiptStore:
                 projectionKinds: ["read_receipt_preferences"]
             )]
             if priorDirect && !command.allowsDirectReadReceipts {
-                // A direct-room graph is unbounded. Commit only a durable
-                // propagation intent here; a cursor-bounded worker emits and
-                // mirrors the reciprocal tombstones outside request latency.
+                // 私聊房间关系图无界。这里只提交持久化传播意图；
+                // 由游标有界的工作器在请求路径之外生成并镜像双方墓碑。
                 try await sql.raw("INSERT INTO im_v2.read_receipt_preference_propagation_outbox (actor_user_id, operation_id, recorded_at, created_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: now), \(bind: now))").run()
             }
             return (.updated(preferences), deliveryRequests)
@@ -913,8 +911,8 @@ public struct PostgresV2ReadReceiptStore:
         guard let peer = try await sql.raw("SELECT CASE WHEN lower_user_id = \(bind: readerID) THEN higher_user_id ELSE lower_user_id END AS user_id FROM im_v2.direct_room_pairs WHERE room_id = \(bind: roomID) AND (lower_user_id = \(bind: readerID) OR higher_user_id = \(bind: readerID))").first(decoding: ReceiptPeerRow.self) else {
             throw V2ReadReceiptStoreError.corruptPersistenceState
         }
-        // Privacy belongs to the control authority. The room transaction saves
-        // only a candidate; target delivery resolves both current preferences.
+        // 隐私决策属于控制侧权威。房间事务只保存候选项；
+        // 目标投递会解析双方当前的偏好。
         try await sql.raw("""
             INSERT INTO im_v2.user_state_event_outbox
                 (user_id, source_event_id, projection_kind, payload, created_at, next_attempt_at, source_room_id)
@@ -969,11 +967,10 @@ public struct PostgresV2ReadReceiptStore:
 
 }
 
-/// Per-row activation validity for receipt microbatches. Unlike the scalar
-/// fence, an authority mismatch must not roll back another valid row. SQL and
-/// lock failures still throw for the whole transaction. No replay read or
-/// materialization occurs until every canonical room/lease lock is acquired
-/// and the database clock has been sampled once.
+/// 回执微批次逐行检查激活有效性。不同于逐条路径的围栏，
+/// 权限不匹配不能回滚其他有效记录。SQL 或加锁失败仍使整个事务抛错。
+/// 在取得全部规范房间锁和租约锁，并读取一次数据库时钟之前，
+/// 不执行重放读取或结果生成。
 private func receiptActivationValidities(
     tokens: [V2RoomActivationToken], sql: any SQLDatabase,
     timeouts: V2RoomActivationSQLTimeouts
@@ -1328,8 +1325,8 @@ private struct GroupReceiptBatchStatement: PostgresPreparedStatement {
         bindings.append(inputs.map(\.userID))
         bindings.append(inputs.map(\.operationID))
         bindings.append(inputs.map(\.requestedSequence))
-        // Use the scalar path's binary Date encoding. Floating-point Unix
-        // seconds plus to_timestamp can round the same clock differently.
+        // 使用逐条路径的二进制 Date 编码。
+        // 浮点 Unix 秒配合 to_timestamp 可能对同一时刻产生不同舍入。
         bindings.append(inputs.map(\.recordedAt))
         bindings.append(inputs.map(\.ownerIsValid))
         return bindings

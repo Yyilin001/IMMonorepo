@@ -271,8 +271,8 @@ final class V2NATSGroupNotificationDispatcher: V2NATSPayloadSubmitting, Sendable
             case .wake:
                 return
             case .directEvent(let event):
-                // A recipient-filtered or sender-excluding notification does
-                // not prove that every local room viewer received the event.
+                // 按接收方过滤或排除发送方的通知，不能证明每个本地房间观看者
+                // 都已收到该事件。
                 guard event.groupMembershipRevision != nil,
                       event.recipientUserIDs.isEmpty,
                       event.excludedConnectionID == nil
@@ -435,10 +435,9 @@ final class V2NATSGroupNotificationDispatcher: V2NATSPayloadSubmitting, Sendable
         guard let notification =
             V2NATSGroupEventWakeBroker.decodeNotificationPayload(payload)
         else { return }
-        // Recovery-cache ingestion must not wait behind socket fan-out. The
-        // latter can legitimately stall on one actor traversing many local
-        // connections; the former is a bounded, non-suspending mailbox write
-        // that makes any later cursor gap locally repairable.
+        // 恢复缓存的接收不能等待套接字扇出。后者可能因某个 Actor 遍历大量
+        // 本地连接而停滞；前者是有界且不会挂起的邮箱写入，
+        // 可让之后出现的游标缺口在本地得到修复。
         recordRecoveryNotification(notification)
         let lane = lanes[Self.laneIndex(
             roomID: Self.roomID(of: notification),
@@ -610,14 +609,14 @@ final class V2NATSGroupNotificationDispatcher: V2NATSPayloadSubmitting, Sendable
         case .wake(let wake): wake.roomID
         case .directEvent(let event): event.roomID
         case .groupEvents(let events):
-            // The decoder rejects an empty or mixed-room group batch.
+            // 解码器会拒绝空批次或混有多个房间的群组批次。
             events[0].roomID
         }
     }
 
     private static func laneIndex(roomID: RoomID, laneCount: Int) -> Int {
-        // A stable FNV-1a hash avoids process-randomized `Hasher` output and
-        // keeps every event for one room on the same lane for this lifetime.
+        // 稳定的 FNV-1a 哈希避免进程随机化的 `Hasher` 输出，
+        // 并让同一房间的所有事件在本次生命周期内进入同一通道。
         var hash: UInt64 = 1_469_598_103_934_665_603
         for byte in roomID.rawValue.utf8 {
             hash ^= UInt64(byte)
@@ -749,9 +748,8 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         let channel = connection?.channel
         connection = nil
         if let channel { try? await channel.close().get() }
-        // Cancellation is cooperative. Wait until a connect already executing
-        // on the NIO group has either closed itself or yielded its channel
-        // before shutting down that group's threads.
+        // 取消是协作式的。关闭 NIO 组线程前，先等待组上正在执行的连接操作
+        // 自行关闭或交出其通道。
         if let pending, let opened = try? await pending.value {
             try? await opened.channel.close().get()
         }
@@ -771,9 +769,9 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
             return
         }
         if subscriptions[roomID] != nil {
-            // A live registry interest may outlast its Core NATS socket. A
-            // repeated activation must heal that transport instead of treating
-            // the in-memory subscription dictionary as proof of broker state.
+            // 注册表中的有效订阅意向可能比 Core NATS 套接字存活更久。
+            // 再次激活时必须修复传输连接，不能把内存中的订阅字典
+            // 当作消息代理状态的证明。
             _ = try await connectedChannel()
             return
         }
@@ -825,8 +823,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         do {
             try await writeConfirmed("UNSUB \(subscriptionID)\r\n", connection: connection)
         } catch {
-            // The local registry has already removed its final viewer. A
-            // reconnect will replay only still-active room interests.
+            // 本地注册表已移除最后一位观看者；重连只会重放仍有效的房间订阅意向。
             await discard(connection)
         }
     }
@@ -904,8 +901,8 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
                 upperBound += 1
             }
             if upperBound == lowerBound {
-                // A single live payload is too large for the conservative
-                // Core NATS envelope. The durable room log remains authority.
+                // 单条实时载荷超过保守设置的 Core NATS 信封上限。
+                // 持久化房间日志仍是权威数据源。
                 await publishForegroundHint(.init(
                     roomID: first.roomID,
                     highWatermark: ordered[lowerBound].roomSequence
@@ -924,8 +921,8 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
                     guarantee: .advisory
                 )
             } catch {
-                // Foreground delivery is advisory; the durable room log and
-                // later metadata wake remain the recovery authority.
+                // 前台投递只是提示；持久化房间日志和后续元数据唤醒
+                // 仍是恢复时的权威依据。
                 return
             }
             lowerBound = upperBound
@@ -983,8 +980,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
     private func confirmActivation(roomID: RoomID, subscriptionID: Int) async throws {
         let connection = try await connectedChannel()
         try Task.checkCancellation()
-        // A newly opened connection replays the interest inserted above. An
-        // existing connection needs the incremental SUB explicitly.
+        // 新建连接会重放上方加入的订阅意向；既有连接则须显式发送增量 SUB。
         if !connection.replayedSubscriptionIDs.contains(subscriptionID) {
             try await writeConfirmed(
                 "SUB \(subject(for: roomID)) \(subscriptionID)\r\n",
@@ -994,9 +990,9 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         guard !Task.isCancelled,
               subscriptions[roomID] == subscriptionID
         else {
-            // Deactivation may reenter while the broker is confirming SUB.
-            // A second UNSUB is harmless and closes the last timing window in
-            // which a cancelled interest could survive on the broker.
+            // 消息代理确认 SUB 时，停用操作可能再次进入。
+            // 再发送一次 UNSUB 无害，还能关闭最后一个时间窗口，
+            // 防止已取消的订阅意向继续留在代理端。
             try? await writeConfirmed("UNSUB \(subscriptionID)\r\n", connection: connection)
             throw CancellationError()
         }
@@ -1314,9 +1310,8 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
         var command = command
         command.writeString("PING\r\n")
         do {
-            // Enqueue the command synchronously immediately after its
-            // acknowledgement. Actor reentrancy may overlap callers, but NIO
-            // write ordering and the handler's FIFO keep confirmations paired.
+            // 收到确认后立即同步入队该命令。Actor 可重入性可能让调用方交叠，
+            // 但 NIO 写入顺序和处理器的 FIFO 会保持确认一一对应。
             try await channel.writeAndFlush(command)
             try await acknowledgement.awaitBrokerConfirmation()
             watchdog.cancel()

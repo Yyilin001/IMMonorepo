@@ -2,7 +2,7 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-// Both forms write on the transaction already selected and fenced by the Store.
+// 两种形式都在 Store 已选定且已围栏化的事务上写入。
 extension PostgresV2RoomWriteStore {
     /// 追加单聊接受后的投影。
     ///
@@ -29,18 +29,15 @@ extension PostgresV2RoomWriteStore {
         sql: any SQLDatabase
     ) async throws -> [DirectPostAcceptanceProjectionChanges] {
         guard !appends.isEmpty else { return [] }
-        // The authoritative preflight has already locked every direct-pair
-        // row and read the current visibility/capability facts. Once both
-        // pair-local producer markers are established, another plain message
-        // cannot produce a profile or capability outbox event. Avoid sending
-        // the otherwise-empty set CTE to PostgreSQL for that steady state:
-        // under load it was one complete SQL statement per append batch even
-        // though `needed`, `projection_events`, and `pair_update` were empty.
+        // 权威预检已锁定每条私聊关系记录，并读取当前可见性与能力事实。
+        // 双方的关系本地生产者标记均建立后，后续普通消息不会再产生
+        // 资料或能力发件箱事件。稳定状态下无需向 PostgreSQL 发送
+        // 原本为空的集合 CTE：高负载时它仍会让每个追加批次执行一整条 SQL，
+        // 尽管 `needed`、`projection_events` 和 `pair_update` 都为空。
         //
-        // This is deliberately a batch-wide short circuit. If even one room
-        // still needs a first-message projection, the existing CTE runs for
-        // the complete batch so outbox insertion and pair marker updates
-        // remain one atomic transaction. The user owner allocates sequences.
+        // 这里有意让整个批次一起短路。只要有一个房间仍需要首消息投影，
+        // 就为完整批次执行既有 CTE，使发件箱插入与关系标记更新
+        // 保持在同一个原子事务中。序号由用户所有者分配。
         guard appends.contains(where: {
             !$0.directContext.senderProfileVisibleToRecipient
                 || $0.directContext.senderCanSend != true
@@ -323,9 +320,9 @@ extension PostgresV2RoomWriteStore {
     }
 }
 
-// Match postgres-nio Date decoding and Foundation's reference-date arithmetic before
-// truncating to wire milliseconds. Numeric-to-bigint rounds; truncating the native
-// epoch alone can also disagree with decoded Date near PostgreSQL's upper bound.
+// 截断为线路毫秒数前，先匹配 postgres-nio 的 Date 解码和 Foundation 的
+// 参考日期运算。numeric 转 bigint 会舍入；仅截断原生纪元值，
+// 在接近 PostgreSQL 上界时也可能与解码后的 Date 不一致。
 private let directProfileUpdatedAtMillisecondsSQL: SQLQueryString = """
     trunc((
         ((extract(epoch FROM profile.updated_at) - 946684800) * 1000000)::double precision

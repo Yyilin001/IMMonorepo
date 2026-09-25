@@ -1,8 +1,8 @@
 import IMV2ActorContracts
 import IMV2ActorRuntime
 
-/// Worker scans supply hints; every mutation obtains a fresh logical room turn
-/// with the service's explicitly configured maintenance permission.
+/// 工作器扫描只提供提示；每次修改都凭服务明确配置的维护权限
+/// 获取新的逻辑房间轮次。
 public struct V2RoomRefMaintenanceInvoker: V2RoomMaintenanceInvoking {
     private let directory: V2RoomDirectory
 

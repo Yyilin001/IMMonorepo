@@ -19,8 +19,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     private var authorizationRecordedAt: Date?
     private var authorizationResolutionDatabase: (any Database)?
     var controlScopeRoomKinds: [UUID: String]?
-    // Immutable for the lifetime of one scoped value copy. Shared caches and
-    // credit actors keep their identities; no mutable ambient route is used.
+    // 在一次限定范围的值拷贝生命周期内保持不可变。共享缓存和额度 Actor
+    // 保持原有身份；不使用可变的隐式路由。
     var ownerRoutes: [UUID: V2RoomShardRoute]?
     var activationScope: V2RoomActivationWriteScope?
     var forwardOwnerSourceRoomID: UUID?
@@ -82,17 +82,16 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return copy
     }
 
-    /// Bind exact, already admitted activation authority. Every SQL path still
-    /// checks it inside its transaction; this value copy grants no authority by
-    /// itself and retains the shared cache and credit-pool identities.
+    /// 绑定已经获准的确切激活权限。每条 SQL 路径仍在自身事务内校验该权限；
+    /// 此值拷贝本身不授予权限，并保留共享缓存及额度池的身份。
     public func usingActivationScope(_ scope: V2RoomActivationWriteScope) -> Self {
         var copy = self
         copy.activationScope = scope
         return copy
     }
 
-    /// A reservation may change facts outside this executor's ordinary turn.
-    /// Clear hints before releasing its barrier; SQL remains authoritative.
+    /// 预留操作可能在此执行器的常规轮次之外改变事实。
+    /// 释放栅栏前清除提示；SQL 中的事实仍是权威。
     func invalidateActorHints(token: V2RoomActivationToken) async {
         guard let room = token.roomID.uuidValue else { return }
         await directSendPolicyCache.invalidate(roomID: room)
@@ -100,18 +99,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         await hybridGroupShardCreditSnapshotCache.invalidate([room])
     }
 
-    /// Hosting calls this only after the executor's SQL and batches settle.
-    /// Unspent credit belongs to this exact epoch and cannot reach a successor.
+    /// Host 仅在执行器的 SQL 与批次处理结束后调用此方法。
+    /// 未使用的额度属于这一确切代次，不能转交给后继代次。
     func closeActorState(token: V2RoomActivationToken) async {
         await invalidateActorHints(token: token)
         await roomAdmissionCommandCreditPool?.retire(activation: token)
     }
 
-    /// Bind the authoritative control pool. It must be independent of the owner
-    /// pool even when both connect to the same physical database. Runtime must
-    /// also pass an independent resolution pool: policy writers must not wait
-    /// for a reservation connection that is waiting for their exclusive lock.
-    /// A shared fallback supports explicitly composed local stores only.
+    /// 绑定权威控制连接池。即使连接同一个物理数据库，也必须独立于归属方连接池。
+    /// 运行时还须提供独立的解析连接池：策略写入者不能等待某个预留连接，
+    /// 而后者又在等待策略写入者持有的排他锁。
+    /// 共享回退路径仅供显式组装的本地存储使用。
     public func usingControlDatabase(_ database: any Database, authorizationResolutionDatabase: (any Database)? = nil) -> Self {
         var copy = self
         copy.controlDatabase = database
@@ -119,10 +117,9 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return copy
     }
 
-    /// Bind grants already committed by the control store. Every owner write
-    /// path below checks them under its operation locks and records terminal
-    /// proof in the SAME transaction as the message or durable business denial.
-    /// Automatic ordinary/batch/forward entry points reserve and bind these grants.
+    /// 绑定控制存储中已提交的授权许可。下方每条归属方写入路径均在操作锁内校验，
+    /// 并在与消息或持久业务拒绝相同的事务中记录最终证明。
+    /// 自动化的常规、批量和转发入口负责预留并绑定这些许可。
     func usingAuthorizationGrants(_ grants: [V2DirectAuthorizationGrant], now: Date) throws -> Self {
         guard !grants.isEmpty, grants.count <= 128, v2PostgresTimestampCanEncode(now) else {
             throw V2DirectAuthorizationIntentError.invalidRequest
@@ -158,9 +155,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         try await v2WithPostgresTransactionRetry(database: database,
             classifyCommitFailure: activationScope != nil,
             useRoomDeadline: activationScope != nil) { transaction in
-            // The room-deadline transaction sets the same LOCAL limits before
-            // this body starts. The activation fence below still reapplies
-            // them before locking; this middle call added no protection.
+            // 房间期限事务在此代码块开始前已设置相同的 LOCAL 限制。
+            // 下方激活栅栏仍会在加锁前重新应用；中间再次设置不会增加保护。
             let result = try await operation(transaction)
             if let grants = authorizationGrants {
                 guard let recordedAt = authorizationRecordedAt else { throw V2DirectAuthorizationIntentError.corruptPersistence }
@@ -174,8 +170,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
     }
 
-    /// Ordinary scalar acceptance and conditional group batches use this
-    /// transaction-bound fence; all other writers retain the general API.
+    /// 常规标量接受和条件式群组批次使用此事务绑定的栅栏；
+    /// 其他写入者仍使用通用 API。
     private func withRoomWriteTransactionWithFenceContext<Result: Sendable>(
         _ operation: @escaping @Sendable (any Database, V2ConfiguredRoomFenceContext?) async throws -> Result
     ) async throws -> Result {
@@ -259,11 +255,11 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         if requests.isEmpty { return try await operation(base) }
         let grants = try await PostgresV2DirectAuthorizationIntentStore(database: controlDatabase).reserve(requests, now: now)
         let scoped = try base.usingAuthorizationGrants(grants, now: now)
-        // Reservation has committed before entering any owner transaction.
+        // 进入任何归属方事务前，预留操作已经提交。
         let result = try await operation(scoped)
-        // Finalize caches and consumed admission credits before a fallible ACK.
-        // A transport failure here retains the obligation; retries/recovery read
-        // the immutable owner proof and never return consumed credits.
+        // 在可能失败的 ACK 前，先完成缓存与已消耗准入额度的收尾。
+        // 此处传输失败不会解除义务；重试和恢复读取不可变的归属方证明，
+        // 也不会返还已消耗的额度。
         do { try await acknowledgeAuthorizations(grants, now: now) }
         catch {
             if activationScope != nil { throw V2RoomTransactionOutcomeUnknown() }
@@ -284,9 +280,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            // This operation may already have committed. Preserve the durable
-            // obligation and use the retryable protocol mapping, never classify
-            // an ACK/database failure as a new command identity conflict.
+            // 此操作可能已提交。保留持久义务并映射为可重试协议错误，
+            // 不得将 ACK 或数据库失败归类为新的命令身份冲突。
             throw V2DirectAuthorizationCoordinationError.ownerUnavailable
         }
     }
@@ -326,11 +321,9 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             identifiers: request.identifiers, now: request.now)
     }
 
-    /// Accept one already reserved source/target pair together with its ledger.
-    /// The callbacks cannot acquire another room or another DB connection. They
-    /// run after message-operation and canonical room/token locks, in the exact
-    /// transaction that commits acceptance. Control authorization is prepared
-    /// before this transaction and acknowledged only after its commit.
+    /// 将一对已预留的来源与目标房间及其台账一起接受。
+    /// 回调不得再获取其他房间或数据库连接；它们在消息操作锁及规范房间/令牌锁之后，
+    /// 于提交接受事实的同一事务内运行。控制授权在事务前准备，仅在提交后确认。
     func acceptActorForwardPair(
         request: V2RoomWriteRequest, sourceRoomID: RoomID,
         activationTokens: [V2RoomActivationToken],
@@ -382,7 +375,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                 return accepted
             }
         } catch let rejection as LateShardAdmissionRejection {
-            // All pair ledger and message effects rolled back together.
+            // 成对台账与消息效果一起回滚。
             switch rejection {
             case .rateLimited(let seconds): return .rateLimited(retryAfterSeconds: seconds)
             case .unavailable(let reason): return .unavailable(reason)
@@ -454,8 +447,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                 guard prior?.disposition != .aborted else { throw V2DirectAuthorizationReceiptError.attemptAborted }
             }
         }
-        // Without a selected route, missing rooms keep the ordinary domain error
-        // from the acceptance path.
+        // 没有选定路由时，缺失房间沿用接受路径的普通领域错误。
     }
 
     public func accept(
@@ -545,16 +537,15 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             return try await importReceivedForwardExport(export, capacityProfile: capacityProfile,
                 limits: limits, identifiers: identifiers, now: now)
         } catch {
-            // Receive has committed a durable workflow fact. A later failure
-            // cannot prove rollback of this entire turn; retain the operation
-            // identity and recover through the inbox on the next activation.
+            // 接收阶段已提交持久化的工作流事实。后续失败不能证明整个处理轮次已回滚；
+            // 保留操作标识，并在下次激活时通过收件箱恢复。
             if activationScope != nil { throw V2RoomTransactionOutcomeUnknown() }
             throw error
         }
     }
 
-    /// Actor entry binds every phase, including immutable receipt replay, to
-    /// the exact target incarnation. It does not grant source-room authority.
+    /// Actor 入口将所有阶段（包括不可变回执的重放）绑定到目标的确切实例，
+    /// 但不会授予源房间权限。
     public func importForwardExport(
         _ export: V2ForwardExport,
         activationToken: V2RoomActivationToken,
@@ -581,17 +572,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         now: Date
     ) async throws -> V2ForwardImportOutcome {
         if let controlDatabase, controlPolicyScope == nil {
-            // This short owner-only preflight ends before control reservation.
-            // The acceptance transaction below rechecks the inbox, media mapping,
-            // exact command fingerprint and owner before any message write.
+            // 此处仅检查所有者的简短预检会在控制侧预留之前结束。
+            // 下方的接受事务会在写入任何消息前重新检查收件箱、媒体映射、
+            // 命令的精确指纹和所有者。
             let preflight: (V2SendMessageCommand?, V2ForwardImportOutcome?) = try await withRoomWriteTransaction { transaction in
                 try await preflightForwardInboxInTransaction(export: export, transaction: transaction)
             }
             if let outcome = preflight.1 {
                 switch outcome {
                 case .accepted, .rejected:
-                    // ACK failure after inbox completion is recovered without
-                    // decoding payload/media again or reserving a new generation.
+                    // 收件箱完成后的 ACK 失败可直接恢复，无须再次解码载荷或媒体，
+                    // 也无须预留新的代次。
                     guard let acknowledgement = authorizationResolutionDatabase else { throw V2DirectAuthorizationCoordinationError.ownerUnavailable }
                     do {
                         if let grant = try await PostgresV2DirectAuthorizationIntentStore(database: acknowledgement)
@@ -624,8 +615,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                 )
             }
         } catch is LateShardAdmissionRejection {
-            // The message, completion, admission counters, and inbox update
-            // all rolled back. The earlier receive remains safely pending.
+            // 消息、完成记录、准入计数器和收件箱更新均已回滚。
+            // 此前的接收记录仍安全地保持待处理状态。
             return .pending(.admission)
         }
         guard let command = prepared.command, let commit = prepared.commit else { return prepared.outcome }
@@ -633,9 +624,9 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             command: command,
             cacheKey: .init(roomID: export.intent.targetRoomID, senderID: export.intent.actorUserID), commit: commit
         )
-        // A crash or completion-transaction failure before this transition leaves the
-        // accepted receipt durable. Retry recovers its normal post-commit work
-        // from message_send_completions before exposing target success.
+        // 若在此状态转换前崩溃或完成事务失败，已接受的回执仍会持久保存。
+        // 重试会先从 message_send_completions 恢复通常的提交后工作，
+        // 再向目标方呈现成功结果。
         return try await withRoomWriteTransaction { transaction in
             try await completeForwardInboxInTransaction(
                 export: export, commit: commit, now: now, transaction: transaction
@@ -710,9 +701,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             return .accelerated
         }
 
-        // Avoid splitting a mostly-cold arrival batch into two transactions.
-        // The standard path warms its successful entries, so a later batch can
-        // graduate to the one-statement accelerated path naturally.
+        // 避免将大部分尚未预热的到达批次拆成两个事务。
+        // 标准路径会预热成功的条目，使后续批次自然进入单语句加速路径。
         let acceleratedCount = partitions.lazy.compactMap { $0 }
             .filter { $0 == .accelerated }
             .count
@@ -917,8 +907,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             )
             throw error
         }
-        // Cold direct sends use the complete scalar path so every command
-        // retains its per-room admission fence.
+        // 尚未预热的私聊发送使用完整的逐条路径，确保每条命令保有房间级准入围栏。
         throw V2AtomicRoomWriteBatchError(reason: .incompatibleConfiguration)
     }
 
@@ -980,11 +969,9 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
         let orderedRequests = ordered
 
-        // Charge command capacity before opening the message transaction.
-        // The actor durably reserves a bounded batch from PostgreSQL and then
-        // issues one token per message. The transaction below still rechecks
-        // the room assignment, lease generation and complete authorization
-        // graph under lock, so this snapshot is only a capacity hint.
+        // 在开启消息事务前扣除命令容量。Actor 先在 PostgreSQL 中持久预留
+        // 有界批次，再为每条消息发放一个令牌。下方事务仍会在锁内重新检查
+        // 房间分配、租约代次和完整授权关系，因此此快照只作为容量提示。
         let uniqueRoomIDs = Array(Set(orderedRequests.map(\.roomID))).sorted {
             $0.uuidString < $1.uuidString
         }
@@ -1053,14 +1040,10 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         do {
             committed = try await withRoomWriteTransactionWithFenceContext { transaction, fenceContext in
                 let sql = try sqlDatabase(from: transaction)
-                // PostgreSQL can evaluate the complete ordinary-group
-                // contract and append the canonical rows in one conditional
-                // statement.  This is not a cache-authorized write: every
-                // membership, mute, account, role permission, room profile,
-                // lease and admission predicate is checked from locked
-                // durable rows. A stale or exceptional row produces zero
-                // writes and the batcher retries the immutable commands via
-                // the established complete path.
+                // PostgreSQL 可在一条条件语句中校验普通群组的完整契约并追加规范记录。
+                // 这不是由缓存授权的写入：成员关系、禁言、账号、角色权限、房间配置、
+                // 租约和准入条件均根据已加锁的持久化记录检查。若记录过期或异常，
+                // 则不会写入；批处理器会通过既有完整路径重试不可变命令。
                 if sql is any PostgresDatabase {
                     if ownerRoutes != nil || activationScope != nil {
                         try await acquireMessageOperationLocks(orderedRequests, sql: sql)
@@ -1315,20 +1298,17 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
               let shardAdmissionCommandCreditPool
         else { return nil }
 
-        // This statement advances a cursor once per room.  Reject a
-        // same-room micro-batch *before* acquiring any process-local room
-        // credits: speculative acquisition could otherwise replace a
-        // reservation entry while another input from that same room still
-        // owns an in-flight token.  The established ordered batch preserves
-        // that case's FIFO semantics.
+        // 此语句每个房间只推进一次游标。必须在获取任何进程内房间额度之前，
+        // 拒绝包含同一房间多条请求的微批次；否则推测性获取可能覆盖预留记录，
+        // 而同一房间的另一条请求仍持有执行中的令牌。既有顺序批处理路径会
+        // 保留此场景的 FIFO 语义。
         guard Set(knownIDs.map(\.roomID)).count == knownIDs.count else {
             return nil
         }
 
-        // Resolve every cache and shape predicate before reserving any
-        // process-local admission credit. A mixed hit/miss batch falls back
-        // as a set; acquiring while this loop is still discovering the set
-        // leaks the prefix's tokens when a later input misses.
+        // 在预留任何进程内准入额度前，先判定全部缓存和请求形态条件。
+        // 缓存命中与未命中混合的批次整体回退；若边遍历边获取额度，
+        // 后续输入未命中时会泄漏此前已获取的令牌。
         var candidates: [FastPlainDirectRoomLogCandidate] = []
         candidates.reserveCapacity(requests.count)
         let cacheKeys = knownIDs.map {
@@ -1387,9 +1367,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             ))
         }
 
-        // Resolve each process-local admission layer with one actor entry. The
-        // established room-before-shard order is retained, while the common
-        // warm batch no longer creates two serial-executor jobs per message.
+        // 每层进程内准入只进入 Actor 一次。保持先房间、后分片的既有顺序，
+        // 同时避免常见的热批次为每条消息创建两个串行执行器任务。
         var roomAcquisitions = Array<V2RoomAdmissionCommandCreditPool.Acquisition?>(
             repeating: nil,
             count: candidates.count
@@ -1517,10 +1496,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             await directRoomLogFastAppendCache.recordAttempt(count: ordered.count)
             let committed = try await withRoomWriteTransaction { transaction in
                 let sql = try sqlDatabase(from: transaction)
-                // Keep idempotency locking separate. PostgreSQL fixes the
-                // statement snapshot before a CTE runs, so this prior lock is
-                // what lets the conditional statement see a just-committed
-                // retry result instead of treating it as a fresh append.
+                // 幂等锁须单独获取。PostgreSQL 在运行 CTE 前固定语句快照；
+                // 提前加锁才能让条件语句看到刚提交的重试结果，避免将其当作新追加。
                 try await acquireMessageOperationLocks(lockRequests, sql: sql)
                 try await requireSelectedOwners(lockRequests.map(\.roomID), sql: sql)
                 let allocations = try await persistFastPlainDirectRoomLogMessages(
@@ -1563,8 +1540,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                         cacheKey: append.cacheKey,
                         commit: .init(
                             outcome: .accepted(accepted),
-                            // The mapped control facts expire with the outer transaction.
-                            // Keep only the original owner snapshot in shared caches.
+                            // 映射得到的控制侧事实随外层事务失效。
+                            // 共享缓存只保留原始的所有者快照。
                             directPolicyCacheUpdate: cachedSnapshots[append.originalIndex].policy,
                             directRoomLogFastAppendCacheUpdate: cachedSnapshots[append.originalIndex],
                             shardAdmissionCommandCredit: append.shardCreditToken,
@@ -1796,9 +1773,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         guard projectionChanges.count == prepared.count else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
-        // Shard and optional room credits were precharged before opening this
-        // transaction. No nested pool acquisition or second reservation runs
-        // while these room locks are held.
+        // 分片额度和可选的房间额度已在开启事务前预扣。
+        // 持有这些房间锁期间，不会再次从池中获取额度或进行第二次预留。
         return zip(prepared, projectionChanges).map { append, changes in
             let reciprocalReplyCacheUpdate = append.advancesReplyMarker
                 ? DirectReplyCacheUpdate(
@@ -1883,9 +1859,9 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             throw V2AtomicRoomWriteBatchError(reason: reason)
         }
         let usesRoomAdmissionCredits = item.usesRoomAdmissionCredits
-        // Activation-bound credits must be prefetched before this transaction.
-        // The live warm path does this in fastPlainDirectRoomLogCommitsIfEligible;
-        // the standard path supplies usesRoomAdmissionCredits = false.
+        // 与激活绑定的额度必须在此事务前预取。
+        // 实时热路径在 fastPlainDirectRoomLogCommitsIfEligible 中完成预取；
+        // 标准路径则传入 usesRoomAdmissionCredits = false。
         guard activationScope == nil || !usesRoomAdmissionCredits else {
             throw V2AtomicRoomWriteBatchError(reason: .roomCreditModeMismatch)
         }
@@ -2298,10 +2274,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         shardTokens.reserveCapacity(committed.count)
         roomTokens.reserveCapacity(committed.count)
         heatObservations.reserveCapacity(committed.count)
-        // Admission heat is process-local runtime state, so it must use the
-        // runtime clock just like the former per-commit finalizer. Request
-        // timestamps may be deterministic/replayed and are not a valid cache
-        // freshness clock.
+        // 准入热度属于进程内运行时状态，因此必须像原先逐次提交的收尾逻辑一样
+        // 使用运行时时钟。请求时间戳可能是确定生成或重放的，不能用于判断缓存新鲜度。
         let heatObservationNow = Date()
 
         for item in committed {
@@ -2338,9 +2312,9 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             }
         }
 
-        // These mutations are tiny actor-isolated dictionary/counter updates.
-        // One batched hop per actor is cheaper and more predictable than
-        // creating four child tasks for every PostgreSQL micro-batch.
+        // 这些修改只是 Actor 隔离的少量字典和计数器更新。
+        // 每个 Actor 批量调用一次，比每个 PostgreSQL 微批次创建四个子任务
+        // 成本更低且更可预测。
         await directSendPolicyCache.insert(policyUpdates)
         await directRoomLogFastAppendCache.insert(fastAppendUpdates)
         await directSendPolicyCache.markRecipientsHaveReplied(reciprocalPolicyUpdates)
@@ -2508,10 +2482,9 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                 clientMessageID: try uuid(item.request.command.clientMessageID)
             )
         }
-        // Production PostgreSQL receives typed arrays through a named
-        // statement. This removes JSON serialization/parsing and lets every
-        // physical foreground connection reuse the invariant recursive lock
-        // plan without changing the transaction or ordered-lock contract.
+        // 生产环境的 PostgreSQL 通过命名语句接收有类型的数组，省去 JSON
+        // 序列化与解析，并让每条前台物理连接复用固定的递归加锁方案，
+        // 同时保持事务和有序加锁契约不变。
         if let postgres = sql as? any PostgresDatabase {
             let statement = MessageOperationLockBatchStatement(inputs: inputs)
             let acquiredCount = try await postgres.withConnection { connection in
@@ -2654,8 +2627,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         let restriction: V2DirectMessageDenied.Reason?
         if policy.senderAccountKind != nil {
             restriction = policy.senderAccountStatus == "active" && policy.senderAllowsServiceMessages == true ? nil : .generic
-            // Special subjects have no public gateway credential. A call that
-            // reaches this branch originated at the trusted service boundary.
+            // 特殊主体没有公共网关凭据；到达此分支的调用来自可信服务边界。
         } else if let recipientAccountKind = policy.recipientAccountKind {
             if policy.recipientAccountStatus != "active" {
                 restriction = .generic
@@ -2746,9 +2718,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                    OR (pair.higher_user_id = \(bind: senderID) AND NOT pair.higher_has_replied))
             RETURNING pair.room_id
             """).first(decoding: DirectReplyMarkerMutationRow.self)
-        // The locked preflight requires this first-reply transition. A
-        // missing update must not leave the accepted message with a stale
-        // reply marker or policy revision.
+        // 加锁预检要求完成首次回复状态转换。若更新缺失，不能让已接受的消息
+        // 带着过期的回复标记或策略修订号继续存在。
         guard updated != nil else { throw V2RoomWriteStoreError.corruptPersistenceState }
         return true
     }
@@ -2776,17 +2747,15 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         currentCanSend: Bool?,
         sql: any SQLDatabase
     ) async throws -> V2DirectMessageDenied {
-        // Preserve the native Date bind below, but expose exactly the time
-        // decoded by a future replay. Rebinding a decoded Date can lose another
-        // microsecond, so response normalization must not change persistence.
+        // 保留下方原生 Date 绑定，但对外返回未来重放时会解码出的确切时间。
+        // 重新绑定已解码的 Date 可能再次损失一微秒，因此响应规范化不能改动持久化值。
         let persistedCreatedAt = try roomWritePersistedDate(createdAt)
         let createdAtMilliseconds = try v2GatewayMilliseconds(persistedCreatedAt)
         let timelineSequence = try signed(nextTimelineSequence)
         let activityType = directMessageTimelineActivityType(for: reason)
         try await sql.raw("UPDATE im_v2.rooms SET timeline_sequence = \(bind: timelineSequence) WHERE room_id = \(bind: roomUUID)").run()
-        // The denial row references its private timeline activity. Insert the
-        // referenced fact first; both rows still commit atomically inside the
-        // surrounding message transaction.
+        // 拒绝记录引用其私有时间线活动。先插入被引用的事实；
+        // 两条记录仍在外围消息事务中原子提交。
         try await sql.raw("INSERT INTO im_v2.room_timeline_activities (source_event_id, room_id, timeline_sequence, activity_type, recipient_user_id, created_at) VALUES (\(bind: sourceEventID), \(bind: roomUUID), \(bind: timelineSequence), \(bind: activityType), \(bind: senderID), \(bind: createdAt))").run()
         try await sql.raw("INSERT INTO im_v2.direct_message_denials (sender_user_id, client_message_id, room_id, source_event_id, timeline_sequence, created_at, reason, fingerprint_version, request_fingerprint) VALUES (\(bind: senderID), \(bind: clientMessageID), \(bind: roomUUID), \(bind: sourceEventID), \(bind: timelineSequence), \(bind: createdAt), \(bind: reason.rawValue), \(bind: Int16(fingerprint.version)), \(bind: fingerprint.digest))").run()
         let activityPayload = try JSONSerialization.data(withJSONObject: ["event_type": activityType, "room_id": roomUUID.uuidString, "timeline_sequence": timelineSequence, "server_created_at_ms": createdAtMilliseconds])
@@ -2919,8 +2888,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     }
 
 
-    /// Room locks are already held by each admission path. Check the fixed
-    /// direct pair independently of any per-user delivery work.
+    /// 各准入路径已持有房间锁。独立于用户级投递工作检查固定的私聊关系。
     func assertDirectMemberships(roomIDs: [UUID], sql: any SQLDatabase) async throws {
         let roomsJSON = try roomWriteJSON(Array(Set(roomIDs)).map { $0.uuidString })
         guard try await sql.raw("""
@@ -2967,10 +2935,9 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             )
         }
         guard Set(quotaInputs.map { "\($0.senderID.uuidString)|\($0.recipientID.uuidString)" }).count == quotaInputs.count else {
-            // A direct pair is unique by design, and this batch already has
-            // one command per room. Keep the assertion explicit because the
-            // upsert below must not consume two quota units for one logical
-            // pair if that invariant ever changes.
+            // 私聊关系按设计唯一，且此批次每个房间仅有一条命令。
+            // 保留显式断言：即使将来该不变量改变，下方 upsert 也不能
+            // 为同一逻辑关系消耗两份配额。
             throw V2AtomicRoomWriteBatchError(reason: .duplicateRoom)
         }
         if !quotaInputs.isEmpty {
@@ -3133,12 +3100,9 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                         == (try? uuid(item.request.identifiers.messageID))
               })
         else {
-            // The fast statement intentionally returns no per-user denial
-            // detail. On its exceptional zero-write path, run the established
-            // authoritative preflight while the operation/room locks are
-            // still held so the batcher can isolate exactly the stale or
-            // denied requests before scalar fallback. The steady accepted
-            // path still remains one statement.
+            // 快速语句有意不返回逐用户的拒绝详情。在异常的零写入路径上，
+            // 趁操作锁和房间锁仍被持有时运行既有权威预检，让批处理器在逐条回退前
+            // 精确定位过期或被拒绝的请求。正常接受路径仍只执行一条语句。
             try await requireSelectedOwners(ordered.map(\.roomID), sql: sql)
             let isolated = try await diagnoseConditionalPlainHybridGroupMismatch(
                 ordered,
@@ -3988,9 +3952,9 @@ private struct SelectedRoomOwnerRow: Decodable {
     }
 }
 
-// Match postgres-nio's Date encoder for both JSON and prepared append inputs.
-// Keep this integer through persistence; Unix-second floating conversion can
-// round a different microsecond, changing stored receipts and boundary checks.
+// 对 JSON 和预处理追加输入统一匹配 postgres-nio 的 Date 编码器。
+// 持久化期间保持整数形式；转换为 Unix 秒浮点数可能舍入到另一微秒，
+// 从而改变已存回执和边界检查结果。
 func roomWritePostgresMicroseconds(_ date: Date) throws -> Int64 {
     let epoch = Date(timeIntervalSince1970: 946_684_800)
     guard let value = Int64(exactly: (date.timeIntervalSince(epoch) * 1_000_000).rounded(.towardZero)),
@@ -3999,18 +3963,16 @@ func roomWritePostgresMicroseconds(_ date: Date) throws -> Int64 {
     return value
 }
 
-// Match floor(extract(epoch FROM created_at) * 1000) using the exact driver
-// input. Divide before adding the epoch offset so the full PostgreSQL range
-// fits without overflowing an intermediate Unix-microsecond integer.
+// 使用驱动的精确输入，匹配 floor(extract(epoch FROM created_at) * 1000)。
+// 先除再加纪元偏移，避免 PostgreSQL 的完整取值范围使中间的 Unix 微秒整数溢出。
 func roomWriteProjectionMilliseconds(_ date: Date) throws -> Int64 {
     let microseconds = try roomWritePostgresMicroseconds(date)
     let floorMilliseconds = microseconds / 1_000 - (microseconds % 1_000 < 0 ? 1 : 0)
     return floorMilliseconds + 946_684_800_000
 }
 
-// Fresh acknowledgements must expose the same Date as the persisted receipt.
-// Only newly accepted messages need conversion: replay dates are already
-// decoded from PostgreSQL and must not be encoded and rounded a second time.
+// 新生成的确认必须暴露与持久回执一致的 Date。
+// 只有新接受的消息需要转换：重放时间已从 PostgreSQL 解码，不能再次编码和舍入。
 private func roomWritePersistedAcceptanceOutcome(_ outcome: V2SendMessageOutcome) throws -> V2SendMessageOutcome {
     guard case .accepted(let message) = outcome else { return outcome }
     let createdAt = try roomWritePersistedDate(message.createdAt)
@@ -4033,8 +3995,8 @@ private func roomWriteStrangerWindowStart(now: Date, interval: TimeInterval) thr
     return cutoff
 }
 
-// Mirror postgres-nio's Date decoding after its microsecond encoding without
-// another SQL read. Use only for fresh response values, not already-read rows.
+// 无须再次读取 SQL，即可模拟 postgres-nio 微秒编码后的 Date 解码。
+// 仅用于新生成的响应值，不用于已经读取的记录。
 func roomWritePersistedDate(_ date: Date) throws -> Date {
     let microseconds = try roomWritePostgresMicroseconds(date)
     return Date(timeInterval: Double(microseconds) / 1_000_000,

@@ -4,8 +4,8 @@ import NIOCore
 import PostgresNIO
 import SQLKit
 
-// Executes the fast direct append on the Store's borrowed transaction.
-// The Store retains idempotency/owner locks, commit, and credit finalization.
+// 在 Store 借用的事务上执行快速私聊追加。
+// 幂等锁、所有者锁、提交和额度结算仍由 Store 负责。
 enum FastPlainDirectRoomLogWritePath {
     static func persist(
         inputs: [FastPlainDirectRoomLogAppendInput],
@@ -13,13 +13,12 @@ enum FastPlainDirectRoomLogWritePath {
         sql: any SQLDatabase
     ) async throws -> [FastPlainDirectRoomLogAllocationRow] {
         let expectedCount = Int64(inputs.count)
-        // SQLKit's raw-query path uses an unnamed extended-protocol
-        // statement. PostgreSQL therefore planned this large, invariant CTE
-        // once per micro-batch; at 6k msg/s measured planning time was 2.57ms
-        // against 5.81ms execution time. A named PostgresNIO statement keeps
-        // the exact transaction and bind contract while allowing every pool
-        // connection to reuse its plan. Retain the SQLKit branch for database
-        // test doubles, but production PostgreSQL must take this branch.
+        // SQLKit 的原始查询路径使用未命名的扩展协议语句。
+        // 因此 PostgreSQL 每个微批都要重新规划这一大型固定 CTE；
+        // 在每秒 6,000 条消息的测量中，规划耗时 2.57 毫秒，执行耗时 5.81 毫秒。
+        // 命名的 PostgresNIO 语句保持精确的事务和绑定契约，
+        // 同时允许连接池中各连接复用执行计划。数据库测试替身仍用 SQLKit 分支；
+        // 生产 PostgreSQL 必须使用此分支。
         if let postgres = sql as? any PostgresDatabase {
             let statement = FastPlainDirectRoomLogAppendStatement(
                 inputs: inputs,

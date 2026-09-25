@@ -1,7 +1,7 @@
 import IMV2ActorRuntime
 
-/// Fixed process-local gauges. In-flight and uncertain work retains command
-/// permits, so outstanding is deliberately broader than a waiting queue.
+/// 固定的进程内测量值。执行中和结果不明的工作仍持有命令许可，
+/// 因此未完成数量有意包含等待队列以外的工作。
 func v2RoomActorMetricLines(_ snapshot: V2RoomRuntimeMetricsSnapshot) -> [String] {
     var values: [(String, Int, String)] = [
         ("cached_locations", snapshot.cachedLocations, "Cached logical room locations."),

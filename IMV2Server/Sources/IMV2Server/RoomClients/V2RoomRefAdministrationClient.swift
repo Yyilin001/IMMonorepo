@@ -3,9 +3,8 @@ import IMV2ActorContracts
 import IMV2ActorRuntime
 import IMV2Core
 
-/// A single total deadline is made before resolution and is passed unchanged
-/// through activation, transport, and the room turn. Runtime retry preserves
-/// the original operation ID; clients never create event IDs or timestamps.
+/// 在解析前设定唯一的总截止时间，并原样传递给激活、传输和房间执行轮次。
+/// 运行时重试保留原操作 ID；客户端绝不创建事件 ID 或时间戳。
 struct V2RoomRefUserCaller: Sendable {
     let invoke: @Sendable (V2RoomRequest, UserID, ContinuousClock.Instant) async throws -> V2RoomResponse
     let timeout: Duration

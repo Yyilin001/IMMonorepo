@@ -131,12 +131,10 @@ struct PostgresV2MessageProjectionStateRepository: Sendable {
         sql: any SQLDatabase
     ) async throws {
         let createdAt = try persistedCreatedAt ?? V2PostgresTimestamp(date: value.createdAt)
-        // A data-modifying CTE does not expose its inserted row through a
-        // sibling scan of the base table in the same statement snapshot.
-        // Keep the successful insert in `inserted`, and consult the base
-        // table only for the conflict/retry branch. This preserves the strict
-        // immutable equality fence while reducing persist from two database
-        // round trips to one.
+        // 修改数据的 CTE 不会让同一语句快照中的并列基础表扫描看到其插入记录。
+        // 成功插入的结果保留在 `inserted` 中；只在冲突或重试分支查询基础表。
+        // 这样既保留严格的不可变相等围栏，
+        // 又将持久化所需的数据库往返从两次降为一次。
         let verified = try await sql.raw("""
             WITH validated AS MATERIALIZED (
                 SELECT 1
@@ -191,13 +189,11 @@ struct PostgresV2MessageProjectionStateRepository: Sendable {
             END AS value
             """).first(decoding: MessageProjectionStateExistsRow.self)
         guard verified?.value == 1 else {
-            // `INSERT .. ON CONFLICT DO NOTHING` can observe an uncommitted
-            // conflicting tuple that the statement's earlier MVCC snapshot
-            // cannot see through the base-table branch above. A new statement
-            // gets a fresh READ COMMITTED snapshot after that conflict has
-            // resolved. Keep this second read off the uncontended hot path,
-            // while preserving true concurrent idempotency without issuing a
-            // no-op `DO UPDATE` that would create a new heap/WAL version.
+            // `INSERT .. ON CONFLICT DO NOTHING` 可观察到尚未提交的冲突元组，
+            // 而该语句较早取得的 MVCC 快照无法通过上方基础表分支看到它。
+            // 冲突解决后，新语句会取得新的 READ COMMITTED 快照。
+            // 将第二次读取排除在无竞争热路径之外，同时保持真正的并发幂等性，
+            // 无须执行会生成新堆记录和 WAL 版本的无效果 `DO UPDATE`。
             guard let concurrentReplay = try await sql.raw("""
                 SELECT 1 AS value
                 FROM \(unsafeRaw: table("message_projection_state_values"))

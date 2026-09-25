@@ -12,8 +12,8 @@ public struct V2ActorForwardSourceEndpoint: Sendable {
     }
 }
 
-/// Source export preparation goes through RoomRef; durable delivery remains a
-/// worker concern and never holds a source room turn across target I/O.
+/// 源导出准备通过 RoomRef 进行；持久化投递仍由工作器负责，
+/// 不会在目标 I/O 期间一直占用源房间轮次。
 public struct V2ActorCrossOwnerForwardService: V2CrossOwnerForwarding {
     private let sources: [String: V2ActorForwardSourceEndpoint]
     private let sourceCommand: @Sendable (V2RoomForwardCommand, ContinuousClock.Instant) async throws -> V2RoomForwardResult

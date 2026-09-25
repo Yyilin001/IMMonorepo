@@ -187,9 +187,8 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                     FOR UPDATE
                     """).first(decoding: ProjectionFailureCountRow.self)
             else {
-                // Another worker advanced or paused this user after our
-                // transaction rolled back. The failed claim is still useful
-                // work, but must not overwrite the newer checkpoint state.
+                // 我方事务回滚后，另一工作器已推进或暂停该用户。
+                // 失败的认领仍代表有用工作，但不能覆盖较新的检查点状态。
                 return .init(claimed: true, appliedRecordCount: 0)
             }
             guard checkpoint.failureCount < Int64.max else {
@@ -511,7 +510,7 @@ public struct PostgresV2UserProjectionWorker: Sendable {
             ownSource = record.sourceEventID.rawValue
             isMember = action == "add"
         } else {
-            // Other members' changes cannot grant this user's revoked membership.
+            // 其他成员的变更不能恢复此用户已撤销的成员资格。
             guard isMember else { return }
             if let previousRevision = (prior?.object["membership_revision"] as? NSNumber)?.int64Value,
                revision <= previousRevision { return }
@@ -519,7 +518,7 @@ public struct PostgresV2UserProjectionWorker: Sendable {
         if !isMember {
             try await removeRoomScope(roomID: roomID, at: record.sequence, userID: userID, sql: sql)
         }
-        // Keep the negative room identity in the snapshot. Its scope's content has been closed above.
+        // 在快照中保留房间身份的否定记录；上方已关闭其作用域的内容。
         var state = object
         if ownRevision > 0, let ownSource {
             state["viewer_membership_revision"] = ownRevision

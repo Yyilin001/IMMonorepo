@@ -38,8 +38,8 @@ public struct V2AccountEdgeClientRateLimitMiddleware: Middleware, Sendable {
         }
         switch result {
         case .allowed:
-            // Deliberately outside the persistence-error mapping: a route's
-            // public 4xx/5xx contract must retain its original status.
+            // 此处有意置于持久化错误映射之外：路由公开的 4xx／5xx 契约
+            // 必须保留原始状态码。
             return try await next.respond(to: request)
         case .rateLimited(let retryAfterSeconds):
             var headers = HTTPFields()

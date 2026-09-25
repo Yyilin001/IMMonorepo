@@ -13,7 +13,7 @@ enum V2DirectRoomLogPayloadCodec {
     /// - Parameter message: 已接受的消息投影。
     /// - Returns: 规范 JSON 载荷；时间戳无法投影为毫秒时返回 `nil`。
     static func encode(_ message: V2AcceptedMessage) -> Data? {
-        // This is a message projection, so pre-1970 timestamps must match the durable floor rounding.
+    // 这是消息投影，因此 1970 年之前的时间戳须与持久化时的向下取整保持一致。
         guard let milliseconds = try? v2MessageProjectionMilliseconds(message) else { return nil }
         if message.entities.isEmpty {
             return encodePlainText(message, milliseconds: milliseconds)

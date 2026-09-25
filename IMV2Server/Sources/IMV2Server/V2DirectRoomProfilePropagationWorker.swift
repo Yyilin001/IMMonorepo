@@ -88,10 +88,9 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
 
         while remaining > 0, let lease = try await claimNext(now: now()) {
             claimed += 1
-            // Read one non-delivered look-ahead row. It does not consume the
-            // recipient work budget, but lets an exact full page complete
-            // immediately instead of requiring an otherwise empty later
-            // poll solely to discover the end of the graph.
+            // 预读一条尚未投递的记录。它不消耗接收方工作预算，
+            // 却能让刚好装满的页面立即判定完成，
+            // 无须之后再进行一次只为发现关系图尾部的空轮询。
             let candidates = try await directTargets(for: lease, limit: remaining + 1)
             let targets = Array(candidates.prefix(remaining))
             let isComplete = candidates.count <= remaining
@@ -110,8 +109,8 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
                 projected += 1
             }
 
-            // An empty contact graph still consumes one source update, so
-            // concurrent profile changes cannot make this pass unbounded.
+            // 即使联系人关系图为空，也消耗一次源更新，
+            // 防止并发资料变更让本轮处理无界增长。
             remaining -= max(1, targets.count)
             try await advance(lease: lease, lastTargetUserID: targets.last?.userID, completed: isComplete, now: now())
             if isComplete { completed += 1 }
@@ -236,9 +235,9 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
                 return try directProfileUnsigned(invalidationSequence)
             }
             let sequence = try await allocateSequence(userID: target.userID, sql: sql)
-            // Match the room-event UUID spelling used by the gateway. The
-            // direct-profile update must not create a second lexical room key
-            // on a client that receives both projections.
+            // 匹配网关使用的房间事件 UUID 字符串形式。
+            // 同时收到两种投影的客户端不能因私聊资料更新
+            // 而创建第二种字符串形式的房间键。
             let wireRoomID = target.roomID.uuidString
             let wireTargetUserID = lease.sourceUserID.uuidString
             try await sql.raw("""

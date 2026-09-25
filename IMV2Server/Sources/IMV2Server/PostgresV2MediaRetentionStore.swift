@@ -84,10 +84,9 @@ public struct PostgresV2MediaRetentionStore: V2MediaRetentionStore {
                     )
                   )
                 """
-            // Lock a bounded candidate set first, then recheck in a new
-            // READ COMMITTED statement. A single CTE has one MVCC snapshot:
-            // an export committing between its snapshot and row lock could
-            // otherwise be invisible even after the lock was released.
+            // 先锁定有界的候选集合，再用新的 READ COMMITTED 语句复查。
+            // 单个 CTE 只有一份 MVCC 快照：如果导出在快照建立后、
+            // 行锁获取前提交，即使随后释放行锁，单次查询仍可能看不到该导出。
             let locked = try await sql.raw("""
                 SELECT media.media_id FROM im_v2.media_objects AS media
                 \(eligible)

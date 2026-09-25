@@ -207,8 +207,8 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
             throw V2DeviceSessionServiceError.unavailable
         }
         let credential = V2DeviceRevocationCredential.generate()
-        // Preserve the device's exact SQL timestamps for the binding and grace
-        // period. Date round trips can lose microseconds even at ordinary dates.
+        // 为绑定和宽限期保留设备的精确 SQL 时间戳。
+        // 即使是普通日期，Date 往返也可能损失微秒。
         guard let issued = try await sql.raw("""
             INSERT INTO im_v2.device_revocation_capabilities
                 (user_id, device_id, credential_digest, session_created_at, session_expires_at, expires_at)
@@ -261,8 +261,8 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
         let digest = Self.revocationDigest(credential)
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DeviceSessionServiceError.unavailable }
-            // Find the target without taking a row lock: all writers acquire
-            // the account lock before any device row lock.
+            // 查找目标时不取得行锁：所有写入方都先取得账号锁，
+            // 再取得任何设备行锁。
             guard let target = try await sql.raw("SELECT user_id, device_id FROM im_v2.device_revocation_capabilities WHERE credential_digest = \(bind: digest)").first(decoding: CapabilityTargetRow.self)
             else { return .invalidCredential }
             try await Self.lockAccountState(sql, userID: target.userID)
@@ -278,8 +278,8 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
                 FOR UPDATE OF device, capability
                 """).first(decoding: CapabilityExpiryRow.self)
             else { return .invalidCredential }
-            // Observe time after waiting for locks. Ordinary authentication,
-            // account disablement and token-key rotation are irrelevant here.
+            // 等锁后再读取时间。普通认证、账号禁用和令牌密钥轮换
+            // 与此处无关。
             let occurredAt = now()
             guard v2PostgresTimestampCanEncode(occurredAt) else { throw V2DeviceSessionServiceError.unavailable }
             guard v2PostgresTimestampCanEncode(row.expiresAt) else { throw V2DeviceSessionServiceError.malformedPersistence }
@@ -534,9 +534,8 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
 
     private func revokeOtherDevices(_ sql: any SQLDatabase, userID: UUID, currentDeviceID: UUID, at: Date) async throws {
         guard v2PostgresTimestampCanEncode(at) else { throw V2DeviceSessionServiceError.unavailable }
-        // Every data-modifying CTE consumes the same bounded set returned by
-        // the auth-device update. This avoids materializing device IDs in the
-        // application and turns N×5 serial database round trips into one.
+        // 每个修改数据的 CTE 都消费认证设备更新返回的同一有界集合。
+        // 这样无须在应用层物化设备 ID，并将 N×5 次串行数据库往返合并为一次。
         try await sql.raw("""
         WITH revoked_devices AS MATERIALIZED (
             UPDATE im_v2.auth_devices

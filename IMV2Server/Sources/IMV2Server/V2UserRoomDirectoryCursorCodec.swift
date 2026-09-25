@@ -2,7 +2,7 @@ import Crypto
 import Foundation
 import IMV2Core
 
-/// A cursor proves scan position, never membership. Authorization is evaluated on every page.
+/// 游标只证明扫描位置，不能证明成员资格；每一页都要重新校验授权。
 public struct V2UserRoomDirectoryCursorCodec: Sendable {
     private let key: SymmetricKey
     public static let maximumBytes = 2048

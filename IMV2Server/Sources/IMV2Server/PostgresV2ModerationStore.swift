@@ -212,9 +212,8 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
             if let expectedRevision = command.expectedMessageRevision {
                 let expectedRevisionValue = try moderationSigned(expectedRevision)
                 guard message.contentRevision == expectedRevisionValue else {
-                // This outcome is intentionally opaque at the privileged
-                // boundary. The review worker re-checks its lease and marks
-                // the stale finding superseded; it never acts on a newer edit.
+                // 此结果在特权边界有意保持不透明。审核工作器复查租约，
+                // 并将过期发现标记为已被取代；绝不处理较新的编辑。
                     return .messageAlreadyRedacted
                 }
             }
@@ -249,7 +248,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
             let redactedProjectionState = try previousProjectionState.state.applyingRemoval(
                 revision: moderationUnsigned(messageRevision)
             )
-            // Only responses use the decoded timestamp; persistence keeps the original Date.
+            // 只有响应使用解码后的时间戳；持久化仍保留原始 Date。
             guard let timestamp = try await sql.raw("""
                 UPDATE im_v2.rooms SET room_sequence = \(bind: roomSequence) WHERE room_id = \(bind: roomID)
                 RETURNING \(bind: now)::timestamptz AS created_at
@@ -258,9 +257,8 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
             }
             let createdAtMilliseconds = try v2GatewayMilliseconds(timestamp.createdAt)
             try await sql.raw("UPDATE im_v2.messages SET content_revision = \(bind: messageRevision), withdrawn_at = \(bind: now), withdrawn_by_user_id = \(bind: actorID) WHERE message_id = \(bind: messageID)").run()
-            // Existing grants fail through message withdrawal.  This explicit
-            // revocation additionally prevents future reference reuse and
-            // gives retention a deterministic disposal marker.
+            // 现有授权许可通过消息撤回失效。此次显式撤销还会防止之后复用引用，
+            // 并为保留期清理提供确定性的处置标记。
             try await sql.raw("UPDATE im_v2.message_media_references SET revoked_at = \(bind: now) WHERE message_id = \(bind: messageID) AND revoked_at IS NULL").run()
             try await sql.raw("""
                 UPDATE im_v2.room_admission SET command_window_used = \(bind: nextRoom.commandWindow.used), shard_lease_id = \(bind: try moderationUUID(lease.id)), shard_lease_generation = \(bind: try moderationSigned(lease.generation)) WHERE room_id = \(bind: roomID)
@@ -343,7 +341,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 ORDER BY joined_revision DESC LIMIT 1 FOR UPDATE
                 """).first(decoding: ModerationMemberRow.self)
             guard let target else { return .targetNotMember }
-            // One non-transferable owner is the current V2 authority model.
+            // 单一且不可转让的所有者是当前 V2 权限模型。
             guard target.role != "owner" else { throw V2ModerationStoreError.actorNotAuthorized }
             guard let admission = try await sql.raw("""
                 SELECT eligible_member_count, command_window_limit, command_window_used,
@@ -444,7 +442,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 """).first(decoding: ModerationOperationRow.self) {
                 guard prior.matchesMute(command, roomID: roomID, targetID: targetID) else { return .idempotencyConflict }
                 guard prior.muteUntil.map(v2PostgresTimestampCanEncode) == true else { throw V2ModerationStoreError.corruptPersistenceState }
-                // Use the same PostgreSQL microsecond precision as the write.
+                // 使用与写入相同的 PostgreSQL 微秒精度。
                 guard prior.muteMatches == true else { return .idempotencyConflict }
                 return .idempotent(try prior.result(operationID: command.operationID))
             }

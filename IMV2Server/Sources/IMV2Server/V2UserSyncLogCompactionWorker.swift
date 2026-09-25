@@ -123,8 +123,8 @@ public struct PostgresV2UserSyncLogCompactionWorker: Sendable {
                 """).first(decoding: CompactionCandidateRow.self)
             else { return nil }
 
-            // Current generation capabilities can still ask for their exact
-            // old watermark. Keep the floor behind every unexpired one.
+            // 当前代次的能力仍可请求其确切旧水位。
+            // 压缩下界须落后于每份未过期能力所保护的水位。
             let protected = try await sql.raw("""
                 SELECT MIN(value) AS value
                 FROM (
@@ -142,11 +142,10 @@ public struct PostgresV2UserSyncLogCompactionWorker: Sendable {
                       AND receipt.expires_at > \(bind: now)
                 ) AS capability
             """).first(decoding: OptionalCompactionFloorRow.self)?.value
-            // Keep a durable replay window for higher-level operation workers
-            // that may re-read a freshly appended effect before advancing
-            // their own checkpoint. This also spans the default shard rollback
-            // and capability lifetimes; compaction is still bounded by rate ×
-            // window rather than total account age.
+            // 为上层操作工作器保留持久化重放窗口：它们在推进自身检查点前，
+            // 可能重新读取刚追加的副作用。该窗口也覆盖默认分片回滚期
+            // 和能力有效期；压缩规模仍受速率 × 窗口约束，
+            // 而不随账号总存续时间增长。
             let recentFloor = try await sql.raw("""
                 SELECT MIN(user_sync_sequence) - 1 AS value
                 FROM \(unsafeRaw: table("user_sync_log"))
@@ -160,8 +159,8 @@ public struct PostgresV2UserSyncLogCompactionWorker: Sendable {
             )
             let floor = max(candidate.compactedThroughSequence, safeFloor)
             guard floor > 0 else {
-                // Move the row behind peers instead of reclaiming it in a hot
-                // loop while a capability legitimately protects the prefix.
+                // 当能力合法地保护此前的日志时，将此行移到同类记录后面，
+                // 不要在热循环中反复认领它。
                 try await sql.raw("""
                     UPDATE \(unsafeRaw: table("user_sync_retention"))
                     SET updated_at = \(bind: now)
@@ -170,14 +169,11 @@ public struct PostgresV2UserSyncLogCompactionWorker: Sendable {
                 return .init()
             }
 
-            // Publish the floor before deleting any prefix row. Pull takes a
-            // shared lock on this row before reading incremental history, so it
-            // either completes against the old floor or observes the new floor
-            // and enters snapshot recovery. No maintenance pass scans a user's
-            // unbounded historical device set.
-            // A bounded pass may leave physical rows at/below the floor; they
-            // are unreachable incremental history and a later pass reclaims
-            // them without changing protocol state.
+            // 删除此前的任何日志行前，先发布压缩下界。拉取操作在读取增量历史前
+            // 会对这一行获取共享锁，因此要么按旧下界完成，
+            // 要么看到新下界并进入快照恢复。维护过程不扫描用户无界的历史设备集合。
+            // 有界的一轮清理可能留下位于下界及其之前的物理记录；
+            // 它们已无法作为增量历史访问，后续轮次可在不改变协议状态的前提下回收。
             if floor > candidate.compactedThroughSequence {
                 try await sql.raw("""
                     UPDATE \(unsafeRaw: table("user_sync_retention"))

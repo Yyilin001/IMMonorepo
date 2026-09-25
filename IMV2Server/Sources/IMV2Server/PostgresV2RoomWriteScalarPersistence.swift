@@ -2,8 +2,8 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-// Scalar acceptance holds transaction, owner/activation fences, and final shard
-// reservation in the Store. These methods only write on its borrowed SQLDatabase.
+// 逐条接受路径的事务、所有者与激活围栏及最终分片预留均由 Store 持有。
+// 这些方法只在 Store 借用的 SQLDatabase 上写入。
 extension PostgresV2RoomWriteStore {
     func persist(
         _ writeSet: V2MessageAcceptanceTransaction,
@@ -132,10 +132,8 @@ extension PostgresV2RoomWriteStore {
             SELECT count(*) FROM completion_insert
             """).run()
         if contentReviewMode.enqueuesJobs {
-            // This outbox row commits with the message. A process crash between
-            // acceptance and worker wake therefore cannot create an unreviewed
-            // blind spot; leases recover the work without touching the hot send
-            // path again.
+            // 此发件箱记录与消息一同提交。因此接受与工作器唤醒之间的进程崩溃
+            // 不会造成未经审核的盲区；租约会恢复工作，无须再次进入热发送路径。
             try await sql.raw("""
                 INSERT INTO im_v2.content_review_jobs
                     (message_id, room_id, expected_content_revision, state, created_at)
@@ -187,7 +185,7 @@ extension PostgresV2RoomWriteStore {
                  )),
                  \(bind: room.membershipRevision), \(bind: message.createdAt))
             """).run()
-        // Mentions wake clients; content is recovered from this room event.
+        // @ 提及会唤醒客户端；内容从此房间事件恢复。
         try await v2EnqueueMentionPushWakes(
             sourceEventID: eventID,
             mentionedUserIDs: mentionTargets,
@@ -239,10 +237,9 @@ extension PostgresV2RoomWriteStore {
     ) async throws {
         let message = writeSet.acceptedMessage
         let admission = writeSet.nextRoomState.admission
-        // The load test's dominant shape is a plain direct message. Keep the
-        // rich path below intact for review/media/mentions, but do not make a
-        // plain message pay for three empty data-modifying CTEs or rewrite
-        // room-admission fields that cannot change in direct room-log mode.
+        // 负载测试中最常见的是普通私聊消息。为审核、媒体和提及保留下方完整路径，
+        // 但不要让普通消息执行三条空的数据修改 CTE，
+        // 也不要重写在私聊房间日志模式下不会变化的房间准入字段。
         if !contentReviewMode.enqueuesJobs,
            message.media.isEmpty,
            message.mentions.isEmpty {

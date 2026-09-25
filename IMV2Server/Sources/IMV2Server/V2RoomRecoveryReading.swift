@@ -15,7 +15,7 @@ public enum V2RoomStateReadResult: Equatable, Sendable {
 }
 
 public protocol V2RoomStateReading: Sendable {
-    /// Each distinct requested room has an explicit result; unavailable reveals no existence information.
+    /// 每个不同的请求房间都有明确结果；不可用结果不透露房间是否存在。
     func states(roomIDs: [RoomID], actorUserID: UserID) async throws -> [RoomID: V2RoomStateReadResult]
 }
 
@@ -35,7 +35,7 @@ public struct V2UserRoomDirectoryEntry: Equatable, Sendable {
     }
 }
 
-/// Storage-local scan progress is separate from visible entries.
+/// 存储内部的扫描进度与可见条目分开。
 public struct V2UserRoomDirectorySlice: Sendable {
     public let entries: [V2UserRoomDirectoryEntry]
     public let scannedThrough: RoomID?

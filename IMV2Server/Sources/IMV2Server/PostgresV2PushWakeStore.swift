@@ -43,9 +43,8 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
-            // Suppress muted work once per batch, before any budget is spent.
-            // The former per-row transaction repeated this global UPDATE up to
-            // `limit` times on every pass.
+            // 每批次在消耗任何预算前只清除一次静音工作。
+            // 旧的逐行事务每轮最多重复执行 `limit` 次全局 UPDATE。
             try await suppressMutedWakes(now: now, on: sql)
 
             let candidates = try await claimCandidates(now: now, limit: limit, on: sql)
@@ -195,9 +194,8 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
     }
 
     private func suppressMutedWakes(now: Date, on sql: any SQLDatabase) async throws {
-        // Push carries only a generic wake hint, so suppression cannot affect
-        // durable user-sync correctness. Expired leases are included because
-        // their provider work is no longer active and may be reclaimed.
+        // 推送只携带通用唤醒提示，因此抑制它不会影响持久化用户同步正确性。
+        // 已过期租约也纳入处理，因为对应的提供方工作已不再活动，可被回收。
         try await sql.raw("""
             UPDATE im_v2.push_wake_outbox AS wake
             SET state = 'suppressed', suppression_reason = 'conversation_muted',
@@ -240,7 +238,7 @@ private struct PendingPushWakeRow: Decodable {
     let dispatchID: UUID
     let deviceID: UUID
     let campaignID: String
-    // This timestamp is part of the budget key; retain its exact stored value.
+    // 此时间戳是预算键的一部分；保留其精确的已存值。
     let budgetWindowStartedAt: V2PostgresTimestamp
     let requiresNewKeyOperation: Bool
     let admittedAt: Date?

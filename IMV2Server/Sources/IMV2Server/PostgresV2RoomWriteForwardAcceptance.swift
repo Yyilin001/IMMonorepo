@@ -4,9 +4,8 @@ import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
-// Each stage borrows the exact transaction supplied by the Store. The Store
-// retains the three transaction boundaries, authorization coordination, and
-// all post-commit cache/credit finalization.
+// 每个阶段都借用 Store 提供的精确事务。Store 继续负责三处事务边界、
+// 授权协调，以及提交后的缓存与额度结算。
 extension PostgresV2RoomWriteStore {
     func preflightForwardInboxInTransaction(
         export: V2ForwardExport,
@@ -22,9 +21,8 @@ extension PostgresV2RoomWriteStore {
             guard row.state == "pending" else { throw V2ForwardInboxError.corruptPersistenceState }
             return (nil, .pending(.media))
         }
-        // Limits do not contribute to command identity. Apply current
-        // limits in the acceptance transaction, preserving its durable
-        // INVALID_ARGUMENT rejection and accepted-receipt recovery.
+        // 限制值不参与命令身份。接受事务中应用当前限制，
+        // 保持持久化 INVALID_ARGUMENT 拒绝和已接受回执恢复语义。
         let identityLimits = try V2MessageCommandLimits(maxUTF8Bytes: max(export.intent.text.utf8.count, 1))
         return (try authority.command(limits: identityLimits), nil)
     }
@@ -54,17 +52,17 @@ extension PostgresV2RoomWriteStore {
             try await activationScope?.require([export.intent.targetRoomID], sql: sql)
             return (.pending(.media), nil, nil)
         }
-        // Preserve inbox -> message operation -> room lock ordering.
-        // Fence before command validation can persist a rejection;
-        // receipt and pending reads above are separately fenced before return.
+        // 保持收件箱 -> 消息操作 -> 房间锁的顺序。
+        // 命令校验可能持久化拒绝结果，因此此前须先设置围栏；
+        // 上方的回执与待处理读取也分别在返回前经过围栏检查。
         try await acquireMessageOperationLock(roomID: export.intent.targetRoomID,
             senderID: export.intent.actorUserID, clientMessageID: export.intent.targetClientMessageID, sql: sql)
         try await v2AssertForwardInboxOwner(authority, sql: sql)
         try await activationScope?.require([export.intent.targetRoomID], sql: sql)
         guard v2PostgresTimestampCanEncode(now) else { throw V2ForwardInboxError.corruptPersistenceState }
         do {
-            // Recovery of an already committed receipt must not be
-            // invalidated by a later deployment's smaller text limit.
+            // 后续部署采用更小的文本上限时，
+            // 不能使已提交回执的恢复结果失效。
             let replayLimits = row.state == "accepted"
                 ? try V2MessageCommandLimits(maxUTF8Bytes: max(export.intent.text.utf8.count, 1)) : limits
             let command = try authority.command(limits: replayLimits)

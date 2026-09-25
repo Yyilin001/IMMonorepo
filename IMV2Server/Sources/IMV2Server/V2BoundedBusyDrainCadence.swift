@@ -74,8 +74,8 @@ public struct V2BoundedBusyDrainCadence: Equatable, Sendable {
             return .sleep(idleCadence.delayAfterPass(didWork: false))
         }
 
-        // Reset an idle backoff immediately, but do not use its nonzero busy
-        // delay: a busy pass is followed by another bounded claim.
+        // 立即重置空闲退避，但不要使用其中非零的繁忙延迟：
+        // 繁忙轮次之后会继续进行下一次有界领取。
         _ = idleCadence.delayAfterPass(didWork: true)
         if consecutiveBusyPasses < Int.max {
             consecutiveBusyPasses += 1

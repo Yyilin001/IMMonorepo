@@ -29,7 +29,7 @@ public func v2WaitForTaskDrain(
                 try await v2Sleep(for: timeout)
                 race.resolve(false)
             } catch {
-                // The drain won and cancelled this timer.
+                // 排空操作先完成，并取消了此计时器。
             }
         }
         race.install(tasks: [drainTask, timeoutTask])

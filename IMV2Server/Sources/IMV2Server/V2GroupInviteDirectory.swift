@@ -122,12 +122,12 @@ public struct V2GroupInviteCreationCoordinator: Sendable {
     ///   - request: 创建请求。
     /// - Returns: 两者时间戳一致时为 `true`。
     private func creationTimesMatch(_ stored: V2StoredGroupInvite, _ request: V2GroupInviteCreatePersistenceRequest) -> Bool {
-        // A database receipt must prove the exact immutable binding. Date's
-        // approximation must not hide differences that persistence preserves.
+        // 数据库回执必须证明完全一致的不可变绑定。Date 的近似值
+        // 不能掩盖持久化层保留的差异。
         if let actual = stored.persistedTimestamps, let expected = request.persistedTimestamps {
             return actual == expected
         }
-        // Retain the established tolerance for Date-only store adapters.
+        // 对仅支持 Date 的存储适配器保留既有容差。
         return abs(stored.createdAt.timeIntervalSince(request.createdAt)) < 0.000002
             && abs(stored.expiresAt.timeIntervalSince(request.expiresAt)) < 0.000002
     }

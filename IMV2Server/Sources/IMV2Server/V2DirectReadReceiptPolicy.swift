@@ -2,8 +2,8 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// Resolve a room read or control policy candidate under the authoritative control
-/// preference locks. The caller keeps this transaction alive through target commit.
+/// 在权威控制偏好锁下解析房间读取或控制策略候选项。
+/// 调用方保持此事务存活，直至目标提交。
 func v2ResolveDirectReadReceiptCandidate(
     _ event: V2UserStateEvent, sql: any SQLDatabase, schema: String
 ) async throws -> Data {

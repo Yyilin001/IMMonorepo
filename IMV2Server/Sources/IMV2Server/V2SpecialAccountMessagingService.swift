@@ -322,11 +322,10 @@ public struct PostgresV2SpecialAccountMessagingStore: V2SpecialAccountMessagingS
                                                classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2SpecialAccountMessagingError.corruptPersistenceState }
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
-            // Serialize retries even when the operation row does not exist yet.
+            // 即使操作行尚不存在，也要串行化重试。
             let lockKey = "special-account-message:\(accountUUID):\(operationUUID)"
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
-            // Replays are room writes too: validate authority before returning
-            // an existing receipt or repairing any audit row.
+            // 重放也属于房间写入：返回现有回执或修复审计行之前，先校验权限。
             if let activationScope { try await activationScope.require([roomUUID], sql: sql) }
             if let existing = try await sql.raw("SELECT request_fingerprint, message_id, room_id FROM im_v2.special_account_message_operations WHERE account_user_id = \(bind: accountUUID) AND operation_id = \(bind: operationUUID) FOR UPDATE").first(decoding: SpecialAccountOperationRow.self) {
                 guard existing.requestFingerprint == request.requestFingerprint, existing.messageID == messageUUID, existing.roomID == roomUUID else {

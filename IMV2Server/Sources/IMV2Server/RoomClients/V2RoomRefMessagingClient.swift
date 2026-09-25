@@ -2,8 +2,8 @@ import IMV2ActorContracts
 import IMV2ActorRuntime
 import IMV2Core
 
-/// The transport edge preserves client operation identities. Acceptance IDs,
-/// server time, capacity policy and all SQL are owned by the room executor.
+/// 传输边界保留客户端操作身份。接受 ID、服务端时刻、容量策略
+/// 和所有 SQL 均由房间执行器负责。
 public struct V2RoomRefMessagingClient: Sendable {
     typealias Invoke = @Sendable (V2RoomRequest, UserID, ContinuousClock.Instant) async throws -> V2RoomResponse
     private let invoke: Invoke
@@ -20,10 +20,10 @@ public struct V2RoomRefMessagingClient: Sendable {
         self.invoke = invoke
     }
 
-    // Database admission belongs to the physical host, not the waiting gateway.
+    // 数据库准入属于物理宿主，不属于等待中的网关。
     public var managesForegroundWriteAdmission: Bool { true }
-    // Gateway may publish its post-commit foreground hint. The durable outbox
-    // remains authoritative even when this hint or the reply is lost.
+    // 网关可以发布提交后的前台提示。即使提示或响应丢失，
+    // 持久化发件箱仍是权威依据。
     public var publishesCommittedGroupEvents: Bool { false }
 
     public func send(_ request: V2AuthenticatedSendMessage) async throws -> V2SendMessageOutcome {

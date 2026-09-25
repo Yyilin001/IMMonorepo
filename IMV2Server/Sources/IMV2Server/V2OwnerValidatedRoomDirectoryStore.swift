@@ -1,7 +1,7 @@
 import IMV2Core
 
-/// Filters entries outside this physical store's current ownership without changing the scan position.
-/// The enclosing directory service must also fence the scan by topology generation.
+/// 过滤不属于此物理存储当前所有权范围的条目，同时保持扫描位置不变。
+/// 外层目录服务还必须按拓扑代次对扫描设置栅栏。
 public struct V2OwnerValidatedRoomDirectoryStore: V2UserRoomDirectoryReading {
     private let underlying: any V2UserRoomDirectoryReading
     private let router: any V2RoomShardRouting
@@ -31,8 +31,8 @@ public struct V2OwnerValidatedRoomDirectoryStore: V2UserRoomDirectoryReading {
         try Task.checkCancellation()
         var entries: [V2UserRoomDirectoryEntry] = []
         for entry in slice.entries {
-            // Missing or inconsistent routing must fail the page, never advance
-            // past an unverified member as though it had been fully checked.
+            // 路由缺失或不一致时，必须使整页失败；
+            // 不能越过未经核实的成员，假装它已完成检查。
             guard let route = routes[entry.roomID] else {
                 throw V2RoomRecoveryReadError.corruptPersistence
             }

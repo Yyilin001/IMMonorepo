@@ -112,8 +112,8 @@ public enum V2RoomReceiptCommand: Codable, Equatable, Sendable {
 }
 
 public enum V2RoomReceiptQuery: Codable, Equatable, Sendable {
-    /// Room-local reader candidates. The owner never returns a final reader
-    /// page; candidates must pass through authoritative control privacy filtering.
+    /// 房间本地的读者候选项。所有者绝不返回最终读者页面；
+    /// 候选项必须经过权威控制侧隐私过滤。
     case readerCandidates(V2ActorReadReceiptReadersQueryWire)
     public var roomID: RoomID {
         switch self { case .readerCandidates(let value): value.roomID }
@@ -137,8 +137,8 @@ public enum V2RoomReceiptResult: Codable, Equatable, Sendable {
     case readerCandidates(V2ActorReadReceiptCandidatePageWire)
 }
 
-/// Optional physical microbatch transport preserves one outcome or domain rejection per item.
-/// It does not imply that a room actor loops over these requests sequentially.
+/// 可选的物理微批传输为每项保留结果或领域拒绝。
+/// 这不表示房间 Actor 会顺序遍历这些请求。
 public struct V2ActorReadReceiptRecordBatchWire: Codable, Equatable, Sendable {
     public let requests: [V2ActorRecordReadReceiptWire]
     public init(requests: [V2ActorRecordReadReceiptWire]) throws {
@@ -167,8 +167,8 @@ public struct V2ActorReadReceiptRecordBatchResultWire: Codable, Equatable, Senda
     public init(results: [V2ActorReadReceiptBatchItemResultWire]) { self.results = results }
 }
 
-/// Room-owned facts only. Candidate identity disclosure must be checked in the
-/// control database before any caller-facing reader page is assembled.
+/// 只包含房间所有者负责的事实。组装面向调用方的读者页面前，
+/// 须在控制数据库中检查候选身份是否可披露。
 public struct V2ActorReadReceiptCandidateWire: Codable, Equatable, Sendable {
     public let userID: UserID
     public let readThroughRoomSequence: UInt64

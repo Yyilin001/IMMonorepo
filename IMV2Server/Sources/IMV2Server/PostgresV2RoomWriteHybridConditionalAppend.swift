@@ -4,8 +4,8 @@ import NIOCore
 import PostgresNIO
 import SQLKit
 
-// Executes on the Store's borrowed transaction connection. It does not own
-// owner fencing, mismatch diagnosis, credit finalization, or transaction commit.
+// 在 Store 借用的事务连接上执行。不负责所有者围栏、不匹配诊断、
+// 额度结算或事务提交。
 enum PlainHybridGroupConditionalWritePath {
     static func execute(
         _ ordered: [OrderedRoomWriteRequest],

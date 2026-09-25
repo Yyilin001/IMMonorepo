@@ -22,7 +22,7 @@ public extension V2ActorSpecialAccountMessageWire {
               value.servicePrincipal == servicePrincipal,
               value.requestFingerprint == requestFingerprint
         else { throw V2SpecialAccountMessagingError.invalidRequest }
-        // The trusted request constructor checks principal metadata; this checks rich content too.
+        // 可信请求构造器检查主体元数据；这里还会检查完整内容。
         try V2RichMessageContent.validate(text: text, entities: entities)
         return value
     }

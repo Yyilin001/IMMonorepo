@@ -2,8 +2,8 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// Media control uses this port at both grant issuance and provider exchange.
-/// Device authority and provider bytes remain with the control coordinator.
+/// 媒体控制在授权签发和服务商交换时都使用此端口。
+/// 设备权限与服务商字节数据仍由控制域协调者负责。
 public struct V2ActorRoomMediaAuthorizationPort: Sendable {
     private let query: @Sendable (V2RoomMediaAuthorizationQuery, ContinuousClock.Instant) async throws -> V2RoomMediaAuthorizationResult
 
@@ -29,8 +29,8 @@ public struct V2ActorRoomMediaAuthorizationPort: Sendable {
         }
     }
 
-    /// A stored grant never substitutes for a fresh room turn. Any change in
-    /// membership/content/media generation invalidates the prior snapshot.
+    /// 已存储的授权不能代替新的房间执行轮次。成员、内容或媒体代次
+    /// 发生任何变化，都会使先前的快照失效。
     public func recheck(_ snapshot: V2ActorMessageMediaVisibilitySnapshotWire,
                         actorUserID: UserID,
                         deadline: ContinuousClock.Instant) async throws -> Bool {

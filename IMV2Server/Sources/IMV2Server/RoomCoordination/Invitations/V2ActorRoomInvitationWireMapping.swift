@@ -197,17 +197,17 @@ extension V2ActorInvitePersistedTimesWire {
               createdAtMicroseconds < expiresAtMicroseconds else {
             throw V2GroupInvitationServiceError.invalidRequest
         }
-        // V2PostgresTimestamp's synthesized Codable carries the exact integer; its Date initializer
-        // necessarily rounds and cannot be used to reconstruct an immutable database receipt.
+        // V2PostgresTimestamp 自动生成的 Codable 携带精确整数；
+        // 其 Date 初始化器必然舍入，不能用于重建不可变的数据库回执。
         func timestamp(_ value: Int64) throws -> V2PostgresTimestamp {
             try JSONDecoder().decode(V2PostgresTimestamp.self,
                                      from: Data("{\"microseconds\":\(value)}".utf8))
         }
         let pair = V2GroupInviteCreationTimestamps(createdAt: try timestamp(createdAtMicroseconds),
                                                    expiresAt: try timestamp(expiresAtMicroseconds))
-        // The microsecond pair is authoritative. A Date agrees with it within
-        // 2µs, or within one Double step where that step is coarser (dates
-        // far from 1970 that PostgreSQL still stores exactly).
+        // 微秒数对是权威值。Date 与其差距应在 2 微秒内；
+        // 若 Double 的单步精度更粗，则允许相差一个步长
+        // （即 PostgreSQL 仍可精确存储、但远离 1970 年的日期）。
         func agrees(_ value: V2PostgresTimestamp, _ date: Date) -> Bool {
             let difference = abs(value.date.timeIntervalSince(date))
             return difference < 0.000002 || difference <= date.timeIntervalSince1970.ulp
@@ -417,9 +417,9 @@ extension V2ActorGroupJoinQuotaIntentWire {
     }
 }
 extension V2ActorGroupJoinQuotaIntentWire {
-    /// Mirrors group_join_quota_outcome_check and group_join_quota_lease_check.
-    /// Reservation replays a retried operation whose request already ended with
-    /// its terminal intent, so every persistable phase must cross the wire.
+    /// 与 group_join_quota_outcome_check 和 group_join_quota_lease_check 对应。
+    /// 预留会重放已重试的操作，即使其请求已经以终态意图结束；
+    /// 因此每个可持久化阶段都必须在线路协议中表示。
     static func isPersistable(phase: V2ActorGroupJoinQuotaPhaseWire, outcome: V2ActorGroupJoinQuotaOutcomeWire?,
                               hasTarget: Bool, hasLease: Bool) -> Bool {
         guard !hasLease || phase == .held || phase == .tracking else { return false }

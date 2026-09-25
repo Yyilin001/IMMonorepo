@@ -1,5 +1,5 @@
-/// Closed domain errors. Infrastructure/commit uncertainty remains a runtime
-/// failure and never becomes an arbitrary remote error string.
+/// 封闭的领域错误集合。基础设施故障或提交结果不明仍属运行时失败，
+/// 绝不转成任意远程错误字符串。
 public enum V2ActorMessagingErrorWire: Codable, Equatable, Sendable {
     case sendStore(V2ActorMessagingSendStoreErrorWire)
     case editStore(V2ActorMessagingEditStoreErrorWire)

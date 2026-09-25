@@ -8,7 +8,7 @@ extension V2ActorOpenDirectRoomWire {
     }
 }
 extension V2ActorCreateGroupRoomWire {
-    /// Capacity class is derived by the coordinator's policy; it is not caller authority.
+/// 容量类别由协调器的策略推导，不能由调用方指定。
     public func toDomain(capacityClass: V2GroupCapacityClass) throws -> V2CreateGroupRoomCommand {
         try .init(actorUserID: actorUserID, operationID: operationID, title: title,
                   capacityClass: capacityClass, initialMemberUserIDs: initialMemberUserIDs)

@@ -3,7 +3,7 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// The composition root supplies RoomRef calls; this control coordinator never resolves an owner database.
+/// 组合入口提供 RoomRef 调用；此控制协调器绝不解析所有者数据库。
 public struct V2ActorInvitationRoomPort: Sendable {
     public let command: @Sendable (V2RoomInvitationCommand, ContinuousClock.Instant) async throws -> V2RoomInvitationResult
     public let query: @Sendable (V2RoomInvitationQuery, ContinuousClock.Instant) async throws -> V2RoomInvitationResult
@@ -15,7 +15,7 @@ public struct V2ActorInvitationRoomPort: Sendable {
     }
 }
 
-/// Control-only secret, directory and quota workflow shared by foreground and recovery.
+/// 前台与恢复共用的控制侧密钥、目录和配额工作流。
 public struct V2ActorInvitationCoordinator: Sendable {
     private let room: V2ActorInvitationRoomPort
     private let directory: any V2GroupInviteDirectory
@@ -60,8 +60,8 @@ public struct V2ActorInvitationCoordinator: Sendable {
             maximumApprovedUses: request.maximumApprovedUses,
             maximumActiveInvitesPerRoom: policy.maximumActiveInvitesPerRoom,
             createdAt: issuedAt)
-        // Read the chosen room turn before allocating any global intent. Existing
-        // owner history fixes the ID and exact PostgreSQL microseconds on retry.
+        // 分配任何全局意图前先读取选定的房间轮次。
+        // 重试时既有所有者历史固定 ID 和精确 PostgreSQL 微秒值。
         guard case .preflightStored(let previous) = try await room.query(
             .preflightCreation(.init(domain: candidate)), deadline) else {
             throw V2GroupInviteDirectoryError.ownerResultMismatch
@@ -94,8 +94,8 @@ public struct V2ActorInvitationCoordinator: Sendable {
 
     public func resumeCreation(_ intent: V2GroupInviteCreationIntent, evaluatedAt: Date,
                                deadline: ContinuousClock.Instant) async throws {
-        // Replay the same durable prepare/owner/finalize workflow, without
-        // issuing a secret or generating a new room-side identity.
+        // 重放同一持久化的准备、所有者处理与收尾工作流，
+        // 不签发密钥，也不生成新的房间侧身份。
         _ = try await V2GroupInviteCreationCoordinator(directory: directory).create(
             intent.request.evaluated(at: evaluatedAt)) { fixed in
             guard case .createdStored(let value) = try await room.command(
@@ -172,7 +172,7 @@ public struct V2ActorInvitationCoordinator: Sendable {
         return .submission(value)
     }
 
-    /// Recovery uses the persisted generation; it never reserves a second slot.
+    /// 恢复使用已存代次，绝不预留第二个槽位。
     func resumeSubmission(_ intent: V2GroupJoinQuotaIntent,
                           deadline: ContinuousClock.Instant) async throws {
         _ = try await applyReserved(intent, deadline: deadline)

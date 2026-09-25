@@ -351,8 +351,8 @@ public struct V2SyncService: Sendable {
     /// - Throws: 代次为零或任一取值超出有符号 64 位范围时抛出
     ///   ``V2SyncServiceError/invalidRequest``。
     private func validate(generation: UInt64, sequence: UInt64 = 0) throws {
-        // Generation zero is never issued. Sequence zero is valid for an
-        // empty account; both fields must fit the durable signed counters.
+        // 不会签发代次零。空账户的序号可以为零；
+        // 两个字段都必须能放入持久化的有符号计数器。
         guard generation > 0, Int64(exactly: generation) != nil,
               Int64(exactly: sequence) != nil else {
             throw V2SyncServiceError.invalidRequest

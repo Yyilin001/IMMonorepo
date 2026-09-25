@@ -15,8 +15,8 @@ public protocol V2PasswordLifecycleManaging: Sendable {
     func resetPassword(accountHandle: String, recoveryCode: String, newPassword: String, deviceID: DeviceID) async throws
 }
 
-/// Password changes and offline recovery share the account-state lock with device issuance.
-/// No password, recovery code, or resulting secret is retained in audit or operation records.
+/// 密码修改和离线恢复与设备签发共用账号状态锁。
+/// 审计或操作记录中不保留密码、恢复码或由此产生的密钥。
 public struct V2PasswordLifecycleService: V2PasswordLifecycleManaging {
     private let database: any Database
     private let passwords: any V2PasswordHashing
@@ -31,8 +31,8 @@ public struct V2PasswordLifecycleService: V2PasswordLifecycleManaging {
         self.recoveryKey = recoveryKey
     }
 
-    /// Replace a recovery code only after verifying the current password. The client generates
-    /// and saves the new code before sending it, so a lost response cannot lose the only copy.
+    /// 只有验证当前密码后才能替换恢复码。客户端在发送前生成并保存新码，
+    /// 因此响应丢失不会导致唯一副本丢失。
     public func setRecoveryCode(accountHandle: String, password: String, recoveryCode: String, deviceID: DeviceID) async throws {
         guard Self.validRecoveryCode(recoveryCode) else { throw V2PasswordLifecycleError.invalidInput }
         let expected = try await verifyPassword(accountHandle: accountHandle, password: password, deviceID: deviceID)
@@ -48,15 +48,15 @@ public struct V2PasswordLifecycleService: V2PasswordLifecycleManaging {
                          newPasswordHash: hash, recoveryHMAC: nil, expectedRecoveryHMAC: nil)
     }
 
-    /// A successful reset consumes the recovery code and revokes every device, including
-    /// the device submitting this request. A fresh login is always required afterwards.
+    /// 重置成功会消耗恢复码并撤销所有设备，包括提交请求的设备。
+    /// 此后始终需要重新登录。
     public func resetPassword(accountHandle: String, recoveryCode: String, newPassword: String, deviceID: DeviceID) async throws {
         guard Self.validRecoveryCode(recoveryCode), V2PasswordHashPolicy.accepts(newPassword) else { throw V2PasswordLifecycleError.invalidInput }
         let handle = try canonicalAccountHandle(accountHandle)
         guard let sql = database as? any SQLDatabase else { throw V2PasswordLifecycleError.unavailable }
-        // Recovery codes have 256 random bits; do not share the password lockout, otherwise
-        // an attacker could prevent recovery simply by submitting incorrect passwords.
-        // The trusted edge's shared address budget still applies to this endpoint.
+        // 恢复码包含 256 位随机数据，不能与密码共用锁定机制；
+        // 否则攻击者仅需提交错误密码就能阻止恢复。
+        // 可信边缘的共享地址限额仍适用于此接口。
         let row = try await sql.raw("SELECT user_id, password_hash, credential_revision, recovery_code_hmac FROM im_v2.account_password_credentials WHERE account_handle = \(bind: handle)").first(decoding: Credential.self)
         let incoming = recoveryKey.digest("v2-recovery|" + recoveryCode)
         guard let row, let stored = row.recoveryHMAC,
@@ -110,7 +110,7 @@ public struct V2PasswordLifecycleService: V2PasswordLifecycleManaging {
                 try await sql.raw("UPDATE im_v2.account_password_credentials SET recovery_code_hmac = \(bind: recoveryHMAC) WHERE user_id = \(bind: user)").run()
             }
             try await sql.raw("DELETE FROM im_v2.account_password_login_rate_limits WHERE account_handle = \(bind: handle)").run()
-            // Only a bounded action name and opaque identities enter this audit.
+            // 此审计只记录有界的操作名称和不可解读的身份标识。
             try await sql.raw("INSERT INTO im_v2.account_password_authentication_audit (event_id, outcome, user_id, device_id, occurred_at) VALUES (\(bind: UUID()), \(bind: newPasswordHash == nil ? "recovery_code_changed" : expectedRecoveryHMAC == nil ? "password_changed" : "password_recovered"), \(bind: user), \(bind: deviceID.uuidValue), clock_timestamp())").run()
         }
     }

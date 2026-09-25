@@ -99,8 +99,7 @@ public struct V2VaporMediaUploadRoutes: Sendable {
                 case .invalidProviderTarget: throw Abort(.serviceUnavailable)
                 }
             } catch is V2MediaStoreError {
-                // Do not reveal whether the caller named a real object or a
-                // session belonging to a different account/device.
+                // 不要透露调用方指定的是实际对象，还是属于其他账户／设备的会话。
                 throw Abort(.notFound)
             } catch {
                 throw Abort(.serviceUnavailable)

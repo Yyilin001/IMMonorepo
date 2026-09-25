@@ -2,8 +2,8 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// The two user-owned preference writes needed beside direct-room creation.
-/// Opening a room is intentionally absent from this control-side capability.
+/// 私聊房间创建时所需的两项用户自有偏好写入。
+/// 此控制侧能力有意不包含打开房间操作。
 public protocol V2DirectMessagePreferenceManaging: Sendable {
     func setStrangerMessagePermission(actorUserID: UserID, operationID: StrangerMessagePreferenceOperationID,
                                       permission: V2StrangerMessagePermission) async throws -> V2SetStrangerMessagePermissionOutcome
@@ -13,8 +13,8 @@ public protocol V2DirectMessagePreferenceManaging: Sendable {
 
 extension V2DirectMessagingService: V2DirectMessagePreferenceManaging {}
 
-/// Constructs only the user preference capability from the control store;
-/// the legacy service's room-opening method need not be built in the app.
+/// 只从控制存储构造用户偏好能力；
+/// 应用无需构造旧服务的房间打开方法。
 public struct V2ControlDirectMessagePreferenceClient: V2DirectMessagePreferenceManaging {
     private let store: any V2DirectMessagingStore
     private let now: @Sendable () -> Date
@@ -40,8 +40,8 @@ public struct V2ControlDirectMessagePreferenceClient: V2DirectMessagePreferenceM
     }
 }
 
-/// Pre-room operations use the control coordinator and its fixed-placement
-/// bootstrap. No old direct/group creation writer is exposed to this handler.
+/// 房间创建前的操作使用控制协调器及其固定位置的启动流程。
+/// 此处理器不暴露旧的私聊或群组创建写入器。
 public struct V2GatewayRoomCreationServices: Sendable {
     typealias Invoke = @Sendable (V2ActorRoomCreationCommand, ContinuousClock.Instant) async throws -> V2ActorRoomCreationResult
     let direct: V2ActorDirectMessagingClient

@@ -254,9 +254,8 @@ public struct V2GatewayDomainCommandHandler:
     private let now: @Sendable () -> Date
     private let monotonicNow: @Sendable () -> ContinuousClock.Instant
 
-    /// Production composition for existing-room calls and pre-room creation.
-    /// User/control services remain explicit so a room capability cannot
-    /// accidentally become the authority for user-owned operations.
+    /// 生产环境中现有房间调用和创建房间前操作的组合入口。
+    /// 用户服务与控制服务保持显式依赖，避免房间能力意外成为用户自有操作的授权依据。
     public init(roomActors: V2GatewayRoomActorServices,
                 roomCreation: V2GatewayRoomCreationServices,
                 liveActivity: V2LiveActivityService,
@@ -601,9 +600,8 @@ public struct V2GatewayDomainCommandHandler:
             await telemetry.record(.gatewayCommand(
                 traceID: traceID,
                 command: command,
-                // A future protocol error may intentionally have no metric
-                // label until it is reviewed. It is still a rejection, never
-                // an accepted command merely because it is unclassified.
+                // 新增的协议错误在完成审核前可能有意不设置指标标签。
+                // 即使尚未分类，它仍表示拒绝，不能被当作已接受的命令。
                 outcome: hasProtocolError ? .rejected : .accepted,
                 rejection: rejection,
                 elapsedMilliseconds: v2ElapsedMilliseconds(since: startedAt, now: monotonicNow())
@@ -619,9 +617,8 @@ public struct V2GatewayDomainCommandHandler:
         case .syncPull, .syncAck, .syncSnapshot, .snapshotPagePull, .snapshotAck:
             return .sync
         case .openDirectRoom where controlWriteAdmissionEnabled:
-            // Opening a relationship/room is a durable control-plane write,
-            // not an event append. It must never exhaust the reservation used
-            // by sends in conversations that are already open.
+            // 建立关系或房间是持久化控制平面写入，并非追加事件。
+            // 不能因此耗尽已建立会话发送消息所用的预留容量。
             return .foregroundControlWrite
         case .getGroupRolePolicyBaseline,
              .listRoomMembers,
@@ -634,15 +631,13 @@ public struct V2GatewayDomainCommandHandler:
              .getLiveActivityPreferences,
              .subscribePresence,
              .subscribeTyping:
-            // These commands authoritatively read persisted state, but they
-            // never mutate it. Keep their bounded waiting separate from
-            // writes so an active room-log catch-up cannot starve message
-            // acceptance. Authorization remains in each domain service.
+            // 这些命令以持久化状态为权威进行读取，但不会修改它。
+            // 将其有界等待与写入分开，避免繁忙的房间日志追赶阻塞消息接受。
+            // 授权仍由各领域服务负责。
             return .interactiveRead
         case .accountRoomChangesStart, .groupEventUnsubscribe, .unsubscribePresence, .unsubscribeTyping:
-            // These commands only release process-local subscription state or
-            // return a static success envelope. They must remain available to
-            // shed resources while PostgreSQL is overloaded.
+            // 这些命令只释放进程内订阅状态，或返回固定的成功响应。
+            // PostgreSQL 过载时仍须可用，以便释放资源。
             return nil
         default:
             return .foregroundWrite
@@ -772,8 +767,7 @@ public struct V2GatewayDomainCommandHandler:
         } catch let failure as V2RoomCallFailure {
             switch failure {
             case .outcomeUnknown:
-                // The client keeps its operation ID on retry; a timed-out
-                // write may already be durable on the previous incarnation.
+                // 客户端重试时沿用操作 ID；超时的写入可能已在前一实例中持久化。
                 return errorEnvelope(code: "UNAVAILABLE", retryable: true)
             case .notAccepted(let reason), .rolledBack(let reason):
                 switch reason {
@@ -843,8 +837,8 @@ public struct V2GatewayDomainCommandHandler:
                 is V2DirectAuthorizationIntentError,
                 is V2DirectAuthorizationReceiptError,
                 is V2DirectSendControlPolicyError {
-            // Unfinished revocation, an aborted grant or unavailable owner is
-            // request-scoped. Preserve the authenticated transport for retry.
+            // 未完成的撤销、中止的授权许可或不可用的所有者只影响当前请求。
+            // 保留已认证的传输连接供重试。
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2SocialRelationshipStoreError.actorInactive {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
@@ -855,11 +849,9 @@ public struct V2GatewayDomainCommandHandler:
         } catch V2RoomWriteStoreError.roomNotFound, V2RoomWriteStoreError.replyTargetNotFound {
             return errorEnvelope(code: "NOT_FOUND", retryable: false)
         } catch V2RoomWriteStoreError.capacityProfileMismatch, V2RoomWriteStoreError.corruptPersistenceState {
-            // Capacity profiles are immutable room contracts. A deployment
-            // using another profile, or a broken persisted admission
-            // invariant, is an operational availability failure—not a wire
-            // or authentication failure. Keep the authenticated connection
-            // alive and expose only the stable protocol vocabulary.
+            // 容量配置是不可变的房间契约。部署使用了另一配置，或持久化准入不变量
+            // 遭到破坏，都属于运行可用性故障，而非线路协议或认证故障。
+            // 保持已认证连接，并只暴露稳定的协议错误类别。
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2MentionValidationError.notAuthorized {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
@@ -905,19 +897,16 @@ public struct V2GatewayDomainCommandHandler:
                 V2MessageReactionStoreError.reactionLimitReached {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
         } catch V2SyncStoreError.invalidOrExpiredSyncToken {
-            // A token is only an opaque continuation capability.  Its expiry
-            // is not a transport failure: the client can restart its pull
-            // from its durable cursor without reconnecting.
+            // 令牌只是不可解读的续传能力。令牌过期不属于传输故障：
+            // 客户端可从持久化游标重新拉取，无须重连。
             return errorEnvelope(code: "SYNC_TOKEN_INVALID", retryable: false)
         } catch V2SyncStoreError.invalidOrExpiredSyncReceipt {
-            // ACK receipts fence an individual pull range.  Do not let a
-            // stale receipt advance a cursor, and make the retry path
-            // explicit to the client rather than surfacing a store error.
+            // ACK 回执限定单次拉取范围。过期回执不能推进游标；
+            // 应向客户端明确指示重试，而非暴露存储错误。
             return errorEnvelope(code: "SYNC_RECEIPT_INVALID", retryable: false)
         } catch V2SyncStoreError.deviceRevoked {
-            // The durable shard tombstone can win the race before every
-            // replica has closed its already-authenticated socket. Fail the
-            // in-flight request without exposing any projection data.
+            // 持久化分片墓碑可能先于所有副本关闭已认证套接字而生效。
+            // 此时让执行中的请求失败，不暴露任何投影数据。
             return errorEnvelope(code: "UNAUTHENTICATED", retryable: false)
         } catch V2SyncStoreError.resetRequired, V2SyncStoreError.generationMismatch {
             return errorEnvelope(code: "RESET_REQUIRED", retryable: false)
@@ -926,14 +915,12 @@ public struct V2GatewayDomainCommandHandler:
         } catch V2SyncStoreError.acknowledgementBeyondWatermark {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
         } catch V2SyncStoreError.syncLogSequenceGap, V2SyncStoreError.snapshotCheckpointUnavailable {
-            // The server cannot produce a complete sync response yet. Keep
-            // the request retryable without issuing partial capabilities or
-            // presenting an unassigned snapshot as ready for the client.
+            // 服务端目前无法生成完整的同步响应。保持请求可重试，
+            // 不发放不完整的能力，也不把尚未分配的快照呈现为已就绪。
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2SyncStoreError.syncRecordTooLarge {
-            // Persisted state must never force a transport-level disconnect.
-            // The non-retryable code also prevents an oversized head record
-            // from becoming an infinite client retry loop.
+            // 持久化状态不能迫使传输层断开连接。
+            // 不可重试的错误码也能防止超大的首条记录让客户端无限重试。
             return errorEnvelope(code: "SYNC_RECORD_TOO_LARGE", retryable: false)
         } catch V2RoomMembershipStoreError.corruptPersistenceState,
                 V2MessageWithdrawalStoreError.corruptPersistenceState,
@@ -944,19 +931,16 @@ public struct V2GatewayDomainCommandHandler:
                 V2DirectMessagingStoreError.corruptPersistenceState,
                 V2GroupRoomCreationIntentStoreError.corruptPersistenceState,
                 V2GroupMessagingStoreError.corruptPersistenceState {
-            // Domain stores use this closed error for failed persistence
-            // invariants. None of these failures invalidates an authenticated
-            // transport session, and leaking the underlying database shape
-            // would expose internal state.
+            // 领域存储使用此封闭错误表示持久化不变量失败。
+            // 这些失败不会使已认证传输会话失效；泄漏底层数据库结构还会暴露内部状态。
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch is V2ForwardMessageResultValidationError {
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch is CancellationError {
             throw CancellationError()
         } catch let error where v2PostgresFailureDisposition(error) != .other {
-            // A request-scoped database shortage or an exhausted transaction
-            // retry is not a transport failure. Return a sanitized retryable
-            // response and keep the authenticated connection alive.
+            // 仅影响当前请求的数据库资源不足或事务重试耗尽都不属于传输故障。
+            // 返回经处理的可重试响应，并保持已认证连接。
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         }
     }
@@ -1003,17 +987,13 @@ public struct V2GatewayDomainCommandHandler:
                 excludingConnectionID: originatingConnectionID
             )?.materialized() {
                 await groupEventLog.recordCommittedDirectRoomLogEvent(directEvent)
-                // Best effort and post-commit only. The dispatcher validates
-                // and queues one immutable payload shared with the local
-                // room-log acceleration cache.
+                // 仅在提交后尽力执行。分发器校验并排队一个不可变载荷，
+                // 与本地房间日志加速缓存共用。
                 foregroundGroupEventHints.submitForegroundDirectEvent(directEvent)
             } else if let groupEventDraft = V2GroupRoomLiveEventDraft(message) {
-                // The append batcher invokes its committed observer before
-                // resuming this request. In that configuration the observer
-                // has already materialized and submitted this exact Hybrid
-                // event. Keep the cheap eligibility draft so the richer-event
-                // fallback below remains unchanged, but do not JSON-encode a
-                // second payload merely to discard it here.
+                // 追加批处理器会在恢复此请求前调用已提交观察者。在这种配置下，
+                // 观察者已生成并提交这一条 Hybrid 事件。保留低成本的资格草稿，
+                // 以维持下方较丰富事件的回退逻辑；不要再编码一份最终会被丢弃的 JSON 载荷。
                 if !sendMessage.publishesCommittedGroupEvents,
                    let groupEvent = groupEventDraft.materialized() {
                     await groupEventLog.recordCommittedDirectRoomLogEvent(groupEvent)
@@ -1030,9 +1010,8 @@ public struct V2GatewayDomainCommandHandler:
         case .idempotent(let message):
             return try acceptedMessageEnvelope(message)
         case .denied:
-            // The durable, private activity and composer capability are
-            // synced separately. Do not disclose which counterpart policy
-            // caused this rejection on the realtime response.
+            // 持久化的私有活动和输入能力分别同步。
+            // 实时响应不得透露对方的哪项策略导致此次拒绝。
             return errorEnvelope(code: "DIRECT_MESSAGE_RESTRICTED", retryable: false)
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds)
@@ -1467,9 +1446,8 @@ public struct V2GatewayDomainCommandHandler:
     /// 才回落到本方法。
     private func groupEventPageEnvelope(_ page: V2GroupEventLogPage) -> IMV2Envelope {
         var response = IMV2Envelope()
-        // Use the largest possible request ID to make this sizing an upper
-        // bound. `V2GatewaySession` replaces it with the actual request ID
-        // immediately before final protobuf encoding.
+        // 使用可能的最大请求 ID，让此处估算成为上界。
+        // `V2GatewaySession` 会在最终 protobuf 编码前替换为实际请求 ID。
         response.requestID = .max
         response.protocolVersion = IMV2ProtocolVersion.current
         response.groupEventPage = .init()
@@ -1502,9 +1480,8 @@ public struct V2GatewayDomainCommandHandler:
             eventFieldBytes = candidateEventFieldBytes
         }
         guard !wireEvents.isEmpty || page.events.isEmpty else {
-            // A durable event must not be able to force a transport close. A
-            // client cannot recover by repeating the same cursor, so make the
-            // persisted incompatibility explicit and retain the connection.
+            // 持久化事件不能迫使传输连接关闭。客户端无法靠重复同一游标恢复，
+            // 因此应明确指出持久化数据不兼容，并保持连接。
             return errorEnvelope(code: "GROUP_EVENT_TOO_LARGE", retryable: false)
         }
 
@@ -1515,11 +1492,10 @@ public struct V2GatewayDomainCommandHandler:
         // 而不是静默地少几条。
         response.groupEventPage.logTrimmedThroughRoomSequence = page.logTrimmedThroughRoomSequence
 
-        // The estimator is exact for the current schema and already uses the
-        // largest possible request ID. Do not serialize the whole page here:
-        // `V2GatewaySession` performs the authoritative protobuf encode once
-        // after substituting the real request ID. Payload-budget tests encode
-        // that final frame and protect this estimator when the proto evolves.
+        // 此估算器对当前 schema 是精确的，且已采用可能的最大请求 ID。
+        // 此处不要序列化整个页面：`V2GatewaySession` 替换实际请求 ID 后，
+        // 才进行唯一一次权威 protobuf 编码。载荷预算测试会编码最终帧，
+        // 在 proto 演进时保护此估算逻辑。
         return response
     }
 
@@ -1701,8 +1677,7 @@ public struct V2GatewayDomainCommandHandler:
             var response = IMV2Envelope(); response.resetRequired = .init(); response.resetRequired.snapshotID = snapshotID.rawValue; response.resetRequired.generation = generation; response.resetRequired.baseUserSyncSequence = base; response.resetRequired.expiresAtMs = try v2GatewayMilliseconds(expiry)
             return response
         case .resetPreparing(_, _, let retryAfter):
-            // The wire carries whole seconds. Round up so clients do not
-            // retry before the store's requested interval has elapsed.
+            // 线路协议只传输整秒数；向上取整，避免客户端在存储要求的间隔结束前重试。
             guard retryAfter >= 0,
                   let seconds = UInt32(exactly: retryAfter.rounded(.up)) else {
                 return errorEnvelope(code: "UNAVAILABLE", retryable: true)
@@ -1756,8 +1731,8 @@ public struct V2GatewayDomainCommandHandler:
         var response = IMV2Envelope()
         response.error = .init()
         guard let seconds = UInt32(exactly: retryAfter), currentRevision <= UInt64(Int64.max) else {
-            // Invalid domain response values indicate a server failure. Do not
-            // truncate a delay or send a revision that cannot be persisted.
+            // 无效的领域响应值意味着服务端故障。不要截断延迟值，
+            // 也不要发送无法持久化的修订号。
             response.error.code = "UNAVAILABLE"
             response.error.retryable = true
             return response

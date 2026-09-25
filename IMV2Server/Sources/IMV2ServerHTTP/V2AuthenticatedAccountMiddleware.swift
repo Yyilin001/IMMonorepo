@@ -38,8 +38,7 @@ public extension Request {
         } catch V2GatewayAuthenticationError.unauthenticated {
             throw Abort(.unauthorized)
         } catch {
-            // Dependency failure and corrupt persistence are not evidence that
-            // a caller's credential is invalid.
+            // 依赖故障和持久化数据损坏不能证明调用方凭据无效。
             throw Abort(.serviceUnavailable)
         }
     }
@@ -87,9 +86,8 @@ public struct V2AuthenticatedAccountRateLimitMiddleware: Middleware, Sendable {
         guard let identity = request.auth.get(V2AuthenticatedAccountIdentity.self)?.connection else {
             throw Abort(.serviceUnavailable)
         }
-        // Exact-handle resolution owns a stricter per-user anti-enumeration
-        // budget in its domain store. Charging the generic per-device budget
-        // as well would serialize two PostgreSQL counters for one lookup.
+        // 精确账号标识解析在领域存储中有更严格的逐用户反枚举预算。
+        // 若再扣通用的逐设备预算，一次查询就须串行更新两个 PostgreSQL 计数器。
         guard let budget = Self.budget(for: request) else {
             return try await next.respond(to: request)
         }

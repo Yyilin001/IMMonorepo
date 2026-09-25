@@ -1,7 +1,7 @@
 import IMV2Core
 
-/// A collection query obtains one independent read turn per item. The host
-/// batcher only combines items whose turns have already been granted.
+/// 集合查询为每个项目分别取得读取轮次。
+/// 宿主批处理器只合并轮次已获准的项目。
 public struct V2ActorRoomRecoveryItemQuery: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable { case state, latestVisible }
     public let roomID: RoomID
@@ -21,9 +21,8 @@ public enum V2ActorRoomRecoveryItemResult: Codable, Equatable, Sendable {
     case failure(V2ActorRoomRecoveryReadErrorWire)
 }
 
-/// Closed capability set. Adding another domain requires an explicit protocol
-/// version decision and executor case; unknown cases cannot fall through to a
-/// successful empty response. Coordinators and user directories are separate.
+/// 封闭的能力集合。新增领域须明确决定协议版本并增加执行器分支；
+/// 未知分支不能落入成功的空响应。协调器和用户目录另行处理。
 public enum V2RoomRequest: Codable, Equatable, Sendable {
     case messaging(V2RoomMessagingCommand)
     case administration(V2RoomAdministrationCommand)
@@ -59,8 +58,8 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
         }
     }
 
-    /// A service-authorized command has no user assertion. The inbound adapter
-    /// checks its specific trusted capability instead of inventing a user.
+    /// 服务授权的命令不含用户声明。入站适配器检查其特定可信能力，
+    /// 不虚构用户身份。
     public var actorUserID: UserID? {
         switch self {
         case .messaging(let value): value.actorUserID

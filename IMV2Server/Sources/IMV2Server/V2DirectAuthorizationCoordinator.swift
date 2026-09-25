@@ -11,12 +11,11 @@ public struct V2DirectAuthorizationRecoveryResult: Equatable, Sendable {
     public let deferred: Int
 }
 
-/// Durable owner abort/proof followed by control acknowledgement. The control
-/// pool must be independent of policy-writer AND grant-reservation pools, even
-/// when colocated: reservations may occupy connections while waiting for the
-/// policy lock held by a writer that needs to acknowledge owner proofs.
-/// Policy writers call drain before mutation. Runtime composition and recovery
-/// lifecycle registration are still required.
+/// 持久化所有者中止或证明后，接着由控制侧确认。
+/// 即使同址，控制连接池也必须独立于策略写入池和授权预留池：
+/// 预留可能占用连接，等待由策略写入方持有的锁，
+/// 而该写入方又需要确认所有者证明。
+/// 策略写入方在修改前调用 drain；运行时组合和恢复生命周期登记仍不可缺少。
 public struct V2DirectAuthorizationCoordinator: Sendable {
     private let intents: PostgresV2DirectAuthorizationIntentStore
     private let ownerAbort: @Sendable (V2DirectAuthorizationAttempt, Date) async throws -> V2DirectAuthorizationReceipt
@@ -36,10 +35,10 @@ public struct V2DirectAuthorizationCoordinator: Sendable {
         self.intents = intents; self.ownerAbort = ownerAbort
     }
 
-    /// Call under the policy's exclusive control lock, before changing policy.
-    /// Every proof is acknowledged on an independent control connection so a
-    /// rollback/unavailable owner cannot erase already completed drain progress.
-    /// Large queues make bounded progress and require a retry, never fake success.
+    /// 在策略的控制侧独占锁下、修改策略前调用。
+    /// 每份证明都在独立控制连接上确认，因此回滚或所有者不可用
+    /// 不会抹掉已完成的排空进度。大队列只推进有界部分并要求重试，
+    /// 绝不伪装成成功。
     func drain(_ scope: V2DirectAuthorizationRevocationScope, transaction: any Database, now: Date, limit: Int = 128) async throws {
         guard (1...128).contains(limit) else { throw V2DirectAuthorizationCoordinationError.invalidLimit }
         try Task.checkCancellation()
@@ -56,9 +55,9 @@ public struct V2DirectAuthorizationCoordinator: Sendable {
         }
     }
 
-    /// A due job may cancel its exact generation, including one whose original
-    /// caller is still running: the owner lock/tombstone makes that cancellation
-    /// durable. An unavailable owner only defers the job; it never frees a grant.
+    /// 到期任务可取消其精确代次，即使原调用方仍在运行；
+    /// 所有者锁与墓碑使取消结果持久化。
+    /// 所有者不可用只会延后任务，绝不释放授权许可。
     public func recover(limit: Int, now: Date) async throws -> V2DirectAuthorizationRecoveryResult {
         try Task.checkCancellation()
         let claimed = try await intents.claim(limit: limit, now: now)
@@ -78,8 +77,8 @@ public struct V2DirectAuthorizationCoordinator: Sendable {
     }
 }
 
-/// Policy writers must fail closed even if composition omitted the coordinator.
-/// The caller holds the corresponding account/pair/preference exclusive lock.
+/// 即使组合层遗漏协调器，策略写入方也必须以安全方式失败。
+/// 调用方持有对应的账号、关系或偏好独占锁。
 func v2DrainDirectAuthorizations(_ scope: V2DirectAuthorizationRevocationScope,
     coordinator: V2DirectAuthorizationCoordinator?, transaction: any Database, now: Date) async throws {
     if let coordinator {

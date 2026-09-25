@@ -4,9 +4,9 @@ import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
-/// Reads a message attachment's current room visibility during a granted
-/// read turn. The media/control coordinator must also validate the device and
-/// repeat this query before session exchange; this is not a provider grant.
+/// 在已授权的读取轮次内，查询消息附件当前在房间中的可见性。
+/// 媒体／控制域协调者还必须校验设备，并在会话交换前再次查询；
+/// 这里的结果不是服务商授权。
 public struct V2RoomMediaAuthorizationDomainExecutor: Sendable {
     private let database: any Database
     private let token: V2RoomActivationToken

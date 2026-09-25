@@ -56,9 +56,8 @@ struct PostgresV2DeviceRegistrationBudget: Sendable {
         guard let cutoff = v2PostgresPastTimestamp(now: now, interval: policy.window) else {
             throw V2DeviceCredentialServiceError.unavailable
         }
-        // Use the same complete window as retryAfter. Adding a truncated
-        // interval to the stored start both loses fractional seconds and can
-        // overflow PostgreSQL's upper timestamp boundary.
+        // 使用与 retryAfter 相同的完整时间窗口。若在存储的起点上
+        // 加入截断后的间隔，既会丢失小数秒，也可能越过 PostgreSQL 时间戳上界。
         try await sql.raw("""
             INSERT INTO im_v2.device_registration_rate_limits
                 (user_id, window_started_at, successful_registrations, updated_at)

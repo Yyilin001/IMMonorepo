@@ -9,8 +9,8 @@ public enum V2RoomActorApplicationError: Error, Sendable {
     case incompleteShutdown
 }
 
-/// Shared startup/shutdown composition for Gateway hosts and Account/Operator
-/// callers. Domain services receive RoomDirectory; Cluster ActorIDs stay here.
+/// Gateway Host 与 Account/Operator 调用方共用的启动和停机组合入口。
+/// 领域服务接收 RoomDirectory；集群 ActorID 仅保留在此边界内。
 public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
     public nonisolated let directory: V2RoomDirectory
     public nonisolated let reservations: V2RoomReservationCoordinator
@@ -115,8 +115,8 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         }
     }
 
-    /// False means shared DB and transport resources must remain alive. The
-    /// caller can retry with a later deadline after the real operations settle.
+    /// 返回 false 表示共享数据库和传输资源仍须保持存活。
+    /// 实际操作结束后，调用方可用更晚的期限重试。
     public func stop(deadline: ContinuousClock.Instant) async throws -> Bool {
         await directory.drain()
         async let directoryStopped = directory.quiesce(deadline: deadline)

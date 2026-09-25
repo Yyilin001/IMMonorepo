@@ -1,8 +1,8 @@
 import Foundation
 import IMV2Core
 
-// Decode the locked room and admission snapshots used by scalar and batch
-// acceptance. The Store still selects their transaction and lock ordering.
+// 解码逐条与批量接受路径使用的已加锁房间及准入快照。
+// 事务和加锁顺序仍由 Store 选择。
 struct RoomRow: Decodable {
     let kind: String
     let roomShardID: String

@@ -226,9 +226,8 @@ public actor V2LivePresenceRenewalBatcher {
         do {
             let results = try await leases.renewConnections(batch.values.map(\.request))
             for (connectionID, item) in batch {
-                // A missing row is a rejected renewal. Failing closed here
-                // keeps an expired or identity-mismatched lease from being
-                // resurrected by an incomplete store implementation.
+                // 行缺失表示续租遭拒。此处采用保守拒绝，避免不完整的存储实现
+                // 使过期或身份不匹配的租约重新生效。
                 let refresh = results[connectionID] ?? .init(
                     outcome: .rejected,
                     allowsOnlinePresence: false

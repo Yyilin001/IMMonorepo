@@ -123,8 +123,8 @@ public struct PostgresV2MessageReactionStore: V2MessageReactionStore, V2OwnerVal
             }
             guard let lease = nextShard.lease, room.roomSequence < Int64.max else { throw V2MessageReactionStoreError.corruptPersistenceState }
             let nextSequence = room.roomSequence + 1, eventUUID = try reactionUUID(eventID)
-            // Use PostgreSQL's decoded timestamp for the fresh response and event
-            // payload. Keep the original clock for every storage binding.
+            // 新响应和事件载荷使用 PostgreSQL 解码后的时间戳；
+            // 所有存储绑定仍使用原始时钟值。
             guard let timestamp = try await sql.raw("UPDATE im_v2.rooms SET room_sequence = \(bind: nextSequence) WHERE room_id = \(bind: roomID) RETURNING \(bind: now)::timestamptz AS created_at").first(decoding: ReactionCommittedTimestampRow.self) else { throw V2MessageReactionStoreError.corruptPersistenceState }
             let createdAtMilliseconds = try v2GatewayMilliseconds(timestamp.createdAt)
             if command.action == .add {

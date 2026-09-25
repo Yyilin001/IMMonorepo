@@ -62,8 +62,7 @@ public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
                     declaredByteCount: contentLength
                 )
             } catch is V2LocalFilesystemMediaProviderError {
-                // A signed target is an opaque capability; do not reveal why
-                // one was rejected or whether its object exists.
+                // 已签名目标是一项不透明能力；不要透露拒绝原因或对象是否存在。
                 throw Abort(.forbidden)
             } catch {
                 throw Abort(.serviceUnavailable)
@@ -113,8 +112,7 @@ public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
             do {
                 object = try await provider.downloadedObject(mediaID: mediaID, targetURL: targetURL)
             } catch is V2LocalFilesystemMediaProviderError {
-                // Do not distinguish expiration, a malformed capability, and
-                // an absent object from the public object-byte boundary.
+                // 在公开的对象字节访问边界，不要区分过期、能力格式错误和对象不存在。
                 throw Abort(.notFound)
             } catch {
                 throw Abort(.serviceUnavailable)

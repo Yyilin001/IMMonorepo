@@ -2,8 +2,8 @@ import IMV2ActorContracts
 import IMV2ActorRuntime
 
 public extension V2ActorInvitationRoomPort {
-    /// Service capabilities carry durable control grants. Ordinary user
-    /// operations still assert the authenticated actor and run room checks.
+/// 服务能力携带持久化控制授权许可。普通用户操作仍须确认
+/// 已认证的操作者身份，并执行房间检查。
     init(directory: V2RoomDirectory) {
         self.init(command: { command, deadline in
             let principal: V2RoomClientPrincipal

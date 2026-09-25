@@ -78,9 +78,9 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
     public func prepare() async throws {
         guard !didPrepare else { return }
         if let preparation { return try await preparation.value }
-        // Publish before suspending: actor reentrancy must not start a second
-        // destructive cleanup. A caller's cancellation does not cancel shared
-        // initialization; every caller drains the same bounded filesystem task.
+        // 挂起前先发布任务：Actor 可重入性不能启动第二次破坏性清理。
+        // 调用方取消不会取消共享初始化；所有调用方等待同一个
+        // 有界文件系统任务结束。
         let task = Task {
             defer { preparation = nil }
             let rootDirectory = self.rootDirectory
@@ -284,8 +284,8 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
                 guard try ForwardMediaFileIO.digest(upload.fileURL, byteCount: receipt.byteCount) == receipt.digest else { throw V2ForwardMediaCopyError.contentConflict }
                 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
                 do {
-                    // link(2) fails if another worker won; unlike replacement,
-                    // it cannot overwrite a previously installed different blob.
+                    // 若其他工作器先完成，link(2) 会失败；
+                    // 不同于替换操作，它不会覆盖此前安装的其他数据块。
                     try FileManager.default.linkItem(at: upload.fileURL, to: object)
                 } catch {
                     guard FileManager.default.fileExists(atPath: object.path) else { throw error }
@@ -428,7 +428,7 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         }
     }
 
-    // Never unlink lock files: old/new descriptors must protect the same inode.
+    // 绝不删除锁文件：旧、新文件描述符必须保护同一 inode。
     private nonisolated static func withObjectMutationLock<Value>(
         _ object: URL, action: (URL) throws -> Value
     ) throws -> Value {
@@ -463,8 +463,8 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         byteCount: Int64,
         expiresAt: Date
     ) throws -> URL {
-        // Download metadata lookup suspends the actor. Validate again here so
-        // the encoded target is still usable when it is actually signed.
+        // 下载元数据查询会挂起 Actor。此处再次校验，
+        // 确保目标在实际签名时仍可使用。
         let milliseconds = try validatedExpiryMilliseconds(expiresAt)
         let claims = TargetClaims(
             kind: kind.rawValue,
@@ -520,8 +520,8 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
     }
 
     private func validatedExpiryMilliseconds(_ expiresAt: Date) throws -> Int64 {
-        // A target's encoded deadline must never outlive the requested one.
-        // Truncating toward zero would extend negative Unix timestamps.
+        // 目标编码后的截止时间不能晚于请求的截止时间。
+        // 向零截断会延长负的 Unix 时间戳。
         guard let milliseconds = Int64(exactly: (expiresAt.timeIntervalSince1970 * 1_000).rounded(.down)),
               Double(milliseconds) > (try currentMilliseconds()) else {
             throw V2LocalFilesystemMediaProviderError.invalidTarget

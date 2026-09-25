@@ -1,11 +1,11 @@
-/// A capability's retry semantics, assigned by the implementation, not the caller.
+/// 能力的重试语义由实现指定，不由调用方指定。
 public enum V2RoomReplayPolicy: String, Codable, Sendable {
     case readOnly
     case durableIdempotent
     case noAutomaticRetry
 }
 
-/// Finite runtime failures; transport messages never carry arbitrary DB errors.
+/// 有限的运行时错误集合；传输消息绝不携带任意数据库错误。
 public enum V2RoomFailureReason: String, Codable, Sendable {
     case staleActivation
     case notReady
@@ -22,13 +22,13 @@ public enum V2RoomFailureReason: String, Codable, Sendable {
     case idempotencyConflict
 }
 
-/// Describes what the runtime can prove, rather than what a timeout suggests.
+/// 描述运行时能够证明的事实，而非超时所暗示的结果。
 public enum V2RoomCallFailure: Error, Equatable, Codable, Sendable {
-    /// Admission never accepted the request.
+    /// 准入从未接受该请求。
     case notAccepted(V2RoomFailureReason)
-    /// The transaction definitely rolled back and no durable effect remains.
+    /// 事务已明确回滚，不存在持久化副作用。
     case rolledBack(V2RoomFailureReason)
-    /// A dispatched write may have committed. Keep its stable operation identity.
+    /// 已分发的写入可能已提交；保持稳定的操作身份。
     case outcomeUnknown
 }
 
@@ -41,8 +41,8 @@ public enum V2RoomRetryAction: Equatable, Sendable {
 }
 
 extension V2RoomCallFailure {
-    /// This classifies retries; the caller must additionally enforce its total
-    /// monotonic deadline and attempt limit. It never manufactures an operation ID.
+    /// 此分类用于重试；调用方还须执行单调总截止时间和尝试次数限制。
+    /// 不会虚构操作 ID。
     public func retryAction(
         policy: V2RoomReplayPolicy,
         hasStableOperationID: Bool
@@ -67,8 +67,8 @@ extension V2RoomCallFailure {
     }
 }
 
-/// Shared database batchers report a transaction result to every participating
-/// room turn. Unknown completion must stop all those turns, not only the caller.
+/// 共享数据库批处理器会向每个参与的房间轮次报告事务结果。
+/// 结果不明时必须停止所有这些轮次，而不只是当前调用方。
 public enum V2RoomTransactionCompletion<Value: Sendable>: Sendable {
     case committed(Value)
     case rolledBack(V2RoomFailureReason)

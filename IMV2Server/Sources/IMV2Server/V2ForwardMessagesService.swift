@@ -322,9 +322,8 @@ public struct V2ForwardMessagesService: V2OwnerValidatedForwardMessagesHandling 
     private func clientMessageID(actor: UserID, operation: MessageForwardOperationID, source: MessageID, target: RoomID, sourceRoomID: RoomID, sourceRevision: V2MessageRevision) async throws -> ClientMessageID {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase, let actor = UUID(uuidString: actor.rawValue), let operation = UUID(uuidString: operation.rawValue), let source = UUID(uuidString: source.rawValue), let target = UUID(uuidString: target.rawValue), let sourceRoom = UUID(uuidString: sourceRoomID.rawValue) else { throw V2ForwardStoreError.corrupt }
-            // Two replicas may retry the same pair concurrently. Serialize
-            // the lookup/create boundary so both receive the same durable
-            // client ID instead of leaking a uniqueness error as UNAVAILABLE.
+            // 两个副本可能并发重试同一房间对。串行化查找／创建边界，
+            // 使两者取得同一个持久客户端 ID，避免把唯一约束错误暴露为 UNAVAILABLE。
             let lockKey = "v2-forward-pair:\(actor):\(operation):\(source):\(target)"
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             try await requireOwners([.init(uuid: sourceRoom), .init(uuid: target)], sql: sql)

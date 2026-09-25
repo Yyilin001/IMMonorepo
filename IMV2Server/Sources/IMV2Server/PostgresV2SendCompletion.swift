@@ -52,10 +52,9 @@ private func roomLogSendCompletionCTE(
     let pairJoin = isGroup ? "" : "LEFT JOIN im_v2.direct_room_pairs AS pair ON pair.room_id = message.room_id"
     let membershipSource = acceptedSource == "input" ? "input" : "accepted"
     let acceptedJoin = acceptedSource == "input" ? "" : "JOIN \(acceptedSource) AS accepted ON accepted.message_id = message.message_id"
-    // Message mutations advance the event stream without allocating a new timeline
-    // item. When the two cursors diverge, preserve the full accepted event instead
-    // of forcing the message-row format's equal-sequence invariant. The accepted
-    // source is the locked/allocated CTE, never a room re-read from an older snapshot.
+    // 消息变更会推进事件流，但不分配新的时间线条目。两个游标分叉时，
+    // 保留完整的已接受事件，不强制套用消息行格式的序号相等约束。
+    // 已接受事件以完成锁定和分配的 CTE 为来源，绝不从旧快照重新读取房间。
     return """
     , event_insert AS (
         INSERT INTO im_v2.room_events

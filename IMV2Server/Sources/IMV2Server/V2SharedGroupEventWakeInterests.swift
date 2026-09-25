@@ -1,12 +1,12 @@
 import Foundation
 import IMV2Core
 
-/// One broker interest per room, shared by independent gateway features.
-/// Each scope maintains its own room-level demand, not one lease per device.
+/// 每个房间只有一份消息代理订阅意向，供网关的不同功能共享。
+/// 各作用域分别维护房间级需求，不按设备创建租约。
 public actor V2SharedGroupEventWakeInterests {
     public enum Scope: Hashable, Sendable {
         case foreground, accountCoverage
-        /// A shared online account lifecycle, independent of connection count.
+        /// 共享的在线账号生命周期，与连接数量无关。
         case account(UUID)
     }
     public enum Failure: Error, Equatable, Sendable { case closed }
@@ -46,7 +46,7 @@ public actor V2SharedGroupEventWakeInterests {
             try Task.checkCancellation()
             guard !closed else { throw Failure.closed }
         } catch {
-            // A late failure cannot release a newer activation by this scope.
+            // 迟到的故障不能释放此作用域中较新的激活。
             if entry.owners[scope] == token {
                 entry.owners.removeValue(forKey: scope)
                 entry.revision = UUID()
@@ -59,12 +59,12 @@ public actor V2SharedGroupEventWakeInterests {
     private func deactivate(roomID: RoomID, scope: Scope) async {
         guard !closed, let entry = entries[roomID], entry.owners.removeValue(forKey: scope) != nil else { return }
         entry.revision = UUID()
-        // A remaining scope's failed broker activation is still reported to
-        // its activation caller; releasing our own demand does not own it.
+        // 其他仍存在作用域的消息代理激活失败，仍须报告给该作用域的调用方；
+        // 释放我方需求不负责处理它。
         do { try await reconcile(roomID: roomID, entry: entry) }
         catch {
-            // A failed in-flight activation can finish after the final scope
-            // has been removed. Still release any partial broker state.
+            // 执行中的激活即使失败，也可能在最后一个作用域移除后才结束。
+            // 仍须释放消息代理端残留的部分状态。
             if !closed, entry.owners.isEmpty { try? await reconcile(roomID: roomID, entry: entry) }
         }
     }
@@ -80,8 +80,8 @@ public actor V2SharedGroupEventWakeInterests {
             do {
                 let settledRevision = try await operation.task.value
                 if entry.operation?.id == operation.id { entry.operation = nil }
-                // The task may already have completed before a newer caller
-                // joined it. Recheck its returned revision, not just success.
+                // 新调用方加入前任务可能已完成。
+                // 不只检查成功与否，还要复查返回的修订号。
                 if settledRevision == entry.revision {
                     if entry.operation == nil, entry.owners.isEmpty, entries[roomID] === entry {
                         entries.removeValue(forKey: roomID)
@@ -103,8 +103,8 @@ public actor V2SharedGroupEventWakeInterests {
             let revision = entry.revision
             if entry.owners.isEmpty { await underlying.deactivate(roomID: roomID) }
             else { try await underlying.activate(roomID: roomID) }
-            // Scope mutations during broker I/O must be reconciled before
-            // any waiter can regard activation/deactivation as complete.
+            // 任何等待者认定激活或停用完成前，
+            // 都须核对消息代理 I/O 期间发生的作用域修改。
             if entry.revision == revision { return revision }
         }
     }

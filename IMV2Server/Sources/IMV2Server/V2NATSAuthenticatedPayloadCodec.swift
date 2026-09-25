@@ -82,8 +82,8 @@ enum V2NATSAuthenticatedPayloadCodec {
         subject: String,
         authenticated: Data
     ) -> Data {
-        // NATS subjects cannot contain NUL, so this binds the MAC to the
-        // transport subject without adding another field to the envelope.
+        // NATS 主题不能包含 NUL，因此可将 MAC 绑定到传输主题，
+        // 无需在信封中增加字段。
         var input = Data(subject.utf8)
         input.append(0)
         input.append(authenticated)

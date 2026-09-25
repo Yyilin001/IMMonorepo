@@ -2,7 +2,7 @@ import IMV2ActorContracts
 import IMV2Core
 
 extension V2ActorAdministrationFailureWire {
-    /// Nil means this is not a D2 business/domain error; let the outer room runtime classify it.
+/// 返回 nil 表示这不是 D2 业务或领域错误，应交由外层房间运行时分类。
     public init?(domainError error: any Error) {
         if let value = error as? V2RoomMembershipStoreError {
             switch value {

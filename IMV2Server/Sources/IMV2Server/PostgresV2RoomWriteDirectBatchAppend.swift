@@ -1,8 +1,8 @@
 import Foundation
 import SQLKit
 
-// Called only after the Store's membership check on its borrowed transaction.
-// This component owns neither the transaction nor credit finalization.
+// 仅在 Store 借用的事务中完成成员资格检查后调用。
+// 此组件既不拥有事务，也不负责额度结算。
 enum PlainDirectRoomLogBatchWritePath {
     static func persist(
         inputs: [PlainRoomLogMessageInput],

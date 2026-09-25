@@ -2,12 +2,12 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// A permit remains charged while queued, executing, or awaiting reconciliation.
-/// Only the budget that issued it can return its capacity.
+/// 许可在排队、执行或等待对账期间持续占用容量。
+/// 只有签发该许可的预算才能归还容量。
 public struct V2RoomCommandPermit: Equatable, Sendable {
     public let roomID: RoomID
-    /// Dispatch uses these exact immutable bytes, not a separately supplied
-    /// payload with a caller-reported size. Data copies share immutable storage.
+    /// 分发使用这些精确的不可变字节，不接受调用方另行提供且自行报告大小的载荷。
+    /// Data 副本共享不可变存储。
     public let encodedRequest: Data
     public var byteCount: Int { encodedRequest.count }
     public let isReservation: Bool
@@ -24,8 +24,8 @@ public struct V2RoomCommandBudgetSnapshot: Equatable, Sendable {
     public let peakByteCount: Int
 }
 
-/// Non-waiting room and host admission prevents overload from creating another
-/// unbounded queue. The activation owns each permit through durable completion.
+/// 房间和宿主准入不等待，避免过载产生另一条无界队列。
+/// 激活实例持有每份许可，直至持久化结果完成。
 public actor V2RoomCommandBudget {
     private let identity = UUID()
     private let configuration: V2RoomRuntimeConfiguration
@@ -44,8 +44,8 @@ public actor V2RoomCommandBudget {
         try acquire(roomID: roomID, encodedRequest: encodedRequest, isReservation: false)
     }
 
-    /// Reservation barriers share the ordinary count/byte limits and have their
-    /// own host-wide concurrency cap. There is no separate unbounded wait queue.
+    /// 预留屏障共用普通请求的数量与字节上限，
+    /// 并有独立的宿主级并发上限；没有额外的无界等待队列。
     func acquireReservation(roomID: RoomID, encodedRequest: Data) throws -> V2RoomCommandPermit {
         try acquire(roomID: roomID, encodedRequest: encodedRequest, isReservation: true)
     }
@@ -78,8 +78,8 @@ public actor V2RoomCommandBudget {
         return permit
     }
 
-    /// Safe for cancellation and completion to race. A late duplicate or a
-    /// permit from another host budget cannot decrement capacity again.
+    /// 取消和完成可以安全地竞速。迟到的重复通知或其他宿主预算的许可
+    /// 不能再次扣减容量。
     @discardableResult
     public func release(_ permit: V2RoomCommandPermit) -> Bool {
         guard permit.budgetID == identity,

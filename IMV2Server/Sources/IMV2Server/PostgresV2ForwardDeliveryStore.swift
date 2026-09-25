@@ -170,7 +170,7 @@ public struct PostgresV2ForwardDeliveryStore: Sendable {
         }
     }
 
-    /// Keep the current source stable through the job update. The export binding is immutable.
+    /// 更新任务期间保持当前源不变；导出绑定不可变。
     private func lockActiveSource(exportID: UUID, sql: any SQLDatabase) async throws -> Bool {
         try await sql.raw("""
             SELECT true AS value FROM im_v2.rooms AS room

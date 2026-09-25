@@ -94,10 +94,9 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
         guard let sql = database as? any SQLDatabase else {
             throw V2PublicIdentityDirectoryError.unavailable
         }
-        // Budget consumption is an atomic, independently committed statement.
-        // The following lookup is read-only and needs no shared snapshot; an
-        // explicit transaction would add BEGIN/COMMIT round trips and could
-        // incorrectly roll back an already-attempted lookup on read failure.
+        // 预算消耗是一条原子且独立提交的语句。后续查询只读，无须共享快照；
+        // 显式事务会增加 BEGIN/COMMIT 往返，
+        // 且可能在读取失败时错误回滚已尝试的查询记录。
         try await consumeLookupBudget(sql: sql, actorUserID: actorUUID)
         guard let row = try await sql.raw("""
             SELECT p.user_id, p.public_handle, p.display_name, p.account_kind
@@ -185,8 +184,7 @@ public struct V2PostgresPublicIdentityDirectory: V2PublicIdentityAccountManaging
                   AND visibility_revision < \(bind: Int64.max)
                 RETURNING revision, updated_at
                 """).first(decoding: UpdatedPublicIdentityRow.self) else {
-                // The row is locked and its name requires a change. A
-                // skipped update must not report the old identity as success.
+                // 记录已加锁且名称需要变更；跳过更新时不能将旧身份报告为成功结果。
                 throw V2PublicIdentityDirectoryError.unavailable
             }
             try await sql.raw("""

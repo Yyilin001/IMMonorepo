@@ -1,5 +1,5 @@
-// Shared by scalar and direct-room-log batch append on the Store's borrowed
-// transaction. Cardinality checks remain with their respective write paths.
+// 供 Store 借用事务上的逐条追加和私聊房间日志批量追加共用。
+// 结果数量检查仍由各自的写入路径负责。
 struct RoomLogMessageMutationRow: Decodable {
     let roomCount: Int64
     let admissionCount: Int64

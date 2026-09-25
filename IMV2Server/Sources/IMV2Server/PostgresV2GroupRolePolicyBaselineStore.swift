@@ -28,9 +28,8 @@ public struct PostgresV2GroupRolePolicyBaselineStore: V2GroupRolePolicyBaselineR
         guard let sql = database as? any SQLDatabase,
               let room = UUID(uuidString: roomID.rawValue), let actor = UUID(uuidString: actorUserID.rawValue)
         else { throw V2GroupRolePolicyBaselineError.corruptPersistenceState }
-        // One SQL statement provides one MVCC read point for membership,
-        // revision, durable explicit-policy markers and permission values.
-        // Neither replay receipts nor filtered room history are read here.
+        // 一条 SQL 语句为成员关系、修订号、持久化显式策略标记和权限值
+        // 提供同一个 MVCC 读取点。此处不读取重放回执或过滤后的房间历史。
         guard let row = try await sql.raw("""
             SELECT room.group_permission_revision, room.membership_revision, room.room_sequence,
                    EXISTS (
@@ -64,8 +63,8 @@ public struct PostgresV2GroupRolePolicyBaselineStore: V2GroupRolePolicyBaselineR
                 let rows = values[role.rawValue] ?? []
                 let decoded = Set(rows.compactMap { V2GroupPermission(rawValue: $0.permission) })
                 guard decoded.count == rows.count else { throw V2GroupRolePolicyBaselineError.corruptPersistenceState }
-                // Nonempty rows predate durable markers in supported history.
-                // No rows plus a marker is deliberately empty, not defaults.
+                // 在受支持的历史中，非空记录早于持久化标记。
+                // 有标记但无记录表示有意设为空，而非使用默认值。
                 if !rows.isEmpty || rawRoles.contains(role.rawValue) { return decoded }
                 return V2GroupPermissionDefaults.permissions(for: role)
             }

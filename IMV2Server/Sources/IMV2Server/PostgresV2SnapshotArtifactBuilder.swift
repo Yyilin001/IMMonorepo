@@ -212,8 +212,8 @@ public struct PostgresV2SnapshotArtifactBuilder: Sendable {
         }
         guard !items.isEmpty else { throw V2SnapshotArtifactBuilderError.itemTooLarge }
 
-        // Encoded size is monotonic in the item prefix. Binary search reduces
-        // page construction from O(n²) repeated encodes to O(n log n) bytes.
+        // 编码大小随项目的前缀长度单调变化。二分查找将页面构建
+        // 从 O(n²) 次重复编码降为 O(n log n) 字节处理量。
         var low = 1
         var high = items.count
         var acceptedCount = 0
@@ -383,9 +383,8 @@ public struct PostgresV2SnapshotArtifactBuilder: Sendable {
                   AND cursor.pending_snapshot_id = reset.snapshot_id
                   AND cursor.state = 'reset_preparing'
                 """).run()
-            // Keep the failed artifact as the operation-id idempotency record,
-            // but discard the unpublished assignment so a later operation can
-            // safely reuse the next reset generation.
+            // 保留失败产物作为操作 ID 的幂等记录，
+            // 但丢弃尚未发布的分配，使后续操作可安全复用下一重置代次。
             try await sql.raw("""
                 DELETE FROM \(unsafeRaw: table("device_snapshot_resets"))
                 WHERE snapshot_id = \(bind: claim.snapshotID) AND state = 'preparing'

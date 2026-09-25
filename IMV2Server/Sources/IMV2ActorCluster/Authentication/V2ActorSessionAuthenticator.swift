@@ -27,15 +27,15 @@ public struct V2ActorAuthenticationLimits: Sendable {
     }
 }
 
-/// Non-Codable proof constructed only after signature, identity, role and replay
-/// checks. Native and remote adapters must both pass through this boundary.
+/// 仅在签名、身份、角色与重放检查后创建的非 Codable 证明。
+/// 原生与远程适配器都必须经过此边界。
 public struct V2ActorVerifiedCall: Sendable {
     public let call: V2ActorAuthenticatedCall
     public let deadline: ContinuousClock.Instant
 }
 
-/// A host-issued, process-local proof of the same signed hello used by remote
-/// sessions. It cannot be serialized or constructed by a caller.
+/// 宿主签发的进程内证明，对应远程会话使用的同一已签名握手消息。
+/// 调用方不能序列化或构造它。
 final class V2ActorLocalCapability: Sendable {
     let issuer: UUID
     let generation: UUID
@@ -58,9 +58,9 @@ final class V2ActorLocalCapability: Sendable {
     }
 }
 
-/// Host-issued session nonces give replay protection without trusting remote
-/// wall clocks or retaining every historical attempt. Once expired, a nonce is
-/// no longer valid even after its replay window has been removed from memory.
+/// 宿主签发的会话随机数提供重放保护，无须信任远程墙上时钟，
+/// 也无须保留每次历史尝试。随机数过期后即失效，
+/// 即使其重放窗口已从内存移除也不会重新有效。
 public actor V2ActorSessionAuthenticator {
     private let host: V2ActorHostIdentity
     private let trust: V2ActorTrustStore
@@ -182,8 +182,8 @@ public actor V2ActorSessionAuthenticator {
             case .specialAccountAudit:
                 guard call.principal == .service, peer.permissions.contains(.specialAccountAudit) else { throw V2ActorAuthenticationError.forbidden }
             case .invitation(.create):
-                // Secret issuance and the durable creation intent belong to
-                // the control coordinator, never a direct room invocation.
+                // 密钥签发和持久化创建意图属于控制协调器，
+                // 绝不由直接房间调用负责。
                 throw V2ActorAuthenticationError.forbidden
             case .invitation(.commitCreation), .invitation(.submitReserved),
                  .invitationQuery(.preflightCreation), .invitationQuery(.reservedSubmissionResponse):

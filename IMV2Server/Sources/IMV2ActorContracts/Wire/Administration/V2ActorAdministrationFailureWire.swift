@@ -1,6 +1,6 @@
 import Foundation
 
-/// Finite D2 domain failures. Transport/infrastructure failures remain in the room call envelope.
+/// 有限的 D2 领域错误。传输与基础设施错误仍由房间调用信封承载。
 public enum V2ActorMembershipFailureWire: String, Codable, Equatable, Sendable {
     case ownerChanged, roomNotFound, actorNotOwner, targetUnavailable, corruptPersistenceState
 }
