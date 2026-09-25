@@ -52,7 +52,9 @@ part of this refactor.
 ## Implementation status
 
 - Shared integration fixtures are isolated in
-  `PostgresV2RoomWriteStoreIntegrationFixtures.swift`.
+  `PostgresV2RoomWriteStoreIntegrationFixtures.swift`, including schema setup,
+  default routing, projection queries, and completion/schema assertions that
+  were previously embedded in the cleanup/invitation test shard.
 - The ordered operation-lock statement and conditional hybrid-group statement
   are separate compilation units; their SQL text and statement names remain
   unchanged.
@@ -77,7 +79,12 @@ part of this refactor.
 - The non-PostgresNIO SQL fallback remains behavior-neutral but is not exercised
   by native PostgreSQL tests. Do not count those tests as fallback coverage.
 
+The PostgreSQL-backed room-write suite passed (342 tests, 1,398 seconds) before
+the latest fixture-only move; four representative database tests passed after
+that move. The suite stays serialized because tests reuse schema names. The
+CI Linux build has not yet been run for the finished decomposition.
+
 Still to extract: scalar acceptance orchestration, forward inbox orchestration,
-remaining preflight/row decoders, and larger integration test fixtures. The complete
-PostgreSQL suite and CI Linux build remain release gates for the finished
-decomposition.
+remaining preflight/row decoders, and larger integration test fixtures. Repeat
+the complete PostgreSQL suite and CI Linux build before declaring the finished
+decomposition verified.

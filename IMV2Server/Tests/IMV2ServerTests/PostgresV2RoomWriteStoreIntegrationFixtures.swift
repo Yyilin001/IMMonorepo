@@ -116,3 +116,167 @@ internal struct DirectWriteArtifactCounts: Decodable, Equatable {
         case messageStates = "message_states"
     }
 }
+
+// Shared schema, projection, and acceptance assertions for all room-write shards.
+extension PostgresV2RoomWriteStoreIntegrationTests {
+    internal func installSchema(on sql: any SQLDatabase, schema: String = "im_v2") async throws {
+        let testFile = URL(fileURLWithPath: #filePath)
+        let repositoryRoot = testFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let schemaURL = repositoryRoot.appending(path: "IMV2/sql/schema.sql")
+        let source = try String(contentsOf: schemaURL, encoding: .utf8)
+            .replacingOccurrences(of: "im_v2", with: schema)
+        let executableSQL = source
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("--") }
+            .joined(separator: "\n")
+        for statement in postgresStatements(in: executableSQL) {
+            guard !statement.isEmpty, statement != "BEGIN", statement != "COMMIT" else { continue }
+            try await sql.raw("\(unsafeRaw: statement)").run()
+        }
+        try await configureDefaultUserShardRoute(
+            .init(bucket: "test-users", observedRouterEpoch: 9),
+            now: Date(timeIntervalSince1970: 0),
+            on: sql,
+            schema: schema
+        )
+    }
+
+    internal func configureDefaultUserShardRoute(
+        _ route: V2UserShardRoute,
+        now: Date,
+        on sql: any SQLDatabase,
+        schema: String = "im_v2"
+    ) async throws {
+        try await sql.raw("""
+            INSERT INTO \(unsafeRaw: schema).user_shard_router_configuration
+                (configuration_key, router_epoch, default_write_bucket,
+                 updated_at)
+            VALUES
+                (TRUE, \(bind: route.observedRouterEpoch), \(bind: route.bucket),
+                 \(bind: now))
+            ON CONFLICT (configuration_key) DO UPDATE
+            SET router_epoch = EXCLUDED.router_epoch,
+                default_write_bucket = EXCLUDED.default_write_bucket,
+                updated_at = EXCLUDED.updated_at
+            """).run()
+    }
+
+    internal func drainV3Projection(database: any Database) async throws {
+        let worker = PostgresV2UserProjectionWorker(database: database, batchSize: 1_000)
+        while try await worker.runOnce().claimed {
+            try Task.checkCancellation()
+        }
+    }
+
+    internal func currentV3ProjectionItems(
+        sql: any SQLDatabase,
+        userID: UserID,
+        kind: String
+    ) async throws -> [CurrentV3ProjectionAssertionRow] {
+        guard let userUUID = UUID(uuidString: userID.rawValue) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        return try await sql.raw("""
+            SELECT version.entity_key,
+                   version.payload::text AS payload_json
+            FROM im_v2.user_projection_versions AS version
+            WHERE version.user_id = \(bind: userUUID)
+              AND version.projection_kind = \(bind: kind)
+              AND version.valid_to_sequence IS NULL
+            ORDER BY version.entity_key
+            """).all(decoding: CurrentV3ProjectionAssertionRow.self)
+    }
+
+
+    internal func scopedCount(_ schema: String, _ table: String, user: UUID, on sql: any SQLDatabase) async throws -> Int {
+        let column = "user_id"
+        let count = try await sql.raw("SELECT COUNT(*)::bigint AS value FROM \(unsafeRaw: schema).\(unsafeRaw: table) WHERE \(unsafeRaw: column) = \(bind: user)")
+            .first(decoding: CountRow.self)?.value ?? 0
+        guard let value = Int(exactly: count) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        return value
+    }
+
+    internal func assertAllAcceptedMessagesHaveCompletions(sql: any SQLDatabase) async throws {
+        let result = try #require(try await sql.raw("""
+            SELECT NOT EXISTS (
+                SELECT 1 FROM im_v2.messages AS message
+                LEFT JOIN im_v2.message_send_completions AS completion
+                  ON completion.room_id = message.room_id
+                 AND completion.sender_user_id = message.sender_user_id
+                 AND completion.client_message_id = message.client_message_id
+                 AND completion.message_id = message.message_id
+                 AND completion.room_sequence = message.room_sequence
+                 AND completion.timeline_sequence = message.timeline_sequence
+                 AND completion.created_at = message.created_at
+                WHERE completion.message_id IS NULL
+            ) AND NOT EXISTS (
+                SELECT 1 FROM im_v2.message_send_completions AS completion
+                LEFT JOIN im_v2.messages AS message ON message.message_id = completion.message_id
+                WHERE message.message_id IS NULL
+            ) AS exists
+            """).first(decoding: ExistsRow.self))
+        #expect(result.exists)
+    }
+
+    internal func assertSendCompletion(
+        command: V2SendMessageCommand, accepted: V2AcceptedMessage, eventID: EventID,
+        sql: any SQLDatabase
+    ) async throws {
+        let result = try #require(try await sql.raw("""
+            SELECT EXISTS (
+                SELECT 1 FROM im_v2.message_send_completions AS completion
+                WHERE room_id = \(bind: command.roomID.uuidValue!)
+                  AND sender_user_id = \(bind: command.senderUserID.uuidValue!)
+                  AND client_message_id = \(bind: command.clientMessageID.uuidValue!)
+                  AND fingerprint_version = \(bind: Int16(command.fingerprint.version))
+                  AND request_fingerprint = \(bind: command.fingerprint.digest)
+                  AND message_id = \(bind: accepted.messageID.uuidValue!)
+                  AND event_id = \(bind: eventID.uuidValue!)
+                  AND room_sequence = \(bind: Int64(accepted.roomSequence))
+                  AND timeline_sequence = \(bind: Int64(accepted.timelineSequence))
+                  AND created_at = \(bind: accepted.createdAt)
+                  AND group_capacity_class IS NOT DISTINCT FROM \(bind: accepted.groupCapacityClass?.rawValue)
+                  AND accepted_membership_revision = \(bind: Int64(accepted.acceptedMembershipRevision ?? 0))
+                  AND NOT (to_jsonb(completion) ?| ARRAY['text_body', 'rich_entities', 'media_presentations'])
+            ) AS exists
+            """).first(decoding: ExistsRow.self))
+        #expect(result.exists)
+    }
+
+    internal func assertSQLSchemaGate(_ expected: Bool, on sql: any SQLDatabase) async throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let statement = try String(contentsOf: root.appending(path: "IMV2/scripts/current_v2_schema_contract.sql"), encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: ";"))
+        let actual = try await sql.raw("SELECT (\(unsafeRaw: statement)) AS exists").first(decoding: ExistsRow.self)
+        #expect(actual?.exists == expected)
+    }
+}
+
+internal struct CurrentV3ProjectionAssertionRow: Decodable, Sendable {
+    let entityKey: String
+    let payloadJSON: String
+
+    enum CodingKeys: String, CodingKey {
+        case entityKey = "entity_key"
+        case payloadJSON = "payload_json"
+    }
+
+    func string(_ key: String) -> String? { object()[key] as? String }
+    func bool(_ key: String) -> Bool? { object()[key] as? Bool }
+    func arrayCount(_ key: String) -> Int? { (object()[key] as? [Any])?.count }
+    func arrayString(_ key: String, index: Int, key nestedKey: String) -> String? {
+        guard let values = object()[key] as? [[String: Any]], values.indices.contains(index) else { return nil }
+        return values[index][nestedKey] as? String
+    }
+
+    func object() -> [String: Any] {
+        guard let value = try? JSONSerialization.jsonObject(with: Data(payloadJSON.utf8)) as? [String: Any] else {
+            return [:]
+        }
+        return value
+    }
+}
