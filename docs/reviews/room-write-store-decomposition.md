@@ -111,12 +111,17 @@ part of this refactor.
 - The non-PostgresNIO SQL fallback remains behavior-neutral but is not exercised
   by native PostgreSQL tests. Do not count those tests as fallback coverage.
 
-The PostgreSQL-backed room-write suite passed (342 tests, 1,398 seconds) before
-the current path extractions. Targeted database tests passed after each move;
-the scalar acceptance move also passed owner-fence, COMMIT-uncertainty, forward
-recovery, authorization-proof, and eight SIGKILL recovery cases. The suite
-stays serialized because tests reuse schema names. The CI Linux build has not
-yet been run for the finished decomposition.
+The PostgreSQL-backed room-write suite passed after the finished path
+extractions (342 tests, 1,482 seconds), including the multi-database and
+subprocess SIGKILL recovery cases. Targeted database tests also passed after
+each move; the scalar acceptance move passed owner-fence, COMMIT-uncertainty,
+forward recovery, authorization-proof, and eight SIGKILL recovery cases. The
+suite stays serialized because tests reuse schema names. All five server and
+probe products from the CI release-build matrix compiled on Linux with Swift
+6.4 and the pinned CI base image. This was a local reproduction of the CI
+build, not a remote CI run. SwiftPM still warns about the pre-existing local
+and remote `postgres-nio` package-identity conflict; dependency changes are
+deferred separately.
 
 After the forward inbox stage extraction, the four focused PostgreSQL tests
 covering 21 owner-fence, acceptance/recovery, rejection, and direct-finalization
@@ -135,5 +140,6 @@ including the subprocess SIGKILL recovery cases.
 The remaining private row decoders are consumed only by Store-owned
 coordination or policy writes. Path-shared decoders have been isolated, and
 test-only assertion rows and doubles remain beside their specific scenarios.
-Repeat the complete PostgreSQL suite and CI Linux build before declaring the
-finished decomposition verified.
+The complete PostgreSQL suite and local reproduction of the CI Linux release
+build both pass. No compile-time or hot-path latency improvement is claimed:
+those measurements were not part of this behavior-neutral extraction.
