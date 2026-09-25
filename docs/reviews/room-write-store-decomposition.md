@@ -64,10 +64,13 @@ part of this refactor.
   write-path component. The Store still constructs validated inputs, acquires
   ordered operation locks, checks owner routes, owns the transaction, and
   finalizes credits after commit.
+- Ordinary direct room-log batch persistence now executes in its own component
+  after the Store validates input ordering and direct memberships on the same
+  transaction connection. Its SQL and cardinality checks are unchanged.
 - The non-PostgresNIO SQL fallback remains behavior-neutral but is not exercised
   by native PostgreSQL tests. Do not count those tests as fallback coverage.
 
-Still to extract: scalar acceptance, ordinary direct room-log writes,
-forwarded acceptance, remaining preflight/row decoders, and larger integration
-test fixtures. The complete PostgreSQL suite and CI Linux build remain release
-gates for the finished decomposition.
+Still to extract: scalar acceptance, forwarded acceptance, remaining
+preflight/row decoders, and larger integration test fixtures. The complete
+PostgreSQL suite and CI Linux build remain release gates for the finished
+decomposition.
