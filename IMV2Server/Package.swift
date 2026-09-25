@@ -23,6 +23,10 @@ let package = Package(
         .package(url: "https://github.com/vapor/routing-kit.git", from: "5.0.0-beta"),
         .package(url: "https://github.com/apple/swift-http-types.git", from: "1.7.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.14.0"),
+        // Xcode 27 未向下传递 AsyncStreaming 请求的条件 trait；
+        // 显式开启 ContainersPreview 协议定义，保证 Xcode 与 SwiftPM 使用同一依赖图。
+        .package(url: "https://github.com/apple/swift-collections.git", from: "1.6.0",
+                 traits: [.trait(name: "UnstableContainersPreview")]),
         .package(url: "https://github.com/apple/swift-configuration.git", from: "1.2.0"),
         .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.11.0"),
         .package(path: "../IMV2Core"),
