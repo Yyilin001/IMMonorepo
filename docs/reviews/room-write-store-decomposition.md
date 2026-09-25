@@ -55,6 +55,9 @@ part of this refactor.
   `PostgresV2RoomWriteStoreIntegrationFixtures.swift`, including schema setup,
   default routing, projection queries, and completion/schema assertions that
   were previously embedded in the cleanup/invitation test shard.
+- The 404-line group-join quota, crash-recovery, and invitation-cancellation
+  scenario group now has its own integration test shard. Its test bodies and
+  serialized suite identity are unchanged.
 - The ordered operation-lock statement and conditional hybrid-group statement
   are separate compilation units; their SQL text and statement names remain
   unchanged.
@@ -126,8 +129,11 @@ After the shared mutation-row move, the scalar and direct-room-log PostgreSQL
 tests passed (three parameterized cases).
 After the direct projection move, five PostgreSQL tests covering 11 warm
 authorization, timestamp, cache, room-log, and stranger-policy cases passed.
+After the group-join scenario move, all six affected PostgreSQL tests passed,
+including the subprocess SIGKILL recovery cases.
 
-Still to extract: remaining shared/path row decoders and larger integration
-test fixtures.
+The remaining private row decoders are consumed only by Store-owned
+coordination or policy writes. Path-shared decoders have been isolated, and
+test-only assertion rows and doubles remain beside their specific scenarios.
 Repeat the complete PostgreSQL suite and CI Linux build before declaring the
 finished decomposition verified.
