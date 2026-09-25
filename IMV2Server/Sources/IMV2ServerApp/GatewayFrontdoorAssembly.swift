@@ -1,7 +1,8 @@
 import Foundation
 import IMV2Server
 
-/// 前台连接、数据库准入和进程内指标的共享依赖；不打开监听端口。
+/// 前台连接、数据库准入、短期缓存与进程内指标的共享依赖。
+/// 这些对象只在本阶段构造，不打开 TLS 或指标监听端口。
 struct GatewayFrontdoorAssembly {
     let authenticator: V2PostgresGatewayAuthenticator
     let commandRateLimiter: V2AuthenticatedGatewayCommandRateLimiter
@@ -17,6 +18,7 @@ struct GatewayFrontdoorAssembly {
     let directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache
     let directSendPolicyCache: V2DirectSendPolicyCache
 
+    /// 根据网关配置建立前台限流和可观测性依赖，供后续装配阶段复用。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
         topology: GatewayDatabaseTopology

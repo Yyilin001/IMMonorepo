@@ -2,11 +2,14 @@ import Foundation
 import IMV2ActorApplication
 import IMV2Server
 
-/// 装配登录后命令服务及可选内容审核 Worker；账号房间变更服务已由组合根登记。
+/// 装配登录后命令处理器及可选内容审核 Worker。
+/// 账号房间变更服务由组合根先登记，避免此阶段抛错时遗漏关闭。
 struct GatewayCommandAssembly {
     let handler: V2GatewayDomainCommandHandler
     let contentReviewWorker: V2RoutedContentReviewWorker?
 
+    /// 把房间、社交、同步与在线活动服务接入统一命令处理器。
+    /// 此阶段还将在线状态能力接入连接注册表；错误由组合根回滚 Actor 与辅助服务。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
         prepared: GatewayPreparedAssembly,
@@ -22,6 +25,7 @@ struct GatewayCommandAssembly {
         let socialRelationships = V2SocialRelationshipService(
             store: PostgresV2SocialRelationshipStore(database: topology.database, projectionDelivery: projection.userShardProjectionDelivery, authorizationCoordinator: prepared.authorization)
         )
+        // 仅配置了审核模式和安全执行身份时才创建各归属库的审核 Worker。
         let contentReviewWorker: V2RoutedContentReviewWorker?
         if configuration.contentReviewMode == .enabled,
            configuration.contentReviewSafetyActorUserID != nil {

@@ -5,6 +5,7 @@ import IMV2Server
 
 /// 将逻辑房间分片映射到物理归属方，复用同址写入 Store 和批处理器。
 /// 此阶段只构造依赖，不启动房间 Actor 或后台任务。
+/// `ownerResources` 按逻辑分片索引；`physicalResources` 按数据库 URL 与 schema 索引。
 struct GatewayRoomOwnerAssembly {
     let actorConfiguration: V2RoomActorApplicationConfiguration
     let committedHybridGroupEvents: V2CommittedHybridGroupEventObserver
@@ -19,6 +20,8 @@ struct GatewayRoomOwnerAssembly {
     let shardAdmissionCredits: V2ShardAdmissionCommandCreditPool?
     let roomAdmissionCredits: V2RoomAdmissionCommandCreditPool?
 
+    /// 为每个物理归属位置只创建一套写入与批处理资源，再映射回逻辑分片。
+    /// 转发目标、创建执行器和 Actor 激活工厂随后使用同一映射，避免同址分片重复占用额度。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
         topology: GatewayDatabaseTopology,
@@ -38,6 +41,7 @@ struct GatewayRoomOwnerAssembly {
         ) -> (any Database)? {
             topology.databaseForRole(for: role, url: url)
         }
+        // 分隔符避免不同 URL/schema 组合拼接后发生键碰撞。
         let roomPhysicalLocationKeys = Set(configuration.roomShardStorage.map {
             $0.databaseURL + "\u{0}" + $0.schema
         })
@@ -70,6 +74,7 @@ struct GatewayRoomOwnerAssembly {
             : nil
         var groupEventWakeStoresByPhysicalLocation:
             [String: any V2GroupEventWakeStore] = [:]
+        // 唤醒 outbox 按物理位置去重；多归属方时交给路由 Store 分发。
         for storage in configuration.roomShardStorage {
             let physicalLocationKey = storage.databaseURL + "\u{0}" + storage.schema
             guard groupEventWakeStoresByPhysicalLocation[physicalLocationKey] == nil
@@ -124,6 +129,7 @@ struct GatewayRoomOwnerAssembly {
         var forwardPairs: [String: V2ActorForwardPairDomainExecutor] = [:]
         let membershipIdentities = V2PostgresMembershipIdentitySnapshotValidator(database: database)
         let invitationIdentities = PostgresV2GroupInvitationIdentityReader(database: database)
+        // 逻辑分片分别拥有 bootstrap/转发入口；同址分片共享实际写入者与批处理器。
         for storage in configuration.roomShardStorage {
             guard let owner = roomShardDatabases[storage.shardID] else {
                 throw V2RoomWriteStoreError.corruptPersistenceState

@@ -4,7 +4,8 @@ import IMV2ServerHTTP
 import Vapor
 import IMV2Server
 
-/// Actor 启动前所需的依赖；构造失败时尚无 Actor 或 Broker 需要回滚。
+/// Actor 启动前所需的依赖快照；包含数据库拓扑、投影、前台连接和房间归属资源。
+/// 此阶段只准备依赖并配置指标地址，不启动房间 Actor 或 Broker。
 struct GatewayPreparedAssembly {
     let topology: GatewayDatabaseTopology
     let authorization: V2DirectAuthorizationCoordinator
@@ -15,6 +16,9 @@ struct GatewayPreparedAssembly {
     let roomOwners: GatewayRoomOwnerAssembly
     let coLocatedControlBuckets: Set<String>
 
+    /// 先验证数据库拓扑，再建立前台/维护依赖、用户分片路由及房间归属资源。
+    ///
+    /// 这里的失败无需清理 Actor 或 Broker；数据库连接池仍由 `GatewayInfrastructure` 持有。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
         resources: V2DatabaseResources,
@@ -28,6 +32,7 @@ struct GatewayPreparedAssembly {
             controlDatabase: topology.authorizationControlDatabase,
             ownerDatabases: topology.authorizationOwners
         )
+        // 同址用户桶复用路由栅栏的控制库连接；其他桶使用各自的投递库连接。
         let coLocatedControlBuckets = Set(configuration.userShardStorage.compactMap { storage in
             storage.databaseURL == configuration.databaseURL && storage.schema == "im_v2"
                 ? storage.bucket : nil
@@ -79,7 +84,8 @@ struct GatewayPreparedAssembly {
         )
     }
 
-    /// Actor 已建立后注册压力指标；此操作不启动指标 HTTP 监听器。
+    /// Actor 已建立后，把 Actor、连接池及缓存的压力指标接入运维 HTTP 应用。
+    /// 此操作仅登记路由；实际监听由 `GatewayRuntime.runServices` 启动。
     func registerMetrics(on app: Application, actors: V2RoomActorApplication) {
         let frontdoor = self.frontdoor
         let ownerMaintenance = self.ownerMaintenance

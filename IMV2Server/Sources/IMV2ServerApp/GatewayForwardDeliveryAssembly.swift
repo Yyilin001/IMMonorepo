@@ -5,10 +5,13 @@ import IMV2Server
 import Logging
 
 /// 为各房间分片构造转发导入端点与投递 Worker；此阶段不启动轮询。
+/// `backgroundDatabases` 保留各分片的投递库句柄，供后台维护阶段使用。
 struct GatewayForwardDeliveryAssembly {
     let runtime: V2ForwardDeliveryRuntime
     let backgroundDatabases: [String: any Database]
 
+    /// 以分片的投递连接池创建导入端点和重试 Worker，并统一接入 Actor 命令端口。
+    /// 可选本地媒体提供者仅在配置存在时构造；文件暂存清理由账号边缘负责。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
         localMediaConfiguration: V2LocalFilesystemMediaRuntimeConfiguration?,

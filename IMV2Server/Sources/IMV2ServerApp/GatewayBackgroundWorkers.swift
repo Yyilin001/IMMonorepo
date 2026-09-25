@@ -4,7 +4,8 @@ import IMV2ActorContracts
 import IMV2Server
 import Logging
 
-/// 只包含后台工作所需的依赖。任务由同一个监督器登记、取消和排空。
+/// 后台工作所需的依赖集合，按投递、投影、维护三类组织。
+/// `assemble` 只连接依赖；`start` 才在同一个监督器内登记可取消的任务。
 struct GatewayBackgroundWorkers {
     let configuration: V2GatewayRuntimeConfiguration
     let logger: Logger
@@ -53,7 +54,8 @@ struct GatewayBackgroundWorkers {
 
     let maintenance: Maintenance
 
-    /// 汇集各装配阶段的后台依赖；真正的任务注册仍由 start() 执行。
+    /// 汇集各装配阶段的后台依赖，并建立持久唤醒 outbox 的转发器。
+    /// 返回值尚无运行中的 Worker；`GatewayRuntime` 会在 HTTP 服务运行时调用 `start`。
     static func assemble(
         configuration: V2GatewayRuntimeConfiguration,
         logger: Logger,
@@ -119,6 +121,7 @@ struct GatewayBackgroundWorkers {
         )
     }
 
+    /// 启动全部后台任务，返回供停机时统一取消与排空的监督器。
     func start() throws -> GatewayWorkerSupervisor {
         let maintenanceCadence = try V2MaintenanceCadence(
             intervalMilliseconds: configuration.maintenancePollIntervalMilliseconds

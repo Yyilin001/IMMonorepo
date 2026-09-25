@@ -3,7 +3,8 @@ import Foundation
 import IMV2Server
 import Logging
 
-/// 构造各物理房间归属库的维护依赖和持久工作指标。
+/// 按物理数据库去重后，构造房间归属库的维护依赖与持久工作指标。
+/// 控制库始终参与聚合，即使房间归属配置只指向其他数据库。
 struct GatewayOwnerMaintenanceAssembly {
     let roomOwnerDatabaseURLs: [String]
     let roomOwnerMaintenanceDatabases: [any Database]
@@ -13,6 +14,8 @@ struct GatewayOwnerMaintenanceAssembly {
     let durableWorkMetrics: V2CachedDurableWorkMetricsSource
     let telemetry: V2CompositeTelemetrySink
 
+    /// 汇总控制库、用户分片和房间归属库的指标，并准备日志与 Prometheus 遥测出口。
+    /// 此阶段只创建 Worker 和指标源，轮询由 `GatewayBackgroundWorkers.start` 启动。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
         topology: GatewayDatabaseTopology,

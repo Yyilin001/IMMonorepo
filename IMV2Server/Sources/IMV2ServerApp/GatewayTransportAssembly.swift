@@ -1,8 +1,10 @@
 import Foundation
 import IMV2Server
 
-/// 集中构造客户端会话、连接工厂与 TLS 监听器；调用方负责启动监听。
+/// 集中构造客户端会话、连接工厂与 TLS 服务对象。
+/// 构造不会绑定端口；`GatewayRuntime.runServices` 在后台依赖就绪后绑定监听。
 enum GatewayTransportAssembly {
+    /// 每条连接独立创建会话，共享认证器、命令处理器、限流器与连接注册表。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
         prepared: GatewayPreparedAssembly,

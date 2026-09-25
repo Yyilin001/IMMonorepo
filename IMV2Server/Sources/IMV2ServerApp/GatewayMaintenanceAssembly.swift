@@ -5,7 +5,8 @@ import IMV2ActorContracts
 import IMV2ActorRuntime
 import IMV2Server
 
-/// 构造定时维护与持久工作处理器；启动前初始化仍由组合根按原顺序调用。
+/// 构造定时维护、撤销清理和可选推送处理器，不启动轮询。
+/// 两个撤销 Worker 的启动游标由组合根在监听器绑定前初始化。
 struct GatewayMaintenanceAssembly {
     let directRoomProfilePropagationWorker: V2DirectRoomProfilePropagationWorker
     let readReceiptPreferencePropagationWorker: V2ReadReceiptPreferencePropagationWorker
@@ -17,6 +18,8 @@ struct GatewayMaintenanceAssembly {
     let controlPlaneHousekeepingWorker: V2ControlPlaneHousekeepingWorker
     let pushWakeWorker: V2PushWakeWorker?
 
+    /// 将维护库与房间归属库的处理器接到同一组后台依赖中。
+    /// 构造 APNS 凭据或媒体保留策略失败时，错误交由组合根回滚。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
         prepared: GatewayPreparedAssembly,

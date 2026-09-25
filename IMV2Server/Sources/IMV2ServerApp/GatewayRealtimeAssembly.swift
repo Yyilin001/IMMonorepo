@@ -1,8 +1,8 @@
 import Foundation
 import IMV2Server
 
-/// 将前台唤醒接到本地或 NATS，并把提示观察者安装到提交后事件流。
-/// 本阶段不执行可抛出操作；调用方持有返回的 Broker，负责失败回滚和最终关闭。
+/// 将前台唤醒接到本地或 NATS，并把提示观察者安装到已提交事件流。
+/// 返回的 Broker 和兴趣管理器由组合根持有，供失败回滚和正常停机使用。
 struct GatewayRealtimeAssembly {
     let groupEventWakePublisher: any V2GroupEventWakePublishing
     let foregroundGroupEventHints: V2ForegroundGroupEventHintDispatcher
@@ -10,6 +10,8 @@ struct GatewayRealtimeAssembly {
     let sharedGroupWakeInterests: V2SharedGroupEventWakeInterests?
     let natsLiveActivityBroker: V2NATSLiveActivityBroker?
 
+    /// 选择本地或 NATS 发布通道，并把接收回调连到当前网关的连接注册表。
+    /// 该方法不抛错；返回后、进入下一个可抛错阶段前，组合根会登记所有 Broker。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
         prepared: GatewayPreparedAssembly,
@@ -101,6 +103,7 @@ struct GatewayRealtimeAssembly {
                 configuration.foregroundGroupBatchExtensionMinimumEvents,
             metrics: transportMetrics
         )
+        // 只在事务提交后发前台提示；客户端仍以持久日志和游标确认实际可见事件。
         committedHybridGroupEvents.install(sink: foregroundGroupEventHints)
         return .init(
             groupEventWakePublisher: groupEventWakePublisher,

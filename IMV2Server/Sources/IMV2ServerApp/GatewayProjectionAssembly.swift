@@ -1,7 +1,8 @@
 import Foundation
 import IMV2Server
 
-/// 初始化用户分片路由栅栏、投影投递器和有界读缓存。
+/// 初始化用户分片路由栅栏、提交后投影投递器和有界读缓存。
+/// 同一用户路由由前台、投递、维护各自的数据库角色访问。
 struct GatewayProjectionAssembly {
     let syncUserShardRouter: V2PostgresUserShardRouter
     let maintenanceUserShardRouter: V2PostgresUserShardRouter
@@ -12,6 +13,8 @@ struct GatewayProjectionAssembly {
     let roomShardRouter: V2CachedRoomShardRouter
     let userStateWorkers: [V2UserStateEventWorker]
 
+    /// 先建立默认用户路由，再为各数据库角色构造独立路由句柄。
+    /// 投影 Worker 按物理房间归属库创建，以消费各库的持久 outbox。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
         topology: GatewayDatabaseTopology,
