@@ -62,6 +62,10 @@ part of this refactor.
   with a borrowed transaction connection. The Store still owns ordered
   preflight, owner/activation fencing, mismatch diagnosis, transaction commit,
   and post-commit credit finalization.
+- The hybrid-group batch's authoritative preflight SQL, named PostgreSQL
+  statement, SQLKit fallback, and row decoder now live together in a borrowed-
+  connection component. The Store still orders requests and owns all fencing,
+  final admission reservation, commit, and credit finalization.
 - Fast direct room-log append SQL and its row decoder now live in a direct
   write-path component. The Store still constructs validated inputs, acquires
   ordered operation locks, checks owner routes, owns the transaction, and
@@ -85,6 +89,6 @@ that move. The suite stays serialized because tests reuse schema names. The
 CI Linux build has not yet been run for the finished decomposition.
 
 Still to extract: scalar acceptance orchestration, forward inbox orchestration,
-remaining preflight/row decoders, and larger integration test fixtures. Repeat
-the complete PostgreSQL suite and CI Linux build before declaring the finished
-decomposition verified.
+remaining direct/scalar preflight and row decoders, and larger integration test
+fixtures. Repeat the complete PostgreSQL suite and CI Linux build before
+declaring the finished decomposition verified.
