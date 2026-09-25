@@ -12,11 +12,13 @@ struct GatewayRealtimeAssembly {
 
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
-        connectionRegistry: V2DeviceConnectionRegistry,
-        groupEventLog: V2RoomRefGroupEventLogClient,
-        transportMetrics: V2GatewayTransportMetrics,
-        committedHybridGroupEvents: V2CommittedHybridGroupEventObserver
+        prepared: GatewayPreparedAssembly,
+        roomServices: GatewayRoomServicesAssembly
     ) async -> Self {
+        let connectionRegistry = prepared.frontdoor.connectionRegistry
+        let groupEventLog = roomServices.groupEventLog
+        let transportMetrics = prepared.frontdoor.transportMetrics
+        let committedHybridGroupEvents = prepared.roomOwners.committedHybridGroupEvents
         var natsGroupWakeBroker: V2NATSGroupEventWakeBroker?
         var sharedGroupWakeInterests: V2SharedGroupEventWakeInterests?
         var natsLiveActivityBroker: V2NATSLiveActivityBroker?

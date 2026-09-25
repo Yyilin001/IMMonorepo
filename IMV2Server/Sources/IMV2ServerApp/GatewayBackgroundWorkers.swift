@@ -53,6 +53,72 @@ struct GatewayBackgroundWorkers {
 
     let maintenance: Maintenance
 
+    /// 汇集各装配阶段的后台依赖；真正的任务注册仍由 start() 执行。
+    static func assemble(
+        configuration: V2GatewayRuntimeConfiguration,
+        logger: Logger,
+        prepared: GatewayPreparedAssembly,
+        roomServices: GatewayRoomServicesAssembly,
+        realtime: GatewayRealtimeAssembly,
+        commands: GatewayCommandAssembly,
+        maintenance: GatewayMaintenanceAssembly,
+        forwardDelivery: GatewayForwardDeliveryAssembly
+    ) -> Self {
+        let userShardWork = prepared.userShardWork
+        let frontdoor = prepared.frontdoor
+        let ownerMaintenance = prepared.ownerMaintenance
+        let projection = prepared.projection
+        let roomOwners = prepared.roomOwners
+        let directAuthorizationCoordinator = prepared.authorization
+        let foregroundGroupEventHints = realtime.foregroundGroupEventHints
+        // 唤醒转发不构成交付依赖：发布失败或重复只影响前台延迟，
+        // 因为客户端始终按游标拉取房间事件日志。
+        let groupEventWakeRelay = V2GroupEventWakeRelay(
+            store: roomOwners.groupEventWakeStore,
+            publisher: realtime.groupEventWakePublisher
+        )
+        return .init(
+            configuration: configuration,
+            logger: logger,
+            delivery: .init(
+                forwardRuntime: forwardDelivery.runtime,
+                directAuthorizationCoordinator: directAuthorizationCoordinator,
+                foregroundGroupEventHints: foregroundGroupEventHints,
+                directRoomLogEventCache: projection.directRoomLogEventCache,
+                syncWakeCoalescer: frontdoor.syncWakeCoalescer,
+                userStateWorkers: projection.userStateWorkers,
+                groupEventWakeRelay: groupEventWakeRelay,
+                contentReviewWorker: commands.contentReviewWorker,
+                pushWakeWorker: maintenance.pushWakeWorker
+            ),
+            projection: .init(
+                userProjectionWorkers: userShardWork.userProjectionWorkers,
+                databaseWorkAdmission: frontdoor.databaseWorkAdmission,
+                snapshotArtifactBuilders: userShardWork.snapshotArtifactBuilders,
+                messageProjectionStateBodyCompactionWorkers: ownerMaintenance.messageProjectionStateBodyCompactionWorkers
+            ),
+            maintenance: .init(
+                revokedDeviceProjectionCleanupWorker: maintenance.revokedDeviceProjectionCleanupWorker,
+                controlPlaneHousekeepingWorker: maintenance.controlPlaneHousekeepingWorker,
+                syncLogCompactionWorkers: userShardWork.syncLogCompactionWorkers,
+                roomMaintenanceWorkers: maintenance.roomMaintenanceWorkers,
+                syncHousekeepingWorkers: userShardWork.syncHousekeepingWorkers,
+                projectionVersionGCWorkers: userShardWork.projectionVersionGCWorkers,
+                personalEventGCWorkers: ownerMaintenance.personalEventGCWorkers,
+                messageProjectionStateGCWorkers: ownerMaintenance.messageProjectionStateGCWorkers,
+                forwardBackgroundDatabases: forwardDelivery.backgroundDatabases,
+                directRoomProfilePropagationWorker: maintenance.directRoomProfilePropagationWorker,
+                readReceiptPreferencePropagationWorker: maintenance.readReceiptPreferencePropagationWorker,
+                deviceRevocationWorker: maintenance.deviceRevocationWorker,
+                moderationAuditRetentionWorker: maintenance.moderationAuditRetentionWorker,
+                maintenanceGroupAudienceStore: roomServices.maintenanceGroupAudienceStore,
+                roomCreation: roomServices.roomCreation,
+                callTimeout: roomServices.callTimeout,
+                mediaRetentionWorker: maintenance.mediaRetentionWorker
+            )
+        )
+    }
+
     func start() throws -> GatewayWorkerSupervisor {
         let maintenanceCadence = try V2MaintenanceCadence(
             intervalMilliseconds: configuration.maintenancePollIntervalMilliseconds

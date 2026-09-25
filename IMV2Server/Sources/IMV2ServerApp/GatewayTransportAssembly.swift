@@ -5,14 +5,15 @@ import IMV2Server
 enum GatewayTransportAssembly {
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
-        authenticator: V2PostgresGatewayAuthenticator,
-        commandRateLimiter: V2AuthenticatedGatewayCommandRateLimiter,
-        preparedGroupEventPageCache: V2PreparedGroupEventPageCache?,
-        handler: V2GatewayDomainCommandHandler,
-        connectionRegistry: V2DeviceConnectionRegistry,
-        transportMetrics: V2GatewayTransportMetrics,
-        gatewayEventLoopLagMetrics: V2EventLoopLagMetrics
+        prepared: GatewayPreparedAssembly,
+        handler: V2GatewayDomainCommandHandler
     ) throws -> V2TLSGatewayServer {
+        let authenticator = prepared.frontdoor.authenticator
+        let commandRateLimiter = prepared.frontdoor.commandRateLimiter
+        let preparedGroupEventPageCache = prepared.projection.preparedGroupEventPageCache
+        let connectionRegistry = prepared.frontdoor.connectionRegistry
+        let transportMetrics = prepared.frontdoor.transportMetrics
+        let gatewayEventLoopLagMetrics = prepared.frontdoor.gatewayEventLoopLagMetrics
         let factory = V2GatewayConnectionFactory {
             let session = V2GatewaySession(
                 limits: configuration.connectionLimits,

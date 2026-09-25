@@ -1,5 +1,6 @@
 import FluentKit
 import Foundation
+import IMV2ActorApplication
 import IMV2ActorContracts
 import IMV2ActorRuntime
 import IMV2Server
@@ -18,19 +19,21 @@ struct GatewayMaintenanceAssembly {
 
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
-        topology: GatewayDatabaseTopology,
-        projectionDelivery: V2PostgresUserShardProjectionDelivery,
-        liveSyncNotifier: any V2LiveSyncNotifier,
-        maintenanceUserShardRouter: V2PostgresUserShardRouter,
-        coLocatedControlBuckets: Set<String>,
-        roomOwnerMaintenanceDatabases: [any Database],
-        actorDirectory: V2RoomDirectory,
-        callTimeout: V2ActorMilliseconds,
-        connectionRegistry: V2DeviceConnectionRegistry
+        prepared: GatewayPreparedAssembly,
+        roomServices: GatewayRoomServicesAssembly,
+        actors: V2RoomActorApplication
     ) throws -> Self {
+        let topology = prepared.topology
         let maintenanceDatabase = topology.maintenanceDatabase
         let maintenanceUserShardStorage = topology.maintenanceUserShardStorage
-        let maintenanceUserShardProjectionDelivery = projectionDelivery
+        let maintenanceUserShardProjectionDelivery = prepared.projection.maintenanceUserShardProjectionDelivery
+        let liveSyncNotifier = prepared.frontdoor.liveSyncNotifier
+        let maintenanceUserShardRouter = prepared.projection.maintenanceUserShardRouter
+        let coLocatedControlBuckets = prepared.coLocatedControlBuckets
+        let roomOwnerMaintenanceDatabases = prepared.ownerMaintenance.roomOwnerMaintenanceDatabases
+        let actorDirectory = actors.directory
+        let callTimeout = roomServices.callTimeout
+        let connectionRegistry = prepared.frontdoor.connectionRegistry
         let directRoomProfilePropagationWorker = V2DirectRoomProfilePropagationWorker(
             database: maintenanceDatabase,
             projectionDelivery: maintenanceUserShardProjectionDelivery,

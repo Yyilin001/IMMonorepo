@@ -12,12 +12,14 @@ struct GatewayForwardDeliveryAssembly {
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
         localMediaConfiguration: V2LocalFilesystemMediaRuntimeConfiguration?,
-        topology: GatewayDatabaseTopology,
-        roomOwners: GatewayRoomOwnerAssembly,
-        forwardPort: V2RoomRefForwardPort,
-        callTimeout: V2ActorMilliseconds,
+        prepared: GatewayPreparedAssembly,
+        roomServices: GatewayRoomServicesAssembly,
         logger: Logger
     ) throws -> Self {
+        let topology = prepared.topology
+        let roomOwners = prepared.roomOwners
+        let forwardPort = roomServices.forwardPort
+        let callTimeout = roomServices.callTimeout
         // 仅供本地使用的字节适配器：账号边缘与 Gateway 必须共享配置的对象根目录。
         // 此处不调用 prepare()；活动上传暂存文件由账号边缘在启动时清理。
         let forwardMediaProvider: V2LocalFilesystemMediaProvider?
