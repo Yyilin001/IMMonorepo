@@ -25,6 +25,12 @@ struct V2GatewaySlowFanoutBenchmarkTests {
         let preloadSlowReaders = ProcessInfo.processInfo.environment["IMV2_SLOW_FANOUT_PRELOAD"] == "1"
         let rounds = Int(ProcessInfo.processInfo.environment["IMV2_SLOW_FANOUT_ROUNDS"] ?? "120") ?? 120
         try #require((1...1_200).contains(rounds))
+        let intervalMilliseconds = Int(ProcessInfo.processInfo.environment["IMV2_SLOW_FANOUT_INTERVAL_MS"] ?? "100") ?? 100
+        try #require((1...10_000).contains(intervalMilliseconds))
+        let drainTimeoutSeconds = Int(ProcessInfo.processInfo.environment["IMV2_SLOW_FANOUT_DRAIN_TIMEOUT_S"] ?? "60") ?? 60
+        try #require((1...600).contains(drainTimeoutSeconds))
+        let socketBufferBytes = Int(ProcessInfo.processInfo.environment["IMV2_SLOW_FANOUT_SOCKET_BUFFER_BYTES"] ?? "4096") ?? 4096
+        try #require((4_096...1_048_576).contains(socketBufferBytes))
         let frameBytes = 1_024
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "imv2-slow-fanout-\(UUID())")
@@ -63,7 +69,7 @@ struct V2GatewaySlowFanoutBenchmarkTests {
         clients.reserveCapacity(connectionCount)
         do {
             listener = try await ServerBootstrap(group: group)
-                .childChannelOption(ChannelOptions.socketOption(.so_sndbuf), value: 4096)
+                .childChannelOption(ChannelOptions.socketOption(.so_sndbuf), value: Int32(socketBufferBytes))
                 .childChannelInitializer { channel in
                     channel.eventLoop.makeCompletedFuture {
                         try channel.pipeline.syncOperations.addHandler(
@@ -78,7 +84,7 @@ struct V2GatewaySlowFanoutBenchmarkTests {
             for index in 0..<connectionCount {
                 let paused = index < pausedCount
                 let channel = try await ClientBootstrap(group: group)
-                    .channelOption(ChannelOptions.socketOption(.so_rcvbuf), value: 4096)
+                    .channelOption(ChannelOptions.socketOption(.so_rcvbuf), value: Int32(socketBufferBytes))
                     .channelInitializer { channel in
                         channel.eventLoop.makeCompletedFuture {
                             try channel.pipeline.syncOperations.addHandler(
@@ -116,9 +122,12 @@ struct V2GatewaySlowFanoutBenchmarkTests {
                 V2NIOGatewayForegroundWriter.submitBatch(targets.all.map {
                     .init(writer: $0, bytes: frame)
                 })
-                try await Task.sleep(for: .milliseconds(100))
+                try await Task.sleep(for: .milliseconds(intervalMilliseconds))
                 if round.isMultiple(of: 50) {
-                    rssSamplesMiB.append(slowFanoutResidentBytes() / 1_048_576)
+                    let rssMiB = slowFanoutResidentBytes() / 1_048_576
+                    rssSamplesMiB.append(rssMiB)
+                    let sample = metrics.gatewayTransportMetricsSnapshot()
+                    print("IMV2_SLOW_FANOUT_SAMPLE round=\(round) rss_mib=\(rssMiB) deferred=\(sample.foregroundNonWritableDeferrals) recovery_replaced=\(sample.foregroundRecoveryFramesReplaced)")
                 }
             }
             state.markProbeSent()
@@ -142,10 +151,12 @@ struct V2GatewaySlowFanoutBenchmarkTests {
             }
             let fastBytes = result.fastBytesAtProbe.sorted()
             let medianFastBytes = fastBytes.isEmpty ? 0 : fastBytes[fastBytes.count / 2]
-            print("IMV2_SLOW_FANOUT_RESULT connected=\(result.ready) paused=\(pausedCount) preload=\(preloadSlowReaders) rounds=\(rounds) fast_probe_received=\(result.completedFast) connect_seconds=\(Double(connectedAt - started) / 1e9) load_seconds=\(Double(submittedAt - connectedAt) / 1e9) probe_p50_ms=\(percentile(0.50)) probe_p95_ms=\(percentile(0.95)) probe_p99_ms=\(percentile(0.99)) min_fast_bytes_at_probe=\(fastBytes.first ?? 0) median_fast_bytes_at_probe=\(medianFastBytes) deferred=\(transport.foregroundNonWritableDeferrals) recovery_queued=\(transport.foregroundRecoveryFramesQueued) recovery_replaced=\(transport.foregroundRecoveryFramesReplaced) peak_queue_bytes=\(transport.peakQueuedForegroundBytes) rss_samples_mib=\(rssSamplesMiB) process_rss_mib=\(slowFanoutResidentBytes() / 1_048_576)")
+            print("IMV2_SLOW_FANOUT_RESULT connected=\(result.ready) paused=\(pausedCount) preload=\(preloadSlowReaders) rounds=\(rounds) interval_ms=\(intervalMilliseconds) socket_buffer_bytes=\(socketBufferBytes) fast_probe_received=\(result.completedFast) connect_seconds=\(Double(connectedAt - started) / 1e9) load_seconds=\(Double(submittedAt - connectedAt) / 1e9) probe_p50_ms=\(percentile(0.50)) probe_p95_ms=\(percentile(0.95)) probe_p99_ms=\(percentile(0.99)) min_fast_bytes_at_probe=\(fastBytes.first ?? 0) median_fast_bytes_at_probe=\(medianFastBytes) deferred=\(transport.foregroundNonWritableDeferrals) recovery_queued=\(transport.foregroundRecoveryFramesQueued) recovery_replaced=\(transport.foregroundRecoveryFramesReplaced) peak_queue_bytes=\(transport.peakQueuedForegroundBytes) rss_samples_mib=\(rssSamplesMiB) process_rss_mib=\(slowFanoutResidentBytes() / 1_048_576)")
             #expect(result.ready == connectionCount)
             #expect(result.completedFast == connectionCount - pausedCount)
-            #expect(fastBytes.first == (rounds + 1) * frameBytes)
+            if pausedCount < connectionCount {
+                #expect(fastBytes.first == (rounds + 1) * frameBytes)
+            }
             if preloadSlowReaders, pausedCount > 0 {
                 #expect(transport.foregroundNonWritableDeferrals > 0)
                 #expect(transport.foregroundRecoveryFramesReplaced > 0)
@@ -157,7 +168,7 @@ struct V2GatewaySlowFanoutBenchmarkTests {
                 }
                 try await EventLoopFuture.andAllSucceed(resumes, on: group.next()).get()
                 for client in clients.prefix(pausedCount) { client.read() }
-                let drainDeadline = ContinuousClock.now.advanced(by: .seconds(60))
+                let drainDeadline = ContinuousClock.now.advanced(by: .seconds(drainTimeoutSeconds))
                 while state.snapshot().completedSlow < pausedCount,
                       ContinuousClock.now < drainDeadline {
                     try await Task.sleep(for: .milliseconds(100))
@@ -220,6 +231,7 @@ private final class SlowFanoutState: Sendable {
     func ready() { storage.withLock { $0.ready += 1 } }
     func markProbeSent() { storage.withLock { $0.probeSentAt = DispatchTime.now().uptimeNanoseconds } }
     func markResumeStarted() { storage.withLock { $0.resumeStartedAt = DispatchTime.now().uptimeNanoseconds } }
+    func isResuming() -> Bool { storage.withLock { $0.resumeStartedAt != 0 } }
     func slowRead(bytes: Int) {
         storage.withLock {
             $0.slowReadCallbacks += 1
@@ -357,5 +369,11 @@ private final class SlowFanoutClientHandler: ChannelInboundHandler {
             }
         }
         context.fireChannelRead(data)
+    }
+    func channelReadComplete(context: ChannelHandlerContext) {
+        if paused, state.isResuming(), !completed {
+            context.read()
+        }
+        context.fireChannelReadComplete()
     }
 }
