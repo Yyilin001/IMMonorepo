@@ -15,7 +15,7 @@ public protocol V2OwnerValidatedGroupCapabilitiesStore: Sendable {
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
     ///   - now: 服务端统一授时时刻。
-    /// - Returns: 置顶结果及后续扇出所需信息。
+    /// - Returns: 置顶结果。
     /// - Throws: 归属不一致、权限不足或持久化失败时抛出。
     func setPinnedMessageOwnerValidated(actorUserID: UserID, command: V2PinnedMessageCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage>
 
@@ -28,7 +28,7 @@ public protocol V2OwnerValidatedGroupCapabilitiesStore: Sendable {
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
     ///   - now: 服务端统一授时时刻。
-    /// - Returns: 公告结果及后续扇出所需信息。
+    /// - Returns: 公告结果。
     /// - Throws: 归属不一致、权限不足或持久化失败时抛出。
     func setAnnouncementOwnerValidated(actorUserID: UserID, command: V2GroupAnnouncementCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement>
 
@@ -41,7 +41,7 @@ public protocol V2OwnerValidatedGroupCapabilitiesStore: Sendable {
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
     ///   - now: 服务端统一授时时刻。
-    /// - Returns: 权限变更结果及后续扇出所需信息。
+    /// - Returns: 权限变更结果。
     /// - Throws: 归属不一致、权限不足或持久化失败时抛出。
     func setRolePermissionsOwnerValidated(actorUserID: UserID, command: V2GroupRolePermissionsCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange>
 
@@ -54,7 +54,7 @@ public protocol V2OwnerValidatedGroupCapabilitiesStore: Sendable {
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
     ///   - now: 服务端统一授时时刻。
-    /// - Returns: 成员角色变更结果及后续扇出所需信息。
+    /// - Returns: 成员角色变更结果。
     /// - Throws: 归属不一致、权限不足或持久化失败时抛出。
     func changeMemberRoleOwnerValidated(actorUserID: UserID, command: V2GroupMemberRoleCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange>
 }

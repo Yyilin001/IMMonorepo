@@ -427,9 +427,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     func preferenceResponseTimestampPrecision(kind: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let shadow = PreferenceReplayClockShadow()
-            let conversations = PostgresV2ConversationCapabilitiesStore(database: database, shadowForwarder: shadow)
-            let receipts = PostgresV2ReadReceiptStore(database: database, shadowForwarder: shadow)
+            let shadow = PreferenceReplayClockDelivery()
+            let conversations = PostgresV2ConversationCapabilitiesStore(database: database, projectionDelivery: shadow)
+            let receipts = PostgresV2ReadReceiptStore(database: database, projectionDelivery: shadow)
             let live = try PostgresV2LiveActivityStore(database: database)
             var messageID = MessageID(uuid: UUID())
             if kind == "favorite" {

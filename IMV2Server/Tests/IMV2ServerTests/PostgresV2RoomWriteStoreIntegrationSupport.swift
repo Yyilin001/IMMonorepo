@@ -645,17 +645,17 @@ internal struct ProfilePropagationProjectionRow: Decodable {
         case revision
     }
 }
-internal struct SuccessfulProjectionShadowForwarder: V2UserShardProjectionShadowing {
-    func shadowIfForwarding(
+internal struct SuccessfulProjectionDelivery: V2UserShardProjectionDelivering {
+    func deliverToCurrentShard(
         userID _: UserID,
         sourceEventID _: EventID,
         projectionKinds _: Set<String>
     ) async throws -> UInt64? { 1 }
 }
-private actor RecordingProjectionShadowForwarder: V2UserShardProjectionShadowing {
+private actor RecordingProjectionDelivery: V2UserShardProjectionDelivering {
     private var requests = 0
 
-    func shadowIfForwarding(
+    func deliverToCurrentShard(
         userID _: UserID,
         sourceEventID _: EventID,
         projectionKinds _: Set<String>
@@ -800,7 +800,7 @@ internal func verifyDurableReplayClockRecovery(
     return result
 }
 
-internal final class PreferenceReplayClockShadow: V2UserShardProjectionShadowing, Sendable {
+internal final class PreferenceReplayClockDelivery: V2UserShardProjectionDelivering, Sendable {
     struct Call: Equatable, Sendable {
         let userID: UserID
         let sourceEventID: EventID
@@ -810,11 +810,11 @@ internal final class PreferenceReplayClockShadow: V2UserShardProjectionShadowing
     private let fails = Mutex(false)
     var calls: [Call] { recorded.withLock { $0 } }
     func setFailure(_ value: Bool) { fails.withLock { $0 = value } }
-    func shadowIfForwarding(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws -> UInt64? {
+    func deliverToCurrentShard(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws -> UInt64? {
         recorded.withLock { $0.append(.init(userID: userID, sourceEventID: sourceEventID, kinds: projectionKinds)) }
-        if fails.withLock({ $0 }) { throw PreferenceReplayClockShadowError.unavailable }
+        if fails.withLock({ $0 }) { throw PreferenceReplayClockDeliveryError.unavailable }
         return nil
     }
 }
 
-internal enum PreferenceReplayClockShadowError: Error { case unavailable }
+internal enum PreferenceReplayClockDeliveryError: Error { case unavailable }

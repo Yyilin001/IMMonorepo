@@ -704,8 +704,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let operation = UUID()
             let block = path == "block" || path == "unblock"
-            let shadow = PreferenceReplayClockShadow()
-            let store = PostgresV2SocialRelationshipStore(database: database, shadowForwarder: shadow)
+            let shadow = PreferenceReplayClockDelivery()
+            let store = PostgresV2SocialRelationshipStore(database: database, projectionDelivery: shadow)
             func perform(conflict: Bool, date: Date) async throws -> (kind: String, time: Date?) {
                 if block {
                     let action: V2UserBlockAction = (path == "block") != conflict ? .block : .unblock
@@ -802,8 +802,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     func directRoomOpenConcurrentReplay(path: String, existingPair: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let now = Date(timeIntervalSince1970: 946_684_800 + 0.00000125)
-            let shadow = PreferenceReplayClockShadow()
-            let store = PostgresV2DirectMessagingStore(database: database, shadowForwarder: shadow)
+            let shadow = PreferenceReplayClockDelivery()
+            let store = PostgresV2DirectMessagingStore(database: database, projectionDelivery: shadow)
             let profile = try forwardImportTestProfile()
             let target = UserID(uuid: memberTwoUUID)
             let otherTarget = UserID(uuid: memberThreeUUID)
@@ -926,8 +926,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await sql.raw("INSERT INTO im_v2.user_direct_send_policy_versions (user_id, revision, updated_at) VALUES (\(bind: senderUUID), \(bind: finalRevision ? Int64.max - 1 : 1), \(bind: later)) ON CONFLICT (user_id) DO UPDATE SET revision = EXCLUDED.revision, updated_at = EXCLUDED.updated_at").run()
             }
             let operation = UUID()
-            let shadow = PreferenceReplayClockShadow()
-            let store = PostgresV2DirectMessagingStore(database: database, shadowForwarder: shadow)
+            let shadow = PreferenceReplayClockDelivery()
+            let store = PostgresV2DirectMessagingStore(database: database, projectionDelivery: shadow)
             func perform(conflict: Bool, date: Date) async throws -> V2ConversationCapabilitiesOutcome<Date> {
                 if stranger {
                     switch try await store.setStrangerMessagePermission(command: .init(actorUserID: senderID,
@@ -985,7 +985,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     return values
                 }
                 let committed = try await snapshot()
-                let call = PreferenceReplayClockShadow.Call(userID: senderID, sourceEventID: .init(uuid: operation),
+                let call = PreferenceReplayClockDelivery.Call(userID: senderID, sourceEventID: .init(uuid: operation),
                     kinds: [stranger ? "stranger_message_permission" : "user_add_permission"])
                 #expect(shadow.calls == Array(repeating: call, count: mismatch ? 1 : 2))
                 for date in [Date(timeIntervalSince1970: .nan), Date(timeIntervalSince1970: .infinity), later] {

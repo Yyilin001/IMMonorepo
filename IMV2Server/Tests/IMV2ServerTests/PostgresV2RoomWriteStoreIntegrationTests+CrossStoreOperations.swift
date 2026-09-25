@@ -32,7 +32,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let now = Date(timeIntervalSince1970: 946_684_800 + 0.00000125)
             let operation = UUID()
-            let store = PostgresV2ConversationCapabilitiesStore(database: database, shadowForwarder: SuccessfulProjectionShadowForwarder())
+            let store = PostgresV2ConversationCapabilitiesStore(database: database, projectionDelivery: SuccessfulProjectionDelivery())
             func perform(changed: Bool, date: Date) async throws -> V2ConversationCapabilitiesOutcome<Date> {
                 if path == "conversation" {
                     let command = try V2ConversationStateCommand(operationID: .init(uuid: operation), roomID: roomID,
@@ -118,10 +118,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let operation = UUID(), target = UserID(uuid: memberTwoUUID), createdRoom = RoomID(uuid: UUID())
             let profile = try forwardImportTestProfile()
-            let direct = PostgresV2DirectMessagingStore(database: database, shadowForwarder: SuccessfulProjectionShadowForwarder())
-            let personal = PostgresV2ConversationCapabilitiesStore(database: database, shadowForwarder: SuccessfulProjectionShadowForwarder())
-            let receipts = PostgresV2ReadReceiptStore(database: database, shadowForwarder: SuccessfulProjectionShadowForwarder())
-            let social = PostgresV2SocialRelationshipStore(database: database, shadowForwarder: SuccessfulProjectionShadowForwarder())
+            let direct = PostgresV2DirectMessagingStore(database: database, projectionDelivery: SuccessfulProjectionDelivery())
+            let personal = PostgresV2ConversationCapabilitiesStore(database: database, projectionDelivery: SuccessfulProjectionDelivery())
+            let receipts = PostgresV2ReadReceiptStore(database: database, projectionDelivery: SuccessfulProjectionDelivery())
+            let social = PostgresV2SocialRelationshipStore(database: database, projectionDelivery: SuccessfulProjectionDelivery())
             var messageRoom = roomID
             if path == "direct-receipt" {
                 guard case .opened(let opened) = try await direct.open(command: .init(actorUserID: senderID,

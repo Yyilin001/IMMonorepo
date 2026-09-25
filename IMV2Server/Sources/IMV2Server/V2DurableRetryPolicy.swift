@@ -1,9 +1,9 @@
 import Foundation
 
-/// 持久化扇出工作在遇到可重试的工作器失败时的退避策略。
+/// 持久后台工作在遇到可重试的工作器失败时的退避策略。
 ///
 /// 重试次数耗尽只会把该行置为暂停并等待运维重放，
-/// 不会把投递转成终态跳过，也不会释放来源房间的准入容量。
+/// 不会把投递转成终态跳过，也不会凭失败自动释放相关资源。
 public struct V2DurableRetryPolicy: Sendable {
     /// 首次重试的基础延迟秒数。
     public let initialDelay: TimeInterval

@@ -60,9 +60,9 @@ public enum V2SendMessageOutcome: Equatable, Sendable {
     case idempotencyConflict
     /// 准入限流及建议重试等待秒数；调用者负责转换为传输层响应。
     case rateLimited(retryAfterSeconds: Int)
-    /// 扇出准入当前不可用，附带容量或状态原因。
+    /// 房间写入准入当前不可用，附带容量或状态原因。
     case unavailable(V2CommandAdmissionUnavailableReason)
-    /// 已为本次操作持久化私有活动与输入能力状态，但没有创建消息、房间事件或扇出计划。
+    /// 已为本次操作持久化私有活动与输入能力状态，但没有创建消息或房间事件。
     case denied(V2DirectMessageDenied)
 
     /// 提取新接受或幂等重放的回执；其余业务结果返回 `nil`。

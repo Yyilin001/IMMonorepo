@@ -585,7 +585,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let registry = try V2StaticUserShardStorageRegistry(locations: [
                 try .init(bucket: "users-primary", database: resources.database(.psql), schema: "im_v2"),
             ])
-            let shadow = V2PostgresUserShardProjectionShadowForwarder(
+            let shadow = V2PostgresUserShardProjectionDelivery(
                 registry: registry,
                 routeFence: router,
                 coLocatedControlBuckets: ["users-primary"]
@@ -595,7 +595,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             // expired lease must retry that exact source event rather than
             // append a second control record or skip the first recipient.
             let interruptedWorker = V2DirectRoomProfilePropagationWorker(
-                database: resources.database(.psql), shadowForwarder: ProfilePropagationFailingShadowForwarder(),
+                database: resources.database(.psql), projectionDelivery: ProfilePropagationFailingProjectionDelivery(),
                 now: { now.addingTimeInterval(2) }
             )
             await #expect(throws: ProfilePropagationShadowFailure.interrupted) {
@@ -624,7 +624,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 """).run()
             let recoveryNow = Date()
             let worker = V2DirectRoomProfilePropagationWorker(
-                database: resources.database(.psql), shadowForwarder: shadow, now: { recoveryNow }
+                database: resources.database(.psql), projectionDelivery: shadow, now: { recoveryNow }
             )
             let firstPage = try await worker.runOnce(limit: 1)
             #expect(firstPage.projectedRecipientCount == 1)
@@ -1756,8 +1756,8 @@ private struct ProfileSuspensionInvalidationAssertionRow: Decodable {
         case minimumProfileRevision = "minimum_profile_revision"
     }
 }
-private struct ProfilePropagationFailingShadowForwarder: V2UserShardProjectionShadowing {
-    func shadowIfForwarding(
+private struct ProfilePropagationFailingProjectionDelivery: V2UserShardProjectionDelivering {
+    func deliverToCurrentShard(
         userID _: UserID,
         sourceEventID _: EventID,
         projectionKinds _: Set<String>

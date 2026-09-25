@@ -36,7 +36,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await leases.release(token: stale))
             let replacement = try await acquire(roomID)
             let executor = V2ActorRoomReceiptExecutor(database: database,
-                shadowForwarder: SuccessfulProjectionShadowForwarder())
+                projectionDelivery: SuccessfulProjectionDelivery())
             let batcher = V2HostRoomReceiptBatcher(executor: executor,
                 configuration: .init(maximumBatchSize: 2, maximumDelay: .milliseconds(20),
                     maximumInFlightBatches: 1, maximumPendingRequests: 4))

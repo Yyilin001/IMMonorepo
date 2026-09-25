@@ -649,7 +649,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try #require(try await sql.raw("SELECT pg_terminate_backend(\(bind: backend)::int4) AS value")
                     .first(decoding: Terminated.self)?.value == true)
                 let revocation = Task {
-                    _ = try await PostgresV2SocialRelationshipStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder(),
+                    _ = try await PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(),
                         authorizationCoordinator: .init(controlDatabase: control, ownerDatabases: ["room-b": owner]))
                         .changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
                             targetUserID: senderID, action: .block), now: now)
@@ -748,7 +748,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     clientMessageID: .init(uuid: UUID()), text: "second"))
                 let results = try await [first, second]
                 #expect(results.allSatisfy { if case .accepted = $0 { true } else { false } })
-                _ = try await PostgresV2SocialRelationshipStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder())
+                _ = try await PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery())
                     .changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
                         targetUserID: senderID, action: .block), now: now)
                 guard case .denied = try await service.send(.init(roomID: room.roomID, actorUserID: senderID,
@@ -795,7 +795,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let original = try await prepare(), accepted = try await receive(original)
             guard case .accepted = accepted else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            let social = PostgresV2SocialRelationshipStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder())
+            let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery())
             _ = try await social.changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
                 targetUserID: actor, action: .block), now: now)
             #expect(try await receive(original) == accepted)
@@ -818,7 +818,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let now = Date(timeIntervalSince1970: 1_750_000_000), profile = try forwardImportTestProfile()
             let recipient = UserID(uuid: memberTwoUUID)
             for database in [control, owner] {
-                let social = PostgresV2SocialRelationshipStore(database: database, shadowForwarder: SuccessfulProjectionShadowForwarder())
+                let social = PostgresV2SocialRelationshipStore(database: database, projectionDelivery: SuccessfulProjectionDelivery())
                 _ = try await social.changeRelationship(.init(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: recipient, action: .request), now: now)
                 _ = try await social.changeRelationship(.init(actorUserID: recipient, operationID: .init(uuid: UUID()), targetUserID: senderID, action: .accept), now: now)
             }
@@ -835,13 +835,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             @Sendable func revoke(_ handler: V2DirectAuthorizationCoordinator?) async throws {
                 switch kind {
                 case "block":
-                    _ = try await PostgresV2SocialRelationshipStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder(), authorizationCoordinator: handler)
+                    _ = try await PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: handler)
                         .changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: operationID), targetUserID: senderID, action: .block), now: now)
                 case "relationship":
-                    _ = try await PostgresV2SocialRelationshipStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder(), authorizationCoordinator: handler)
+                    _ = try await PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: handler)
                         .changeRelationship(.init(actorUserID: recipient, operationID: .init(uuid: operationID), targetUserID: senderID, action: .remove), now: now)
                 case "preference":
-                    _ = try await PostgresV2DirectMessagingStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder(), authorizationCoordinator: handler)
+                    _ = try await PostgresV2DirectMessagingStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: handler)
                         .setStrangerMessagePermission(command: .init(actorUserID: recipient, operationID: .init(uuid: operationID), permission: .deny), now: now)
                 default:
                     _ = try await V2PostgresAccountDisableService(database: control, operatorPrincipal: "authorization-test", authorizationCoordinator: handler, now: { now })
@@ -977,7 +977,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
             }
             if kind == "denied" {
-                _ = try await PostgresV2SocialRelationshipStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder())
+                _ = try await PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery())
                     .changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
                         targetUserID: senderID, action: .block), now: now)
             }
@@ -1120,7 +1120,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let denied = scenario == "denied" || scenario == "ack-denied" || scenario == "revoked"
             if denied && scenario != "revoked" {
-                _ = try await PostgresV2SocialRelationshipStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder(),
+                _ = try await PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(),
                     authorizationCoordinator: .init(controlDatabase: control, ownerDatabases: ["room-b": owner]))
                     .changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()), targetUserID: actor, action: .block), now: now)
             }
@@ -1184,7 +1184,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 if scenario == "revoked" {
                     let grant = try #require(try await PostgresV2DirectAuthorizationIntentStore(database: control)
                         .existing(roomID: room.roomID.uuidValue!, senderID: actor.uuidValue!, clientMessageID: export.intent.targetClientMessageID))
-                    _ = try await PostgresV2SocialRelationshipStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder(),
+                    _ = try await PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(),
                         authorizationCoordinator: .init(controlDatabase: control, ownerDatabases: ["room-b": owner]))
                         .changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()), targetUserID: actor, action: .block), now: now)
                     try #require(try await sql.raw("SELECT disposition AS value FROM im_v2.direct_authorization_intents").first(decoding: StringValueRow.self)?.value == "aborted")
@@ -1339,7 +1339,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(concurrent.allSatisfy { if case .accepted = $0 { true } else { false } })
             let before = try await count("im_v2.messages", on: ownerSQL)
             let blocked = recipients[blockedFirst ? 0 : 1]
-            let social = PostgresV2SocialRelationshipStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder(), authorizationCoordinator: .init(controlDatabase: control, ownerDatabases: ["room-b": owner]))
+            let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: .init(controlDatabase: control, ownerDatabases: ["room-b": owner]))
             _ = try await social.changeUserBlock(.init(actorUserID: blocked, operationID: .init(uuid: UUID()),
                 targetUserID: senderID, action: .block), now: now)
             #expect(try await count("im_v2.user_blocks", on: ownerSQL) == 0)
@@ -1376,11 +1376,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let recipient = UserID(uuid: memberTwoUUID), profile = try forwardImportTestProfile()
             let coordinator = V2DirectAuthorizationCoordinator(controlDatabase: control, ownerDatabases: ["room-b": owner])
-            let social = PostgresV2SocialRelationshipStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder(), authorizationCoordinator: coordinator)
-            let directControl = PostgresV2DirectMessagingStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder())
+            let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: coordinator)
+            let directControl = PostgresV2DirectMessagingStore(database: control, projectionDelivery: SuccessfulProjectionDelivery())
             if kind == "relationship" {
                 for database in [control, owner] {
-                    let store = PostgresV2SocialRelationshipStore(database: database, shadowForwarder: SuccessfulProjectionShadowForwarder())
+                    let store = PostgresV2SocialRelationshipStore(database: database, projectionDelivery: SuccessfulProjectionDelivery())
                     _ = try await store.changeRelationship(.init(actorUserID: senderID, operationID: .init(uuid: UUID()),
                         targetUserID: recipient, action: .request), now: now)
                     _ = try await store.changeRelationship(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
@@ -1526,8 +1526,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: .standard) { control, _, sql, ownerSQL, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let recipient = UserID(uuid: memberTwoUUID)
-            let social = PostgresV2SocialRelationshipStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder())
-            let direct = PostgresV2DirectMessagingStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder())
+            let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery())
+            let direct = PostgresV2DirectMessagingStore(database: control, projectionDelivery: SuccessfulProjectionDelivery())
             if kind == "relationship" {
                 _ = try await social.changeRelationship(.init(actorUserID: senderID, operationID: .init(uuid: UUID()),
                     targetUserID: recipient, action: .request), now: now)
@@ -1632,7 +1632,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw("INSERT INTO im_v2.special_accounts (account_user_id, stable_key, account_kind, allows_customer_messages, allows_service_messages, created_at, updated_at) VALUES (\(bind: senderUUID), 'clock_special_account', \(bind: kind.rawValue), \(bind: kind == .customerSupport), true, \(bind: base), \(bind: base))").run()
             let store = PostgresV2SpecialAccountMessagingStore(database: database)
             let account = try #require(try await store.resolveActiveAccount(stableKey: "clock_special_account"))
-            let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: database, shadowForwarder: SuccessfulProjectionShadowForwarder()), capacityProfile: profile, roomShardID: "room-a", now: { base })
+            let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: database, projectionDelivery: SuccessfulProjectionDelivery()), capacityProfile: profile, roomShardID: "room-a", now: { base })
             guard case .opened(let opened) = try await direct.open(actorUserID: customer, operationID: .init(uuid: UUID()), targetUserID: senderID) else { throw V2SpecialAccountMessagingError.corruptPersistenceState }
             let messages = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), now: { base.addingTimeInterval(1) })
             if kind == .customerSupport {

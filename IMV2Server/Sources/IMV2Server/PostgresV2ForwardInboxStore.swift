@@ -344,7 +344,7 @@ func v2AssertForwardInboxOwner(_ authorization: ForwardInboxAuthorization, sql: 
     let intent = authorization.export.intent
     // Acceptance calls after message-operation and room locks; completion
     // calls after the inbox lock. Retain the owner through the caller's commit,
-    // including when a migration changed it while this statement waited.
+    // including when a stale caller attempts to use another owner or epoch.
     guard let room = try await sql.raw("""
         SELECT room_shard_id, owner_epoch FROM im_v2.rooms WHERE room_id = \(bind: intent.targetRoomID) FOR NO KEY UPDATE
         """).first(decoding: ForwardInboxOwnerRow.self),

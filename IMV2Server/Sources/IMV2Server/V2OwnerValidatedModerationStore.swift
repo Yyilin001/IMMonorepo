@@ -13,7 +13,6 @@ public protocol V2OwnerValidatedModerationStore: Sendable {
     ///   - ownerRoute: 已选定的房间归属；与房间当前记录不一致时事务拒绝提交。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识，重放同标识命令不得产生第二次效果。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻，用于审计与留存计算。
     /// - Returns: 审核结果。
     /// - Throws: 归属已变更、权限不足或持久化失败时抛出。
@@ -26,7 +25,6 @@ public protocol V2OwnerValidatedModerationStore: Sendable {
     ///   - ownerRoute: 已选定的房间归属；与房间当前记录不一致时事务拒绝提交。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识，重放同标识命令不得产生第二次效果。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻，用于审计与留存计算。
     /// - Returns: 审核结果。
     /// - Throws: 归属已变更、命令动作不受可信安全入口支持或持久化失败时抛出。

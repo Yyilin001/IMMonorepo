@@ -29,7 +29,7 @@ public struct V2RoomServerOwnerResources: Sendable {
                 sendBatcher: any V2ActorGrantedSendBatching,
                 membershipIdentities: any V2MembershipIdentitySnapshotValidating,
                 invitationIdentities: any V2GroupInvitationIdentityReading,
-                receiptShadowForwarder: any V2UserShardProjectionShadowing,
+                receiptProjectionDelivery: any V2UserShardProjectionDelivering,
                 capacityProfile: V2CapacityProfile, messageLimits: V2MessageCommandLimits,
                 maximumEditBytes: Int, contentReviewMode: V2ContentReviewMode,
                 queryBatchConfiguration: V2HostRoomRecoveryQueryBatcher.Configuration,
@@ -48,7 +48,7 @@ public struct V2RoomServerOwnerResources: Sendable {
         self.reactions = .init(database: database)
         self.identities = membershipIdentities
         self.invitationIdentities = invitationIdentities
-        let receipts = V2ActorRoomReceiptExecutor(database: database, shadowForwarder: receiptShadowForwarder)
+        let receipts = V2ActorRoomReceiptExecutor(database: database, projectionDelivery: receiptProjectionDelivery)
         self.receipts = receipts
         self.receiptBatcher = .init(executor: receipts,
             configuration: receiptBatchConfiguration,

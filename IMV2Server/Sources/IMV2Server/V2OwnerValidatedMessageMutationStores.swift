@@ -13,7 +13,6 @@ public protocol V2OwnerValidatedMessageEditStore: Sendable {
     ///   - ownerRoute: 已选定的房间归属。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 编辑结果。
     /// - Throws: 归属已变更、权限不足或持久化失败时抛出。
@@ -30,7 +29,6 @@ public protocol V2OwnerValidatedMessageWithdrawalStore: Sendable {
     ///   - ownerRoute: 已选定的房间归属。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 撤回结果。
     /// - Throws: 归属已变更、权限不足或持久化失败时抛出。
@@ -47,7 +45,6 @@ public protocol V2OwnerValidatedMessageReactionStore: Sendable {
     ///   - ownerRoute: 已选定的房间归属。
     ///   - capacityProfile: 本次命令使用的容量档位。
     ///   - eventID: 命令幂等标识。
-    ///   - planID: 本次命令关联的扇出计划标识。
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 表情变更结果。
     /// - Throws: 归属已变更、权限不足或持久化失败时抛出。

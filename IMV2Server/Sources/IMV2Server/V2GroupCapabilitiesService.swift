@@ -93,7 +93,7 @@ public enum V2GroupCapabilitiesStoreError: Error, Equatable, Sendable {
     case corruptPersistenceState
 }
 
-/// 群能力命令的事件与扇出标识生成器。
+/// 群能力命令的事件标识生成器。
 public struct V2GroupCapabilitiesIDFactory: Sendable {
     private let makeUUID: @Sendable () -> UUID
 
@@ -120,7 +120,7 @@ public struct V2GroupCapabilitiesService: Sendable {
     /// - Parameters:
     ///   - store: 实际执行变更的存储实现。
     ///   - capacityProfile: 固定的容量档位，服务内不会逐次调整。
-    ///   - identifiers: 事件与扇出标识生成器。
+    ///   - identifiers: 事件标识生成器。
     ///   - now: 可注入的当前时刻读取函数。
     public init(store: any V2GroupCapabilitiesStore, capacityProfile: V2CapacityProfile, identifiers: V2GroupCapabilitiesIDFactory = .init(), now: @escaping @Sendable () -> Date = Date.init) { self.store = store; self.capacityProfile = capacityProfile; self.identifiers = identifiers; self.now = now }
 

@@ -16,7 +16,7 @@ public enum V2DatabasePoolMetricClass: String, CaseIterable, Sendable {
     case foreground
     /// 同步工作使用的连接池。
     case sync
-    /// 持久化扇出投递使用的连接池。
+    /// 持久化后台投递使用的连接池。
     case delivery
     /// 派生状态投影使用的连接池。
     case projection

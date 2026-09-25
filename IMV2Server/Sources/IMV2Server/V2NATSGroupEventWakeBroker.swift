@@ -969,7 +969,7 @@ public actor V2NATSGroupEventWakeBroker: V2GroupEventWakePublishing, V2Foregroun
     /// 尽力而为地发布一条前台唤醒提示。
     ///
     /// 前台提示刻意允许丢失。不要把 broker 故障回传进发送方已接受的响应；
-    /// 持久扇出或混合唤醒发件箱的恢复仍能保证正确性。
+    /// 持久房间唤醒发件箱的恢复仍能保证正确性。
     ///
     /// - Parameter hint: 房间水位提示。
     public func publishForegroundHint(_ hint: V2GroupEventWake) async {

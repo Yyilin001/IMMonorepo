@@ -7,13 +7,13 @@ import IMV2Core
 /// be called by a physical RoomActor turn; user preferences remain control-side.
 public struct V2ActorRoomReceiptExecutor: Sendable {
     private let database: any Database
-    private let shadowForwarder: any V2UserShardProjectionShadowing
+    private let projectionDelivery: any V2UserShardProjectionDelivering
     private let timeouts: V2RoomActivationSQLTimeouts
 
-    public init(database: any Database, shadowForwarder: any V2UserShardProjectionShadowing,
+    public init(database: any Database, projectionDelivery: any V2UserShardProjectionDelivering,
                 timeouts: V2RoomActivationSQLTimeouts = .default) {
         self.database = database
-        self.shadowForwarder = shadowForwarder
+        self.projectionDelivery = projectionDelivery
         self.timeouts = timeouts
     }
 
@@ -75,6 +75,6 @@ public struct V2ActorRoomReceiptExecutor: Sendable {
     }
 
     private func store(_ database: any Database) -> PostgresV2ReadReceiptStore {
-        .init(database: database, shadowForwarder: shadowForwarder)
+        .init(database: database, projectionDelivery: projectionDelivery)
     }
 }

@@ -4,7 +4,7 @@ import IMV2Core
 /// 一次已认证的消息表态请求。
 ///
 /// HTTP/领域适配器在完成身份与权限校验后构造该值；
-/// 服务层只负责补齐扇出标识并转交存储边界。
+/// 服务层只负责补齐事件标识并转交存储边界。
 public struct V2AuthenticatedMessageReaction: Sendable {
     /// 目标房间。
     public let roomID: RoomID
@@ -46,7 +46,7 @@ public enum V2MessageReactionOutcome: Equatable, Sendable {
     case alreadyInDesiredState
     /// 触发限流；关联值为建议的重试等待秒数。
     case rateLimited(retryAfterSeconds: Int)
-    /// 依赖的扇出准入暂时不可用。
+    /// 房间写入准入暂时不可用。
     case unavailable(V2CommandAdmissionUnavailableReason)
 }
 

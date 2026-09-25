@@ -199,8 +199,8 @@ struct V2FixedUserShardRouteFence: V2UserShardRouteFencing {
     }
 }
 
-private struct V2DiscardingUserShardProjectionShadower: V2UserShardProjectionShadowing {
-    func shadowIfForwarding(
+private struct V2DiscardingUserShardProjectionDelivery: V2UserShardProjectionDelivering {
+    func deliverToCurrentShard(
         userID _: UserID,
         sourceEventID _: EventID,
         projectionKinds _: Set<String>
@@ -241,24 +241,24 @@ extension PostgresV2MessageEditStore {
 
 extension PostgresV2ReadReceiptStore {
     init(database: any Database) {
-        self.init(database: database, shadowForwarder: V2DiscardingUserShardProjectionShadower())
+        self.init(database: database, projectionDelivery: V2DiscardingUserShardProjectionDelivery())
     }
 }
 
 extension PostgresV2DirectMessagingStore {
     init(database: any Database) {
-        self.init(database: database, shadowForwarder: V2DiscardingUserShardProjectionShadower())
+        self.init(database: database, projectionDelivery: V2DiscardingUserShardProjectionDelivery())
     }
 }
 
 extension PostgresV2SocialRelationshipStore {
     init(database: any Database) {
-        self.init(database: database, shadowForwarder: V2DiscardingUserShardProjectionShadower())
+        self.init(database: database, projectionDelivery: V2DiscardingUserShardProjectionDelivery())
     }
 }
 
 extension PostgresV2ConversationCapabilitiesStore {
     init(database: any Database) {
-        self.init(database: database, shadowForwarder: V2DiscardingUserShardProjectionShadower())
+        self.init(database: database, projectionDelivery: V2DiscardingUserShardProjectionDelivery())
     }
 }

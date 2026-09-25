@@ -279,7 +279,7 @@ private func hostSharedAckHost(database: any Database, writeDatabase: any Databa
         sendBatcher: batcher,
         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
-        receiptShadowForwarder: HostSharedAckShadow(),
+        receiptProjectionDelivery: HostSharedAckProjectionDelivery(),
         capacityProfile: fixture.forwardImportTestProfile(),
         messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
         contentReviewMode: .disabled, queryBatchConfiguration: .init())
@@ -415,8 +415,8 @@ private actor HostSharedAckGate {
     }
 }
 
-private struct HostSharedAckShadow: V2UserShardProjectionShadowing {
-    func shadowIfForwarding(userID: UserID, sourceEventID: EventID,
+private struct HostSharedAckProjectionDelivery: V2UserShardProjectionDelivering {
+    func deliverToCurrentShard(userID: UserID, sourceEventID: EventID,
         projectionKinds: Set<String>) async throws -> UInt64? { nil }
 }
 

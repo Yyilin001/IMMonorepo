@@ -121,7 +121,7 @@ public enum V2ControlPlaneHousekeepingError: Error, Equatable, Sendable {
 /// 控制面维护的 PostgreSQL 实现。
 ///
 /// 它保留权威房间事件与消息，只删除有界的终态工作器簿记。
-/// 扇出相关行按从叶子到根的次序拆除，因此不会绕过任何外键栅栏或仍在进行的投递。
+/// 终态工作行按外键依赖顺序删除，不绕过仍在进行的投递。
 /// 房间自有的操作台账与审核任务不在此处删除，而是由持有激活租约的房间
 /// 维护回合（``PostgresV2RoomBookkeepingStore``）清理，每类删除只有一个物理归属。
 public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepingStore {

@@ -137,7 +137,7 @@ public enum V2ModerationOutcome: Equatable, Sendable {
 /// 审核命令的持久化能力。
 ///
 /// 单个 PostgreSQL 事务必须完成：推导发起者角色、校验动作合法性、写入权威状态、
-/// 追加房间事件与审计行、预留扇出计划、写入发件箱工作并持久化幂等结果。
+/// 追加房间事件与审计行、写入所需发件箱工作并持久化幂等结果。
 public protocol V2ModerationStore: Sendable {
     /// 应用一次审核命令。
     ///
@@ -251,7 +251,7 @@ public protocol V2TrustedSafetyModerationStore: Sendable {
     func applyTrustedSafety(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome
 }
 
-/// 审核命令的事件与扇出标识生成器。
+/// 审核命令的事件标识生成器。
 public struct V2ModerationIDFactory: Sendable {
     private let makeUUID: @Sendable () -> UUID
     /// 注入 UUID 来源。
@@ -280,7 +280,7 @@ public struct V2ModerationService: Sendable {
     /// - Parameters:
     ///   - store: 执行审核的存储实现。
     ///   - capacityProfile: 固定的容量档位。
-    ///   - identifiers: 事件与扇出标识生成器。
+    ///   - identifiers: 事件标识生成器。
     ///   - now: 可注入的当前时刻读取函数。
     public init(store: any V2ModerationStore, capacityProfile: V2CapacityProfile, identifiers: V2ModerationIDFactory = .init(), now: @escaping @Sendable () -> Date = Date.init) {
         self.store = store
@@ -327,7 +327,7 @@ public struct V2TrustedSafetyModerationService: Sendable {
     ///   - store: 执行特权审核的存储实现。
     ///   - safetyActorUserID: 服务配置的受信审计主体。
     ///   - capacityProfile: 固定的容量档位。
-    ///   - identifiers: 事件与扇出标识生成器。
+    ///   - identifiers: 事件标识生成器。
     ///   - now: 可注入的当前时刻读取函数。
     public init(store: any V2TrustedSafetyModerationStore, safetyActorUserID: UserID, capacityProfile: V2CapacityProfile, identifiers: V2ModerationIDFactory = .init(), now: @escaping @Sendable () -> Date = Date.init) {
         self.store = store

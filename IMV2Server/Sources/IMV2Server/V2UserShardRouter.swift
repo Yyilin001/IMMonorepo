@@ -26,7 +26,7 @@ public struct V2UserShardRoute: Equatable, Sendable {
 
 /// 可注入且带代次的用户归属解析边界。
 ///
-/// 扇出计划通过此接口获取归属，不在本地自行哈希标识推导目标桶。
+/// 个人状态投递通过此接口获取归属，不在本地自行哈希标识推导目标桶。
 public protocol V2UserShardRouter: Sendable {
     /// 按输入顺序为每个用户返回一个路由。
     ///

@@ -260,7 +260,7 @@ private func makePairHost(database: any Database, profile: V2CapacityProfile,
         sendBatcher: sends,
         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
-        receiptShadowForwarder: PairShadow(), capacityProfile: profile,
+        receiptProjectionDelivery: PairProjectionDelivery(), capacityProfile: profile,
         messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
         contentReviewMode: .disabled, queryBatchConfiguration: .init(),
         databaseWorkAdmission: admission)
@@ -422,8 +422,8 @@ private func pairWaitUntil(_ condition: @escaping @Sendable () async throws -> B
     }
 }
 
-private struct PairShadow: V2UserShardProjectionShadowing {
-    func shadowIfForwarding(userID: UserID, sourceEventID: EventID,
+private struct PairProjectionDelivery: V2UserShardProjectionDelivering {
+    func deliverToCurrentShard(userID: UserID, sourceEventID: EventID,
         projectionKinds: Set<String>) async throws -> UInt64? { nil }
 }
 

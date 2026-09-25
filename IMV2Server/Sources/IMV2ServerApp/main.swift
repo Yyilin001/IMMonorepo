@@ -114,7 +114,7 @@ enum IMV2ServerApp {
                   let maintenanceDatabase = databaseForRole(for: .maintenance, url: configuration.databaseURL)
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
 
-            // 独立控制连接持有路由围栏，数据连接先提交源端再镜像。
+            // 独立控制连接持有路由围栏，数据连接先提交源端再投递到当前归属。
             // 即使关闭工作类别隔离也不能合并这两个池；总连接数已在配置阶段计入预算。
             let userStateRouteDatabaseID = DatabaseID(string: "gateway-user-state-route")
             resources.databases.use(try postgresDatabaseConfiguration(
@@ -449,21 +449,21 @@ enum IMV2ServerApp {
             let maintenanceUserShardRouter = V2PostgresUserShardRouter(
                 database: maintenanceDatabase
             )
-            // Projection shadowing is post-commit cross-store delivery work.
+            // Control projections are post-commit cross-store delivery work.
             // Acquiring its route fence from the foreground pool can create a
             // pool self-starvation cycle during a first-message burst: every
-            // append waits for a shadow fence while foreground connections are
+            // append waits for a route fence while foreground connections are
             // occupied by the same burst. Advisory locks are database-global,
-            // so the delivery pool preserves the exact cutover fence while
+            // so the delivery pool preserves the current-route fence while
             // isolating this bounded follow-up work from message persistence.
-            let userShardShadowForwarder = V2PostgresUserShardProjectionShadowForwarder(
+            let userShardProjectionDelivery = V2PostgresUserShardProjectionDelivery(
                 registry: deliveryUserShardStorage,
                 routeFence: deliveryUserShardRouter,
                 batchRouteFence: deliveryUserShardRouter,
                 coLocatedControlBuckets: coLocatedControlBuckets
             )
-            let maintenanceUserShardShadowForwarder =
-                V2PostgresUserShardProjectionShadowForwarder(
+            let maintenanceUserShardProjectionDelivery =
+                V2PostgresUserShardProjectionDelivery(
                     registry: maintenanceUserShardStorage,
                     routeFence: maintenanceUserShardRouter,
                     batchRouteFence: maintenanceUserShardRouter,
@@ -639,7 +639,7 @@ enum IMV2ServerApp {
                     }
                     resourcesForOwner = try .init(database: owner, writes: write, sendBatcher: batcher,
                         membershipIdentities: membershipIdentities, invitationIdentities: invitationIdentities,
-                        receiptShadowForwarder: userShardShadowForwarder,
+                        receiptProjectionDelivery: userShardProjectionDelivery,
                         capacityProfile: configuration.capacityProfile, messageLimits: configuration.messageLimits,
                         maximumEditBytes: configuration.messageLimits.maxUTF8Bytes,
                         contentReviewMode: configuration.contentReviewMode,
@@ -656,7 +656,7 @@ enum IMV2ServerApp {
                 ownerResources[storage.shardID] = resourcesForOwner
                 forwardTargetWritesByShard[storage.shardID] = write
                 bootstraps[storage.shardID] = try .init(shardID: storage.shardID,
-                    direct: PostgresV2DirectMessagingStore(database: owner, shadowForwarder: userShardShadowForwarder),
+                    direct: PostgresV2DirectMessagingStore(database: owner, projectionDelivery: userShardProjectionDelivery),
                     group: PostgresV2GroupMessagingStore(database: owner), capacityProfile: configuration.capacityProfile)
                 forwardPairs[storage.shardID] = .init(database: owner, write: write,
                     capacityProfile: configuration.capacityProfile, limits: configuration.messageLimits,
@@ -674,7 +674,7 @@ enum IMV2ServerApp {
             let roomQueries = V2RoomRefQueryClient(directory: actorDirectory, callTimeout: callTimeout.duration)
             let roomActorServices = V2GatewayRoomActorServices(directory: actorDirectory, callTimeout: callTimeout,
                 readReceiptControlStore: PostgresV2ReadReceiptStore(database: database,
-                    shadowForwarder: userShardShadowForwarder), databaseWorkAdmission: databaseWorkAdmission,
+                    projectionDelivery: userShardProjectionDelivery), databaseWorkAdmission: databaseWorkAdmission,
                 directRoomLogEventCache: directRoomLogEventCache)
             let fixedBootstraps = bootstraps
             let bootstrapPort = V2ActorCreationBootstrapPort(execute: { request, deadline in
@@ -699,7 +699,7 @@ enum IMV2ServerApp {
                 bootstrap: bootstrapPort, capacityProfile: configuration.capacityProfile)
             let roomCreationServices = V2GatewayRoomCreationServices(coordinator: roomCreation,
                 directPreferences: V2ControlDirectMessagePreferenceClient(store:
-                    PostgresV2DirectMessagingStore(database: database, shadowForwarder: userShardShadowForwarder,
+                    PostgresV2DirectMessagingStore(database: database, projectionDelivery: userShardProjectionDelivery,
                         authorizationCoordinator: directAuthorizationCoordinator)), callTimeout: callTimeout)
             let maintenanceGroupAudienceStore = PostgresV2GroupAudienceImportStore(database: maintenanceDatabase)
             let groupEventLog = V2RoomRefGroupEventLogClient(rooms: roomQueries,
@@ -817,9 +817,9 @@ enum IMV2ServerApp {
                 metrics: transportMetrics
             )
             committedHybridGroupEvents.install(sink: foregroundGroupEventHints)
-            // 会话摘要按房间分片扇出；未读与预览都由服务端聚合，客户端只回传游标。
+            // 会话目录按房间归属读取；客户端按有效活动事实本地排序。
             // Recovery scans use uncached control-plane routing, so a cached
-            // owner cannot validate a stale physical copy after migration.
+            // owner cannot validate a room outside its current static owner.
             let recoveryRouter = V2PostgresRoomShardRouter(database: syncControlDatabase)
             let recoveryStorageGroups = Dictionary(grouping: configuration.roomShardStorage) {
                 $0.databaseURL + "\u{0}" + $0.schema
@@ -859,7 +859,7 @@ enum IMV2ServerApp {
             accountRoomChangeService = accountChanges
             await connectionRegistry.configureAccountRoomChanges(accountChanges)
             let socialRelationships = V2SocialRelationshipService(
-                store: PostgresV2SocialRelationshipStore(database: database, shadowForwarder: userShardShadowForwarder, authorizationCoordinator: directAuthorizationCoordinator)
+                store: PostgresV2SocialRelationshipStore(database: database, projectionDelivery: userShardProjectionDelivery, authorizationCoordinator: directAuthorizationCoordinator)
             )
             let contentReviewWorker: V2RoutedContentReviewWorker?
             if configuration.contentReviewMode == .enabled,
@@ -895,7 +895,7 @@ enum IMV2ServerApp {
                 contentReviewWorker = nil
             }
             let conversationCapabilities = V2ConversationCapabilitiesService(
-                store: PostgresV2ConversationCapabilitiesStore(database: database, shadowForwarder: userShardShadowForwarder)
+                store: PostgresV2ConversationCapabilitiesStore(database: database, projectionDelivery: userShardProjectionDelivery)
             )
             let liveActivityStore = try PostgresV2LiveActivityStore(database: database)
             let liveActivity = V2LiveActivityService(store: liveActivityStore)
@@ -943,7 +943,7 @@ enum IMV2ServerApp {
             )
             let directRoomProfilePropagationWorker = V2DirectRoomProfilePropagationWorker(
                 database: maintenanceDatabase,
-                shadowForwarder: maintenanceUserShardShadowForwarder,
+                projectionDelivery: maintenanceUserShardProjectionDelivery,
                 liveNotifier: liveSyncNotifier
             )
             let readReceiptPreferencePropagationWorker = V2ReadReceiptPreferencePropagationWorker(
@@ -1479,7 +1479,7 @@ enum IMV2ServerApp {
                             var didWork = false
                             do {
                                 // Profile changes are a distinct direct-contact
-                                // graph from room-event fan-out. Its work budget is
+                                // graph from room-event recovery. Its work budget is
                                 // per recipient, so one very connected account never
                                 // turns a maintenance tick into an unbounded loop.
                                 let report = try await directRoomProfilePropagationWorker.runOnce(

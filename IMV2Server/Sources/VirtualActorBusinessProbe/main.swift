@@ -87,8 +87,8 @@ private struct MultiPartitionRejoinResult: Encodable {
     let primaryMessageRows: Int64
 }
 
-private struct NoopProjectionShadow: V2UserShardProjectionShadowing {
-    func shadowIfForwarding(userID: UserID, sourceEventID: EventID,
+private struct NoopProjectionShadow: V2UserShardProjectionDelivering {
+    func deliverToCurrentShard(userID: UserID, sourceEventID: EventID,
                             projectionKinds: Set<String>) async throws -> UInt64? { nil }
 }
 
@@ -221,7 +221,7 @@ enum VirtualActorBusinessProbe {
             sendBatcher: sends,
             membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
             invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
-            receiptShadowForwarder: NoopProjectionShadow(), capacityProfile: capacity,
+            receiptProjectionDelivery: NoopProjectionShadow(), capacityProfile: capacity,
             messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
             contentReviewMode: .disabled, queryBatchConfiguration: .init())
         let factory = try V2RoomServerActivationFactory(owners: ["room-a": owner],
@@ -367,7 +367,7 @@ enum VirtualActorBusinessProbe {
             sendBatcher: sends,
             membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
             invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
-            receiptShadowForwarder: NoopProjectionShadow(), capacityProfile: capacity,
+            receiptProjectionDelivery: NoopProjectionShadow(), capacityProfile: capacity,
             messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
             contentReviewMode: .disabled, queryBatchConfiguration: .init())
         let factory = try V2RoomServerActivationFactory(owners: ["room-a": owner],

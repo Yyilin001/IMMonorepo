@@ -262,7 +262,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2Owne
             let membershipRevision = context.room.membershipRevision + 1
             let committed = try await commit(room: ids.room, context: context, actor: ids.actor, eventID: eventID, eventType: "group.member_role_changed", payload: try groupPayload(["event_type": "group.member_role_changed", "room_id": ids.room.uuidString, "target_user_id": targetID.uuidString, "role": command.role.rawValue, "membership_revision": membershipRevision, "actor_user_id": ids.actor.uuidString]), now: now, sql: sql)
             // Membership history is revisioned. Close the active row and add
-            // a new active interval so historical fan-out remains correct.
+            // a new active interval so historical room-event visibility remains correct.
             try await sql.raw("UPDATE im_v2.room_memberships SET left_revision = \(bind: membershipRevision) WHERE room_id = \(bind: ids.room) AND user_id = \(bind: targetID) AND joined_revision = \(bind: target.joinedRevision)").run()
             try await sql.raw("INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision, left_revision) VALUES (\(bind: ids.room), \(bind: targetID), \(bind: command.role.rawValue), \(bind: membershipRevision), NULL)").run()
             try await sql.raw("UPDATE im_v2.rooms SET membership_revision = \(bind: membershipRevision) WHERE room_id = \(bind: ids.room)").run()
@@ -345,7 +345,7 @@ private func commit(room: UUID, context: GroupContext, actor: UUID, eventID: Eve
     try await sql.raw("UPDATE im_v2.room_admission SET command_window_used = \(bind: context.nextRoom.commandWindow.used), shard_lease_id = \(bind: leaseID), shard_lease_generation = \(bind: try groupSigned(lease.generation)) WHERE room_id = \(bind: room)").run()
     try await sql.raw("UPDATE im_v2.shard_admission_pools SET command_window_used = \(bind: lease.commandWindow.used) WHERE room_shard_id = \(bind: context.room.roomShardID) AND capacity_profile_id = \(bind: context.room.capacityProfileID) AND lease_id = \(bind: leaseID) AND generation = \(bind: try groupSigned(lease.generation))").run()
     // Assign the source version under the same room lock as the append.
-    // Personal fan-out preserves this payload but assigns its own cursor.
+    // Personal-state projection preserves this payload but assigns its own cursor.
     try await sql.raw("INSERT INTO im_v2.room_events (event_id, room_id, room_sequence, event_type, actor_user_id, payload, committed_membership_revision, created_at) VALUES (\(bind: event), \(bind: room), \(bind: sequence), \(bind: eventType), \(bind: actor), \(bind: payload)::jsonb || jsonb_build_object('room_sequence', \(bind: sequence), 'server_created_at_ms', \(bind: createdAtMilliseconds)), \(bind: context.room.membershipRevision), \(bind: now))").run()
     return .init(sequence: sequence, eventID: event, createdAt: timestamp.createdAt)
 }

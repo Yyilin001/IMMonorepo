@@ -143,9 +143,8 @@ public struct PostgresV2ForwardExportStore: Sendable {
                       export.intent.sourceRoomID == sourceRoom,
                       export.intent.sourceRevision == source.revision.signedValue
                 else { throw V2ForwardExportError.idempotencyConflict }
-                // Original routing epochs are immutable evidence. A future
-                // migration delivery protocol must carry them, never regrant
-                // from a changed source or rewrite this envelope on retry.
+                // Original routing epochs are immutable evidence. Retries
+                // must not regrant from changed source facts or rewrite this envelope.
                 return .export(export)
             }
             guard let room = try await sql.raw("""

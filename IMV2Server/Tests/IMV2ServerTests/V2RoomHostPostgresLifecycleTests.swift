@@ -209,7 +209,7 @@ private func g2Host(database: any Database, fixture: PostgresV2RoomWriteStoreInt
         sendBatcher: batcher,
         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
-        receiptShadowForwarder: G2ShadowForwarder(),
+        receiptProjectionDelivery: G2ProjectionDelivery(),
         capacityProfile: fixture.forwardImportTestProfile(),
         messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
         contentReviewMode: .disabled, queryBatchConfiguration: .init())
@@ -286,8 +286,8 @@ private actor G2PhaseBarrier {
     }
 }
 
-private struct G2ShadowForwarder: V2UserShardProjectionShadowing {
-    func shadowIfForwarding(userID: UserID, sourceEventID: EventID,
+private struct G2ProjectionDelivery: V2UserShardProjectionDelivering {
+    func deliverToCurrentShard(userID: UserID, sourceEventID: EventID,
         projectionKinds: Set<String>) async throws -> UInt64? { nil }
 }
 

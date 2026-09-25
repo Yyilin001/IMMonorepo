@@ -70,8 +70,8 @@ struct PostgresV2DirectAuthorizationReceiptStore: Sendable {
             guard row.matches(attempt) else { throw V2DirectAuthorizationReceiptError.identityConflict }
             return row.receipt
         }
-        // Changing generations must never change the immutable command. A new
-        // generation may use a new owner after migration, but not new content.
+        // Changing generations must never change the immutable command,
+        // even when a caller presents a different route or retry context.
         if let prior = try await sql.raw("""
             SELECT * FROM \(unsafeRaw: schema).direct_authorization_receipts
             WHERE room_id = \(bind: attempt.roomID) AND sender_user_id = \(bind: attempt.senderID)

@@ -282,7 +282,7 @@ extension PostgresV2RoomWriteStore {
             // made the complete write graph wait behind one of nine shared
             // shard rows and multiplied foreground connection occupancy.
             // A rejection still throws inside this transaction, so all prior
-            // message/fan-out writes roll back atomically.
+            // message and room-event writes roll back atomically.
             try await reserveShardAdmission(
                 shardReservation,
                 room: room,

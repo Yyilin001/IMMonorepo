@@ -1,6 +1,6 @@
 import IMV2Core
 
-/// Filters migration copies without changing the physical scan position.
+/// Filters entries outside this physical store's current ownership without changing the scan position.
 /// The enclosing directory service must also fence the scan by topology generation.
 public struct V2OwnerValidatedRoomDirectoryStore: V2UserRoomDirectoryReading {
     private let underlying: any V2UserRoomDirectoryReading

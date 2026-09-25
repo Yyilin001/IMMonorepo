@@ -19,8 +19,8 @@ enum DatabaseEdgeProbe {
         func value(for key: String) -> String? { ProcessInfo.processInfo.environment[key] }
     }
     private struct Row: Decodable { let value: Int64 }
-    private struct Shadow: V2UserShardProjectionShadowing {
-        func shadowIfForwarding(userID: UserID, sourceEventID: EventID,
+    private struct Shadow: V2UserShardProjectionDelivering {
+        func deliverToCurrentShard(userID: UserID, sourceEventID: EventID,
                                 projectionKinds: Set<String>) async throws -> UInt64? { nil }
     }
     private static let user = UserID(uuid: id(12))
@@ -89,7 +89,7 @@ enum DatabaseEdgeProbe {
                     sendBatcher: batcher,
                     membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
                     invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: control),
-                    receiptShadowForwarder: Shadow(),
+                    receiptProjectionDelivery: Shadow(),
                     capacityProfile: .init(id: "standard", limits: .init(
                         maxEligibleMembers: 10, maxCommandsPerWindow: 1000, retryAfterSeconds: 3)),
                     messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,

@@ -3,7 +3,7 @@ import IMV2Core
 
 /// 一次已认证的消息编辑请求。
 ///
-/// 适配器在完成身份与权限校验后构造该值；服务层只负责补齐扇出标识并转交存储边界。
+/// 适配器在完成身份与权限校验后构造该值；服务层只负责补齐事件标识并转交存储边界。
 public struct V2AuthenticatedMessageEdit: Sendable {
     /// 目标房间。
     public let roomID: RoomID
@@ -47,7 +47,7 @@ public enum V2MessageEditOutcome: Equatable, Sendable {
     case alreadyWithdrawn
     /// 触发限流；关联值为建议的重试等待秒数。
     case rateLimited(retryAfterSeconds: Int)
-    /// 依赖的扇出准入暂时不可用。
+    /// 房间写入准入暂时不可用。
     case unavailable(V2CommandAdmissionUnavailableReason)
 }
 

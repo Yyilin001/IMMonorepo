@@ -191,8 +191,9 @@ evidence remains local-stack coverage, not a production deployment approval.
   deadline. Sending a slow stream of fragments cannot extend it.
 - `IM_V2_IDLE_TIMEOUT_MS` closes a silent TLS session. Foreground clients send
   application-owned heartbeats; background clients rely on reconnect and sync.
-- `IM_V2_WORKER_BATCH_SIZE` and `IM_V2_WORKER_POLL_INTERVAL_MS` schedule the
-  bounded durable path from room outbox to fan-out plan to user sync log.
+- `IM_V2_WORKER_BATCH_SIZE` and `IM_V2_WORKER_POLL_INTERVAL_MS` bound and
+  schedule the current durable workers, including personal-event projection,
+  room wake, review, media and cleanup work.
 - Gateway PostgreSQL work is split into explicit foreground, Sync, Delivery,
   Projection and Maintenance pools whose per-event-loop sum remains inside the
   legacy aggregate ceiling. A separate short admission queue returns retryable
@@ -205,55 +206,18 @@ evidence remains local-stack coverage, not a production deployment approval.
   retain their own bounded compaction and garbage collection; the retention
   setting is `IM_V2_MESSAGE_PROJECTION_STATE_RETENTION_SECONDS`.
   See [personal snapshot operations](../IMV2/docs/10-operations/personal-snapshot-runbook.md).
-- `IM_V2_DIRECT_FANOUT_MODE=preplanned` derives a direct message's fixed
-  two-user audience from the locked pair and revision-fenced memberships, then
-  creates the completion unit and two durable deliveries in the source
-  transaction. `planner` is the rolling-deployment fallback; neither mode
-  accepts a client-supplied delivery audience. Rollout, audit and rollback are
-  defined in [the direct fan-out runbook](../IMV2/docs/10-operations/direct-preplanned-fanout-runbook.md).
-- `IM_V2_FANOUT_PAYLOAD_WRITE_MODE=reference` stores an accepted-message sync
-  body as a reference when its immutable message state is semantically equal.
-  Edit and withdrawal deltas remain inline. Apply the nullable-payload expand
-  and deploy reference-capable readers before switching from `body`.
-- `IM_V2_FANOUT_DELIVERY_COMMIT_BATCH_SIZE` groups 1...128 co-located target
-  projections into one atomic PostgreSQL transaction (baseline: 128). A batch
-  failure rolls back all its inbox, sequence, sync-log and completion updates.
-- `IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_BATCH_SIZE` separately groups
-  1...256 remote user-shard target effects before their lease-fenced control
-  acknowledgement (baseline: 256). It does not widen the co-located
-  transaction above. Forwarding deliveries retain their per-target path because
-  a process-local transaction cannot make multiple databases atomic.
-- `IM_V2_CROSS_STORE_FANOUT_DELIVERY_COMMIT_CONCURRENCY` permits at most two
-  target/control commits from one already-claimed remote lease set to overlap
-  (baseline: 2). It is not claim-worker parallelism: completions and live
-  hints remain source-batch ordered, a failed batch retries alone, and
-  co-located delivery remains at one.
-- `IM_V2_FANOUT_DELIVERY_CLAIM_BATCH_SIZE` independently bounds how many
-  lease-fenced deliveries one worker may hold in a pass (1...2,000; baseline:
-  2,000). It reduces claim-query overhead without increasing the 128-target
-  transaction or changing the generic outbox/planner worker batch.
-- Planning and durable Hybrid-group wake relays run on their own worker cadence. A
-  long delivery drain therefore does not serially delay creation of a new
-  durable plan or a best-effort Hybrid wake; both paths remain bounded by the
-  configured PostgreSQL pool and their explicit concurrency limits.
-- `IM_V2_FANOUT_FRESH_BURST_PASSES` bounds how many new-delivery claim passes
-  can run before one recovery-first pass. That pass alternates due retries and
-  expired leases; empty lanes fall through within the same poll. It changes
-  scheduling fairness only—claim tokens, lease fencing and the inbox-backed
-  exactly-once projection remain the durable correctness boundary.
-- PostgreSQL durable polling is always the correctness path. When
-  `IM_V2_NATS_URL` and `IM_V2_NATS_SUBJECT` are both configured, the gateway
-  publishes a best-effort Core NATS wake hint only after durable publication.
-  Loss, duplication or publishing failure cannot release work or change user
-  state; polling recovers it. The current adapter retains one serial Core NATS
-  connection per process publisher, discards it on failure, bounds connection
-  and broker confirmation to two seconds, and requires `PONG` after each
-  `PUB`. A non-loopback endpoint must use TLS plus token authentication;
-  private-CA and SNI overrides are explicit. It has no NKey, autonomous
-  reconnect loop, circuit breaker or broker-health metrics. The isolated suite
-  does prove a real Core
-  NATS subscriber receives the privacy-safe trigger envelope, but the adapter
-  is still not a delivery dependency.
+- Direct and group public messages use the ordered room log. Send acceptance
+  commits with its immutable receipt before ACK; retries return that result.
+  Room cursors recover content. Personal state continues through the durable
+  user-state event outbox and user projection. Neither path uses the retired
+  direct fan-out selectors or delivery-plan tables.
+- PostgreSQL durable polling remains the correctness path. When the current
+  `IM_V2_GROUP_WAKE_NATS_*` configuration is enabled, NATS supplies only
+  best-effort room and live-activity hints. Loss or duplication does not
+  determine acceptance, authorization or cursor progress. The
+  [room-log operations](../IMV2/docs/10-operations/direct-room-log-command-credit-runbook.md)
+  and [observability guide](../IMV2/docs/10-operations/observability.md)
+  describe the active worker and hint boundaries.
 - Groups use the existing authenticated TLS/protobuf connection rather than
   WebSocket or one-second foreground polling. An active detail view sends a
   room subscription, receives a metadata-only availability frame, then pulls
@@ -266,45 +230,40 @@ evidence remains local-stack coverage, not a production deployment approval.
   room subjects and a distinct payload-authentication key. Every live payload
   MAC is bound to its actual NATS subject, so a broker credential cannot forge
   or move a captured event across subjects. NATS loss or duplication only
-  delays visibility because the Hybrid cursor or standard personal sync
-  remains authoritative.
+  delays visibility because the room cursor remains authoritative.
 - `IM_V2_DURABLE_RETRY_*` is an explicit exponential-backoff budget for that
   path. The initial/max delays, attempt budget and 0–100% jitter are required
   deployment inputs. Exhausted work becomes alertable `paused` durable work;
   it requires a controlled operator replay and never becomes a skipped target.
-- Ordinary message edits, author withdrawals, and reactions use each message's
-  immutable send completion to choose personal fan-out or ordered room-log
-  delivery. Current room defaults and accepted payload placement do not decide
-  this choice. Missing acceptance metadata rejects a new mutation before
-  changing state; completed operation replay remains idempotent. New personal mutation plans intersect accepted and mutation membership and
-  settle the exact reservation after paged enumeration. Other read surfaces,
-  content revocation, and dependency recovery remain open; see the
-  [audience contract](../docs/reviews/message-mutation-audience-contract.md) and [delivery authority contract](../docs/reviews/message-mutation-delivery-authority-contract.md).
-  Reaction commands and ordinary mutation room pulls also require accepted-time membership; protocol 26 permits scanned-through invisible tails. See the [read contract](../docs/reviews/message-mutation-read-contract.md).
-  Protocol 27 new edits carry complete state and acceptance identity to bridge authorized revision gaps; late accepted events preserve newer projections. See the [replacement contract](../docs/reviews/message-edit-replacement-contract.md).
+- Ordinary edits, author withdrawals and reactions append ordered room events.
+  They use immutable acceptance facts and current authorization for the
+  operation; room reads also enforce accepted-time and event-time visibility.
+  Missing acceptance facts reject a new mutation before state changes.
+  Completed operation replay remains idempotent. A room continuation can scan
+  through invisible events; new edits carry complete replacement state so a
+  client may cross an authorized revision gap. See the
+  [mutation authority](../docs/reviews/message-mutation-delivery-authority-contract.md),
+  [read contract](../docs/reviews/message-mutation-read-contract.md) and
+  [replacement contract](../docs/reviews/message-edit-replacement-contract.md).
 - Membership add/remove is owner-authorized and revision-fenced. Its source
-  transaction records the durable operation result, room event, exact frozen
-  audience, fan-out plan, and room outbox together; a lost response may replay
-  the original operation ID without re-evaluating later membership state.
+  transaction records the durable operation result, room event and required
+  personal-state outbox effects together; a lost response may replay the
+  original operation ID without creating a second membership change.
 - `IM_V2_GATEWAY_NODE_ID` must be unique per replica. It scopes the durable
   cursor that replays device-revocation events and closes local live sockets.
-- `IM_V2_USER_SHARD_BUCKET` and `IM_V2_USER_SHARD_ROUTER_EPOCH` are required
-  routing-control-plane inputs. The first deployment maps all users to this
-  explicit logical bucket; fan-out records that bucket and epoch rather than
-  deriving a destination from a user ID. The local delivery worker claims only
-  this bucket. When `IM_V2_USER_SHARD_STORES_JSON` declares physical stores,
-  routed fan-out projections are committed in the selected target store before
-  the control delivery is completed. See
-  [`user-shard migration runbook`](../IMV2/docs/10-operations/user-shard-migration-runbook.md);
-  two-database integration is covered locally, while production permissions,
-  partition behavior and long-running forwarding evidence remain pending.
+- `IM_V2_USER_SHARD_BUCKET`, `IM_V2_USER_SHARD_ROUTER_EPOCH` and
+  `IM_V2_USER_SHARD_STORES_JSON` configure the current, static logical-bucket
+  routing. Personal-state projection targets the configured current store;
+  control-plane effects retain durable idempotency across databases. See the
+  [static user-shard deployment scope](../IMV2/docs/10-operations/user-shard-migration-runbook.md).
+  Online copy, cutover and rollback are outside the current runtime.
 - `IM_V2_DIRECT_ROOM_SHARD_ID` selects the admission pool used for new
   two-user rooms. It accepts either one pool ID or a bounded comma-separated
   pool list; an unordered user-pair hash selects one stable pool so reciprocal
   opens cannot split the same conversation. Every configured pool must have a
   live lease for the selected capacity profile. Because a direct pair and its
   room profile are immutable, switching `IM_V2_CAPACITY_PROFILE_ID` also
-  requires fresh test users/pairs or an explicit room-profile migration; an
+  requires fresh test users/pairs or a newly bootstrapped environment; an
   existing pair under another profile returns retryable `UNAVAILABLE` at open
   instead of failing a later message write. `IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW` and
   `IM_V2_STRANGER_MESSAGE_WINDOW_SECONDS` are enforced in the durable message
@@ -345,5 +304,3 @@ run:
 ```sh
 bash scripts/run_v2_postgres_integration.sh
 ```
-
-

@@ -29,7 +29,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 sendBatcher: batcher,
                 membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
-                receiptShadowForwarder: ActorFactoryShadow(), capacityProfile: forwardImportTestProfile(),
+                receiptProjectionDelivery: ActorFactoryProjectionDelivery(), capacityProfile: forwardImportTestProfile(),
                 messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
                 contentReviewMode: .disabled, queryBatchConfiguration: .init(),
                 databaseWorkAdmission: admission)
@@ -156,7 +156,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 database: ownerDatabase, writes: writes, sendBatcher: batcher,
                 membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: control),
-                receiptShadowForwarder: ActorFactoryShadow(), capacityProfile: forwardImportTestProfile(),
+                receiptProjectionDelivery: ActorFactoryProjectionDelivery(), capacityProfile: forwardImportTestProfile(),
                 messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
                 contentReviewMode: .disabled, queryBatchConfiguration: .init(),
                 databaseWorkAdmission: admission
@@ -201,6 +201,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
 }
 
-private struct ActorFactoryShadow: V2UserShardProjectionShadowing {
-    func shadowIfForwarding(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws -> UInt64? { nil }
+private struct ActorFactoryProjectionDelivery: V2UserShardProjectionDelivering {
+    func deliverToCurrentShard(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws -> UInt64? { nil }
 }

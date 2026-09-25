@@ -84,16 +84,16 @@ public struct V2ConversationCapabilitiesService: Sendable {
 /// 会话能力的 PostgreSQL 持久化实现。
 ///
 /// 每次变更都在单事务内完成操作台账写入、权威状态更新与用户同步投影，
-/// 并在事务提交之后按需把控制面记录镜像到用户的当前写入归属。
+/// 并在事务提交之后按需把控制面记录投递到用户的当前写入归属。
 public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitiesStore {
     private let database: any Database
-    private let shadowForwarder: any V2UserShardProjectionShadowing
+    private let projectionDelivery: any V2UserShardProjectionDelivering
     /// 创建 PostgreSQL 会话能力存储。
     ///
     /// - Parameters:
     ///   - database: 控制面数据库连接。
-    ///   - shadowForwarder: 提交后镜像控制面投影的影子转发器。
-    public init(database: any Database, shadowForwarder: any V2UserShardProjectionShadowing) { self.database = database; self.shadowForwarder = shadowForwarder }
+    ///   - projectionDelivery: 提交后投递控制面投影到当前用户分片的实现。
+    public init(database: any Database, projectionDelivery: any V2UserShardProjectionDelivering) { self.database = database; self.projectionDelivery = projectionDelivery }
 
     /// 设置会话状态，并把结果投影到发送者的用户同步日志。
     ///
@@ -133,7 +133,7 @@ public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitie
         }
         switch result {
         case .applied, .idempotent:
-            try await shadow(actor: actorUserID, operation: command.operationID.rawValue, kinds: ["conversation_state"])
+            try await deliverProjection(actor: actorUserID, operation: command.operationID.rawValue, kinds: ["conversation_state"])
         case .idempotencyConflict:
             break
         }
@@ -173,7 +173,7 @@ public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitie
         }
         switch result {
         case .applied, .idempotent:
-            try await shadow(actor: actorUserID, operation: command.operationID.rawValue, kinds: ["message_favorite"])
+            try await deliverProjection(actor: actorUserID, operation: command.operationID.rawValue, kinds: ["message_favorite"])
         case .idempotencyConflict:
             break
         }
@@ -197,7 +197,7 @@ public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitie
     private func appendStateProjection(actor: UUID, source: UUID, value: V2ConversationState, now: Date, sql: any SQLDatabase) async throws { let sequence = try await nextSequence(actor: actor, sql: sql); try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: actor), \(bind: sequence), \(bind: source), 'conversation_state', jsonb_build_object('room_id', \(bind: value.roomID.rawValue), 'is_pinned', \(bind: value.isPinned), 'is_archived', \(bind: value.isArchived), 'mute_until_ms', \(bind: value.muteUntil.map { Int64($0.timeIntervalSince1970 * 1_000) } ?? 0), 'updated_at_ms', \(bind: Int64(value.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: now))").run() }
     private func appendFavoriteProjection(actor: UUID, source: UUID, value: V2MessageFavorite, now: Date, sql: any SQLDatabase) async throws { let sequence = try await nextSequence(actor: actor, sql: sql); try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: actor), \(bind: sequence), \(bind: source), 'message_favorite', jsonb_build_object('room_id', \(bind: value.roomID.rawValue), 'message_id', \(bind: value.messageID.rawValue), 'is_favorited', \(bind: value.isFavorited), 'updated_at_ms', \(bind: Int64(value.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: now))").run() }
     private func nextSequence(actor: UUID, sql: any SQLDatabase) async throws -> Int64 { guard let result = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: actor), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 WHERE im_v2.user_sync_sequences.next_sequence < \(bind: Int64.max) RETURNING next_sequence").first(decoding: CapabilitySyncRow.self)?.sequence else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }; return result }
-    private func shadow(actor: UserID, operation: String, kinds: Set<String>) async throws { _ = try await shadowForwarder.shadowIfForwarding(userID: actor, sourceEventID: .init(operation), projectionKinds: kinds) }
+    private func deliverProjection(actor: UserID, operation: String, kinds: Set<String>) async throws { _ = try await projectionDelivery.deliverToCurrentShard(userID: actor, sourceEventID: .init(operation), projectionKinds: kinds) }
 }
 private struct ConversationStateRow: Decodable { let muteMatches: Bool; let roomID: UUID; let pinnedAt: Date?; let archivedAt: Date?; let muteUntil: Date?; let updatedAt: Date; enum CodingKeys: String, CodingKey { case muteMatches = "mute_matches", roomID = "room_id", pinnedAt = "pinned_at", archivedAt = "archived_at", muteUntil = "mute_until", updatedAt = "updated_at" }; func value() throws -> V2ConversationState { try .init(roomID: .init(roomID.uuidString), isPinned: pinnedAt != nil, isArchived: archivedAt != nil, muteUntil: muteUntil, updatedAt: updatedAt) } }
 private struct FavoriteRow: Decodable { let roomID: UUID; let messageID: UUID; let isFavorited: Bool; let updatedAt: Date; enum CodingKeys: String, CodingKey { case roomID = "room_id", messageID = "message_id", isFavorited = "is_favorited", updatedAt = "updated_at" }; func value() throws -> V2MessageFavorite { try .init(roomID: .init(roomID.uuidString), messageID: .init(messageID.uuidString), isFavorited: isFavorited, updatedAt: updatedAt) } }

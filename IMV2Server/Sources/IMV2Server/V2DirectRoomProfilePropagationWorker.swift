@@ -35,24 +35,24 @@ public struct V2DirectRoomProfilePropagationReport: Equatable, Sendable {
 /// 这样既避免了控制面与用户分片之间的分布式事务，也不会接受一次被丢弃的资料更新。
 public struct V2DirectRoomProfilePropagationWorker: Sendable {
     private let database: any Database
-    private let shadowForwarder: any V2UserShardProjectionShadowing
+    private let projectionDelivery: any V2UserShardProjectionDelivering
     private let liveNotifier: (any V2LiveSyncNotifier)?
     private let leaseDuration: TimeInterval
     private let makeUUID: @Sendable () -> UUID
     private let now: @Sendable () -> Date
 
-    /// 组合数据库、影子转发器与租约参数。
+    /// 组合数据库、当前分片投影投递器与租约参数。
     ///
     /// - Parameters:
     ///   - database: 存放资料传播操作与检查点的数据库。
-    ///   - shadowForwarder: 把投影变更转发到影子分片的实现。
+    ///   - projectionDelivery: 把控制面投影投递到当前用户分片的实现。
     ///   - liveNotifier: 同步变更通知器，可选。
     ///   - leaseDuration: 认领租约秒数，需大于零，默认 30 秒。
     ///   - makeUUID: 标识生成方式。
     ///   - now: 可注入的当前时刻读取函数。
     public init(
         database: any Database,
-        shadowForwarder: any V2UserShardProjectionShadowing,
+        projectionDelivery: any V2UserShardProjectionDelivering,
         liveNotifier: (any V2LiveSyncNotifier)? = nil,
         leaseDuration: TimeInterval = 30,
         makeUUID: @escaping @Sendable () -> UUID = UUID.init,
@@ -60,7 +60,7 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
     ) {
         precondition(leaseDuration > 0)
         self.database = database
-        self.shadowForwarder = shadowForwarder
+        self.projectionDelivery = projectionDelivery
         self.liveNotifier = liveNotifier
         self.leaseDuration = leaseDuration
         self.makeUUID = makeUUID
@@ -98,7 +98,7 @@ public struct V2DirectRoomProfilePropagationWorker: Sendable {
             for target in targets {
                 _ = try await appendControlProjections(target: target, lease: lease)
                 let eventID = try EventID(lease.sourceEventID.uuidString)
-                guard let liveSequence = try await shadowForwarder.shadowIfForwarding(
+                guard let liveSequence = try await projectionDelivery.deliverToCurrentShard(
                     userID: try .init(target.userID.uuidString), sourceEventID: eventID,
                     projectionKinds: ["direct_room_profile", "profile_invalidation"]
                 ) else {

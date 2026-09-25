@@ -3,7 +3,7 @@ import IMV2Core
 
 /// 转发导入端点，直接复用目标房间归属已配置的写存储。
 ///
-/// 复用写存储意味着准入、投影影子转发与提交后恢复适配器全部沿用目标归属的既有语义，
+/// 复用写存储意味着准入、当前分片投影投递与提交后恢复适配器全部沿用目标归属的既有语义，
 /// 而不是另起一条绕过准入的写入路径。
 public struct V2ForwardImportEndpoint: V2ForwardExportDelivering {
     private let inbox: PostgresV2ForwardInboxStore

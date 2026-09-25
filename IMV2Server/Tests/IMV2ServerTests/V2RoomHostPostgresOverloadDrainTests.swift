@@ -224,7 +224,7 @@ private func overloadHost(database: any Database,
         sendBatcher: batcher,
         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
-        receiptShadowForwarder: OverloadShadowForwarder(),
+        receiptProjectionDelivery: OverloadProjectionDelivery(),
         capacityProfile: fixture.forwardImportTestProfile(),
         messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
         contentReviewMode: .disabled, queryBatchConfiguration: .init())
@@ -353,8 +353,8 @@ private func overloadSeedRoom(_ room: RoomID,
         """).run()
 }
 
-private struct OverloadShadowForwarder: V2UserShardProjectionShadowing {
-    func shadowIfForwarding(userID: UserID, sourceEventID: EventID,
+private struct OverloadProjectionDelivery: V2UserShardProjectionDelivering {
+    func deliverToCurrentShard(userID: UserID, sourceEventID: EventID,
         projectionKinds: Set<String>) async throws -> UInt64? { nil }
 }
 

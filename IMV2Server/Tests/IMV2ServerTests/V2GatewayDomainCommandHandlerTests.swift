@@ -801,7 +801,9 @@ struct V2GatewayDomainCommandHandlerTests {
             maximumForegroundWriteQueued: 1,
             maximumInteractiveReadQueued: 1,
             maximumSyncQueued: 1,
-            timeout: .milliseconds(5)
+            // The queued reader must remain queued while the handler is
+            // constructed and called, even under a loaded parallel test run.
+            timeout: .seconds(5)
         ))
         #expect(await admission.acquire(.foregroundWrite) == .admitted)
         #expect(await admission.acquire(.interactiveRead) == .admitted)
@@ -831,8 +833,9 @@ struct V2GatewayDomainCommandHandlerTests {
         else {
             Issue.record("expected room-log pull telemetry instead of unsupported")
             await admission.release(.interactiveRead)
-            _ = await queuedRead.value
-            await admission.release(.interactiveRead)
+            if await queuedRead.value == .admitted {
+                await admission.release(.interactiveRead)
+            }
             await admission.release(.foregroundWrite)
             return
         }
@@ -840,8 +843,11 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(snapshot.interactiveRead.queueFullRejections == 1)
         #expect(snapshot.foregroundWrite.rejectedRequests == 0)
         await admission.release(.interactiveRead)
-        #expect(await queuedRead.value == .admitted)
-        await admission.release(.interactiveRead)
+        let queuedResult = await queuedRead.value
+        #expect(queuedResult == .admitted)
+        if queuedResult == .admitted {
+            await admission.release(.interactiveRead)
+        }
         await admission.release(.foregroundWrite)
     }
 

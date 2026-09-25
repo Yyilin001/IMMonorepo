@@ -10,18 +10,18 @@ import SQLKit
 public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
     private let database: any Database
     private let authorizationCoordinator: V2DirectAuthorizationCoordinator?
-    private let shadowForwarder: any V2UserShardProjectionShadowing
+    private let projectionDelivery: any V2UserShardProjectionDelivering
 
-    /// 组合数据库与投影影子转发器。
+    /// 组合数据库与当前用户分片投影投递器。
     ///
     /// - Parameters:
     ///   - database: 存放关系、拉黑与偏好设置的数据库。
-    ///   - shadowForwarder: 用于把投影变更转发到影子用户分片的实现。
-    public init(database: any Database, shadowForwarder: any V2UserShardProjectionShadowing,
+    ///   - projectionDelivery: 用于把控制面投影投递到当前用户分片的实现。
+    public init(database: any Database, projectionDelivery: any V2UserShardProjectionDelivering,
         authorizationCoordinator: V2DirectAuthorizationCoordinator? = nil) {
         self.database = database
         self.authorizationCoordinator = authorizationCoordinator
-        self.shadowForwarder = shadowForwarder
+        self.projectionDelivery = projectionDelivery
     }
 
     /// 应用一次关系变更。
@@ -105,7 +105,7 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
         }
         switch outcome {
         case .changed, .idempotent:
-            try await shadow(users: [command.actorUserID, command.targetUserID], operationID: command.operationID.rawValue, kinds: ["relationship"])
+            try await deliverProjection(users: [command.actorUserID, command.targetUserID], operationID: command.operationID.rawValue, kinds: ["relationship"])
         case .idempotencyConflict, .invalidState, .forbidden:
             break
         }
@@ -180,7 +180,7 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
             // A block may have also removed the relationship. Querying both
             // kinds is safe: the forwarder mirrors only rows actually written
             // by this source event for the named user.
-            try await shadow(users: [command.actorUserID, command.targetUserID], operationID: command.operationID.rawValue, kinds: ["user_block", "relationship"])
+            try await deliverProjection(users: [command.actorUserID, command.targetUserID], operationID: command.operationID.rawValue, kinds: ["user_block", "relationship"])
         case .idempotencyConflict:
             break
         }
@@ -289,10 +289,10 @@ public struct PostgresV2SocialRelationshipStore: V2SocialRelationshipStore {
         return Dictionary(uniqueKeysWithValues: rows.map { ($0.userID, $0) })
     }
 
-    private func shadow(users: [UserID], operationID: String, kinds: Set<String>) async throws {
+    private func deliverProjection(users: [UserID], operationID: String, kinds: Set<String>) async throws {
         let eventID = try EventID(operationID)
         for userID in Set(users) {
-            _ = try await shadowForwarder.shadowIfForwarding(userID: userID, sourceEventID: eventID, projectionKinds: kinds)
+            _ = try await projectionDelivery.deliverToCurrentShard(userID: userID, sourceEventID: eventID, projectionKinds: kinds)
         }
     }
 }

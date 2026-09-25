@@ -1850,13 +1850,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 now: now,
                 on: sql
             )
-            let shadow = V2PostgresUserShardProjectionShadowForwarder(
+            let shadow = V2PostgresUserShardProjectionDelivery(
                 registry: registry,
                 routeFence: router,
                 batchRouteFence: router,
                 coLocatedControlBuckets: ["users-source"]
             )
-            let direct = PostgresV2DirectMessagingStore(database: resources.database(.psql), shadowForwarder: shadow)
+            let direct = PostgresV2DirectMessagingStore(database: resources.database(.psql), projectionDelivery: shadow)
             let capacityProfile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 10,    retryAfterSeconds: 3))
             let forwardingLeaseID = UUID(uuidString: "00000000-0000-0000-0000-000000000f17")!
             try await sql.raw("INSERT INTO im_v2.shard_admission_pools (room_shard_id, capacity_profile_id, lease_id, generation, valid_until, command_window_limit) VALUES ('rooms-primary', 'standard', \(bind: forwardingLeaseID), 1, \(bind: now.addingTimeInterval(600)), 10)").run()
@@ -1896,7 +1896,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             _ = try await direct.setStrangerMessagePermission(
                 command: .init(actorUserID: senderID, operationID: preferenceOperation, permission: .deny), now: now.addingTimeInterval(1)
             )
-            let social = PostgresV2SocialRelationshipStore(database: resources.database(.psql), shadowForwarder: shadow)
+            let social = PostgresV2SocialRelationshipStore(database: resources.database(.psql), projectionDelivery: shadow)
             _ = try await social.changeRelationship(.init(
                 actorUserID: senderID, operationID: try .init("00000000-0000-0000-0000-000000000f13"),
                 targetUserID: try .init(memberTwoUUID.uuidString), action: .request
@@ -1915,7 +1915,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 for: try .init(memberTwoUUID.uuidString), displayName: "成员二新版"
             )
             let profileWorker = V2DirectRoomProfilePropagationWorker(
-                database: resources.database(.psql), shadowForwarder: shadow, now: { now.addingTimeInterval(4) }
+                database: resources.database(.psql), projectionDelivery: shadow, now: { now.addingTimeInterval(4) }
             )
             #expect(try await profileWorker.runOnce(limit: 1).projectedRecipientCount == 1)
 
@@ -1939,7 +1939,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 LIMIT 2
                 """).all(decoding: ShadowIdentityRow.self)
             #expect(existingShadowSources.count == 2)
-            let batchResults = try await shadow.shadowIfForwarding(
+            let batchResults = try await shadow.deliverToCurrentShard(
                 try existingShadowSources.map {
                     .init(
                         userID: senderID,

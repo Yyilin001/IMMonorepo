@@ -1427,7 +1427,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             func run(at date: Date, fails: Bool) async throws {
                 if path == "profile" {
                     let worker = V2DirectRoomProfilePropagationWorker(database: database,
-                        shadowForwarder: SuccessfulProjectionShadowForwarder(), leaseDuration: 1, now: { date })
+                        projectionDelivery: SuccessfulProjectionDelivery(), leaseDuration: 1, now: { date })
                     if fails {
                         await #expect(throws: V2DirectRoomProfilePropagationError.corruptPersistenceState) { try await worker.runOnce(limit: 1) }
                     } else {
@@ -1528,7 +1528,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     }
                     if path == "profile" {
                         let worker = V2DirectRoomProfilePropagationWorker(database: database,
-                            shadowForwarder: SuccessfulProjectionShadowForwarder(), now: { now })
+                            projectionDelivery: SuccessfulProjectionDelivery(), now: { now })
                         #expect(try await worker.runOnce(limit: 1) == .init(claimedUpdateCount: 1, projectedRecipientCount: 1, completedUpdateCount: 1))
                     } else {
                         let worker = V2ReadReceiptPreferencePropagationWorker(database: database,
@@ -1582,7 +1582,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let clock = TestSequenceClock([base.addingTimeInterval(1)])
             let directory = V2PostgresPublicIdentityDirectory(database: database, policy: try .init(maximumQueries: 10, window: 60), makeUUID: { event }, now: { clock.now() })
             func worker(lifetime: TimeInterval = 30) -> V2DirectRoomProfilePropagationWorker {
-                .init(database: database, shadowForwarder: SuccessfulProjectionShadowForwarder(), leaseDuration: lifetime, now: { clock.now() })
+                .init(database: database, projectionDelivery: SuccessfulProjectionDelivery(), leaseDuration: lifetime, now: { clock.now() })
             }
             func snapshot() async throws -> String {
                 struct State: Decodable { let value: String }
@@ -1816,7 +1816,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let registry = try V2StaticUserShardStorageRegistry(locations: [
                     .init(bucket: "users-source", database: coLocated ? control : target, schema: liveSchema)])
                 let router = V2PostgresUserShardRouter(database: control)
-                let shadow = V2PostgresUserShardProjectionShadowForwarder(registry: registry, routeFence: router,
+                let shadow = V2PostgresUserShardProjectionDelivery(registry: registry, routeFence: router,
                     batchRouteFence: path == "batch" ? router : nil,
                     coLocatedControlBuckets: coLocated ? ["users-source"] : [])
                 let offsets: [Int64] = [-1, 1, 803_315_200_123_457, -211_813_487_999_999_999, 9_223_371_331_199_999_999]
@@ -1834,7 +1834,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     var buffer = ByteBuffer()
                     buffer.writeInteger(offset)
                     let timestamp = try V2PostgresTimestamp(from: &buffer, type: .timestamptz, format: .binary, context: .default)
-                    var requests: [V2UserShardProjectionShadowRequest] = []
+                    var requests: [V2UserShardProjectionDeliveryRequest] = []
                     for item in 0..<2 {
                         let event = UUID()
                         let sequence = Int64(index * 2 + item + 1)
@@ -1850,9 +1850,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         var sequences: [UInt64?] = []
                         if path == "scalar" {
                             for request in requests {
-                                sequences.append(try await shadow.shadowIfForwarding(userID: request.userID, sourceEventID: request.sourceEventID, projectionKinds: request.projectionKinds))
+                                sequences.append(try await shadow.deliverToCurrentShard(userID: request.userID, sourceEventID: request.sourceEventID, projectionKinds: request.projectionKinds))
                             }
-                        } else { sequences = try await shadow.shadowIfForwarding(requests) }
+                        } else { sequences = try await shadow.deliverToCurrentShard(requests) }
                         #expect(sequences == [UInt64(index * 2 + 1), UInt64(index * 2 + 2)])
                         #expect(try await snapshot(schema: liveSchema, on: coLocated ? controlSQL : targetSQL) == expected)
                         #expect(try await snapshot(schema: "im_v2", on: controlSQL) == expected)

@@ -41,7 +41,7 @@ public struct V2MetricsListenerConfiguration: Equatable, Sendable {
 
 /// 仅用于部署的「逻辑桶到物理数据库」映射。
 ///
-/// 它在启动时解析，绝不写入扇出记录、日志或 API 响应。
+/// 它在启动时解析，绝不写入业务记录、日志或 API 响应。
 /// 省略该 JSON 会让单桶部署保持显式。
 public struct V2UserShardStorageConfiguration: Codable, Equatable, Sendable {
     public let bucket: String
@@ -199,8 +199,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     /// 每个事件循环允许的数据库连接数。
     ///
     /// Fluent 默认每个事件循环只用一个 PostgreSQL 连接。
-    /// 网关在同一进程中同时运行前台命令与持久扇出，
-    /// 因此部署必须显式设定该值，而不能放任一次扇出事务在某个事件循环上饿死同步或命令工作。
+    /// 网关在同一进程中同时运行前台命令与持久后台工作，
+    /// 因此部署必须显式设定该值，避免后台事务在某个事件循环上饿死同步或命令工作。
     public var databaseMaxConnectionsPerEventLoop: Int {
         databasePolicy.maximumConnectionsPerEventLoop
     }

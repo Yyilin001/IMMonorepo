@@ -152,8 +152,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     func preferenceConflictShadowFailure(kind: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let now = Date(timeIntervalSince1970: 946_684_800 + 0.00000125)
-            let shadow = PreferenceReplayClockShadow()
-            let store = PostgresV2ConversationCapabilitiesStore(database: database, shadowForwarder: shadow)
+            let shadow = PreferenceReplayClockDelivery()
+            let store = PostgresV2ConversationCapabilitiesStore(database: database, projectionDelivery: shadow)
             let sender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
                 capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { now })
             guard case .accepted(let message) = try await sender.send(.init(roomID: roomID, actorUserID: senderID,
@@ -186,8 +186,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 return values
             }
             shadow.setFailure(true)
-            await #expect(throws: PreferenceReplayClockShadowError.unavailable) { try await perform(conflict: false, date: now) }
-            let expectedCall = PreferenceReplayClockShadow.Call(userID: senderID, sourceEventID: .init(uuid: operation),
+            await #expect(throws: PreferenceReplayClockDeliveryError.unavailable) { try await perform(conflict: false, date: now) }
+            let expectedCall = PreferenceReplayClockDelivery.Call(userID: senderID, sourceEventID: .init(uuid: operation),
                 kinds: [kind == "conversation" ? "conversation_state" : "message_favorite"])
             #expect(shadow.calls == [expectedCall])
             let table = kind == "conversation" ? "user_room_preference_operations" : "user_message_favorite_operations"
@@ -201,7 +201,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             // Matching retries must still attempt the outstanding forwarding,
             // surface a dependency failure, and recover when it is available.
-            await #expect(throws: PreferenceReplayClockShadowError.unavailable) {
+            await #expect(throws: PreferenceReplayClockDeliveryError.unavailable) {
                 try await perform(conflict: false, date: Date(timeIntervalSince1970: .nan))
             }
             #expect(shadow.calls == [expectedCall, expectedCall])
@@ -218,9 +218,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     func preferenceReplayTimestampBounds(kind: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let shadow = PreferenceReplayClockShadow()
-            let conversations = PostgresV2ConversationCapabilitiesStore(database: database, shadowForwarder: shadow)
-            let receipts = PostgresV2ReadReceiptStore(database: database, shadowForwarder: shadow)
+            let shadow = PreferenceReplayClockDelivery()
+            let conversations = PostgresV2ConversationCapabilitiesStore(database: database, projectionDelivery: shadow)
+            let receipts = PostgresV2ReadReceiptStore(database: database, projectionDelivery: shadow)
             var messageID = MessageID(uuid: UUID())
             if kind == "favorite" {
                 let send = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: try forwardImportTestProfile(),
@@ -1904,8 +1904,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let clock = TestSequenceClock([base])
             let directory = V2PostgresRoomShardRouter(database: control, now: { clock.now() })
             let cached = V2CachedRoomShardRouter(source: directory, capacity: 16, bucketCount: 2)
-            let ownerStore = PostgresV2DirectMessagingStore(database: owner, shadowForwarder: SuccessfulProjectionShadowForwarder())
-            let routed = try V2RoutedDirectMessagingStore(router: cached, ownerStores: ["room-b": ownerStore], controlStore: PostgresV2DirectMessagingStore(database: control, shadowForwarder: SuccessfulProjectionShadowForwarder()))
+            let ownerStore = PostgresV2DirectMessagingStore(database: owner, projectionDelivery: SuccessfulProjectionDelivery())
+            let routed = try V2RoutedDirectMessagingStore(router: cached, ownerStores: ["room-b": ownerStore], controlStore: PostgresV2DirectMessagingStore(database: control, projectionDelivery: SuccessfulProjectionDelivery()))
             let profile = try forwardImportTestProfile()
             let createdID = UUID()
             let createdRoom = RoomID(uuid: createdID)

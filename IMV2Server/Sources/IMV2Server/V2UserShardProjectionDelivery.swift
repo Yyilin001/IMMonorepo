@@ -5,18 +5,18 @@ import SQLKit
 
 /// 用户同步中不参与扇出的一小部分（关系、拉黑与接收偏好）以控制面存储为权威。
 ///
-/// 该边界把已提交记录镜像到当前写入归属。
-/// 来源操作标识就是持久化重试键，因此响应丢失后可以安全地重复镜像，
+/// 该边界把已提交记录投递到当前写入归属。
+/// 来源操作标识就是持久化重试键，因此响应丢失后可以安全地重复投递，
 /// 而不会额外占用目标端序号。
-public struct V2UserShardProjectionShadowRequest: Sendable {
+public struct V2UserShardProjectionDeliveryRequest: Sendable {
     /// 目标用户。
     public let userID: UserID
     /// 来源事件标识。
     public let sourceEventID: EventID
-    /// 需要镜像的投影类型集合。
+    /// 需要投递的投影类型集合。
     public let projectionKinds: Set<String>
 
-    /// 保存镜像请求。
+    /// 保存投递请求。
     ///
     /// - Parameters:
     ///   - userID: 目标用户。
@@ -33,8 +33,8 @@ public struct V2UserShardProjectionShadowRequest: Sendable {
     }
 }
 
-/// 用户分片投影影子转发能力。
-public protocol V2UserShardProjectionShadowing: Sendable {
+/// 用户分片投影当前归属投递能力。
+public protocol V2UserShardProjectionDelivering: Sendable {
     /// 把既有控制面记录写入用户当前写入归属。
     ///
     /// 返回的序号属于当前写入归属，可用于尽力而为的实时同步提示；
@@ -46,34 +46,34 @@ public protocol V2UserShardProjectionShadowing: Sendable {
     ///   - projectionKinds: 投影类型集合。
     /// - Returns: 当前写入归属的序号；无来源投影时为 `nil`。
     /// - Throws: 路由或存储失败时抛出。
-    func shadowIfForwarding(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws -> UInt64?
+    func deliverToCurrentShard(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws -> UInt64?
 
-    /// 镜像一个有界的已提交微批。
+    /// 投递一个有界的已提交微批。
     ///
     /// 结果保持请求顺序，语义等同于逐条调用标量方法。具体存储可以把路由栅栏与来源读取
     /// 合并为集合式操作；默认实现保证既有适配器行为正确。
     ///
-    /// - Parameter requests: 待镜像请求列表。
+    /// - Parameter requests: 待投递请求列表。
     /// - Returns: 与输入顺序对应的序号结果。
     /// - Throws: 路由或存储失败时抛出。
-    func shadowIfForwarding(
-        _ requests: [V2UserShardProjectionShadowRequest]
+    func deliverToCurrentShard(
+        _ requests: [V2UserShardProjectionDeliveryRequest]
     ) async throws -> [UInt64?]
 }
 
-public extension V2UserShardProjectionShadowing {
-    /// 逐条镜像的兼容实现。
+public extension V2UserShardProjectionDelivering {
+    /// 逐条投递的默认实现。
     ///
-    /// - Parameter requests: 待镜像请求列表。
+    /// - Parameter requests: 待投递请求列表。
     /// - Returns: 与输入顺序对应的序号结果。
     /// - Throws: 任一条目失败时抛出。
-    func shadowIfForwarding(
-        _ requests: [V2UserShardProjectionShadowRequest]
+    func deliverToCurrentShard(
+        _ requests: [V2UserShardProjectionDeliveryRequest]
     ) async throws -> [UInt64?] {
         var results: [UInt64?] = []
         results.reserveCapacity(requests.count)
         for request in requests {
-            results.append(try await shadowIfForwarding(
+            results.append(try await deliverToCurrentShard(
                 userID: request.userID,
                 sourceEventID: request.sourceEventID,
                 projectionKinds: request.projectionKinds
@@ -83,8 +83,8 @@ public extension V2UserShardProjectionShadowing {
     }
 }
 
-/// 基于 PostgreSQL 的用户分片投影影子转发实现。
-public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectionShadowing, Sendable {
+/// 基于 PostgreSQL 的用户分片投影当前归属投递实现。
+public struct V2PostgresUserShardProjectionDelivery: V2UserShardProjectionDelivering, Sendable {
     private let registry: any V2UserShardStorageResolving
     private let routeFence: any V2UserShardRouteFencing
     private let batchRouteFence: (any V2UserShardRouteBatchFencing)?
@@ -109,7 +109,7 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
         self.coLocatedControlBuckets = coLocatedControlBuckets
     }
 
-    /// 镜像单条已提交投影。
+    /// 投递单条已提交投影。
     ///
     /// - Parameters:
     ///   - userID: 目标用户。
@@ -117,12 +117,12 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
     ///   - projectionKinds: 投影类型集合。
     /// - Returns: 当前写入归属的序号；无来源投影时为 `nil`。
     /// - Throws: 路由或存储失败时抛出。
-    public func shadowIfForwarding(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws -> UInt64? {
+    public func deliverToCurrentShard(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws -> UInt64? {
         try await routeFence.withCurrentRoute(for: userID) { route, fencedDatabase in
             guard fencedDatabase is any SQLDatabase,
                   UUID(uuidString: userID.rawValue) != nil
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            return try await shadow(
+            return try await deliver(
                 userID: userID, sourceEventID: sourceEventID,
                 projectionKinds: projectionKinds, route: route,
                 controlDatabase: fencedDatabase
@@ -130,23 +130,23 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
         }
     }
 
-    /// 批量镜像已提交投影。
+    /// 批量投递已提交投影。
     ///
     /// 请求为空时直接返回空结果；数量超过 1024 或未配置批量栅栏时，
-    /// 退化为逐条镜像以保持语义一致。
+    /// 退化为逐条投递以保持语义一致。
     ///
-    /// - Parameter requests: 待镜像请求列表。
+    /// - Parameter requests: 待投递请求列表。
     /// - Returns: 与输入顺序对应的序号结果。
     /// - Throws: 路由或存储失败时抛出。
-    public func shadowIfForwarding(
-        _ requests: [V2UserShardProjectionShadowRequest]
+    public func deliverToCurrentShard(
+        _ requests: [V2UserShardProjectionDeliveryRequest]
     ) async throws -> [UInt64?] {
         guard !requests.isEmpty else { return [] }
         guard requests.count <= 1_024, let batchRouteFence else {
             var results: [UInt64?] = []
             results.reserveCapacity(requests.count)
             for request in requests {
-                results.append(try await shadowIfForwarding(
+                results.append(try await deliverToCurrentShard(
                     userID: request.userID,
                     sourceEventID: request.sourceEventID,
                     projectionKinds: request.projectionKinds
@@ -160,7 +160,7 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
             guard routes.count == requests.count else {
                 throw V2UserShardRouterError.resultCountMismatch
             }
-            return try await shadowBatch(
+            return try await deliverBatch(
                 requests: requests,
                 routes: routes,
                 controlDatabase: fencedDatabase
@@ -168,7 +168,7 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
         }
     }
 
-    private func shadow(
+    private func deliver(
         userID: UserID, sourceEventID: EventID,
         projectionKinds: Set<String>, route: V2UserShardRoute,
         controlDatabase: any Database
@@ -192,7 +192,7 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
                 FROM im_v2.user_projection_effects
                 WHERE user_id = \(bind: userUUID) AND source_event_id = \(bind: eventUUID)
                   AND projection_kind = \(bind: kind)
-                """).first(decoding: ShadowSourceRow.self)
+                """).first(decoding: ProjectionSourceRow.self)
             else { continue }
             let currentProjector = try PostgresV2UserProjectionStore(database: current.database, schema: current.schema)
             let sequence = try await currentProjector.projectAllocated(
@@ -201,7 +201,7 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
             )
             // A single source event can carry a profile projection plus an
             // invalidation. The wake hint must cover the last
-            // mirrored sequence, otherwise a client could stop just before
+            // delivered sequence, otherwise a client could stop just before
             // the invalidation and retain stale profile data.
             liveSequence = max(liveSequence ?? 0, sequence)
 
@@ -209,20 +209,20 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
         return liveSequence
     }
 
-    /// 有界批量镜像实现，语义与逐条标量路径一致。
+    /// 有界批量投递实现，语义与逐条标量路径一致。
     ///
     /// 同库部署下批量读取当前路由与控制来源行，
     /// 并复用来源 Sync 序号作为已物化的实时结果。
     /// 远端路由保留与标量路径相同的目标事务与幂等校验。
     ///
     /// - Parameters:
-    ///   - requests: 待镜像的请求列表，返回结果顺序与之一致。
+    ///   - requests: 待投递的请求列表，返回结果顺序与之一致。
     ///   - routes: 各目标用户对应的用户分片路由。
     ///   - controlDatabase: 控制面数据库连接。
     /// - Returns: 与输入顺序对应的序号结果。
     /// - Throws: 路由或存储失败时抛出。
-    private func shadowBatch(
-        requests: [V2UserShardProjectionShadowRequest],
+    private func deliverBatch(
+        requests: [V2UserShardProjectionDeliveryRequest],
         routes: [V2UserShardRoute],
         controlDatabase: any Database
     ) async throws -> [UInt64?] {
@@ -234,7 +234,7 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
                   let sourceEventID = UUID(uuidString: request.sourceEventID.rawValue)
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
             return request.projectionKinds.sorted().map {
-                ShadowBatchInput(
+                ProjectionBatchInput(
                     ordinal: ordinal,
                     userID: userID,
                     sourceEventID: sourceEventID,
@@ -246,11 +246,11 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
 
-        var sourceRowsByOrdinal: [[ShadowSourceRow]] = Array(
+        var sourceRowsByOrdinal: [[ProjectionSourceRow]] = Array(
             repeating: [], count: requests.count
         )
         if !flattened.isEmpty {
-            let inputJSON = try shadowJSON(flattened)
+            let inputJSON = try deliveryJSON(flattened)
             let sourceRows = try await sql.raw("""
                 WITH input AS MATERIALIZED (
                     SELECT input.ordinal, input.user_id,
@@ -272,7 +272,7 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
                  AND effect.source_event_id = input.source_event_id
                  AND effect.projection_kind = input.projection_kind
                 ORDER BY input.ordinal, input.projection_kind
-                """).all(decoding: ShadowBatchSourceRow.self)
+                """).all(decoding: ProjectionBatchSourceRow.self)
             for row in sourceRows {
                 guard sourceRowsByOrdinal.indices.contains(row.ordinal) else {
                     throw V2RoomWriteStoreError.corruptPersistenceState
@@ -303,7 +303,7 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
             for row in sourceRows {
                 let sequence: UInt64
                 if currentIsCoLocated {
-                    sequence = try shadowUnsigned(row.sequence)
+                    sequence = try deliveryUnsigned(row.sequence)
                 } else {
                     let projector = try PostgresV2UserProjectionStore(
                         database: current.database,
@@ -327,11 +327,11 @@ public struct V2PostgresUserShardProjectionShadowForwarder: V2UserShardProjectio
     }
 }
 
-private struct ShadowSourceRow: Decodable {
+private struct ProjectionSourceRow: Decodable {
     let sequence: Int64
     let projectionKind: String
     let payloadJSON: String
-    // Preserve the source's database value through both allocation and mirror.
+    // Preserve the source's database value through both allocation and delivery.
     let createdAt: V2PostgresTimestamp
     enum CodingKeys: String, CodingKey {
         case sequence = "user_sync_sequence"
@@ -340,7 +340,7 @@ private struct ShadowSourceRow: Decodable {
         case createdAt = "created_at"
     }
 }
-private struct ShadowBatchInput: Encodable {
+private struct ProjectionBatchInput: Encodable {
     let ordinal: Int
     let userID: UUID
     let sourceEventID: UUID
@@ -353,13 +353,13 @@ private struct ShadowBatchInput: Encodable {
     }
 }
 
-private struct ShadowBatchSourceRow: Decodable {
+private struct ProjectionBatchSourceRow: Decodable {
     let ordinal: Int
     let sequence: Int64
     let projectionKind: String
     let payloadJSON: String
     let createdAt: V2PostgresTimestamp
-    var record: ShadowSourceRow {
+    var record: ProjectionSourceRow {
         .init(
             sequence: sequence,
             projectionKind: projectionKind,
@@ -376,7 +376,7 @@ private struct ShadowBatchSourceRow: Decodable {
     }
 }
 
-private func shadowJSON<T: Encodable>(_ value: T) throws -> String {
+private func deliveryJSON<T: Encodable>(_ value: T) throws -> String {
     let data = try JSONEncoder().encode(value)
     guard let json = String(data: data, encoding: .utf8) else {
         throw V2RoomWriteStoreError.corruptPersistenceState
@@ -384,7 +384,7 @@ private func shadowJSON<T: Encodable>(_ value: T) throws -> String {
     return json
 }
 
-private func shadowUnsigned(_ value: Int64) throws -> UInt64 {
+private func deliveryUnsigned(_ value: Int64) throws -> UInt64 {
     guard value > 0 else { throw V2RoomWriteStoreError.corruptPersistenceState }
     return UInt64(value)
 }

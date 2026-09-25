@@ -5,7 +5,7 @@ import SQLKit
 
 /// 消息编辑的 PostgreSQL 实现。
 ///
-/// 受修订约束的正文替换、权威房间事件、扇出计划与持久化操作重放记录会在同一个事务内提交。
+/// 受修订约束的正文替换、权威房间事件与持久化操作重放记录会在同一个事务内提交。
 public struct PostgresV2MessageEditStore: V2MessageEditStore, V2OwnerValidatedMessageEditStore {
     private let database: any Database
     private var activationScope: V2RoomActivationWriteScope?

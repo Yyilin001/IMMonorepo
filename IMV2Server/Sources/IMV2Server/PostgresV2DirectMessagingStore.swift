@@ -10,18 +10,18 @@ import SQLKit
 public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
     private let database: any Database
     private let authorizationCoordinator: V2DirectAuthorizationCoordinator?
-    private let shadowForwarder: any V2UserShardProjectionShadowing
+    private let projectionDelivery: any V2UserShardProjectionDelivering
 
-    /// 组合数据库与投影影子转发器。
+    /// 组合数据库与当前用户分片投影投递器。
     ///
     /// - Parameters:
     ///   - database: 存放私聊房间、操作记录与偏好设置的数据库。
-    ///   - shadowForwarder: 用于把投影变更转发到影子用户分片的实现。
-    public init(database: any Database, shadowForwarder: any V2UserShardProjectionShadowing,
+    ///   - projectionDelivery: 用于把控制面投影投递到当前用户分片的实现。
+    public init(database: any Database, projectionDelivery: any V2UserShardProjectionDelivering,
         authorizationCoordinator: V2DirectAuthorizationCoordinator? = nil) {
         self.database = database
         self.authorizationCoordinator = authorizationCoordinator
-        self.shadowForwarder = shadowForwarder
+        self.projectionDelivery = projectionDelivery
     }
 
     /// 打开或复用一对用户的私聊房间。
@@ -64,7 +64,7 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
                 // immutable capacity profile selected at creation. Do not
                 // return a room that this deployment cannot subsequently
                 // write; callers can retry after the intended profile is
-                // restored or an explicit room migration completes.
+                // restored in a fresh deployment configuration.
                 guard existingPair.capacityProfileID == capacityProfile.id else {
                     return .unavailable
                 }
@@ -159,7 +159,7 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
         }
         switch outcome {
         case .updated, .idempotent:
-            _ = try await shadowForwarder.shadowIfForwarding(
+            _ = try await projectionDelivery.deliverToCurrentShard(
                 userID: command.actorUserID, sourceEventID: try .init(command.operationID.rawValue),
                 projectionKinds: ["stranger_message_permission"]
             )
@@ -199,7 +199,7 @@ public struct PostgresV2DirectMessagingStore: V2DirectMessagingStore {
         }
         switch outcome {
         case .updated, .idempotent:
-            _ = try await shadowForwarder.shadowIfForwarding(userID: command.actorUserID, sourceEventID: try .init(command.operationID.rawValue), projectionKinds: ["user_add_permission"])
+            _ = try await projectionDelivery.deliverToCurrentShard(userID: command.actorUserID, sourceEventID: try .init(command.operationID.rawValue), projectionKinds: ["user_add_permission"])
         case .idempotencyConflict:
             break
         }

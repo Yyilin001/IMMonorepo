@@ -217,7 +217,7 @@ public final class V2GatewayTransportMetrics: V2GatewayTransportMetricsRecorder,
     }
 
     private let storage = Mutex(Storage())
-    // The foreground fanout path can submit hundreds of thousands of local
+    // The foreground frame path can submit hundreds of thousands of local
     // recipient frames per second. Relaxed atomics keep metrics from becoming
     // a global mutex on that path; these counters publish observations only
     // and protect no application state.

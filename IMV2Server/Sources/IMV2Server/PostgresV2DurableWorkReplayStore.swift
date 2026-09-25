@@ -374,7 +374,7 @@ private struct ReplayExistsRow: Decodable { let value: Bool }
 ///   - kind: 目标工作类型。
 ///   - sourceEventID: 来源事件标识。
 ///   - targetUserID: 目标用户；按事件定位的类型为空。
-///   - projectionKind: 投影类型；仅扇出投递给出。
+///   - projectionKind: 投影类型；仅用户投影重放给出。
 /// - Returns: 稳定的行级操作标识。
 func v2BatchReplayOperationID(
     batchOperationID: UUID,

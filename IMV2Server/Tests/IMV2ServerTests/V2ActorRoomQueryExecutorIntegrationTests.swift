@@ -18,7 +18,7 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
             let owner = try V2RoomDataOwner(shardID: "owner-a", epoch: 0)
             let old = try await acquire(activation, room: room, owner: owner, host: "host-a")
             let receipt = V2ActorRoomReceiptExecutor(database: database,
-                shadowForwarder: SuccessfulProjectionShadowForwarder())
+                projectionDelivery: SuccessfulProjectionDelivery())
             let operation = ReadReceiptOperationID(uuid: UUID())
             let request = try V2ActorRecordReadReceiptWire(roomID: .init(uuid: room),
                 actorUserID: .init(uuid: actor), operationID: operation, readThroughRoomSequence: 1)
@@ -61,7 +61,7 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
             let oldA = try await acquire(activation, room: roomA, owner: owner, host: "host-a")
             let currentB = try await acquire(activation, room: roomB, owner: owner, host: "host-a")
             let executor = V2ActorRoomReceiptExecutor(database: database,
-                shadowForwarder: SuccessfulProjectionShadowForwarder())
+                projectionDelivery: SuccessfulProjectionDelivery())
             let user = UserID(uuid: actor), now = Date(timeIntervalSince1970: 1_750_000_000)
             let oldOperation = try V2ActorRecordReadReceiptWire(roomID: .init(uuid: roomA),
                 actorUserID: user, operationID: .init(uuid: UUID()), readThroughRoomSequence: 1)
@@ -111,7 +111,7 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
             }
             await locked.wait()
             let executor = V2ActorRoomReceiptExecutor(database: database,
-                shadowForwarder: SuccessfulProjectionShadowForwarder(),
+                projectionDelivery: SuccessfulProjectionDelivery(),
                 timeouts: try .init(lockMilliseconds: 75, statementMilliseconds: 1_000,
                     idleTransactionMilliseconds: 1_000))
             let request = try V2ActorRecordReadReceiptWire(roomID: .init(uuid: room),

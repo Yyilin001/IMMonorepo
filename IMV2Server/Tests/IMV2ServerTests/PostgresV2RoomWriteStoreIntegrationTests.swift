@@ -1314,18 +1314,18 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw("UPDATE im_v2.\(unsafeRaw: table) SET retry_count = CASE WHEN \(unsafeRaw: key) = \(bind: primary) THEN \(bind: starting) ELSE 0 END").run()
             if expired { try await sql.raw("UPDATE im_v2.\(unsafeRaw: table) SET state = 'claimed', claim_token = \(bind: UUID()), lease_expires_at = \(bind: now)").run() }
             let event = path == "profile" ? primary : receiptTombstoneSourceEventID(operationID: primary, roomID: primaryRoom)
-            actor Shadow: V2UserShardProjectionShadowing {
+            actor Shadow: V2UserShardProjectionDelivering {
                 let event: UUID
                 var fails: Bool
                 init(event: UUID, fails: Bool) { self.event = event; self.fails = fails }
-                func shadowIfForwarding(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws -> UInt64? {
+                func deliverToCurrentShard(userID: UserID, sourceEventID: EventID, projectionKinds: Set<String>) async throws -> UInt64? {
                     fails && sourceEventID.uuidValue == event ? nil : 1
                 }
                 func recover() { fails = false }
             }
             let shadow = Shadow(event: event, fails: fails)
             let clock = TestSequenceClock([now])
-            let profileWorker = V2DirectRoomProfilePropagationWorker(database: database, shadowForwarder: shadow, now: { clock.now() })
+            let profileWorker = V2DirectRoomProfilePropagationWorker(database: database, projectionDelivery: shadow, now: { clock.now() })
             let receiptWorker = V2ReadReceiptPreferencePropagationWorker(database: database, retryPolicy: .init(initialDelay: 2, maximumDelay: 2, maximumAttempts: 10, jitterFraction: 0), now: { clock.now() })
             // 瞬时失败不再因预算耗尽而暂停，因此失败路径只释放重试；
             // 下面的 replay 覆盖改为显式构造暂停行。

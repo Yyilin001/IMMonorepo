@@ -17,11 +17,11 @@ public struct PostgresV2ReadReceiptStore:
     V2ReadReceiptBatchStore
 {
     private let database: any Database
-    private let shadowForwarder: any V2UserShardProjectionShadowing
+    private let projectionDelivery: any V2UserShardProjectionDelivering
 
-    public init(database: any Database, shadowForwarder: any V2UserShardProjectionShadowing) {
+    public init(database: any Database, projectionDelivery: any V2UserShardProjectionDelivering) {
         self.database = database
-        self.shadowForwarder = shadowForwarder
+        self.projectionDelivery = projectionDelivery
     }
     public func record(command: V2RecordReadReceiptCommand, now: Date) async throws -> V2ReadReceiptOutcome {
         try await record(command: command, ownerRoute: nil, activationScope: nil, timeouts: .default, now: now)
@@ -399,7 +399,7 @@ public struct PostgresV2ReadReceiptStore:
     }
 
     public func setPreferences(command: V2SetReadReceiptPreferencesCommand, now: Date) async throws -> V2SetReadReceiptPreferencesOutcome {
-        let result: (outcome: V2SetReadReceiptPreferencesOutcome, shadowRequests: [ReceiptProjectionShadowRequest]) = try await database.transaction { transaction in
+        let result: (outcome: V2SetReadReceiptPreferencesOutcome, deliveryRequests: [ReceiptProjectionDeliveryRequest]) = try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ReadReceiptStoreError.corruptPersistenceState }
             let actorID = try receiptUUID(command.actorUserID)
             let operationID = try receiptUUID(command.operationID)
@@ -408,7 +408,7 @@ public struct PostgresV2ReadReceiptStore:
             if let prior = try await sql.raw("SELECT allows_direct_read_receipts, allows_group_read_receipts, preference_revision, updated_at FROM im_v2.read_receipt_preference_operations WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)").first(decoding: ReceiptPreferenceOperationRow.self) {
                 guard prior.allowsDirect == command.allowsDirectReadReceipts, prior.allowsGroup == command.allowsGroupReadReceipts else { return (.idempotencyConflict, []) }
                 guard v2PostgresTimestampCanEncode(prior.updatedAt) else { throw V2ReadReceiptStoreError.corruptPersistenceState }
-                let requests = [try ReceiptProjectionShadowRequest(
+                let requests = [try ReceiptProjectionDeliveryRequest(
                     userID: command.actorUserID,
                     sourceEventID: operationID,
                     projectionKinds: ["read_receipt_preferences"]
@@ -435,7 +435,7 @@ public struct PostgresV2ReadReceiptStore:
             guard let persisted = try await sql.raw("INSERT INTO im_v2.read_receipt_preference_operations (actor_user_id, operation_id, allows_direct_read_receipts, allows_group_read_receipts, preference_revision, updated_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: command.allowsDirectReadReceipts), \(bind: command.allowsGroupReadReceipts), \(bind: version.revision), \(bind: now)) RETURNING allows_direct_read_receipts, allows_group_read_receipts, preference_revision, updated_at").first(decoding: ReceiptPreferenceOperationRow.self) else { throw V2ReadReceiptStoreError.corruptPersistenceState }
             let preferences = try persisted.preferences()
             try await appendPreferenceProjection(recipientID: actorID, sourceEventID: operationID, preferences: preferences, revision: version.revision, now: now, sql: sql)
-            let shadowRequests = [try ReceiptProjectionShadowRequest(
+            let deliveryRequests = [try ReceiptProjectionDeliveryRequest(
                 userID: command.actorUserID,
                 sourceEventID: operationID,
                 projectionKinds: ["read_receipt_preferences"]
@@ -446,10 +446,10 @@ public struct PostgresV2ReadReceiptStore:
                 // mirrors the reciprocal tombstones outside request latency.
                 try await sql.raw("INSERT INTO im_v2.read_receipt_preference_propagation_outbox (actor_user_id, operation_id, recorded_at, created_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: now), \(bind: now))").run()
             }
-            return (.updated(preferences), shadowRequests)
+            return (.updated(preferences), deliveryRequests)
         }
-        for request in result.shadowRequests {
-            _ = try await shadowForwarder.shadowIfForwarding(
+        for request in result.deliveryRequests {
+            _ = try await projectionDelivery.deliverToCurrentShard(
                 userID: request.userID,
                 sourceEventID: request.sourceEventID,
                 projectionKinds: request.projectionKinds
@@ -1440,7 +1440,7 @@ private struct ReceiptCursor: Codable {
     let readThroughRoomSequence: Int64
     let userID: UUID
 }
-private struct ReceiptProjectionShadowRequest: Sendable {
+private struct ReceiptProjectionDeliveryRequest: Sendable {
     let userID: UserID
     let sourceEventID: EventID
     let projectionKinds: Set<String>
