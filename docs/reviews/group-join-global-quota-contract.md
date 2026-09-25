@@ -7,7 +7,7 @@
 
 当前新库合同为 schema 39。控制库保存 `group_join_quota_intents` 预留和恢复任务，
 `group_join_quota_aliases` 保存重复操作与原申请的绑定；房间库保存不可变的
-`group_join_submission_receipts`。`V2RoutedGroupInvitationStore.submit` 已接入“预留→房间事务回执→确认”路径，
+`group_join_submission_receipts`。当前 `V2ActorInvitationCoordinator.submitBySecret` 已接入“预留→房间 Actor 事务回执→确认”路径，
 Account runtime 已启动有界恢复任务。提交、重复绑定、崩溃与终态恢复均已有对应专项证据。
 
 账本遵循以下规则：
@@ -44,8 +44,8 @@ Account runtime 已启动有界恢复任务。提交、重复绑定、崩溃与�
    不能靠申请人的当前成员资格判断原申请是否完成。即时通知丢失后后台仍须收敛。
 5. **实际跨库与故障验收。** 同一申请人跨多个 owner 并发提交，验证全局 20 上限；覆盖 control 预留后、
    owner 提交后、control 确认前的进程中断，以及迟到旧代次、终态释放、取消/审批竞态和重试。
-6. **发布边界。** 新库基线不要求兼容旧 schema，但运行中房间迁移不得遗漏申请、回执和预留绑定；
-   完整搬迁执行器仍由 B27 跟踪，不能用受控 epoch 切换冒充迁移验收。
+6. **发布边界。** 新库基线不要求兼容旧 schema；在线房间数据搬迁不在首版范围。
+   受控 epoch 切换只验证旧归属拒绝与恢复，不代表完整搬迁验收。
 
 ## 验证记录
 
@@ -54,4 +54,4 @@ Account runtime 已启动有界恢复任务。提交、重复绑定、崩溃与�
 后续已增加真实双 owner 并发、重复操作绑定及独立子进程 SIGKILL 恢复专项。
 最初跨库生命周期用例在审批处失败：测试传入命令额度 100，而数据库固定为 10，导致审批限流；
 已修正测试配置为 10，未放宽审批成功断言。后续 16 项配额/邀请专项全部通过，另补 operator 恢复 3 场景；详见[最终接线验收](verification-records.md#20260919-group-join-global-quota)。
-没有执行全仓业务测试；B23 关闭。完整房间迁移仍由 B27 跟踪，生产长稳与容量仍由 E09 跟踪。
+当时没有执行全仓业务测试；B23 关闭。在线房间搬迁已退出首版范围，生产长稳与容量仍由 E09 跟踪。

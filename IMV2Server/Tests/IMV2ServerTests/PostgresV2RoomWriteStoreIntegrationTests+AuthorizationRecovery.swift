@@ -312,13 +312,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     #if os(macOS)
     @Test("authorization survives SIGKILL before and after both durable commits", .timeLimit(.minutes(3)),
-          arguments: ["send", "batch", "forward"], ["before-reservation", "after-reservation", "after-owner", "after-ack"])
+          arguments: ["send", "forward"], ["before-reservation", "after-reservation", "after-owner", "after-ack"])
     func directAuthorizationProcessCrash(kind: String, checkpoint: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { control, owner, sql, ownerSQL, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000), profile = try forwardImportTestProfile()
             let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: owner), capacityProfile: profile, roomShardID: "room-b", now: { now })
             var rooms: [UUID] = [], operations: [UUID] = []
-            for recipient in (kind == "batch" ? [memberTwoUUID, memberThreeUUID] : [memberTwoUUID]) {
+            for recipient in [memberTwoUUID] {
                 guard case .opened(let room) = try await direct.open(actorUserID: senderID,
                     operationID: .init(uuid: UUID()), targetUserID: .init(uuid: recipient)) else { throw CancellationError() }
                 rooms.append(room.roomID.uuidValue!); operations.append(UUID())
@@ -446,7 +446,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let now = mode == "recover" ? initial.addingTimeInterval(32) : initial
             let writer = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled,
-                directRoomLogAdmissionMode: .shardOnly, shardAdmissionCommandCreditPool: .init(database: owner, batchSize: 2))
+                shardAdmissionCommandCreditPool: .init(database: owner, batchSize: 2))
                 .usingControlDatabase(resources.database(reservationID), authorizationResolutionDatabase: control)
             let profile = try forwardImportTestProfile()
             if spec.kind == "forward" {
@@ -459,14 +459,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         clientMessageID: .init(uuid: spec.operations[index]), text: "crash authorization", limits: .init(maxUTF8Bytes: 64)),
                         capacityProfile: profile, identifiers: try V2AcceptanceIDFactory().make(at: now), now: now)
                 }
-                var outcomes: [V2SendMessageOutcome] = []
-                if spec.kind == "batch" {
-                    do { outcomes = try await writer.acceptAtomically(requests: requests) }
-                    catch is V2AtomicRoomWriteBatchError {
-                        for request in requests { outcomes.append(try await writer.accept(command: request.command, capacityProfile: profile, identifiers: request.identifiers, now: now)) }
-                    }
-                } else { outcomes = [try await writer.accept(command: requests[0].command, capacityProfile: profile, identifiers: requests[0].identifiers, now: now)] }
-                try #require(outcomes.count == requests.count && outcomes.allSatisfy { if case .accepted = $0 { true } else if case .idempotent = $0 { true } else { false } })
+                try #require(requests.count == 1)
+                let outcome = try await writer.accept(
+                    command: requests[0].command, capacityProfile: profile,
+                    identifiers: requests[0].identifiers, now: now
+                )
+                switch outcome {
+                case .accepted, .idempotent: break
+                default: throw CancellationError()
+                }
             }
             if mode == "crash" {
                 try #require(spec.checkpoint == "after-ack")
@@ -578,7 +579,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 operationID: .init(uuid: UUID()), targetUserID: recipient) else { throw CancellationError() }
             let writer = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-                contentReviewMode: .disabled, directRoomLogAdmissionMode: .room,
+                contentReviewMode: .disabled,
                 shardAdmissionCommandCreditPool: warm ? .init(database: owner, batchSize: 2) : nil)
                 .usingControlDatabase(reservation, authorizationResolutionDatabase: control)
             let service = V2SendMessageService(store: writer, capacityProfile: profile,
@@ -705,7 +706,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     #endif
 
 
-    @Test("routed sends complete with separate one-connection control and owner pools",
+    @Test("owner writes complete with separate one-connection control and owner pools",
           .timeLimit(.minutes(1)), arguments: [false, true])
     func routedDirectControlPools(colocated: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { _, _, _, _, groupRoom in
@@ -733,9 +734,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 """).run()
                 }
                 let write = PostgresV2RoomWriteStore(database: owner).usingControlDatabase(control)
-                let routed = try V2RoutedRoomWriteStore(router: V2PostgresRoomShardRouter(database: control),
-                    stores: ["room-b": write])
-                let service = V2SendMessageService(store: routed, capacityProfile: profile,
+                // The live Actor path grants a room turn before this writer runs;
+                // this regression targets its owner/control database authority.
+                let service = V2SendMessageService(store: write, capacityProfile: profile,
                     limits: try .init(maxUTF8Bytes: 64), now: { now })
                 guard case .accepted = try await service.send(.init(roomID: groupRoom, actorUserID: senderID,
                     clientMessageID: .init(uuid: UUID()), text: "group stays on owner")) else {
@@ -909,7 +910,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let cache = V2DirectRoomLogFastAppendCache()
             let writer = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-                contentReviewMode: .disabled, directRoomLogAdmissionMode: .shardOnly,
+                contentReviewMode: .disabled,
                 directRoomLogFastAppendCache: cache, shardAdmissionCommandCreditPool: credits)
                 .usingControlDatabase(control, authorizationResolutionDatabase: control)
             func command(_ id: ClientMessageID = .init(uuid: UUID()), text: String = "automatic grant") throws -> V2SendMessageCommand {
@@ -961,7 +962,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let cache = V2DirectRoomLogFastAppendCache()
             let base = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-                contentReviewMode: .disabled, directRoomLogAdmissionMode: .room,
+                contentReviewMode: .disabled,
                 directRoomLogFastAppendCache: cache,
                 shardAdmissionCommandCreditPool: warm ? .init(database: owner, batchSize: 2) : nil)
                 .usingControlDatabase(control)
@@ -1029,8 +1030,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("atomic direct authorization abort rolls back every message", arguments: [false, true], [false, true])
-    func directDurableOwnerBatch(warm: Bool, abortFirst: Bool) async throws {
+    @Test("atomic warm direct authorization abort rolls back every message", arguments: [false, true])
+    func directDurableOwnerBatch(abortFirst: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { control, owner, _, ownerSQL, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 100, retryAfterSeconds: 3))
@@ -1040,17 +1041,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let cache = V2DirectRoomLogFastAppendCache()
             let base = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 20, window: 86_400), contentReviewMode: .disabled,
-                directRoomLogAdmissionMode: .shardOnly, directRoomLogFastAppendCache: cache,
+                directRoomLogFastAppendCache: cache,
                 shardAdmissionCommandCreditPool: .init(database: owner, batchSize: 2)).usingControlDatabase(control)
             var requests: [V2RoomWriteRequest] = [], grants: [V2DirectAuthorizationGrant] = []
             for recipient in recipients {
                 guard case .opened(let room) = try await direct.open(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: recipient) else { throw CancellationError() }
-                if warm {
-                    let command = try V2SendMessageCommand(roomID: room.roomID, senderUserID: senderID,
-                        clientMessageID: .init(uuid: UUID()), text: "warm", limits: .init(maxUTF8Bytes: 64))
-                    guard case .accepted = try await base.accept(command: command, capacityProfile: profile,
-                        identifiers: V2AcceptanceIDFactory().make(at: now), now: now) else { throw CancellationError() }
-                }
+                let warmCommand = try V2SendMessageCommand(roomID: room.roomID, senderUserID: senderID,
+                    clientMessageID: .init(uuid: UUID()), text: "warm", limits: .init(maxUTF8Bytes: 64))
+                guard case .accepted = try await base.accept(command: warmCommand, capacityProfile: profile,
+                    identifiers: V2AcceptanceIDFactory().make(at: now), now: now) else { throw CancellationError() }
                 let command = try V2SendMessageCommand(roomID: room.roomID, senderUserID: senderID,
                     clientMessageID: .init(uuid: UUID()), text: "durable batch", limits: .init(maxUTF8Bytes: 64))
                 requests.append(.init(command: command, capacityProfile: profile, identifiers: try V2AcceptanceIDFactory().make(at: now), now: now))
@@ -1064,14 +1063,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await base.usingAuthorizationGrants(initial, now: now).acceptAtomically(requests: batch)
             }
             #expect(try await count("im_v2.messages", on: ownerSQL) == before)
-            #expect(try await count("im_v2.direct_authorization_receipts", on: ownerSQL) == (warm ? 3 : 1))
+            #expect(try await count("im_v2.direct_authorization_receipts", on: ownerSQL) == 3)
             try await PostgresV2DirectAuthorizationIntentStore(database: control).resolve(initial[target].attempt, receipt: aborted, now: now)
             grants[target] = try await directAuthorizationGrant(batch[target].command, recipient: recipients[target], control: control, now: now)
             let outcomes = try await base.usingAuthorizationGrants(grants, now: now).acceptAtomically(requests: batch)
             #expect(outcomes.count == 2 && outcomes.allSatisfy { if case .accepted = $0 { true } else { false } })
             #expect(try await count("im_v2.messages", on: ownerSQL) == before + 2)
-            #expect(try await count("im_v2.direct_authorization_receipts", on: ownerSQL) == (warm ? 5 : 3))
-            if warm { #expect(await cache.snapshot().committedAppends == 2) }
+            #expect(try await count("im_v2.direct_authorization_receipts", on: ownerSQL) == 5)
+            #expect(await cache.snapshot().committedAppends == 2)
         }
     }
 
@@ -1285,9 +1284,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         return try #require(try await PostgresV2DirectAuthorizationIntentStore(database: control).reserve([request], now: now).first)
     }
 
-    @Test("atomic direct batches apply control authority to every room before any append",
-          arguments: [false, true], [false, true])
-    func directBatchControlAuthority(warm: Bool, blockedFirst: Bool) async throws {
+    @Test("atomic warm direct batches apply control authority to every room before any append",
+          arguments: [false, true])
+    func directBatchControlAuthority(blockedFirst: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { control, owner, _, ownerSQL, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try V2CapacityProfile(id: "standard", limits: .init(
@@ -1307,7 +1306,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let cache = V2DirectRoomLogFastAppendCache()
             let writer = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 20, window: 86_400),
-                contentReviewMode: .disabled, directRoomLogAdmissionMode: .shardOnly,
+                contentReviewMode: .disabled,
                 directRoomLogFastAppendCache: cache,
                 shardAdmissionCommandCreditPool: .init(database: owner, batchSize: 2)).usingControlDatabase(control)
             let roomIDs = rooms
@@ -1321,18 +1320,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         ownerRoute: try .init(shardID: "room-b", epoch: 0))
                 }
             }
-            if warm {
-                for item in try requests() {
-                    guard case .accepted = try await writer.acceptOwnerValidated(request: item.request,
-                        ownerRoute: item.ownerRoute) else {
-                        Issue.record("warm-up failed"); return
-                    }
+            for item in try requests() {
+                guard case .accepted = try await writer.acceptOwnerValidated(request: item.request,
+                    ownerRoute: item.ownerRoute) else {
+                    Issue.record("warm-up failed"); return
                 }
             }
             let first = try await writer.acceptAtomicallyOwnerValidated(requests: requests())
             #expect(first.count == 2)
             #expect(first.allSatisfy { if case .accepted = $0 { true } else { false } })
-            if warm { #expect(await cache.snapshot().committedAppends == 2) }
+            #expect(await cache.snapshot().committedAppends == 2)
             // Reverse arrival order across concurrent batches while sharing a sender.
             let forwardInputs = try requests(), reverseInputs = try requests(reversed: true)
             async let forward = writer.acceptAtomicallyOwnerValidated(requests: forwardInputs)
@@ -1401,7 +1398,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let cache = V2DirectRoomLogFastAppendCache()
             let writer = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-                contentReviewMode: .disabled, directRoomLogAdmissionMode: .room,
+                contentReviewMode: .disabled,
                 directRoomLogFastAppendCache: cache,
                 shardAdmissionCommandCreditPool: warm ? .init(database: owner, batchSize: 2) : nil,
                 roomAdmissionCommandCreditPool: warm ? .init(database: owner, batchSize: 2) : nil).usingControlDatabase(control)

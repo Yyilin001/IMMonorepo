@@ -444,7 +444,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: senderUUID)").run()
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 20,    retryAfterSeconds: 3))
-            let writer = PostgresV2RoomWriteStore(database: resources.database(.psql), strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled, directRoomLogAdmissionMode: .shardOnly, shardAdmissionCommandCreditPool: .init(database: resources.database(.psql), batchSize: 2))
+            let writer = PostgresV2RoomWriteStore(database: resources.database(.psql), strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled, shardAdmissionCommandCreditPool: .init(database: resources.database(.psql), batchSize: 2))
             func request() throws -> V2RoomWriteRequest {
                 try .init(command: .init(roomID: roomID, senderUserID: .init(uuid: memberThreeUUID), clientMessageID: .init(uuid: UUID()), text: "permission boundary", limits: .init(maxUTF8Bytes: 64)), capacityProfile: profile, identifiers: try V2AcceptanceIDFactory().make(at: now), now: now)
             }

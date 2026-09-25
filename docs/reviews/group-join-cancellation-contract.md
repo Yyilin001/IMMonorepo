@@ -31,9 +31,9 @@
 原申请人重新打开邀请仍能看到 pending/approving；没有待审申请的人不能借失效链接查看预览。
 取消不依赖链接秘密重新授权，必须验证请求所属申请人。
 
-取消由 `V2RoutedGroupInvitationStore` 解析当前房间 owner，读取控制库身份、写入 owner 申请。
+取消由 `V2ActorInvitationCoordinator` 经房间 Actor 在当前 owner 执行，控制库保存身份与跨 owner 配额事实。
 事务内校验 owner epoch；不匹配就拒绝，不向其他库回退。本合同不把受控 epoch 切换
-视为运行中完整房间搬迁；B27 的完整迁移实现仍开放。
+视为运行中完整房间搬迁；在线数据搬迁不在首版范围。
 
 ## App 与 HTTP 边界
 

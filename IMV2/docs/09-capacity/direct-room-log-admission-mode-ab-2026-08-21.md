@@ -1,7 +1,7 @@
 # Direct room-log admission-mode A/B (2026-08-21)
 
-This is a disposable, same-host experiment. It decides the default for the
-`shard_only` admission experiment; it is not a production capacity promise.
+Historical, disposable, same-host experiment. The `shard_only` mode was
+removed on 2026-09-25; these measurements are not a production capacity promise.
 
 ## Controlled inputs
 
@@ -33,13 +33,15 @@ separate, valuable optimization and must not be disabled with `shard_only`.
 
 ## Decision
 
-Do **not** deploy `shard_only` as the default. The feature preserves the
+The `shard_only` mode has been removed. The experiment preserved the
 intended authorization and durability invariants, but it does not remove the
 locked-room pre-read, canonical message/event append, event indexes, or
 synchronous WAL commit. On this representative test it made the end-to-end
-path slower. Keep the runtime guard and integration test for controlled
-research only; use `room` with a credit batch size of `32` for the default
-direct room-log deployment.
+path slower. The supported direct room-log path retains per-room admission;
+the experiment and its mode-specific integration test are retired.
+
+2026-09-25 operational alignment: the multi-owner topology validation overlay
+uses the sole supported per-room admission path. The historical A/B was not rerun.
 
 The next experiment must target a larger mandatory unit of work: an ordered,
 bounded micro-batch that durably appends several canonical events in one

@@ -1,5 +1,6 @@
 import Foundation
 import IMV2Core
+@testable import IMV2Server
 
 /// 只把源/目标房间对路由到其已持久化的归属。
 ///

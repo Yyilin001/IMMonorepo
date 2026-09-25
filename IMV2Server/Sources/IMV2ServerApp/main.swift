@@ -616,7 +616,6 @@ enum IMV2ServerApp {
                     write = PostgresV2RoomWriteStore(database: owner,
                         strangerMessagePolicy: configuration.strangerMessagePolicy,
                         contentReviewMode: configuration.contentReviewMode,
-                        directRoomLogAdmissionMode: configuration.directRoomLogAdmissionMode,
                         directSendPolicyCache: directSendPolicyCache,
                         directRoomLogFastAppendCache: directRoomLogFastAppendCache,
                         shardAdmissionCommandCreditPool: shardCredits,

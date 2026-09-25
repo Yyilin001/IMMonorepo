@@ -121,6 +121,84 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
         }
     }
+
+    @Test("control route selects the physical owner for an Actor-hosted send")
+    func actorSendUsesSelectedRemoteOwner() async throws {
+        try await withForwardOwnerDatabases(mode: .standard) {
+            control, ownerDatabase, controlSQL, ownerSQL, room in
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            try await controlSQL.raw("""
+                INSERT INTO im_v2.room_owner_routes
+                    (room_id, room_shard_id, route_epoch, created_at, updated_at)
+                VALUES (\(bind: room.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now))
+                """).run()
+            let route = try await V2PostgresRoomShardRouter(database: control).route(for: room)
+            let selectedOwner = try V2RoomDataOwner(shardID: route.shardID, epoch: route.epoch)
+            #expect(selectedOwner.shardID == "room-b")
+            await #expect(throws: V2RoomActivationLeaseError.roomNotFound) {
+                _ = try await PostgresV2RoomActivationStore(database: control)
+                    .locate(roomID: room, owner: selectedOwner)
+            }
+
+            let writes = PostgresV2RoomWriteStore(database: ownerDatabase)
+                .usingControlDatabase(control)
+            let batcher = V2SendMessageAdmissionBatcher(
+                store: writes,
+                configuration: .init(maximumBatchSize: 8, maximumDelay: .milliseconds(2)),
+                actorGrantedStore: writes
+            )
+            let admission = V2DatabaseWorkAdmissionController(policy: .init(
+                maximumForegroundWriteInFlight: 1, maximumInteractiveReadInFlight: 1,
+                maximumSyncInFlight: 1, maximumForegroundWriteQueued: 2,
+                maximumInteractiveReadQueued: 2, maximumSyncQueued: 1,
+                timeout: .seconds(1)))
+            let resources = try V2RoomServerOwnerResources(
+                database: ownerDatabase, writes: writes, sendBatcher: batcher,
+                membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
+                invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: control),
+                receiptShadowForwarder: ActorFactoryShadow(), capacityProfile: forwardImportTestProfile(),
+                messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
+                contentReviewMode: .disabled, queryBatchConfiguration: .init(),
+                databaseWorkAdmission: admission
+            )
+            let factory = try V2RoomServerActivationFactory(
+                owners: ["room-b": resources], safetyActorUserID: senderID, now: { now }
+            ).runtimeFactory()
+            let configuration = try V2RoomRuntimeConfiguration()
+            let leases = try V2RoomServerLeaseStore(databases: ["room-b": ownerDatabase])
+            let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(
+                identity: .init(hostID: try .init("remote-send-host"), incarnationID: UUID()),
+                leaseStore: leases, configuration: configuration,
+                budget: .init(configuration: configuration),
+                classify: { $0.canShareSendTurn ? .send : .barrier }, factory: factory
+            )
+            await host.start()
+            do {
+                guard case .ready(let token) = try await host.activate(
+                    roomID: room, owner: selectedOwner, deadline: .now + .seconds(10)
+                ) else { throw V2RoomCallFailure.notAccepted(.notReady) }
+                let request = V2RoomRequest.messaging(.send(.init(
+                    roomID: room, actorUserID: senderID,
+                    clientMessageID: .init(uuid: UUID()), text: "remote owner send",
+                    media: [], mentions: [], entities: [], replyTo: nil
+                )))
+                let response = try await host.invoke(
+                    token: token, encodedRequest: JSONEncoder().encode(request),
+                    deadline: .now + .seconds(10)
+                )
+                guard case .messaging(.send(let sent)) = response,
+                      case .accepted = try sent.toDomain() else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+                #expect(try await count("im_v2.messages", on: ownerSQL) == 1)
+                #expect(try await count("im_v2.messages", on: controlSQL) == 0)
+                #expect(await host.stop(deadline: .now + .seconds(10)).completed)
+            } catch {
+                _ = await host.stop(deadline: .now + .seconds(10))
+                throw error
+            }
+        }
+    }
 }
 
 private struct ActorFactoryShadow: V2UserShardProjectionShadowing {

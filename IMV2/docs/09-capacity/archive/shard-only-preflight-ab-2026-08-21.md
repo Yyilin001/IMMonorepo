@@ -1,6 +1,6 @@
 # Direct room-log shard-only preflight experiment — 2026-08-21
 
-> **历史归档。** 该 shard-only 预检实验已被落地的分片路由合同取代，见
+> **历史归档。** `shard_only` 运行模式已于 2026-09-25 移除。该预检实验已被落地的分片路由合同取代，见
 > [ADR-006 路由与迁移](../../00-foundation/ADR-006-routing-and-migration.md) 与
 > [ADR-010 容量与灾备](../ADR-010-capacity-and-disaster-recovery.md)。
 ## Purpose

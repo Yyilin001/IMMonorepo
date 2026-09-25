@@ -32,7 +32,7 @@
   `im-v2-current-53`；这是唯一新环境建库合同。仅撤销凭据已随注册事务原子交付、与 access/refresh 同项保存，刷新保持原证明与期限，见[原子签发合同](../../docs/reviews/atomic-revocation-credential-issue-contract.md)。真实 HTTPS/App 链路已验证；[独立持久退出交接](../../docs/reviews/device-revocation-handoff-contract.md)已接入，原凭据删除前保留撤销任务，[独立执行器与本地退出](../../docs/reviews/device-revocation-runner-contract.md)已接通前台重试，[暂停反馈与恢复](../../docs/reviews/device-revocation-status-contract.md)已完成，完整生命周期交互验收仍待完成。设备会话保存默认 30 天绝对截止，刷新、认证及 Push/媒体授权不能越过期限；见[期限合同](../../docs/reviews/device-session-absolute-expiry-contract.md)。群角色的显式策略标记独立于可清理的操作回执。
   readiness 拒绝不符合当前结构的数据库；旧压测库须重建，不提供在线升级。
   schema 19→20 为群申请增加审核人＋决策操作唯一约束；新审批将成员、配额、事件、outbox 和
-  申请记账放入一次事务。审批引用的成员操作回执已增加清理保留；旧 approving 及其恢复服务已删除，B27 owner 路由仍开放，见
+  申请记账放入一次事务。审批引用的成员操作回执已增加清理保留；旧 approving 及其恢复服务已删除，B27 原邀请静态 owner 路由缺陷已按当前 Actor 入口验证，见
   [原子审批合同](../../docs/reviews/atomic-group-approval-contract.md)。
   普通成员变更在单库/分库组装中均保留 owner route/epoch，在回执重放前于事务内检查；其他房间写入的原缺陷验收仍开放，见[成员栅栏合同](../../docs/reviews/room-membership-owner-fence-contract.md)。
   历史邀请目录分页导入已移除，不再提供旧数据回填入口。

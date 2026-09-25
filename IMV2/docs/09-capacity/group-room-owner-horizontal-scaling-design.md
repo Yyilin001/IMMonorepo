@@ -1,6 +1,6 @@
 # 群聊 room-owner 横向扩展设计
 
-状态：房间热路径、创建 saga、核心消息派生写与 read receipt owner 边界已实现；公共内容正统一为房间日志，旧扇出运行时已删除，完整清理仍在进行。下文性能数字保留其原测试日期，不代表清理后的新基线。
+状态：历史设计与容量记录。下文“当前代码”“必须增加”等叙述对应当时的 routed-store 阶段，不能作为 2026-09-25 的生产入口清单。`V2RoutedRoomWriteStore` 和 `V2RoutedGroupMessagingStore` 已退出生产路径；现行 Gateway 的房间命令经 Room Actor/activation port，建群经 Actor 创建协调器，Account 邀请经 `V2ActorInvitationCoordinator`。公共内容已统一为房间日志，在线房间搬迁不在首版范围。下文性能数字保留原测试日期，不代表当前基线。
 
 ## 1. 目标与不可修改的语义
 

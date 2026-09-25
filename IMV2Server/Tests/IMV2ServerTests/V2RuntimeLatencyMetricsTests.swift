@@ -28,7 +28,6 @@ struct V2RuntimeLatencyMetricsTests {
         #expect(persistence.sumMilliseconds == 12)
         #expect(persistence.count(atOrBelow: .milliseconds8) == 0)
         #expect(persistence.count(atOrBelow: .milliseconds16) == 1)
-        #expect(snapshot.value(for: .shardReservation) == .empty)
     }
 
     @Test("event-loop lag uses the same bounded cumulative histogram")

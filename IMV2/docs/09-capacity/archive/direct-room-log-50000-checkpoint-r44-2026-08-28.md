@@ -13,7 +13,7 @@ R44 在 50,000 个峰值活跃连接、总计 4,000 msg/s、真实 room-log hint
 完成 360,000 次发送并收到 360,000 次 ACK。没有 workload failure、连接失败、心跳漏失、
 Gateway 队列满、数据库死锁、OOM 或容器重启。
 
-本轮修复把 `shard_only` 模式下的冷 room/cache-miss 普通私聊写入合并为单个 PostgreSQL 事务：
+历史实验记录（`shard_only` 模式已于 2026-09-25 移除）。本轮修复曾把该模式下的冷 room/cache-miss 普通私聊写入合并为单个 PostgreSQL 事务：
 批量加操作锁、批量做房间/成员/策略预检、批量持久化消息，最后按 shard lease 聚合并条件扣减容量。
 任何容量不满足都会回滚同批全部消息。旧 `room` admission 模式仍保留标量冷路径，避免进程内预取
 room credit 与数据库绝对计数互相覆盖。

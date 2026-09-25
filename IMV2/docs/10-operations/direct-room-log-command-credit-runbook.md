@@ -5,25 +5,24 @@ write path. It removes most of the serialized per-message updates to the
 shard admission pool; it does not change message durability, authorization,
 idempotency, or the command-window limit.
 
-`shard_only` is **not** the deployment default. A clean, same-host
-1,500-connection room-log A/B measured worse message and room-log P95 with
-that mode; see [the benchmark](../09-capacity/direct-room-log-admission-mode-ab-2026-08-21.md).
-Use the normal `room` mode with a batch size of `32` unless conducting a new,
-controlled experiment.
+The former `shard_only` experiment was removed after a clean, same-host
+1,500-connection A/B measured worse message and room-log P95; see
+[the historical benchmark](../09-capacity/direct-room-log-admission-mode-ab-2026-08-21.md).
+Per-room admission is now the only direct room-log path.
+
+The room-shard topology validation overlay exercises the same deployment
+admission contract. The historical A/B remains research evidence, not a release gate.
 
 ## Preconditions
 
 - Use the current room-log-only server; the retired fanout-mode selector must not be configured.
-- IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE=room or shard_only
+- Do not set the retired `IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE` variable; startup rejects it.
 - One gateway replica for the benchmark. Credits are process-local, so each
   replica may retain at most one partially unused batch per active shard.
 - PostgreSQL remains healthy and is the only authority for admission.
 
-`IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE=room` is the default and preserves the
-per-room command window while batching the durable shard admission reserve.
-`shard_only` is the direct-room-log-only experiment: the durable shard command
-window becomes the command-capacity authority for ordinary direct messages,
-and the per-room counter is no longer rewritten. It is not the default after the A/B regression.
+Per-room admission preserves the room command window while batching the durable
+shard admission reserve.
 
 Set IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE=32 for the initial load
 test. The accepted range is 1...128; 0 is the default and disables the
@@ -33,20 +32,17 @@ conservative unused quota after a process crash or a lease rollover.
 ## Preserving per-room admission while batching it
 
 `IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE` is a separate, default-off
-optimization for the normal `room` admission mode. It is the only supported
-way to remove the per-message `room_admission` lock/update while retaining
+optimization for direct room-log admission. It removes the per-message
+`room_admission` lock/update while retaining
 the existing per-room command-window contract:
 
 ```
-IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE=room
 IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE=32
 IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE=16
 ```
 
-The accepted range is `1...32`; it requires `room_log`, normal `room`
-admission, and a nonzero shard-credit batch. `shard_only` and room credits
-are deliberately mutually exclusive: the former removes the room limit,
-whereas the latter preserves it.
+The accepted range is `1...32`; it requires `room_log` and a nonzero
+shard-credit batch. Room credits preserve the per-room limit.
 
 For a room credit reservation, PostgreSQL atomically increments that room's
 existing `room_admission.command_window_used` by at most the selected size,
@@ -252,13 +248,12 @@ statement and borrowing it from the same bounded foreground pool can make all
 outer transactions wait for connections they already hold.
 
 - No request can exceed the durable command-window limit.
-- `shard_only` does not weaken authorization: room locking, active membership,
+- Authorization still requires room locking, active membership,
   mute checks, direct-pair and user-policy revision locks, stranger quota, and
   Gateway user/device rate limits are still evaluated before an acceptance.
-- The idle direct-room `room_admission.command_window_used` value remains
-  unchanged. Do not use that per-room metric to judge direct room-log traffic;
-  use the shard-admission and Gateway rate-limit metrics instead.
-- With room credits enabled in normal `room` mode, the per-room counter is
+- The per-room `room_admission.command_window_used` counter is authoritative
+  for direct room-log traffic, including cold and rich sends.
+- With room credits enabled, the per-room counter is
   still authoritative and therefore advances by each durable reservation,
   rather than by each ACK. It may be ahead of the accepted-message count by
   the local unused remainder; use it for enforcement, not exact analytics.
@@ -438,8 +433,7 @@ ACK、0 failure；控制组出现 2,451 次 `SERVER_BUSY`。完整证据见
 
 ## Rollback
 
-Set `IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE=room`,
-`IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE=0`, and, if required,
+Set `IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE=0` and, if required,
 `IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE=0`, then restart the gateway.
 No migration or data rollback is required. Already reserved durable credits
 remain counted in the current command window and therefore only make the

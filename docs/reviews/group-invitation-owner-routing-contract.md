@@ -1,10 +1,16 @@
-# 群邀请 owner 路由与 control 身份合同（B27 第二阶段）
+# 群邀请 owner 路由与 control 身份合同（B27）
 
-> 2026-09-20 当前范围：在线迁移与历史邀请导入均已退出当前范围，旧审批恢复审计及阻断表已删除。当前保留持久 owner 路由和正常创建补偿；下文涉及历史数据迁移的要求不再适用。
+## 当前实现与验收（2026-09-25）
 
-2026-09-06。本批已替换 Account 的固定 control 库组装，接入持久 room route、owner epoch 与 control 身份读取。**B27 仍为实施中**：完整房间迁移及其历史覆盖验收尚未闭环，独立 owner 旧链接已接通[审计导入](group-invite-directory-import-contract.md)；后续持久创建恢复见[恢复合同](group-invite-creation-recovery-contract.md)；跨 owner 全局申请配额仍由 B23 跟进。
+Account 将邀请 HTTP 路由接到 `V2ActorGroupInvitationClient` 和 `V2ActorInvitationCoordinator`。协调器在 control 数据库保存 token 目录、身份和跨 owner 申请配额，通过房间 Actor 在持久 owner/epoch 对应的数据库执行房间操作；创建及申请中断由持久恢复 worker 补全。错误 owner 或旧 epoch 失败关闭，不向其他数据库盲目重试。当前部署只承诺静态数据 owner 路由，不支持在线搬迁房间数据。
 
-## 运行组装
+原 B27 缺陷已验证：`routedInvitationsUseControlIdentity` 在独立 control、两个无身份资料的 owner 数据库上，以 standard/large 两档覆盖创建、列表、预览、提交、审批、拒绝、撤销、旧操作重放、错误 owner/epoch、控制身份及 HTTP 状态；相关创建恢复、全局配额和 SIGKILL 六检查点同在 `6597d53b` 的定向测试中通过（共 17 项、2 套件）。这不是当前提交的 Linux 全量、真实多 Host 容量或在线数据迁移证明。B23 的全局 20 条待审配额已有独立 control 账本与恢复路径；状态见[问题总表](status.md)。
+
+## 2026-09-06 历史实现记录
+
+以下记载旧 `V2RoutedGroupInvitationStore` 与旧审批/导入计划，只用于追溯；不代表当前 Account 组装、当前 schema 或首版范围。当时 Account 已从固定 control 库切换到持久 room route、owner epoch 与 control 身份读取，B27 尚未按当前 Actor 入口验收。
+
+### 当时的运行组装
 
 `V2RoutedGroupInvitationStore` 作为现有 `V2GroupInvitationService` 的存储边界。Account 为配置中的各物理 owner 初始化池、检查 session/schema/capacity，再注册邀请 HTTP 路由；与本地媒体共用已创建的同 URL 连接池。本地媒体关闭也会初始化邀请 owner。
 
@@ -12,7 +18,7 @@ Account 必须显式提供 `IM_V2_ROOM_SHARD_STORES_JSON`；既有 user store �
 
 每个操作读取持久 route，再按注册表解析唯一数据库。未知 shard 抛出明确错误，没有广播、哈希重选或单物理库捷径。当前实现仅接受 `im_v2` schema，配置也拒绝其他 schema。
 
-## Owner 事务边界
+### Owner 事务边界
 
 创建、撤销、提交、批准和拒绝在原有操作锁顺序内取得 room 行锁，并核对 `room_shard_id` 与 `owner_epoch`。**包括成功操作的重放，也必须先通过 owner fence**。读列表、预览和待审批页在独立只读工作事务中持有 room 共享锁，直到授权及结果读取完成；迁移/角色变更的 room 写锁不能越过这个读点。
 
@@ -22,7 +28,7 @@ Account 必须显式提供 `IM_V2_ROOM_SHARD_STORES_JSON`；既有 user store �
 
 目录成功不是有效性证明；撤销、过期、成员状态和额度全部由 owner 当前记录判断。错误 owner、旧 epoch 和已过期缓存均失败，不向另一数据库重试业务写入。Account 的生产路由器直接读取 PostgreSQL 目录；缓存路由器仅用于验收 stale route 的阻断。
 
-## Control 身份与展示
+### Control 身份与展示
 
 `PostgresV2GroupInvitationIdentityReader` 一次读取至多 100 个身份，返回 public identity 与 active 状态。active 要求 profile.state=active 且无 account_disables。创建/撤销/列表/提交等操作在 owner 事务开始前取当前 actor 状态；批准先读取不可变 applicant ID，再从 control 读取 reviewer/applicant 状态，进入 owner 事务后核对 applicant ID 并传给共享成员变更函数。
 
@@ -32,13 +38,13 @@ Owner SQL 不再 JOIN public_user_profiles 或 account_disables。申请行只�
 
 新审批拒绝已停用目标且不产生任何成员/事件效果；已提交审批的精确重放可读取原结果，不重新加人。新操作仍要通过当前 reviewer 状态与角色。账号禁用不会删除 owner 申请历史。
 
-## Schema 23
+### Schema 23
 
 当前 schema 的链接 creator/revoker、申请 applicant/reviewer 不引用公共资料缓存；room/invite/request 的本地关系约束继续保留。新库直接创建这些边界，不提供历史升级或混合版本运行流程。
 
 Swift 与 SQL readiness 除完整旧合同外，还拒绝 invite/request 对 profile 或 account_disables 的外键依赖，包含 NOT VALID 外键。物理 owner 目前仍使用统一 schema（空身份表存在），无需复制身份行。
 
-## 验证及剩余范围
+### 当时的验证及剩余范围
 
 见[路由证据](../../docs/reviews/verification-records.md#20260906-routed-invitation)：最终 29 项测试 / 3 套件通过，22→23 数据保留迁移及完整 readiness 负例通过。三库测试将 control 与两个 room owner 分开，control 没有 rooms/memberships/requests，两个 owner 的 public_user_profiles 均为空；同时覆盖 standard fanout 和 large-group hybrid。正常流程、创建 finalize 中断、控制资料更新、停用目标/审核人、原决策重放、未知或错误物理 owner、真实持久 epoch 不一致、缓存 stale 及 Vapor 状态边界均纳入测试。
 

@@ -351,7 +351,7 @@ private func withCreditFenceDatabase(_ operation: (CreditFenceContext) async thr
         let cache = V2DirectRoomLogFastAppendCache()
         let writer = PostgresV2RoomWriteStore(database: database,
             strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-            contentReviewMode: .disabled, directRoomLogAdmissionMode: .room,
+            contentReviewMode: .disabled,
             directRoomLogFastAppendCache: cache,
             shardAdmissionCommandCreditPool: .init(database: database, batchSize: 1),
             roomAdmissionCommandCreditPool: credits)

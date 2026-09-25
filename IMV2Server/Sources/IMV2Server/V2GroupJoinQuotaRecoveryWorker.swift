@@ -14,13 +14,6 @@ public struct V2GroupJoinQuotaRecoveryWorker: Sendable {
     private let resume: @Sendable (V2GroupJoinQuotaIntent, Date) async throws -> Void
     private let now: @Sendable () -> Date
 
-    public init(controlDatabase: any Database, invitations: V2RoutedGroupInvitationStore,
-                now: @escaping @Sendable () -> Date = { Date() }) {
-        self.jobs = .init(database: controlDatabase)
-        self.resume = { intent, at in try await invitations.resumeSubmission(intent, now: at) }
-        self.now = now
-    }
-
     public init(controlDatabase: any Database, coordinator: V2ActorInvitationCoordinator,
                 deadline: @escaping @Sendable () -> ContinuousClock.Instant,
                 now: @escaping @Sendable () -> Date = Date.init) {

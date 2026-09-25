@@ -1449,7 +1449,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     window: 86_400
                 ),
                 contentReviewMode: .disabled,
-                directRoomLogAdmissionMode: .shardOnly,
                 shardAdmissionCommandCreditPool: .init(
                     database: resources.database(.psql),
                     batchSize: 4
@@ -1560,7 +1559,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     window: 86_400
                 ),
                 contentReviewMode: .disabled,
-                directRoomLogAdmissionMode: .shardOnly,
                 shardAdmissionCommandCreditPool: .init(
                     database: resources.database(.psql),
                     batchSize: 4
@@ -1823,7 +1821,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     window: 86_400
                 ),
                 contentReviewMode: .disabled,
-                directRoomLogAdmissionMode: .shardOnly,
                 shardAdmissionCommandCreditPool: .init(
                     database: resources.database(.psql),
                     batchSize: 4

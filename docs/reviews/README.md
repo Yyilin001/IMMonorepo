@@ -114,7 +114,7 @@
 | 邀请 token 目录与创建意图 | [token 目录与创建意图合同](group-invite-directory-contract.md) | B27 |
 | 邀请创建后台恢复 | [创建恢复合同](group-invite-creation-recovery-contract.md) | B27 |
 | 邀请 owner 路由与 control 身份 | [owner 路由合同](group-invitation-owner-routing-contract.md) | B27 |
-| 历史邀请目录导入 | [分页导入合同](group-invite-directory-import-contract.md) | B27 |
+| 历史邀请目录导入（已取消，历史设计） | [分页导入合同](group-invite-directory-import-contract.md) | B27 历史范围 |
 | 历史邀请创建的目录绑定 | [兼容补充合同](group-invite-legacy-binding-contract.md) | B27 |
 | 群申请原子审批 | [原子审批合同](atomic-group-approval-contract.md) | B26 |
 | 遗留审批恢复 | [受控恢复](group-approval-recovery-contract.md)、[证据保留](approval-recovery-evidence-contract.md) | D05、B26 |

@@ -22,18 +22,6 @@ public enum V2ContentReviewMode: String, Equatable, Sendable {
     var enqueuesJobs: Bool { self == .enabled }
 }
 
-/// 控制当普通单聊消息的规范投递记录就是房间事件日志时，适用哪一道持久命令速率围栏。
-///
-/// 这是部署策略而非客户端输入。
-///
-/// `room` 保留原先的每房间命令窗口。
-/// `shardOnly` 仍保留持久分片命令窗口、网关用户/设备速率限制、单聊策略检查与陌生人配额，
-/// 但不会再为每条单聊消息改写本应闲置的每房间命令计数器。
-public enum V2DirectRoomLogAdmissionMode: String, Equatable, Sendable {
-    case room
-    case shardOnly = "shard_only"
-}
-
 /// 指标刻意只绑定到 loopback 监听器。
 ///
 /// 采集器必须运行在同一主机或 Pod 命名空间内；
@@ -339,11 +327,9 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let roomLogRetentionMode: V2RoomLogRetentionMode
     /// 窗口模式下读者不再钉住日志下界的宽限秒数；永久模式不使用该值。
     public let roomLogRetentionWindowSeconds: TimeInterval
-    /// 仅用于 direct-room-log 部署的一道围栏。
+    /// 仅用于 direct-room-log 部署的分片额度预扣优化。
     ///
-    /// 默认值保留与旧版完全一致的房间准入语义。
-    public let directRoomLogAdmissionMode: V2DirectRoomLogAdmissionMode
-    /// 取零表示保留精确的每消息分片准入。
+    /// 取零表示保留精确的每消息分片准入；每房间准入始终有效。
     ///
     /// 正值是一个显式的、仅用于 direct-room-log 的预扣命令额度批大小；
     /// 它绝不会由客户端请求开启。
@@ -812,18 +798,11 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ROOM_LOG_RETENTION_WINDOW_SECONDS")
         }
         roomLogRetentionWindowSeconds = retentionWindow
-        let rawDirectRoomLogAdmissionMode = Self.optional(
-            "IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE", environment: environment
-        )?.lowercased() ?? V2DirectRoomLogAdmissionMode.room.rawValue
-        guard let parsedDirectRoomLogAdmissionMode = V2DirectRoomLogAdmissionMode(
-            rawValue: rawDirectRoomLogAdmissionMode
-        )
-        else {
+        guard environment.value(for: "IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE") == nil else {
             throw V2GatewayRuntimeConfigurationError.invalid(
                 "IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE"
             )
         }
-        directRoomLogAdmissionMode = parsedDirectRoomLogAdmissionMode
         let rawDirectRoomLogShardCreditBatchSize = Self.optional(
             "IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE", environment: environment
         ) ?? "0"
@@ -840,10 +819,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         ) ?? "0"
         guard let parsedDirectRoomLogRoomCreditBatchSize = Int(rawDirectRoomLogRoomCreditBatchSize),
               (0 ... 32).contains(parsedDirectRoomLogRoomCreditBatchSize),
-              parsedDirectRoomLogRoomCreditBatchSize == 0 || (
-                  parsedDirectRoomLogAdmissionMode == .room
-                      && parsedDirectRoomLogShardCreditBatchSize > 0
-              )
+              parsedDirectRoomLogRoomCreditBatchSize == 0 || parsedDirectRoomLogShardCreditBatchSize > 0
         else {
             throw V2GatewayRuntimeConfigurationError.invalid(
                 "IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE"

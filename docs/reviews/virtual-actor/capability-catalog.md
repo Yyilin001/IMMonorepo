@@ -202,7 +202,7 @@ Source extraction lists declared methods, not extension defaults or runtime cove
 - `func states(roomIDs: [RoomID], actorUserID: UserID) async throws -> [RoomID: V2RoomStateReadResult]`
 ## V2UserRoomDirectoryReading (V2RoomRecoveryReading.swift:45)
 - `func rooms(actorUserID: UserID, after: RoomID?, limit: Int) async throws -> V2UserRoomDirectorySlice`
-## V2ControlValidatedRoomMembershipStore (V2RoutedRoomMutationStores.swift:56)
+## V2ControlValidatedRoomMembershipStore (V2MembershipIdentitySnapshotValidator.swift:56)
 - `func changeControlValidated( command: V2ChangeRoomMembershipCommand, ownerRoute: V2RoomShardRoute, identitySnapshot: V2MembershipIdentitySnapshot, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date ) async throws -> V2RoomMembershipChangeOutcome`
 ## V2RoomWriteStore (V2SendMessageService.swift:147)
 - `func accept( command: consuming V2SendMessageCommand, capacityProfile: V2CapacityProfile, identifiers: V2AcceptanceIdentifiers, now: Date ) async throws -> V2SendMessageOutcome`

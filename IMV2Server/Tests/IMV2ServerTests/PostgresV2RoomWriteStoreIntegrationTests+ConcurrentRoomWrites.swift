@@ -6,6 +6,7 @@ import HTTPTypes
 #if os(macOS)
 import Darwin
 #endif
+import IMV2ActorContracts
 import IMV2Core
 import IMV2ServerHTTP
 import PostgresNIO
@@ -1652,7 +1653,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
 
     @Test("reciprocal first sends promote both direct-room cache directions without weakening revision fences", arguments: [false, true])
-    func reciprocalFirstSendsPromoteBothFastAppendDirections(_ ownerValidated: Bool) async throws {
+    func reciprocalFirstSendsPromoteBothFastAppendDirections(_ actorScoped: Bool) async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
               Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
         else { return }
@@ -1715,14 +1716,23 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 database: resources.database(.psql),
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 2, window: 86_400),
                 contentReviewMode: .disabled,
-                directRoomLogAdmissionMode: .shardOnly,
                 directRoomLogFastAppendCache: fastCache,
                 shardAdmissionCommandCreditPool: .init(database: resources.database(.psql), batchSize: 4)
             )
-            let scopedWriter = try V2RoutedRoomWriteStore(
-                router: V2CachedRoomShardRouter(source: V2PostgresRoomShardRouter(database: resources.database(.psql))),
-                stores: ["reciprocal-shard": writer])
-            let selectedWriter: any V2RoomWriteStore = ownerValidated ? scopedWriter : writer
+            let selectedWriter: any V2RoomWriteStore
+            if actorScoped {
+                let owner = try V2RoomDataOwner(shardID: "reciprocal-shard", epoch: 0)
+                let host = V2ActorHostIdentity(
+                    hostID: try .init("reciprocal-fast-test"), incarnationID: UUID()
+                )
+                let activations = PostgresV2RoomActivationStore(database: resources.database(.psql))
+                guard case .acquired(let lease) = try await activations.acquire(
+                    roomID: room.roomID, owner: owner, host: host, duration: .init(30_000)
+                ) else { throw V2RoomActivationLeaseError.activationChanged }
+                selectedWriter = writer.usingActivationScope(try .init(tokens: [lease.token]))
+            } else {
+                selectedWriter = writer
+            }
             let messages = V2SendMessageService(
                 store: selectedWriter,
                 capacityProfile: profile,
@@ -1830,12 +1840,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(afterSteadyState.committedAppends == beforeSteadyState.committedAppends + 2)
             #expect(afterSteadyState.fallbackAppends == beforeSteadyState.fallbackAppends)
 
-            if ownerValidated {
+            if actorScoped {
                 let roomUUID = try #require(room.roomID.uuidValue)
                 try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: roomUUID)").run()
                 let stale = V2AuthenticatedSendMessage(roomID: room.roomID, actorUserID: first, clientMessageID: .init(uuid: UUID()), text: "stale warm append")
                 let beforeStale = await fastCache.snapshot()
-                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) { _ = try await messages.send(stale) }
+                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await messages.send(stale) }
                 let afterStale = await fastCache.snapshot()
                 #expect(afterStale.attemptedAppends == beforeStale.attemptedAppends + 1)
                 #expect(afterStale.committedAppends == beforeStale.committedAppends)

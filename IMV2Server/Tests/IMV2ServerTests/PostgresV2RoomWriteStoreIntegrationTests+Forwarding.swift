@@ -1331,8 +1331,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("direct imports recover a failed completion transaction without duplicating personal events", arguments: ["room-log", "shard-room-log"], [false, true])
-    func forwardInboxDirectFinalization(delivery: String, changesOwner: Bool) async throws {
+    @Test("direct imports recover a failed completion transaction without duplicating personal events", arguments: [false, true])
+    func forwardInboxDirectFinalization(changesOwner: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { sourceDB, targetDB, _, targetSQL, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile()
@@ -1360,8 +1360,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 """).run()
             let write = try PostgresV2RoomWriteStore(database: targetDB,
                 strangerMessagePolicy: .init(maximumMessagesPerWindow: 10, window: 86_400),
-                contentReviewMode: .disabled,
-                directRoomLogAdmissionMode: delivery == "shard-room-log" ? .shardOnly : .room).usingWorkloadDatabase(targetDB)
+                contentReviewMode: .disabled).usingWorkloadDatabase(targetDB)
             await #expect(throws: (any Error).self) {
                 try await write.importForwardExport(export, capacityProfile: profile, limits: limits, identifiers: try V2AcceptanceIDFactory().make(at: now), now: now)
             }

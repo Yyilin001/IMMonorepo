@@ -4,10 +4,12 @@
 > 逐批追加的验证过程已移出到 [历史时间线](archive/2026-09-05-remediation-timeline.md)；
 > 某个主题当前生效的设计合同见 [合同索引](README.md)。
 >
-> **清单校正：2026-09-20；核对对象为 HEAD `f0aa8699` 加当前未提交工作区。**
-> 本次核对清单、当前实现入口、schema/协议生成物及后续专题验收记录；不是一次新的全量代码审计。
+> **最后定向校正：2026-09-25；核对对象为 `main` 的 `6597d53b`。**
+> 本次只重核 B27 邀请静态 owner 路由、当前 schema 与相应入口；其他编号沿用 2026-09-20 的逐项证据，不宣称重新完成全量审计。
 > “已验证”沿用原问题已有的修复证据，不表示本次重新运行了业务测试，也不代表整个相关功能已完成。
 > 后续验收的通过、失败、跳过及版本范围分别保留；没有完整关闭证据的项目继续开放。
+
+2026-09-25 校正：B27 原问题限定为邀请按房间静态 owner 路由，现由 Account 的 `V2ActorInvitationCoordinator` 经房间 Actor 执行；独立 control/双 owner PostgreSQL 的 standard/large 测试覆盖创建、预览、提交、审批、拒绝、撤销、重放、错误 owner/epoch 与 HTTP 状态，当前提交上已实际通过。B27 按原缺陷标记已验证；在线房间搬迁不在首版范围。当前 schema 为 `im-v2-current-53`，协议为 30。最新完整 Linux 回归的冻结源码是 `ee142084`，不能作为本提交的全量回归证据；本提交上完成的是相关邀请与 wire 定向测试（17 项、2 套件）。以下标明 2026-09-20 的审计、范围和过程数字是当时快照，不覆盖本段校正。
 
 原始审查日期：2026-09-05。范围：IMApp、ClientKit、Core、Server、协议、PostgreSQL schema、部署与运维证据。
 
@@ -22,7 +24,7 @@
 当前版本自身的重启、快照、裁剪与静态分片路由仍须验证；在线数据迁移已退出首版范围。
 房间日志改造与会话恢复是两个不同范围，分别见[已完成的改造记录](room-log-only-implementation.md)和[仍开放的恢复验收矩阵](client-owned-conversation-sync-acceptance.md)。
 
-## 收敛审计（2026-09-20）
+## 收敛审计（2026-09-20 历史快照）
 
 用户提出代码增长及过度设计问题后，当前执行顺序调整为先审计范围和复杂度，不继续扩展跨库生命周期探针或迁移执行器。此调整不删除已知风险、不把未实现能力标为已完成，也不修改既有关闭数量。
 
@@ -51,7 +53,7 @@
 - **D07 收尾方式：** 持久授权解决的是已复现的跨库断连后迟到写入，应保留。剩余工作须逐项对应现存生产路径和不变量，不把所有未来迁移能力或任意故障组合自动作为此条目的关闭条件。已有同库真实 Gateway 生命周期证据；跨库扩展尚未实施。
 - **发布条件：** E 类属于上线验收，客户端暂缓项也仍留在历史总数中。后续分别展示缺陷关闭、扩展能力和发布准备，避免用一个百分比混淆三者。拆分前保留原统计，不能通过移动条目制造完成率提升。
 
-## 当前执行范围（2026-09-20）
+## 当时执行范围（2026-09-20 历史快照）
 
 用户已明确：当前不需要在线数据迁移。房间在线搬迁及用户分片在线复制、双写、切换、回滚不再作为首版新增实现目标；迁移执行器、运维入口、后台清理、迁移专用冻结字段与测试已删除。保留静态分片路由、当前归属校验、普通用户状态投递、发送幂等与撤权一致性。B27 的邀请路由原缺陷须独立按现有证据验收，其他条目不再以未要求的在线搬迁作为新增关闭门槛。既有迁移合同保留为历史设计，不代表继续实施授权；在完成原缺陷验收及清单拆分前，不调整关闭数量。
 
@@ -65,7 +67,7 @@
 
 本轮优先处理 B01、B04、B11、B27、D07 的服务端剩余范围；B03、B06、B08、D08 只推进其中服务端可独立完成的部分。B07、B15、B16、B22、B28、D02–D04 的当前客户端/设备剩余验收暂缓。发布项中 E01–E03、E06–E10 继续作为服务端上线前条件，E04–E05 的真机与真实推送验收暂缓。
 
-当前按原问题编号计算，代码/设计关闭率为 20/37（约 54%），含发布项为 20/47（约 43%）。这是问题关闭率，不是功能开发完成度；部分编号混合服务端与客户端要求，尚无独立服务端分母，不据此声称“服务端完成 54%”。
+当时按原问题编号计算，代码/设计关闭率为 20/37（约 54%），含发布项为 20/47（约 43%）；2026-09-25 B27 定向校正后的计数见下方状态汇总。这是问题关闭率，不是功能开发完成度；部分编号混合服务端与客户端要求，尚无独立服务端分母。
 
 ### 本轮未关闭项速览
 
@@ -76,7 +78,7 @@
 | 服务端发布验收 | 8 | E01–E03、E06–E10 | 生产部署与认证、媒体服务、NATS、安全恢复与灾备、同版 CI、容量长稳、Linux 崩溃根因 |
 | 暂缓的客户端/设备剩余项 | 10 | B07、B15、B16、B22、B28、D02–D04、E04–E05 | 不纳入本轮执行，不计作关闭 |
 
-本轮涉及 17 个仍开放编号（9 个代码/设计、8 个发布验收），不是“服务端总共只有 17 项”，也不能用原清单的 20 个已关闭项作为服务端完成率的分子。当前优先阻断是 D07 的进程级故障验证；B27 仍只到 freezing，未完成复制、路由发布与接管。
+当时涉及 17 个仍开放编号（9 个代码/设计、8 个发布验收），不是“服务端总共只有 17 项”。这里关于 B27 freezing/复制/发布/接管的旧迁移范围已取消；当前 B27 静态路由结论见 2026-09-25 校正和完整问题表。
 
 
 ## 架构判断
@@ -86,7 +88,7 @@
 - **授权应随内容版本绑定。** 当前成员身份不能证明能看到历史消息或某次编辑。B04 已补源可见性检查，跨库转发的终态保留仍需闭环。
 - **恢复工作已持久化。** `V2RoomRecoveryRunner` / `V2RoomRecoveryEngine` 管理目录、通知和恢复待办；自身成员授予与待办同事务提交，撤销时清理房间投影。B03/B06/D08 的剩余范围见下表。
 - **异步任务必须有唯一所有者和恢复步骤。** Push、退出和文件擦除仍需以持久用户意图驱动；模拟器成功不能替代真机锁屏和系统后台期限证据。
-- **组件通过与整轮通过分开计。** 当前 PostgreSQL 为 `im-v2-current-51`，协议为 30；源码/生成物可直接核对。会话恢复已有真实双 Gateway、PostgreSQL/NATS 和 App/TLS 分层记录，前台自动重连驱动漏计设备已修，三次断线、App 和数据库终验整轮通过；这不关闭剩余后台及多设备组合。
+- **组件通过与整轮通过分开计。** 当前 PostgreSQL 为 `im-v2-current-53`，协议为 30；源码/生成物可直接核对。会话恢复已有真实双 Gateway、PostgreSQL/NATS 和 App/TLS 分层记录，前台自动重连驱动漏计设备已修，三次断线、App 和数据库终验整轮通过；这不关闭剩余后台及多设备组合。
 
 ## 状态汇总
 
@@ -94,13 +96,13 @@
 
 | 状态 | 数量 | 含义 |
 | --- | --- | --- |
-| 已验证 | 20 | 原缺陷在当前代码中不再成立，且仓库内有对应验证记录 |
+| 已验证 | 21 | 原缺陷在当前代码中不再成立，且仓库内有对应验证记录 |
 | 已实现待验证 | 6 | 已有实现，尚需真实设备、网络或系统生命周期证据 |
-| 实施中 | 9 | 主要路径已有修复，仍有实现、范围审计或组合验收缺口 |
+| 实施中 | 8 | 主要路径已有修复，仍有实现、范围审计或组合验收缺口 |
 | 待外部验收 | 2 | 代码完成，只差归档或人工验收 |
 | 未开始 | 0 | 尚无实现 |
 
-代码与设计项已关闭 20 项、开放 17 项；外部发布缺口 E01–E10 另计，全部未关闭，合计开放 27 项。
+按原编号，代码与设计项已关闭 21 项、开放 16 项；外部发布缺口 E01–E10 另计，全部未关闭，合计开放 26 项。此次只改变 B27 的状态，其他条目的状态尚未重新审计。
 B11 改为“实施中”：指纹记录保留/GC 的策略仍有缺口，不能描述为只差验证。
 D06 已按申请人取消的完整功能范围关闭；原审批与客户端隔离回归同轮通过，生产发布仍由 E 类跟踪。
 E 类“未开始”表示尚无对应生产发布验收的关闭证据，不否定已有本机准备和测试。
@@ -135,7 +137,7 @@ E 类“未开始”表示尚无对应生产发布验收的关闭证据，不否
 | B24 | P2 | 待审批游标随着审批状态变化而失效 | 已验证 | 待审批游标改为绑定 (created_at, request_id) 不可变排序键，不再要求锚点仍处于 pending。 |
 | B25 | P2 | 已耗尽链接不展示，却继续占满活跃链接额度 | 已验证 | 活跃链接计数条件改为与列表一致：state=active 且未耗尽且未过期。 |
 | B26 | P2 | 审批冲突重试后未持久化实际 membership revision | 已验证 | approve 改为单事务完成成员、配额、事件与记账；旧 approving 一律返回 conflict，交 operator 按确切操作恢复，不再按申请人当前成员身份结算。 |
-| B27 | P2 | 新增邀请链路没有按群所属数据库路由 | 实施中 | Account 按持久 owner/epoch 路由，control 身份读取、token 目录与创建恢复已接通。在线房间搬迁与用户分片在线迁移已按范围决定删除，不再是关闭条件。剩余：按邀请路由原缺陷核对当前静态部署入口及故障证据；不以范围删减代替验收。 |
+| B27 | P2 | 新增邀请链路没有按群所属数据库路由 | 已验证 | Account 组装 Actor 邀请协调器；独立 control 与两个 owner 的 standard/large PostgreSQL 测试覆盖邀请完整生命周期、错误物理 owner、过期 epoch、重放、创建恢复及 HTTP 边界，并在 `6597d53b` 上通过。在线数据搬迁不在首版范围；生产多 Host 容量与故障验收仍由发布项跟踪。 |
 | B28 | P3 | VoiceOver 筛选值朗读内部 UUID | 待外部验收 | 筛选值改为 `senderFilterDisplayName`，不再向 VoiceOver 朗读内部 UUID。剩余：真机人工无障碍验收。 |
 | B29 | P3 | 当前协议版本文档已漂移 | 已验证 | 当前协议源文件与 Server/ClientKit 生成物均为 30；本表旧值 27 已校正。协议文档门禁核对 implementation-status，尚不自动覆盖所有专题文档中的历史版本叙述。 |
 | D01 | P2 | 旧 TLS reader 的迟到失败可能关闭新连接 | 已验证 | 连接引入 generation，`requireGeneration` 阻止旧 reader 回调影响新连接。 |
@@ -153,7 +155,7 @@ E 类“未开始”表示尚无对应生产发布验收的关闭证据，不否
 | E05 | 发布验收 | 真实 APNs | 未开始 | 真实 APNs 凭据/profile、失效 token、后台冷启动与用户开关组合未闭环。 |
 | E06 | 发布验收 | NATS 生产安全和可观测性 | 未开始 | 本机真实 NATS 安装窗口、broker 重启及提示丢失后恢复已有记录。仍缺生产 TLS/NKey、指标、分区/重连长稳与部署验收；局部故障恢复通过不关闭本项。 |
 | E07 | 发布验收 | WAL/PITR、RPO/RTO 和灾备 | 未开始 | 逻辑备份不代表 WAL/PITR；需时间点恢复、密钥恢复、故障切换和 RPO/RTO 演练。 |
-| E08 | 发布验收 | 远端 CI / 干净 checkout 证据 | 未开始 | 工作区包含大量未提交变更，缺与最终代码一致的干净 checkout/远端统一门禁证据。历史各模块通过不等于最终同版门禁；本次未查询 CI 额度，不沿用历史“额度耗尽”作为当前事实。 |
+| E08 | 发布验收 | 远端 CI / 干净 checkout 证据 | 未开始 | `6597d53b` 的工作区干净且相关邀请测试通过；仍缺与最终代码一致的远端/干净 checkout 统一门禁。历史各模块通过不等于最终同版门禁；本次未查询 CI 额度，不沿用历史“额度耗尽”作为当前事实。 |
 | E09 | 发布验收 | 完整混合负载、长期运行与多 Gateway/分片容量 | 未开始 | 当前房间日志有20在线连接/800消息的有界 Release 负载与重启记录；房间恢复有五档规模和双 Gateway 记录。仍缺同版混合消息、热点、大历史缺口、多设备/分片、完整资源与长稳故障验收；旧50k容量数字不能外推当前改造。 |
 | E10 | 发布验收 | ARM64 Linux 压力下历史 SIGSEGV 根因未关闭 | 未开始 | 历史 ARM64 Linux SIGSEGV 仍缺符号化根因；一次未复现不能关闭，需原始 core 与同版本长稳。 |
 
@@ -167,17 +169,17 @@ E 类“未开始”表示尚无对应生产发布验收的关闭证据，不否
 | B01 整数边界 | [时间戳转换](../../IMV2Server/Sources/IMV2Server/V2PostgresTimestampBounds.swift)、[变更结果边界测试](../../IMV2Core/Tests/IMV2CoreTests/MessageMutationResultBoundsTests.swift)、[恢复 DTO 测试](../../IMV2ClientKit/Tests/IMV2ClientKitTests/V2ProjectionRecoveryBoundsTests.swift) | 已有多层边界保护；[消息投影专项与入口核对](message-projection-integer-boundaries.md)记录当前修复，快照计数、Core 发送序号、私聊缓存及部分 worker 已对应；其余 worker、客户端 outbox 计数及分页/响应转换仍需完成映射 |
 | B03/B12 房间恢复 | [Runner](../../IMV2ClientKit/Sources/IMV2ClientKit/V2RoomRecoveryRunner.swift)、[Engine](../../IMV2ClientKit/Sources/IMV2ClientKit/V2RoomRecoveryEngine.swift)、[持久待办](../../IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2RoomRecoveryStore.swift) | [验收矩阵](client-owned-conversation-sync-acceptance.md)、[事务边界](client-owned-conversation-sync-transaction-audit.md)、[规模结果](client-owned-conversation-sync-scale-results.md)；原单轮预算问题已修，完整恢复目标仍开放 |
 | B06 成员与角色 | [本地 reducer](../../IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2LocalSyncStore.swift) 的 applyMembershipAwareRoomProjection / applyGroupCapability | 本人 membership 状态保留撤销版本，新的授予同时创建待办；其他成员 add/remove/role 按独立持久来源历史归并，快照保留撤销事实并拒绝冲突；缺失历史时的权威基线与代次组合仍开放 |
-| B04/B11 转发与接受记录 | [转发路由](../../IMV2Server/Sources/IMV2Server/V2RoutedForwardMessagesService.swift)、[接受记录](../../IMV2Server/Sources/IMV2Server/PostgresV2SendCompletion.swift)、[清理器](../../IMV2Server/Sources/IMV2Server/V2ControlPlaneHousekeepingWorker.swift) | [房间日志改造](room-log-only-implementation.md)记录 v3 指纹和接受回执验证；终态保留/清理不由这些记录替代 |
+| B04/B11 转发与接受记录 | [Actor 转发协调器](../../IMV2Server/Sources/IMV2Server/RoomCoordination/Forwarding/V2ActorForwardingCoordinator.swift)、[接受记录](../../IMV2Server/Sources/IMV2Server/PostgresV2SendCompletion.swift)、[清理器](../../IMV2Server/Sources/IMV2Server/V2ControlPlaneHousekeepingWorker.swift) | [房间日志改造](room-log-only-implementation.md)记录 v3 指纹和接受回执验证；终态保留/清理不由这些记录替代 |
 | B08 退出与凭据恢复 | [App Store](../../IMApp/IMApp/V2/V2AppStore.swift)、[撤销恢复测试](../../IMV2ClientKit/Tests/IMV2ClientKitTests/V2DeviceRevocationRecoveryTests.swift) | [受控进程中断](archive/legacy-registration-app-process-contract.md)、[撤销状态](device-revocation-status-contract.md)保留真机、系统后台及 GC 边界 |
 | B15/B16/D02–D04 生命周期 | [App runtime](../../IMApp/IMApp/V2/V2AppRealtimeRuntime.swift)、[Push reconciler](../../IMV2ClientKit/Sources/IMV2ClientKit/V2PushIntentReconciler.swift) | 后续 headless 整轮通过见[恢复验收](client-owned-conversation-sync-acceptance.md)；不等同真实 APNs、磁盘擦除或账号切换全组合通过 |
 | B23/B24/B25/B26/D06 邀请与审批 | [申请存储](../../IMV2Server/Sources/IMV2Server/PostgresV2GroupInvitationStore.swift)、[服务接口](../../IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift)、[schema](../../IMV2/sql/schema.sql) | owner 内锁串行申请；schema 39 的 control 账本承担跨 owner 配额并保存重复操作绑定，owner 保存原子提交回执；B23 全局配额专项已通过。分页使用不可变键，审批单事务提交；申请人可取消旧 pending，终态保留重放记录 |
-| B27 owner 路由 | [Account 组装](../../IMV2Server/Sources/IMV2AccountServerApp/main.swift)、[邀请路由](../../IMV2Server/Sources/IMV2Server/V2RoutedGroupInvitationStore.swift) | 原邀请路由按当前静态 owner 配置验收，在线搬迁不作为关闭条件 |
-| B29 版本 | [协议版本源](../../Protocol/im_realtime/v2/protocol_version.txt)、[客户端生成物](../../IMV2ClientKit/Sources/IMV2ClientKit/Generated/IMV2ProtocolVersion.swift)、[服务端生成物](../../IMV2Server/Sources/IMV2Server/Generated/IMV2ProtocolVersion.swift) | 均为30；schema 为 im-v2-current-51，不再沿用旧表的27/30组合 |
+| B27 owner 路由 | [Account 组装](../../IMV2Server/Sources/IMV2AccountServerApp/main.swift)、[Actor 邀请协调器](../../IMV2Server/Sources/IMV2Server/RoomCoordination/Invitations/V2ActorInvitationCoordinator.swift)、[三库测试](../../IMV2Server/Tests/IMV2ServerTests/PostgresV2RoomWriteStoreIntegrationTests+GroupCapabilities.swift) | 原邀请静态 owner 路由已验证；在线搬迁不作为关闭条件 |
+| B29 版本 | [协议版本源](../../Protocol/im_realtime/v2/protocol_version.txt)、[客户端生成物](../../IMV2ClientKit/Sources/IMV2ClientKit/Generated/IMV2ProtocolVersion.swift)、[服务端生成物](../../IMV2Server/Sources/IMV2Server/Generated/IMV2ProtocolVersion.swift) | 均为30；schema 为 im-v2-current-53，不再沿用旧表的27/30组合 |
 | D07/D08 新架构与组合证据 | [已完成改造](room-log-only-implementation.md)、[当前有界运行验收](room-log-current-runtime-2026-09-13.md)、[会话恢复矩阵](client-owned-conversation-sync-acceptance.md) | 旧流水线移除已完成；新恢复矩阵仍开放。自动重连漏计设备已修，三次断线、13台设备总数及该账号2台设备终验通过；历史失败保留，见[治理专项](verification-records.md#20260919-governance-recovery) |
 
 ## 修复顺序与验收要求
 
-1. **先完成服务端实现与范围审计：B01、B04、B11、B27、D07。** 聚焦整数边界、授权/幂等/准入、终态保留和静态 owner 路由；不增加旧模式或旧 schema 兼容。
+1. **先完成服务端实现与范围审计：B01、B04、B11、D07。** 聚焦整数边界、授权/幂等/准入和终态保留；B27 的原邀请静态路由缺陷已单独验证，不增加旧模式或旧 schema 兼容。
 2. **核对混合条目的服务端部分：B03、B06、B08、D08。** 推进快照/裁剪、成员权限、撤销记录保留及跨分片故障中可独立验证的服务端行为；客户端组合未验收时，原编号保持开放。
 3. **完成服务端发布准备与可执行验收：E01–E03、E06–E10。** 生产接入、同版 CI、容量、灾备及 Linux 故障按证据关闭；缺少外部环境的条件保持待验收。
 4. **暂缓客户端优化、真机及客户端发布专项。** B07、B15、B16、B22、B28、D02–D04 和 E04–E05 的剩余要求保留在表内，本轮不推进、不计作关闭。

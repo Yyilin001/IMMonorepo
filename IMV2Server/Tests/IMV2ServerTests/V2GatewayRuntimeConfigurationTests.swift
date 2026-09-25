@@ -209,7 +209,6 @@ struct V2GatewayRuntimeConfigurationTests {
             environment: V2DictionaryRuntimeEnvironment(runtimeValues)
         )
         #expect(defaults.messageProjectionStateRetentionSeconds == 604_800)
-        #expect(defaults.directRoomLogAdmissionMode == .room)
         // 保留窗口默认是"永久"=不裁剪历史，与既有行为一致；窗口模式必须显式选择。
         #expect(defaults.roomLogRetentionMode == .permanent)
         #expect(defaults.roomLogRetentionWindowSeconds == V2GatewayRuntimeConfiguration.defaultRoomLogRetentionWindowSeconds)
@@ -241,15 +240,17 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(sharedConfiguration.messageProjectionStateRetentionSeconds == 86_400)
 
         let roomLog = runtimeValues
-
-
-        var shardOnlyAdmission = roomLog
-        shardOnlyAdmission["IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE"] = "shard_only"
-        #expect(try V2GatewayRuntimeConfiguration(
-            environment: V2DictionaryRuntimeEnvironment(shardOnlyAdmission)
-        ).directRoomLogAdmissionMode == .shardOnly)
-
-
+        for retiredMode in ["", "room", "shard_only"] {
+            var retiredAdmission = roomLog
+            retiredAdmission["IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE"] = retiredMode
+            #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
+                "IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE"
+            )) {
+                _ = try V2GatewayRuntimeConfiguration(
+                    environment: V2DictionaryRuntimeEnvironment(retiredAdmission)
+                )
+            }
+        }
 
         var credits = roomLog
         credits["IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"] = "64"
@@ -270,17 +271,6 @@ struct V2GatewayRuntimeConfigurationTests {
         )) {
             _ = try V2GatewayRuntimeConfiguration(
                 environment: V2DictionaryRuntimeEnvironment(roomCreditsWithoutShardCredits)
-            )
-        }
-
-        var roomCreditsWithShardOnlyAdmission = shardOnlyAdmission
-        roomCreditsWithShardOnlyAdmission["IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"] = "64"
-        roomCreditsWithShardOnlyAdmission["IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE"] = "16"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
-            "IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE"
-        )) {
-            _ = try V2GatewayRuntimeConfiguration(
-                environment: V2DictionaryRuntimeEnvironment(roomCreditsWithShardOnlyAdmission)
             )
         }
 

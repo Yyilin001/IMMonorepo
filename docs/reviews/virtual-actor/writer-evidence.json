@@ -22,7 +22,7 @@
     {
       "id": "W02",
       "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteStore.swift",
-      "symbol": "reserveTransactionalShardAdmissions",
+      "symbol": "reserveShardAdmission",
       "table_or_marker": "im_v2.shard_admission_pools"
     },
     {
@@ -189,7 +189,7 @@
     },
     {
       "id": "W24",
-      "path": "IMV2Server/Sources/IMV2Server/V2RoutedMediaDownloadService.swift",
+      "path": "IMV2Server/Sources/IMV2Server/RoomClients/V2RoomRefMediaDownloadClient.swift",
       "symbol": "func downloadTarget",
       "table_or_marker": "im_v2.media_download_grants"
     },
@@ -209,7 +209,7 @@
       "id": "W27",
       "path": "IMV2Server/Sources/IMV2Server/V2ControlPlaneHousekeepingWorker.swift",
       "symbol": "func purgeTerminal",
-      "table_or_marker": "content_review_jobs"
+      "table_or_marker": "control_housekeeping_cursor"
     },
     {
       "id": "W28",

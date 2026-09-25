@@ -301,38 +301,6 @@ public struct V2GatewayDomainCommandHandler:
                   now: now, monotonicNow: monotonicNow)
     }
 
-    public init(sendMessage: V2SendMessageService, membership: V2RoomMembershipService, withdrawal: V2MessageWithdrawalService, reaction: V2MessageReactionService, edit: V2MessageEditService, readReceipt: V2ReadReceiptService, liveActivity: V2LiveActivityService, directMessaging: V2DirectMessagingService, groupAudienceImports: V2GroupAudienceImportService, groupEventLog: V2GroupEventLogService, foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting, membershipDirectory: V2RoomMembershipDirectoryService, roomRecovery: any V2RoomRecoveryCommandHandling, accountChanges: any V2AccountRoomChangesStarting, socialRelationships: V2SocialRelationshipService, moderation: V2ModerationService, conversationCapabilities: V2ConversationCapabilitiesService, groupCapabilities: V2GroupCapabilitiesService, groupRolePolicyBaseline: any V2GroupRolePolicyBaselineReading, forwardMessages: any V2ForwardMessagesHandling, sync: V2SyncService, telemetry: any V2TelemetrySink, databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil, controlWriteAdmissionEnabled: Bool = false, maximumGroupEventPagePayloadBytes: Int = 48 * 1_024, now: @escaping @Sendable () -> Date = Date.init, monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
-        precondition(maximumGroupEventPagePayloadBytes > 0)
-        self.sendMessage = sendMessage
-        self.membership = membership
-        self.withdrawal = withdrawal
-        self.reaction = reaction
-        self.edit = edit
-        self.readReceipt = readReceipt
-        self.liveActivity = liveActivity
-        self.directMessaging = directMessaging
-        self.groupAudienceImports = groupAudienceImports
-        self.groupEventLog = groupEventLog
-        self.foregroundGroupEventHints = foregroundGroupEventHints
-        self.membershipDirectory = membershipDirectory
-        self.roomRecovery = roomRecovery
-        self.accountChanges = accountChanges
-        self.socialRelationships = socialRelationships
-        self.moderation = moderation
-        self.conversationCapabilities = conversationCapabilities
-        self.groupCapabilities = groupCapabilities
-        self.groupRolePolicyBaseline = groupRolePolicyBaseline
-        self.forwardMessages = forwardMessages
-        self.sync = sync
-        self.telemetry = telemetry
-        self.databaseWorkAdmission = databaseWorkAdmission
-        self.roomCommandsHostAdmitted = false
-        self.controlWriteAdmissionEnabled = controlWriteAdmissionEnabled
-        self.maximumGroupEventPagePayloadBytes = maximumGroupEventPagePayloadBytes
-        self.now = now
-        self.monotonicNow = monotonicNow
-    }
-
     init(
         sendMessage: any V2GatewaySendMessageHandling,
         membershipHandler: any V2GatewayRoomMembershipHandling,

@@ -2158,7 +2158,7 @@
     {
       "name": "V2MembershipIdentitySnapshot",
       "target": "IMV2Server",
-      "path": "IMV2Server/Sources/IMV2Server/V2RoutedRoomMutationStores.swift",
+      "path": "IMV2Server/Sources/IMV2Server/V2MembershipIdentitySnapshotValidator.swift",
       "line": 10,
       "kind": "struct",
       "explicitCodable": false,

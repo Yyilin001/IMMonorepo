@@ -2,16 +2,9 @@
 services:
   gateway:
     environment:
-      # A clean, same-host A/B found that bypassing this per-room counter did
-      # not improve the real room-log workload. Keep the proven room-local
-      # admission path as the deployment default; `shard_only` remains an
-      # explicitly opt-in experiment guarded by the runtime configuration.
-      IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE: room
       # Reserve shard command-window capacity in bounded durable batches for
       # the fixed-audience direct room-log path. PostgreSQL remains the
       # authority; an interrupted process can only leave up to 31 already
-      # charged credits unused for its current shard/lease. This removes the
-      # Keep the proven durable shard-credit batch. It removes the
-      # per-message shard admission update while room-local admission remains
-      # authoritative for the default path.
+      # charged credits unused for its current shard/lease. Per-room admission
+      # remains authoritative.
       IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE: "32"

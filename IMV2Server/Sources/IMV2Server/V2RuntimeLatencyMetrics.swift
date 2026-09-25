@@ -119,8 +119,6 @@ public enum V2DirectRoomLogAppendStage: String, CaseIterable, Sendable {
     case fastPathProbe = "fast_path_probe"
     /// 加速路径整体阶段。
     case acceleratedTotal = "accelerated_total"
-    /// 标准路径整体阶段。
-    case standardTotal = "standard_total"
     /// 缓存查询阶段。
     case cacheLookup = "cache_lookup"
     /// 数据库事务阶段。
@@ -137,8 +135,6 @@ public enum V2DirectRoomLogAppendStage: String, CaseIterable, Sendable {
     case messagePersistence = "message_persistence"
     /// 投影持久化阶段。
     case projectionPersistence = "projection_persistence"
-    /// 分片预留阶段。
-    case shardReservation = "shard_reservation"
     /// 缓存收尾阶段。
     case cacheFinalization = "cache_finalization"
     /// 提交后缓存与额度收尾阶段。

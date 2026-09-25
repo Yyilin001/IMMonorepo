@@ -39,7 +39,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 destination = room.roomID
             } else { destination = roomID }
             let destinationUUID = try #require(destination.uuidValue)
-            let roomLog = deliveryKind.contains("RoomLog")
             let writer = PostgresV2RoomWriteStore(database: database,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
             let send = try V2SendMessageService(store: writer, capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), now: { base })
@@ -558,7 +557,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     operationID: .init(uuid: UUID()), permission: .deny), now: base)
             }
             let writer = PostgresV2RoomWriteStore(database: database,
-                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled, directRoomLogAdmissionMode: .shardOnly,
+                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled,
                 shardAdmissionCommandCreditPool: .init(database: database, batchSize: 1))
             let batcher = V2SendMessageAdmissionBatcher(store: writer,
                 configuration: .init(maximumBatchSize: 2, maximumDelay: .milliseconds(2)))
@@ -652,7 +651,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let interval: TimeInterval = scenario == "precision" ? 0.1234567 : scenario == "tiny" ? 0.0000001 : 86_400
             func writer(window: TimeInterval, cache: V2DirectRoomLogFastAppendCache = .init()) throws -> PostgresV2RoomWriteStore {
                 PostgresV2RoomWriteStore(database: database,
-                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: window), contentReviewMode: .disabled, directRoomLogAdmissionMode: .shardOnly,
+                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: window), contentReviewMode: .disabled,
                     directRoomLogFastAppendCache: cache,
                     shardAdmissionCommandCreditPool: .init(database: database, batchSize: 1))
             }
@@ -676,8 +675,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 : scenario == "lower" ? Date(timeIntervalSince1970: 946_684_800 - 211_813_488_000 + 86_399)
                 : Date(timeIntervalSince1970: 946_684_800)
             let inputs = try rooms.indices.map { try request($0, now: now) }
-            func send(on active: PostgresV2RoomWriteStore) async throws -> [V2SendMessageOutcome] {
-                if path != "scalar" { return try await active.acceptAtomically(requests: inputs) }
+            func send(on active: PostgresV2RoomWriteStore, atomic: Bool) async throws -> [V2SendMessageOutcome] {
+                if atomic { return try await active.acceptAtomically(requests: inputs) }
                 var outcomes: [V2SendMessageOutcome] = []
                 for input in inputs { outcomes.append(try await scalar(input, on: active)) }
                 return outcomes
@@ -693,7 +692,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             if scenario != "precision" {
                 let before = try await snapshot()
                 var actual: V2RoomWriteStoreError?
-                do { _ = try await send(on: store) } catch { actual = error as? V2RoomWriteStoreError }
+                do { _ = try await send(on: store, atomic: path == "hot") } catch { actual = error as? V2RoomWriteStoreError }
                 #expect(actual == .corruptPersistenceState)
                 #expect(try await snapshot() == before)
                 return
@@ -706,12 +705,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             // A separate rejecting writer preserves the warmed cache so the
             // following successful reset must exercise the prepared fast path.
             let rejecting = try writer(window: interval)
-            do { _ = try await send(on: rejecting); Issue.record("Quota must remain exhausted before its cutoff") }
+            do { _ = try await send(on: rejecting, atomic: false); Issue.record("Quota must remain exhausted before its cutoff") }
             catch { #expect(error is V2RoomWriteStoreError || error is V2AtomicRoomWriteBatchError) }
             #expect(try await snapshot() == before)
             try await sql.raw("UPDATE im_v2.stranger_message_windows SET window_started_at = \(bind: cutoff)").run()
             let beforeFast = await fastCache.snapshot()
-            let outcomes = try await send(on: store)
+            let outcomes = try await send(on: store, atomic: path == "hot")
             if path == "hot" {
                 let afterFast = await fastCache.snapshot()
                 #expect(afterFast.committedAppends - beforeFast.committedAppends == 2)
@@ -749,7 +748,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             func store() throws -> PostgresV2RoomWriteStore {
                 PostgresV2RoomWriteStore(database: database,
-                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled, directRoomLogAdmissionMode: .shardOnly,
+                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled,
                     shardAdmissionCommandCreditPool: .init(database: database, batchSize: 1))
             }
             func request(_ index: Int) throws -> V2RoomWriteRequest {
@@ -775,7 +774,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             var batchError: V2AtomicRoomWriteBatchError?
             do { _ = try await writer.acceptAtomically(requests: [muted, sibling]) }
             catch { batchError = error as? V2AtomicRoomWriteBatchError }
-            try #require(batchError?.reason == .authorizationState)
+            try #require(batchError?.reason == (path == "direct" ? .incompatibleConfiguration : .authorizationState))
             for table in ["messages", "message_send_completions", "room_events", "stranger_message_windows"] {
                 #expect(try await count("im_v2." + table, on: sql) == 0)
             }
@@ -795,7 +794,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             guard case .accepted = try await scalar(request(1), on: writer) else { throw CancellationError() }
             let cold = try store()
             let expiredRequests = [muted, try request(1)]
-            let outcomes = try await cold.acceptAtomically(requests: expiredRequests)
+            let outcomes: [V2SendMessageOutcome]
+            if path == "direct" {
+                var accepted: [V2SendMessageOutcome] = []
+                for request in expiredRequests { accepted.append(try await scalar(request, on: cold)) }
+                outcomes = accepted
+            } else {
+                outcomes = try await cold.acceptAtomically(requests: expiredRequests)
+            }
             #expect(outcomes.count == 2)
             for (request, outcome) in zip(expiredRequests, outcomes) {
                 guard case .accepted(let message) = outcome else { throw CancellationError() }
@@ -812,7 +818,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
 
     @Test("Message append paths retain the scalar timestamp and replay the same wire milliseconds",
-          arguments: ["group", "hybrid", "hybrid-batch", "direct", "direct-room", "direct-batch"], [false, true])
+          arguments: ["group", "hybrid", "hybrid-batch", "direct", "direct-room"], [false, true])
     func messageAppendTimestampPrecision(path: String, nearDatabaseBounds: Bool) async throws {
         try await withForwardOwnerDatabases(mode: path.hasPrefix("hybrid") ? .large : .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
@@ -830,7 +836,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let store = PostgresV2RoomWriteStore(database: database,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled,
-                directRoomLogAdmissionMode: path == "direct-room" ? .room : .shardOnly,
                 shardAdmissionCommandCreditPool: .init(database: database, batchSize: 1))
             func scalar(_ request: V2RoomWriteRequest) async throws -> V2SendMessageOutcome {
                 try await store.accept(command: request.command, capacityProfile: request.capacityProfile,
@@ -1051,7 +1056,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
 
     @Test("Message storage checks caller-supplied clocks and isolates invalid batch entries",
-          arguments: ["group", "hybrid", "direct-room", "direct-shard"])
+          arguments: ["group", "hybrid", "direct-room"])
     func messageStorageClockBounds(path: String) async throws {
         try await withForwardOwnerDatabases(mode: path == "hybrid" ? .large : .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
@@ -1066,7 +1071,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             } else { targetRoom = roomID }
             let store = PostgresV2RoomWriteStore(database: database,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled,
-                directRoomLogAdmissionMode: path == "direct-shard" ? .shardOnly : .room,
                 shardAdmissionCommandCreditPool: .init(database: database, batchSize: 1))
             let batcher = V2SendMessageAdmissionBatcher(store: store,
                 configuration: .init(maximumBatchSize: 2, maximumDelay: .milliseconds(2)))
