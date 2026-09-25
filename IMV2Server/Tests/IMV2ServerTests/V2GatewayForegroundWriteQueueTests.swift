@@ -196,4 +196,32 @@ struct V2GatewayForegroundWriteQueueTests {
         #expect(Array(output.readableBytesView) == [7, 8])
         #expect(try channel.finish().isClean)
     }
+
+    @Test("non-writable writer drains its prefix and latest recovery frame after resuming")
+    func writerDrainsLatestRecoveryAfterWritabilityResumes() throws {
+        let channel = EmbeddedChannel()
+        _ = try channel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: 1))
+        channel.isWritable = false
+        let writer = V2NIOGatewayForegroundWriter(
+            channel: channel,
+            scheduler: .init(),
+            maximumQueuedBytes: 2,
+            maximumQueuedFrames: 2,
+            maximumDrainBytes: 2,
+            maximumDrainFrames: 2
+        )
+        for value in 1...4 { writer.submit(Data([UInt8(value)])) }
+        channel.embeddedEventLoop.run()
+        #expect(try channel.readOutbound(as: ByteBuffer.self) == nil)
+
+        channel.isWritable = true
+        writer.resumeAfterWritabilityChange()
+        channel.embeddedEventLoop.run()
+        var drained: [UInt8] = []
+        while let buffer = try channel.readOutbound(as: ByteBuffer.self) {
+            drained.append(contentsOf: buffer.readableBytesView)
+        }
+        #expect(drained == [1, 2, 4])
+        #expect(try channel.finish().isClean)
+    }
 }

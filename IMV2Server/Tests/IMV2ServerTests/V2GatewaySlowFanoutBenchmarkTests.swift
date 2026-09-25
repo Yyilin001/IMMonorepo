@@ -18,11 +18,13 @@ struct V2GatewaySlowFanoutBenchmarkTests {
     @Test("10,000 TLS connections with optional paused readers",
         .enabled(if: ProcessInfo.processInfo.environment["IMV2_RUN_SLOW_FANOUT_BENCHMARK"] == "1"))
     func tenThousandConnections() async throws {
-        let connectionCount = 10_000
+        let connectionCount = Int(ProcessInfo.processInfo.environment["IMV2_SLOW_FANOUT_CONNECTIONS"] ?? "10000") ?? 10_000
+        try #require((1...10_000).contains(connectionCount))
         let pausedCount = Int(ProcessInfo.processInfo.environment["IMV2_SLOW_FANOUT_PAUSED"] ?? "1000") ?? 1_000
         try #require((0...connectionCount).contains(pausedCount))
         let preloadSlowReaders = ProcessInfo.processInfo.environment["IMV2_SLOW_FANOUT_PRELOAD"] == "1"
-        let rounds = 120
+        let rounds = Int(ProcessInfo.processInfo.environment["IMV2_SLOW_FANOUT_ROUNDS"] ?? "120") ?? 120
+        try #require((1...1_200).contains(rounds))
         let frameBytes = 1_024
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "imv2-slow-fanout-\(UUID())")
@@ -108,12 +110,16 @@ struct V2GatewaySlowFanoutBenchmarkTests {
                 }
                 try await Task.sleep(for: .milliseconds(500))
             }
+            var rssSamplesMiB: [UInt64] = [slowFanoutResidentBytes() / 1_048_576]
             let frame = ByteBuffer(bytes: Data(repeating: 0x42, count: frameBytes))
-            for _ in 0..<rounds {
+            for round in 1...rounds {
                 V2NIOGatewayForegroundWriter.submitBatch(targets.all.map {
                     .init(writer: $0, bytes: frame)
                 })
                 try await Task.sleep(for: .milliseconds(100))
+                if round.isMultiple(of: 50) {
+                    rssSamplesMiB.append(slowFanoutResidentBytes() / 1_048_576)
+                }
             }
             state.markProbeSent()
             let probe = ByteBuffer(bytes: Data(repeating: 0x43, count: frameBytes))
@@ -136,10 +142,34 @@ struct V2GatewaySlowFanoutBenchmarkTests {
             }
             let fastBytes = result.fastBytesAtProbe.sorted()
             let medianFastBytes = fastBytes.isEmpty ? 0 : fastBytes[fastBytes.count / 2]
-            print("IMV2_SLOW_FANOUT_RESULT connected=\(result.ready) paused=\(pausedCount) preload=\(preloadSlowReaders) fast_probe_received=\(result.completedFast) connect_seconds=\(Double(connectedAt - started) / 1e9) load_seconds=\(Double(submittedAt - connectedAt) / 1e9) probe_p50_ms=\(percentile(0.50)) probe_p95_ms=\(percentile(0.95)) probe_p99_ms=\(percentile(0.99)) min_fast_bytes_at_probe=\(fastBytes.first ?? 0) median_fast_bytes_at_probe=\(medianFastBytes) deferred=\(transport.foregroundNonWritableDeferrals) recovery_queued=\(transport.foregroundRecoveryFramesQueued) recovery_replaced=\(transport.foregroundRecoveryFramesReplaced) peak_queue_bytes=\(transport.peakQueuedForegroundBytes) process_rss_mib=\(slowFanoutResidentBytes() / 1_048_576)")
+            print("IMV2_SLOW_FANOUT_RESULT connected=\(result.ready) paused=\(pausedCount) preload=\(preloadSlowReaders) rounds=\(rounds) fast_probe_received=\(result.completedFast) connect_seconds=\(Double(connectedAt - started) / 1e9) load_seconds=\(Double(submittedAt - connectedAt) / 1e9) probe_p50_ms=\(percentile(0.50)) probe_p95_ms=\(percentile(0.95)) probe_p99_ms=\(percentile(0.99)) min_fast_bytes_at_probe=\(fastBytes.first ?? 0) median_fast_bytes_at_probe=\(medianFastBytes) deferred=\(transport.foregroundNonWritableDeferrals) recovery_queued=\(transport.foregroundRecoveryFramesQueued) recovery_replaced=\(transport.foregroundRecoveryFramesReplaced) peak_queue_bytes=\(transport.peakQueuedForegroundBytes) rss_samples_mib=\(rssSamplesMiB) process_rss_mib=\(slowFanoutResidentBytes() / 1_048_576)")
             #expect(result.ready == connectionCount)
             #expect(result.completedFast == connectionCount - pausedCount)
             #expect(fastBytes.first == (rounds + 1) * frameBytes)
+            if preloadSlowReaders, pausedCount > 0 {
+                #expect(transport.foregroundNonWritableDeferrals > 0)
+                #expect(transport.foregroundRecoveryFramesReplaced > 0)
+            }
+            if pausedCount > 0 {
+                state.markResumeStarted()
+                let resumes = clients.prefix(pausedCount).map {
+                    $0.setOption(ChannelOptions.autoRead, value: true)
+                }
+                try await EventLoopFuture.andAllSucceed(resumes, on: group.next()).get()
+                for client in clients.prefix(pausedCount) { client.read() }
+                let drainDeadline = ContinuousClock.now.advanced(by: .seconds(60))
+                while state.snapshot().completedSlow < pausedCount,
+                      ContinuousClock.now < drainDeadline {
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+                let recovered = state.snapshot()
+                let slowBytes = recovered.slowBytesAtProbe.sorted()
+                let latencies = recovered.slowDrainLatencies.sorted()
+                let p95 = latencies.isEmpty ? 0 : Double(latencies[Int(Double(latencies.count - 1) * 0.95)]) / 1_000_000
+                print("IMV2_SLOW_FANOUT_DRAIN resumed=\(pausedCount) probe_received=\(recovered.completedSlow) ordered=\(recovered.orderedSlow) slow_read_callbacks=\(recovered.slowReadCallbacks) slow_read_bytes=\(recovered.slowReadBytes) slow_min_bytes=\(slowBytes.first ?? 0) slow_median_bytes=\(slowBytes.isEmpty ? 0 : slowBytes[slowBytes.count / 2]) drain_p95_ms=\(p95) process_rss_mib=\(slowFanoutResidentBytes() / 1_048_576)")
+                #expect(recovered.completedSlow == pausedCount)
+                #expect(recovered.orderedSlow == pausedCount)
+            }
         } catch {
             let futures = clients.map(\.closeFuture) + (listener.map { [$0.closeFuture] } ?? [])
             for client in clients { client.close(promise: nil) }
@@ -175,13 +205,27 @@ private final class SlowFanoutState: Sendable {
     private struct Storage: Sendable {
         var ready = 0
         var completedFast = 0
+        var completedSlow = 0
+        var orderedSlow = 0
+        var slowReadCallbacks = 0
+        var slowReadBytes = 0
         var probeSentAt: UInt64 = 0
+        var resumeStartedAt: UInt64 = 0
         var latencies: [UInt64] = []
         var fastBytesAtProbe: [Int] = []
+        var slowDrainLatencies: [UInt64] = []
+        var slowBytesAtProbe: [Int] = []
     }
     private let storage = Mutex(Storage())
     func ready() { storage.withLock { $0.ready += 1 } }
     func markProbeSent() { storage.withLock { $0.probeSentAt = DispatchTime.now().uptimeNanoseconds } }
+    func markResumeStarted() { storage.withLock { $0.resumeStartedAt = DispatchTime.now().uptimeNanoseconds } }
+    func slowRead(bytes: Int) {
+        storage.withLock {
+            $0.slowReadCallbacks += 1
+            $0.slowReadBytes += bytes
+        }
+    }
     func completed(bytes: Int) {
         storage.withLock {
             $0.completedFast += 1
@@ -189,8 +233,25 @@ private final class SlowFanoutState: Sendable {
             $0.fastBytesAtProbe.append(bytes)
         }
     }
-    func snapshot() -> (ready: Int, completedFast: Int, latencies: [UInt64], fastBytesAtProbe: [Int]) {
-        storage.withLock { ($0.ready, $0.completedFast, $0.latencies, $0.fastBytesAtProbe) }
+    func slowCompleted(bytes: Int, ordered: Bool) {
+        storage.withLock {
+            $0.completedSlow += 1
+            if ordered { $0.orderedSlow += 1 }
+            $0.slowBytesAtProbe.append(bytes)
+            $0.slowDrainLatencies.append(DispatchTime.now().uptimeNanoseconds - $0.resumeStartedAt)
+        }
+    }
+    func snapshot() -> (
+        ready: Int, completedFast: Int, completedSlow: Int, orderedSlow: Int,
+        slowReadCallbacks: Int, slowReadBytes: Int,
+        latencies: [UInt64], fastBytesAtProbe: [Int],
+        slowDrainLatencies: [UInt64], slowBytesAtProbe: [Int]
+    ) {
+        storage.withLock {
+            ($0.ready, $0.completedFast, $0.completedSlow, $0.orderedSlow,
+                $0.slowReadCallbacks, $0.slowReadBytes,
+                $0.latencies, $0.fastBytesAtProbe, $0.slowDrainLatencies, $0.slowBytesAtProbe)
+        }
     }
 }
 
@@ -234,6 +295,16 @@ private final class SlowFanoutServerHandler: ChannelInboundHandler {
             writers.append(writer, slow: marker == 1)
         }
     }
+    func channelWritabilityChanged(context: ChannelHandlerContext) {
+        if context.channel.isWritable {
+            writer?.resumeAfterWritabilityChange()
+        }
+        context.fireChannelWritabilityChanged()
+    }
+    func channelInactive(context: ChannelHandlerContext) {
+        writer?.finish()
+        context.fireChannelInactive()
+    }
 }
 
 private final class SlowFanoutClientHandler: ChannelInboundHandler {
@@ -242,6 +313,9 @@ private final class SlowFanoutClientHandler: ChannelInboundHandler {
     private let paused: Bool
     private let state: SlowFanoutState
     private var receivedBytes = 0
+    private var probeBytes = 0
+    private var lastByte: UInt8 = 0
+    private var ordered = true
     private var completed = false
     private var ready = false
     init(paused: Bool, state: SlowFanoutState) {
@@ -265,9 +339,22 @@ private final class SlowFanoutClientHandler: ChannelInboundHandler {
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let buffer = unwrapInboundIn(data)
         receivedBytes += buffer.readableBytes
-        if !paused, !completed, buffer.readableBytesView.contains(0x43) {
-            completed = true
-            state.completed(bytes: receivedBytes)
+        if paused { state.slowRead(bytes: buffer.readableBytes) }
+        if !completed {
+            if paused {
+                for byte in buffer.readableBytesView {
+                    if byte < lastByte { ordered = false }
+                    lastByte = byte
+                    if byte == 0x43 { probeBytes += 1 }
+                }
+            } else if buffer.readableBytesView.contains(0x43) {
+                probeBytes += buffer.readableBytesView.filter { $0 == 0x43 }.count
+            }
+            if probeBytes >= 1_024 {
+                completed = true
+                if paused { state.slowCompleted(bytes: receivedBytes, ordered: ordered) }
+                else { state.completed(bytes: receivedBytes) }
+            }
         }
         context.fireChannelRead(data)
     }
