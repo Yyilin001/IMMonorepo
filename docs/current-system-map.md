@@ -65,7 +65,7 @@ Gateway 可托管房间或仅调用远端 Host；Account 的房间能力使用 c
   绑定到本机 SQLite，用于会话列表与详情标题；未知资料只显示“会话”。仅对 active direct
   room，Snapshot V3（projection schema 31）会重建权威的对方公开资料；打开私聊时也会写入双方各一条有界资料
   投影。显示名变更与来源事件在同一 PostgreSQL 事务内写入控制面 outbox，gateway 按接收者
-  预算投递、按 checkpoint 恢复，并在迁移 forwarding 期间镜像到目标 user shard。ClientKit
+  预算投递、按 checkpoint 恢复，并将控制面资料事件投递到用户当前所属分片。ClientKit
   始终优先使用该服务端同步资料，而非设备本地的显式查询缓存。群 roster 仍保持按需读取，
   不做资料 fan-out。
 - 非好友可以发起私聊，但陌生人消息在服务端持久化事务中按接收方设置和窗口限额准入。默认基线为每个发送者 24 小时 3 条；接收方可关闭此类消息。
@@ -85,7 +85,7 @@ Gateway 可托管房间或仅调用远端 Host；Account 的房间能力使用 c
 客户端逐页写入 SQLite shadow tables；服务端 ACK 成功后才原子替换 live projection。ACK 前崩溃
 会重用本地 manifest/shadow，过期拒绝则恢复 reset 前游标，因此 generation 与 UI 投影不会分叉。
 `user_sync_log` 只保留 checkpoint 之上的增量尾部与最小 replay window。有界 compactor 在
-token/receipt、迁移 fence、consumer inbox 稳定结果和 shared payload 引用均安全后推进
+有效 token/receipt 与最小重放窗口均安全后推进
 retained floor 并分批删除前缀，不扫描历史设备。新设备或低于 floor 的 cursor 在实际 pull 时
 才进入 Snapshot V3；同一用户/profile/schema 可复用仍在 floor 之上的最新 artifact，再通过
 增量同步追上，generation/token/receipt 仍逐设备隔离。已撤销设备的 cursor 与 capability 由
@@ -94,7 +94,7 @@ housekeeping 分批删除。控制投影的稳定
 
 ## 可选 NATS 提示层
 
-默认不需要 Redis 或 NATS。gateway 始终轮询 PostgreSQL durable work；启用 NATS 后，fan-out plan hint 仍是持久化完成后的可丢失优化。Hybrid 房间和 presence/typing 使用每个 gateway 一条复用 Core NATS 连接，只订阅本机当前观看/观察的作用域；所有命令以 `PING`/`PONG` 确认，连接失败或 broker 重启后按当前本机兴趣重放订阅。
+默认不需要 Redis 或 NATS。gateway 始终轮询 PostgreSQL durable work；启用 NATS 后，房间变化与实时活动提示仍是持久化完成后的可丢失优化。当前群房间和 presence/typing 使用每个 gateway 一条复用 Core NATS 连接，只订阅本机当前观看/观察的作用域；所有命令以 `PING`/`PONG` 确认，连接失败或 broker 重启后按当前本机兴趣重放订阅。
 
 当前实现仍不参与完成、授权、去重或重试决定。前台 room hint mailbox、broker payload mailbox 和 pending ACK 均有硬上限；NATS 不可用、提示丢失或重复时，durable polling/cursor pull 会恢复。尚缺 NATS TLS/NKey、broker/reconnect/consumer-lag 指标与代表性负载/故障证据，因此生产热点群仍不能只依赖该提示层。
 
@@ -106,4 +106,4 @@ housekeeping 分批删除。控制投影的稳定
 - 想知道 47 项问题哪些还开着：查看 [问题状态表](reviews/status.md)；整改过程的逐批记录在
   [历史时间线](reviews/archive/2026-09-05-remediation-timeline.md)，不代表当前状态。
 - 想运行本机账户栈：查看 [IMApp README](../IMApp/README.md) 或 [IMV2Server README](../IMV2Server/README.md)。
-- 想处理 paused durable work、观察指标或迁移用户分片：从 [V2 文档入口](../IMV2/docs/README.md) 进入对应 runbook。
+- 想处理 paused durable work、观察指标或配置静态用户分片：从 [V2 文档入口](../IMV2/docs/README.md) 进入对应 runbook。

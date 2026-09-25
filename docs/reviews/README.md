@@ -12,6 +12,8 @@
 
 | 你想知道 | 看这里 |
 | --- | --- |
+| 如何逐项审核设计、实现与体验（执行计划，非通过证明） | [设计与实现质量审核蓝图](design-implementation-review-blueprint.md) |
+| 如何判断测试是否有独立验证价值（首轮治理台账） | [测试有效性治理](test-governance-audit.md) |
 | 账号密码变更、离线恢复码、断言版本与登录限流 | [账号认证生命周期](account-authentication-lifecycle.md) |
 | 系统由哪些组件组成、消息怎么流动 | [当前系统架构](../current-system-map.md) |
 | 现在有哪些能力、证据到什么等级 | [当前实现与发布证据](../../IMV2/docs/implementation-status.md) |
@@ -67,11 +69,12 @@
 | --- | --- | --- |
 | 房间读模型：投递、未读与保留窗口（**已实施**：单聊与标准群默认都走读模型、未读、保留窗口与运维重放；列表为本地优先 + 服务端未读；进入房间按 §5.4 推进到已应用序号／房间头） | [房间读模型合同](room-read-model-contract.md) | B03、B04、D07 |
 | 发送请求指纹与幂等 | [发送接受记录保留与清理](send-completion-retention.md)；[旧指纹实施历史](2026-09-05-send-message-fingerprint-contract.md)仅供追溯 | B11、D07 |
-| 房间 owner 在线迁移（已取消，历史设计） | [冻结、复制、发布与恢复实施合同](room-owner-migration-contract.md) | B27、B04、B11、D08 |
+| 房间写入存储的职责拆分与事务边界 | [Room write Store decomposition](room-write-store-decomposition.md) | D07 |
+| 静态房间归属与跨库持久发送授权 | [当前归属与发送授权合同](room-owner-migration-contract.md)；在线迁移章节仅供追溯 | B27、B04、B11、D07 |
 | 房间逻辑寻址、激活、事务资格与回收 | [房间 Virtual Actor 合同](room-virtual-actor-contract.md) | B27 |
 | 消息发送的 owner 栅栏 | [消息发送 owner 事务栅栏](send-message-owner-fence-contract.md) | B27 |
-| 编辑、撤回、reaction 的分发归属 | [沿用原接受记录的分发归属](message-mutation-delivery-authority-contract.md) | B03 |
-| 变更受众与历史读取 | [历史受众与预留结算](message-mutation-audience-contract.md)、[历史读取与扫描游标](message-mutation-read-contract.md) | B03 |
+| 编辑、撤回、reaction 的接受事实与房间恢复 | [消息变更与房间日志](message-mutation-delivery-authority-contract.md) | B03、B06、D07 |
+| 消息变更的历史可见性与扫描游标 | [读取与游标合同](message-mutation-read-contract.md)；[旧受众结算记录](message-mutation-audience-contract.md)仅供追溯 | B03 |
 | 编辑的完整替换与版本缺口 | [可授权完整编辑与版本缺口](message-edit-replacement-contract.md) | B03、B06 |
 | 编辑与权限变更的提交顺序 | [提交顺序合同](edit-policy-commit-ordering.md) | B02 |
 | 消息终态与快照重放 | [终态、版本缺口与快照重放](message-terminal-projection-contract.md) | B06 |

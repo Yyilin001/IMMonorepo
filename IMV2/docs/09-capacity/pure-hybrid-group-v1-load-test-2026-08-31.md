@@ -1,5 +1,7 @@
 # Pure hybrid-group send benchmark — 2026-08-31
 
+Status: historical benchmark for the 2026-08-31 build. Its workload and counters do not certify the current Actor-based runtime; see [current implementation evidence](../implementation-status.md).
+
 ## Scope
 
 This benchmark isolates the accepted-send path for large hybrid groups. It is

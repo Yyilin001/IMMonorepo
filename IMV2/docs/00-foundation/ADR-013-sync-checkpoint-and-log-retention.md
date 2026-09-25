@@ -8,8 +8,8 @@
 
 旧 snapshot 路径虽按 sequence 分批读 `user_sync_log`，仍需在应用层持续折叠一个随用户
 历史增长的完整当前状态。它限制了单次查询，却没有给一次 reset 的进程内状态设置硬上限；
-此外，`user_sync_log` 还承担设备增量同步、cross-store inbox 幂等结果、shared fan-out
-payload 引用和 user-shard copy/verify。简单按时间或设备 ACK 删除日志会破坏这些语义。
+此外，`user_sync_log` 仍承担设备增量同步。简单按时间或设备 ACK 删除日志会破坏
+有效同步 token、增量回执和新设备从快照入场的语义。
 
 ## 已决定并实施：Snapshot V3
 
@@ -25,8 +25,8 @@ Snapshot V3 不再从完整日志临时物化当前状态：
 4. 客户端逐页验证并写入 SQLite shadow tables。完整 shadow 先由服务端幂等 ACK 提交 generation，
    再在一个本地事务中激活；ACK 前 live projection 从不被替换。客户端保存 reset 前精确游标，
    服务端拒绝过期 fence 时可无损回退；ACK 后进程崩溃则从本地 manifest/shadow 重放同一 ACK。
-5. user-shard copy/fingerprint 已覆盖 projection versions、checkpoint、artifact/page、reset 和完整
-   ACK fence；projection version GC 会保护所有 building/published snapshot baseline 和迁移 fence。
+5. projection version GC 保护仍被 building/published snapshot 使用的基线；
+   控制投影的稳定幂等结果独立保存在 `user_projection_effects`，不依赖可裁剪日志。
 
 协议与本地状态均按绿地切换，不保留旧 snapshot schema 或双读兼容路径。
 
@@ -37,29 +37,26 @@ Snapshot V3 关闭 reset 内存随历史增长，并把 reset 构建工作量改
 
 1. checkpoint 已持久化、摘要已验证，并可被当前受支持 capability profile 解码；
 2. 新设备以及低于 retained floor 的 cursor 强制从 checkpoint snapshot 入场；
-3. 没有未过期 token、receipt、snapshot 或迁移 fence 引用更早序列；
-4. consumer inbox 保存足以回答裁剪后重试的稳定 sequence/result，不再回查已删除 log row；
-5. media delivery authorization 已改读 current projection；shared payload 只在所有 log
-   引用消失后回收；fan-out inbox 持久化原分配 sequence，裁剪后重试不回查 log；
-6. user-shard copy、fingerprint、forwarding 与回滚复制 retained floor 和剩余 tail；
-7. compactor 不枚举设备历史；pull 与 retained-floor 发布通过 retention row lock 串行化，只有
+3. 没有未过期增量 token 或 receipt 要求保留更早序列；
+4. 最小日志年龄构成独立 replay window，不因 checkpoint 已推进就立刻删除近期日志；
+5. 控制投影的稳定操作结果保存在独立 effect/operation ledger 中，裁剪后重试不依赖已删日志；
+6. compactor 不枚举设备历史；pull 与 retained-floor 发布通过 retention row lock 串行化，只有
    真正再次拉取且低于 floor 的有效设备才获得 reset assignment；同一用户/profile/schema
    可复用仍位于 floor 之上的最新不可变 artifact（之后用增量同步追上），但各自保留独立
    generation、token、receipt 和有效期；
-8. 已撤销、无法再次认证的设备能力与 cursor 由 housekeeping 分批回收，不再永久钉住
+7. 已撤销、无法再次认证的设备能力与 cursor 由 housekeeping 分批回收，不再永久钉住
    compaction 或让状态量随账户设备历史增长。
 
 `PostgresV2UserSyncLogCompactionWorker` 按用户和序列使用有界 `SKIP LOCKED` 批次，在同一
-事务复核 checkpoint/fence、未过期 token/receipt 和最小 replay window，发布 retained floor
+事务复核 checkpoint、未过期 token/receipt 和最小 replay window，发布 retained floor
 并分批删除前缀。未来新设备/低 token 的 pull 在共享锁下读到 floor 后按需 stage V3 reset；
-压缩成本因此与有界日志批次相关，而不与历史设备数或设备数乘快照大小相关。迁移复制、
-fingerprint 和 source retention cleanup 覆盖 floor 与
-inbox sequence。Prometheus 分别暴露 uncompacted records、projector lag、snapshot、GC 和
+压缩成本因此与有界日志批次相关，而不与历史设备数或设备数乘快照大小相关。
+Prometheus 分别暴露 uncompacted records、projector lag、snapshot、GC 和
 sync-log relation 指标。
 
 高吞吐 compaction 不再绑定一分钟级通用 retention tick。独立 backlog-drain loop 在有工作时
-连续执行有界事务，并按 pass 数/墙钟预算主动 yield；空闲时才指数退避。每个用户批次删除的
-shared payload key 会用一次 `unnest` 集合 DELETE 回收，不再按 key 产生 N+1 SQL。该调度与
+连续执行有界事务，并按 pass 数/墙钟预算主动 yield；空闲时才指数退避。每个用户批次
+按序号选出至多 `rowLimit` 条个人日志并删除；当前路径不再清理旧共享扇出载荷表。该调度与
 control-plane terminal housekeeping 共用显式、独立的 busy/idle 容量配置，但各自仍只使用
 maintenance database pool。
 
@@ -74,9 +71,9 @@ maintenance database pool。
 ## 验收与运行边界
 
 Snapshot V3 的仓库门禁包括最大尺寸 codec/page、逐页恢复、空账户、构建失败 generation 回退、
-过期 reset 回退、ACK 后崩溃恢复、跨代 ACK 重放、MVCC GC 与跨 shard copy/fingerprint；客户端
+过期 reset 回退、ACK 后崩溃恢复、跨代 ACK 重放与 MVCC GC；客户端
 完整套件和 disposable PostgreSQL 完整套件必须持续通过。
 
 代码回归覆盖 poison projector、compaction 不触碰低 cursor、低 cursor/new device 按需共享
-artifact、撤销设备状态回收、有界多批删除和迁移复制。
+artifact、撤销设备状态回收和有界多批删除。
 生产仍需按实际速率验证 replay window、阈值与恢复演练，但不再保留 append-only 设计风险。

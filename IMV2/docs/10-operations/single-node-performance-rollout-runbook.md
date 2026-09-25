@@ -96,8 +96,13 @@ IM_V2_PROFILE_DATABASE_URL=... IMV2/scripts/capture_v2_postgres_profile.sh repor
 暂停压测写入并等 worker drain 后验证：
 
 ```sql
-SELECT count(*) FROM im_v2.fanout_deliveries WHERE state <> 'terminal';
-SELECT count(*) FROM im_v2.fanout_completion_units WHERE state <> 'released';
+SELECT state, count(*)
+FROM im_v2.user_state_event_outbox
+WHERE state <> 'delivered'
+GROUP BY state;
+SELECT state, count(*)
+FROM im_v2.group_event_wake_outbox
+GROUP BY state;
 SELECT count(*) FROM im_v2.user_projection_checkpoints WHERE state = 'paused';
 SELECT max(sequence.next_sequence - checkpoint.projected_sequence)
 FROM im_v2.user_projection_checkpoints checkpoint
@@ -105,11 +110,14 @@ JOIN im_v2.user_sync_sequences sequence USING (user_id);
 SELECT count(*)
 FROM im_v2.user_projection_versions
 WHERE projection_kind = 'message'
-  AND valid_to_sequence IS NULL
-  AND payload IS NULL AND message_state_id IS NULL;
+  AND valid_to_sequence IS NULL;
 ```
 
-前两项应为 0，paused 应为 0，最大 lag 应回到 0，最后一项必须为 0。再随机抽取多设备用户做完整 Snapshot reset 与增量 Pull/ACK 回放。
+个人事件 outbox 的 `pending`/`leased` 应在排空后为 0，`paused` 必须为 0；
+`delivered` 是保留的终态，不要求删除。房间 wake 是可丢失的提示工作，
+按配置和租约检查 `pending`/`leased` 是否持续增长，不能将其数量当作正文缺失。
+projection 的 paused、最大 lag 与仍活动的旧个人 `message` 投影应为 0。
+再随机抽取多设备用户做完整 Snapshot reset 与增量 Pull/ACK 回放。
 
 ## 压测门槛
 
