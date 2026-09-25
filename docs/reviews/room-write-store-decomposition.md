@@ -91,6 +91,9 @@ part of this refactor.
   preflight, acceptance, and completion stages now live in a borrowed-
   transaction extension. The Store still owns the three transaction boundaries,
   authorization coordination, and post-commit cache/credit finalization.
+- Direct-policy snapshot decoding and cache projection conversions now live
+  beside the direct acceptance path. Their field mapping and post-commit
+  publication rules are unchanged.
 - The non-PostgresNIO SQL fallback remains behavior-neutral but is not exercised
   by native PostgreSQL tests. Do not count those tests as fallback coverage.
 
@@ -104,6 +107,8 @@ yet been run for the finished decomposition.
 After the forward inbox stage extraction, the four focused PostgreSQL tests
 covering 21 owner-fence, acceptance/recovery, rejection, and direct-finalization
 cases passed, as did all eight direct/forward authorization SIGKILL cases.
+After the direct-policy row move, four focused PostgreSQL tests covering 11
+policy-fence, revision, cache, and stranger-quota cases passed.
 
 Still to extract: remaining shared/path row decoders and larger integration
 test fixtures.
