@@ -62,7 +62,6 @@ struct GatewayComposition {
             let syncUserShardStorage = topology.syncUserShardStorage
             let deliveryUserShardStorage = topology.deliveryUserShardStorage
             let maintenanceUserShardStorage = topology.maintenanceUserShardStorage
-            let physicalDatabaseURLs = topology.physicalDatabaseURLs
             func databaseForRole(
                 for role: V2PostgresWorkloadPoolBudget.Role, url: String
             ) -> (any Database)? {
@@ -140,43 +139,10 @@ struct GatewayComposition {
                     )
                 )
             )
-            let workloadPoolTopology: V2DatabasePoolTopologySnapshot
-            let configuredHandleCount = configuration.databasePolicy.eventLoopThreads *
-                physicalDatabaseURLs.count
-            if configuration.databaseWorkloadPoolIsolationEnabled {
-                workloadPoolTopology = .init(
-                    pools: V2PostgresWorkloadPoolBudget.Role.allCases.map { role in
-                        .init(
-                            poolClass: databasePoolMetricClass(for: role),
-                            eventLoopHandles: configuredHandleCount,
-                            connectionCeiling: configuredHandleCount *
-                                configuration.databaseWorkloadPoolBudget
-                                    .connectionsPerEventLoop(for: role)
-                        )
-                    }
-                )
-            } else {
-                workloadPoolTopology = .init(pools: [
-                    .init(
-                        poolClass: .shared,
-                        eventLoopHandles: configuredHandleCount,
-                        connectionCeiling: configuredHandleCount *
-                            configuration.databasePolicy.maximumConnectionsPerEventLoop
-                    )
-                ])
-            }
-            let databasePoolTopology = V2DatabasePoolTopologySnapshot(pools: workloadPoolTopology.pools + [
-                .init(poolClass: .userStateRoute,
-                      eventLoopHandles: configuration.databasePolicy.eventLoopThreads,
-                      connectionCeiling: configuration.databasePolicy.eventLoopThreads),
-                .init(poolClass: .directSendControl,
-                      eventLoopHandles: configuration.databasePolicy.eventLoopThreads,
-                      connectionCeiling: configuration.databasePolicy.eventLoopThreads *
-                        configuration.directSendControlConnectionsPerEventLoop),
-                .init(poolClass: .directAuthorizationResolution,
-                      eventLoopHandles: configuration.databasePolicy.eventLoopThreads * configuration.directAuthorizationResolutionDatabaseURLs.count,
-                      connectionCeiling: configuration.databasePolicy.eventLoopThreads * configuration.directAuthorizationResolutionDatabaseURLs.count)
-            ])
+            let databasePoolTopology = GatewayPoolMetricsTopology.make(
+                configuration: configuration,
+                physicalDatabaseCount: topology.physicalDatabaseURLs.count
+            )
             let prometheusTelemetry = V2PrometheusTelemetrySink()
             let transportMetrics = V2GatewayTransportMetrics()
             let directRoomLogAppendStageMetrics = V2DirectRoomLogAppendStageMetrics()
@@ -234,7 +200,7 @@ struct GatewayComposition {
                 ) / 1_000
             )
             let telemetry = V2CompositeTelemetrySink([
-                V2ApplicationTelemetrySink(
+                GatewayApplicationTelemetrySink(
                     logger: logger,
                     successSamplePermille: configuration.commandSuccessLogSamplePermille,
                     slowCommandThresholdMilliseconds:
@@ -616,37 +582,9 @@ struct GatewayComposition {
                 metrics: transportMetrics
             )
             committedHybridGroupEvents.install(sink: foregroundGroupEventHints)
-            // 会话目录按房间归属读取；客户端按有效活动事实本地排序。
-            // 恢复扫描使用不经缓存的控制面路由，避免过期的归属缓存
-            // 为当前静态归属方之外的房间提供校验。
-            let recoveryRouter = V2PostgresRoomShardRouter(database: syncControlDatabase)
-            let recoveryStorageGroups = Dictionary(grouping: configuration.roomShardStorage) {
-                $0.databaseURL + "\u{0}" + $0.schema
-            }
-            var recoveryDirectoryStores: [any V2UserRoomDirectoryReading] = []
-            var recoveryStorageIdentities: [String] = []
-            var recoveryLocations: [V2RoomShardStorageLocation] = []
-            for key in recoveryStorageGroups.keys.sorted() {
-                guard let group = recoveryStorageGroups[key], let first = group.first,
-                      let owner = databaseForRole(for: .sync, url: first.databaseURL) else {
-                    throw V2RoomRecoveryReadError.corruptPersistence
-                }
-                let shardIDs = Set(group.map(\.shardID))
-                let store = try PostgresV2RoomRecoveryStore(database: owner, schema: first.schema)
-                recoveryDirectoryStores.append(try V2OwnerValidatedRoomDirectoryStore(
-                    underlying: store, router: recoveryRouter, physicalStoreShardIDs: shardIDs))
-                // 部署指纹同时包含别名与物理身份；连接材料只参与哈希，不对外返回。
-                recoveryStorageIdentities.append(try JSONEncoder().encode([key] + shardIDs.sorted()).base64EncodedString())
-                for shardID in shardIDs.sorted() {
-                    recoveryLocations.append(try .init(shardID: shardID, database: owner, schema: first.schema))
-                }
-            }
-            let recoveryTopology = try PostgresV2RoomRecoveryTopology(
-                database: syncControlDatabase, stores: recoveryDirectoryStores,
-                orderedStoreIdentities: recoveryStorageIdentities)
-            let recoveryDirectory = V2UserRoomDirectoryService(topologySource: recoveryTopology,
-                cursorCodec: try .init(key: Data(configuration.accessTokenKey
-                    .digest("im-v2-room-recovery-cursor-root-v1").utf8)))
+            let recoveryDirectory = try GatewayRoomRecoveryDirectory.build(
+                configuration: configuration, topology: topology
+            )
             let recoveryStates = roomQueries
             let latestVisible = try V2RoomLatestVisibleCommandService(reader: roomQueries)
             let roomRecovery = V2RoomRecoveryCommandService(directory: recoveryDirectory, states: recoveryStates, latestVisible: latestVisible)
@@ -969,79 +907,5 @@ struct GatewayComposition {
             exit(EXIT_FAILURE)
         }
         await shutdownAuxiliaryServices()
-    }
-}
-
-private func databasePoolMetricClass(
-    for role: V2PostgresWorkloadPoolBudget.Role
-) -> V2DatabasePoolMetricClass {
-    switch role {
-    case .foreground: .foreground
-    case .sync: .sync
-    case .delivery: .delivery
-    case .projection: .projection
-    case .maintenance: .maintenance
-    }
-}
-
-/// 库遥测边界的生产日志适配器。
-///
-/// 这些是结构化运维事件，而不是高基数指标标签：
-/// 其中不会包含房间、用户或消息标识，也不包含载荷、地址、令牌或凭据。
-private struct V2ApplicationTelemetrySink: V2TelemetrySink {
-    let logger: Logger
-    let successSamplePermille: Int
-    let slowCommandThresholdMilliseconds: Int
-    let diagnosticLogLimiter: V2CommandDiagnosticLogLimiter
-
-    func record(_ event: V2TelemetryEvent) async {
-        switch event {
-        case .gatewayCommand(let traceID, let command, let outcome, let rejection, let elapsedMilliseconds):
-            guard shouldLogGatewayCommand(
-                traceID: traceID,
-                command: command,
-                outcome: outcome,
-                rejection: rejection,
-                elapsedMilliseconds: elapsedMilliseconds
-            ) else { return }
-            logger.info("im_v2.gateway.command", metadata: [
-                "trace_id": "\(traceID.uuidString)",
-                "command": "\(command.rawValue)",
-                "outcome": "\(outcome.rawValue)",
-                "rejection": "\(rejection?.rawValue ?? "none")",
-                "elapsed_ms": "\(elapsedMilliseconds)",
-            ])
-
-        }
-    }
-
-    private func shouldLogGatewayCommand(
-        traceID: UUID,
-        command: V2GatewayTelemetryCommand,
-        outcome: V2GatewayTelemetryOutcome,
-        rejection: V2GatewayTelemetryRejection?,
-        elapsedMilliseconds: UInt64
-    ) -> Bool {
-        guard outcome == .accepted,
-              elapsedMilliseconds < UInt64(slowCommandThresholdMilliseconds)
-        else {
-            return diagnosticLogLimiter.admit(
-                command: command,
-                outcome: outcome,
-                rejection: rejection
-            )
-        }
-        guard successSamplePermille > 0 else { return false }
-        guard successSamplePermille < 1_000 else { return true }
-        // 对 UUID 的 16 个原始字节计算 FNV，避免每次接受命令时
-        // 都分配其 36 字符的字符串表示。
-        var hash: UInt64 = 14_695_981_039_346_656_037
-        withUnsafeBytes(of: traceID.uuid) { bytes in
-            for byte in bytes {
-                hash ^= UInt64(byte)
-                hash &*= 1_099_511_628_211
-            }
-        }
-        return hash % 1_000 < UInt64(successSamplePermille)
     }
 }
