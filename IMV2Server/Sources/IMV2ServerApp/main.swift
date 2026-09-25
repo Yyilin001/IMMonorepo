@@ -16,7 +16,9 @@ enum IMV2ServerApp {
         }
         let logger = Logger(label: "imv2.gateway")
         do {
-            try await withLogger(logger) { _ in try await GatewayRuntime.run(logger: logger) }
+            try await withLogger(logger) { scopedLogger in
+                try await GatewayRuntime.run(logger: scopedLogger)
+            }
         } catch {
             logger.error("IM V2 gateway startup or shutdown failed", metadata:
                 V2SafeLogMetadata.failure(error, stage: "gateway_lifecycle"))

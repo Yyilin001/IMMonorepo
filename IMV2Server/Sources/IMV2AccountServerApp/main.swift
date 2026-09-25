@@ -24,7 +24,9 @@ enum IMV2AccountServerApp {
         }
         let logger = Logger(label: "imv2.account")
         do {
-            try await withLogger(logger) { _ in try await run(logger: logger) }
+            try await withLogger(logger) { scopedLogger in
+                try await run(logger: scopedLogger)
+            }
         } catch {
             logger.error("IM V2 account startup or shutdown failed", metadata:
                 V2SafeLogMetadata.failure(error, stage: "account_lifecycle"))
