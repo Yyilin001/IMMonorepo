@@ -10,283 +10,7 @@ final class IMAppLocalAccountUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    /// Isolates simulator-to-host TLS reachability before the registration UI
-    /// test. The deliberately malformed body must reach the real local edge
-    /// and receive its public 400 contract; no account or credential is made.
-    func testSimulatorCanReachLocalAccountEdge() async throws {
-        var request = URLRequest(url: try XCTUnwrap(URL(string: "https://localhost:8443/v2/account-auth/password/assertion")))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = Data("{}".utf8)
-
-        let (_, response) = try await URLSession.shared.data(for: request)
-        let http = try XCTUnwrap(response as? HTTPURLResponse)
-        XCTAssertEqual(http.statusCode, 400, "本机账户边缘必须可被所选模拟器经 HTTPS 访问。")
-    }
-
-    /// Checks the two HTTPS contracts consumed by ClientKit without importing
-    /// the App's transitive GRDB module graph into this UI-test target.
-    func testSimulatorCanRegisterAndIssueLocalDeviceCredentials() async throws {
-        let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-        let deviceID = UUID().uuidString.lowercased()
-        let accountHandle = "kit_\(suffix.prefix(20))"
-        let publicHandle = "kit\(suffix.prefix(20))"
-        let registration = try await localJSONRequest(
-            endpoint: try XCTUnwrap(URL(string: "https://localhost:8443/v2/account-auth/password/register")),
-            body: [
-                "accountHandle": accountHandle,
-                "password": "local-clientkit-password",
-                "deviceID": deviceID,
-                "publicHandle": publicHandle,
-                "displayName": "Local HTTPS E2E",
-            ]
-        )
-        let assertion = try XCTUnwrap(registration["accountAssertion"] as? String)
-        XCTAssertFalse(assertion.isEmpty)
-        let pending = try V2PendingDeviceCredentialRegistration.prepare(deviceID: DeviceID(deviceID), operationID: UUID())
-        let issued = try await localJSONRequest(
-            endpoint: try XCTUnwrap(URL(string: "https://localhost:8443/v2/device-credentials")),
-            body: [
-                "accountAssertion": assertion,
-                "deviceID": deviceID,
-                "operationID": pending.operationID.uuidString,
-            ], cancellation: pending.cancellation
-        )
-        let issuedUserID = try XCTUnwrap(issued["userID"] as? String)
-        let issuedExpiry = try XCTUnwrap(issued["accessTokenExpiresAtMilliseconds"] as? NSNumber)
-        XCTAssertEqual((issued["deviceID"] as? String).flatMap(UUID.init(uuidString:)), UUID(uuidString: deviceID))
-        XCTAssertNotNil(UUID(uuidString: issuedUserID))
-        XCTAssertFalse((issued["accessToken"] as? String ?? "").isEmpty)
-        XCTAssertFalse((issued["refreshCredential"] as? String ?? "").isEmpty)
-        XCTAssertGreaterThan(
-            issuedExpiry.int64Value,
-            Int64(Date().timeIntervalSince1970 * 1_000),
-            "账户边缘返回的访问凭据必须尚未过期。"
-        )
-    }
-
-    /// Uses two independently registered local accounts, two authenticated
-    /// TLS connections and two independent SQLite stores. Both parties
-    /// disconnect after the direct room is established: the sender persists
-    /// its message in the outbox, reconnects and replays that immutable ID;
-    /// the receiver then reconnects and projects the accepted message.
-    func testTwoLocalClientsDeliverDirectMessageIntoReceiverProjection() async throws {
-        let sender = try await registerLocalAccount(displayName: "Local sender")
-        let receiver = try await registerLocalAccount(displayName: "Local receiver")
-        let frameLimits = try V2FrameLimits(
-            maximumPayloadBytes: 65_536,
-            acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]
-        )
-        let endpoint = try V2RealtimeEndpoint(host: "localhost", port: 7_443)
-        let senderConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
-        let receiverConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
-        let reconnectingSenderConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
-        let reconnectingReceiverConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
-
-        do {
-            let senderSession = try await senderConnection.connectAndAuthenticate(
-                accessToken: sender.accessToken,
-                deviceID: sender.deviceID,
-                supportedCapabilityProfiles: ["base"]
-            )
-            let receiverSession = try await receiverConnection.connectAndAuthenticate(
-                accessToken: receiver.accessToken,
-                deviceID: receiver.deviceID,
-                supportedCapabilityProfiles: ["base"]
-            )
-            XCTAssertEqual(senderSession.userID, sender.userID)
-            XCTAssertEqual(receiverSession.userID, receiver.userID)
-
-            let senderTransport = V2ProtobufSyncTransport(
-                wire: senderConnection,
-                protocolVersion: senderSession.protocolVersion
-            )
-            let receiverTransport = V2ProtobufSyncTransport(
-                wire: receiverConnection,
-                protocolVersion: receiverSession.protocolVersion
-            )
-            let databaseDirectory = FileManager.default.temporaryDirectory
-                .appendingPathComponent("im-v2-dual-client-e2e-\(UUID().uuidString)", isDirectory: true)
-            let senderDatabaseURL = databaseDirectory.appendingPathComponent("sender.sqlite")
-            let databaseURL = databaseDirectory.appendingPathComponent("receiver.sqlite")
-            defer { try? FileManager.default.removeItem(at: databaseDirectory) }
-            let senderStore = try await V2LocalStoreBootstrapper(
-                bindingStore: LocalE2EInstallationBindingStore()
-            ).open(databaseURL: senderDatabaseURL)
-            let receiverStore = try await V2LocalStoreBootstrapper(
-                bindingStore: LocalE2EInstallationBindingStore()
-            ).open(databaseURL: databaseURL)
-            let receiverSync = V2SyncEngine(
-                transport: receiverTransport,
-                store: receiverStore,
-                capabilityProfile: receiverSession.capabilityProfile
-            )
-            try await synchronizeInitialState(receiverSync)
-            await receiverConnection.disconnect()
-
-            let directRoom = try await senderTransport.openDirectRoom(
-                operationID: try DirectRoomOperationID(UUID().uuidString.lowercased()),
-                targetUserID: receiver.userID
-            )
-            let expectedText = "dual-client-local-\(UUID().uuidString.lowercased())"
-            await senderConnection.disconnect()
-            let offlineSenderOutbox = V2CommandOutboxEngine(store: senderStore, transport: senderTransport)
-            let command = try await offlineSenderOutbox.enqueueMessage(
-                roomID: directRoom.roomID,
-                text: expectedText,
-                media: [],
-                mentions: []
-            )
-            let firstFlush = try await offlineSenderOutbox.flushOnce()
-            XCTAssertEqual(
-                firstFlush,
-                .retryScheduled(command.clientMessageID),
-                "断线时消息必须保存在 sender SQLite outbox 中，而不能丢弃。"
-            )
-            let scheduledCommands = try await senderStore.pendingMessageCommands()
-            let scheduledCommand = try XCTUnwrap(
-                scheduledCommands.first(where: { $0.clientMessageID == command.clientMessageID })
-            )
-            XCTAssertEqual(scheduledCommand.state, .pending)
-            XCTAssertEqual(scheduledCommand.attemptCount, 1)
-
-            let reconnectedSenderSession = try await reconnectingSenderConnection.connectAndAuthenticate(
-                accessToken: sender.accessToken,
-                deviceID: sender.deviceID,
-                supportedCapabilityProfiles: ["base"]
-            )
-            XCTAssertEqual(reconnectedSenderSession.userID, sender.userID)
-            let reconnectedSenderOutbox = V2CommandOutboxEngine(
-                store: senderStore,
-                transport: V2ProtobufSyncTransport(
-                    wire: reconnectingSenderConnection,
-                    protocolVersion: reconnectedSenderSession.protocolVersion
-                )
-            )
-            let acceptedClientMessageID = try await awaitSenderOutboxReplay(
-                reconnectedSenderOutbox,
-                expectedClientMessageID: command.clientMessageID
-            )
-            XCTAssertEqual(acceptedClientMessageID, command.clientMessageID)
-            let acceptedCommands = try await senderStore.pendingMessageCommands()
-            let acceptedCommand = try XCTUnwrap(
-                acceptedCommands.first(where: { $0.clientMessageID == command.clientMessageID })
-            )
-            let acceptedMessageID = try XCTUnwrap(acceptedCommand.acceptedMessageID)
-            XCTAssertEqual(acceptedCommand.state, .accepted)
-            XCTAssertNotNil(acceptedCommand.acceptedRoomSequence)
-
-            let reconnectedReceiverSession = try await reconnectingReceiverConnection.connectAndAuthenticate(
-                accessToken: receiver.accessToken,
-                deviceID: receiver.deviceID,
-                supportedCapabilityProfiles: ["base"]
-            )
-            XCTAssertEqual(reconnectedReceiverSession.userID, receiver.userID)
-            let reconnectedReceiverSync = V2SyncEngine(
-                transport: V2ProtobufSyncTransport(
-                    wire: reconnectingReceiverConnection,
-                    protocolVersion: reconnectedReceiverSession.protocolVersion
-                ),
-                store: receiverStore,
-                capabilityProfile: reconnectedReceiverSession.capabilityProfile
-            )
-            let delivered = try await awaitReceiverProjection(
-                in: receiverStore,
-                roomID: directRoom.roomID,
-                messageID: acceptedMessageID,
-                syncEngine: reconnectedReceiverSync
-            )
-            XCTAssertEqual(delivered.messageID, acceptedMessageID)
-            XCTAssertEqual(delivered.senderUserID, sender.userID)
-            XCTAssertEqual(delivered.text, expectedText)
-        } catch {
-            await senderConnection.disconnect()
-            await receiverConnection.disconnect()
-            await reconnectingSenderConnection.disconnect()
-            await reconnectingReceiverConnection.disconnect()
-            throw error
-        }
-
-        await senderConnection.disconnect()
-        await receiverConnection.disconnect()
-        await reconnectingSenderConnection.disconnect()
-        await reconnectingReceiverConnection.disconnect()
-    }
-
-    /// The stranger-message preference is recipient-owned. A sender can open
-    /// the deterministic direct room, but a denied recipient must receive no
-    /// message until the recipient explicitly restores the permission.
-    func testReceiverCanDenyAndRestoreStrangerMessageDelivery() async throws {
-        let sender = try await registerLocalAccount(displayName: "Stranger sender")
-        let receiver = try await registerLocalAccount(displayName: "Stranger receiver")
-        let frameLimits = try V2FrameLimits(
-            maximumPayloadBytes: 65_536,
-            acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]
-        )
-        let endpoint = try V2RealtimeEndpoint(host: "localhost", port: 7_443)
-        let senderConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
-        let receiverConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
-
-        do {
-            let senderSession = try await senderConnection.connectAndAuthenticate(
-                accessToken: sender.accessToken,
-                deviceID: sender.deviceID,
-                supportedCapabilityProfiles: ["base"]
-            )
-            let receiverSession = try await receiverConnection.connectAndAuthenticate(
-                accessToken: receiver.accessToken,
-                deviceID: receiver.deviceID,
-                supportedCapabilityProfiles: ["base"]
-            )
-            XCTAssertEqual(senderSession.userID, sender.userID)
-            XCTAssertEqual(receiverSession.userID, receiver.userID)
-
-            let senderTransport = V2ProtobufSyncTransport(
-                wire: senderConnection,
-                protocolVersion: senderSession.protocolVersion
-            )
-            let receiverTransport = V2ProtobufSyncTransport(
-                wire: receiverConnection,
-                protocolVersion: receiverSession.protocolVersion
-            )
-            _ = try await receiverTransport.setStrangerMessagePermission(
-                operationID: try StrangerMessagePreferenceOperationID(UUID().uuidString.lowercased()),
-                permission: .deny
-            )
-            let directRoom = try await senderTransport.openDirectRoom(
-                operationID: try DirectRoomOperationID(UUID().uuidString.lowercased()),
-                targetUserID: receiver.userID
-            )
-            await assertStrangerMessageIsForbidden(
-                senderTransport: senderTransport,
-                roomID: directRoom.roomID
-            )
-
-            _ = try await receiverTransport.setStrangerMessagePermission(
-                operationID: try StrangerMessagePreferenceOperationID(UUID().uuidString.lowercased()),
-                permission: .allow
-            )
-            let accepted = try await senderTransport.sendMessage(
-                roomID: directRoom.roomID,
-                clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
-                text: "allowed-after-explicit-restore",
-                media: [],
-                mentions: []
-            )
-            XCTAssertEqual(accepted.roomID, directRoom.roomID)
-        } catch {
-            await senderConnection.disconnect()
-            await receiverConnection.disconnect()
-            throw error
-        }
-
-        await senderConnection.disconnect()
-        await receiverConnection.disconnect()
-    }
-
-    /// A private block applies even to an already-open direct room. The
-    /// sender receives only the generic authorization result and may resume
-    /// once the recipient explicitly removes that block.
+    /// Covers the App relaunch and UI-visible private hint as well as the live gateway contract.
     func testReceiverCanBlockAndRestoreExistingDirectMessageDelivery() async throws {
         let sender = try await registerLocalAccount(displayName: "Blocked sender")
         let receiver = try await registerLocalAccount(displayName: "Blocking receiver")
@@ -494,242 +218,6 @@ final class IMAppLocalAccountUITests: XCTestCase {
         await restoredSenderConnection.disconnect()
     }
 
-    /// A friendship is server-authoritative: both sides complete the private
-    /// request/accept exchange before the resulting direct room is used.
-    func testTwoLocalClientsCanRequestAndAcceptRelationshipBeforeMessaging() async throws {
-        let requester = try await registerLocalAccount(displayName: "Relationship requester")
-        let recipient = try await registerLocalAccount(displayName: "Relationship recipient")
-        let frameLimits = try V2FrameLimits(maximumPayloadBytes: 65_536, acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)])
-        let endpoint = try V2RealtimeEndpoint(host: "localhost", port: 7_443)
-        let requesterConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
-        let recipientConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
-
-        do {
-            let requesterSession = try await requesterConnection.connectAndAuthenticate(accessToken: requester.accessToken, deviceID: requester.deviceID, supportedCapabilityProfiles: ["base"])
-            let recipientSession = try await recipientConnection.connectAndAuthenticate(accessToken: recipient.accessToken, deviceID: recipient.deviceID, supportedCapabilityProfiles: ["base"])
-            XCTAssertEqual(requesterSession.userID, requester.userID)
-            XCTAssertEqual(recipientSession.userID, recipient.userID)
-
-            let requesterTransport = V2ProtobufSyncTransport(wire: requesterConnection, protocolVersion: requesterSession.protocolVersion)
-            let recipientTransport = V2ProtobufSyncTransport(wire: recipientConnection, protocolVersion: recipientSession.protocolVersion)
-            let requested = try await requesterTransport.changeRelationship(
-                operationID: try RelationshipOperationID(UUID().uuidString.lowercased()),
-                targetUserID: recipient.userID,
-                action: .request
-            )
-            XCTAssertEqual(requested.resultingState, .pending)
-            let accepted = try await recipientTransport.changeRelationship(
-                operationID: try RelationshipOperationID(UUID().uuidString.lowercased()),
-                targetUserID: requester.userID,
-                action: .accept
-            )
-            XCTAssertEqual(accepted.resultingState, .accepted)
-            let directRoom = try await requesterTransport.openDirectRoom(
-                operationID: try DirectRoomOperationID(UUID().uuidString.lowercased()),
-                targetUserID: recipient.userID
-            )
-            let message = try await requesterTransport.sendMessage(
-                roomID: directRoom.roomID,
-                clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
-                text: "accepted-relationship-message",
-                media: [],
-                mentions: []
-            )
-            XCTAssertEqual(message.roomID, directRoom.roomID)
-        } catch {
-            await requesterConnection.disconnect()
-            await recipientConnection.disconnect()
-            throw error
-        }
-
-        await requesterConnection.disconnect()
-        await recipientConnection.disconnect()
-    }
-
-    /// The local stack's stranger policy permits three initial messages in a
-    /// 24-hour window. The limit is enforced at the authenticated gateway,
-    /// rather than being a sender-side UI convention, and the fourth request
-    /// remains retryable so a durable outbox can apply its own backoff before
-    /// attempting the server window again.
-    func testStrangerMessageRateLimitIsEnforcedByGateway() async throws {
-        let sender = try await registerLocalAccount(displayName: "Rate-limit sender")
-        let receiver = try await registerLocalAccount(displayName: "Rate-limit receiver")
-        let frameLimits = try V2FrameLimits(
-            maximumPayloadBytes: 65_536,
-            acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]
-        )
-        let endpoint = try V2RealtimeEndpoint(host: "localhost", port: 7_443)
-        let senderConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
-        let receiverConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
-
-        do {
-            let senderSession = try await senderConnection.connectAndAuthenticate(
-                accessToken: sender.accessToken,
-                deviceID: sender.deviceID,
-                supportedCapabilityProfiles: ["base"]
-            )
-            let receiverSession = try await receiverConnection.connectAndAuthenticate(
-                accessToken: receiver.accessToken,
-                deviceID: receiver.deviceID,
-                supportedCapabilityProfiles: ["base"]
-            )
-            XCTAssertEqual(senderSession.userID, sender.userID)
-            XCTAssertEqual(receiverSession.userID, receiver.userID)
-
-            let senderTransport = V2ProtobufSyncTransport(
-                wire: senderConnection,
-                protocolVersion: senderSession.protocolVersion
-            )
-            let directRoom = try await senderTransport.openDirectRoom(
-                operationID: try DirectRoomOperationID(UUID().uuidString.lowercased()),
-                targetUserID: receiver.userID
-            )
-            for messageIndex in 1 ... 3 {
-                let accepted = try await senderTransport.sendMessage(
-                    roomID: directRoom.roomID,
-                    clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
-                    text: "stranger-window-message-\(messageIndex)",
-                    media: [],
-                    mentions: []
-                )
-                XCTAssertEqual(accepted.roomID, directRoom.roomID)
-            }
-            await assertStrangerMessageIsRateLimited(
-                senderTransport: senderTransport,
-                roomID: directRoom.roomID
-            )
-        } catch {
-            await senderConnection.disconnect()
-            await receiverConnection.disconnect()
-            throw error
-        }
-
-        await senderConnection.disconnect()
-        await receiverConnection.disconnect()
-    }
-
-    /// Exercises the ordinary group command surface against the real local
-    /// gateway. Group roster facts stay on the explicit directory read: they
-    /// are never inferred from a direct-message projection or from a client
-    /// cache.
-    func testGroupCreationMembershipChangeAndRosterReadThroughGateway() async throws {
-        let owner = try await registerLocalAccount(displayName: "Group owner")
-        let initialMember = try await registerLocalAccount(displayName: "Initial group member")
-        let addedMember = try await registerLocalAccount(displayName: "Added group member")
-        let frameLimits = try V2FrameLimits(
-            maximumPayloadBytes: 65_536,
-            acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]
-        )
-        let endpoint = try V2RealtimeEndpoint(host: "localhost", port: 7_443)
-        let ownerConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
-        let initialMemberConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
-        let addedMemberConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
-
-        do {
-            let ownerSession = try await ownerConnection.connectAndAuthenticate(
-                accessToken: owner.accessToken,
-                deviceID: owner.deviceID,
-                supportedCapabilityProfiles: ["base"]
-            )
-            let initialMemberSession = try await initialMemberConnection.connectAndAuthenticate(
-                accessToken: initialMember.accessToken,
-                deviceID: initialMember.deviceID,
-                supportedCapabilityProfiles: ["base"]
-            )
-            let addedMemberSession = try await addedMemberConnection.connectAndAuthenticate(
-                accessToken: addedMember.accessToken,
-                deviceID: addedMember.deviceID,
-                supportedCapabilityProfiles: ["base"]
-            )
-            XCTAssertEqual(ownerSession.userID, owner.userID)
-            XCTAssertEqual(initialMemberSession.userID, initialMember.userID)
-            XCTAssertEqual(addedMemberSession.userID, addedMember.userID)
-
-            let ownerTransport = V2ProtobufSyncTransport(
-                wire: ownerConnection,
-                protocolVersion: ownerSession.protocolVersion
-            )
-            let initialMemberTransport = V2ProtobufSyncTransport(
-                wire: initialMemberConnection,
-                protocolVersion: initialMemberSession.protocolVersion
-            )
-            let addedMemberTransport = V2ProtobufSyncTransport(
-                wire: addedMemberConnection,
-                protocolVersion: addedMemberSession.protocolVersion
-            )
-            let groupOperationID = try GroupRoomOperationID(UUID().uuidString.lowercased())
-            _ = try await ownerTransport.beginGroupRoomCreation(
-                operationID: groupOperationID,
-                title: "  Local gateway group  "
-            )
-            _ = try await ownerTransport.appendGroupRoomCreationMembers(
-                operationID: groupOperationID,
-                memberUserIDs: [initialMember.userID]
-            )
-            let group = try await ownerTransport.finalizeGroupRoomCreation(operationID: groupOperationID)
-            XCTAssertEqual(group.title, "Local gateway group")
-            XCTAssertEqual(group.memberCount, 2)
-
-            let ownerPage = try await ownerTransport.listRoomMembers(
-                roomID: group.roomID,
-                cursor: nil,
-                pageSize: 10
-            )
-            XCTAssertEqual(ownerPage.actorRole, .owner)
-            XCTAssertEqual(Set(ownerPage.members.map(\.userID)), Set([owner.userID, initialMember.userID]))
-            XCTAssertNil(ownerPage.nextCursor)
-
-            let initialMemberPage = try await initialMemberTransport.listRoomMembers(
-                roomID: group.roomID,
-                cursor: nil,
-                pageSize: 10
-            )
-            XCTAssertEqual(initialMemberPage.actorRole, .member)
-            XCTAssertEqual(initialMemberPage.membershipRevision, ownerPage.membershipRevision)
-            XCTAssertEqual(Set(initialMemberPage.members.map(\.userID)), Set([owner.userID, initialMember.userID]))
-
-            let added = try await ownerTransport.changeMembership(
-                roomID: group.roomID,
-                operationID: try MembershipOperationID(UUID().uuidString.lowercased()),
-                targetUserID: addedMember.userID,
-                action: .add,
-                expectedMembershipRevision: ownerPage.membershipRevision
-            )
-            XCTAssertEqual(added.action, .add)
-            XCTAssertEqual(added.targetUserID, addedMember.userID)
-            XCTAssertGreaterThan(added.membershipRevision, ownerPage.membershipRevision)
-
-            let addedMemberPage = try await addedMemberTransport.listRoomMembers(
-                roomID: group.roomID,
-                cursor: nil,
-                pageSize: 10
-            )
-            XCTAssertEqual(addedMemberPage.actorRole, .member)
-            XCTAssertEqual(addedMemberPage.membershipRevision, added.membershipRevision)
-            XCTAssertEqual(
-                Set(addedMemberPage.members.map(\.userID)),
-                Set([owner.userID, initialMember.userID, addedMember.userID])
-            )
-            let acceptance = try await addedMemberTransport.sendMessage(
-                roomID: group.roomID,
-                clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
-                text: "accepted-after-membership-change",
-                media: [],
-                mentions: []
-            )
-            XCTAssertEqual(acceptance.roomID, group.roomID)
-        } catch {
-            await ownerConnection.disconnect()
-            await initialMemberConnection.disconnect()
-            await addedMemberConnection.disconnect()
-            throw error
-        }
-
-        await ownerConnection.disconnect()
-        await initialMemberConnection.disconnect()
-        await addedMemberConnection.disconnect()
-    }
-
     @MainActor
     func testPasswordRegistrationEstablishesLocalSession() throws {
         let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
@@ -805,6 +293,7 @@ final class IMAppLocalAccountUITests: XCTestCase {
     }
 }
 
+
 struct LocalE2EAccountCredentials: Sendable {
     let accountHandle: String
     let credentials: V2AuthCredentials
@@ -827,11 +316,22 @@ actor LocalE2EInstallationBindingStore: V2InstallationBindingStore {
     }
 }
 
+private enum LocalE2EContractError: Error {
+    case missingValue
+    case unexpectedHTTPStatus(Int)
+    case mismatchedCancellation
+}
+
+private func requireLocalE2E<T>(_ value: T?) throws -> T {
+    guard let value else { throw LocalE2EContractError.missingValue }
+    return value
+}
+
 func registerLocalAccount(displayName: String) async throws -> LocalE2EAccountCredentials {
     let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     let deviceID = try DeviceID(UUID().uuidString.lowercased())
     let registration = try await localJSONRequest(
-        endpoint: try XCTUnwrap(URL(string: "https://localhost:8443/v2/account-auth/password/register")),
+        endpoint: try requireLocalE2E(URL(string: "https://localhost:8443/v2/account-auth/password/register")),
         body: [
             "accountHandle": "dual_\(suffix.prefix(20))",
             "password": "local-clientkit-password",
@@ -840,10 +340,10 @@ func registerLocalAccount(displayName: String) async throws -> LocalE2EAccountCr
             "displayName": displayName,
         ]
     )
-    let assertion = try XCTUnwrap(registration["accountAssertion"] as? String)
+    let assertion = try requireLocalE2E(registration["accountAssertion"] as? String)
     let pending = try V2PendingDeviceCredentialRegistration.prepare(deviceID: deviceID, operationID: UUID())
     let issued = try await localJSONRequest(
-        endpoint: try XCTUnwrap(URL(string: "https://localhost:8443/v2/device-credentials")),
+        endpoint: try requireLocalE2E(URL(string: "https://localhost:8443/v2/device-credentials")),
         body: [
             "accountAssertion": assertion,
             "deviceID": deviceID.rawValue,
@@ -853,12 +353,12 @@ func registerLocalAccount(displayName: String) async throws -> LocalE2EAccountCr
     return try .init(
         accountHandle: "dual_\(suffix.prefix(20))",
         credentials: .init(
-            userID: .init(XCTUnwrap(issued["userID"] as? String)), deviceID: deviceID,
-            accessToken: XCTUnwrap(issued["accessToken"] as? String),
-            accessTokenExpiresAt: Date(timeIntervalSince1970: XCTUnwrap(issued["accessTokenExpiresAtMilliseconds"] as? Double) / 1000),
-            refreshCredential: XCTUnwrap(issued["refreshCredential"] as? String),
-            revocationCredential: .init(rawValue: XCTUnwrap(issued["revocationCredential"] as? String)),
-            revocationCredentialExpiresAt: Date(timeIntervalSince1970: XCTUnwrap(issued["revocationCredentialExpiresAtMilliseconds"] as? Double) / 1000)
+            userID: .init(requireLocalE2E(issued["userID"] as? String)), deviceID: deviceID,
+            accessToken: requireLocalE2E(issued["accessToken"] as? String),
+            accessTokenExpiresAt: Date(timeIntervalSince1970: requireLocalE2E(issued["accessTokenExpiresAtMilliseconds"] as? Double) / 1000),
+            refreshCredential: requireLocalE2E(issued["refreshCredential"] as? String),
+            revocationCredential: .init(rawValue: requireLocalE2E(issued["revocationCredential"] as? String)),
+            revocationCredentialExpiresAt: Date(timeIntervalSince1970: requireLocalE2E(issued["revocationCredentialExpiresAtMilliseconds"] as? Double) / 1000)
         )
     )
 }
@@ -1011,14 +511,14 @@ private func localJSONRequest(endpoint: URL, body: [String: String], cancellatio
     if let cancellation { payload["cancellation"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(cancellation)) }
     request.httpBody = try JSONSerialization.data(withJSONObject: payload)
     let (data, response) = try await URLSession.shared.data(for: request)
-    let http = try XCTUnwrap(response as? HTTPURLResponse)
-    XCTAssertEqual(http.statusCode, 200, "本机账户 HTTPS 合约应接受测试中的有效请求。")
-    let result = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    let http = try requireLocalE2E(response as? HTTPURLResponse)
+    guard http.statusCode == 200 else { throw LocalE2EContractError.unexpectedHTTPStatus(http.statusCode) }
+    let result = try requireLocalE2E(try JSONSerialization.jsonObject(with: data) as? [String: Any])
     if let cancellation {
-        let confirmation = try XCTUnwrap(result["registrationCancellation"])
+        let confirmation = try requireLocalE2E(result["registrationCancellation"])
         let decoded = try JSONDecoder().decode(V2DeviceRegistrationCancellation.self,
             from: JSONSerialization.data(withJSONObject: confirmation))
-        XCTAssertTrue(decoded == cancellation, "Issuer must confirm original cancellation binding.")
+        guard decoded == cancellation else { throw LocalE2EContractError.mismatchedCancellation }
     }
     return result
 }

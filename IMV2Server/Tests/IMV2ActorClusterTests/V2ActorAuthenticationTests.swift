@@ -200,8 +200,8 @@ struct V2ActorAuthenticationTests {
         }
     }
 
-    @Test("owner receipt queries expose only candidates for control privacy filtering")
-    func readersPrivacyBoundary() async throws {
+    @Test("a signed user reader-candidate query passes actor session admission")
+    func readerCandidateAdmission() async throws {
         let fixture = try Fixture()
         let grant = try await fixture.open()
         let query = try V2ActorReadReceiptReadersQueryWire(roomID: fixture.token.roomID,

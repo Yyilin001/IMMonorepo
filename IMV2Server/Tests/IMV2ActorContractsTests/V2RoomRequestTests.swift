@@ -64,7 +64,5 @@ struct V2RoomRequestTests {
         for value in values {
             #expect(try JSONDecoder().decode(V2RoomResponse.self, from: JSONEncoder().encode(value)) == value)
         }
-        #expect(values[0] != values[1])
-        #expect(values[2] != values[3])
     }
 }

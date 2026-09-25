@@ -94,6 +94,7 @@ xcodebuild test \
   -configuration Debug \
   -destination "platform=iOS Simulator,id=${destination_id}" \
   -only-testing:IMAppLocalAccountE2ETests/IMAppLocalAccountUITests \
+  -only-testing:IMAppTests/IMAppLocalAccountIntegrationTests \
   -resultBundlePath "${result_bundle}"
 
 test_summary="$(xcrun xcresulttool get test-results summary --path "${result_bundle}" --compact)"

@@ -9,6 +9,20 @@
       <BuildActionEntries>
          <BuildActionEntry
             buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "1BADBC1A2F73859E00E89B24"
+               BuildableName = "IMAppTests.xctest"
+               BlueprintName = "IMAppTests"
+               ReferencedContainer = "container:IMApp.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
             buildForRunning = "YES"
             buildForProfiling = "YES"
             buildForArchiving = "YES"
@@ -47,6 +61,16 @@
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
+               BlueprintIdentifier = "1BADBC1A2F73859E00E89B24"
+               BuildableName = "IMAppTests.xctest"
+               BlueprintName = "IMAppTests"
+               ReferencedContainer = "container:IMApp.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
                BlueprintIdentifier = "A1E2E3E4F567891011121311"
                BuildableName = "IMAppLocalAccountE2ETests.xctest"
                BlueprintName = "IMAppLocalAccountE2ETests"
@@ -54,6 +78,13 @@
             </BuildableReference>
          </TestableReference>
       </Testables>
+      <EnvironmentVariables>
+         <EnvironmentVariable
+            key = "IMV2_LOCAL_ACCOUNT_E2E"
+            value = "1"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+      </EnvironmentVariables>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"
