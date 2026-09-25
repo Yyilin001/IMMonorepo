@@ -60,7 +60,7 @@ part of this refactor.
   unchanged.
 - The hybrid-group batch append now executes through a write-path component
   with a borrowed transaction connection. The Store still owns ordered
-  preflight, owner/activation fencing, mismatch diagnosis, transaction commit,
+  request preparation, owner/activation fencing, mismatch diagnosis, transaction commit,
   and post-commit credit finalization.
 - The hybrid-group batch's authoritative preflight SQL, named PostgreSQL
   statement, SQLKit fallback, and row decoder now live together in a borrowed-
@@ -79,7 +79,9 @@ part of this refactor.
 - Scalar persistence (group event, rich direct room-log, and plain direct
   adapter) is in a same-module extension that receives the Store's transaction
   connection. Scalar replay, authorization, denial, and final shard reservation
-  remain in the Store's acceptance orchestration.
+  now execute in a dedicated acceptance-path extension on that borrowed
+  transaction. The Store retains transaction creation, authorization receipt
+  completion, and post-commit cache/credit finalization.
 - The scalar acceptance preflight, its lock-bearing SQL, and its replay/context
   row decoders are isolated behind a borrowed-connection loader. The Store
   still selects the owner/activation fence before loading and controls all
@@ -91,11 +93,13 @@ part of this refactor.
   by native PostgreSQL tests. Do not count those tests as fallback coverage.
 
 The PostgreSQL-backed room-write suite passed (342 tests, 1,398 seconds) before
-the latest fixture-only move; four representative database tests passed after
-that move. The suite stays serialized because tests reuse schema names. The
-CI Linux build has not yet been run for the finished decomposition.
+the current path extractions. Targeted database tests passed after each move;
+the scalar acceptance move also passed owner-fence, COMMIT-uncertainty, forward
+recovery, authorization-proof, and eight SIGKILL recovery cases. The suite
+stays serialized because tests reuse schema names. The CI Linux build has not
+yet been run for the finished decomposition.
 
-Still to extract: scalar acceptance orchestration, forward inbox orchestration,
-remaining shared/path row decoders, and larger integration test fixtures.
+Still to extract: forward inbox acceptance stages, remaining shared/path row
+decoders, and larger integration test fixtures.
 Repeat the complete PostgreSQL suite and CI Linux build before declaring the
 finished decomposition verified.

@@ -15,17 +15,17 @@ import SQLKit
 public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerValidatedForwardMessageWriteStore {
     private var database: any Database
     private var controlDatabase: (any Database)?
-    private var authorizationGrants: [String: V2DirectAuthorizationGrant]?
+    var authorizationGrants: [String: V2DirectAuthorizationGrant]?
     private var authorizationRecordedAt: Date?
     private var authorizationResolutionDatabase: (any Database)?
-    private var controlScopeRoomKinds: [UUID: String]?
+    var controlScopeRoomKinds: [UUID: String]?
     // Immutable for the lifetime of one scoped value copy. Shared caches and
     // credit actors keep their identities; no mutable ambient route is used.
-    private var ownerRoutes: [UUID: V2RoomShardRoute]?
-    private var activationScope: V2RoomActivationWriteScope?
-    private var forwardOwnerSourceRoomID: UUID?
+    var ownerRoutes: [UUID: V2RoomShardRoute]?
+    var activationScope: V2RoomActivationWriteScope?
+    var forwardOwnerSourceRoomID: UUID?
     private var controlPolicyScope: [V2DirectSendPolicyCache.Key: V2DirectSendControlPolicy]?
-    private let strangerMessagePolicy: V2StrangerMessagePolicy
+    let strangerMessagePolicy: V2StrangerMessagePolicy
     let contentReviewMode: V2ContentReviewMode
     private let directSendPolicyCache: V2DirectSendPolicyCache
     private let directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache
@@ -33,7 +33,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     private let hybridGroupShardCreditSnapshotCache:
         V2HybridGroupShardCreditSnapshotCache
     private let shardAdmissionCommandCreditPool: V2ShardAdmissionCommandCreditPool?
-    private let roomAdmissionCommandCreditPool: V2RoomAdmissionCommandCreditPool?
+    let roomAdmissionCommandCreditPool: V2RoomAdmissionCommandCreditPool?
     private let appendStageMetrics: V2DirectRoomLogAppendStageMetrics?
 
     /// 组合数据库与写入策略。
@@ -301,7 +301,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return policy
     }
 
-    private func senderIsActive(_ local: Bool?, roomID: UUID, senderID: UUID) throws -> Bool {
+    func senderIsActive(_ local: Bool?, roomID: UUID, senderID: UUID) throws -> Bool {
         try controlPolicy(roomID: roomID, senderID: senderID)?.sender.isActive ?? (local == true)
     }
 
@@ -423,7 +423,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     ///   - roomIDs: 待校验归属的房间标识。
     ///   - sql: 参与当前事务的数据库连接。
     /// - Throws: 存在未选定归属的房间时抛出。
-    private func requireSelectedOwners(_ roomIDs: [UUID], sql: any SQLDatabase) async throws {
+    func requireSelectedOwners(_ roomIDs: [UUID], sql: any SQLDatabase) async throws {
         let rooms = Set(roomIDs)
         if let ownerRoutes, !rooms.allSatisfy({ ownerRoutes[$0] != nil }) {
             throw V2RoomOwnerFenceError.ownerChanged
@@ -1729,7 +1729,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     ///
     /// - Parameter policy: 待判断的单聊策略快照。
     /// - Returns: 是否可作为缓存候选。
-    private func fastPlainDirectPolicyIsCacheCandidate(
+    func fastPlainDirectPolicyIsCacheCandidate(
         _ policy: V2DirectSendPolicyCache.Entry
     ) -> Bool {
         policy.senderIsActive
@@ -1921,7 +1921,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
     }
 
-    private static func isPlainDirectRoomLogBatchShape(
+    static func isPlainDirectRoomLogBatchShape(
         _ request: V2RoomWriteRequest
     ) -> Bool {
         let command = request.command
@@ -2257,341 +2257,6 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         )
     }
 
-    private func acceptInTransaction(
-        command: V2SendMessageCommand,
-        capacityProfile: V2CapacityProfile,
-        identifiers: V2AcceptanceIdentifiers,
-        now: Date,
-        roomID: UUID,
-        senderID: UUID,
-        cachedDirectPolicy: V2DirectSendPolicyCache.Entry?,
-        importedForward: ForwardInboxAuthorization? = nil,
-        fenceContext: V2ConfiguredRoomFenceContext? = nil,
-        transaction: any Database
-    ) async throws -> RoomWriteCommit {
-            do {
-            guard let sql = transaction as? any SQLDatabase else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            let clientMessageID = try uuid(command.clientMessageID)
-            try await acquireMessageOperationLock(
-                roomID: roomID,
-                senderID: senderID,
-                clientMessageID: clientMessageID,
-                sql: sql
-            )
-            let forwardSourceRoomID: UUID?
-            if importedForward == nil, let expectedSource = forwardOwnerSourceRoomID {
-                guard command.forwardedFrom != nil, let ownerRoutes else { throw V2RoomOwnerFenceError.ownerChanged }
-                try await v2RequireForwardOwners(ownerRoutes, sql: sql)
-                try await activationScope?.require([expectedSource, roomID], sql: sql)
-                forwardSourceRoomID = expectedSource
-            } else if importedForward == nil, let forwarded = command.forwardedFrom {
-                forwardSourceRoomID = try await v2LockForwardRooms(
-                    sourceMessageID: uuid(forwarded.messageID), targetRoomID: roomID, sql: sql
-                )
-            } else {
-                forwardSourceRoomID = nil
-            }
-            if forwardOwnerSourceRoomID == nil || authorizationGrants != nil {
-                if let fenceContext, let activationScope,
-                   command.forwardedFrom == nil, importedForward == nil,
-                   forwardOwnerSourceRoomID == nil, authorizationGrants == nil {
-                    try await fenceContext.requireSelectedOwnersAndActivations(
-                        roomIDs: [roomID], expectedRoutes: ownerRoutes,
-                        expectedKinds: controlScopeRoomKinds, scope: activationScope)
-                } else {
-                    try await requireSelectedOwners([roomID], sql: sql)
-                }
-            }
-            let loadedContext = try await ScalarMessagePreflight.load(
-                roomID: roomID,
-                senderID: senderID,
-                clientMessageID: clientMessageID,
-                now: now,
-                cachedDirectPolicy: cachedDirectPolicy,
-                sql: sql
-            )
-            let room = loadedContext.room
-            guard controlScopeRoomKinds == nil || controlScopeRoomKinds?[roomID] == room.kind else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            // Every accepted public message uses the room log. Historical
-            // deployment selectors must never restore per-user fanout writes.
-            let usesDirectRoomLog = room.kind == "direct"
-
-            // An accepted inbox is still live work until its terminal marker.
-            // Fence it before message replay can resume post-commit effects.
-            if let importedForward { try await v2AssertForwardInboxOwner(importedForward, sql: sql) }
-
-            // A completed command must replay its canonical result even if a
-            // later membership change removes the sender. Otherwise a lost
-            // acceptance response becomes an observable false rejection and
-            // clients cannot safely retain their immutable operation ID.
-            switch try loadedContext.existingOperation() {
-            case .accepted(let receipt, let fingerprint):
-                if fingerprint == command.fingerprint {
-                    guard v2PostgresTimestampCanEncode(receipt.createdAt) else {
-                        throw V2RoomWriteStoreError.corruptPersistenceState
-                    }
-                }
-                return .init(
-                    outcome: fingerprint == command.fingerprint ? .idempotent(receipt) : .idempotencyConflict
-                )
-            case .denied(let priorDenial, let fingerprint):
-                if fingerprint == command.fingerprint {
-                    guard v2PostgresTimestampCanEncode(priorDenial.createdAt) else {
-                        throw V2RoomWriteStoreError.corruptPersistenceState
-                    }
-                }
-                return .init(
-                    outcome: fingerprint == command.fingerprint ? .denied(priorDenial) : .idempotencyConflict
-                )
-            case nil:
-                break
-            }
-            guard room.capacityProfileID == capacityProfile.id else {
-                throw V2RoomWriteStoreError.capacityProfileMismatch
-            }
-            guard room.frozenAt == nil else {
-                throw V2RoomWriteStoreError.roomFrozen
-            }
-            let admissionSnapshot = try loadedContext.admissionSnapshot()
-            let admission = admissionSnapshot.room
-            let shard = admissionSnapshot.shard
-            guard admission.shardLeaseID == shard.leaseID,
-                  admission.shardLeaseGeneration == shard.generation
-            else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            try await v2AuthorizeContentWrite(
-                roomID: roomID, isGroup: room.kind == "group", frozenAt: room.frozenAt,
-                actorIsActive: try senderIsActive(admissionSnapshot.senderIsActive, roomID: roomID, senderID: senderID),
-                actorRole: admissionSnapshot.actorRole,
-                isMuted: admissionSnapshot.muted != false, sql: sql
-            )
-            let directContext: DirectMessageAcceptanceContext?
-            if room.kind == "direct" {
-                let context = try directMessageContext(from: loadedContext.directPolicySnapshot(), roomID: roomID, senderID: senderID)
-                directContext = context
-                if let restriction = context.restriction {
-                    let denied = try await persistDirectMessageDenied(
-                        fingerprint: command.fingerprint,
-                        roomID: command.roomID,
-                        roomUUID: roomID,
-                        senderID: senderID,
-                        clientMessageID: clientMessageID,
-                        sourceEventID: try uuid(identifiers.eventID),
-                        nextTimelineSequence: try roomWriteNextSequence(room.timelineSequence),
-                        createdAt: now,
-                        reason: restriction,
-                        currentCanSend: context.senderCanSend,
-                        sql: sql
-                    )
-                    return .init(outcome: .denied(denied))
-                }
-            } else {
-                directContext = nil
-            }
-            try await assertMentionsAuthorized(command.mentions, roomID: roomID, membershipRevision: room.membershipRevision, senderID: senderID, sql: sql)
-            let mediaPresentations = try await RoomWriteMediaAcceptance.presentations(
-                command: command,
-                importedForward: importedForward,
-                forwardSourceRoomID: forwardSourceRoomID,
-                senderID: senderID,
-                now: now,
-                sql: sql
-            )
-            try await assertReplyTarget(command.replyTo, roomID: roomID, actorID: senderID, sql: sql)
-            let roomState = try room.commandState(roomID: command.roomID, admission: admission)
-            let shardState = try shard.admissionState()
-            // The complete path owns a foreground PostgreSQL transaction and
-            // may already hold room, membership and policy locks. Never call
-            // the process credit actor here: a refill borrows from the same
-            // bounded pool and can deadlock when every foreground connection
-            // is waiting for that nested acquisition. Warm plain sends reserve
-            // credits before their transaction in the conditional fast path;
-            // this cold/rich path uses the exact conditional SQL reservation
-            // below as its final statement instead.
-            let shardStateForReduction = shardState
-            let result: V2SendMessageAcceptanceResult
-            // 房间日志是权威副本：不预留任何逐用户投递成本，被 @ 的成员只收到通知。
-            result = try roomLogReduction(
-                command: command,
-                roomState: roomState,
-                shardState: shardStateForReduction,
-                profile: capacityProfile.limits,
-                identifiers: identifiers,
-                now: now
-            )
-            guard case .accepted(let writeSet) = result else {
-                return .init(
-                    outcome: result.outcome(
-                        mediaPresentations: mediaPresentations,
-                        groupCapacityClass: room.kind == "group" ? room.capacityClass : nil
-                    )
-                )
-            }
-            // Do this only after the generic admission reducer accepts. A
-            // capacity rejection returns normally from this transaction, so
-            // consuming the stranger window earlier would be a silent quota
-            // loss despite no accepted message.
-            if let directContext, directContext.requiresStrangerQuota {
-                try await consumeDirectMessageQuota(
-                    senderID: senderID,
-                    recipientID: directContext.recipientID,
-                    policy: strangerMessagePolicy,
-                    now: now,
-                    sql: sql
-                )
-            }
-            let loadedDirectPolicyCacheEntry = loadedContext.directPolicyCacheEntry()
-            var updatedDirectPolicyCacheEntry = loadedDirectPolicyCacheEntry
-            // The reply marker is monotonic. Once a sender has an accepted
-            // message we no longer issue a no-op UPDATE for every later send.
-            // The actual value comes from the transaction snapshot, never
-            // from the process-local cache.
-            var replyMarkerAdvanced = false
-            if let directContext, !directContext.senderHasReplied {
-                replyMarkerAdvanced = try await markDirectSenderHasReplied(
-                    roomID: roomID,
-                    senderID: senderID,
-                    sql: sql
-                )
-                if replyMarkerAdvanced {
-                    updatedDirectPolicyCacheEntry = updatedDirectPolicyCacheEntry?.markingSenderHasReplied()
-                }
-            }
-
-            let timelineWriteSet = try withTimelineSequence(writeSet, timelineSequence: roomWriteNextSequence(room.timelineSequence))
-            let acceptedMessage = timelineWriteSet.acceptedMessage.materialized(
-                mediaPresentations: mediaPresentations,
-                groupCapacityClass: room.kind == "group" ? room.capacityClass : nil,
-
-                sourceEventID: timelineWriteSet.eventID,
-                acceptedMembershipRevision: try unsigned(room.membershipRevision),
-                directRecipientUserID: directContext.map { .init(uuid: $0.recipientID) },
-                projectionCreatedAtUnixMilliseconds: try roomWriteProjectionMilliseconds(timelineWriteSet.acceptedMessage.createdAt)
-            )
-            let acceptedState = try V2MessageProjectionState(
-                accepted: acceptedMessage,
-                forwardedFromMessageID: command.forwardedFrom?.messageID,
-                forwardedFromUserID: command.forwardedFrom?.senderUserID
-            )
-            let messageStateEventID = try uuid(timelineWriteSet.eventID)
-            let storedMessageState = try V2StoredMessageProjectionState(
-                state: acceptedState,
-                originEventID: messageStateEventID,
-                stateEventID: messageStateEventID,
-                createdAt: acceptedMessage.createdAt
-            )
-            let shardReservation = try shardAdmissionReservation(
-                from: shardStateForReduction,
-                to: timelineWriteSet.nextShardState
-            )
-            try await persist(
-                timelineWriteSet,
-                command: command,
-                mediaPresentations: mediaPresentations,
-                messageProjectionState: storedMessageState,
-                room: room,
-                sql: sql
-            )
-            if let directContext,
-               (!directContext.senderProfileVisibleToRecipient || directContext.senderCanSend != true || directContext.supportAccountID != nil) {
-                let recipientID = directContext.recipientID
-                let projectionChanges = try await appendDirectPostAcceptanceProjections(
-                    roomID: roomID,
-                    senderID: senderID,
-                    recipientID: recipientID,
-                    senderProfileVisibleToRecipient: directContext.senderProfileVisibleToRecipient,
-                    senderCanSend: directContext.senderCanSend,
-                    sourceEventID: messageStateEventID,
-                    createdAt: timelineWriteSet.acceptedMessage.createdAt,
-                    stateVersion: timelineWriteSet.acceptedMessage.timelineSequence,
-                    sql: sql
-                )
-                updatedDirectPolicyCacheEntry = updatedDirectPolicyCacheEntry?
-                    .applyingPostAcceptanceProjection(
-                        senderCapabilityInserted: projectionChanges.senderCapabilityInserted,
-                        recipientProfileInserted: projectionChanges.recipientProfileInserted
-                    )
-                if let supportAccountID = directContext.supportAccountID {
-                    try await openSupportSessionIfNeeded(
-                        roomID: roomID,
-                        senderID: senderID,
-                        supportAccountID: supportAccountID,
-                        createdAt: timelineWriteSet.acceptedMessage.createdAt,
-                        sql: sql
-                    )
-                }
-            }
-            // Keep the contended shard counter update as the final, narrow
-            // statement. Folding this lock into the large data-modifying CTE
-            // made the complete write graph wait behind one of nine shared
-            // shard rows and multiplied foreground connection occupancy.
-            // A rejection still throws inside this transaction, so all prior
-            // message/fan-out writes roll back atomically.
-            try await reserveShardAdmission(
-                shardReservation,
-                room: room,
-                retryAfterSeconds: capacityProfile.limits.retryAfterSeconds,
-                now: now,
-                sql: sql
-            )
-            let fastAppendCacheUpdate: V2DirectRoomLogFastAppendCache.Entry?
-            if usesDirectRoomLog,
-               Self.isPlainDirectRoomLogBatchShape(.init(
-                    command: command,
-                    capacityProfile: capacityProfile,
-                    identifiers: identifiers,
-                    now: now
-               )),
-               let cacheEntry = updatedDirectPolicyCacheEntry,
-               fastPlainDirectPolicyIsCacheCandidate(cacheEntry) {
-                fastAppendCacheUpdate = .init(
-                    policy: cacheEntry,
-                    roomShardID: room.roomShardID,
-                    capacityProfileID: room.capacityProfileID,
-                    membershipRevision: room.membershipRevision,
-                    shardState: try shard.admissionState()
-                )
-            } else {
-                fastAppendCacheUpdate = nil
-            }
-            let reciprocalReplyCacheUpdate: DirectReplyCacheUpdate?
-            if replyMarkerAdvanced,
-               let directContext,
-               let loadedDirectPolicyCacheEntry {
-                reciprocalReplyCacheUpdate = .init(
-                    key: .init(
-                        roomID: roomID,
-                        senderID: directContext.recipientID
-                    ),
-                    expectedDirectPairRevision: loadedDirectPolicyCacheEntry.directPairRevision
-                )
-            } else {
-                reciprocalReplyCacheUpdate = nil
-            }
-            return .init(
-                outcome: .accepted(acceptedMessage),
-                directPolicyCacheUpdate: updatedDirectPolicyCacheEntry,
-                directRoomLogFastAppendCacheUpdate: fastAppendCacheUpdate,
-                reciprocalDirectReplyCacheUpdate: reciprocalReplyCacheUpdate,
-                shardAdmissionCommandCredit: nil,
-                roomAdmissionHeatObservation: usesDirectRoomLog
-                    && roomAdmissionCommandCreditPool != nil
-                    && directContext?.supportAccountID == nil
-                    && command.media.isEmpty
-                    && command.mentions.isEmpty
-                    && command.replyTo == nil
-                    && command.forwardedFrom == nil
-                    ? roomID : nil
-            )
-            } catch {
-                throw error
-            }
-    }
 
     /// 只在 Fluent 已提交源事务之后运行。
     ///
@@ -2787,7 +2452,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     ///
     /// - Parameter initial: 预检得到的初始分片准入状态。
     /// - Returns: 预留结果。
-    private func shardAdmissionReservation(
+    func shardAdmissionReservation(
         from initial: ShardAdmissionState,
         to next: ShardAdmissionState
     ) throws -> ShardAdmissionReservation {
@@ -2807,7 +2472,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         )
     }
 
-    private func reserveShardAdmission(
+    func reserveShardAdmission(
         _ reservation: ShardAdmissionReservation,
         room: RoomRow,
         retryAfterSeconds: Int,
@@ -2883,7 +2548,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     ///   - clientMessageID: 客户端消息标识。
     ///   - sql: 参与当前事务的数据库连接。
     /// - Throws: 加锁失败时抛出。
-    private func acquireMessageOperationLock(
+    func acquireMessageOperationLock(
         roomID: UUID,
         senderID: UUID,
         clientMessageID: UUID,
@@ -3055,7 +2720,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     /// - Parameter policy: 单聊策略快照行。
     /// - Returns: 单聊消息接受上下文。
     /// - Throws: 快照字段非法时抛出。
-    private func directMessageContext(
+    func directMessageContext(
         from localPolicy: DirectMessagePolicySnapshotRow, roomID: UUID, senderID: UUID
     ) throws -> DirectMessageAcceptanceContext {
         let authority = try controlPolicy(roomID: roomID, senderID: senderID, recipientID: localPolicy.recipientUserID)
@@ -3104,7 +2769,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     ///   - now: 服务端统一授时时刻。
     ///   - sql: 参与当前事务的数据库连接。
     /// - Throws: 额度耗尽或写入失败时抛出。
-    private func consumeDirectMessageQuota(senderID: UUID, recipientID: UUID, policy: V2StrangerMessagePolicy, now: Date, sql: any SQLDatabase) async throws {
+    func consumeDirectMessageQuota(senderID: UUID, recipientID: UUID, policy: V2StrangerMessagePolicy, now: Date, sql: any SQLDatabase) async throws {
         let windowStart = try roomWriteStrangerWindowStart(now: now, interval: policy.window)
         let consumed = try await sql.raw("""
             INSERT INTO im_v2.stranger_message_windows (sender_user_id, recipient_user_id, window_started_at, message_count)
@@ -3132,7 +2797,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     /// - Returns: 是否发生了首次回复状态迁移。
     /// - Throws: 持久化状态损坏或写入失败时抛出。
     @discardableResult
-    private func markDirectSenderHasReplied(
+    func markDirectSenderHasReplied(
         roomID: UUID,
         senderID: UUID,
         sql: any SQLDatabase
@@ -3173,7 +2838,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     ///   - sql: 参与当前事务的数据库连接。
     /// - Returns: 拒绝的特有记录。
     /// - Throws: 持久化状态损坏或写入失败时抛出。
-    private func persistDirectMessageDenied(
+    func persistDirectMessageDenied(
         fingerprint: V2SendMessageFingerprint,
         roomID: RoomID,
         roomUUID: UUID,
@@ -3289,7 +2954,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     ///   - createdAt: 会话创建时间。
     ///   - sql: 参与当前事务的数据库连接。
     /// - Throws: 写入失败时抛出。
-    private func openSupportSessionIfNeeded(roomID: UUID, senderID: UUID, supportAccountID: UUID, createdAt: Date, sql: any SQLDatabase) async throws {
+    func openSupportSessionIfNeeded(roomID: UUID, senderID: UUID, supportAccountID: UUID, createdAt: Date, sql: any SQLDatabase) async throws {
         try await sql.raw("INSERT INTO im_v2.support_conversation_sessions (room_id, support_account_user_id, customer_user_id, state, opened_at, last_activity_at, closed_at) VALUES (\(bind: roomID), \(bind: supportAccountID), \(bind: senderID), 'open', \(bind: createdAt), \(bind: createdAt), NULL) ON CONFLICT (room_id) DO UPDATE SET last_activity_at = EXCLUDED.last_activity_at, state = CASE WHEN im_v2.support_conversation_sessions.state = 'resolved' THEN 'open' ELSE im_v2.support_conversation_sessions.state END, closed_at = CASE WHEN im_v2.support_conversation_sessions.state = 'resolved' THEN NULL ELSE im_v2.support_conversation_sessions.closed_at END").run()
     }
 
@@ -3302,7 +2967,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         try await PostgresV2UserStateEventOutbox(database: database).enqueue(event, sourceRoomID: .init(uuid: sourceRoomID), in: sql)
     }
 
-    private func withTimelineSequence(_ writeSet: V2MessageAcceptanceTransaction, timelineSequence: UInt64) throws -> V2MessageAcceptanceTransaction {
+    func withTimelineSequence(_ writeSet: V2MessageAcceptanceTransaction, timelineSequence: UInt64) throws -> V2MessageAcceptanceTransaction {
         let revisedMessage = try withTimelineSequence(writeSet.acceptedMessage, timelineSequence: timelineSequence)
         return .init(acceptedMessage: revisedMessage, eventID: writeSet.eventID, nextRoomState: writeSet.nextRoomState, nextShardState: writeSet.nextShardState)
     }
@@ -3547,7 +3212,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         }
     }
 
-    private func appendDirectPostAcceptanceProjections(
+    func appendDirectPostAcceptanceProjections(
         roomID: UUID,
         senderID: UUID,
         recipientID: UUID,
@@ -4006,7 +3671,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     }
 
 
-    private func assertMentionsAuthorized(_ mentions: [V2MentionTarget], roomID: UUID, membershipRevision: Int64, senderID: UUID, sql: any SQLDatabase) async throws {
+    func assertMentionsAuthorized(_ mentions: [V2MentionTarget], roomID: UUID, membershipRevision: Int64, senderID: UUID, sql: any SQLDatabase) async throws {
         guard !mentions.isEmpty else { return }
         guard mentions.count <= V2MessageCommandLimits.maxMentions,
               Set(mentions).count == mentions.count
@@ -4060,7 +3725,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         try V2MentionAuthorization.authorize(mentions, visibility: visibility, limits: .init(maximumTargets: V2MessageCommandLimits.maxMentions))
     }
 
-    private func assertReplyTarget(_ replyTo: V2MessageReplyReference?, roomID: UUID, actorID: UUID, sql: any SQLDatabase) async throws {
+    func assertReplyTarget(_ replyTo: V2MessageReplyReference?, roomID: UUID, actorID: UUID, sql: any SQLDatabase) async throws {
         guard let replyTo else { return }
         guard let targetID = UUID(uuidString: replyTo.messageID.rawValue),
               (try await sql.raw("""
@@ -4077,7 +3742,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     }
 }
 
-private extension V2SendMessageAcceptanceResult {
+extension V2SendMessageAcceptanceResult {
     func outcome(
         mediaPresentations: [V2MediaPresentation] = [],
         groupCapacityClass: V2GroupCapacityClass? = nil
@@ -4102,7 +3767,7 @@ private extension V2SendMessageAcceptanceResult {
 /// - Parameter current: 当前已持久化的序号。
 /// - Returns: 加一后的序号。
 /// - Throws: 当前值超出可编码范围时抛出。
-private func roomWriteNextSequence(_ current: Int64) throws -> UInt64 {
+func roomWriteNextSequence(_ current: Int64) throws -> UInt64 {
     guard current >= 0, current < Int64.max else {
         throw V2RoomWriteStoreError.corruptPersistenceState
     }
@@ -4121,7 +3786,7 @@ struct RoomRow: Decodable {
     let frozenAt: Date?
     enum CodingKeys: String, CodingKey { case kind = "room_kind", roomShardID = "room_shard_id", roomSequence = "room_sequence", timelineSequence = "timeline_sequence", membershipRevision = "membership_revision", capacityProfileID = "capacity_profile_id", capacityClass = "capacity_class", frozenAt = "frozen_at" }
 
-    fileprivate func commandState(roomID: RoomID, admission: AdmissionRow) throws -> V2RoomCommandState {
+    func commandState(roomID: RoomID, admission: AdmissionRow) throws -> V2RoomCommandState {
         try .init(
             roomID: roomID,
             nextRoomSequence: roomWriteNextSequence(roomSequence),
@@ -4158,7 +3823,7 @@ struct RoomRow: Decodable {
     }
 }
 
-private func roomLogReduction(
+func roomLogReduction(
     command: V2SendMessageCommand,
     roomState: V2RoomCommandState,
     shardState: ShardAdmissionState,
@@ -4400,7 +4065,7 @@ private struct ShardAdmissionMutationRow: Decodable {
     let applied: Int
 }
 
-private struct ShardAdmissionReservation: Sendable {
+struct ShardAdmissionReservation: Sendable {
     let leaseID: UUID
     let generation: Int64
     let commandDelta: Int
@@ -4769,7 +4434,7 @@ private struct DirectRoomPairRow: Decodable {
     enum CodingKeys: String, CodingKey { case lowerUserID = "lower_user_id", higherUserID = "higher_user_id" }
 }
 private struct DirectPolicyBooleanRow: Decodable { let value: Bool }
-private struct DirectMessageAcceptanceContext {
+struct DirectMessageAcceptanceContext {
     let recipientID: UUID
     let restriction: V2DirectMessageDenied.Reason?
     let requiresStrangerQuota: Bool
@@ -4778,11 +4443,11 @@ private struct DirectMessageAcceptanceContext {
     let senderHasReplied: Bool
     let supportAccountID: UUID?
 }
-private struct DirectReplyCacheUpdate {
+struct DirectReplyCacheUpdate {
     let key: V2DirectSendPolicyCache.Key
     let expectedDirectPairRevision: Int64
 }
-private struct RoomWriteCommit {
+struct RoomWriteCommit {
     let outcome: V2SendMessageOutcome
     let directPolicyCacheUpdate: V2DirectSendPolicyCache.Entry?
     let directRoomLogFastAppendCacheUpdate: V2DirectRoomLogFastAppendCache.Entry?
@@ -4820,7 +4485,7 @@ private struct RoomWriteCommit {
         self.roomAdmissionHeatObservation = roomAdmissionHeatObservation
     }
 }
-private struct DirectPostAcceptanceProjectionChanges {
+struct DirectPostAcceptanceProjectionChanges {
     let senderCapabilityInserted: Bool
     let recipientProfileInserted: Bool
 }
@@ -4929,7 +4594,7 @@ private extension DirectMessagePolicySnapshotRow {
     }
 }
 
-private extension V2DirectSendPolicyCache.Entry {
+extension V2DirectSendPolicyCache.Entry {
     /// 集合预检已在持有锁的情况下比较过持久配对与策略修订。
     ///
     /// 只有在那道围栏匹配之后，这些缓存派生字段才可被复用于未变更的判定表。
