@@ -2,7 +2,7 @@ import Foundation
 import IMV2Core
 import Logging
 
-/// 服务端进程共用的日志配置。仅调整 `imv2.` 首方 logger，避免开启依赖库的调试输出。
+/// 服务端进程共用的日志配置。仅调整标签以 `imv2.` 开头的本项目日志，避免开启依赖库的调试输出。
 public enum V2ServiceLogging {
     /// 日志配置无法从环境变量解析时抛出的错误。
     public enum ConfigurationError: Error, Equatable, Sendable {
@@ -10,13 +10,13 @@ public enum V2ServiceLogging {
         case invalidLevel
     }
 
-    /// 从环境变量解析首方服务的日志级别。
+    /// 从环境变量解析本项目服务端日志的级别。
     ///
     /// 未设置 `IM_V2_LOG_LEVEL` 时返回 `.info`；设置后先去掉首尾空白并转为小写。
     /// 无效值会抛错，避免服务在操作者误以为已启用某个级别时继续启动。
     ///
     /// - Parameter environment: 待读取的环境变量，通常为当前进程的环境。
-    /// - Returns: 首方服务 logger 使用的日志级别。
+    /// - Returns: 本项目服务端 logger 使用的日志级别。
     /// - Throws: `ConfigurationError.invalidLevel`，当变量值不是有效日志级别时。
     public static func applicationLevel(environment: [String: String]) throws -> Logger.Level {
         guard let value = environment["IM_V2_LOG_LEVEL"] else { return .info }
@@ -44,11 +44,11 @@ public enum V2ServiceLogging {
         }
     }
 
-    /// 为日志标签创建写入标准错误输出的 handler，并只调整首方标签的级别。
+    /// 为日志标签创建写入标准错误输出的 handler，并只调整本项目服务端日志的级别。
     ///
     /// - Parameters:
-    ///   - label: logger 标签；`imv2.` 前缀表示首方服务。
-    ///   - applicationLevel: 首方服务使用的日志级别。
+    ///   - label: logger 标签；以 `imv2.` 开头时视为本项目服务端日志。
+    ///   - applicationLevel: 本项目服务端日志使用的级别。
     /// - Returns: 按标签设置级别的 `StreamLogHandler`。
     static func handler(label: String, applicationLevel: Logger.Level) -> StreamLogHandler {
         var handler = StreamLogHandler.standardError(label: label)
