@@ -43,17 +43,14 @@ struct GatewayComposition {
                 app: app,
                 logger: logger
             )
-            let topology = prepared.topology
-            let frontdoor = prepared.frontdoor
-            let projection = prepared.projection
-            let roomOwners = prepared.roomOwners
-            let actorConfiguration = roomOwners.actorConfiguration
-            let actorFactory = try V2RoomServerActivationFactory(owners: roomOwners.ownerResources,
+            let actorFactory = try V2RoomServerActivationFactory(owners: prepared.roomOwners.ownerResources,
                 safetyActorUserID: configuration.contentReviewSafetyActorUserID)
-            let actors = try await V2RoomActorApplication.start(configuration: actorConfiguration,
-                ownerRouter: V2PostgresRoomShardRouter(database: topology.database),
-                roomDatabases: topology.roomShardDatabases,
-                factory: actorConfiguration.hostIdentity == nil ? nil : actorFactory)
+            let actors = try await V2RoomActorApplication.start(
+                configuration: prepared.roomOwners.actorConfiguration,
+                ownerRouter: V2PostgresRoomShardRouter(database: prepared.topology.database),
+                roomDatabases: prepared.topology.roomShardDatabases,
+                factory: prepared.roomOwners.actorConfiguration.hostIdentity == nil ? nil : actorFactory
+            )
             roomActorApplication = actors
             let roomServices = try GatewayRoomServicesAssembly.build(
                 configuration: configuration,
@@ -69,19 +66,23 @@ struct GatewayComposition {
             natsGroupWakeBroker = realtime.natsGroupWakeBroker
             sharedGroupWakeInterests = realtime.sharedGroupWakeInterests
             natsLiveActivityBroker = realtime.natsLiveActivityBroker
-            let foregroundGroupEventHints = realtime.foregroundGroupEventHints
             let recoveryDirectory = try GatewayRoomRecoveryDirectory.build(
-                configuration: configuration, topology: topology
+                configuration: configuration, topology: prepared.topology
             )
-            let recoveryStates = roomServices.roomQueries
             let latestVisible = try V2RoomLatestVisibleCommandService(reader: roomServices.roomQueries)
-            let roomRecovery = V2RoomRecoveryCommandService(directory: recoveryDirectory, states: recoveryStates, latestVisible: latestVisible)
+            let roomRecovery = V2RoomRecoveryCommandService(
+                directory: recoveryDirectory,
+                states: roomServices.roomQueries,
+                latestVisible: latestVisible
+            )
             let accountInterests = sharedGroupWakeInterests
                 ?? V2SharedGroupEventWakeInterests(underlying: V2LocalRoomChangeInterest())
             sharedGroupWakeInterests = accountInterests
-            let accountChanges = try V2AccountRoomChangeService(states: recoveryStates, interests: accountInterests)
+            let accountChanges = try V2AccountRoomChangeService(
+                states: roomServices.roomQueries, interests: accountInterests
+            )
             accountRoomChangeService = accountChanges
-            await frontdoor.connectionRegistry.configureAccountRoomChanges(accountChanges)
+            await prepared.frontdoor.connectionRegistry.configureAccountRoomChanges(accountChanges)
             let commands = try await GatewayCommandAssembly.build(
                 configuration: configuration,
                 prepared: prepared,
@@ -127,10 +128,10 @@ struct GatewayComposition {
             return .init(
                 server: server,
                 actors: actors,
-                actorConfiguration: actorConfiguration,
-                connectionRegistry: frontdoor.connectionRegistry,
-                foregroundGroupEventHints: foregroundGroupEventHints,
-                directRoomLogEventCache: projection.directRoomLogEventCache,
+                actorConfiguration: prepared.roomOwners.actorConfiguration,
+                connectionRegistry: prepared.frontdoor.connectionRegistry,
+                foregroundGroupEventHints: realtime.foregroundGroupEventHints,
+                directRoomLogEventCache: prepared.projection.directRoomLogEventCache,
                 backgroundWorkers: backgroundWorkers,
                 natsGroupWakeBroker: natsGroupWakeBroker,
                 sharedGroupWakeInterests: sharedGroupWakeInterests,
