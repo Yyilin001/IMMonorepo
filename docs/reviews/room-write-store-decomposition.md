@@ -94,6 +94,9 @@ part of this refactor.
 - Direct-policy snapshot decoding and cache projection conversions now live
   beside the direct acceptance path. Their field mapping and post-commit
   publication rules are unchanged.
+- Locked room, room-admission, and shard-admission snapshot row decoders now
+  live together outside the Store. Their sequence bounds and lease-generation
+  checks remain unchanged.
 - The non-PostgresNIO SQL fallback remains behavior-neutral but is not exercised
   by native PostgreSQL tests. Do not count those tests as fallback coverage.
 
@@ -109,6 +112,8 @@ covering 21 owner-fence, acceptance/recovery, rejection, and direct-finalization
 cases passed, as did all eight direct/forward authorization SIGKILL cases.
 After the direct-policy row move, four focused PostgreSQL tests covering 11
 policy-fence, revision, cache, and stranger-quota cases passed.
+After the room/admission row move, four focused PostgreSQL tests covering five
+scalar, hybrid-batch, direct-room-log, and activation-fence cases passed.
 
 Still to extract: remaining shared/path row decoders and larger integration
 test fixtures.
