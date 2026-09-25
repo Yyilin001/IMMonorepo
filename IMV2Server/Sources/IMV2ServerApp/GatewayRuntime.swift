@@ -58,6 +58,8 @@ enum GatewayRuntime {
         }
     }
 
+    /// 从同一进程环境读取网关与可选本地媒体配置。
+    /// 配置解析失败时标记为 `gateway_configuration`，此时尚未创建运行时资源。
     private static func loadConfigurations() throws -> (
         V2GatewayRuntimeConfiguration, V2LocalFilesystemMediaRuntimeConfiguration?
     ) {
@@ -72,6 +74,8 @@ enum GatewayRuntime {
         }
     }
 
+    /// 创建 HTTP 应用、数据库资源和事件循环，并标记启动失败阶段。
+    /// `GatewayInfrastructure.start` 负责清理自身创建过程中未完成的资源。
     private static func startInfrastructure(
         configuration: V2GatewayRuntimeConfiguration, logger: Logger
     ) async throws -> GatewayInfrastructure {
@@ -82,6 +86,10 @@ enum GatewayRuntime {
         }
     }
 
+    /// 绑定公网 TLS 监听，再在指标 HTTP 服务的运行作用域内启动后台任务。
+    ///
+    /// 停机时先排空上层任务，再关闭 TLS 与房间 Actor；只有这些资源退出后，
+    /// `run` 才会释放基础设施。绑定失败和 HTTP 运行失败分别保留自己的阶段标识。
     private static func runServices(
         configuration: V2GatewayRuntimeConfiguration,
         infrastructure: GatewayInfrastructure,
@@ -116,6 +124,7 @@ enum GatewayRuntime {
                     serverIsShutdown = true
                     try await stopRoomActors(composition: composition, logger: logger)
                     if let listenerShutdownError {
+                        // 停止接纳新连接失败时，也要先完成后续排空与清理再上抛。
                         throw V2StagedOperationalError(
                             stage: "gateway_listener_shutdown", error: listenerShutdownError
                         )
@@ -130,6 +139,12 @@ enum GatewayRuntime {
         }
     }
 
+    /// 停止接纳新连接、取消后台任务，并在期限内等待任务退出。
+    ///
+    /// 监听关闭错误暂存到排空完成后再报告；若任务未能排空，则立即退出进程，
+    /// 避免在仍有任务使用数据库时释放连接池和事件循环。
+    ///
+    /// - Returns: 停止接纳新连接时的错误；成功则为 `nil`。
     private static func stopAcceptingAndDrainWorkers(
         composition: GatewayComposition,
         workers: GatewayWorkerSupervisor,
@@ -158,6 +173,8 @@ enum GatewayRuntime {
         return listenerShutdownError
     }
 
+    /// 在后台任务排空后断开在线状态管理，并关闭相关 broker 等辅助服务。
+    /// 这些组件必须先于 TLS 服务和底层基础设施退出。
     private static func shutdownPresenceAndAuxiliaryServices(
         composition: GatewayComposition, logger: Logger
     ) async {
@@ -169,6 +186,8 @@ enum GatewayRuntime {
         logger.notice("IM V2 broker and presence shutdown finished")
     }
 
+    /// 在 TLS 服务关闭后，按 Actor 配置的期限等待房间 Actor 停止。
+    /// 超时直接失败退出；停止过程抛出的错误交由上层执行失败清理。
     private static func stopRoomActors(composition: GatewayComposition, logger: Logger) async throws {
         guard try await composition.actors.stop(
             deadline: .now + composition.actorConfiguration.runtime.drainTimeout.duration
