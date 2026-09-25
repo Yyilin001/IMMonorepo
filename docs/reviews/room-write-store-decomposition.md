@@ -97,6 +97,10 @@ part of this refactor.
 - Locked room, room-admission, and shard-admission snapshot row decoders now
   live together outside the Store. Their sequence bounds and lease-generation
   checks remain unchanged.
+- The message mutation-count row shared by scalar and direct batch writes now
+  lives beside those write paths. Six unreferenced private row decoders were
+  removed; Store-local decoders still used only by Store orchestration remain
+  private in the Store.
 - The non-PostgresNIO SQL fallback remains behavior-neutral but is not exercised
   by native PostgreSQL tests. Do not count those tests as fallback coverage.
 
@@ -114,6 +118,8 @@ After the direct-policy row move, four focused PostgreSQL tests covering 11
 policy-fence, revision, cache, and stranger-quota cases passed.
 After the room/admission row move, four focused PostgreSQL tests covering five
 scalar, hybrid-batch, direct-room-log, and activation-fence cases passed.
+After the shared mutation-row move, the scalar and direct-room-log PostgreSQL
+tests passed (three parameterized cases).
 
 Still to extract: remaining shared/path row decoders and larger integration
 test fixtures.

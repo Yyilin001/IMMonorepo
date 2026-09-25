@@ -3876,27 +3876,6 @@ private struct CurrentShardLeaseRow: Decodable {
     }
 }
 
-struct RoomLogMessageMutationRow: Decodable {
-    let roomCount: Int64
-    let admissionCount: Int64
-    let messageCount: Int64
-    let reviewCount: Int64
-    let mediaCount: Int64
-    let mentionCount: Int64
-    let eventCount: Int64
-
-    enum CodingKeys: String, CodingKey {
-        case roomCount = "room_count"
-        case admissionCount = "admission_count"
-        case messageCount = "message_count"
-        case reviewCount = "review_count"
-        case mediaCount = "media_count"
-        case mentionCount = "mention_count"
-        case eventCount = "event_count"
-    }
-}
-
-
 private struct PlainHybridGroupShardCreditSnapshotRow: Decodable {
     let roomID: UUID
     let kind: String
@@ -4222,12 +4201,6 @@ private struct DirectRoomLogBatchMutationCounts: Decodable {
 }
 
 private struct AuthorizationRow: Decodable { let authorized: Bool }
-private struct DirectRoomPairRow: Decodable {
-    let lowerUserID: UUID
-    let higherUserID: UUID
-    enum CodingKeys: String, CodingKey { case lowerUserID = "lower_user_id", higherUserID = "higher_user_id" }
-}
-private struct DirectPolicyBooleanRow: Decodable { let value: Bool }
 struct DirectMessageAcceptanceContext {
     let recipientID: UUID
     let restriction: V2DirectMessageDenied.Reason?
@@ -4361,14 +4334,6 @@ private struct DirectCapabilityMutationRow: Decodable {
         case pairCount = "pair_count"
     }
 }
-private struct DirectMessageSyncSequenceRow: Decodable {
-    let nextSequence: Int64
-    enum CodingKeys: String, CodingKey { case nextSequence = "next_sequence" }
-}
-private struct DirectMessageEventRow: Decodable {
-    let eventID: UUID
-    enum CodingKeys: String, CodingKey { case eventID = "event_id" }
-}
 private struct RoomWriteBatchRouteRow: Decodable {
     let roomID: UUID
     let roomKind: String
@@ -4382,43 +4347,8 @@ private struct RoomWriteBatchRouteRow: Decodable {
 }
 private struct DirectMessageWindowRow: Decodable { let messageCount: Int; enum CodingKeys: String, CodingKey { case messageCount = "message_count" } }
 private struct DirectReplyMarkerMutationRow: Decodable { let roomID: UUID; enum CodingKeys: String, CodingKey { case roomID = "room_id" } }
-private struct MessageMediaPresentationRow: Decodable {
-    let mediaID: UUID
-    let contentType: String
-    let byteCount: Int64
-
-    enum CodingKeys: String, CodingKey {
-        case mediaID = "media_id"
-        case contentType = "content_type"
-        case byteCount = "byte_count"
-    }
-
-    var presentation: V2MediaPresentation {
-        get throws {
-            try .init(
-                mediaID: .init(uuid: mediaID),
-                kind: V2MediaPresentation.kind(forContentType: contentType),
-                contentType: contentType,
-                byteCount: byteCount
-            )
-        }
-    }
-}
 private struct MentionSenderMembershipRow: Decodable { let role: String }
 private struct MentionMembershipRow: Decodable { let userID: UUID; let mentionable: Bool; enum CodingKeys: String, CodingKey { case userID = "user_id", mentionable } }
-private struct MentionRow: Decodable {
-    let kind: String; let userID: UUID?
-    enum CodingKeys: String, CodingKey { case kind = "mention_kind", userID = "mentioned_user_id" }
-    var target: V2MentionTarget {
-        get throws {
-            switch kind {
-            case "everyone": return .everyone
-            case "user": guard let userID else { throw V2RoomWriteStoreError.corruptPersistenceState }; return .user(.init(uuid: userID))
-            default: throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-        }
-    }
-}
 
 private func uuid<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
     guard let value = value.uuidValue else { throw V2RoomWriteStoreError.corruptPersistenceState }
