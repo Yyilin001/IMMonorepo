@@ -70,6 +70,9 @@ part of this refactor.
   write-path component. The Store still constructs validated inputs, acquires
   ordered operation locks, checks owner routes, owns the transaction, and
   finalizes credits after commit.
+- The direct room-log hot path's authoritative pair/policy/member preflight
+  and wide row decoder now live in a borrowed-connection component. Cached
+  policy facts remain hints checked against locked durable revisions.
 - Ordinary direct room-log batch persistence now executes in its own component
   after the Store validates input ordering and direct memberships on the same
   transaction connection. Its SQL and cardinality checks are unchanged.
@@ -89,6 +92,6 @@ that move. The suite stays serialized because tests reuse schema names. The
 CI Linux build has not yet been run for the finished decomposition.
 
 Still to extract: scalar acceptance orchestration, forward inbox orchestration,
-remaining direct/scalar preflight and row decoders, and larger integration test
+remaining scalar preflight and row decoders, and larger integration test
 fixtures. Repeat the complete PostgreSQL suite and CI Linux build before
 declaring the finished decomposition verified.
