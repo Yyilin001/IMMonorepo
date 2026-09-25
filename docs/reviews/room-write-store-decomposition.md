@@ -71,10 +71,13 @@ part of this refactor.
   adapter) is in a same-module extension that receives the Store's transaction
   connection. Scalar replay, authorization, denial, and final shard reservation
   remain in the Store's acceptance orchestration.
+- Forward-source version/reference validation and message-media locking now
+  share a transaction-borrowing media acceptance component. Forward inbox
+  transitions and commit/finalization ordering remain in the Store.
 - The non-PostgresNIO SQL fallback remains behavior-neutral but is not exercised
   by native PostgreSQL tests. Do not count those tests as fallback coverage.
 
-Still to extract: scalar acceptance orchestration, forwarded acceptance,
+Still to extract: scalar acceptance orchestration, forward inbox orchestration,
 remaining preflight/row decoders, and larger integration test fixtures. The complete
 PostgreSQL suite and CI Linux build remain release gates for the finished
 decomposition.
