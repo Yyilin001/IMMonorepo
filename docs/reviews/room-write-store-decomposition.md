@@ -73,6 +73,10 @@ part of this refactor.
 - The direct room-log hot path's authoritative pair/policy/member preflight
   and wide row decoder now live in a borrowed-connection component. Cached
   policy facts remain hints checked against locked durable revisions.
+- Scalar and ordered-batch direct first-message projection writes now share a
+  borrowed-connection component with their input and result row decoders. The
+  Store still owns the acceptance transaction and publishes cache changes
+  only after commit.
 - Ordinary direct room-log batch persistence now executes in its own component
   after the Store validates input ordering and direct memberships on the same
   transaction connection. Its SQL and cardinality checks are unchanged.
@@ -120,6 +124,8 @@ After the room/admission row move, four focused PostgreSQL tests covering five
 scalar, hybrid-batch, direct-room-log, and activation-fence cases passed.
 After the shared mutation-row move, the scalar and direct-room-log PostgreSQL
 tests passed (three parameterized cases).
+After the direct projection move, five PostgreSQL tests covering 11 warm
+authorization, timestamp, cache, room-log, and stranger-policy cases passed.
 
 Still to extract: remaining shared/path row decoders and larger integration
 test fixtures.
