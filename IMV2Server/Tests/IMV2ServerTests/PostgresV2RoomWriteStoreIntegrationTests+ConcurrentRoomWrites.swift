@@ -666,36 +666,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    internal func withForwardOwnerDatabases(mode: V2GroupCapacityClass,
-        _ operation: (any Database, any Database, any SQLDatabase, any SQLDatabase, RoomID) async throws -> Void
-    ) async throws {
-        guard let primary = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              let secondary = Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"),
-              primary != secondary, Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
-        let resources = makeV2DatabaseTestResources()
-        let secondaryID = DatabaseID(string: "forward-import-target")
-        do {
-            resources.databases.use(try .postgres(url: primary, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
-            resources.databases.use(try .postgres(url: secondary, maxConnectionsPerEventLoop: 4), as: secondaryID)
-            let sourceDB = resources.database(.psql), targetDB = resources.database(secondaryID)
-            let sourceSQL = try #require(sourceDB as? any SQLDatabase), targetSQL = try #require(targetDB as? any SQLDatabase)
-            for sql in [sourceSQL, targetSQL] {
-                guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else { throw TestConfigurationError.schemaAlreadyExists }
-                try await installSchema(on: sql)
-            }
-            let target = RoomID(uuid: UUID())
-            try await seedRoom(capacityClass: mode, on: sourceSQL)
-            try await seedRoom(capacityClass: mode, roomID: target.uuidValue!, shardID: "room-b", on: targetSQL)
-            try await operation(sourceDB, targetDB, sourceSQL, targetSQL, target)
-            for sql in [sourceSQL, targetSQL] { try await sql.raw("DROP SCHEMA im_v2 CASCADE").run() }
-            try await resources.shutdown()
-        } catch {
-            for database in [resources.database(.psql), resources.database(secondaryID)] {
-                if let sql = database as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
-            }
-            try? await resources.shutdown(); throw error
-        }
-    }
 
     @Test("multi-hop media forwards use exact active source references and reject late revocation", arguments: [V2GroupCapacityClass.standard, .large])
     func forwardedMediaUsesSourceReferences(capacityClass: V2GroupCapacityClass) async throws {

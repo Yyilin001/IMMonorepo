@@ -1892,82 +1892,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    internal func seedRoom(
-        capacityClass: V2GroupCapacityClass = .standard,
-        roomID: UUID = roomUUID,
-        shardID: String = "room-a",
-        on sql: any SQLDatabase
-    ) async throws {
-        let seededAt = Date(timeIntervalSince1970: 1_750_000_000)
-        try await sql.raw("""
-            INSERT INTO im_v2.public_user_profiles
-                (user_id, public_handle, display_name, revision, created_at, updated_at)
-            VALUES
-                (\(bind: senderUUID), 'sender012', '发送者', 1, \(bind: seededAt), \(bind: seededAt)),
-                (\(bind: memberTwoUUID), 'member015', '成员二', 1, \(bind: seededAt), \(bind: seededAt)),
-                (\(bind: memberThreeUUID), 'member016', '成员三', 1, \(bind: seededAt), \(bind: seededAt))
-            """).run()
-        try await sql.raw("""
-            INSERT INTO im_v2.rooms
-                (room_id, room_shard_id, capacity_profile_id, capacity_class)
-            VALUES
-                (\(bind: roomID), \(bind: shardID), 'standard', \(bind: capacityClass.rawValue))
-            """).run()
-        try await sql.raw("""
-            INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at)
-            VALUES (\(bind: roomID), \(bind: shardID), 0, \(bind: seededAt), \(bind: seededAt))
-            """).run()
-        try await sql.raw("""
-            INSERT INTO im_v2.group_rooms (room_id, owner_user_id, title, created_at)
-            VALUES (\(bind: roomID), \(bind: senderUUID), '集成测试群', \(bind: Date(timeIntervalSince1970: 1_750_000_000)))
-            """).run()
-        try await sql.raw("""
-            INSERT INTO im_v2.shard_admission_pools
-                (room_shard_id, capacity_profile_id, lease_id, generation, valid_until, command_window_limit)
-            VALUES (\(bind: shardID), 'standard', \(bind: leaseUUID), 1, \(bind: Date(timeIntervalSince1970: 1_750_000_100)), 10)
-            """).run()
-        try await sql.raw("""
-            INSERT INTO im_v2.room_admission
-                (room_id, eligible_member_count, command_window_limit, shard_lease_id, shard_lease_generation)
-            VALUES (\(bind: roomID), 3, 10, \(bind: leaseUUID), 1)
-            """).run()
-        try await sql.raw("""
-            INSERT INTO im_v2.room_memberships (room_id, user_id, joined_revision)
-            VALUES (\(bind: roomID), \(bind: senderUUID), 0)
-            """).run()
-        try await sql.raw("""
-            INSERT INTO im_v2.room_memberships (room_id, user_id, joined_revision)
-            VALUES (\(bind: roomID), \(bind: memberTwoUUID), 0),
-                   (\(bind: roomID), \(bind: memberThreeUUID), 0)
-            """).run()
-    }
-
-    internal func count(_ table: String, on sql: any SQLDatabase) async throws -> Int64 {
-        try #require(try await sql.raw("SELECT COUNT(*) AS value FROM \(unsafeRaw: table)").first(decoding: CountRow.self)).value
-    }
-
-    internal func directWriteArtifactCounts(
-        sql: any SQLDatabase
-    ) async throws -> DirectWriteArtifactCounts {
-        try #require(try await sql.raw("""
-            SELECT
-                (SELECT COUNT(*)::bigint FROM im_v2.messages) AS messages,
-                (SELECT COUNT(*)::bigint FROM im_v2.room_events) AS events,
-                (SELECT COUNT(*)::bigint FROM im_v2.message_projection_states) AS message_states
-            """).first(decoding: DirectWriteArtifactCounts.self))
-    }
 }
 
-internal struct DirectWriteArtifactCounts: Decodable, Equatable {
-    let messages: Int64
-    let events: Int64
-    let messageStates: Int64
-
-    enum CodingKeys: String, CodingKey {
-        case messages, events
-        case messageStates = "message_states"
-    }
-}
 
 internal struct CurrentV3ProjectionAssertionRow: Decodable, Sendable {
     let entityKey: String
