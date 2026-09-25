@@ -80,6 +80,10 @@ part of this refactor.
   adapter) is in a same-module extension that receives the Store's transaction
   connection. Scalar replay, authorization, denial, and final shard reservation
   remain in the Store's acceptance orchestration.
+- The scalar acceptance preflight, its lock-bearing SQL, and its replay/context
+  row decoders are isolated behind a borrowed-connection loader. The Store
+  still selects the owner/activation fence before loading and controls all
+  subsequent acceptance effects.
 - Forward-source version/reference validation and message-media locking now
   share a transaction-borrowing media acceptance component. Forward inbox
   transitions and commit/finalization ordering remain in the Store.
@@ -92,6 +96,6 @@ that move. The suite stays serialized because tests reuse schema names. The
 CI Linux build has not yet been run for the finished decomposition.
 
 Still to extract: scalar acceptance orchestration, forward inbox orchestration,
-remaining scalar preflight and row decoders, and larger integration test
-fixtures. Repeat the complete PostgreSQL suite and CI Linux build before
-declaring the finished decomposition verified.
+remaining shared/path row decoders, and larger integration test fixtures.
+Repeat the complete PostgreSQL suite and CI Linux build before declaring the
+finished decomposition verified.
