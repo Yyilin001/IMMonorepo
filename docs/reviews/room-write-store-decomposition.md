@@ -67,10 +67,14 @@ part of this refactor.
 - Ordinary direct room-log batch persistence now executes in its own component
   after the Store validates input ordering and direct memberships on the same
   transaction connection. Its SQL and cardinality checks are unchanged.
+- Scalar persistence (group event, rich direct room-log, and plain direct
+  adapter) is in a same-module extension that receives the Store's transaction
+  connection. Scalar replay, authorization, denial, and final shard reservation
+  remain in the Store's acceptance orchestration.
 - The non-PostgresNIO SQL fallback remains behavior-neutral but is not exercised
   by native PostgreSQL tests. Do not count those tests as fallback coverage.
 
-Still to extract: scalar acceptance, forwarded acceptance, remaining
-preflight/row decoders, and larger integration test fixtures. The complete
+Still to extract: scalar acceptance orchestration, forwarded acceptance,
+remaining preflight/row decoders, and larger integration test fixtures. The complete
 PostgreSQL suite and CI Linux build remain release gates for the finished
 decomposition.
