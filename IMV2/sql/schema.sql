@@ -941,43 +941,6 @@ CREATE TABLE im_v2.media_scan_outbox (
     CONSTRAINT media_scan_outbox_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'claimed'::text, 'completed'::text, 'paused'::text])))
 );
 
-CREATE TABLE im_v2.media_upload_grants (
-    upload_session_id uuid NOT NULL,
-    media_id uuid NOT NULL,
-    user_id uuid NOT NULL,
-    device_id uuid NOT NULL,
-    content_type text NOT NULL,
-    byte_count bigint NOT NULL,
-    expires_at timestamp with time zone NOT NULL,
-    state text DEFAULT 'pending'::text NOT NULL,
-    claim_token uuid,
-    lease_expires_at timestamp with time zone,
-    retry_count bigint DEFAULT 0 NOT NULL,
-    redeemed_at timestamp with time zone,
-    created_at timestamp with time zone NOT NULL,
-    CONSTRAINT media_upload_grants_byte_count_check CHECK ((byte_count > 0)),
-    CONSTRAINT media_upload_grants_check CHECK ((expires_at > created_at)),
-    CONSTRAINT media_upload_grants_check1 CHECK (((state = 'claimed'::text) = (claim_token IS NOT NULL))),
-    CONSTRAINT media_upload_grants_check2 CHECK (((state = 'claimed'::text) = (lease_expires_at IS NOT NULL))),
-    CONSTRAINT media_upload_grants_check3 CHECK (((state = 'consumed'::text) = (redeemed_at IS NOT NULL))),
-    CONSTRAINT media_upload_grants_content_type_check CHECK (((octet_length(content_type) > 0) AND (octet_length(content_type) <= 127))),
-    CONSTRAINT media_upload_grants_retry_count_check CHECK ((retry_count >= 0)),
-    CONSTRAINT media_upload_grants_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'claimed'::text, 'consumed'::text])))
-);
-
-CREATE TABLE im_v2.media_upload_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    media_id uuid NOT NULL,
-    content_type text NOT NULL,
-    byte_count bigint NOT NULL,
-    upload_session_id uuid NOT NULL,
-    expires_at timestamp with time zone NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    requesting_device_id uuid NOT NULL,
-    CONSTRAINT media_upload_operations_byte_count_check CHECK ((byte_count > 0))
-);
-
 CREATE TABLE im_v2.message_edit_operations (
     actor_user_id uuid NOT NULL,
     operation_id uuid NOT NULL,
@@ -2832,15 +2795,6 @@ ALTER TABLE ONLY im_v2.media_purge_outbox
 ALTER TABLE ONLY im_v2.media_scan_outbox
     ADD CONSTRAINT media_scan_outbox_pkey PRIMARY KEY (media_id);
 
-ALTER TABLE ONLY im_v2.media_upload_grants
-    ADD CONSTRAINT media_upload_grants_pkey PRIMARY KEY (upload_session_id);
-
-ALTER TABLE ONLY im_v2.media_upload_operations
-    ADD CONSTRAINT media_upload_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
-
-ALTER TABLE ONLY im_v2.media_upload_operations
-    ADD CONSTRAINT media_upload_operations_upload_session_id_key UNIQUE (upload_session_id);
-
 ALTER TABLE ONLY im_v2.message_edit_operations
     ADD CONSTRAINT message_edit_operations_event_id_key UNIQUE (event_id);
 
@@ -3220,10 +3174,6 @@ CREATE INDEX media_scan_outbox_claim_idx ON im_v2.media_scan_outbox USING btree 
 
 CREATE INDEX media_scan_outbox_completed_cleanup_idx ON im_v2.media_scan_outbox USING btree (completed_at, media_id) WHERE (state = 'completed'::text);
 
-CREATE INDEX media_upload_grants_claim_idx ON im_v2.media_upload_grants USING btree (state, lease_expires_at, expires_at) WHERE (state <> 'consumed'::text);
-
-CREATE INDEX media_upload_operations_cleanup_idx ON im_v2.media_upload_operations USING btree (created_at);
-
 CREATE INDEX message_edit_operations_cleanup_idx ON im_v2.message_edit_operations USING btree (created_at);
 
 CREATE INDEX message_forward_operations_cleanup_idx ON im_v2.message_forward_operations USING btree (created_at);
@@ -3504,21 +3454,6 @@ ALTER TABLE ONLY im_v2.media_purge_outbox
 
 ALTER TABLE ONLY im_v2.media_scan_outbox
     ADD CONSTRAINT media_scan_outbox_media_id_fkey FOREIGN KEY (media_id) REFERENCES im_v2.media_objects(media_id);
-
-ALTER TABLE ONLY im_v2.media_upload_grants
-    ADD CONSTRAINT media_upload_grants_media_id_fkey FOREIGN KEY (media_id) REFERENCES im_v2.media_objects(media_id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY im_v2.media_upload_grants
-    ADD CONSTRAINT media_upload_grants_upload_session_id_fkey FOREIGN KEY (upload_session_id) REFERENCES im_v2.media_objects(upload_session_id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY im_v2.media_upload_grants
-    ADD CONSTRAINT media_upload_grants_user_id_device_id_fkey FOREIGN KEY (user_id, device_id) REFERENCES im_v2.auth_devices(user_id, device_id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY im_v2.media_upload_operations
-    ADD CONSTRAINT media_upload_operations_media_id_fkey FOREIGN KEY (media_id) REFERENCES im_v2.media_objects(media_id);
-
-ALTER TABLE ONLY im_v2.media_upload_operations
-    ADD CONSTRAINT media_upload_operations_requesting_device_fk FOREIGN KEY (actor_user_id, requesting_device_id) REFERENCES im_v2.auth_devices(user_id, device_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY im_v2.message_edit_operations
     ADD CONSTRAINT message_edit_operations_message_id_fkey FOREIGN KEY (message_id) REFERENCES im_v2.messages(message_id);
@@ -3817,3 +3752,253 @@ CREATE INDEX registration_cancellation_pending_expiry_idx ON im_v2.device_regist
 
 ALTER TABLE ONLY im_v2.direct_authorization_receipts
     ADD CONSTRAINT direct_authorization_receipts_room_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);
+
+-- Resource subsystem additive schema.
+-- Apply on every physical owner database before enabling resource routes.
+-- Additive and replay-safe. Rollback: disable routes/workers; retain rows until uploads drain.
+CREATE TABLE im_v2.resource_catalog (
+    media_id uuid PRIMARY KEY REFERENCES im_v2.media_objects(media_id),
+    home_kind text NOT NULL CHECK(home_kind IN ('account','room')),
+    home_id uuid NOT NULL,
+    usage_kind text NOT NULL CHECK(usage_kind IN ('message_attachment','user_avatar','group_avatar')),
+    generation bigint NOT NULL DEFAULT 1 CHECK(generation > 0),
+    created_at timestamptz NOT NULL,
+    CHECK((usage_kind='user_avatar' AND home_kind='account')
+       OR (usage_kind IN ('message_attachment','group_avatar') AND home_kind='room'))
+);
+CREATE TABLE im_v2.resource_forward_outputs (
+    export_id uuid NOT NULL,
+    ordinal integer NOT NULL,
+    target_media_id uuid NOT NULL UNIQUE REFERENCES im_v2.media_objects(media_id),
+    reference_json jsonb NOT NULL,
+    byte_count bigint NOT NULL CHECK(byte_count > 0),
+    sha256 bytea NOT NULL CHECK(octet_length(sha256)=32),
+    created_at timestamptz NOT NULL,
+    PRIMARY KEY(export_id,ordinal),
+    FOREIGN KEY(export_id,ordinal) REFERENCES im_v2.message_forward_media_imports(export_id,ordinal)
+);
+
+CREATE TABLE im_v2.resource_group_avatars (
+    room_id uuid PRIMARY KEY REFERENCES im_v2.group_rooms(room_id),
+    media_id uuid REFERENCES im_v2.media_objects(media_id),
+    revision bigint NOT NULL CHECK(revision > 0),
+    updated_by_user_id uuid NOT NULL,
+    updated_at timestamptz NOT NULL
+);
+CREATE INDEX resource_group_avatars_media_idx ON im_v2.resource_group_avatars(media_id) WHERE media_id IS NOT NULL;
+CREATE TABLE im_v2.resource_group_avatar_operations (
+    actor_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    room_id uuid NOT NULL REFERENCES im_v2.group_rooms(room_id),
+    requested_media_id uuid REFERENCES im_v2.media_objects(media_id),
+    expected_revision bigint NOT NULL CHECK(expected_revision >= 0),
+    resulting_revision bigint NOT NULL CHECK(resulting_revision > 0),
+    room_sequence bigint NOT NULL CHECK(room_sequence > 0),
+    event_id uuid NOT NULL UNIQUE,
+    created_at timestamptz NOT NULL,
+    PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE FUNCTION im_v2.reject_group_avatar_operation_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'group avatar operation receipts are immutable' USING ERRCODE='23514';
+END;
+$$;
+CREATE TRIGGER resource_group_avatar_operations_immutable
+    BEFORE UPDATE OR DELETE ON im_v2.resource_group_avatar_operations FOR EACH ROW
+    EXECUTE FUNCTION im_v2.reject_group_avatar_operation_mutation();
+
+CREATE TABLE im_v2.resource_upload_sessions (
+    session_id uuid PRIMARY KEY,
+    media_id uuid NOT NULL UNIQUE REFERENCES im_v2.media_objects(media_id),
+    home_kind text NOT NULL CHECK (home_kind IN ('account','room')),
+    home_id uuid NOT NULL,
+    actor_user_id uuid NOT NULL,
+    device_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    request_json jsonb NOT NULL,
+    generation bigint NOT NULL DEFAULT 1 CHECK (generation > 0),
+    state text NOT NULL DEFAULT 'created' CHECK (state IN ('created','uploading','finalizing','completed','cancelled','expired','failed')),
+    storage_binding_id text NOT NULL,
+    storage_configuration_revision integer NOT NULL CHECK (storage_configuration_revision > 0),
+    placement_json jsonb NOT NULL,
+    expires_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL,
+    claim_token uuid,
+    lease_expires_at timestamptz,
+    retry_at timestamptz,
+    UNIQUE(home_kind,home_id,actor_user_id,operation_id)
+);
+CREATE INDEX resource_upload_sessions_pending_idx ON im_v2.resource_upload_sessions(retry_at,session_id) WHERE state = 'finalizing';
+CREATE INDEX resource_upload_sessions_expiry_idx ON im_v2.resource_upload_sessions(expires_at,session_id) WHERE state IN ('created','uploading');
+CREATE TABLE im_v2.resource_blob_placements (
+    placement_id uuid PRIMARY KEY,
+    media_id uuid NOT NULL REFERENCES im_v2.media_objects(media_id),
+    generation bigint NOT NULL CHECK(generation > 0),
+    reference_json jsonb NOT NULL,
+    byte_count bigint NOT NULL CHECK(byte_count > 0),
+    sha256 bytea NOT NULL CHECK(octet_length(sha256) = 32),
+    state text NOT NULL CHECK(state IN ('active','retiring','deleted')),
+    verified_at timestamptz NOT NULL,
+    UNIQUE(media_id,generation)
+);
+
+CREATE TABLE im_v2.resource_variants (
+    variant_id uuid NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    media_id uuid NOT NULL REFERENCES im_v2.media_objects(media_id),
+    generation bigint NOT NULL,
+    recipe text NOT NULL CHECK(recipe IN ('avatar','preview')),
+    recipe_version integer NOT NULL DEFAULT 1,
+    size integer NOT NULL,
+    reference_json jsonb NOT NULL,
+    byte_count bigint,
+    sha256 bytea,
+    state text NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','ready','deleted')),
+    created_at timestamptz NOT NULL,
+    PRIMARY KEY(media_id,generation,recipe,recipe_version,size),
+    CHECK(state <> 'ready' OR (byte_count IS NOT NULL AND sha256 IS NOT NULL AND byte_count > 0 AND octet_length(sha256)=32))
+);
+CREATE INDEX resource_variants_media_state_idx ON im_v2.resource_variants(media_id,state);
+CREATE TABLE im_v2.resource_imports (
+    actor_user_id uuid NOT NULL,
+    device_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    home_json jsonb NOT NULL,
+    request_json jsonb NOT NULL,
+    target_media_id uuid NOT NULL,
+    session_json jsonb,
+    state text NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','copying','processing','ready','cancelled','failed')),
+    created_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL,
+    PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE INDEX resource_imports_pending_idx ON im_v2.resource_imports(updated_at,operation_id) WHERE state IN ('pending','copying','processing');
+CREATE TABLE im_v2.resource_import_holds (
+    actor_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    media_id uuid NOT NULL REFERENCES im_v2.media_objects(media_id),
+    reference_json jsonb NOT NULL,
+    request_json jsonb NOT NULL,
+    byte_count bigint NOT NULL CHECK(byte_count > 0),
+    sha256 bytea NOT NULL CHECK(octet_length(sha256) = 32),
+    content_type text NOT NULL CHECK(length(content_type) BETWEEN 1 AND 127),
+    released_at timestamptz,
+    created_at timestamptz NOT NULL,
+    PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE INDEX resource_import_holds_active_idx ON im_v2.resource_import_holds(media_id) WHERE released_at IS NULL;
+
+-- Same-home provider migration. Source/output references survive process failure.
+CREATE TABLE im_v2.resource_storage_migrations (
+    operation_id uuid PRIMARY KEY,
+    media_id uuid NOT NULL REFERENCES im_v2.media_objects(media_id),
+    generation bigint NOT NULL CHECK(generation > 0),
+    variant_id uuid,
+    request_json jsonb NOT NULL,
+    source_json jsonb NOT NULL,
+    destination_json jsonb NOT NULL,
+    destination_placement_id uuid NOT NULL UNIQUE,
+    byte_count bigint NOT NULL CHECK(byte_count > 0),
+    sha256 bytea NOT NULL CHECK(octet_length(sha256)=32),
+    state text NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','copying','switched')),
+    claim_token uuid,
+    lease_expires_at timestamptz,
+    attempt_count bigint NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+    retry_at timestamptz NOT NULL,
+    switched_at timestamptz,
+    source_released_at timestamptz,
+    created_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL,
+    CHECK((state='copying') = (claim_token IS NOT NULL)),
+    CHECK((state='copying') = (lease_expires_at IS NOT NULL)),
+    CHECK((state='switched') = (switched_at IS NOT NULL)),
+    CHECK(source_released_at IS NULL OR (state='switched' AND isfinite(source_released_at)))
+);
+CREATE UNIQUE INDEX resource_storage_migrations_active_media_idx ON im_v2.resource_storage_migrations(media_id) WHERE state IN ('pending','copying');
+CREATE INDEX resource_storage_migrations_recovery_idx ON im_v2.resource_storage_migrations(updated_at,operation_id) WHERE state IN ('pending','copying');
+CREATE INDEX resource_storage_migrations_retained_idx ON im_v2.resource_storage_migrations(media_id) WHERE source_released_at IS NULL;
+
+-- Message-operation permanent recovery fence.
+-- Apply to every room owner before enabling message-operation recovery.
+-- Permanent negative receipts have no cascading room/message FK or retention cleanup.
+CREATE TABLE im_v2.message_operation_closures (
+    room_id uuid NOT NULL,
+    sender_user_id uuid NOT NULL,
+    client_message_id uuid NOT NULL,
+    fingerprint_version smallint NOT NULL CHECK (fingerprint_version = 3),
+    request_fingerprint bytea NOT NULL CHECK (octet_length(request_fingerprint) = 32),
+    closed_at timestamptz NOT NULL CHECK (isfinite(closed_at)),
+    PRIMARY KEY (room_id, sender_user_id, client_message_id)
+);
+
+CREATE FUNCTION im_v2.reject_closed_message_acceptance() RETURNS trigger
+LANGUAGE plpgsql VOLATILE AS $$
+BEGIN
+    -- VOLATILE executes the second query using a fresh READ COMMITTED snapshot after
+    -- a waiting operation lock. A conditional append's older outer snapshot is insufficient.
+    IF current_setting('transaction_isolation') <> 'read committed' THEN
+        RAISE EXCEPTION 'message acceptance requires read committed isolation' USING ERRCODE = '25000';
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'v2-message-operation:' || NEW.room_id::text || ':' || NEW.sender_user_id::text || ':' || NEW.client_message_id::text, 0));
+    IF EXISTS (SELECT 1 FROM im_v2.message_operation_closures
+        WHERE room_id = NEW.room_id AND sender_user_id = NEW.sender_user_id AND client_message_id = NEW.client_message_id) THEN
+        RAISE EXCEPTION 'message operation is permanently closed'
+            USING ERRCODE = '23514', CONSTRAINT = 'message_operation_permanently_closed';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER message_send_completion_close_fence BEFORE INSERT ON im_v2.message_send_completions
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_closed_message_acceptance();
+
+CREATE FUNCTION im_v2.reject_message_operation_closure_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'message operation closure is permanent' USING ERRCODE = '23514';
+END;
+$$;
+CREATE TRIGGER message_operation_closures_immutable BEFORE UPDATE OR DELETE ON im_v2.message_operation_closures
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_operation_closure_mutation();
+
+-- Permanent group-avatar operation closure is part of the canonical owner schema.
+-- Permanent closure has no cascading FK or retention deletion.
+CREATE TABLE im_v2.resource_group_avatar_closures (
+    actor_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    requested_media_id uuid,
+    expected_revision bigint NOT NULL CHECK(expected_revision >= 0),
+    closed_at timestamptz NOT NULL CHECK(isfinite(closed_at)),
+    PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE FUNCTION im_v2.fence_group_avatar_terminal_result() RETURNS trigger
+LANGUAGE plpgsql VOLATILE AS $$
+BEGIN
+    IF current_setting('transaction_isolation') <> 'read committed' THEN
+        RAISE EXCEPTION 'group avatar recovery requires read committed isolation' USING ERRCODE='25000';
+    END IF;
+    -- Swift UUID.uuidString uses uppercase; match the existing group command lock.
+    PERFORM pg_advisory_xact_lock(hashtextextended(upper(NEW.actor_user_id::text) || ':' || upper(NEW.operation_id::text), 0));
+    -- VOLATILE obtains a fresh snapshot after waiting for the operation lock.
+    IF TG_TABLE_NAME='resource_group_avatar_operations' AND EXISTS(
+        SELECT 1 FROM im_v2.resource_group_avatar_closures WHERE actor_user_id=NEW.actor_user_id AND operation_id=NEW.operation_id) THEN
+        RAISE EXCEPTION 'group avatar operation is permanently closed'
+            USING ERRCODE='23514', CONSTRAINT='group_avatar_operation_permanently_closed';
+    ELSIF TG_TABLE_NAME='resource_group_avatar_closures' AND EXISTS(
+        SELECT 1 FROM im_v2.resource_group_avatar_operations WHERE actor_user_id=NEW.actor_user_id AND operation_id=NEW.operation_id) THEN
+        RAISE EXCEPTION 'group avatar operation is already committed'
+            USING ERRCODE='23514', CONSTRAINT='group_avatar_operation_already_committed';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS resource_group_avatar_operations_close_fence ON im_v2.resource_group_avatar_operations;
+CREATE TRIGGER resource_group_avatar_operations_close_fence BEFORE INSERT ON im_v2.resource_group_avatar_operations
+    FOR EACH ROW EXECUTE FUNCTION im_v2.fence_group_avatar_terminal_result();
+DROP TRIGGER IF EXISTS resource_group_avatar_closures_commit_fence ON im_v2.resource_group_avatar_closures;
+CREATE TRIGGER resource_group_avatar_closures_commit_fence BEFORE INSERT ON im_v2.resource_group_avatar_closures
+    FOR EACH ROW EXECUTE FUNCTION im_v2.fence_group_avatar_terminal_result();
+DROP TRIGGER IF EXISTS resource_group_avatar_closures_immutable ON im_v2.resource_group_avatar_closures;
+CREATE TRIGGER resource_group_avatar_closures_immutable BEFORE UPDATE OR DELETE ON im_v2.resource_group_avatar_closures
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_group_avatar_operation_mutation();

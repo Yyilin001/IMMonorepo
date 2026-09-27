@@ -60,6 +60,7 @@ enum IMV2AccountServerApp {
         let runtimeTasks = RuntimeTaskSupervisor()
         let passwordWorker = V2PasswordHashWorker()
         var roomActor: V2RoomActorApplication?
+        var resourceProfileRuntime: V2ResourceProfilePresentationService?
         var stage = "account_composition"
         do {
             resources.databases.use(
@@ -167,6 +168,8 @@ enum IMV2AccountServerApp {
                 configuration: actorConfiguration, ownerRouter: roomRouter,
                 roomDatabases: roomDatabases)
             roomActor = actor
+            V2VaporMessageOperationRecoveryRoutes(authenticator: authenticator,
+                messages: .init(directory: actor.directory, callTimeout: try .init(10000))).register(on: authenticatedAccountRoutes)
             if let localMediaConfiguration {
                 let provider = try V2LocalFilesystemMediaProvider(
                     rootDirectory: localMediaConfiguration.rootDirectory,
@@ -175,16 +178,7 @@ enum IMV2AccountServerApp {
                 )
                 try await provider.prepare()
                 let media = V2MediaService(
-                    store: PostgresV2MediaStore(database: database),
-                    limits: try V2MediaUploadLimits(maximumBytes: localMediaConfiguration.maximumBytes)
-                )
-                let uploadProviderSessions = try V2MediaUploadProviderSessionService(
-                    store: PostgresV2MediaUploadSessionStore(database: database),
-                    provider: provider
-                )
-                let downloadProviderSessions = try V2MediaProviderSessionService(
-                    store: PostgresV2MediaDownloadSessionStore(database: database),
-                    provider: provider
+                    store: PostgresV2MediaStore(database: database)
                 )
                 let mediaEventLoops = Array(applicationEventLoops.makeIterator())
                 for url in Set(configuration.roomShardStorage.map(\.databaseURL) + configuration.userShardStorage.map(\.databaseURL)) where accountStorageDatabases[url] == nil {
@@ -202,15 +196,90 @@ enum IMV2AccountServerApp {
                     try await V2SchemaReadiness.verify(database: owner)
                     mediaOwners[storage.shardID] = .init(database: owner, provider: provider)
                 }
+                let backendConfiguration = try V2ResourceBackendConfiguration(environment: ProcessRuntimeEnvironment(), defaultDirectory: localMediaConfiguration.rootDirectory)
+                var storageValues: [V2StorageBinding: V2LocalResourceStorage] = [:]
+                var transportValues: [any V2UploadTransport] = []
+                for entry in backendConfiguration.entries {
+                    let binding = try entry.binding
+                    let directory = URL(fileURLWithPath: entry.directory, isDirectory: true)
+                    let uploadProvider: V2LocalFilesystemMediaProvider
+                    if directory.standardizedFileURL == localMediaConfiguration.rootDirectory {
+                        uploadProvider = provider
+                    } else {
+                        let base = localMediaConfiguration.publicBaseURL.appendingPathComponent("v2/resource-backends")
+                            .appendingPathComponent(entry.id).appendingPathComponent(String(entry.revision))
+                        uploadProvider = try .init(rootDirectory: directory, targetBaseURL: base, signingKey: localMediaConfiguration.signingKey)
+                        try await uploadProvider.prepare()
+                        try V2VaporLocalFilesystemMediaRoutes(provider: uploadProvider, fileIO: app.fileio,
+                            publicBaseURL: base, maximumUploadBytes: localMediaConfiguration.maximumBytes)
+                            .register(on: app.grouped("v2", "resource-backends", .constant(entry.id), .constant(String(entry.revision))))
+                    }
+                    storageValues[binding] = try .init(root: directory.appendingPathComponent("sealed-resources"), binding: binding)
+                    transportValues.append(V2LocalResourceUploadTransport(binding: binding, provider: uploadProvider))
+                }
+                let configuredStorages = storageValues
+                let configuredTransports = transportValues
+                let resourceRegistry = try V2ResourceStorageRegistry(storages: Array(configuredStorages.values), defaultBinding: backendConfiguration.defaultBinding)
+                let resourceDelivery = try V2LocalResourceDelivery(registry: resourceRegistry,
+                    baseURL: localMediaConfiguration.publicBaseURL, keyID: "local-v1", keys: ["local-v1": localMediaConfiguration.signingKey])
+                V2VaporResourceByteRoutes(delivery: resourceDelivery).register(on: app)
+                for owner in accountStorageDatabases.values {
+                    try await V2BoundMediaProvider(database: owner, registry: resourceRegistry, delivery: resourceDelivery, transports: configuredTransports).verifyReferencedBindings()
+                }
+                for storage in configuration.roomShardStorage {
+                    guard let owner = accountStorageDatabases[storage.databaseURL] else { throw V2ResourceProviderError.configurationInvalid }
+                    mediaOwners[storage.shardID] = .init(database: owner,
+                        provider: try V2BoundMediaProvider(database: owner, registry: resourceRegistry, delivery: resourceDelivery, transports: configuredTransports))
+                }
+                let resourceRouter = V2ResourceHomeRouter(controlDatabase: database, rooms: roomRouter,
+                    ownerDatabases: roomDatabases, authorization: .init(directory: actor.directory))
+                let imageWorkerPath = ProcessInfo.processInfo.environment["IMV2_RESOURCE_IMAGE_WORKER"]
+                    ?? URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+                        .appendingPathComponent("IMV2ResourceImageWorker").path
+                let transformer: V2LocalResourceTransformer?
+                if FileManager.default.isExecutableFile(atPath: imageWorkerPath) {
+                    transformer = try .init(executable: URL(fileURLWithPath: imageWorkerPath),
+                        temporaryDirectory: localMediaConfiguration.rootDirectory.appendingPathComponent("processing"))
+                } else { transformer = nil }
+                if let transformer { try await transformer.verifyReadiness() }
+                let resourceService = try V2ResourceService(resolve: { home, usage, user, device in
+                    try await resourceRouter.resolve(home: home, usage: usage, actorUserID: user, deviceID: device)
+                }, registry: resourceRegistry,
+                    transports: configuredTransports,
+                    maximumBytes: localMediaConfiguration.maximumBytes, supportsAvatars: transformer != nil,
+                    allocate: { binding in
+                        guard let storage = configuredStorages[binding] else { throw V2ResourceProviderError.configurationInvalid }
+                        return try storage.allocate()
+                    })
+                V2VaporResourceRoutes(authenticator: authenticator, service: resourceService).register(on: authenticatedAccountRoutes)
+                let resourceProfiles = V2ResourceProfilePresentationService(controlDatabase: database,
+                    authorization: .init(directory: actor.directory), avatars: .init(delivery: resourceDelivery))
+                resourceProfileRuntime = resourceProfiles
+                V2VaporProfilePresentationBatchRoutes(authenticator: authenticator, service: resourceProfiles).register(on: authenticatedAccountRoutes)
+                let groupAvatars = V2ResourceGroupAvatarPresentationService(controlDatabase: database,
+                    rooms: roomRouter, ownerDatabases: roomDatabases, authorization: .init(directory: actor.directory),
+                    avatars: .init(delivery: resourceDelivery))
+                V2VaporGroupAvatarPresentationRoutes(authenticator: authenticator, service: groupAvatars).register(on: authenticatedAccountRoutes)
+                let groupAvatarCommands = V2ResourceGroupAvatarCommandService(controlDatabase: database,
+                    administration: .init(directory: actor.directory))
+                V2VaporGroupAvatarCommandRoutes(authenticator: authenticator, service: groupAvatarCommands).register(on: authenticatedAccountRoutes)
+                V2VaporGroupAvatarRecoveryRoutes(authenticator: authenticator, service: groupAvatarCommands).register(on: authenticatedAccountRoutes)
+                let resourceImports = V2ResourceImportService(resources: resourceService, resolve: { home, usage, user, device in
+                    try await resourceRouter.resolve(home: home, usage: usage, actorUserID: user, deviceID: device)
+                }, sources: .init(controlDatabase: database, rooms: roomRouter, ownerDatabases: roomDatabases,
+                    authorization: .init(directory: actor.directory), avatarAuthorization: { key, media, variant, user, device in
+                        _ = try await resourceProfiles.authorizeAvatarImport(key: key, mediaID: media, variantID: variant,
+                            actorUserID: user, deviceID: device)
+                    }), registry: resourceRegistry, transports: configuredTransports)
+                V2VaporResourceImportRoutes(authenticator: authenticator, service: resourceImports).register(on: authenticatedAccountRoutes)
+
                 let mediaDownloads = V2RoomRefMediaDownloadClient(
-                    local: .init(media: media, providerSessions: downloadProviderSessions),
+                    local: .init(media: media, providerSessions: try V2MediaProviderSessionService(
+                        store: PostgresV2MediaDownloadSessionStore(database: database),
+                        provider: V2BoundMediaProvider(database: database, registry: resourceRegistry, delivery: resourceDelivery, transports: configuredTransports))),
                     rooms: roomRouter, owners: mediaOwners, controlDatabase: database,
                     authorization: .init(directory: actor.directory)
                 )
-                V2VaporMediaUploadRoutes(
-                    authenticator: authenticator,
-                    handler: .init(edge: .init(media: media, providerSessions: uploadProviderSessions))
-                ).register(on: authenticatedAccountRoutes)
                 V2VaporMediaEdgeRoutes(
                     authenticator: authenticator,
                     handler: .init(resolver: mediaDownloads)
@@ -222,32 +291,36 @@ enum IMV2AccountServerApp {
                     maximumUploadBytes: localMediaConfiguration.maximumBytes
                 ).register(on: app)
 
-                let scanner = try V2MediaScanWorker(
-                    store: PostgresV2MediaScanStore(database: database),
-                    provider: V2LocalEICARMediaScanner(provider: provider)
-                )
-                let purger = try V2MediaPurgeWorker(
-                    store: PostgresV2MediaPurgeStore(database: database),
-                    provider: provider
-                )
-                await runtimeTasks.start {
-                    while !Task.isCancelled {
-                        do {
-                            async let scanReport = scanner.runOnce(limit: 16)
-                            async let purgeReport = purger.runOnce(limit: 16)
-                            _ = try await (scanReport, purgeReport)
-                        } catch is CancellationError {
-                            break
-                        } catch {
-                            // 此本地扫描器仅用于诊断；这里不得记录标识符、路径或字节内容。
-                            V2ServiceLogging.logWorkerFailure(logger, worker: "local_media_maintenance_worker", error: error)
-                        }
-                        do {
-                            try await v2Sleep(for: .milliseconds(200))
-                        } catch is CancellationError {
-                            break
-                        } catch {
-                            break
+                // Every distinct physical owner hosts resource sessions and durable jobs.
+                for ownerDatabase in accountStorageDatabases.values {
+                    let variants = transformer.map { transformer in
+                        V2ResourceVariantProcessor(database: ownerDatabase, registry: resourceRegistry, transformer: transformer,
+                            allocate: { binding in
+                                guard let storage = configuredStorages[binding] else { throw V2ResourceProviderError.configurationInvalid }
+                                return try storage.allocate()
+                            })
+                    }
+                    let scanner = try V2MediaScanWorker(store: PostgresV2MediaScanStore(database: ownerDatabase),
+                        provider: V2PlacementMediaScanner(database: ownerDatabase, registry: resourceRegistry,
+                            scanner: V2LocalResourceScanner(), variants: variants))
+                    let purger = try V2MediaPurgeWorker(store: PostgresV2MediaPurgeStore(database: ownerDatabase),
+                        provider: V2PlacementMediaPurger(database: ownerDatabase, registry: resourceRegistry,
+                            uploads: try V2BoundMediaProvider(database: ownerDatabase, registry: resourceRegistry, delivery: resourceDelivery, transports: configuredTransports)))
+                    let retention = try V2MediaRetentionWorker(store: PostgresV2MediaRetentionStore(database: ownerDatabase))
+                    let recovery = V2ResourceRecoveryWorker(database: ownerDatabase, service: resourceService)
+                    await runtimeTasks.start {
+                        while !Task.isCancelled {
+                            do {
+                                try await recovery.runOnce(limit: 16)
+                                try await resourceImports.runOnce(database: ownerDatabase, limit: 16)
+                                _ = try await scanner.runOnce(limit: 16)
+                                _ = try await retention.runOnce(limit: 16)
+                                _ = try await purger.runOnce(limit: 16)
+                            } catch is CancellationError { break
+                            } catch {
+                                V2ServiceLogging.logWorkerFailure(logger, worker: "local_media_maintenance_worker", error: error)
+                            }
+                            do { try await v2Sleep(for: .milliseconds(200)) } catch { break }
                         }
                     }
                 }
@@ -274,10 +347,7 @@ enum IMV2AccountServerApp {
                     policy: configuration.publicIdentityLookupRateLimit
                 )
             ).register(on: authenticatedAccountRoutes)
-            V2VaporProfileViewRoutes(
-                authenticator: authenticator,
-                profiles: .init(store: PostgresV2ProfileViewStore(database: database))
-            ).register(on: authenticatedAccountRoutes)
+            V2VaporProfileViewRoutes(authenticator: authenticator).register(on: authenticatedAccountRoutes)
             let profileUpdateStore = PostgresV2ProfileUpdateStore(database: database)
             V2VaporProfileUpdateRoutes(
                 authenticator: authenticator,
@@ -288,7 +358,7 @@ enum IMV2AccountServerApp {
                 presentations: V2RoomRefProfilePresentationClient(
                     aliases: PostgresV2ProfilePresentationStore(database: database),
                     directory: actor.directory
-                )
+                ), authorizedProfiles: resourceProfileRuntime
             ).register(on: authenticatedAccountRoutes)
             let invitationCoordinator = V2ActorInvitationCoordinator(
                 controlDatabase: database,
@@ -354,6 +424,7 @@ enum IMV2AccountServerApp {
             await runtimeTasks.cancelAndWait(logger: logger)
             try await passwordWorker.shutdown()
             try await app.shutdown()
+            await resourceProfileRuntime?.close()
             guard try await actor.stop(deadline: .now + actor.configuration.drainTimeout.duration) else {
                 logger.critical("IM V2 account room actor drain exceeded its shutdown deadline",
                     metadata: V2SafeLogMetadata.drainTimeout(stage: "account_actor_shutdown"))
@@ -368,6 +439,7 @@ enum IMV2AccountServerApp {
             await runtimeTasks.cancelAndWait(logger: logger)
             try? await passwordWorker.shutdown()
             try? await app.shutdown()
+            await resourceProfileRuntime?.close()
             if let roomActor {
                 do {
                     guard try await roomActor.stop(deadline: .now + roomActor.configuration.drainTimeout.duration) else {

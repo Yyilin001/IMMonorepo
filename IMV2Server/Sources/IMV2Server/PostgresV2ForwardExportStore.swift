@@ -43,7 +43,8 @@ public struct PostgresV2ForwardExportStore: Sendable {
     /// 已存在同一用户、操作、源消息与目标房间的导出时逐字段复核其不可变绑定，
     /// 包括源房间与源修订；不匹配即判定幂等冲突，而不会改写信封或重新授予。
     /// 新导出会校验源房间归属、消息可见性与未撤回状态、修订一致、富文本合法、
-    /// 媒体引用全部未撤销且可用未过期，并以 UUID 顺序锁定消息引用的全部媒体。
+    /// 媒体引用全部未撤销且可用，并以 UUID 顺序锁定消息引用的全部媒体。
+    /// 已绑定的新资源不受首次上传绑定期限限制；旧媒体仍沿用原期限合同。
     ///
     /// - Parameters:
     ///   - actorUserID: 发起转发的用户。
@@ -184,10 +185,13 @@ public struct PostgresV2ForwardExportStore: Sendable {
             // 要么在导出事务提交后的下一轮看到这份导出固定引用。
             for reference in references {
                 guard let media = try await sql.raw("""
-                    SELECT media_id, upload_session_id, content_type, byte_count, state, expires_at
+                    SELECT media_id, upload_session_id, content_type, byte_count, state, expires_at,
+                           EXISTS(SELECT 1 FROM im_v2.resource_catalog c
+                             WHERE c.media_id=media_objects.media_id AND c.home_kind='room'
+                               AND c.home_id=\(bind:sourceRoom) AND c.usage_kind='message_attachment') AS bound_resource
                     FROM im_v2.media_objects WHERE media_id = \(bind: reference.mediaID) FOR UPDATE
                     """).first(decoding: ExportMediaRow.self),
-                      media.state == "available", media.expiresAt.microseconds > currentTime.microseconds,
+                      media.state == "available", media.boundResource || media.expiresAt.microseconds > currentTime.microseconds,
                       media.byteCount > 0
                 else { throw V2ForwardExportError.mediaUnavailable }
                 mediaByID[media.mediaID] = .init(mediaID: media.mediaID, uploadSessionID: media.uploadSessionID,
@@ -288,8 +292,10 @@ private struct ExportReferenceRow: Decodable {
 private struct ExportMediaRow: Decodable {
     let mediaID: UUID; let uploadSessionID: UUID; let contentType: String
     let byteCount: Int64; let state: String; let expiresAt: V2PostgresTimestamp
+    let boundResource: Bool
     enum CodingKeys: String, CodingKey {
         case mediaID = "media_id"; case uploadSessionID = "upload_session_id"; case contentType = "content_type"
         case byteCount = "byte_count"; case state; case expiresAt = "expires_at"
+        case boundResource = "bound_resource"
     }
 }

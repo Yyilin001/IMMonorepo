@@ -275,13 +275,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await sourceSQL.raw("INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at) VALUES (\(bind: targetRoom.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
                 let copiedMessage = try #require(try await targetSQL.raw("SELECT message_id AS value FROM im_v2.messages").first(decoding: ForwardInboxUUIDAssertion.self))
                 let downloads = V2MediaEdgeHTTPHandler(resolver: V2RoutedMediaDownloadService(
-                    local: .init(media: .init(store: PostgresV2MediaStore(database: sourceDB), limits: try .init(maximumBytes: 1_024)), providerSessions: try .init(store: PostgresV2MediaDownloadSessionStore(database: sourceDB), provider: sourceProvider)),
+                    local: .init(media: .init(store: PostgresV2MediaStore(database: sourceDB)), providerSessions: try .init(store: PostgresV2MediaDownloadSessionStore(database: sourceDB), provider: sourceProvider)),
                     rooms: V2PostgresRoomShardRouter(database: sourceDB), owners: ["room-b": .init(database: targetDB, provider: targetProvider)],
                     controlDatabase: sourceDB, now: { now }))
                 for (row, value) in zip(mapped, ["first attachment", "second attachment"]) {
                     let id = MediaID(uuid: row.value)
                     let download = try await downloads.downloadTarget(actorUserID: .init(uuid: memberTwoUUID), deviceID: device, rawMediaID: id.rawValue, rawRoomID: targetRoom.rawValue, rawMessageID: copiedMessage.value.uuidString)
-                    #expect(try await targetProvider.readDownloadedObject(mediaID: id, targetURL: #require(URL(string: download.url))) == Data(value.utf8))
+                    #expect(try await targetProvider.readDownloadedObject(mediaID: id, targetURL: download.plan.url) == Data(value.utf8))
                 }
             }
         }
@@ -336,7 +336,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 if scenario == "cancel" { try await Task.sleep(for: .seconds(3_600)) }
             }
             let service = V2RoutedMediaDownloadService(
-                local: .init(media: .init(store: PostgresV2MediaStore(database: controlDB), limits: try .init(maximumBytes: 1_024)), providerSessions: try .init(store: PostgresV2MediaDownloadSessionStore(database: controlDB), provider: provider)),
+                local: .init(media: .init(store: PostgresV2MediaStore(database: controlDB)), providerSessions: try .init(store: PostgresV2MediaDownloadSessionStore(database: controlDB), provider: provider)),
                 rooms: V2PostgresRoomShardRouter(database: controlDB), owners: ["room-b": .init(database: ownerDB, provider: signing)],
                 controlDatabase: controlDB, now: { clock.now() })
             let handler = V2MediaEdgeHTTPHandler(resolver: service)
@@ -372,7 +372,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
                 clock.set([now])
                 let result = try await download()
-                #expect(try await provider.readDownloadedObject(mediaID: media, targetURL: #require(URL(string: result.url))) == bytes)
+                #expect(try await provider.readDownloadedObject(mediaID: media, targetURL: result.plan.url) == bytes)
                 #expect(try await count("im_v2.media_download_grants WHERE state = 'consumed'", on: ownerSQL) == 9)
                 #expect(try await count("im_v2.media_download_grants WHERE state = 'claimed'", on: ownerSQL) == 0)
                 #expect(try await count("im_v2.media_download_grants", on: controlSQL) == 0)
@@ -381,7 +381,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             if scenario == "standard" || scenario == "room-log" {
                 let result = try await download()
-                #expect(try await provider.readDownloadedObject(mediaID: media, targetURL: #require(URL(string: result.url))) == bytes)
+                #expect(try await provider.readDownloadedObject(mediaID: media, targetURL: result.plan.url) == bytes)
                 #expect(try await ownerSQL.raw("SELECT count(*) AS value FROM im_v2.media_download_grants WHERE state = 'consumed' AND message_room_id = \(bind: room.uuidValue!) AND message_id = \(bind: message.messageID.uuidValue!)").first(decoding: CountRow.self)?.value == 1)
                 #expect(try await count("im_v2.media_download_grants", on: controlSQL) == 0)
                 #expect(await signing.calls == 1)
@@ -1986,7 +1986,7 @@ private actor MessageMediaTestProvider: V2MediaObjectProvider {
     init(provider: V2LocalFilesystemMediaProvider, beforeReturn: @escaping @Sendable () async throws -> Void) {
         self.provider = provider; self.beforeReturn = beforeReturn
     }
-    func issueDownloadTarget(mediaID: MediaID, expiresAt: Date) async throws -> V2MediaProviderObjectTarget {
+    func issueDownloadTarget(mediaID: MediaID, expiresAt: Date) async throws -> V2ResourceTransferPlan {
         calls += 1
         defer { drained = true }
         let result = try await provider.issueDownloadTarget(mediaID: mediaID, expiresAt: expiresAt)

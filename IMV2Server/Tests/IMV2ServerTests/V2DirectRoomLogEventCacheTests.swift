@@ -295,6 +295,38 @@ struct V2DirectRoomLogEventCacheTests {
         #expect((await cache.snapshot()).hits == 2)
     }
 
+    @Test("author sampling on prepared pages respects exact output bounds and preserves shared encoded hits")
+    func boundedPreparedAuthorSample() async throws {
+        let room = RoomID(uuid: UUID())
+        let cache = V2DirectRoomLogEventCache(configuration: .init(maximumEvents: 64, maximumBytes: 1_048_576,
+            maximumEventsPerRoom: 64, shardCount: 1))
+        for sequence in 1...20 {
+            await cache.recordCommittedPlainDirectMessage(try message(roomID: room, sequence: UInt64(sequence),
+                membershipRevision: 7, groupCapacityClass: .large))
+        }
+        let encoded = V2PreparedGroupEventPageCache(configuration: .init(maximumEntries: 8, maximumBytes: 1_048_576, shardCount: 1))
+        func pull(sample: Bool, limit: Int = 48 * 1_024, joined: UInt64 = 7) async throws -> V2DirectRoomLogEventCache.PreparedPageResult {
+            var context = preparedContext(requestID: sample ? 2 : 1, cache: encoded, maximumGroupEventPagePayloadBytes: limit)
+            context.captureAuthorSample = sample
+            return try await cache.preparedPage(roomID: room, actorJoinedRevision: joined, actorLeftRevision: nil,
+                currentHighWatermark: 20, afterRoomSequence: 0, pageSize: 20, context: context)
+        }
+        guard case .prepared(let first) = try await pull(sample: false),
+              case .prepared(let second) = try await pull(sample: true) else { throw V2GroupEventLogError.corruptPersistenceState }
+        #expect(first.authorSample == nil)
+        let sample = try #require(second.authorSample)
+        #expect(sample.events.count == 16)
+        #expect(V2AuthorPresentationHints(page: sample)?.authors.count == 8)
+        #expect(first.frame.payload == second.frame.payload && encoded.snapshot().hits == 1)
+        guard case .prepared(let small) = try await pull(sample: true, limit: 1_024) else { throw V2GroupEventLogError.corruptPersistenceState }
+        let wire = try V2ServerProtobufFrameCodec.decode(small.frame)
+        #expect(wire.groupEventPage.events.count < 16)
+        #expect(small.authorSample?.events.map(\.roomSequence) == wire.groupEventPage.events.map(\.roomSequence))
+        guard case .miss = try await pull(sample: true, joined: 8) else {
+            Issue.record("a sampled prepared page must still pass the fresh membership fence"); return
+        }
+    }
+
     @Test("prepared pages never cross join or leave membership revisions")
     func preparedPagePreservesMembershipEpoch() async throws {
         let roomID = try RoomID(UUID().uuidString)

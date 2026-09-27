@@ -197,8 +197,11 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     private(set) var authenticationMessage: String?
     @ObservationIgnored private var accountAttachmentUploader: V2ForegroundConversationAttachmentUploader?
     @ObservationIgnored private var accountAttachmentStager: V2FileConversationAttachmentStager?
+    @ObservationIgnored private var accountProfileRepository: V2ProfileRepository?
     @ObservationIgnored private var mediaCacheDownloader: V2ForegroundConversationMediaDownloader?
     private(set) var mediaThumbnailCache: V2LocalMediaThumbnailCache? = nil
+    private(set) var avatarPipeline: V2AvatarPipeline? = nil
+    @ObservationIgnored private var avatarInvalidationTask: Task<Void, Never>?
     private(set) var conversationStore: V2ConversationListStore?
     private(set) var contactsStore: V2ContactsStore?
     private(set) var privacySettingsStore: V2PrivacySettingsStore?
@@ -207,6 +210,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     private(set) var pushWakeSettingsStore: V2PushWakeSettingsStore?
     private(set) var deviceSessionsStore: V2DeviceSessionsStore?
     private(set) var groupInvitationStore: V2GroupInvitationStore?
+    private(set) var pendingGroupAvatarsStore: V2PendingGroupAvatarsStore?
 
     init(
         startupMode: StartupMode = .production,
@@ -633,7 +637,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
 
     /// 撤下账号界面，停止任务并关闭捕获的本地存储。
     ///
-    /// 先隐藏页面，再依次等待观察、运行时、索引和媒体任务；上传结束后才删暂存。
+    /// 先隐藏页面，再依次等待观察、运行时、索引和媒体任务；保留账户暂存供下次恢复。
     /// 清理失败进入不可用 route，不伪装成已经完成。
     ///
     /// - Parameter nextRoute: 全部本地收尾成功后要进入的 route。
@@ -641,10 +645,25 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         authenticationObserver.stop()
         groupInvitationStore?.invalidate()
         let thumbnails = mediaThumbnailCache
+        let closingAvatarInvalidations = avatarInvalidationTask
+        closingAvatarInvalidations?.cancel(); avatarInvalidationTask = nil
+        let oldAvatarPipeline = avatarPipeline
+        avatarPipeline = nil
         mediaThumbnailCache = nil
         let indexer = messageSearchIndexTask
         let localStore = messageSearchLocalStore
         let pushSettings = pushWakeSettingsStore
+        let closingDownloader = mediaCacheDownloader
+        let closingUploader = accountAttachmentUploader
+        let closingStager = accountAttachmentStager
+        let closingProfiles = accountProfileRepository
+        accountProfileRepository = nil
+        let closingPendingGroupAvatars = pendingGroupAvatarsStore
+        pendingGroupAvatarsStore?.suspend()
+        pendingGroupAvatarsStore = nil
+        mediaCacheDownloader = nil
+        accountAttachmentUploader = nil
+        accountAttachmentStager = nil
         indexer?.cancel()
         messageSearchIndexTask = nil
         messageSearchLocalStore = nil
@@ -659,6 +678,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         pushWakeSettingsStore = nil
         deviceSessionsStore = nil
         groupInvitationStore = nil
+        await closingPendingGroupAvatars?.close()
+        await closingProfiles?.close()
+        await oldAvatarPipeline?.close()
+        await closingAvatarInvalidations?.value
         await thumbnails?.close()
         await pushSettings?.stop()
         await backgroundSync?.stop()
@@ -667,13 +690,16 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         realtimeRuntime = nil
         await indexer?.value
         do {
-            try await mediaCacheDownloader?.close()
-            mediaCacheDownloader = nil
-            await accountAttachmentUploader?.close()
-            accountAttachmentUploader = nil
-            try await accountAttachmentStager?.close()
-            accountAttachmentStager = nil
-            if let localStore { try await bootstrapper?.closeLocalStore(localStore) }
+            // The account database and unknown operation journal survive sign-out.
+            // Keep source files too; next activation removes only aged orphans
+            // after consulting that journal. Closing is not a cancellation proof.
+            let closingBootstrapper = bootstrapper
+            try await V2AccountResourceCleanup.run([
+                { await closingUploader?.close() },
+                { try await closingDownloader?.close() },
+                { try await closingStager?.close(preservingDurableFiles: true) },
+                { if let localStore { try await closingBootstrapper?.closeLocalStore(localStore) } }
+            ])
             authenticationMessage = nil
             route = nextRoute
         } catch {
@@ -708,191 +734,267 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         guard let authEpoch = credentials.sessionEpoch else { throw V2AuthSessionError.sessionInvalidated }
         guard scope.accountID == userID else { throw V2AccountLocalStoreError.staleStore }
         try Task.checkCancellation()
-        try await mediaCacheDownloader?.close()
+        guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
+        let previousDownloader = mediaCacheDownloader
+        let previousUploader = accountAttachmentUploader
+        let previousStager = accountAttachmentStager
+        let previousProfiles = accountProfileRepository
+        accountProfileRepository = nil
         mediaCacheDownloader = nil
-        await accountAttachmentUploader?.close()
         accountAttachmentUploader = nil
-        try await accountAttachmentStager?.close()
         accountAttachmentStager = nil
+        try await V2AccountResourceCleanup.run([
+            { await previousProfiles?.close() },
+            { await previousUploader?.close() },
+            { try await previousDownloader?.close() },
+            { try await previousStager?.close(preservingDurableFiles: true) }
+        ])
         try Task.checkCancellation()
         guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
         try await authSession.requireAuthenticatedEpoch(authEpoch)
-        let realtime = try V2AppRealtimeRuntime(
-            configuration: configuration,
-            authSession: authSession,
-            authEpoch: authEpoch,
-            localStore: localStore,
-            mediaCacheDirectory: scope.mediaCacheDirectory
-        )
-        let attachmentStager = try? V2FileConversationAttachmentStager(directory: scope.mediaStagingDirectory)
-        await attachmentStager?.discardOrphanedStagedFiles()
-        try Task.checkCancellation()
-        await realtime.mediaCacheMaintenance.performMaintenance()
-        try Task.checkCancellation()
-        let accountHTTP = V2SessionHTTPAuthorization(session: authSession, epoch: authEpoch)
-        let publicIdentityDirectory = try V2HTTPPublicIdentityDirectory(
-            endpoint: configuration.endpoint("v2/public-identities/resolve"),
-            credentials: accountHTTP, transport: accountHTTP
-        )
-        let roomRecovery = realtime.roomRecovery
-        let conversationDataSource = V2GRDBConversationDataSource(
-            localStore: localStore,
-            requestLatestVisible: { try await roomRecovery.requestLatestVisible(roomIDs: $0) }
-        )
-        let contactsDataSource = V2GRDBContactsDataSource(
-            localStore: localStore,
-            profiles: realtime.profileRepository,
-            currentUserID: userID
-        )
-        let conversationEnvironment = V2ConversationFeatureEnvironment(
-            userID: userID.rawValue,
-            projections: .init(
-                dataSource: conversationDataSource,
-                messageSearcher: conversationDataSource
-            ),
-            messages: .init(
-                sender: realtime.sender,
-                withdrawer: realtime.messageWithdrawer,
-                reactionChanger: realtime.messageReactionChanger,
-                editor: realtime.messageEditor,
-                readReceiptReporter: realtime.readReceiptReporter,
-                stateChanger: realtime.conversationStateChanger,
-                favoriter: realtime.messageFavoriter,
-                groupPinner: realtime.groupMessagePinner,
-                forwarder: realtime.messageForwarder
-            ),
-            groups: .init(
-                announcementManager: realtime.groupAnnouncementManager,
-                memberRoleChanger: realtime.groupMemberRoleChanger,
-                rolePolicyChanger: realtime.groupRolePolicyChanger,
-                readReceiptReader: realtime.groupReadReceiptReader,
-                conversationCreator: realtime.groupConversationCreator,
-                memberDirectory: realtime.groupMemberDirectory,
-                membershipChanger: realtime.groupMembershipChanger,
-                memberMuter: realtime.groupMemberMuter,
-                moderatedMemberRemover: realtime.moderatedGroupMemberRemover
-            ),
-            discovery: .init(
-                directConversationOpener: realtime.directConversationOpener,
-                publicIdentityResolver: publicIdentityDirectory
-            ),
-            media: .init(
-                attachmentStager: attachmentStager,
-                attachmentUploader: realtime.attachmentUploader,
-                downloader: realtime.mediaDownloader
-            ),
-            runtime: .init(
-                liveActivity: realtime.conversationLiveActivity,
-                projectionChangeNotifier: realtime.projectionChangeNotifier,
-                activeHybridGroupSynchronizer: realtime.activeHybridGroupSynchronizer,
-                roomSubscriptions: realtime.roomSubscriptions
+        try await V2AccountActivationScope.withPrepared { activation in
+            let attachmentStager = try V2FileConversationAttachmentStager(directory: scope.mediaStagingDirectory)
+            activation.onDiscard { try await attachmentStager.close(preservingDurableFiles: true) }
+            let realtime = try V2AppRealtimeRuntime(
+                configuration: configuration,
+                actorUserID: userID,
+                deviceID: credentials.deviceID,
+                authSession: authSession,
+                authEpoch: authEpoch,
+                localStore: localStore,
+                mediaCacheDirectory: scope.mediaCacheDirectory,
+                mediaStagingDirectory: scope.mediaStagingDirectory
             )
-        )
-        let conversations = V2ConversationListStore(environment: conversationEnvironment)
-        let privacySettings = V2PrivacySettingsStore(
-            reader: V2GRDBStrangerMessagePreferenceDataSource(localStore: localStore),
-            updater: realtime.strangerMessagePreferenceUpdater,
-            userAddReader: V2GRDBUserAddPreferenceDataSource(localStore: localStore),
-            userAddUpdater: realtime.userAddPreferenceUpdater,
-            readReceiptUpdater: realtime.readReceiptPreferenceUpdater,
-            readReceiptReader: V2GRDBReadReceiptPreferenceDataSource(localStore: localStore),
-            liveActivityUpdater: realtime.liveActivityPreferenceUpdater,
-            liveActivityReader: realtime.liveActivityPreferenceReader,
-            projectionChangeNotifier: realtime.projectionChangeNotifier
-        )
-        let contacts = V2ContactsStore(
-            dataSource: contactsDataSource,
-            identityResolver: publicIdentityDirectory,
-            relationshipChanger: realtime.relationshipChanger,
-            userBlockChanger: realtime.userBlockChanger,
-            directConversationOpener: realtime.directConversationOpener,
-            currentUserID: userID,
-            projectionChangeNotifier: realtime.projectionChangeNotifier
-        )
-        let userBlockSettings = V2UserBlockSettingsStore(
-            resolver: publicIdentityDirectory,
-            changer: realtime.userBlockChanger,
-            currentUserID: userID
-        )
-        let publicIdentitySettings = V2PublicIdentitySettingsStore(
-            manager: try V2HTTPOwnProfileClient(
-                endpoint: configuration.endpoint("v2/profile/me"),
-                credentials: accountHTTP, transport: accountHTTP
-            ),
-            attachmentStager: attachmentStager,
-            attachmentUploader: realtime.attachmentUploader,
-            mediaDownloader: realtime.mediaDownloader
-        )
-        let deviceSessions = try V2DeviceSessionsStore(
-            manager: V2HTTPDeviceSessionClient(
-                endpoint: configuration.endpoint("v2/devices"),
-                credentials: accountHTTP, transport: accountHTTP
-            )
-        )
-        let groupInvitations = V2GroupInvitationStore(
-            client: try V2HTTPGroupInvitationClient(
-                baseURL: configuration.accountBaseURL,
-                credentials: accountHTTP, transport: accountHTTP
-            )
-        )
-        let pushWakeSettings: V2PushWakeSettingsStore?
-        if let remoteNotificationRegistrar {
-            guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
-            try await authSession.requireAuthenticatedEpoch(authEpoch)
-            await pushWakeSettingsStore?.stop()
-            let preferences = V2UserDefaultsPushWakePreferenceStore(key: localKeychainService + ".push-wake-enabled." + userID.rawValue)
-            let initialPreference = preferences.isEnabled()
-            let pushScope = try await localStore.pushIntentScope(deviceID: credentials.deviceID)
-            guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
-            try await authSession.requireAuthenticatedEpoch(authEpoch)
-            let reconciler = try await V2PushIntentReconciler.activate(
-                store: localStore,
-                transport: V2HTTPPushEndpointClient(endpoint: configuration.pushEndpoint, session: authSession, epoch: authEpoch),
-                scope: pushScope, initialPreference: initialPreference
-            )
-            guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else {
-                await reconciler.stop(); return
+            activation.onDiscard {
+                await realtime.backgroundSync.stop()
+                await realtime.runtime.stop()
+                await realtime.profileRepository.close()
+                await realtime.profilePresentations.close()
+                await realtime.attachmentUploader.close()
+                try await realtime.mediaCacheMaintenance.close()
             }
-            do { try await authSession.requireAuthenticatedEpoch(authEpoch); try Task.checkCancellation() }
-            catch { await reconciler.stop(); throw error }
-            pushWakeSettings = .init(reconciler: reconciler, preferences: preferences, remoteNotificationRegistrar: remoteNotificationRegistrar, environment: configuration.pushEndpointEnvironment)
-        } else { pushWakeSettings = nil }
-        guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
-        await stopRealtime()
-        let previousThumbnails = mediaThumbnailCache
-        mediaThumbnailCache = nil
-        await previousThumbnails?.close()
-        try Task.checkCancellation()
-        guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
-        try await authSession.requireAuthenticatedEpoch(authEpoch)
-        try Task.checkCancellation()
-        guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
-        accountAttachmentUploader = realtime.attachmentUploader
-        accountAttachmentStager = attachmentStager
-        mediaCacheDownloader = realtime.mediaCacheMaintenance
-        mediaThumbnailCache = V2LocalMediaThumbnailCache(directory: scope.directory)
-        realtimeRuntime = realtime.runtime
-        backgroundSync = realtime.backgroundSync
-        conversationStore = conversations
-        contactsStore = contacts
-        privacySettingsStore = privacySettings
-        userBlockSettingsStore = userBlockSettings
-        publicIdentitySettingsStore = publicIdentitySettings
-        pushWakeSettingsStore = pushWakeSettings
-        deviceSessionsStore = deviceSessions
-        groupInvitationStore = groupInvitations
-        messageSearchLocalStore = localStore
-        route = .signedIn(userID: userID.rawValue)
-        authenticationObserver.start(session: authSession, epoch: authEpoch) { [weak self] change in
-            await self?.authenticationStateDidChange(change)
+            let retainedTokens = try await localStore.retainedResourceFileTokens()
+            await attachmentStager.discardOrphanedStagedFiles(retaining: retainedTokens, olderThan: Date().addingTimeInterval(-86_400))
+            try Task.checkCancellation()
+            await realtime.mediaCacheMaintenance.performMaintenance()
+            try Task.checkCancellation()
+            let accountHTTP = V2SessionHTTPAuthorization(session: authSession, epoch: authEpoch)
+            let publicIdentityDirectory = try V2HTTPPublicIdentityDirectory(
+                endpoint: configuration.endpoint("v2/public-identities/resolve"),
+                actorUserID: userID,
+                credentials: accountHTTP, transport: accountHTTP
+            )
+            let roomRecovery = realtime.roomRecovery
+            let conversationDataSource = V2GRDBConversationDataSource(
+                localStore: localStore,
+                requestLatestVisible: { try await roomRecovery.requestLatestVisible(roomIDs: $0) }
+            )
+            let contactsDataSource = V2GRDBContactsDataSource(
+                localStore: localStore,
+                profiles: realtime.profileRepository,
+                currentUserID: userID
+            )
+            let conversationEnvironment = V2ConversationFeatureEnvironment(
+                userID: userID.rawValue,
+                projections: .init(
+                    dataSource: conversationDataSource,
+                    messageSearcher: conversationDataSource
+                ),
+                messages: .init(
+                    sender: realtime.sender,
+                    withdrawer: realtime.messageWithdrawer,
+                    reactionChanger: realtime.messageReactionChanger,
+                    editor: realtime.messageEditor,
+                    readReceiptReporter: realtime.readReceiptReporter,
+                    stateChanger: realtime.conversationStateChanger,
+                    favoriter: realtime.messageFavoriter,
+                    groupPinner: realtime.groupMessagePinner,
+                    forwarder: realtime.messageForwarder
+                ),
+                groups: .init(
+                    announcementManager: realtime.groupAnnouncementManager,
+                    memberRoleChanger: realtime.groupMemberRoleChanger,
+                    rolePolicyChanger: realtime.groupRolePolicyChanger,
+                    readReceiptReader: realtime.groupReadReceiptReader,
+                    conversationCreator: realtime.groupConversationCreator,
+                    memberDirectory: realtime.groupMemberDirectory,
+                    membershipChanger: realtime.groupMembershipChanger,
+                    memberMuter: realtime.groupMemberMuter,
+                    moderatedMemberRemover: realtime.moderatedGroupMemberRemover,
+                    avatarManager: realtime.groupAvatarManager
+                ),
+                discovery: .init(
+                    directConversationOpener: realtime.directConversationOpener,
+                    publicIdentityResolver: publicIdentityDirectory
+                ),
+                media: .init(
+                    attachmentStager: attachmentStager,
+                    resourceSender: realtime.attachmentUploader.durable,
+                    downloader: realtime.mediaDownloader
+                ),
+                runtime: .init(
+                    liveActivity: realtime.conversationLiveActivity,
+                    projectionChangeNotifier: realtime.projectionChangeNotifier,
+                    activeHybridGroupSynchronizer: realtime.activeHybridGroupSynchronizer,
+                    roomSubscriptions: realtime.roomSubscriptions
+                )
+            )
+            let conversations = V2ConversationListStore(environment: conversationEnvironment)
+            let privacySettings = V2PrivacySettingsStore(
+                reader: V2GRDBStrangerMessagePreferenceDataSource(localStore: localStore),
+                updater: realtime.strangerMessagePreferenceUpdater,
+                userAddReader: V2GRDBUserAddPreferenceDataSource(localStore: localStore),
+                userAddUpdater: realtime.userAddPreferenceUpdater,
+                readReceiptUpdater: realtime.readReceiptPreferenceUpdater,
+                readReceiptReader: V2GRDBReadReceiptPreferenceDataSource(localStore: localStore),
+                liveActivityUpdater: realtime.liveActivityPreferenceUpdater,
+                liveActivityReader: realtime.liveActivityPreferenceReader,
+                projectionChangeNotifier: realtime.projectionChangeNotifier
+            )
+            let contacts = V2ContactsStore(
+                dataSource: contactsDataSource,
+                identityResolver: publicIdentityDirectory,
+                relationshipChanger: realtime.relationshipChanger,
+                userBlockChanger: realtime.userBlockChanger,
+                directConversationOpener: realtime.directConversationOpener,
+                currentUserID: userID,
+                projectionChangeNotifier: realtime.projectionChangeNotifier
+            )
+            let userBlockSettings = V2UserBlockSettingsStore(
+                resolver: publicIdentityDirectory,
+                changer: realtime.userBlockChanger,
+                currentUserID: userID
+            )
+            let publicIdentitySettings = V2PublicIdentitySettingsStore(
+                manager: try V2HTTPOwnProfileClient(
+                    endpoint: configuration.endpoint("v2/profile/me"),
+                    credentials: accountHTTP, transport: accountHTTP
+                ),
+                attachmentStager: attachmentStager,
+                attachmentUploader: realtime.attachmentUploader
+            )
+            let deviceSessions = try V2DeviceSessionsStore(
+                manager: V2HTTPDeviceSessionClient(
+                    endpoint: configuration.endpoint("v2/devices"),
+                    credentials: accountHTTP, transport: accountHTTP
+                )
+            )
+            let groupInvitations = V2GroupInvitationStore(
+                client: try V2HTTPGroupInvitationClient(
+                    baseURL: configuration.accountBaseURL,
+                    credentials: accountHTTP, transport: accountHTTP
+                )
+            )
+            let groupAvatarManager = realtime.groupAvatarManager, groupAvatarNotifier = realtime.projectionChangeNotifier
+            let pendingGroupAvatars = V2PendingGroupAvatarsStore(reader: groupAvatarManager,
+                notifier: groupAvatarNotifier) { roomID, operationID in
+                V2GroupAvatarManagementStore(roomID: roomID, manager: groupAvatarManager,
+                    stager: attachmentStager, notifier: groupAvatarNotifier, focusedOperationID: operationID)
+            }
+            let pushWakeSettings: V2PushWakeSettingsStore?
+            if let remoteNotificationRegistrar {
+                guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
+                try await authSession.requireAuthenticatedEpoch(authEpoch)
+                await pushWakeSettingsStore?.stop()
+                let preferences = V2UserDefaultsPushWakePreferenceStore(key: localKeychainService + ".push-wake-enabled." + userID.rawValue)
+                let initialPreference = preferences.isEnabled()
+                let pushScope = try await localStore.pushIntentScope(deviceID: credentials.deviceID)
+                guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
+                try await authSession.requireAuthenticatedEpoch(authEpoch)
+                let reconciler = try await V2PushIntentReconciler.activate(
+                    store: localStore,
+                    transport: V2HTTPPushEndpointClient(endpoint: configuration.pushEndpoint, session: authSession, epoch: authEpoch),
+                    scope: pushScope, initialPreference: initialPreference
+                )
+                guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else {
+                    await reconciler.stop(); return
+                }
+                do { try await authSession.requireAuthenticatedEpoch(authEpoch); try Task.checkCancellation() }
+                catch { await reconciler.stop(); throw error }
+                pushWakeSettings = .init(reconciler: reconciler, preferences: preferences, remoteNotificationRegistrar: remoteNotificationRegistrar, environment: configuration.pushEndpointEnvironment)
+            } else { pushWakeSettings = nil }
+            activation.onDiscard { await pushWakeSettings?.stop() }
+            let thumbnails = V2LocalMediaThumbnailCache(directory: scope.directory)
+            activation.onDiscard { await thumbnails.close() }
+            let presentations = realtime.profilePresentations
+            let groupReader = try V2HTTPGroupAvatarPresentationClient(roomsEndpoint: configuration.endpoint("v2/rooms"),
+                actorUserID: userID, credentials: accountHTTP, transport: accountHTTP)
+            let groupPresentations = V2GroupAvatarPresentationRepository(actorUserID: userID, deviceID: credentials.deviceID,
+                reader: groupReader, minimumRevision: { try await localStore.groupAvatarRevision(roomID: $0) })
+            let pipeline = V2AvatarPipeline(profiles: presentations, groups: groupPresentations,
+                files: realtime.mediaCacheMaintenance, thumbnails: thumbnails,
+                authors: realtime.makeAuthorPresentationCoordinator(presentations))
+            activation.onDiscard { await pipeline.close() }
+            guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
+            let previousThumbnails = mediaThumbnailCache
+            let previousPipeline = avatarPipeline
+            mediaThumbnailCache = nil
+            avatarPipeline = nil
+            let previousAvatarInvalidations = avatarInvalidationTask
+            previousAvatarInvalidations?.cancel()
+            avatarInvalidationTask = nil
+            await stopRealtime()
+            await previousPipeline?.close()
+            await previousAvatarInvalidations?.value
+            await previousThumbnails?.close()
+            try Task.checkCancellation()
+            guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
+            try await authSession.requireAuthenticatedEpoch(authEpoch)
+            try Task.checkCancellation()
+            guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
+            // No awaits between adoption and publishing the complete account state.
+            try activation.adopt()
+            accountAttachmentUploader = realtime.attachmentUploader
+            accountAttachmentStager = attachmentStager
+            accountProfileRepository = realtime.profileRepository
+            mediaCacheDownloader = realtime.mediaCacheMaintenance
+            mediaThumbnailCache = thumbnails
+            avatarPipeline = pipeline
+            avatarInvalidationTask?.cancel()
+            avatarInvalidationTask = Task {
+                let notifier = realtime.projectionChangeNotifier
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask {
+                        for await _ in await notifier.updates(scopes: .presentations) {
+                            guard !Task.isCancelled else { return }
+                            await pipeline.suspend()
+                        }
+                    }
+                    group.addTask {
+                        for await _ in await notifier.updates(scopes: .groupNicknames) {
+                            guard !Task.isCancelled else { return }
+                            try? await presentations.refreshNicknameInvalidations()
+                        }
+                    }
+                    await group.waitForAll()
+                }
+            }
+            realtimeRuntime = realtime.runtime
+            backgroundSync = realtime.backgroundSync
+            conversationStore = conversations
+            contactsStore = contacts
+            privacySettingsStore = privacySettings
+            userBlockSettingsStore = userBlockSettings
+            publicIdentitySettingsStore = publicIdentitySettings
+            pushWakeSettingsStore = pushWakeSettings
+            deviceSessionsStore = deviceSessions
+            groupInvitationStore = groupInvitations
+            pendingGroupAvatarsStore = pendingGroupAvatars
+            messageSearchLocalStore = localStore
+            route = .signedIn(userID: userID.rawValue)
+            authenticationObserver.start(session: authSession, epoch: authEpoch) { [weak self] change in
+                await self?.authenticationStateDidChange(change)
+            }
+            await realtime.attachmentUploader.durable.startRecovery()
+            guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true,
+                  accountAttachmentUploader === realtime.attachmentUploader, isApplicationActive else { return }
+            startMessageSearchIndexing(localStore: localStore)
+            await conversations.refresh()
+            guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
+            await pushWakeSettings?.activate()
+            guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
+            startRealtimeIfApplicationActive(runtime: realtime.runtime, conversations: conversations)
         }
-        guard isApplicationActive else { return }
-        startMessageSearchIndexing(localStore: localStore)
-        await conversations.refresh()
-        guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
-        await pushWakeSettings?.activate()
-        guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
-        startRealtimeIfApplicationActive(runtime: realtime.runtime, conversations: conversations)
     }
 
     private func authenticationStateDidChange(_ change: V2AuthenticationStateObserver.Change) async {

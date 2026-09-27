@@ -285,6 +285,13 @@ public actor V2GatewayByteStream {
     private let registry: V2DeviceConnectionRegistry
     private nonisolated let foregroundTransport = V2GatewayForegroundTransport()
     private var registeredIdentity: V2AuthenticatedConnection?
+    private let authorPresentationDispatcher: V2AuthorPresentationDispatcher?
+    private let authorPresentationIngress: V2AuthorPresentationIngress?
+    private let authorPresentationTransport = V2AuthorPresentationTransport()
+    private var authorPresentationWriter: (@Sendable (V2AuthorPresentationWrite) async -> Bool)?
+    private var authorPresentationView: (roomID: RoomID, viewID: UUID)?
+    private var authorPresentationRegistered = false
+    private var authorPresentationWriting = false
     // 传输确认本地通道关闭前，撤销工作器不能推进持久化游标。
     // 因此处理器将 NIO 关闭 future 桥接进此 Actor，
     // 而不只是安排一次尽力而为的关闭。
@@ -303,7 +310,9 @@ public actor V2GatewayByteStream {
         session: V2GatewaySession,
         handler: any V2GatewayCommandHandler,
         connectionID: UUID = V2GatewayByteStream.makeConnectionID(),
-        registry: V2DeviceConnectionRegistry
+        registry: V2DeviceConnectionRegistry,
+        authorPresentationDispatcher: V2AuthorPresentationDispatcher? = nil,
+        authorPresentationIngress: V2AuthorPresentationIngress? = nil
     ) {
         self.decoder = .init(limits: frameLimits)
         self.frameLimits = frameLimits
@@ -311,6 +320,8 @@ public actor V2GatewayByteStream {
         self.handler = handler
         self.connectionID = connectionID
         self.registry = registry
+        self.authorPresentationDispatcher = authorPresentationDispatcher
+        self.authorPresentationIngress = authorPresentationIngress
     }
 
     /// 接收 TLS 流产生的任意分片。
@@ -368,18 +379,25 @@ public actor V2GatewayByteStream {
         do {
             let inbound = try decoder.append(bytes)
             for frame in inbound {
+                // Capture before the handler suspends. A late page must not
+                // become optional work for a replacement view of the same room.
+                let authorView = authorPresentationIngress == nil ? nil : authorPresentationView
                 let exchange = try await session.receive(
                     frame,
                     handler: handler,
-                    originatingConnectionID: connectionID
+                    originatingConnectionID: connectionID,
+                    captureAuthorSample: authorView != nil
                 )
                 try await registerAuthenticatedDeviceIfNeeded()
                 try await updateHybridGroupSubscription(
                     inbound: exchange.request,
                     response: exchange.responseEnvelope
                 )
+                await endAuthorPresentationSubscription(inbound: exchange.request, response: exchange.responseEnvelope)
                 try V2FrameCodec.validateForEncoding(exchange.response, limits: frameLimits)
                 try await respond(exchange.response)
+                offerPageAuthors(exchange, capturedView: authorView)
+                try await activateAuthorPresentationSubscription(inbound: exchange.request, response: exchange.responseEnvelope)
                 if case .accountRoomChangesReady(let ready)? = exchange.responseEnvelope.body {
                     try await registry.accountRoomChangesReadyWritten(connectionID: connectionID, epoch: ready.connectionEpoch)
                 }
@@ -461,13 +479,15 @@ public actor V2GatewayByteStream {
         outboundWriter: @escaping @Sendable (Data) async -> Void,
         requiredNotificationWriter: (@Sendable (Data) async -> Bool)? = nil,
         requiredNotificationClose: (@Sendable () async -> Void)? = nil,
-        foregroundWriter: (@Sendable (Data) -> Void)? = nil
+        foregroundWriter: (@Sendable (Data) -> Void)? = nil,
+        authorPresentationWriter: (@Sendable (V2AuthorPresentationWrite) async -> Bool)? = nil
     ) -> Bool {
         guard !transportClosed else { return false }
         self.deviceRevocationHandler = deviceRevocationHandler
         self.outboundWriter = outboundWriter
         self.requiredNotificationWriter = requiredNotificationWriter
         self.requiredNotificationClose = requiredNotificationClose ?? deviceRevocationHandler
+        self.authorPresentationWriter = authorPresentationWriter
         let adaptedForegroundWriter: (@Sendable (ByteBuffer) -> Void)?
         if let foregroundWriter {
             adaptedForegroundWriter = { buffer in
@@ -495,13 +515,15 @@ public actor V2GatewayByteStream {
         outboundWriter: @escaping @Sendable (Data) async -> Void,
         requiredNotificationWriter: (@Sendable (Data) async -> Bool)? = nil,
         requiredNotificationClose: (@Sendable () async -> Void)? = nil,
-        foregroundWriter: V2NIOGatewayForegroundWriter?
+        foregroundWriter: V2NIOGatewayForegroundWriter?,
+        authorPresentationWriter: (@Sendable (V2AuthorPresentationWrite) async -> Bool)? = nil
     ) -> Bool {
         guard !transportClosed else { return false }
         self.deviceRevocationHandler = deviceRevocationHandler
         self.outboundWriter = outboundWriter
         self.requiredNotificationWriter = requiredNotificationWriter
         self.requiredNotificationClose = requiredNotificationClose ?? deviceRevocationHandler
+        self.authorPresentationWriter = authorPresentationWriter
         foregroundTransport.attach(nioWriter: foregroundWriter)
         return true
     }
@@ -537,12 +559,13 @@ public actor V2GatewayByteStream {
     /// - Parameters:
     ///   - roomID: 目标房间标识。
     ///   - highWatermark: 该房间当前的高水位。
+    @discardableResult
     public func sendGroupEventAvailable(
         roomID: RoomID,
         highWatermark: UInt64,
         directEvent: V2DirectRoomLiveEvent? = nil
-    ) async {
-        guard let version = await session.authenticatedProtocolVersion(), let outboundWriter else { return }
+    ) async -> Bool {
+        guard let version = await session.authenticatedProtocolVersion(), let outboundWriter else { return false }
         var envelope = IMV2Envelope()
         envelope.requestID = 0
         envelope.protocolVersion = UInt32(version)
@@ -559,8 +582,9 @@ public actor V2GatewayByteStream {
         }
         guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version),
               let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits)
-        else { return }
+        else { return false }
         await outboundWriter(bytes)
+        return true
     }
 
     /// 发送一份为进程本地已授权受众编码一次的帧。
@@ -569,13 +593,15 @@ public actor V2GatewayByteStream {
     /// 过期或协议版本不同的流无法消费这份共享字节。
     ///
     /// - Parameter prepared: 已准备的群组事件帧。
-    func sendGroupEventAvailable(_ prepared: V2PreparedGatewayGroupEventAvailable) async {
+    @discardableResult
+    func sendGroupEventAvailable(_ prepared: V2PreparedGatewayGroupEventAvailable) async -> Bool {
         guard let contract = await session.authenticatedFrameContract(),
               contract.protocolVersion == prepared.protocolVersion,
               let outboundWriter
-        else { return }
+        else { return false }
         let buffer = prepared.bytes(for: contract.compression)
         await outboundWriter(Data(buffer.readableBytesView))
+        return true
     }
 
     /// 生产前台通知使用该 nonisolated 快速路径。
@@ -661,6 +687,8 @@ public actor V2GatewayByteStream {
         requiredNotificationWriter = nil
         requiredNotificationClose = nil
         foregroundTransport.detach()
+        authorPresentationTransport.deactivate()
+        authorPresentationWriter = nil
     }
 
     private func registerAuthenticatedDeviceIfNeeded() async throws {
@@ -679,6 +707,28 @@ public actor V2GatewayByteStream {
             await registry.unregister(connectionID: connectionID)
             throw V2GatewaySessionError.unsupportedCommand
         }
+        if let streamID = await session.authenticatedAuthorPresentationStreamID() {
+            guard let authorPresentationDispatcher, authorPresentationWriter != nil,
+                  registeredIdentity == identity, !transportClosed else { throw V2GatewaySessionError.unsupportedCommand }
+            let authorRegistered: Bool
+            do {
+                _ = try await authorPresentationDispatcher.register(connectionID: connectionID, identity: identity,
+                    streamID: streamID, send: { [weak self] bytes, deadline in
+                        await self?.sendAuthorPresentation(bytes, deadline: deadline) ?? false
+                    })
+                authorRegistered = true
+            } catch V2ResourceProviderError.throttled {
+                // Supplement capacity must never consume a healthy messaging
+                // connection. This negotiated stream may deliver no deltas;
+                // visible demand continues through normal batch HTTP.
+                authorRegistered = false
+            }
+            guard registeredIdentity == identity, !transportClosed else {
+                if authorRegistered { await authorPresentationDispatcher.unregister(connectionID: connectionID) }
+                throw V2GatewaySessionError.unsupportedCommand
+            }
+            authorPresentationRegistered = authorRegistered
+        }
         foregroundTransport.activate(
             protocolVersion: contract.protocolVersion,
             compression: contract.compression
@@ -689,7 +739,90 @@ public actor V2GatewayByteStream {
         guard registeredIdentity != nil else { return }
         registeredIdentity = nil
         foregroundTransport.deactivate()
+        authorPresentationTransport.deactivate(); authorPresentationView = nil
+        authorPresentationRegistered = false
+        await authorPresentationDispatcher?.unregister(connectionID: connectionID)
         await registry.unregister(connectionID: connectionID)
+    }
+
+    /// Start resource work only after the subscription response crosses the
+    /// transport write boundary, so a delta cannot overtake its nonce echo.
+    private func activateAuthorPresentationSubscription(inbound: IMV2Envelope, response: IMV2Envelope) async throws {
+        guard case .groupEventSubscribe(let request) = inbound.body,
+              case .groupEventSubscribed(let subscribed) = response.body else { return }
+        guard !transportClosed, registeredIdentity != nil else { throw V2GatewaySessionError.unsupportedCommand }
+        let roomID = try RoomID(request.roomID)
+        guard !subscribed.authorPresentationViewID.isEmpty,
+              let viewID = UUID(uuidString: subscribed.authorPresentationViewID), authorPresentationRegistered else {
+            // A separate room's ordinary subscription does not end the selected
+            // foreground author page. A same-room ordinary subscribe does.
+            if authorPresentationView?.roomID == roomID { await clearAuthorPresentationView() }
+            return
+        }
+        let activated = await authorPresentationDispatcher?.activateView(connectionID: connectionID, roomID: roomID, viewID: viewID) ?? false
+        guard activated, registeredIdentity != nil, !transportClosed else { throw V2GatewaySessionError.unsupportedCommand }
+        authorPresentationView = (roomID, viewID)
+        authorPresentationTransport.activate(viewID: viewID, roomID: roomID)
+    }
+
+    /// Called only after the registry selected this recipient using the body
+    /// event's membership fence and submitted its shared frame. Never await here.
+    nonisolated func offerAuthorPresentation(_ hints: V2AuthorPresentationHints, to ingress: V2AuthorPresentationIngress) {
+        guard let viewID = authorPresentationTransport.selectedView(in: hints.roomID) else { return }
+        ingress.submit(connectionID: connectionID, roomID: hints.roomID, viewID: viewID, authors: hints.authors)
+    }
+
+    private func offerPageAuthors(_ exchange: V2GatewaySessionExchange,
+                                 capturedView: (roomID: RoomID, viewID: UUID)?) {
+        guard !Task.isCancelled, !transportClosed, authorPresentationRegistered,
+              let ingress = authorPresentationIngress, let view = capturedView,
+              authorPresentationTransport.selectedView(in: view.roomID) == view.viewID,
+              case .groupEventPull(let pull) = exchange.request.body,
+              (try? RoomID(pull.roomID)) == view.roomID,
+              case .groupEventPage(let page) = exchange.responseEnvelope.body,
+              (try? RoomID(page.roomID)) == view.roomID,
+              let sample = exchange.authorSample, sample.roomID == view.roomID,
+              let hints = V2AuthorPresentationHints(page: sample) else { return }
+        ingress.submit(connectionID: connectionID, roomID: view.roomID,
+                       viewID: view.viewID, authors: hints.authors)
+    }
+
+    private func clearAuthorPresentationView() async {
+        let previous = authorPresentationView
+        authorPresentationView = nil; authorPresentationTransport.deactivate()
+        if let previous { await authorPresentationDispatcher?.deactivateView(connectionID: connectionID, viewID: previous.viewID) }
+    }
+
+    /// Invalidate the actual enqueue permit before writing the acknowledgement.
+    /// The session already checked this connection's negotiated stream identity.
+    private func endAuthorPresentationSubscription(inbound: IMV2Envelope, response: IMV2Envelope) async {
+        guard case .authorPresentationEnd(let request) = inbound.body,
+              case .authorPresentationEnded = response.body,
+              let view = authorPresentationView,
+              (try? RoomID(request.roomID)) == view.roomID,
+              UUID(uuidString: request.viewID) == view.viewID else { return }
+        await clearAuthorPresentationView()
+    }
+
+    /// Called by the bounded dispatcher, never by the message/ACK writer.
+    private func sendAuthorPresentation(_ payload: Data, deadline: ContinuousClock.Instant) async -> Bool {
+        guard !authorPresentationWriting, !Task.isCancelled, .now < deadline,
+              let identity = registeredIdentity, let view = authorPresentationView,
+              let writer = authorPresentationWriter, !transportClosed else { return false }
+        authorPresentationWriting = true
+        defer { authorPresentationWriting = false }
+        do {
+            guard let frame = try await session.authorPresentationFrame(payload),
+                  let sessionIsLive = await session.authorPresentationSessionCheck(),
+                  registeredIdentity == identity, authorPresentationView?.viewID == view.viewID,
+                  !transportClosed, !Task.isCancelled else { return false }
+            let bytes = try V2FrameCodec.encode(frame, limits: frameLimits)
+            let delta = try V2AuthorPresentationDelta.decode(payload)
+            guard delta.roomID == view.roomID, delta.viewID == view.viewID,
+                  let write = authorPresentationTransport.prepare(bytes: bytes, viewID: view.viewID,
+                    deadline: deadline, sessionIsLive: sessionIsLive) else { return false }
+            return await withTaskCancellationHandler(operation: { await writer(write) }, onCancel: { write.cancel() })
+        } catch { return false }
     }
 
     private func updateHybridGroupSubscription(inbound: IMV2Envelope, response: IMV2Envelope) async throws {
@@ -725,6 +858,7 @@ public actor V2GatewayByteStream {
         case .groupEventUnsubscribe(let request):
             guard case .acknowledged? = response.body else { return }
             await registry.unsubscribeForegroundGroup(connectionID: connectionID, roomID: try .init(request.roomID))
+            if authorPresentationView?.roomID == (try? RoomID(request.roomID)) { await clearAuthorPresentationView() }
         case .subscribePresence(let request):
             guard case .presenceSubscribed(let subscribed)? = response.body,
                   let roomID = try? RoomID(request.roomID),

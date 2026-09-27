@@ -1854,9 +1854,10 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(response.roomMembersPage.roomID == fixture.roomID.rawValue)
         #expect(response.roomMembersPage.actorRole == .owner)
         #expect(response.roomMembersPage.members.count == 1)
-        #expect(response.roomMembersPage.members.first?.publicHandle == "owner_1")
-        #expect(response.roomMembersPage.members.first?.displayName == "群主")
-        #expect(response.roomMembersPage.members.first?.accountKind == "regular")
+        #expect(response.roomMembersPage.members.first?.userID == fixture.userID.rawValue)
+        let member = try #require(response.roomMembersPage.members.first)
+        let serialized = try #require(JSONSerialization.jsonObject(with: member.jsonUTF8Data()) as? [String: Any])
+        #expect(Set(serialized.keys) == ["userId", "role"])
         #expect(await store.actor() == fixture.userID)
     }
 
@@ -2005,6 +2006,40 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(response.memberRemovedByModerator.targetUserID == request.moderateMemberRemoval.targetUserID)
         #expect(response.memberRemovedByModerator.membershipRevision == 4)
         #expect(await store.actor() == fixture.userID)
+    }
+}
+
+extension V2GatewayDomainCommandHandlerTests {
+    @Test("read receipt transport contains only reader IDs and preserves the authenticated actor")
+    func receiptDirectoryContainsNoProfileContent() async throws {
+        let fixture = try GatewayDomainFixture(), source = GatewayReceiptIDStore()
+        let handler = makeGatewayDomainCommandHandler(
+            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
+            readReceipt: .init(store: source), sync: fixture.syncService())
+        var request = IMV2Envelope(); request.listReadReceiptReaders = .init()
+        request.listReadReceiptReaders.roomID = fixture.roomID.rawValue
+        request.listReadReceiptReaders.messageID = UUID().uuidString
+        request.listReadReceiptReaders.pageSize = 50
+        let response = try await handler.handle(envelope: request, identity: fixture.identity)
+        let reader = try #require(response.readReceiptReadersPage.readers.first)
+        let fields = try #require(JSONSerialization.jsonObject(with: reader.jsonUTF8Data()) as? [String: Any])
+        #expect(Set(fields.keys) == ["userId"])
+        #expect(await source.actor == fixture.userID)
+        request.listReadReceiptReaders.cursor = String(repeating: "a", count: 513)
+        let invalid = try await handler.handle(envelope: request, identity: fixture.identity)
+        #expect(invalid.error.code == "INVALID_ARGUMENT")
+        #expect(await source.calls == 1)
+    }
+}
+
+private actor GatewayReceiptIDStore: V2ReadReceiptStore {
+    private(set) var actor: UserID?
+    private(set) var calls = 0
+    func record(command: V2RecordReadReceiptCommand, now: Date) throws -> V2ReadReceiptOutcome { throw CancellationError() }
+    func setPreferences(command: V2SetReadReceiptPreferencesCommand, now: Date) throws -> V2SetReadReceiptPreferencesOutcome { throw CancellationError() }
+    func readers(roomID: RoomID, messageID: MessageID, actorUserID: UserID, cursor: String?, pageSize: Int) throws -> V2ReadReceiptReadersPage {
+        actor = actorUserID; calls += 1
+        return try .init(roomID: roomID, messageID: messageID, readers: [.init(userID: .init(uuid: UUID()))], nextCursor: nil)
     }
 }
 

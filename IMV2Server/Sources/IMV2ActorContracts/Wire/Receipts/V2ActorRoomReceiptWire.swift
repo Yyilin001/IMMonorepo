@@ -79,10 +79,7 @@ public struct V2ActorReadReceiptReadersQueryWire: Codable, Equatable, Sendable {
 
 public struct V2ActorReadReceiptReaderWire: Codable, Equatable, Sendable {
     public let userID: UserID
-    public let publicIdentity: V2ActorPublicIdentityWire
-    public init(userID: UserID, publicIdentity: V2ActorPublicIdentityWire) {
-        self.userID = userID; self.publicIdentity = publicIdentity
-    }
+    public init(userID: UserID) { self.userID = userID }
 }
 
 public struct V2ActorReadReceiptReadersPageWire: Codable, Equatable, Sendable {

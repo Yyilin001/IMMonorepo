@@ -9,6 +9,29 @@ import VaporTesting
 
 @Suite("V2 Vapor profile presentation routes")
 struct V2VaporProfilePresentationRoutesTests {
+    @Test("nickname lists never fall back to the raw manager without authorized profile assembly")
+    func nicknameReadFailsClosed() async throws {
+        let app = try await Application(.testing), actor = UserID(uuid: UUID()), room = RoomID(uuid: UUID())
+        let manager = PresentationRouteManager(nickname: try .init(roomID: room, userID: actor,
+            groupNickname: "Must remain private", revision: #require(.init(rawValue: 1))))
+        do {
+            V2VaporProfilePresentationRoutes(authenticator: PresentationRouteAuthenticator(userID: actor),
+                presentations: manager).register(on: app)
+            try await app.testing { client in
+                let path = "v2/profile-presentations/groups/\(room.rawValue)/nicknames"
+                let response = try await client.send(.get, headers: authenticatedHeaders(), to: URI(string: path))
+                #expect(response.status == .serviceUnavailable)
+                #expect(try await response.body.string()?.contains("Must remain private") == false)
+                for invalid in ["0", "101", "500", "abc", "1.5"] {
+                    let result = try await client.send(.get, headers: authenticatedHeaders(), to: URI(string: path + "?limit=" + invalid))
+                    #expect(result.status == .badRequest)
+                }
+            }
+            #expect(await manager.nicknameReads == 0)
+            try await app.shutdown()
+        } catch { try? await app.shutdown(); throw error }
+    }
+
     @Test("contact aliases are scoped to the authenticated owner and disable caching")
     func contactAliasesUseAuthenticatedOwner() async throws {
         let app = try await Application(.testing)
@@ -137,6 +160,7 @@ private actor PresentationRouteManager: V2ProfilePresentationManaging {
     private var aliasList: AliasListRequest?
     private var nicknameUpdate: NicknameUpdateRequest?
     private var aliasUpdates = 0
+    private(set) var nicknameReads = 0
     func aliasUpdateCount() -> Int { aliasUpdates }
 
     init(alias: V2ContactAlias? = nil, nickname: V2GroupMemberPresentation? = nil, error: V2ProfilePresentationError? = nil) {
@@ -155,6 +179,7 @@ private actor PresentationRouteManager: V2ProfilePresentationManaging {
         return try #require(alias)
     }
     func groupNicknames(actorUserID _: UserID, roomID _: RoomID, afterUserID _: UserID?, limit _: Int) throws -> V2GroupNicknamePage {
+        nicknameReads += 1
         if let error { throw error }
         return .init(values: nickname.map { [$0] } ?? [], nextCursor: nil)
     }

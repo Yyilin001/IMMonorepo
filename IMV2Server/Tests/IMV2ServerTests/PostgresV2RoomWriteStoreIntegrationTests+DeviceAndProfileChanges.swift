@@ -539,7 +539,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             } else {
                 try await sql.raw("INSERT INTO im_v2.room_member_nicknames(room_id,user_id,nickname,revision,updated_at) VALUES (\(bind: roomUUID),\(bind: senderUUID),'original',\(bind: starting),\(bind: now))").run()
             }
-            let store = PostgresV2ProfilePresentationStore(database: database, now: { now })
+            let store = PostgresV2ProfilePresentationStore(database: database, nicknameCapacityProfile: try forwardImportTestProfile(), now: { now })
             func update(_ name: String, operationID: UUID) async throws -> V2ProfileRevision {
                 if kind == "alias" {
                     return try await store.updateContactAlias(ownerUserID: senderID, targetUserID: target, operationID: .init(uuid: operationID), expectedRevision: maximum, remarkName: name).revision
@@ -1812,9 +1812,9 @@ private actor LegacyMediaTransitionProvider: V2MediaObjectProvider {
     let transition: @Sendable () async throws -> Void
     private(set) var calls = 0
     init(transition: @escaping @Sendable () async throws -> Void) { self.transition = transition }
-    func issueDownloadTarget(mediaID: MediaID, expiresAt: Date) async throws -> V2MediaProviderObjectTarget {
+    func issueDownloadTarget(mediaID: MediaID, expiresAt: Date) async throws -> V2ResourceTransferPlan {
         calls += 1
         try await transition()
-        return .init(url: URL(string: "https://media.invalid/test")!, expiresAt: expiresAt)
+        return try resourceDownloadTestPlan(url: URL(string: "https://media.invalid/test")!, expiresAt: expiresAt)
     }
 }

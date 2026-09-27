@@ -119,6 +119,7 @@ enum GatewayRuntime {
                         configuration: configuration,
                         logger: logger
                     )
+                    await composition.shutdownAuthorPresentations(logger: logger)
                     await shutdownPresenceAndAuxiliaryServices(composition: composition, logger: logger)
                     try await server.shutdown()
                     serverIsShutdown = true
@@ -134,6 +135,7 @@ enum GatewayRuntime {
                 throw V2StagedOperationalError(stage: "gateway_http_runtime", error: error)
             }
         } catch {
+            await composition.shutdownAuthorPresentations(logger: logger)
             if !serverIsShutdown { try? await server.shutdown() }
             throw error
         }

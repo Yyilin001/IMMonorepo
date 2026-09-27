@@ -10,15 +10,14 @@
 
 | 入口 | 单位与原取整规则 | 拒绝结果 |
 | --- | --- | --- |
-| Core 上传目标 envelope | Unix 毫秒，向下取整 | invalidUploadTarget |
-| Core 下载目标 envelope | Unix 毫秒，向下取整 | invalidDownloadTarget |
+| Core 资源上传/下载计划 | Unix 毫秒，向下取整 | invalidTimestamp |
 | accepted 消息完整投影 | Unix 毫秒，向下取整 | invalidPayload |
 | 跨 owner 批量消息状态 | Unix 微秒，向下取整 | corruptPersistenceState；进入目标事务前失败 |
 | 设备凭据 HTTP 响应 | Unix 毫秒，向零取整 | malformedPersistence |
 | 设备列表 HTTP 响应 | Unix 毫秒，向零取整 | malformedPersistence，路由返回 503 |
 | APNs JWT iat | Unix 秒，向零取整；仍禁止负时间 | invalidConfiguration |
 
-API 类型、合法 JSON 数值和无效输入的错误类别保持不变。极端值代表错误时钟、损坏记录或服务返回，不表示普通用户已可通过公开接口注入这些值；具体可达性取决于入口上游。
+原媒体上传 envelope 已随资源系统收敛移除；当前上传/下载共用资源传输计划的时间校验。极端值代表错误时钟、损坏记录或服务返回，不表示普通用户已可通过公开接口注入这些值；具体可达性取决于入口上游。
 
 ## 本批排除的疑点
 

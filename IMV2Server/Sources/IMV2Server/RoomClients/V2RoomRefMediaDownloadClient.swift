@@ -27,7 +27,7 @@ public struct V2RoomRefMediaDownloadClient: V2MediaDownloadTargetResolving {
     }
 
     public func downloadTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID,
-                               message: V2MediaMessageLocation?) async throws -> V2MediaProviderObjectTarget {
+                               message: V2MediaMessageLocation?) async throws -> V2ResourceTransferPlan {
         guard let message else {
             return try await local.downloadTarget(actorUserID: actorUserID, deviceID: deviceID,
                                                   mediaID: mediaID)

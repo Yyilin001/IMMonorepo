@@ -1499,47 +1499,38 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await seedRoom(on: sql)
 
             let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let uploadLimits = try V2MediaUploadLimits(maximumBytes: 1_000_000)
             let availableID = try MediaID("00000000-0000-0000-0000-000000000090")
             let unavailableID = try MediaID("00000000-0000-0000-0000-000000000091")
             let mentionedUser = try UserID(memberTwoUUID.uuidString)
             let mediaStore = PostgresV2MediaStore(database: resources.database(.psql))
             try await sql.raw("""
-                INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at)
-                VALUES (\(bind: senderUUID), \(bind: UUID(uuidString: deviceID.rawValue)!), \(bind: now), \(bind: now))
+                INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at, session_expires_at)
+                VALUES (\(bind: senderUUID), \(bind: deviceID.uuidValue!), \(bind: now), \(bind: now), \(bind: Date().addingTimeInterval(3600)))
                 """).run()
-            let availableGrant = try await mediaStore.requestUpload(
-                .init(actorUserID: senderID, operationID: try .init("00000000-0000-0000-0000-000000000093"), mediaID: availableID, contentType: "image/png", byteCount: 42, limits: uploadLimits),
-                deviceID: deviceID,
-                expiresAt: now.addingTimeInterval(600),
-                now: now
-            )
-            let uploadSessions = PostgresV2MediaUploadSessionStore(database: resources.database(.psql))
-            let uploadClaim = try await uploadSessions.claimUpload(
-                ownerUserID: senderID,
-                deviceID: deviceID,
-                uploadSessionID: availableGrant.uploadSessionID,
-                now: now.addingTimeInterval(1),
-                leaseDuration: 30
-            )
-            #expect(uploadClaim.mediaID == availableID)
-            #expect(uploadClaim.byteCount == 42)
-            try await uploadSessions.completeUploadTarget(uploadClaim, now: now.addingTimeInterval(1))
-            try await mediaStore.markUploadCompleted(ownerUserID: senderID, deviceID: deviceID, mediaID: availableID, now: now.addingTimeInterval(1))
-            #expect(try await mediaStore.uploadStatus(ownerUserID: senderID, deviceID: deviceID, mediaID: availableID, now: now.addingTimeInterval(1)) == .scanning)
+            let uploads = PostgresV2ResourceLifecycleStore(database: resources.database(.psql), authorize: { _ in })
+            func createUpload(_ mediaID: MediaID) async throws -> V2PersistedResourceUpload {
+                let input = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: mediaID, usage: .messageAttachment(roomID),
+                    contentType: "image/png", byteCount: 42, checksum: .init(value: String(repeating: "a", count: 64)))
+                return try await uploads.create(homeKind: "room", homeID: roomUUID, usageKind: "message_attachment", actor: senderUUID,
+                    device: deviceID.uuidValue!, operation: input.operationID.uuidValue!, mediaID: mediaID.uuidValue!, contentType: input.contentType,
+                    byteCount: input.byteCount, requestJSON: String(decoding: JSONEncoder().encode(input), as: UTF8.self),
+                    allocate: { try .init(placementID: UUID(), binding: .init(id: "message-acceptance", configurationRevision: 1), handle: Data(mediaID.rawValue.utf8)) },
+                    expiresAt: now.addingTimeInterval(600), now: now)
+            }
+            let availableUpload = try await createUpload(availableID)
+            let uploadClaim = try await uploads.claimFinalize(session: availableUpload.sessionID, generation: 1,
+                actor: senderUUID, device: deviceID.uuidValue!, now: now.addingTimeInterval(1))
+            try await uploads.publish(uploadClaim, facts: .init(reference: uploadClaim.placement, byteCount: 42, sha256: Data(repeating: 0xaa, count: 32)),
+                actor: senderUUID, device: deviceID.uuidValue!, now: now.addingTimeInterval(1))
+            #expect(try await uploads.status(session: availableUpload.sessionID, actor: senderUUID, device: deviceID.uuidValue!).mediaState == "scanning")
             let scanStore = PostgresV2MediaScanStore(database: resources.database(.psql), makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000092")! })
             let scanLease = try #require(try await scanStore.claimPending(now: now.addingTimeInterval(2), leaseDuration: 10, limit: 1).first)
             #expect(scanLease.mediaID == availableID)
             try await scanStore.complete(scanLease, result: .passed, now: now.addingTimeInterval(2))
             let completedScan = try #require(try await sql.raw("SELECT state FROM im_v2.media_scan_outbox WHERE media_id = \(bind: UUID(uuidString: availableID.rawValue)!)").first(decoding: PushStateRow.self))
             #expect(completedScan.state == "completed")
-            #expect(try await mediaStore.uploadStatus(ownerUserID: senderID, deviceID: deviceID, mediaID: availableID, now: now.addingTimeInterval(2)) == .available)
-            _ = try await mediaStore.requestUpload(
-                .init(actorUserID: senderID, operationID: try .init("00000000-0000-0000-0000-000000000094"), mediaID: unavailableID, contentType: "image/png", byteCount: 42, limits: uploadLimits),
-                deviceID: deviceID,
-                expiresAt: now.addingTimeInterval(600),
-                now: now
-            )
+            #expect(try await uploads.status(session: availableUpload.sessionID, actor: senderUUID, device: deviceID.uuidValue!).mediaState == "available")
+            _ = try await createUpload(unavailableID)
 
             let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 10,    retryAfterSeconds: 3))
             let service = V2SendMessageService(

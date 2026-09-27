@@ -6,6 +6,131 @@ import Testing
 
 @Suite("Room turns serialize across suspension and preserve cancellation evidence")
 struct V2RoomTurnLaneTests {
+    @Test("profile cohorts obey target budgets and cannot cross send or write barriers")
+    func profileCohortBoundaries() async throws {
+        let fixture = try Fixture()
+        let first = fixture.submit(.init(id: 0, send: false, hold: true))
+        await fixture.executor.waitForStarts(1)
+        var tasks: [Task<Int, any Error>] = []
+        do {
+            let commands: [Command] = [
+                .init(id: 1, send: false, profileTargets: 60), .init(id: 2, send: false, profileTargets: 40),
+                .init(id: 3, send: false, profileTargets: 1), .init(id: 4, send: false),
+                .init(id: 5, send: false, profileTargets: 1), .init(id: 6, send: true),
+                .init(id: 7, send: false, profileTargets: 1), .init(id: 8, send: false, profileTargets: 1)
+            ]
+            for command in commands {
+                tasks.append(fixture.submit(command))
+                try await fixture.waitForQueue(tasks.count)
+            }
+            await fixture.executor.release()
+            _ = try await first.value
+            for task in tasks { _ = try await task.value }
+            #expect(await fixture.executor.starts == [[0], [1, 2], [3], [4], [5], [6], [7, 8]])
+            #expect(await fixture.executor.observations().maximumConcurrentTurns == 1)
+            try await fixture.waitForBudget(0)
+        } catch {
+            await fixture.executor.release()
+            _ = await first.result
+            for task in tasks { _ = await task.result }
+            throw error
+        }
+    }
+
+    @Test("profile cohorts bound encoded bytes and treat invalid costs as barriers")
+    func profileCohortByteAndCostLimits() async throws {
+        let fixture = try Fixture()
+        let oversized = fixture.submit(.init(id: -1, send: false, profileTargets: 1,
+                                             padding: String(repeating: "x", count: 64 * 1_024)))
+        await expectFailure(.notAccepted(.invalidRequest), from: oversized)
+        try await fixture.waitForBudget(0)
+        #expect(await fixture.executor.starts.isEmpty)
+        let first = fixture.submit(.init(id: 0, send: false, hold: true))
+        await fixture.executor.waitForStarts(1)
+        var tasks: [Task<Int, any Error>] = []
+        do {
+            let commands: [Command] = [
+                .init(id: 1, send: false, profileTargets: 1, padding: String(repeating: "x", count: 33_000)),
+                .init(id: 2, send: false, profileTargets: 1, padding: String(repeating: "x", count: 33_000)),
+                .init(id: 3, send: false, profileTargets: Int.max),
+                .init(id: 4, send: false, profileTargets: Int.min),
+                .init(id: 5, send: false, profileTargets: 0),
+                .init(id: 6, send: false, profileTargets: 1)
+            ]
+            for command in commands {
+                tasks.append(fixture.submit(command))
+                try await fixture.waitForQueue(tasks.count)
+            }
+            await fixture.executor.release()
+            _ = try await first.value
+            for task in tasks { _ = try await task.value }
+            #expect(await fixture.executor.starts == [[0], [1], [2], [3], [4], [5], [6]])
+            try await fixture.waitForBudget(0)
+        } catch {
+            await fixture.executor.release()
+            _ = await first.result
+            for task in tasks { _ = await task.result }
+            throw error
+        }
+    }
+
+    @Test("cancelling a dispatched profile viewer retains the entire read turn until completion")
+    func profileCohortCancellation() async throws {
+        let fixture = try Fixture()
+        let first = fixture.submit(.init(id: 0, send: false, hold: true))
+        await fixture.executor.waitForStarts(1)
+        let a = fixture.submit(.init(id: 1, send: false, hold: true, profileTargets: 1))
+        try await fixture.waitForQueue(1)
+        let b = fixture.submit(.init(id: 2, send: false, profileTargets: 1))
+        try await fixture.waitForQueue(2)
+        await fixture.executor.release()
+        _ = try await first.value
+        await fixture.executor.waitForStarts(2)
+        a.cancel()
+        await expectFailure(.outcomeUnknown, from: a)
+        #expect(await fixture.budget.snapshot().commandCount == 2)
+        let write = fixture.submit(.init(id: 3, send: false))
+        do {
+            try await fixture.waitForQueue(1)
+            #expect(await fixture.executor.starts == [[0], [1, 2]])
+            await fixture.executor.release()
+            #expect(try await b.value == 2)
+            #expect(try await write.value == 3)
+            try await fixture.waitForBudget(0)
+        } catch {
+            await fixture.executor.release()
+            _ = await b.result; _ = await write.result
+            throw error
+        }
+    }
+
+    @Test("expired queued profile demand is removed and command-count limits still split cohorts")
+    func profileCohortDeadlineAndCommandLimit() async throws {
+        let fixture = try Fixture(configuration: .init(maximumCommandsPerTurn: 2))
+        let first = fixture.submit(.init(id: 0, send: false, hold: true))
+        await fixture.executor.waitForStarts(1)
+        let expired = fixture.submit(.init(id: 1, send: false, profileTargets: 1),
+                                     deadline: .now + .milliseconds(100))
+        await expectFailure(.notAccepted(.deadlineExceeded), from: expired)
+        var tasks: [Task<Int, any Error>] = []
+        do {
+            for id in 2...6 {
+                tasks.append(fixture.submit(.init(id: id, send: false, profileTargets: 1)))
+                try await fixture.waitForQueue(tasks.count)
+            }
+            await fixture.executor.release()
+            _ = try await first.value
+            for task in tasks { _ = try await task.value }
+            #expect(await fixture.executor.starts == [[0], [2, 3], [4, 5], [6]])
+            try await fixture.waitForBudget(0)
+        } catch {
+            await fixture.executor.release()
+            _ = await first.result
+            for task in tasks { _ = await task.result }
+            throw error
+        }
+    }
+
     @Test("send batches stop at a barrier and never overlap an awaited turn")
     func fifoAndBatching() async throws {
         let fixture = try Fixture()
@@ -247,6 +372,8 @@ struct V2RoomTurnLaneTests {
         let send: Bool
         var hold = false
         var unknown = false
+        var profileTargets: Int? = nil
+        var padding = ""
     }
 
     private struct Fixture {
@@ -266,7 +393,11 @@ struct V2RoomTurnLaneTests {
                     host: .init(hostID: V2ActorHostID(uuid: UUID()), incarnationID: UUID())
                 ),
                 configuration: config, budget: budget,
-                classify: { $0.send ? .send : .barrier },
+                classify: { command in
+                    if command.send { return .send }
+                    if let count = command.profileTargets { return .profileVisibility(targetCount: count) }
+                    return .barrier
+                },
                 execute: { await executor.run($0) }, onUncertain: { _ in }
             )
         }

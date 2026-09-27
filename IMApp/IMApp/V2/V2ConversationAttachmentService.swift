@@ -119,24 +119,31 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
         else { throw V2ConversationAttachmentStagingError.stagingQuotaExceeded }
         let id = makeUUID()
         let destination = directory.appendingPathComponent(id.uuidString, isDirectory: false)
+        let partial = directory.appendingPathComponent(".partial-" + id.uuidString, isDirectory: false)
         var copiedByteCount: Int64 = 0
         do {
             copiedByteCount = try copyWithinLimits(
                 sourceURL: sourceURL,
-                destination: destination,
+                destination: partial,
                 maximumDirectoryAddition: policy.maximumDirectoryBytes - usage.byteCount
             )
+            try Task.checkCancellation()
+            try fileManager.moveItem(at: partial, to: destination)
             try V2DeviceLocalStoragePolicy.applyToManagedFile(destination, fileManager: fileManager)
         } catch is CancellationError {
+            try? fileManager.removeItem(at: partial)
             try? fileManager.removeItem(at: destination)
             throw CancellationError()
         } catch let error as V2ConversationAttachmentStagingError {
+            try? fileManager.removeItem(at: partial)
             try? fileManager.removeItem(at: destination)
             throw error
         } catch let error as V2DeviceLocalStorageError {
+            try? fileManager.removeItem(at: partial)
             try? fileManager.removeItem(at: destination)
             throw error
         } catch {
+            try? fileManager.removeItem(at: partial)
             try? fileManager.removeItem(at: destination)
             throw V2ConversationAttachmentStagingError.fileSystemFailure
         }
@@ -161,6 +168,7 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
         guard !fileManager.fileExists(atPath: destination.path),
               fileManager.createFile(atPath: destination.path, contents: nil)
         else { throw V2ConversationAttachmentStagingError.fileSystemFailure }
+        try V2DeviceLocalStoragePolicy.applyToManagedFile(destination, fileManager: fileManager)
         let source: FileHandle
         do {
             source = try FileHandle(forReadingFrom: sourceURL)
@@ -240,8 +248,9 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
     /// actor 串行化保证同步复制已结束；调用者必须先等待上传者结束文件读取。
     ///
     /// - Throws: 无法删除目录时抛出文件系统错误，不能把清理失败当成退出成功。
-    func close() throws {
+    func close(preservingDurableFiles: Bool = false) throws {
         isClosed = true
+        if preservingDurableFiles { return }
         if fileManager.fileExists(atPath: directory.path) {
             do { try fileManager.removeItem(at: directory) }
             catch { throw V2ConversationAttachmentStagingError.fileSystemFailure }
@@ -256,19 +265,21 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
 
     /// 清理残留的暂存文件。
     ///
-    /// 暂存上传刻意没有持久化重试记录：只有经扫描器批准的不透明引用才能进入消息发件箱。
-    /// 因此新一次激活可以安全删除被中断的前台上传遗留的文件，
-    /// 同时绝不会遍历到该目录之外。
-    func discardOrphanedStagedFiles() {
+    /// 调用方从账号 journal 提供仍受引用的文件 token；只清理超过宽限期的孤儿。
+    /// 恢复中的上传与冻结发送意图不能被当成缓存淘汰，且绝不遍历目录之外。
+    func discardOrphanedStagedFiles(retaining tokens: Set<String> = [], olderThan cutoff: Date? = nil) {
         guard let entries = try? fileManager.contentsOfDirectory(
             at: directory,
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles]
+            includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
+            options: []
         ) else { return }
         for entry in entries {
             let candidate = entry.standardizedFileURL
             guard candidate.deletingLastPathComponent() == directory,
-                  (try? candidate.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+                  !tokens.contains(candidate.lastPathComponent),
+                  let values = try? candidate.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey]),
+                  values.isRegularFile == true,
+                  cutoff.map({ (values.contentModificationDate ?? .distantFuture) < $0 }) ?? true
             else { continue }
             try? fileManager.removeItem(at: candidate)
         }
@@ -282,12 +293,10 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
 actor V2ForegroundConversationAttachmentUploader: V2ConversationAttachmentUploading {
     private var isClosed = false
     private var transfers: [UUID: Task<V2MediaReference, Error>] = [:]
-    private let uploader: V2ClientMediaUploadService
-    private let makeUUID: @Sendable () -> UUID
+    let durable: any V2DurableConversationSending
 
-    init(uploader: V2ClientMediaUploadService, makeUUID: @escaping @Sendable () -> UUID = UUID.init) {
-        self.uploader = uploader
-        self.makeUUID = makeUUID
+    init(durable: any V2DurableConversationSending) {
+        self.durable = durable
     }
 
     /// 上传暂存附件并等待媒体达到可用状态。
@@ -318,6 +327,7 @@ actor V2ForegroundConversationAttachmentUploader: V2ConversationAttachmentUpload
     /// 底层任务忽略取消时仍等待其返回，避免先删除它正在读取的暂存文件。
     func close() async {
         isClosed = true
+        await durable.close()
         let pending = Array(transfers.values)
         for task in pending { task.cancel() }
         for task in pending { _ = await task.result }
@@ -326,15 +336,6 @@ actor V2ForegroundConversationAttachmentUploader: V2ConversationAttachmentUpload
     private func performUpload(_ attachment: V2StagedConversationAttachment) async throws -> V2MediaReference {
         try Task.checkCancellation()
         guard !isClosed else { throw CancellationError() }
-        let operationID = try MediaUploadOperationID(makeUUID().uuidString)
-        let mediaID = try MediaID(makeUUID().uuidString)
-        try await uploader.upload(
-            fileURL: attachment.fileURL,
-            operationID: operationID,
-            mediaID: mediaID,
-            contentType: attachment.contentType,
-            byteCount: attachment.byteCount
-        )
-        return .init(mediaID: mediaID)
+        return try await durable.upload(attachment, usage: .userAvatar)
     }
 }

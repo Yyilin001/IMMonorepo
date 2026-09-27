@@ -2075,7 +2075,7 @@
       "name": "V2MediaDownloadGrant",
       "target": "IMV2Core",
       "path": "IMV2Core/Sources/IMV2Core/MediaReference.swift",
-      "line": 129,
+      "line": 68,
       "kind": "struct",
       "explicitCodable": false,
       "declaration": "public struct V2MediaDownloadGrant: Equatable, Sendable",
@@ -2102,7 +2102,7 @@
       "name": "V2MediaObjectState",
       "target": "IMV2Core",
       "path": "IMV2Core/Sources/IMV2Core/MediaReference.swift",
-      "line": 288,
+      "line": 120,
       "kind": "enum",
       "explicitCodable": true,
       "declaration": "public enum V2MediaObjectState: String, Codable, Equatable, Sendable",
@@ -2115,18 +2115,27 @@
       ]
     },
     {
-      "name": "V2MediaProviderObjectTarget",
-      "target": "IMV2Server",
-      "path": "IMV2Server/Sources/IMV2Server/V2MediaProviderSessionService.swift",
-      "line": 8,
+      "name": "V2ResourceTransferPlan",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/ResourceTransferPlan.swift",
+      "line": 73,
       "kind": "struct",
-      "explicitCodable": false,
-      "declaration": "public struct V2MediaProviderObjectTarget: Equatable, Sendable",
+      "explicitCodable": true,
+      "declaration": "public struct V2ResourceTransferPlan: Equatable, Codable, Sendable",
       "members": [
+        "public let version: Int",
+        "public let mode: V2ResourceTransferMode",
         "public let url: URL",
-        "public let headers: [String: String]",
-        "public let expiresAt: Date",
-        "public let expectedByteCount: Int64?"
+        "public let headers: [V2ResourceTransferHeader]",
+        "public let formFields: [String: String]",
+        "public let formFileField: String?",
+        "public let expiresAtUnixMilliseconds: Int64",
+        "public let expectedByteCount: Int64",
+        "public let byteRange: V2ResourceByteRange?",
+        "public let partNumber: Int?",
+        "public let checksum: V2ResourceChecksum?",
+        "public var expiresAt: Date { V2ResourceTime.date(expiresAtUnixMilliseconds) }",
+        "public var httpMethod: String { mode.httpMethod }"
       ]
     },
     {
@@ -2139,20 +2148,6 @@
       "declaration": "public struct V2MediaReference: Hashable, Codable, Sendable",
       "members": [
         "public let mediaID: MediaID"
-      ]
-    },
-    {
-      "name": "V2MediaUploadGrant",
-      "target": "IMV2Core",
-      "path": "IMV2Core/Sources/IMV2Core/MediaReference.swift",
-      "line": 111,
-      "kind": "struct",
-      "explicitCodable": false,
-      "declaration": "public struct V2MediaUploadGrant: Equatable, Sendable",
-      "members": [
-        "public let mediaID: MediaID",
-        "public let uploadSessionID: MediaUploadSessionID",
-        "public let expiresAt: Date"
       ]
     },
     {
@@ -2715,22 +2710,6 @@
       ]
     },
     {
-      "name": "V2RequestMediaUploadCommand",
-      "target": "IMV2Core",
-      "path": "IMV2Core/Sources/IMV2Core/MediaReference.swift",
-      "line": 81,
-      "kind": "struct",
-      "explicitCodable": false,
-      "declaration": "public struct V2RequestMediaUploadCommand: Equatable, Sendable",
-      "members": [
-        "public let actorUserID: UserID",
-        "public let operationID: MediaUploadOperationID",
-        "public let mediaID: MediaID",
-        "public let contentType: String",
-        "public let byteCount: Int64"
-      ]
-    },
-    {
       "name": "V2ResolvedSpecialAccount",
       "target": "IMV2Server",
       "path": "IMV2Server/Sources/IMV2Server/V2SpecialAccountMessagingService.swift",
@@ -3288,6 +3267,146 @@
         "public let expectedRevision: V2MessageRevision",
         "public var expectedMessageRevision: UInt64 { expectedRevision.rawValue }"
       ]
+    },
+    {
+      "name": "GroupAvatarOperationID",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatar.swift",
+      "line": 4,
+      "kind": "typealias",
+      "explicitCodable": true,
+      "declaration": "public typealias GroupAvatarOperationID = V2Identifier<GroupAvatarOperationIDTag>",
+      "members": []
+    },
+    {
+      "name": "V2GroupAvatarMutation",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatar.swift",
+      "line": 6,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2GroupAvatarMutation: Equatable, Codable, Sendable {",
+      "members": []
+    },
+    {
+      "name": "V2GroupAvatarCommand",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatar.swift",
+      "line": 16,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2GroupAvatarCommand: Equatable, Codable, Sendable {",
+      "members": []
+    },
+    {
+      "name": "V2GroupAvatarState",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatar.swift",
+      "line": 42,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2GroupAvatarState: Equatable, Codable, Sendable {",
+      "members": []
+    },
+    {
+      "name": "V2GroupAvatarChange",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatar.swift",
+      "line": 62,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2GroupAvatarChange: Equatable, Codable, Sendable {",
+      "members": []
+    },
+    {
+      "name": "V2GroupAvatarPresentation",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatarPresentation.swift",
+      "line": 5,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2GroupAvatarPresentation: Equatable, Codable, Sendable {",
+      "members": []
+    },
+    {
+      "name": "V2ActorGroupAvatarWire",
+      "target": "IMV2ActorContracts",
+      "path": "IMV2Server/Sources/IMV2ActorContracts/Wire/Administration/V2RoomAdministrationCommandWire.swift",
+      "line": 16,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2ActorGroupAvatarWire: Codable, Equatable, Sendable {",
+      "members": []
+    },
+    {
+      "name": "V2ActorGroupAvatarVisibilityWire",
+      "target": "IMV2ActorContracts",
+      "path": "IMV2Server/Sources/IMV2ActorContracts/Wire/MediaAuthorization/V2ActorRoomMediaAuthorizationWire.swift",
+      "line": 74,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2ActorGroupAvatarVisibilityWire: Codable, Equatable, Sendable {",
+      "members": []
+    },
+    {
+      "name": "V2ActorGroupAvatarVisibilitySnapshotWire",
+      "target": "IMV2ActorContracts",
+      "path": "IMV2Server/Sources/IMV2ActorContracts/Wire/MediaAuthorization/V2ActorRoomMediaAuthorizationWire.swift",
+      "line": 83,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2ActorGroupAvatarVisibilitySnapshotWire: Codable, Equatable, Sendable {",
+      "members": []
+    },
+    {
+      "name": "V2GroupAvatarCommandResponse",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatarCommandResponse.swift",
+      "line": 5,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2GroupAvatarCommandResponse: Equatable, Codable, Sendable {",
+      "members": []
+    },
+    {
+      "name": "V2GroupAvatarRecoveryRequest",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatarRecovery.swift",
+      "line": 3,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2GroupAvatarRecoveryRequest: Equatable, Codable, Sendable {",
+      "members": []
+    },
+    {
+      "name": "V2GroupAvatarRecoveryResult",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatarRecovery.swift",
+      "line": 10,
+      "kind": "enum",
+      "explicitCodable": true,
+      "declaration": "public enum V2GroupAvatarRecoveryResult: Equatable, Codable, Sendable {",
+      "members": []
+    },
+    {
+      "name": "V2GroupAvatarRecoveryResponse",
+      "target": "IMV2Core",
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatarRecovery.swift",
+      "line": 18,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2GroupAvatarRecoveryResponse: Equatable, Codable, Sendable {",
+      "members": []
+    },
+    {
+      "name": "V2ActorGroupAvatarRecoveryWire",
+      "target": "IMV2ActorContracts",
+      "path": "IMV2Server/Sources/IMV2ActorContracts/Wire/Administration/V2RoomAdministrationCommandWire.swift",
+      "line": 25,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2ActorGroupAvatarRecoveryWire: Codable, Equatable, Sendable {",
+      "members": []
     }
   ]
 }

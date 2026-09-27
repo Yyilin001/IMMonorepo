@@ -4,7 +4,7 @@ import SQLKit
 
 /// 媒体可见性授权判定的 PostgreSQL 实现。
 ///
-/// 消息附件由规范消息引用与房间访问权限授权，头像由可见资料授权。
+/// 此路径只授权消息附件；头像由资料展示服务签发独立的展示租约与下载能力。
 /// 共享状态、旧个人副本或媒体标识本身不构成授权；每次签发和兑换都重新检查。
 enum V2PostgresMediaVisibilityAuthorization {
     /// 判断请求者是否有权访问指定媒体。
@@ -36,10 +36,9 @@ enum V2PostgresMediaVisibilityAuthorization {
     ///
     /// 媒体表达式由受信服务端代码拼接，所有受调用方控制的标识仍以绑定参数传入。
     ///
-    /// 谓词要求：媒对象处于可用状态、设备有效且账号未停用；随后满足其一——
+    /// 谓词要求：资源已登记且当前代次可用、设备有效且账号未停用；
     /// 消息引用路径要求消息未撤回、引用未撤销、请求者在消息接受修订与当前修订下都具备成员资格，
-    /// 并且请求者对当前正文修订具有历史访问权限；
-    /// 或头像路径要求资料有效、双方无拉黑，并且请求者与资料所有者存在好友、同房间等关联。
+    /// 并且请求者对当前正文修订具有历史访问权限。
     ///
     /// - Parameters:
     ///   - mediaID: 已拼装的媒体标识表达式，通常为绑定参数。
@@ -79,50 +78,17 @@ enum V2PostgresMediaVisibilityAuthorization {
                             ON message.message_id = reference.message_id
                           JOIN im_v2.rooms AS room
                             ON room.room_id = message.room_id
+                          JOIN im_v2.resource_catalog AS resource
+                            ON resource.media_id = media.media_id
+                           AND resource.home_kind = 'room' AND resource.home_id = room.room_id
+                           AND resource.usage_kind = 'message_attachment'
+                          JOIN im_v2.resource_blob_placements AS placement
+                            ON placement.media_id = resource.media_id AND placement.generation = resource.generation
+                           AND placement.state = 'active'
                           WHERE reference.media_id = media.media_id
                             AND message.withdrawn_at IS NULL
                             AND reference.revoked_at IS NULL
                             AND (\(v2ForwardSourceVisibility(actorID: requesterUserID)))
-                      )
-                      OR EXISTS (
-                          SELECT 1
-                          FROM im_v2.public_user_profiles AS profile
-                          WHERE profile.avatar_media_id = media.media_id
-                            AND profile.state = 'active'
-                            AND NOT EXISTS (
-                                SELECT 1
-                                FROM im_v2.user_blocks AS block
-                                WHERE (block.blocker_user_id = \(bind: requesterUserID)
-                                       AND block.blocked_user_id = profile.user_id)
-                                   OR (block.blocker_user_id = profile.user_id
-                                       AND block.blocked_user_id = \(bind: requesterUserID))
-                            )
-                            AND (
-                                profile.user_id = \(bind: requesterUserID)
-                                OR EXISTS (
-                                    SELECT 1
-                                    FROM im_v2.user_relationships AS relationship
-                                    WHERE relationship.state IN ('pending', 'accepted')
-                                      AND ((relationship.lower_user_id = \(bind: requesterUserID)
-                                            AND relationship.higher_user_id = profile.user_id)
-                                        OR (relationship.higher_user_id = \(bind: requesterUserID)
-                                            AND relationship.lower_user_id = profile.user_id))
-                                )
-                                OR EXISTS (
-                                    SELECT 1
-                                    FROM im_v2.rooms AS room
-                                    JOIN im_v2.room_memberships AS requester_membership
-                                      ON requester_membership.room_id = room.room_id
-                                     AND requester_membership.user_id = \(bind: requesterUserID)
-                                     AND requester_membership.joined_revision <= room.membership_revision
-                                     AND (requester_membership.left_revision IS NULL OR requester_membership.left_revision > room.membership_revision)
-                                    JOIN im_v2.room_memberships AS profile_membership
-                                      ON profile_membership.room_id = room.room_id
-                                     AND profile_membership.user_id = profile.user_id
-                                     AND profile_membership.joined_revision <= room.membership_revision
-                                     AND (profile_membership.left_revision IS NULL OR profile_membership.left_revision > room.membership_revision)
-                                )
-                            )
                       )
                   )
             )

@@ -166,6 +166,7 @@ public actor V2CommandOutboxEngine {
     private let now: @Sendable () -> Date
     /// 非服务端指定重试错误的默认等待秒数。
     private let retryDelay: TimeInterval
+    private let recovery: V2MessageOperationRecoveryController?
 
     /// 配置持久化发件箱与发送依赖。
     ///
@@ -177,13 +178,14 @@ public actor V2CommandOutboxEngine {
     ///   - retryDelay: 默认重试秒数，必须大于零；实际重试日期的可表示性在安排时检查。
     ///
     /// 不在初始化时发送或入队。非正重试延迟触发前置条件失败。
-    public init(store: any V2LocalCommandStore, transport: any V2ClientMessageTransport, makeUUID: @escaping @Sendable () -> UUID = UUID.init, now: @escaping @Sendable () -> Date = Date.init, retryDelay: TimeInterval = 1) {
+    public init(store: any V2LocalCommandStore, transport: any V2ClientMessageTransport, makeUUID: @escaping @Sendable () -> UUID = UUID.init, now: @escaping @Sendable () -> Date = Date.init, retryDelay: TimeInterval = 1, recovery: V2MessageOperationRecoveryController? = nil) {
         precondition(retryDelay > 0)
         self.store = store
         self.transport = transport
         self.makeUUID = makeUUID
         self.now = now
         self.retryDelay = retryDelay
+        self.recovery = recovery
     }
 
     @discardableResult
@@ -232,6 +234,7 @@ public actor V2CommandOutboxEngine {
     /// 取消直接传播，不在此安排重试；选择命令失败也直接传播。保存接受结果时的一般错误位于同一 catch 范围内，
     /// 也会尝试安排重试，因此网络接受成功与本地终态保存失败不能混为同一种结果，后续重放依赖服务端幂等。
     private func flushNextReadyCommand() async throws -> V2CommandFlushResult {
+        if let result = try await recovery?.flushOnce(now: now()) { return result }
         guard let command = try await store.nextReadyMessage(now: now()) else { return .idle }
         do {
             let accepted = try await transport.sendMessage(roomID: command.roomID, clientMessageID: command.clientMessageID, text: command.text, media: command.media, mentions: command.mentions, entities: command.entities, replyTo: command.replyTo)
@@ -243,6 +246,10 @@ public actor V2CommandOutboxEngine {
         } catch let error as V2RealtimeTransportError {
             switch error {
             case .server(let code, let retryable, let retryAfter, _):
+                if code == "MEDIA_UNAVAILABLE", let recovery {
+                    try await recovery.requireRecovery(command, now: now())
+                    return .retryScheduled(command.clientMessageID)
+                }
                 // A rate-limit response is a conclusive rejection of this
                 // particular send attempt. Although the server permits a
                 // later request, silently replaying chat content after the

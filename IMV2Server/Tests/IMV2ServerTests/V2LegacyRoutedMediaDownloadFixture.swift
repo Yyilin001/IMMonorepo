@@ -47,7 +47,7 @@ public struct V2RoutedMediaDownloadService: V2MediaDownloadTargetResolving {
     ///   ``V2MediaEdgeHTTPHandlerError/messageOwnerUnavailable``；
     ///   时刻不可编码时抛出 ``V2RoomWriteStoreError/corruptPersistenceState``；
     ///   目标已过期时抛出 ``V2MediaProviderSessionError/expiredSession``。
-    public func downloadTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation?) async throws -> V2MediaProviderObjectTarget {
+    public func downloadTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation?) async throws -> V2ResourceTransferPlan {
         guard let message else { return try await local.downloadTarget(actorUserID: actorUserID, deviceID: deviceID, mediaID: mediaID) }
         try Task.checkCancellation()
         let route: V2RoomShardRoute

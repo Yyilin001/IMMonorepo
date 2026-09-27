@@ -38,7 +38,7 @@ struct V2ContactsStoreTests {
         let currentUserID = try UserID("00000000-0000-0000-0000-000000000811")
         let target = try makeIdentity(userID: "00000000-0000-0000-0000-000000000812", handle: "target", displayName: "目标用户")
         let source = ContactsDataSourceFake(projections: [], hydratedProfiles: [:])
-        let resolver = PublicIdentityResolverFake(identity: target)
+        let resolver = PublicIdentityResolverFake(identity: target, actorUserID: currentUserID)
         let changer = RelationshipChangerFake(outcome: .accepted)
         let store = makeStore(
             dataSource: source,
@@ -77,6 +77,72 @@ struct V2ContactsStoreTests {
         #expect(await opener.openedUserIDs() == [friend.userID])
         #expect(rootNavigation.selectedTab == .conversations)
         #expect(rootNavigation.conversationRequest?.roomID == roomID)
+    }
+
+    @Test(arguments: ["edit", "expiry", "background", "exit"])
+    func discoveryResultCannotSubmitAfterInvalidation(kind: String) async throws {
+        let actor = try UserID("00000000-0000-0000-0000-000000000811")
+        let identity = try makeIdentity(userID: "00000000-0000-0000-0000-000000000812", handle: "target", displayName: "Target")
+        let changer = RelationshipChangerFake(outcome: .accepted)
+        let store = makeStore(dataSource: ContactsDataSourceFake(projections: [], hydratedProfiles: [:]), currentUserID: actor,
+            identityResolver: PublicIdentityResolverFake(identity: identity, actorUserID: actor), relationshipChanger: changer)
+        store.addFriendHandle = "@target"
+        await store.resolveAddFriend()
+        let result = try #require(store.resolvedAddFriend)
+        switch kind {
+        case "edit": store.addFriendHandle = "@another"
+        case "expiry": store.expireAddFriendResolution(at: result.deadline)
+        case "exit": store.resetAddFriend()
+        default: store.invalidateAddFriendResolution()
+        }
+        #expect(store.resolvedAddFriend == nil)
+        #expect(store.addFriendExpiration == nil)
+        await store.sendFriendRequest()
+        #expect(await changer.actions().isEmpty)
+    }
+
+    @Test(arguments: [false, true])
+    func replacementDiscoveryWaitsForNoncooperativeLookupAndRejectsItsLateResult(failingOld: Bool) async throws {
+        let actor = try UserID("00000000-0000-0000-0000-000000000811")
+        let oldIdentity = try makeIdentity(userID: "old", handle: "first", displayName: "Old name")
+        let newIdentity = try makeIdentity(userID: "new", handle: "second", displayName: "New name")
+        let resolver = DiscoveryResolverGate(actorUserID: actor, identities: [oldIdentity, newIdentity])
+        var started = resolver.started.makeAsyncIterator()
+        let store = makeStore(dataSource: ContactsDataSourceFake(projections: [], hydratedProfiles: [:]), currentUserID: actor,
+            identityResolver: resolver)
+        store.addFriendHandle = "first"
+        let first = Task { await store.resolveAddFriend() }
+        #expect(await started.next() == "first")
+        store.addFriendHandle = "second"
+        let second = Task { await store.resolveAddFriend() }
+        #expect(store.resolvedAddFriend == nil)
+        #expect(await resolver.activeCount == 1)
+        await resolver.release(handle: "first", failing: failingOld)
+        await first.value
+        #expect(await started.next() == "second")
+        #expect(store.resolvedAddFriend == nil)
+        await resolver.release(handle: "second", failing: false)
+        await second.value
+        #expect(store.resolvedAddFriend?.identity == newIdentity)
+        #expect(await resolver.maximumActive == 1)
+    }
+
+    @Test func cancelledDiscoveryDoesNotPublishEvenWhenTransportReturnsSuccess() async throws {
+        let actor = try UserID("actor")
+        let resolver = DiscoveryResolverGate(actorUserID: actor,
+            identities: [try makeIdentity(userID: "target", handle: "target", displayName: "Target")])
+        var started = resolver.started.makeAsyncIterator()
+        let store = makeStore(dataSource: ContactsDataSourceFake(projections: [], hydratedProfiles: [:]), currentUserID: actor,
+            identityResolver: resolver)
+        store.addFriendHandle = "target"
+        let task = Task { await store.resolveAddFriend() }
+        #expect(await started.next() == "target")
+        task.cancel()
+        #expect(await resolver.activeCount == 1)
+        await resolver.release(handle: "target", failing: false)
+        await task.value
+        #expect(store.addFriendState == .entering)
+        #expect(store.resolvedAddFriend == nil)
     }
 
     @Test func contactListLoadsStableAdditionalPages() async throws {
@@ -279,6 +345,44 @@ struct V2ContactsStoreTests {
         try await local.close()
     }
 
+    @Test("production contact hydration shares leases, persists search content, and handles explicit revocation")
+    func contactHydrationUsesSharedPresentations() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "im-contact-leases-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let current = UserID(uuid: UUID()), device = DeviceID(uuid: UUID())
+        let local = try GRDBV2LocalSyncStore(databaseURL: root.appending(path: "store.sqlite"), installationBinding: .init(value: UUID()))
+        _ = try await seedContactGroup(local, current: current, group: 0, range: 1...3, after: 0)
+        let users = try (1...3).map { try UserID(String(format: "00000000-0000-0000-0000-%012d", $0)) }
+        let views = try await local.profileViews(userIDs: users)
+        for user in users { try await local.markProfileUnavailable(userID: user) }
+        let remote = AuthorizedContactProjectionReader(actor: current, device: device, views: views)
+        let presentations = V2ProfilePresentationRepository(actorUserID: current, deviceID: device, reader: remote)
+        let profiles = V2ProfileRepository(store: local, reader: V2ProfileProjectionReader(presentations: presentations))
+        let source = V2GRDBContactsDataSource(localStore: local, profiles: profiles, currentUserID: current)
+        let store = makeStore(dataSource: source, currentUserID: current)
+        do {
+            await store.refresh()
+            #expect(store.state == .loaded)
+            #expect(store.friends.count == 3)
+            #expect(store.friends.allSatisfy { $0.publicIdentity != nil })
+            #expect(await remote.requests.count == 1)
+            #expect(await remote.requests.flatMap { $0 }.allSatisfy { $0.context == .relationship })
+            let page = await presentations.activate()
+            #expect(await presentations.cachedSnapshot(for: .init(userID: users[0], context: .relationship), activation: page) == nil)
+            await presentations.deactivate(page)
+            store.searchQuery = "Member 0 1"
+            await store.refreshFriendSearch()
+            #expect(store.filteredFriends.map(\.userID) == [users[0]])
+            store.searchQuery = ""
+            await remote.revoke()
+            await store.refresh(revalidateProfiles: true)
+            #expect(store.friends.allSatisfy { $0.publicIdentity == nil })
+            #expect(try await local.profileViews(userIDs: users).isEmpty)
+            await profiles.close(); await presentations.close(); try await local.close()
+        } catch { await profiles.close(); await presentations.close(); try? await local.close(); throw error }
+    }
+
     @Test("relationship revocation cancels a slow profile read before applying the latest SQLite window")
     func urgentRevocationCancelsProfileHydration() async throws {
         let current = UserID(uuid: UUID())
@@ -477,7 +581,7 @@ struct V2ContactsStoreTests {
     private func makeStore(
         dataSource: any V2ContactsReading,
         currentUserID: UserID,
-        identityResolver: any V2ConversationPublicIdentityResolving = PublicIdentityResolverFake(identity: nil),
+        identityResolver: any V2PublicIdentityPresentationResolving = PublicIdentityResolverFake(identity: nil),
         relationshipChanger: any V2RelationshipChanging = RelationshipChangerFake(outcome: .accepted),
         directConversationOpener: any V2DirectConversationOpening = DirectConversationOpenerFake(roomID: "00000000-0000-0000-0000-000000000899"),
         projectionChangeNotifier: V2ProjectionChangeNotifier? = nil
@@ -582,16 +686,80 @@ private actor ContactsDataSourceFake: V2ContactsReading {
     func hydratedRequests() -> [[UserID]] { requests }
 }
 
-private actor PublicIdentityResolverFake: V2ConversationPublicIdentityResolving {
+private actor PublicIdentityResolverFake: V2PublicIdentityPresentationResolving {
     private let identity: V2PublicIdentity?
+    private let actorUserID: UserID?
 
-    init(identity: V2PublicIdentity?) {
+    init(identity: V2PublicIdentity?, actorUserID: UserID? = nil) {
         self.identity = identity
+        self.actorUserID = actorUserID
     }
 
-    func resolve(handle _: String) async throws -> V2PublicIdentity {
-        guard let identity else { throw V2PublicIdentityValidationError.invalidHandle }
-        return identity
+    func resolveForPresentation(handle _: String) async throws -> V2PublicIdentityLookupSnapshot {
+        guard let identity, let actorUserID else { throw V2PublicIdentityValidationError.invalidHandle }
+        let now = Date(), instant = ContinuousClock.now
+        return try .init(resolution: .init(identity: identity, actorUserID: actorUserID,
+            deviceID: .init("00000000-0000-0000-0000-000000000901"), observedAt: now,
+            validUntil: now.addingTimeInterval(60), serverNow: now), requestStartedAt: instant, responseReceivedAt: instant)
+    }
+}
+
+private actor DiscoveryResolverGate: V2PublicIdentityPresentationResolving {
+    nonisolated let started: AsyncStream<String>
+    private let startedContinuation: AsyncStream<String>.Continuation
+    private let actorUserID: UserID
+    private let identities: [String: V2PublicIdentity]
+    private var pending: [String: CheckedContinuation<V2PublicIdentityLookupSnapshot, any Error>] = [:]
+    private(set) var maximumActive = 0
+    var activeCount: Int { pending.count }
+    init(actorUserID: UserID, identities: [V2PublicIdentity]) {
+        self.actorUserID = actorUserID
+        self.identities = Dictionary(uniqueKeysWithValues: identities.map { ($0.handle.rawValue, $0) })
+        let events = AsyncStream<String>.makeStream()
+        started = events.stream; startedContinuation = events.continuation
+    }
+    func resolveForPresentation(handle: String) async throws -> V2PublicIdentityLookupSnapshot {
+        try await withCheckedThrowingContinuation { continuation in
+            pending[handle] = continuation
+            maximumActive = max(maximumActive, pending.count)
+            startedContinuation.yield(handle)
+        }
+    }
+    func release(handle: String, failing: Bool) {
+        guard let continuation = pending.removeValue(forKey: handle), let identity = identities[handle] else {
+            Issue.record("unexpected release"); return
+        }
+        do {
+            if failing { throw V2PublicIdentityDirectoryClientError.notFound }
+            let now = Date(), instant = ContinuousClock.now
+            continuation.resume(returning: try .init(resolution: .init(identity: identity, actorUserID: actorUserID,
+                deviceID: .init("device"), observedAt: now, validUntil: now.addingTimeInterval(60), serverNow: now),
+                requestStartedAt: instant, responseReceivedAt: instant))
+        } catch { continuation.resume(throwing: error) }
+    }
+}
+
+private actor AuthorizedContactProjectionReader: V2ProfilePresentationReading {
+    let actor: UserID, device: DeviceID, views: [UserID: V2ProfileView]
+    private(set) var requests: [[V2ProfileViewLookupKey]] = []
+    private var revoked = false
+    init(actor: UserID, device: DeviceID, views: [UserID: V2ProfileView]) {
+        self.actor = actor; self.device = device; self.views = views
+    }
+    func revoke() { revoked = true }
+    func readPresentations(_ keys: [V2ProfileViewLookupKey]) throws -> V2ProfilePresentationBatch {
+        requests.append(keys)
+        let now = Date()
+        if revoked { return .init(presentations: [:], unavailable: Set(keys), serverNow: now) }
+        var results: [V2ProfileViewLookupKey: V2AuthorizedProfilePresentation] = [:]
+        for key in keys {
+            #expect(key.context == .relationship)
+            let view = try #require(views[key.userID])
+            results[key] = try .init(view: view, lease: .init(actorUserID: actor, deviceID: device, key: key,
+                profileRevision: view.revision, visibilityRevision: view.visibilityRevision, contextRevision: 1,
+                observedAt: now, validUntil: now.addingTimeInterval(300)))
+        }
+        return .init(presentations: results, unavailable: [], serverNow: now)
     }
 }
 

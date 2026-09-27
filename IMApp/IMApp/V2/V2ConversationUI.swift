@@ -38,6 +38,7 @@ enum V2ConversationKind: Hashable, Sendable {
 }
 
 struct V2ConversationListItem: Hashable, Identifiable, Sendable {
+    let presentationKey: V2ProfileViewLookupKey?
 
     let id: String
     let title: String
@@ -53,7 +54,8 @@ struct V2ConversationListItem: Hashable, Identifiable, Sendable {
     /// 轮转还没覆盖到的房间为 0：界面不显示角标，也不用本地推算冒充服务端值。
     let unreadCount: UInt64?
 
-    init(id: String, title: String, preview: String, lastActivity: Date, isOutgoing: Bool, kind: V2ConversationKind, isPinned: Bool = false, isArchived: Bool = false, muteUntil: Date? = nil, unreadCount: UInt64? = nil) {
+    init(id: String, title: String, preview: String, lastActivity: Date, isOutgoing: Bool, kind: V2ConversationKind, isPinned: Bool = false, isArchived: Bool = false, muteUntil: Date? = nil, unreadCount: UInt64? = nil, presentationKey: V2ProfileViewLookupKey? = nil) {
+        self.presentationKey = presentationKey
         self.id = id
         self.title = title
         self.preview = preview
@@ -72,12 +74,13 @@ struct V2ConversationListItem: Hashable, Identifiable, Sendable {
 /// 用户看到的是标题，不透明标识仍被限制在存储边界内部。
 struct V2ConversationForwardTarget: Hashable, Identifiable, Sendable {
     let roomID: String
-    let title: String
+    let label: V2ConversationLabel
 
     var id: String { roomID }
 }
 
 struct V2ConversationMessageItem: Hashable, Identifiable, Sendable {
+    let senderUserID: UserID?
     let id: String
     let roomSequence: UInt64
     let revision: UInt64
@@ -108,7 +111,8 @@ struct V2ConversationMessageItem: Hashable, Identifiable, Sendable {
     let isForwarded: Bool
     let reactions: [V2ConversationMessageReaction]
 
-    init(id: String, roomSequence: UInt64 = 1, revision: UInt64, text: String, media: [V2MediaReference] = [], mediaPresentations: [V2MediaPresentation] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, createdAt: Date, isOutgoing: Bool, isWithdrawn: Bool, reactions: [V2ConversationMessageReaction] = [], isReadByPeer: Bool = false, isFavorited: Bool = false, isPinnedInGroup: Bool = false, isForwarded: Bool = false) {
+    init(id: String, roomSequence: UInt64 = 1, revision: UInt64, text: String, media: [V2MediaReference] = [], mediaPresentations: [V2MediaPresentation] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil, createdAt: Date, isOutgoing: Bool, isWithdrawn: Bool, reactions: [V2ConversationMessageReaction] = [], isReadByPeer: Bool = false, isFavorited: Bool = false, isPinnedInGroup: Bool = false, isForwarded: Bool = false, senderUserID: UserID? = nil) {
+        self.senderUserID = senderUserID
         self.id = id
         self.roomSequence = roomSequence
         self.revision = revision
@@ -199,11 +203,11 @@ struct V2ConversationTimelinePage: Equatable, Sendable {
 
 /// 个人收藏页使用的跨会话紧凑条目。
 ///
-/// 标识仅作为导航键使用；展示字符串已在数据源边界解析完成。
+/// 标识仅作为导航键使用；私聊名称在可见行中取得限期展示授权。
 struct V2FavoriteConversationMessageItem: Hashable, Identifiable, Sendable {
     let id: String
     let roomID: String
-    let roomTitle: String
+    let label: V2ConversationLabel
     let text: String
     let createdAt: Date
 }
@@ -343,11 +347,11 @@ protocol V2GroupRolePolicyAccessing: Sendable {
 /// 把全文检索与 GRDB 边界挡在 SwiftUI 搜索状态之外。
 protocol V2ConversationMessageSearching: Sendable {
     func searchMessages(_ request: V2MessageSearchRequest) async throws -> V2MessageSearchPage
-    func searchSenderDisplayName(userID: UserID) async throws -> String?
+    func searchConversationContext(roomID: RoomID) async throws -> V2ClientConversationLookupContext?
 }
 
 extension V2ConversationMessageSearching {
-    func searchSenderDisplayName(userID: UserID) async throws -> String? { nil }
+    func searchConversationContext(roomID: RoomID) async throws -> V2ClientConversationLookupContext? { nil }
 }
 
 protocol V2ConversationMessageSearchProgressReading: Sendable {
@@ -464,6 +468,7 @@ final class V2ConversationListStore {
     private(set) var pendingGroupConversationOperationID: String?
     private var explicitRoomTitles: [String: String] = [:]
     private var explicitRoomKinds: [String: V2ConversationKind] = [:]
+    private var explicitDirectPresentationKeys: [String: V2ProfileViewLookupKey] = [:]
     private var refreshGeneration = 0
 
     init(environment: V2ConversationFeatureEnvironment) {
@@ -863,7 +868,7 @@ final class V2ConversationListStore {
         let kind = explicitRoomKinds[roomID] ?? item?.kind ?? .unknown
         let forwardTargets = items
             .filter { $0.id != roomID }
-            .map { V2ConversationForwardTarget(roomID: $0.id, title: $0.title) }
+            .map { V2ConversationForwardTarget(roomID: $0.id, label: .init(item: $0)) }
         return .init(
             environment: environment,
             context: .init(
@@ -872,14 +877,15 @@ final class V2ConversationListStore {
                 kind: kind,
                 forwardTargets: forwardTargets,
                 initialDraft: initialDraft,
-                initialMentionHandles: initialMentionHandles
+                initialMentionHandles: initialMentionHandles,
+                presentationKey: explicitDirectPresentationKeys[roomID] ?? item?.presentationKey
             )
         )
     }
 
     func messageSearchStore() -> V2ConversationSearchStore? {
         guard let messageSearcher else { return nil }
-        return .init(searcher: messageSearcher)
+        return .init(searcher: messageSearcher, actorUserID: try? .init(userID))
     }
 
     func observeProjectionChanges() async {
@@ -920,6 +926,7 @@ final class V2ConversationListStore {
             try Task.checkCancellation()
             explicitRoomTitles[roomID] = identity.displayName
             explicitRoomKinds[roomID] = .direct(accountKind: identity.accountKind)
+            explicitDirectPresentationKeys[roomID] = .init(userID: identity.userID, context: .directConversation)
             directConversationFeedback = nil
             return roomID
         } catch is CancellationError {
@@ -1017,7 +1024,11 @@ struct V2ConversationListView: View {
                         NavigationLink(value: item.id) {
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
-                                    Text(item.title).font(.headline)
+                                    if let key = item.presentationKey { V2AuthorizedAvatarView(key: key, showsName: true) }
+                                    else {
+                                        if item.kind == .group, let room = try? RoomID(item.id) { V2AuthorizedGroupAvatarView(roomID: room) }
+                                        Text(item.kind == .group ? item.title : "会话").font(.headline)
+                                    }
                                     if let accountKind = item.kind.directAccountKind,
                                        let accountBadge = accountKind.badgeTitle {
                                         Text(accountBadge)
@@ -1361,8 +1372,10 @@ private extension V2AccountKind {
 struct V2ConversationAccountMenu: View {
     let canOpenPublicIdentity: Bool
     let canOpenDeviceSessions: Bool
+    let canOpenPendingGroupAvatars: Bool
     let openPublicIdentity: @MainActor () -> Void
     let openDeviceSessions: @MainActor () -> Void
+    let openPendingGroupAvatars: @MainActor () -> Void
     let openPrivacySettings: @MainActor () -> Void
     let openAccountSecurity: @MainActor () -> Void
     let signOut: @MainActor () -> Void
@@ -1376,6 +1389,10 @@ struct V2ConversationAccountMenu: View {
             if canOpenDeviceSessions {
                 Button("登录设备", action: openDeviceSessions)
                     .accessibilityIdentifier("v2.device-sessions.open")
+            }
+            if canOpenPendingGroupAvatars {
+                Button("待处理群头像", action: openPendingGroupAvatars)
+                    .accessibilityIdentifier("v2.group.avatar.pending.open")
             }
             Button("消息接收设置", action: openPrivacySettings)
                 .accessibilityIdentifier("v2.privacy.open")
@@ -1397,6 +1414,7 @@ private struct V2MessageSearchView: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable var store: V2ConversationSearchStore
     let onSelect: (V2MessageSearchHit) -> Void
+    @State private var profilePageID = UUID()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1423,13 +1441,14 @@ private struct V2MessageSearchView: View {
                         Text("已按成员筛选")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                        if let key = store.senderPresentationKey { V2AuthorizedProfileNameView(key: key, placeholder: "选定成员").font(.footnote) }
+                        else { Text("选定成员").font(.footnote) }
                         Spacer()
                         Button("清除") { store.clearSenderFilter() }
                             .accessibilityLabel("清除成员筛选")
                             .accessibilityIdentifier("v2.message.search.clear-sender-filter")
                     }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityValue(store.senderFilterDisplayName)
+                    .accessibilityElement(children: .contain)
                 }
             }
             .padding()
@@ -1486,7 +1505,7 @@ private struct V2MessageSearchView: View {
                             .contextMenu {
                                 if store.senderFilter != hit.senderUserID {
                                     Button("只看此成员的消息", systemImage: "person.fill") {
-                                        store.filterToSender(hit.senderUserID)
+                                        store.filterToSender(hit.senderUserID, in: hit.roomID)
                                     }
                                     .accessibilityIdentifier("v2.message.search.filter-sender.\(hit.senderUserID.rawValue)")
                                 }
@@ -1510,10 +1529,11 @@ private struct V2MessageSearchView: View {
             }
         }
         .task { await store.observeIndexState() }
-        .task(id: store.senderFilter) { await store.refreshSenderDisplayName() }
+        .task(id: store.senderContextGeneration) { await store.refreshSenderPresentationContext() }
         .task(id: [store.query, store.contentFilter.rawValue, store.senderFilter?.rawValue ?? ""].joined(separator: "|")) {
             await store.search()
         }
+        .authorPresentationPage(context: .list(profilePageID))
     }
 }
 
@@ -1521,6 +1541,7 @@ private struct V2FavoriteMessagesSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable var store: V2ConversationListStore
     let select: (V2FavoriteConversationMessageItem) -> Void
+    @State private var profilePageID = UUID()
 
     var body: some View {
         NavigationStack {
@@ -1538,7 +1559,7 @@ private struct V2FavoriteMessagesSheet: View {
                                 select(item)
                             } label: {
                                 VStack(alignment: .leading, spacing: 5) {
-                                    Text(item.roomTitle)
+                                    V2ConversationLabelView(label: item.label)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                     Text(item.text)
@@ -1549,8 +1570,7 @@ private struct V2FavoriteMessagesSheet: View {
                                         .foregroundStyle(.secondary)
                                 }
                             }
-                            .accessibilityLabel(item.roomTitle)
-                            .accessibilityValue(item.text)
+                            .accessibilityElement(children: .combine)
                             .accessibilityHint("打开这条收藏消息所在的会话")
                             .accessibilityIdentifier("v2.message.favorite.item.\(item.id)")
                         }
@@ -1579,15 +1599,18 @@ private struct V2FavoriteMessagesSheet: View {
             }
             .task { await store.loadFavorites() }
         }
+        .authorPresentationPage(context: .list(profilePageID))
     }
 }
 
 struct V2ConversationDetailView: View {
     private enum PresentedDetailSheet: Identifiable {
         case groupMembers
+        case groupAvatar
         case groupReadReceipts(V2ConversationMessageItem)
         case edit(V2ConversationMessageItem)
         case forward
+        case copyAttachments(V2ConversationMessageItem)
         case groupAnnouncement
         case groupPermissions
         case groupInvitations
@@ -1596,12 +1619,16 @@ struct V2ConversationDetailView: View {
             switch self {
             case .groupMembers:
                 "groupMembers"
+            case .groupAvatar:
+                "groupAvatar"
             case .groupReadReceipts(let message):
                 "groupReadReceipts-\(message.id)"
             case .edit(let message):
                 "edit-\(message.id)"
             case .forward:
                 "forward"
+            case .copyAttachments(let message):
+                "copyAttachments-\(message.id)"
             case .groupAnnouncement:
                 "groupAnnouncement"
             case .groupPermissions:
@@ -1686,7 +1713,8 @@ struct V2ConversationDetailView: View {
                                                 beginForward: {
                                                     store.beginForwardSelection(with: message)
                                                     presentedDetailSheet = .forward
-                                                }
+                                                },
+                                                beginCopyAttachments: { presentedDetailSheet = .copyAttachments(message) }
                                             )
                                             .id(item.id)
                                         case .activity(let activity):
@@ -1826,6 +1854,19 @@ struct V2ConversationDetailView: View {
                             .padding(.bottom, 8)
                             .accessibilityIdentifier("v2.message.sending-restricted")
                     }
+                    ForEach(store.pendingResourceSends) { pending in
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(pending.status).font(.caption)
+                                if pending.total > 0 {
+                                    ProgressView(value: Double(pending.completed), total: Double(pending.total))
+                                        .accessibilityLabel("附件已准备 \(pending.completed)/\(pending.total)")
+                                }
+                            }
+                            if pending.canRetry { Button("重试") { Task { await store.retryResourceSend(pending.id) } } }
+                            if pending.canCancel { Button("取消") { Task { await store.cancelResourceSend(pending.id) } } }
+                        }.padding(.horizontal)
+                    }
                     if let sendFeedback = store.sendFeedback {
                         Text(sendFeedback)
                             .font(.caption)
@@ -1853,19 +1894,35 @@ struct V2ConversationDetailView: View {
                 }
             }
         }
-        .navigationTitle(store.title)
+        .navigationTitle(store.isGroupConversation ? store.title : "会话")
+        .toolbar {
+            if let key = store.presentationKey {
+                ToolbarItem(placement: .principal) { V2AuthorizedAvatarView(key: key, showsName: true, size: 24) }
+            } else if store.isGroupConversation, let room = try? RoomID(store.roomID) {
+                ToolbarItem(placement: .principal) {
+                    HStack(spacing: 6) {
+                        V2AuthorizedGroupAvatarView(roomID: room, size: 24)
+                        Text(store.title).font(.headline).lineLimit(1)
+                    }
+                }
+            }
+        }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { conversationToolbar }
         .sheet(item: $presentedDetailSheet) { sheet in
             switch sheet {
             case .groupMembers:
                 V2GroupMembersSheet(store: store)
+            case .groupAvatar:
+                if let manager = store.groupAvatarManagementStore() { V2GroupAvatarManagementView(store: manager) }
             case .groupReadReceipts(let message):
                 V2GroupReadReceiptsSheet(store: store, message: message)
             case .edit(let message):
                 V2MessageEditSheet(store: store, message: message)
             case .forward:
                 V2ForwardMessagesSheet(store: store)
+            case .copyAttachments(let message):
+                V2CopyAttachmentsSheet(store: store, message: message)
             case .groupAnnouncement:
                 V2GroupAnnouncementSheet(store: store)
             case .groupPermissions:
@@ -1896,6 +1953,8 @@ struct V2ConversationDetailView: View {
         }
         .task { await store.observeProjectionChanges() }
         .task { await store.pollVisibleHybridGroupEvents() }
+        .authorPresentationPage(context: store.authorPresentationContext)
+        .task { await store.observeResourceSends() }
         .task { await store.observeLiveActivity() }
         .task(id: focusedMessageID) {
             guard let focusedMessageID else { return }
@@ -1946,6 +2005,12 @@ struct V2ConversationDetailView: View {
             }
         }
         if store.isGroupConversation {
+            if store.hasGroupAvatarManagement {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("群头像", systemImage: "person.crop.circle") { presentedDetailSheet = .groupAvatar }
+                        .accessibilityIdentifier("v2.group.avatar.manage")
+                }
+            }
             if groupInvitationStore != nil {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("邀请", systemImage: "person.badge.plus") { presentedDetailSheet = .groupInvitations }
@@ -2115,11 +2180,14 @@ private struct V2ConversationMessageRow: View {
     let beginEditing: () -> Void
     let showReadReceipts: () -> Void
     let beginForward: () -> Void
+    let beginCopyAttachments: () -> Void
 
     var body: some View {
         HStack {
             if message.isOutgoing { Spacer(minLength: 44) }
-            V2ConversationMessageBubble(store: store, message: message, beginEditing: beginEditing, showReadReceipts: showReadReceipts, beginForward: beginForward)
+            if !message.isOutgoing, let key = store.authorPresentationKey(for: message) { V2AuthorizedAvatarView(key: key, showsName: store.isGroupConversation) }
+            V2ConversationMessageBubble(store: store, message: message, beginEditing: beginEditing, showReadReceipts: showReadReceipts, beginForward: beginForward, beginCopyAttachments: beginCopyAttachments)
+            if message.isOutgoing, let key = store.authorPresentationKey(for: message) { V2AuthorizedAvatarView(key: key) }
             if !message.isOutgoing { Spacer(minLength: 44) }
         }
         // Keep the row queryable without letting its identifier overwrite the
@@ -2163,6 +2231,7 @@ private struct V2ConversationMessageBubble: View {
     let beginEditing: () -> Void
     let showReadReceipts: () -> Void
     let beginForward: () -> Void
+    let beginCopyAttachments: () -> Void
 
     var body: some View {
         VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 3) {
@@ -2279,6 +2348,9 @@ private struct V2ConversationMessageBubble: View {
             if !message.isWithdrawn {
                 Button("转发", systemImage: "arrowshape.turn.up.right") { beginForward() }
                     .accessibilityIdentifier("v2.message.forward.\(message.id)")
+                if !message.media.isEmpty {
+                    Button("复制附件到会话", systemImage: "doc.on.doc", action: beginCopyAttachments)
+                }
             }
             if store.canEditMessage(message) {
                 Button("编辑") { beginEditing() }
@@ -2402,6 +2474,7 @@ private struct V2ForwardMessagesSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var selectedTargetRoomIDs: Set<String> = []
     @State private var selectionFeedback: String?
+    @State private var profilePageID = UUID()
 
     var body: some View {
         NavigationStack {
@@ -2421,7 +2494,7 @@ private struct V2ForwardMessagesSheet: View {
                                 HStack(spacing: 12) {
                                     Image(systemName: selectedTargetRoomIDs.contains(target.roomID) ? "checkmark.circle.fill" : "circle")
                                         .foregroundStyle(selectedTargetRoomIDs.contains(target.roomID) ? Color.accentColor : Color.secondary)
-                                    Text(target.title)
+                                    V2ConversationLabelView(label: target.label)
                                         .foregroundStyle(.primary)
                                         .lineLimit(2)
                                     Spacer()
@@ -2429,7 +2502,7 @@ private struct V2ForwardMessagesSheet: View {
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
-                            .accessibilityLabel(target.title)
+                            .accessibilityElement(children: .combine)
                             .accessibilityValue(selectedTargetRoomIDs.contains(target.roomID) ? "已选择" : "未选择")
                             .accessibilityHint("选择为转发目标")
                             .accessibilityIdentifier("v2.message.forward.target.\(target.roomID)")
@@ -2463,6 +2536,7 @@ private struct V2ForwardMessagesSheet: View {
                 }
             }
         }
+        .authorPresentationPage(context: .list(profilePageID))
     }
 
     private func toggle(_ target: V2ConversationForwardTarget) {
@@ -2475,6 +2549,48 @@ private struct V2ForwardMessagesSheet: View {
         } else {
             selectionFeedback = "一次最多转发到 \(V2ForwardMessagesCommand.maximumTargetRooms) 个会话。"
         }
+    }
+}
+
+private struct V2CopyAttachmentsSheet: View {
+    @Bindable var store: V2ConversationDetailStore
+    let message: V2ConversationMessageItem
+    @Environment(\.dismiss) private var dismiss
+    @State private var profilePageID = UUID()
+    @State private var selectedTarget: String?
+    @State private var feedback: String?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if store.forwardTargets.isEmpty {
+                    ContentUnavailableView("没有可用的目标会话", systemImage: "bubble.left.and.bubble.right")
+                }
+                ForEach(store.forwardTargets) { target in
+                    Button { selectedTarget = target.roomID } label: {
+                        HStack {
+                            V2ConversationLabelView(label: target.label)
+                            Spacer()
+                            if selectedTarget == target.roomID { ProgressView().accessibilityLabel("正在保存复制操作") }
+                        }
+                    }
+                    .disabled(selectedTarget != nil)
+                    .accessibilityHint("复制附件到此会话")
+                    .accessibilityIdentifier("v2.message.copy.target.\(target.roomID)")
+                }
+                if let feedback { Text(feedback).foregroundStyle(.secondary) }
+            }
+            .navigationTitle("复制附件到")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("返回") { dismiss() } } }
+            .task(id: selectedTarget) {
+                guard let target = selectedTarget else { return }
+                let saved = await store.copyAttachments(message, to: target)
+                guard !Task.isCancelled else { return }
+                if saved { dismiss() }
+                else { feedback = store.messageActionFeedback; selectedTarget = nil }
+            }
+        }
+        .authorPresentationPage(context: .list(profilePageID))
     }
 }
 

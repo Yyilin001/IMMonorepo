@@ -8,6 +8,66 @@ import Testing
 
 @Suite("V2 native media transfer")
 struct V2MediaTransferTests {
+    @Test("download publishes a file only after size and checksum verification", arguments: ["valid", "digest", "length", "partial"])
+    func verifiesDownloadedFileBeforePublishing(mode: String) async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ResourceDownloadURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let destination = root.appendingPathComponent("published")
+        let digest = mode == "digest" ? String(repeating: "0", count: 64)
+            : "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        let plan = try V2ResourceTransferPlan(mode: .httpGet, url: #require(URL(string: "https://resource-download.test/\(mode)")),
+            expiresAt: Date().addingTimeInterval(60), expectedByteCount: mode == "length" ? 4 : 3,
+            checksum: .init(value: digest))
+        let transfer = V2URLSessionMediaByteTransfer(session: session)
+        let target = try V2ClientMediaTransferTarget(downloadPlan: plan)
+        if mode == "valid" {
+            try await transfer.download(target: target, destinationURL: destination)
+            #expect(try Data(contentsOf: destination) == Data("abc".utf8))
+            await #expect(throws: V2ClientMediaTransferError.destinationAlreadyExists) {
+                try await transfer.download(target: target, destinationURL: destination)
+            }
+            #expect(try Data(contentsOf: destination) == Data("abc".utf8))
+        } else {
+            await #expect(throws: mode == "partial" ? V2ClientMediaTransferError.serverStatus(206) : mode == "digest" ? .checksumMismatch : .byteCountMismatch) {
+                try await transfer.download(target: target, destinationURL: destination)
+            }
+            #expect(!FileManager.default.fileExists(atPath: destination.path))
+        }
+    }
+    @Test("structured object credentials are vendor-neutral and never forward the account token", arguments:["valid","account-token","missing-plan"])
+    func resourcePlanCredentials(_ mode:String) async throws {
+        let endpoint=try #require(URL(string:"https://account.invalid/v2/media"))
+        let objectURL=try #require(URL(string:"https://independent-edge.invalid/object"))
+        let credential=mode == "account-token" ? "Bearer account-secret" : "Bearer object-capability"
+        let plan=try V2ResourceTransferPlan(mode:.httpGet,url:objectURL,
+            headers:[.init(name:"Authorization",value:credential,kind:.objectCapability),.init(name:"X-Independent-Ticket",value:"opaque")],
+            expiresAt:Date().addingTimeInterval(60),expectedByteCount:3,checksum:.init(value:String(repeating:"a",count:64)))
+        let envelope = try V2MediaDownloadTargetEnvelope(plan: plan)
+        var data=try JSONEncoder().encode(envelope)
+        if mode == "missing-plan" {
+            var json=try #require(JSONSerialization.jsonObject(with:data) as? [String:Any])
+            json.removeValue(forKey: "plan")
+            data=try JSONSerialization.data(withJSONObject:json)
+        }
+        let response=try #require(HTTPURLResponse(url:endpoint,statusCode:200,httpVersion:nil,headerFields:["Content-Type":"application/json"]))
+        let transport=RecordingEdgeTransport(result:.success((data,response)))
+        let resolver=try V2HTTPMediaDownloadTargetResolver(endpoint:endpoint,
+            credentials:FixedMediaEdgeCredentials(accessToken:"account-secret",deviceID:.init(uuid:UUID())),transport:transport)
+        if mode == "valid" {
+            let result=try await resolver.resolveDownloadTarget(mediaID:.init(uuid:UUID()))
+            #expect(result.headers["Authorization"]=="Bearer object-capability")
+            #expect(result.headers["X-Independent-Ticket"]=="opaque")
+            #expect(result.checksum==plan.checksum)
+        } else {
+            await #expect(throws: mode == "account-token" ? V2ClientMediaTransferError.invalidTarget : .invalidMediaEdgeResponse) {
+                _ = try await resolver.resolveDownloadTarget(mediaID:.init(uuid:UUID()))
+            }
+        }
+    }
     @Test("download resolves one target and transfers without exposing auth to the caller")
     func downloadUsesResolvedTarget() async throws {
         let now = Date(timeIntervalSince1970: 1_750_000_000)
@@ -63,25 +123,21 @@ struct V2MediaTransferTests {
         #expect(await transfer.downloads().isEmpty)
     }
 
-    @Test("target model rejects plaintext URLs and malformed headers")
-    func targetValidationRejectsUnsafeValues() async throws {
-        #expect(throws: V2ClientMediaTransferError.invalidTarget) {
-            _ = try V2ClientMediaTransferTarget(url: try #require(URL(string: "http://media.invalid/object")), expiresAt: .now)
-        }
-        #expect(throws: V2ClientMediaTransferError.invalidTarget) {
-            _ = try V2ClientMediaTransferTarget(url: try #require(URL(string: "https://media.invalid/object")), headers: ["x-test": "line\nbreak"], expiresAt: .now)
-        }
+    @Test("download target requires a complete GET plan and checksum", arguments: [false, true])
+    func targetRejectsIncompletePlan(upload: Bool) throws {
+        let plan = try V2ResourceTransferPlan(mode: upload ? .httpPut : .httpGet,
+            url: #require(URL(string: "https://media.invalid/object")), expiresAt: .now, expectedByteCount: 1,
+            checksum: upload ? .init(value: String(repeating: "a", count: 64)) : nil)
+        #expect(throws: V2ClientMediaTransferError.invalidTarget) { try V2ClientMediaTransferTarget(downloadPlan: plan) }
     }
 
     @Test("HTTPS edge resolver keeps gateway authorization separate from the provider target", arguments: [false, true])
     func edgeResolverBuildsNoStoreRequestAndMapsEnvelope(scoped: Bool) async throws {
         let expiry = Date(timeIntervalSince1970: 1_750_000_020)
-        let envelope = try V2MediaDownloadTargetEnvelope(
+        let envelope = try V2MediaDownloadTargetEnvelope(plan: .init(mode: .httpGet,
             url: #require(URL(string: "https://provider.invalid/object")),
-            headers: ["x-oss-meta-provider": "opaque"],
-            expiresAt: expiry,
-            expectedByteCount: 9
-        )
+            headers: [.init(name: "X-Object-Ticket", value: "opaque")], expiresAt: expiry,
+            expectedByteCount: 9, checksum: .init(value: String(repeating: "a", count: 64))))
         let credentials = FixedMediaEdgeCredentials(accessToken: "access-token", deviceID: try .init("device"))
         let edgeResponseURL = try #require(URL(string: "https://edge.invalid/v2/media/media"))
         let edgeResponse = try #require(HTTPURLResponse(
@@ -107,7 +163,7 @@ struct V2MediaTransferTests {
         let target = try await resolver.resolveDownloadTarget(mediaID: .init("media"), message: scoped ? location : nil)
 
         #expect(target.url == providerURL)
-        #expect(target.headers == ["x-oss-meta-provider": "opaque"])
+        #expect(target.headers == ["X-Object-Ticket": "opaque"])
         #expect(target.expectedByteCount == 9)
         let request = try #require(await transport.lastRequest())
         #expect(request.httpMethod == "GET")
@@ -129,121 +185,25 @@ struct V2MediaTransferTests {
         }
     }
 
-    @Test("upload resolves a device-bound target, transfers exact bytes, then completes")
-    func uploadCompletesOnlyAfterByteTransfer() async throws {
-        let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let mediaID = try MediaID("media")
-        let operationID = try MediaUploadOperationID("operation")
-        let target = try target(expiresAt: now.addingTimeInterval(30))
-        let resolver = RecordingUploadTargetResolver(result: .success(target))
-        let transfer = UploadRecordingByteTransfer()
-        let completer = RecordingUploadCompleter()
-        let statusReader = RecordingUploadStatusReader(states: [.scanning, .available])
-        let service = V2ClientMediaUploadService(
-            targetResolver: resolver,
-            byteTransfer: transfer,
-            completer: completer,
-            statusReader: statusReader,
-            now: { now },
-            sleep: { _ in }
-        )
-        let fileURL = URL(fileURLWithPath: "/tmp/v2-media-upload")
-
-        try await service.upload(
-            fileURL: fileURL,
-            operationID: operationID,
-            mediaID: mediaID,
-            contentType: "image/png",
-            byteCount: 4
-        )
-
-        #expect(await resolver.requests() == [.init(operationID: operationID, mediaID: mediaID, contentType: "image/png", byteCount: 4)])
-        #expect(await transfer.uploads() == [.init(fileURL: fileURL, target: target)])
-        #expect(await completer.completedMedia() == [mediaID])
-        #expect(await statusReader.requestedMedia() == [mediaID, mediaID])
-    }
-
-    @Test("failed byte upload does not call the durable completion endpoint")
-    func uploadDoesNotCompleteAfterByteFailure() async throws {
-        let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let resolver = RecordingUploadTargetResolver(result: .success(try target(expiresAt: now.addingTimeInterval(30))))
-        let transfer = UploadRecordingByteTransfer(uploadError: V2ClientMediaTransferError.networkFailure)
-        let completer = RecordingUploadCompleter()
-        let service = V2ClientMediaUploadService(
-            targetResolver: resolver,
-            byteTransfer: transfer,
-            completer: completer,
-            statusReader: RecordingUploadStatusReader(states: [.available]),
-            now: { now }
-        )
-
-        await #expect(throws: V2ClientMediaTransferError.networkFailure) {
-            try await service.upload(
-                fileURL: URL(fileURLWithPath: "/tmp/v2-media-upload"),
-                operationID: .init("operation"),
-                mediaID: .init("media"),
-                contentType: "image/png",
-                byteCount: 4
-            )
-        }
-        #expect(await completer.completedMedia().isEmpty)
-    }
-
-    @Test("upload edge client produces no-store metadata request and completes through the same authenticated boundary")
-    func httpUploadClientMapsTargetAndCompletion() async throws {
-        let expiry = Date(timeIntervalSince1970: 1_750_000_020)
-        let envelope = try V2MediaUploadTargetEnvelope(
-            url: #require(URL(string: "https://provider.invalid/upload")),
-            headers: ["x-oss-meta-provider": "opaque"],
-            expiresAt: expiry,
-            expectedByteCount: 4
-        )
-        let uploadResponseURL = try #require(URL(string: "https://edge.invalid/v2/media/uploads"))
-        let completionResponseURL = try #require(URL(string: "https://edge.invalid/v2/media/media/complete"))
-        let statusResponseURL = try #require(URL(string: "https://edge.invalid/v2/media/media/upload-status"))
-        let transport = SequencedEdgeTransport(responses: [
-            .success((try JSONEncoder().encode(envelope), try #require(HTTPURLResponse(url: uploadResponseURL, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])))),
-            .success((Data(), try #require(HTTPURLResponse(url: completionResponseURL, statusCode: 204, httpVersion: nil, headerFields: nil)))),
-            .success((try JSONEncoder().encode(V2MediaUploadStatusEnvelope(state: .available)), try #require(HTTPURLResponse(url: statusResponseURL, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])))),
-        ])
-        let client = try V2HTTPMediaUploadEdgeClient(
-            endpoint: #require(URL(string: "https://edge.invalid/v2/media")),
-            credentials: FixedMediaEdgeCredentials(accessToken: "access-token", deviceID: try .init("device")),
-            transport: transport
-        )
-
-        let target = try await client.resolveUploadTarget(
-            operationID: .init("operation"),
-            mediaID: .init("media"),
-            contentType: "image/png",
-            byteCount: 4
-        )
-        try await client.completeUpload(mediaID: .init("media"))
-        #expect(try await client.uploadStatus(mediaID: .init("media")) == .available)
-
-        let providerURL = try #require(URL(string: "https://provider.invalid/upload"))
-        #expect(target.url == providerURL)
-        let requests = await transport.requests()
-        #expect(requests.count == 3)
-        #expect(requests[0].httpMethod == "POST")
-        #expect(requests[0].url?.absoluteString == "https://edge.invalid/v2/media/uploads")
-        #expect(requests[0].value(forHTTPHeaderField: "Authorization") == "Bearer access-token")
-        #expect(requests[0].value(forHTTPHeaderField: "X-IM-Device-ID") == "device")
-        #expect(requests[0].value(forHTTPHeaderField: "Cache-Control") == "no-store")
-        let body = try #require(requests[0].httpBody)
-        let input = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
-        #expect(input["operationID"] as? String == "operation")
-        #expect(input["mediaID"] as? String == "media")
-        #expect(input["contentType"] as? String == "image/png")
-        #expect(input["byteCount"] as? Int == 4)
-        #expect(requests[1].url?.absoluteString == "https://edge.invalid/v2/media/media/complete")
-        #expect(requests[2].httpMethod == "GET")
-        #expect(requests[2].url?.absoluteString == "https://edge.invalid/v2/media/media/upload-status")
-    }
-
     private func target(expiresAt: Date) throws -> V2ClientMediaTransferTarget {
-        try .init(url: try #require(URL(string: "https://media.invalid/object")), headers: ["x-oss-meta-media": "opaque"], expiresAt: expiresAt, expectedByteCount: 4)
+        try .init(downloadPlan: .init(mode: .httpGet, url: #require(URL(string: "https://media.invalid/object")),
+            headers: [.init(name: "X-Object-Ticket", value: "opaque")], expiresAt: expiresAt,
+            expectedByteCount: 4, checksum: .init(value: String(repeating: "a", count: 64))))
     }
+}
+
+private final class ResourceDownloadURLProtocol: URLProtocol, @unchecked Sendable {
+    // No shared mutable state; each request returns the same fixture through its own client.
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "resource-download.test" }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        guard let url = request.url, let response = HTTPURLResponse(url: url, statusCode: url.lastPathComponent == "partial" ? 206 : 200,
+            httpVersion: "HTTP/1.1", headerFields: ["Content-Length": "3", "Content-Type": "application/octet-stream"]) else { return }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data("abc".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
 }
 
 private actor RecordingTargetResolver: V2ClientMediaDownloadTargetResolver {
@@ -261,67 +221,8 @@ private actor RecordingTargetResolver: V2ClientMediaDownloadTargetResolver {
 private actor RecordingByteTransfer: V2ClientMediaByteTransfer {
     struct Download: Equatable, Sendable { let target: V2ClientMediaTransferTarget; let destination: URL }
     private var receivedDownloads: [Download] = []
-    func upload(fileURL _: URL, target _: V2ClientMediaTransferTarget) {}
     func download(target: V2ClientMediaTransferTarget, destinationURL: URL) { receivedDownloads.append(.init(target: target, destination: destinationURL)) }
     func downloads() -> [Download] { receivedDownloads }
-}
-
-private actor RecordingUploadTargetResolver: V2ClientMediaUploadTargetResolver {
-    struct Request: Equatable, Sendable {
-        let operationID: MediaUploadOperationID
-        let mediaID: MediaID
-        let contentType: String
-        let byteCount: Int64
-    }
-
-    private let result: Result<V2ClientMediaTransferTarget, Error>
-    private var receivedRequests: [Request] = []
-
-    init(result: Result<V2ClientMediaTransferTarget, Error>) { self.result = result }
-
-    func resolveUploadTarget(operationID: MediaUploadOperationID, mediaID: MediaID, contentType: String, byteCount: Int64) throws -> V2ClientMediaTransferTarget {
-        receivedRequests.append(.init(operationID: operationID, mediaID: mediaID, contentType: contentType, byteCount: byteCount))
-        return try result.get()
-    }
-
-    func requests() -> [Request] { receivedRequests }
-}
-
-private actor UploadRecordingByteTransfer: V2ClientMediaByteTransfer {
-    struct Upload: Equatable, Sendable { let fileURL: URL; let target: V2ClientMediaTransferTarget }
-    private let uploadError: (any Error)?
-    private var receivedUploads: [Upload] = []
-
-    init(uploadError: (any Error)? = nil) { self.uploadError = uploadError }
-
-    func upload(fileURL: URL, target: V2ClientMediaTransferTarget) throws {
-        if let uploadError { throw uploadError }
-        receivedUploads.append(.init(fileURL: fileURL, target: target))
-    }
-
-    func download(target _: V2ClientMediaTransferTarget, destinationURL _: URL) {}
-    func uploads() -> [Upload] { receivedUploads }
-}
-
-private actor RecordingUploadCompleter: V2ClientMediaUploadCompleting {
-    private var media: [MediaID] = []
-    func completeUpload(mediaID: MediaID) { media.append(mediaID) }
-    func completedMedia() -> [MediaID] { media }
-}
-
-private actor RecordingUploadStatusReader: V2ClientMediaUploadStatusReading {
-    private var states: [V2MediaObjectState]
-    private var media: [MediaID] = []
-
-    init(states: [V2MediaObjectState]) { self.states = states }
-
-    func uploadStatus(mediaID: MediaID) -> V2MediaObjectState {
-        media.append(mediaID)
-        guard !states.isEmpty else { return .scanning }
-        return states.removeFirst()
-    }
-
-    func requestedMedia() -> [MediaID] { media }
 }
 
 private enum TargetResolutionFailure: Error { case denied }
@@ -344,19 +245,4 @@ private actor RecordingEdgeTransport: V2ClientMediaEdgeHTTPTransport {
         return try result.get()
     }
     func lastRequest() -> URLRequest? { request }
-}
-
-private actor SequencedEdgeTransport: V2ClientMediaEdgeHTTPTransport {
-    private var responses: [Result<(Data, HTTPURLResponse), Error>]
-    private var receivedRequests: [URLRequest] = []
-
-    init(responses: [Result<(Data, HTTPURLResponse), Error>]) { self.responses = responses }
-
-    func data(for request: URLRequest) throws -> (Data, HTTPURLResponse) {
-        receivedRequests.append(request)
-        guard !responses.isEmpty else { throw TargetResolutionFailure.denied }
-        return try responses.removeFirst().get()
-    }
-
-    func requests() -> [URLRequest] { receivedRequests }
 }

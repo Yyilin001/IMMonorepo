@@ -397,6 +397,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     SELECT room_id FROM v2_group_role_policies WHERE room_id = ? AND room_sequence IS NOT NULL AND (typeof(room_sequence) <> 'integer' OR room_sequence < 1)
                     UNION ALL
                     SELECT room_id FROM v2_group_member_roles WHERE room_id = ? AND (typeof(room_sequence) <> 'integer' OR room_sequence < 1)
+                    UNION ALL
+                    SELECT room_id FROM v2_group_avatar_invalidations WHERE room_id = ? AND (typeof(room_sequence) <> 'integer' OR room_sequence < 1)
+                    UNION ALL
+                    SELECT room_id FROM v2_group_nickname_invalidations WHERE room_id = ? AND (typeof(room_sequence) <> 'integer' OR room_sequence < 1)
                 ) THEN NULL ELSE (
                     SELECT COALESCE(MAX(value), 0) FROM (
                         SELECT applied_room_sequence AS value FROM v2_group_event_cursors WHERE room_id = ?
@@ -414,9 +418,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                         SELECT MAX(room_sequence) AS value FROM v2_group_role_policies WHERE room_id = ?
                         UNION ALL
                         SELECT MAX(room_sequence) AS value FROM v2_group_member_roles WHERE room_id = ?
+                        UNION ALL
+                        SELECT MAX(room_sequence) AS value FROM v2_group_avatar_invalidations WHERE room_id = ?
+                        UNION ALL
+                        SELECT MAX(room_sequence) AS value FROM v2_group_nickname_invalidations WHERE room_id = ?
                     )
                 ) END AS value
-                """, arguments: StatementArguments(Array(repeating: roomID.rawValue, count: 16))) else {
+                """, arguments: StatementArguments(Array(repeating: roomID.rawValue, count: 20))) else {
                 throw V2ClientSyncError.storageRangeExceeded
             }
             return try Self.storageUnsigned(row, column: "value")
@@ -1120,6 +1128,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         "v2_pin_effects",
         "v2_group_announcements",
         "v2_announcement_effects",
+        "v2_group_avatar_invalidations",
+        "v2_group_avatar_effects",
+        "v2_group_nickname_invalidations",
+        "v2_group_nickname_effects",
         "v2_group_role_policies",
         "v2_group_role_policy_baselines",
         "v2_role_policy_effects",
@@ -1253,6 +1265,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try copyRoomRows(table: "v2_timeline_activity_projections", shadow: shadowTimeline, positiveSequence: "timeline_sequence")
         try preservePinnedMessagesInSnapshot(db: db)
         try copyRoomRows(table: "v2_group_announcements", shadow: shadowAnnouncements)
+        try preserveGroupAvatarInvalidations(authorizedRoomsSQL: authorizedRoomsSQL, db: db)
+        try preserveGroupNicknameInvalidations(authorizedRoomsSQL: authorizedRoomsSQL, db: db)
         if try Bool.fetchOne(db, sql: """
             SELECT EXISTS (
                 SELECT 1 FROM (
@@ -1678,7 +1692,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     ///
     /// 显式路由让每个快照分页都走普通 DML，从而避免 schema 重写与 schema 锁失效，
     /// 使实时投影在可续传导入期间始终可读。
-    private enum ProjectionTableTarget {
+    enum ProjectionTableTarget {
         case live
         case snapshotShadow
 
@@ -1820,9 +1834,11 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         var parts = value.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
         let identityIndices: [Int]
         switch parts.first {
-        case "announcement" where parts.count == 2: identityIndices = [1]
+        case "announcement", "avatar":
+            guard parts.count == 2 else { return nil }
+            identityIndices = [1]
         case "permissions" where parts.count == 3: identityIndices = [1]
-        case "pin", "member-role":
+        case "pin", "member-role", "nickname":
             guard parts.count == 3 else { return nil }
             identityIndices = [1, 2]
         default: return nil
@@ -1868,6 +1884,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             switch eventType {
             case "message.pinned_changed": return "pin:\(room):\(try string("message_id"))"
             case "group.announcement_changed": return "announcement:\(room)"
+            case "group.avatar_changed": return "avatar:\(room)"
+            case "group.nickname_changed": return "nickname:\(room):\(try string("target_user_id"))"
             case "group.role_permissions_changed": return "permissions:\(room):\(try string("role"))"
             case "group.member_role_changed": return "member-role:\(room):\(try string("target_user_id"))"
             default: throw V2ClientSyncError.snapshotProjectionConflict
@@ -2246,6 +2264,30 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         }
     }
 
+    /// Reads at most one page in a single SQLite snapshot. Direct profile text
+    /// is deliberately excluded: these facts select a lookup, not display access.
+    public func conversationLookupContexts(for roomIDs: [RoomID]) throws -> [RoomID: V2ClientConversationLookupContext] {
+        guard roomIDs.count <= 100 else { throw V2ClientProjectionError.invalidMessagePayload }
+        let unique = Array(Set(roomIDs)).sorted()
+        guard !unique.isEmpty else { return [:] }
+        let placeholders = Array(repeating: "?", count: unique.count).joined(separator: ",")
+        let arguments = StatementArguments(unique.map(\.rawValue))
+        return try databasePool.read { db in
+            var contexts: [RoomID: V2ClientConversationLookupContext] = [:]
+            for table in ["v2_direct_room_identities", "v2_direct_room_profile_projections"] {
+                for row in try Row.fetchAll(db,
+                    sql: "SELECT room_id, target_user_id FROM \(table) WHERE room_id IN (\(placeholders))", arguments: arguments) {
+                    contexts[try .init(row["room_id"] as String)] = .direct(peerUserID: try .init(row["target_user_id"] as String))
+                }
+            }
+            for row in try Row.fetchAll(db,
+                sql: "SELECT room_id, title FROM v2_room_profile_projections WHERE room_id IN (\(placeholders))", arguments: arguments) {
+                contexts[try .init(row["room_id"] as String)] = .group(title: row["title"])
+            }
+            return contexts
+        }
+    }
+
     /// 读取房间最新的群公告。
     ///
     /// 它是物化的同步投影，而不是「碰巧创建了该公告的命令」留下的缓存响应。
@@ -2266,6 +2308,14 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 revision: try Self.storageUnsigned(row, column: "revision"),
                 updatedAt: .init(timeIntervalSince1970: row["updated_at"] as Double)
             )
+        }
+    }
+
+    /// A lower bound used to invalidate ephemeral presentation leases after sync or restart.
+    public func groupAvatarRevision(roomID: RoomID) throws -> UInt64 {
+        try databasePool.read { db in
+            guard let row = try Row.fetchOne(db, sql: "SELECT revision FROM v2_group_avatar_invalidations WHERE room_id=?", arguments: [roomID.rawValue]) else { return 0 }
+            return UInt64(try Self.effectInteger(row, "revision"))
         }
     }
 
@@ -3465,7 +3515,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             "v2_message_reactions", "v2_reaction_versions", "v2_reaction_effects", "v2_message_effects", "v2_message_tombstones", "v2_message_projections",
             "v2_moderation_projections", "v2_room_control_projections", "v2_room_profile_projections",
             "v2_conversation_states", "v2_message_favorites", "v2_timeline_activity_projections",
-            "v2_group_pinned_messages", "v2_pin_effects", "v2_group_announcements", "v2_announcement_effects", "v2_group_role_policies", "v2_role_policy_effects", "v2_group_role_policy_baselines", "v2_role_policy_recovery_requests",
+            "v2_group_pinned_messages", "v2_pin_effects", "v2_group_announcements", "v2_announcement_effects", "v2_group_avatar_invalidations", "v2_group_avatar_effects", "v2_group_nickname_invalidations", "v2_group_nickname_effects", "v2_group_role_policies", "v2_role_policy_effects", "v2_group_role_policy_baselines", "v2_role_policy_recovery_requests",
             "v2_group_member_roles", "v2_member_effects", "v2_group_permission_revisions", "v2_group_events",
             "v2_group_event_cursors", "v2_conversation_summaries", "v2_conversation_list_entries",
         ] {
@@ -3844,6 +3894,10 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             try applyPinnedMessage(V2LocalPinnedMessageEffect(record: record, expectedRoomSequence: expectedRoomSequence, expectedRoomID: expectedRoomID), target: target, db: db)
         case "group.announcement_changed":
             try applyAnnouncement(V2LocalAnnouncementEffect(record: record, expectedRoomSequence: expectedRoomSequence, expectedRoomID: expectedRoomID), target: target, db: db)
+        case "group.avatar_changed":
+            try applyGroupAvatarInvalidation(V2LocalGroupAvatarEffect(record: record, expectedRoomSequence: expectedRoomSequence, expectedRoomID: expectedRoomID), target: target, db: db)
+        case "group.nickname_changed":
+            try applyGroupNicknameInvalidation(V2LocalGroupNicknameEffect(record: record, expectedRoomSequence: expectedRoomSequence, expectedRoomID: expectedRoomID), target: target, db: db)
         case "group.role_permissions_changed":
             try applyRolePolicy(V2LocalRolePolicyEffect(record: record, expectedRoomSequence: expectedRoomSequence, expectedRoomID: expectedRoomID), target: target, db: db)
         case "group.member_role_changed":
@@ -5108,6 +5162,12 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         var migrator = DatabaseMigrator()
         migrator.registerMigration("createCurrentV2Schema") { db in
             try db.execute(sql: currentSchemaSQL)
+            try db.execute(sql: resourceJournalSchemaSQL)
+            try db.execute(sql: resourceImportSchemaSQL)
+            try db.execute(sql: messageOperationRecoverySchemaSQL)
+            try db.execute(sql: groupAvatarInvalidationSchemaSQL)
+            try db.execute(sql: groupAvatarIntentsSchemaSQL)
+            try db.execute(sql: groupNicknameInvalidationSchemaSQL)
         }
         return migrator
     }()

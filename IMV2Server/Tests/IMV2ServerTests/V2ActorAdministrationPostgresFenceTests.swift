@@ -23,6 +23,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             guard !exists else { throw TestConfigurationError.schemaAlreadyExists }
             try await installSchema(on: sql)
             try await seedRoom(on: sql)
+            try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until=clock_timestamp()+interval '1 hour'").run()
             let room = RoomID(uuid: roomUUID), actor = UserID(uuid: senderUUID)
             let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
             let leases = PostgresV2RoomActivationStore(database: database)
@@ -31,7 +32,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 roomID: room, owner: owner, host: hostA, duration: try .init(30_000)
             ) else { throw V2RoomActivationLeaseError.activationChanged }
             let old = PostgresV2ProfilePresentationStore(database: database,
-                activationScope: try .init(tokens: [first.token]))
+                activationScope: try .init(tokens: [first.token]), nicknameCapacityProfile: try forwardImportTestProfile())
             let initialOperation = GroupNicknameOperationID(uuid: UUID())
             let initial = try await old.updateOwnGroupNickname(actorUserID: actor, roomID: room,
                 operationID: initialOperation, expectedRevision: nil, nickname: "Alice")
@@ -70,7 +71,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     operationID: initialOperation, expectedRevision: nil, nickname: "Alice")
             }
             let current = PostgresV2ProfilePresentationStore(database: database,
-                activationScope: try .init(tokens: [successor.token]))
+                activationScope: try .init(tokens: [successor.token]), nicknameCapacityProfile: try forwardImportTestProfile())
             #expect(try await current.updateOwnGroupNickname(actorUserID: actor, roomID: room,
                 operationID: initialOperation, expectedRevision: nil, nickname: "Alice") == initial)
             let oldScope = try V2RoomActivationWriteScope(tokens: [first.token])
@@ -102,7 +103,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let executor = try V2RoomAdministrationDomainExecutor(database: database,
                 token: successor.token, capacityProfile: profile,
-                membershipIdentities: D2IdentityReader())
+                membershipIdentities: D2IdentityReader(), makeEventID: { eventID })
             let update = V2RoomAdministrationCommand.groupNickname(.init(roomID: room,
                 actorUserID: actor, operationID: .init(uuid: UUID()),
                 expectedRevision: initial.revision, nickname: "Alice B"))
@@ -111,6 +112,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             #expect(updated.groupNickname == "Alice B")
             #expect(try await count("im_v2.room_member_nickname_operations", on: sql) == 2)
+            #expect(try await sql.raw("""
+                SELECT EXISTS(SELECT 1 FROM im_v2.room_events WHERE event_id=\(bind: eventID.uuidValue!)
+                    AND room_id=\(bind: roomUUID) AND event_type='group.nickname_changed') AS value
+                """).first(decoding: D2ExistsRow.self)?.value == true)
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await resources.shutdown()
         } catch {

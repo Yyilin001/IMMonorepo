@@ -718,21 +718,24 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Media lifecycle clocks preserve durable replay and complete every scan scheduling state", arguments: ["pending", "claimed", "retry", "paused"], [false, true])
+    @Test("Resource lifecycle clocks preserve replay and scan claims respect scheduling", arguments: ["pending", "claimed", "retry", "paused"], [false, true])
     func mediaLifecycleClockBounds(schedule: String, passed: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             let device = DeviceID(uuid: UUID()), mediaID = MediaID(uuid: UUID()), operation = MediaUploadOperationID(uuid: UUID())
             try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at, session_expires_at) VALUES (\(bind: senderUUID), \(bind: device.uuidValue!), \(bind: base), \(bind: base), \(bind: Date().addingTimeInterval(3600)))").run()
             let store = PostgresV2MediaStore(database: database)
-            let command = try V2RequestMediaUploadCommand(actorUserID: senderID, operationID: operation, mediaID: mediaID, contentType: "image/png", byteCount: 42, limits: .init(maximumBytes: 1024))
+            let uploads = PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in })
+            let input = try V2ResourceUploadRequest(operationID: operation, mediaID: mediaID, usage: .messageAttachment(roomID),
+                contentType: "image/png", byteCount: 42, checksum: .init(value: String(repeating: "a", count: 64)))
             func snapshot() async throws -> String {
                 struct State: Decodable { let value: String }
                 return try #require(try await sql.raw("""
                     SELECT jsonb_build_object(
                         'media', (SELECT jsonb_agg(to_jsonb(r) ORDER BY media_id) FROM im_v2.media_objects r),
-                        'operations', (SELECT jsonb_agg(to_jsonb(r) ORDER BY operation_id) FROM im_v2.media_upload_operations r),
-                        'uploads', (SELECT jsonb_agg(to_jsonb(r) ORDER BY upload_session_id) FROM im_v2.media_upload_grants r),
+                        'catalog', (SELECT jsonb_agg(to_jsonb(r) ORDER BY media_id) FROM im_v2.resource_catalog r),
+                        'uploads', (SELECT jsonb_agg(to_jsonb(r) ORDER BY session_id) FROM im_v2.resource_upload_sessions r),
+                        'placements', (SELECT jsonb_agg(to_jsonb(r) ORDER BY placement_id) FROM im_v2.resource_blob_placements r),
                         'downloads', (SELECT jsonb_agg(to_jsonb(r) ORDER BY download_session_id) FROM im_v2.media_download_grants r),
                         'scans', (SELECT jsonb_agg(to_jsonb(r) ORDER BY media_id) FROM im_v2.media_scan_outbox r)
                     )::text AS value
@@ -742,64 +745,72 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let invalidPairs = [(base, base), (base, base.addingTimeInterval(-1)), (Date(timeIntervalSince1970: 946_684_800.00000025), Date(timeIntervalSince1970: 946_684_800.00000075))]
             let initial = try await snapshot()
             for invalid in badDates {
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.requestUpload(command, deviceID: device, expiresAt: base.addingTimeInterval(600), now: invalid) }
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.requestUpload(command, deviceID: device, expiresAt: invalid, now: base) }
+                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await createResourceUpload(input, device: device, store: uploads, expiresAt: base.addingTimeInterval(600), now: invalid) }
+                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await createResourceUpload(input, device: device, store: uploads, expiresAt: invalid, now: base) }
                 #expect(try await snapshot() == initial)
             }
             for (start, end) in invalidPairs {
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.requestUpload(command, deviceID: device, expiresAt: end, now: start) }
+                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await createResourceUpload(input, device: device, store: uploads, expiresAt: end, now: start) }
             }
             #expect(try await snapshot() == initial)
-            let upload = try await store.requestUpload(command, deviceID: device, expiresAt: base.addingTimeInterval(600), now: base)
+            let upload = try await createResourceUpload(input, device: device, store: uploads, expiresAt: base.addingTimeInterval(600), now: base)
             let registered = try await snapshot()
-            let conflict = try V2RequestMediaUploadCommand(actorUserID: senderID, operationID: operation, mediaID: mediaID, contentType: "image/png", byteCount: 43, limits: .init(maximumBytes: 1024))
+            let conflict = try V2ResourceUploadRequest(operationID: operation, mediaID: mediaID, usage: input.usage, contentType: input.contentType, byteCount: 43, checksum: input.checksum)
             for invalid in badDates {
-                #expect(try await store.requestUpload(command, deviceID: device, expiresAt: invalid, now: invalid) == upload)
-                await #expect(throws: V2MediaStoreError.idempotencyConflict) { try await store.requestUpload(conflict, deviceID: device, expiresAt: invalid, now: invalid) }
+                let replay = try await createResourceUpload(input, device: device, store: uploads, expiresAt: invalid, now: invalid)
+                #expect(replay.sessionID == upload.sessionID && replay.expiresAt == upload.expiresAt)
+                await #expect(throws: V2MediaStoreError.idempotencyConflict) { try await createResourceUpload(conflict, device: device, store: uploads, expiresAt: invalid, now: invalid) }
                 #expect(try await snapshot() == registered)
             }
-            // A replay still works if only the newly proposed deadline is bad.
-            let replayService = V2MediaService(store: store, limits: try .init(maximumBytes: 1024, temporaryLifetime: .infinity), now: { base })
-            #expect(try await replayService.requestUpload(actorUserID: senderID, deviceID: device, operationID: operation, mediaID: mediaID, contentType: "image/png", byteCount: 42) == upload)
-            let sessions = PostgresV2MediaUploadSessionStore(database: database)
-            let claim = try await sessions.claimUpload(ownerUserID: senderID, deviceID: device, uploadSessionID: upload.uploadSessionID, now: base, leaseDuration: 30)
-            try await sessions.completeUploadTarget(claim, now: base.addingTimeInterval(1))
-            let consumed = try await snapshot()
+            let claim = try await uploads.claimFinalize(session: upload.sessionID, generation: 1, actor: senderUUID, device: device.uuidValue!, now: base)
+            let facts = try V2StoredObjectFacts(reference: claim.placement, byteCount: 42, sha256: Data(repeating: 0xaa, count: 32))
+            let claimed = try await snapshot()
             for invalid in badDates {
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.markUploadCompleted(ownerUserID: senderID, deviceID: device, mediaID: mediaID, now: invalid) }
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.uploadStatus(ownerUserID: senderID, deviceID: device, mediaID: mediaID, now: invalid) }
-                #expect(try await snapshot() == consumed)
+                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await uploads.publish(claim, facts: facts, actor: senderUUID, device: device.uuidValue!, now: invalid) }
+                #expect(try await snapshot() == claimed)
             }
-            try await store.markUploadCompleted(ownerUserID: senderID, deviceID: device, mediaID: mediaID, now: base.addingTimeInterval(2))
+            try await uploads.publish(claim, facts: facts, actor: senderUUID, device: device.uuidValue!, now: base.addingTimeInterval(2))
             let scans = PostgresV2MediaScanStore(database: database)
-            if schedule != "pending" {
-                let scan = try #require(try await scans.claimPending(now: base.addingTimeInterval(3), leaseDuration: 30, limit: 1).first)
-                if schedule == "retry" { try await scans.scheduleRetry(scan, disposition: .retry(at: base.addingTimeInterval(60)), now: base.addingTimeInterval(3)) }
-                if schedule == "paused" { try await scans.scheduleRetry(scan, disposition: .pause, now: base.addingTimeInterval(3)) }
+            let result: V2MediaScanResult = passed ? .passed : .failed
+            var lease = try #require(try await scans.claimPending(now: base.addingTimeInterval(3), leaseDuration: 30, limit: 1).first)
+            var completedAt = base.addingTimeInterval(4)
+            if schedule == "retry" || schedule == "paused" {
+                try await scans.scheduleRetry(lease, disposition: schedule == "retry" ? .retry(at: base.addingTimeInterval(60)) : .pause, now: base.addingTimeInterval(3))
+                let released = try await snapshot()
+                try await scans.complete(lease, result: result, now: completedAt)
+                #expect(try await snapshot() == released)
+                #expect(try await scans.claimPending(now: base.addingTimeInterval(59), leaseDuration: 30, limit: 1).isEmpty)
+                if schedule == "paused" {
+                    #expect(try await scans.claimPending(now: base.addingTimeInterval(61), leaseDuration: 30, limit: 1).isEmpty)
+                    #expect(try await snapshot() == released)
+                    return
+                }
+                let oldLease = lease
+                lease = try #require(try await scans.claimPending(now: base.addingTimeInterval(60), leaseDuration: 30, limit: 1).first)
+                #expect(lease.claimToken != oldLease.claimToken)
+                let reclaimed = try await snapshot()
+                try await scans.complete(oldLease, result: result, now: base.addingTimeInterval(61))
+                #expect(try await snapshot() == reclaimed)
+                completedAt = base.addingTimeInterval(61)
             }
             let scanning = try await snapshot()
             for invalid in badDates {
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.recordScanResult(mediaID: mediaID, passed: passed, now: invalid) }
+                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await scans.complete(lease, result: result, now: invalid) }
                 #expect(try await snapshot() == scanning)
             }
-            try await store.recordScanResult(mediaID: mediaID, passed: passed, now: base.addingTimeInterval(4))
-            #expect(try await sql.raw("SELECT state = 'completed' AND completed_at = \(bind: base.addingTimeInterval(4)) AND claim_token IS NULL AND lease_expires_at IS NULL AND next_attempt_at IS NULL AND paused_at IS NULL AS exists FROM im_v2.media_scan_outbox").first(decoding: ExistsRow.self)?.exists == true)
-            #expect(try await store.uploadStatus(ownerUserID: senderID, deviceID: device, mediaID: mediaID, now: base.addingTimeInterval(5)) == (passed ? .available : .failed))
+            try await scans.complete(lease, result: result, now: completedAt)
+            #expect(try await sql.raw("SELECT state = 'completed' AND completed_at = \(bind: completedAt) AND claim_token IS NULL AND lease_expires_at IS NULL AND next_attempt_at IS NULL AND paused_at IS NULL AS exists FROM im_v2.media_scan_outbox").first(decoding: ExistsRow.self)?.exists == true)
+            #expect(try await uploads.status(session: upload.sessionID, actor: senderUUID, device: device.uuidValue!).mediaState == (passed ? "available" : "failed"))
             let scanned = try await snapshot()
-            await #expect(throws: V2MediaStoreError.invalidStateTransition) { try await store.recordScanResult(mediaID: mediaID, passed: !passed, now: base.addingTimeInterval(5)) }
-            for invalid in badDates {
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.assertAvailableForReference(ownerUserID: senderID, mediaIDs: [mediaID], now: invalid) }
-                try await store.assertAvailableForReference(ownerUserID: senderID, mediaIDs: [], now: invalid)
-            }
-            #expect(try await store.uploadStatus(ownerUserID: senderID, deviceID: device, mediaID: mediaID, now: base.addingTimeInterval(600)) == .expired)
+            try await scans.complete(lease, result: passed ? .failed : .passed, now: completedAt.addingTimeInterval(1))
             #expect(try await snapshot() == scanned)
             if !passed { return }
-            let sender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { base.addingTimeInterval(5) })
+            let sender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { [completedAt] in completedAt.addingTimeInterval(1) })
             guard case .accepted(let message) = try await sender.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "media lifecycle", media: [.init(mediaID: mediaID)])) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             #expect(try await count("im_v2.user_sync_log", on: sql) == 0)
             let beforeDownload = try await snapshot()
             for invalid in badDates {
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.requestDownload(requesterUserID: senderID, deviceID: device, mediaID: mediaID, expiresAt: base.addingTimeInterval(60), now: invalid) }
+                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.requestDownload(requesterUserID: senderID, deviceID: device, mediaID: mediaID, expiresAt: base.addingTimeInterval(120), now: invalid) }
                 await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.requestDownload(requesterUserID: senderID, deviceID: device, mediaID: mediaID, expiresAt: invalid, now: base) }
                 #expect(try await snapshot() == beforeDownload)
             }
@@ -807,35 +818,43 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await store.requestDownload(requesterUserID: senderID, deviceID: device, mediaID: mediaID, expiresAt: end, now: start) }
             }
             #expect(try await snapshot() == beforeDownload)
-            let download = try await store.requestDownload(requesterUserID: senderID, deviceID: device, mediaID: mediaID, expiresAt: base.addingTimeInterval(60), now: base.addingTimeInterval(8))
+            let download = try await store.requestDownload(requesterUserID: senderID, deviceID: device, mediaID: mediaID, expiresAt: base.addingTimeInterval(120), now: completedAt.addingTimeInterval(2))
             let downloads = PostgresV2MediaDownloadSessionStore(database: database)
-            let downloadClaim = try await downloads.claimDownload(requesterUserID: senderID, deviceID: device, downloadSessionID: download.downloadSessionID, now: base.addingTimeInterval(9), leaseDuration: 15)
-            try await downloads.completeDownload(downloadClaim, now: base.addingTimeInterval(10))
+            let downloadClaim = try await downloads.claimDownload(requesterUserID: senderID, deviceID: device, downloadSessionID: download.downloadSessionID, now: completedAt.addingTimeInterval(3), leaseDuration: 15)
+            try await downloads.completeDownload(downloadClaim, now: completedAt.addingTimeInterval(4))
             #expect(try await count("im_v2.media_download_grants WHERE state = 'consumed'", on: sql) == 1)
             #expect(try await count("im_v2.messages", on: sql) == 1)
         }
     }
 
-    @Test("Media session clock failures preserve leases and normal provider exchange recovers")
-    func mediaSessionClockBounds() async throws {
+    @Test("Current resource download clock failures preserve leases and provider exchange recovers")
+    func resourceDownloadSessionClockBounds() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let device = DeviceID(uuid: UUID()), uploadMedia = MediaID(uuid: UUID()), downloadMedia = MediaID(uuid: UUID())
+            let device = DeviceID(uuid: UUID()), downloadMedia = MediaID(uuid: UUID())
             // A fresh, live local device fixture; only business timestamps vary.
             let deviceExpiry = Date().addingTimeInterval(3600)
             try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at, session_expires_at) VALUES (\(bind: senderUUID), \(bind: device.uuidValue!), \(bind: base), \(bind: base), \(bind: deviceExpiry))").run()
             let media = PostgresV2MediaStore(database: database)
-            let upload = try await media.requestUpload(.init(actorUserID: senderID, operationID: .init(uuid: UUID()), mediaID: uploadMedia, contentType: "image/png", byteCount: 42, limits: .init(maximumBytes: 1024)), deviceID: device, expiresAt: base.addingTimeInterval(600), now: base)
-            try await sql.raw("INSERT INTO im_v2.media_objects (media_id, owner_user_id, content_type, byte_count, state, upload_session_id, expires_at, state_updated_at, created_at) VALUES (\(bind: downloadMedia.uuidValue!), \(bind: senderUUID), 'image/png', 42, 'available', \(bind: UUID()), \(bind: base.addingTimeInterval(600)), \(bind: base), \(bind: base))").run()
+            let uploads = PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in })
+            let reference = try V2StoredObjectReference(placementID: UUID(), binding: .init(id: "download-clock", configurationRevision: 1), handle: Data("exact-object".utf8))
+            let input = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: downloadMedia, usage: .messageAttachment(roomID),
+                contentType: "text/plain", byteCount: 42, checksum: .init(value: String(repeating: "a", count: 64)))
+            let upload = try await uploads.create(homeKind: "room", homeID: roomUUID, usageKind: "message_attachment", actor: senderUUID,
+                device: device.uuidValue!, operation: input.operationID.uuidValue!, mediaID: downloadMedia.uuidValue!, contentType: input.contentType,
+                byteCount: input.byteCount, requestJSON: String(decoding: JSONEncoder().encode(input), as: UTF8.self), allocate: { reference },
+                expiresAt: base.addingTimeInterval(600), now: base)
+            let uploadClaim = try await uploads.claimFinalize(session: upload.sessionID, generation: 1, actor: senderUUID, device: device.uuidValue!, now: base)
+            try await uploads.publish(uploadClaim, facts: .init(reference: reference, byteCount: 42, sha256: Data(repeating: 0xaa, count: 32)),
+                actor: senderUUID, device: device.uuidValue!, now: base)
+            let scans = PostgresV2MediaScanStore(database: database)
+            let scan = try #require(try await scans.claimPending(now: base, leaseDuration: 30, limit: 1).first)
+            try await scans.complete(scan, result: .passed, now: base)
             let sender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { base })
             guard case .accepted(let message) = try await sender.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "media session clock", media: [.init(mediaID: downloadMedia)])) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             #expect(try await count("im_v2.user_sync_log", on: sql) == 0)
             let download = try await media.requestDownload(requesterUserID: senderID, deviceID: device, mediaID: downloadMedia, expiresAt: base.addingTimeInterval(600), now: base)
-            let uploads = PostgresV2MediaUploadSessionStore(database: database)
             let downloads = PostgresV2MediaDownloadSessionStore(database: database)
-            func claimUpload(at time: Date, duration: TimeInterval = 30) async throws -> V2ClaimedMediaUpload {
-                try await uploads.claimUpload(ownerUserID: senderID, deviceID: device, uploadSessionID: upload.uploadSessionID, now: time, leaseDuration: duration)
-            }
             func claimDownload(at time: Date, duration: TimeInterval = 30) async throws -> V2ClaimedMediaDownload {
                 try await downloads.claimDownload(requesterUserID: senderID, deviceID: device, downloadSessionID: download.downloadSessionID, now: time, leaseDuration: duration)
             }
@@ -844,8 +863,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 return try #require(try await sql.raw("""
                     SELECT jsonb_build_object(
                         'media', (SELECT jsonb_agg(to_jsonb(r) ORDER BY media_id) FROM im_v2.media_objects r),
-                        'operations', (SELECT jsonb_agg(to_jsonb(r) ORDER BY operation_id) FROM im_v2.media_upload_operations r),
-                        'uploads', (SELECT jsonb_agg(to_jsonb(r) ORDER BY upload_session_id) FROM im_v2.media_upload_grants r),
+                        'catalog', (SELECT jsonb_agg(to_jsonb(r) ORDER BY media_id) FROM im_v2.resource_catalog r),
+                        'uploads', (SELECT jsonb_agg(to_jsonb(r) ORDER BY session_id) FROM im_v2.resource_upload_sessions r),
                         'downloads', (SELECT jsonb_agg(to_jsonb(r) ORDER BY download_session_id) FROM im_v2.media_download_grants r)
                     )::text AS value
                     """).first(decoding: State.self)).value
@@ -853,75 +872,56 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let badDates = [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12].map { Date(timeIntervalSince1970: $0) }
             let initial = try await snapshot()
             for invalid in badDates {
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await claimUpload(at: invalid) }
                 await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await claimDownload(at: invalid) }
             }
             for duration in [Double.infinity, .greatestFiniteMagnitude, .leastNonzeroMagnitude, 0.000000001] {
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await claimUpload(at: base, duration: duration) }
                 await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await claimDownload(at: base, duration: duration) }
             }
             for duration in [Double.nan, 0, -1] {
-                await #expect(throws: V2MediaUploadSessionStoreError.invalidRequest) { try await claimUpload(at: base, duration: duration) }
                 await #expect(throws: V2MediaDownloadSessionStoreError.invalidRequest) { try await claimDownload(at: base, duration: duration) }
             }
             let upper = Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 10)
-            await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await claimUpload(at: upper) }
             await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await claimDownload(at: upper) }
             #expect(try await snapshot() == initial)
-            let firstUpload = try await claimUpload(at: base), firstDownload = try await claimDownload(at: base)
+            let firstDownload = try await claimDownload(at: base)
             let claimed = try await snapshot()
             for invalid in badDates {
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await uploads.completeUploadTarget(firstUpload, now: invalid) }
                 await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await downloads.completeDownload(firstDownload, now: invalid) }
                 #expect(try await snapshot() == claimed)
             }
-            await #expect(throws: V2MediaUploadSessionStoreError.sessionUnavailable) { try await claimUpload(at: base.addingTimeInterval(29)) }
             await #expect(throws: V2MediaDownloadSessionStoreError.sessionUnavailable) { try await claimDownload(at: base.addingTimeInterval(29)) }
-            await #expect(throws: V2MediaUploadSessionStoreError.sessionUnavailable) { try await uploads.completeUploadTarget(firstUpload, now: base.addingTimeInterval(30)) }
             await #expect(throws: V2MediaDownloadSessionStoreError.sessionUnavailable) { try await downloads.completeDownload(firstDownload, now: base.addingTimeInterval(30)) }
             #expect(try await snapshot() == claimed)
-            let nextUpload = try await claimUpload(at: base.addingTimeInterval(30)), nextDownload = try await claimDownload(at: base.addingTimeInterval(30))
-            #expect(nextUpload.claimToken != firstUpload.claimToken && nextDownload.claimToken != firstDownload.claimToken)
+            let nextDownload = try await claimDownload(at: base.addingTimeInterval(30))
+            #expect(nextDownload.claimToken != firstDownload.claimToken)
             let reclaimed = try await snapshot()
-            await #expect(throws: V2MediaUploadSessionStoreError.sessionUnavailable) { try await uploads.completeUploadTarget(firstUpload, now: base.addingTimeInterval(31)) }
             await #expect(throws: V2MediaDownloadSessionStoreError.sessionUnavailable) { try await downloads.completeDownload(firstDownload, now: badDates[0]) }
-            try await uploads.releaseUploadTarget(firstUpload)
             try await downloads.releaseDownload(firstDownload)
             #expect(try await snapshot() == reclaimed)
-            try await uploads.releaseUploadTarget(nextUpload)
             try await downloads.releaseDownload(nextDownload)
-            struct Provider: V2MediaUploadObjectProvider, V2MediaObjectProvider {
-                func issueUploadTarget(mediaID: MediaID, contentType: String, byteCount: Int64, expiresAt: Date) async throws -> V2MediaProviderObjectTarget {
-                    .init(url: URL(string: "https://media.invalid/upload")!, expiresAt: expiresAt, expectedByteCount: byteCount)
-                }
-                func issueDownloadTarget(mediaID: MediaID, expiresAt: Date) async throws -> V2MediaProviderObjectTarget {
-                    .init(url: URL(string: "https://media.invalid/download")!, expiresAt: expiresAt, expectedByteCount: 42)
+            struct Provider: V2MediaObjectProvider {
+                func issueDownloadTarget(mediaID: MediaID, expiresAt: Date) async throws -> V2ResourceTransferPlan {
+                    try resourceDownloadTestPlan(url: URL(string: "https://media.invalid/download")!, expiresAt: expiresAt, expectedByteCount: 42)
                 }
             }
             let clock = TestSequenceClock([base.addingTimeInterval(60)])
-            let uploadService = try V2MediaUploadProviderSessionService(store: uploads, provider: Provider(), now: { clock.now() })
             let downloadService = try V2MediaProviderSessionService(store: downloads, provider: Provider(), now: { clock.now() })
             for (index, invalid) in badDates.enumerated() {
                 // Signing succeeds, then the completion clock becomes invalid.
                 // The service must release its exact claim so a healthy retry works.
                 clock.set([base.addingTimeInterval(60), base.addingTimeInterval(60), invalid])
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await uploadService.exchangeUpload(actorUserID: senderID, deviceID: device, uploadSessionID: upload.uploadSessionID) }
-                clock.set([base.addingTimeInterval(60), base.addingTimeInterval(60), invalid])
                 await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await downloadService.exchangeDownload(actorUserID: senderID, deviceID: device, downloadSessionID: download.downloadSessionID) }
-                for table in ["media_upload_grants", "media_download_grants"] {
+                for table in ["media_download_grants"] {
                     #expect(try await sql.raw("SELECT state = 'pending' AND claim_token IS NULL AND lease_expires_at IS NULL AND redeemed_at IS NULL AND retry_count = \(bind: Int64(index + 3)) AS exists FROM im_v2.\(unsafeRaw: table)").first(decoding: ExistsRow.self)?.exists == true)
                 }
             }
             clock.set([base.addingTimeInterval(61)])
-            #expect(try await uploadService.exchangeUpload(actorUserID: senderID, deviceID: device, uploadSessionID: upload.uploadSessionID).expiresAt == upload.expiresAt)
             #expect(try await downloadService.exchangeDownload(actorUserID: senderID, deviceID: device, downloadSessionID: download.downloadSessionID).expiresAt == download.expiresAt)
-            for table in ["media_upload_grants", "media_download_grants"] {
+            for table in ["media_download_grants"] {
                 #expect(try await sql.raw("SELECT state = 'consumed' AND claim_token IS NULL AND lease_expires_at IS NULL AND redeemed_at = \(bind: base.addingTimeInterval(61)) AS exists FROM im_v2.\(unsafeRaw: table)").first(decoding: ExistsRow.self)?.exists == true)
             }
             let completed = try await snapshot()
-            await #expect(throws: V2MediaUploadSessionStoreError.sessionUnavailable) { try await claimUpload(at: base.addingTimeInterval(62)) }
             await #expect(throws: V2MediaDownloadSessionStoreError.sessionUnavailable) { try await claimDownload(at: base.addingTimeInterval(62)) }
-            try await uploads.releaseUploadTarget(firstUpload)
             try await downloads.releaseDownload(firstDownload)
             #expect(try await snapshot() == completed)
             #expect(try await count("im_v2.messages", on: sql) == 1)
@@ -929,22 +929,24 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+
     @Test("Media maintenance validates clocks and preserves scan, purge and retention state", arguments: ["passed", "failed", "expired"])
     func mediaMaintenanceClockBounds(scenario: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             let scanID = UUID(), purgeID = UUID(), unreferencedID = UUID(), referencedID = UUID()
-            for (id, state, expiry) in [(scanID, "scanning", base.addingTimeInterval(scenario == "expired" ? 1 : 1000)), (purgeID, "expired", base), (unreferencedID, "available", base.addingTimeInterval(-1)), (referencedID, "available", base.addingTimeInterval(1000))] {
+            for (id, state, expiry) in [(scanID, "scanning", base.addingTimeInterval(scenario == "expired" ? 1 : 1000)), (purgeID, "expired", base), (unreferencedID, "available", base.addingTimeInterval(-1))] {
                 try await sql.raw("""
                     INSERT INTO im_v2.media_objects (media_id, owner_user_id, content_type, byte_count, state, upload_session_id, expires_at, state_updated_at, created_at)
                     VALUES (\(bind: id), \(bind: senderUUID), 'image/png', 42, \(bind: state), \(bind: UUID()), \(bind: expiry), \(bind: base), \(bind: base))
                     """).run()
             }
+            try await prepareDownloadableResource(mediaID: .init(uuid: referencedID), device: .init(uuid: UUID()), database: database)
+            // Its completed scan bookkeeping has already been collected.
+            try await sql.raw("DELETE FROM im_v2.media_scan_outbox WHERE media_id = \(bind: referencedID)").run()
             try await sql.raw("INSERT INTO im_v2.media_scan_outbox (media_id, state, created_at) VALUES (\(bind: scanID), 'pending', \(bind: base))").run()
             try await sql.raw("INSERT INTO im_v2.media_purge_outbox (media_id, reason, state, created_at) VALUES (\(bind: purgeID), 'unreferenced_expired', 'pending', \(bind: base))").run()
-            let messages = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: try forwardImportTestProfile(), limits: try .init(maxUTF8Bytes: 64), now: { base })
-            guard case .accepted(let message) = try await messages.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "retention boundary", media: [.init(mediaID: .init(uuid: referencedID))])) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            try await sql.raw("UPDATE im_v2.messages SET withdrawn_at = \(bind: base.addingTimeInterval(20)), withdrawn_by_user_id = \(bind: senderUUID) WHERE message_id = \(bind: message.messageID.uuidValue)").run()
+            try await sql.raw("UPDATE im_v2.messages SET withdrawn_at = \(bind: base.addingTimeInterval(20)), withdrawn_by_user_id = \(bind: senderUUID) WHERE message_id IN (SELECT message_id FROM im_v2.message_media_references WHERE media_id = \(bind: referencedID))").run()
             let scan = PostgresV2MediaScanStore(database: database)
             let purge = PostgresV2MediaPurgeStore(database: database)
             let retention = PostgresV2MediaRetentionStore(database: database)
@@ -1006,7 +1008,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await scan.scheduleRetry(firstScan, disposition: .retry(at: base), now: badDates[0])
             try await purge.scheduleRetry(firstPurge, disposition: .retry(at: base), now: badDates[0])
             #expect(try await snapshot() == reclaimed)
-            try await scan.scheduleRetry(nextScan, disposition: .retry(at: base.addingTimeInterval(-1)), now: badDates[0])
+            await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) {
+                try await scan.scheduleRetry(nextScan, disposition: .retry(at: base.addingTimeInterval(-1)), now: badDates[0])
+            }
+            #expect(try await snapshot() == reclaimed)
+            try await scan.scheduleRetry(nextScan, disposition: .retry(at: base.addingTimeInterval(-1)), now: base.addingTimeInterval(30))
             try await purge.scheduleRetry(nextPurge, disposition: .retry(at: base.addingTimeInterval(-1)), now: badDates[0])
             let retryScan = try #require(try await scan.claimPending(now: base.addingTimeInterval(30), leaseDuration: 30, limit: 1).first)
             let retryPurge = try #require(try await purge.claimPending(now: base.addingTimeInterval(30), leaseDuration: 30, limit: 1).first)

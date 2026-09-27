@@ -22,6 +22,9 @@ final class V2ConversationSearchStore {
     private let searcher: any V2ConversationMessageSearching
     private let progressReader: (any V2ConversationMessageSearchProgressReading)?
     private let scope: V2MessageSearchScope
+    private let actorUserID: UserID?
+    private(set) var senderContextGeneration: UInt64 = 0
+    private var senderFilterRoomID: RoomID?
     private var generation = 0
     private var paginationOperation: UUID?
     var isLoadingMore: Bool { paginationOperation != nil }
@@ -31,16 +34,17 @@ final class V2ConversationSearchStore {
     var query = ""
     var contentFilter: V2MessageSearchContentFilter = .all
     private(set) var senderFilter: UserID?
-    private(set) var senderFilterDisplayName = "选定成员"
+    private(set) var senderPresentationKey: V2ProfileViewLookupKey?
     private(set) var hits: [V2MessageSearchHit] = []
     private(set) var state: State = .idle
     private(set) var canLoadMore = false
     private(set) var isCatchingUp = false
 
-    init(searcher: any V2ConversationMessageSearching, scope: V2MessageSearchScope = .allMessages) {
+    init(searcher: any V2ConversationMessageSearching, scope: V2MessageSearchScope = .allMessages, actorUserID: UserID? = nil) {
         self.searcher = searcher
         progressReader = searcher as? any V2ConversationMessageSearchProgressReading
         self.scope = scope
+        self.actorUserID = actorUserID
     }
 
     func search() async {
@@ -170,22 +174,29 @@ final class V2ConversationSearchStore {
         catch { if !Task.isCancelled { state = .failed } }
     }
 
-    func refreshSenderDisplayName() async {
-        guard let userID = senderFilter else { return }
-        let name = try? await searcher.searchSenderDisplayName(userID: userID)
-        guard !Task.isCancelled, senderFilter == userID else { return }
-        senderFilterDisplayName = name ?? "选定成员"
+    func refreshSenderPresentationContext() async {
+        guard let userID = senderFilter, let room = senderFilterRoomID else { return }
+        let generation = senderContextGeneration
+        let context = try? await searcher.searchConversationContext(roomID: room)
+        guard !Task.isCancelled, generation == senderContextGeneration,
+              senderFilter == userID, senderFilterRoomID == room else { return }
+        senderPresentationKey = context?.authorKey(for: userID, in: room, actorUserID: actorUserID)
     }
 
-    func filterToSender(_ userID: UserID) {
-        guard senderFilter != userID else { return }
+    func filterToSender(_ userID: UserID, in originRoom: RoomID? = nil) {
+        let room: RoomID? = if case .room(let room) = scope { room } else { originRoom }
+        guard senderFilter != userID || senderFilterRoomID != room else { return }
+        senderContextGeneration &+= 1
         senderFilter = userID
-        senderFilterDisplayName = "选定成员"
+        senderFilterRoomID = room
+        senderPresentationKey = nil
     }
 
     func clearSenderFilter() {
         guard senderFilter != nil else { return }
+        senderContextGeneration &+= 1
         senderFilter = nil
-        senderFilterDisplayName = "选定成员"
+        senderFilterRoomID = nil
+        senderPresentationKey = nil
     }
 }

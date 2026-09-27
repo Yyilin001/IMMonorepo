@@ -51,7 +51,7 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
             let budget = V2RoomCommandBudget(configuration: runtime)
             let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: identity,
                 leaseStore: leases, configuration: runtime, budget: budget,
-                classify: { $0.canShareSendTurn ? .send : .barrier }, factory: factory.runtimeFactory())
+                classify: { $0.turnSchedulingClass }, factory: factory.runtimeFactory())
             runtimeHost = host
             runtimeBudget = budget
             let hostNode = V2RoomClusterNode(configuration: try .init(name: configuration.name,

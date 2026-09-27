@@ -186,7 +186,27 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                             revokeDevice: false, closePromise: promise)
                     }
                 }
-            }, foregroundWriter: foregroundWriter)
+            }, foregroundWriter: foregroundWriter, authorPresentationWriter: { write in
+                await withCheckedContinuation { continuation in
+                    eventLoop.execute {
+                        let handler = boundHandler.value, context = boundContext.value
+                        // Optional data gets no retry queue and never closes a
+                        // healthy connection merely because it is congested.
+                        guard !handler.closed, !handler.processing, !handler.needsFrameDrain,
+                              handler.pendingResponseWrite == nil, context.channel.isActive,
+                              context.channel.isWritable, !foregroundWriter.hasPendingFrames else {
+                            continuation.resume(returning: false); return
+                        }
+                        let accepted = write.enqueueIfCurrent {
+                            let context = boundContext.value
+                            var buffer = context.channel.allocator.buffer(capacity: write.bytes.count)
+                            buffer.writeBytes(write.bytes)
+                            context.writeAndFlush(boundHandler.value.wrapOutboundOut(buffer), promise: nil)
+                        }
+                        continuation.resume(returning: accepted)
+                    }
+                }
+            })
             eventLoop.execute {
                 let handler = boundHandler.value
                 guard attached, !handler.closed else { return }
@@ -629,6 +649,10 @@ struct V2GatewayForegroundWriteQueue: Sendable {
 /// 并只执行一次 flush，使解码器可以消费这些合并帧，
 /// 同时摊薄事件循环、系统调用与 TLS 记录的开销。
 final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
+    /// Read from the actual EventLoop before optional author bytes are written.
+    /// Body drain writes synchronously on that same loop, so an extracted body
+    /// batch cannot be overtaken between this check and the optional write.
+    var hasPendingFrames: Bool { state.withLock { !$0.queue.isEmpty } }
     private struct LaneBatch {
         let lane: V2NIOForegroundWriteScheduler.Lane
         var writers: [V2NIOGatewayForegroundWriter]

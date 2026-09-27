@@ -7,6 +7,81 @@ import Testing
 @MainActor
 @Suite("V2 group invitation intent isolation", .timeLimit(.minutes(1)))
 struct V2GroupInvitationStoreTests {
+    @Test("management replacement drains prior reads and fences late results", arguments: [false, true], [false, true])
+    func managementReplacement(sameRoom: Bool, succeeds: Bool) async throws {
+        let client = InvitationBarrierClient()
+        let subject = V2GroupInvitationStore(client: client)
+        await client.enableManagement()
+        let room = RoomID(uuid: UUID()), nextRoom = sameRoom ? room : RoomID(uuid: UUID())
+        let first = Task { await subject.loadManagement(roomID: room.rawValue) }
+        try await client.waitForManagement(1)
+        let second = Task { await subject.loadManagement(roomID: nextRoom.rawValue) }
+        try await Task.sleep(for: .milliseconds(10))
+        #expect(await client.managementCalls.count == 1)
+        await client.finishManagement(0, result: succeeds ? .success(try managementPage(room)) : .failure(V2ClientGroupInvitationError.authorizationDenied))
+        await first.value
+        try await client.waitForManagement(2)
+        #expect(subject.requests.isEmpty && subject.feedback == nil && subject.isWorking)
+        let expected = try managementPage(nextRoom)
+        await client.finishManagement(1, result: .success(expected))
+        await second.value
+        #expect(subject.requests == expected.requests && subject.feedback == nil && !subject.isWorking)
+        subject.endManagement()
+    }
+
+    @Test("closing management or signing out clears its data and ignores late errors", arguments: [false, true])
+    func closedManagement(invalidate: Bool) async throws {
+        let client = InvitationBarrierClient(), room = RoomID(uuid: UUID())
+        let subject = V2GroupInvitationStore(client: client)
+        await client.enableManagement()
+        let first = Task { await subject.loadManagement(roomID: room.rawValue) }
+        try await client.waitForManagement(1)
+        await client.finishManagement(0, result: .success(try managementPage(room, next: "page-2")))
+        await first.value
+        #expect(!subject.requests.isEmpty)
+        let more = Task { await subject.loadMoreRequests(roomID: room.rawValue) }
+        try await client.waitForManagement(2)
+        if invalidate { subject.invalidate() } else { subject.endManagement() }
+        #expect(subject.requests.isEmpty && subject.nextRequestCursor == nil)
+        await client.finishManagement(1, result: .failure(V2ClientGroupInvitationError.authorizationDenied))
+        await more.value
+        #expect(subject.feedback == nil && subject.requests.isEmpty && !subject.isWorking)
+    }
+
+    @Test("management pagination keeps a bounded window and can restart at the beginning")
+    func managementWindow() async throws {
+        let client = InvitationBarrierClient(), room = RoomID(uuid: UUID())
+        let subject = V2GroupInvitationStore(client: client)
+        await client.enableManagement()
+        for index in 0..<11 {
+            let load = Task {
+                if index == 0 { await subject.loadManagement(roomID: room.rawValue) }
+                else { await subject.loadMoreRequests(roomID: room.rawValue) }
+            }
+            try await client.waitForManagement(index + 1)
+            await client.finishManagement(index, result: .success(try managementPage(room, count: 100, next: "page-\(index + 1)")))
+            await load.value
+            #expect(subject.requests.count == min(1_000, (index + 1) * 100))
+        }
+        #expect(subject.hasEarlierRequests)
+        let restart = Task { await subject.loadManagement(roomID: room.rawValue) }
+        try await client.waitForManagement(12)
+        #expect(await client.managementCalls.last?.cursor == nil)
+        let firstPage = try managementPage(room)
+        await client.finishManagement(11, result: .success(firstPage))
+        await restart.value
+        #expect(!subject.hasEarlierRequests && subject.requests == firstPage.requests)
+        subject.endManagement()
+    }
+
+    private func managementPage(_ room: RoomID, count: Int = 1, next: String? = nil) throws -> V2ClientGroupJoinRequestPage {
+        .init(requests: try (0..<count).map { _ in
+            try .init(requestID: .init(uuid: UUID()), inviteID: .init(uuid: UUID()), roomID: room,
+                applicantUserID: .init(uuid: UUID()), note: nil, state: .pending,
+                resumableDecisionOperationID: nil, createdAt: Date(), decidedAt: nil)
+        }, nextCursor: next)
+    }
+
     @Test("提交 A 后切到 B，A 的迟到完成不能改变 B 的加载、预览或提交", arguments: [0, 1, 2], [false, true])
     func lateSubmissionCannotChangeReplacement(stage: Int, succeeds: Bool) async throws {
         let client = InvitationBarrierClient()
@@ -227,9 +302,9 @@ struct V2GroupInvitationStoreTests {
         #expect(subject.canSubmit == (scenario == "replace"))
     }
 
-    private func cancellationRecord(_ preview: V2GroupInvitePreview, state: V2GroupJoinRequestState) throws -> V2GroupJoinRequest {
+    private func cancellationRecord(_ preview: V2GroupInvitePreview, state: V2GroupJoinRequestState) throws -> V2ClientGroupJoinRequest {
         try .init(requestID: #require(preview.requestID), inviteID: preview.inviteID, roomID: preview.roomID,
-                  applicant: .init(userID: .init(uuid: UUID()), handle: .init("cancel_applicant"), displayName: "Applicant", accountKind: .regular),
+                  applicantUserID: .init(uuid: UUID()),
                   note: nil, state: state, resumableDecisionOperationID: nil, createdAt: Date(), decidedAt: Date())
     }
 
@@ -286,11 +361,30 @@ private actor InvitationBarrierClient: V2ClientGroupInvitationManaging {
     func create(roomID: RoomID, operationID: GroupInviteOperationID, lifetimeSeconds: Int, maximumApprovedUses: Int) async throws -> V2GroupInviteLink { throw V2ClientGroupInvitationError.unavailable }
     func activeInvites(roomID: RoomID) async throws -> [V2GroupInviteLink] { [] }
     func revoke(inviteID: GroupInviteID, roomID: RoomID, operationID: GroupInviteOperationID) async throws {}
-    func pendingRequests(roomID: RoomID, cursor: String?, pageSize: Int) async throws -> V2GroupJoinRequestPage { .init(requests: [], nextCursor: nil) }
+    private var controlledManagement = false
+    private(set) var managementCalls: [(room: RoomID, cursor: String?)] = []
+    private var managementPages: [Int: CheckedContinuation<V2ClientGroupJoinRequestPage, any Error>] = [:]
+    func enableManagement() { controlledManagement = true }
+    func pendingRequests(roomID: RoomID, cursor: String?, pageSize: Int) async throws -> V2ClientGroupJoinRequestPage {
+        guard controlledManagement else { return .init(requests: [], nextCursor: nil) }
+        let index = managementCalls.count
+        managementCalls.append((roomID, cursor))
+        return try await withCheckedThrowingContinuation { managementPages[index] = $0 }
+    }
+    func waitForManagement(_ count: Int) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while managementCalls.count < count {
+            guard ContinuousClock.now < deadline else { throw V2ClientGroupInvitationError.networkFailure }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+    }
+    func finishManagement(_ index: Int, result: Result<V2ClientGroupJoinRequestPage, any Error>) {
+        managementPages.removeValue(forKey: index)?.resume(with: result)
+    }
     private(set) var cancellations: [GroupJoinRequestID] = []
-    private var pendingCancellation: CheckedContinuation<V2GroupJoinRequest, any Error>?
+    private var pendingCancellation: CheckedContinuation<V2ClientGroupJoinRequest, any Error>?
     private var cancellationWaiter: CheckedContinuation<Void, Never>?
-    func cancel(roomID: RoomID, requestID: GroupJoinRequestID) async throws -> V2GroupJoinRequest {
+    func cancel(roomID: RoomID, requestID: GroupJoinRequestID) async throws -> V2ClientGroupJoinRequest {
         cancellations.append(requestID)
         return try await withCheckedThrowingContinuation {
             pendingCancellation = $0
@@ -302,7 +396,7 @@ private actor InvitationBarrierClient: V2ClientGroupInvitationManaging {
         guard cancellations.count < count else { return }
         await withCheckedContinuation { cancellationWaiter = $0 }
     }
-    func finishCancellation(result: Result<V2GroupJoinRequest, any Error>) {
+    func finishCancellation(result: Result<V2ClientGroupJoinRequest, any Error>) {
         pendingCancellation?.resume(with: result)
         pendingCancellation = nil
     }

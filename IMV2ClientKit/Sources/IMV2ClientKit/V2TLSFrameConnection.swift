@@ -45,6 +45,8 @@ public struct V2AuthenticatedClientSession: Equatable, Sendable {
     public let frameCompression: V2NegotiatedFrameCompression?
     /// 可选进程内连接代际身份，用于使旧任务失效。
     public let connectionID: UUID?
+    /// Nil unless both peers explicitly negotiated author supplements.
+    public let authorPresentationStreamID: UUID?
 
     /// 保存连接或提示快照，不执行字段范围及跨字段一致性校验。
     ///
@@ -61,7 +63,8 @@ public struct V2AuthenticatedClientSession: Equatable, Sendable {
         protocolVersion: UInt8,
         capabilityProfile: String,
         frameCompression: V2NegotiatedFrameCompression? = nil,
-        connectionID: UUID? = nil
+        connectionID: UUID? = nil,
+        authorPresentationStreamID: UUID? = nil
     ) {
         self.userID = userID
         self.deviceID = deviceID
@@ -69,6 +72,7 @@ public struct V2AuthenticatedClientSession: Equatable, Sendable {
         self.capabilityProfile = capabilityProfile
         self.frameCompression = frameCompression
         self.connectionID = connectionID
+        self.authorPresentationStreamID = authorPresentationStreamID
     }
 }
 
@@ -345,7 +349,7 @@ struct V2NetworkTLSByteConnection: V2TLSByteConnection {
 ///
 /// 连接工厂的生产实现使用 TLS 1.3 和平台信任校验，网络进入 `.ready` 后才发送握手。
 /// 每轮连接持有独立代际与接收缓冲，异步操作恢复时核对代际，防止旧回调影响替换连接。
-public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabilityHintSource, V2GroupEventAvailabilityHintSource, V2AccountRoomChangeSource, V2LiveActivityEventSource, V2RealtimeConnection {
+public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabilityHintSource, V2GroupEventAvailabilityHintSource, V2AccountRoomChangeSource, V2LiveActivityEventSource, V2AuthorPresentationSource, V2RealtimeConnection {
     /// 每代创建新字节连接的工厂。
     private let connectionFactory: @Sendable () -> any V2TLSByteConnection
     /// 当前连接允许占用的在途关联槽位上限。
@@ -382,11 +386,15 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     private var authenticatedVersion: UInt8?
     /// 握手选定的压缩方式，关闭时清空。
     private var negotiatedFrameCompression: V2NegotiatedFrameCompression?
+    private let supportsAuthorPresentationDelta: Bool
+    private var authorPresentationInbox: V2AuthorPresentationInbox?
+    private var authorPresentationWaiter: Waiter<V2ReceivedAuthorPresentationDelta>?
     /// 关联请求的内部身份、可选等待者及发送和超时任务。
     private struct PendingResponse {
         /// 区分相同请求号不同生命周期的内部身份。
         let id: UUID
         let command: V2FrameCommand
+        let authorView: V2AuthorPresentationView?
         /// 调用者等待句柄；nil 表示调用者已取消但线上请求仍占位。
         var continuation: CheckedContinuation<V2Frame, Error>?
         /// 独立超时任务，取消等待者后仍保留。
@@ -434,6 +442,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     ///   - maximumProtobufMessageDepth: 正的 protobuf 嵌套深度上限。
     ///   - requestTimeout: 正的连接或单次请求超时，默认 20 秒，不是整个多阶段握手的总预算。
     ///   - maximumPendingRequests: 正的在途请求上限，默认 256。
+    ///   - supportsAuthorPresentationDelta: 前台所有者负责 nonce 续期及展示消费后才启用，默认关闭。
     ///
     /// 非法深度、超时或请求上限触发前置条件失败。
     public init(
@@ -441,12 +450,14 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         frameLimits: V2FrameLimits,
         maximumProtobufMessageDepth: Int = V2ProtobufFrameCodec.defaultMaximumMessageDepth,
         requestTimeout: Duration = .seconds(20),
-        maximumPendingRequests: Int = 256
+        maximumPendingRequests: Int = 256,
+        supportsAuthorPresentationDelta: Bool = false
     ) {
         precondition(maximumProtobufMessageDepth > 0)
         self.connectionFactory = { V2NetworkTLSByteConnection(endpoint: endpoint) }
         precondition(maximumPendingRequests > 0 && requestTimeout > .zero)
         self.maximumPendingRequests = maximumPendingRequests
+        self.supportsAuthorPresentationDelta = supportsAuthorPresentationDelta
         self.limits = frameLimits
         self.maximumProtobufMessageDepth = maximumProtobufMessageDepth
         self.requestTimeout = requestTimeout
@@ -457,11 +468,13 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         connectionFactory: @escaping @Sendable () -> any V2TLSByteConnection,
         frameLimits: V2FrameLimits,
         requestTimeout: Duration = .seconds(20),
-        maximumPendingRequests: Int = 256
+        maximumPendingRequests: Int = 256,
+        supportsAuthorPresentationDelta: Bool = false
     ) {
         precondition(maximumPendingRequests > 0 && requestTimeout > .zero)
         self.connectionFactory = connectionFactory
         self.maximumPendingRequests = maximumPendingRequests
+        self.supportsAuthorPresentationDelta = supportsAuthorPresentationDelta
         limits = frameLimits
         maximumProtobufMessageDepth = V2ProtobufFrameCodec.defaultMaximumMessageDepth
         self.requestTimeout = requestTimeout
@@ -492,6 +505,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
             hello.clientHello.supportedCapabilityProfiles = Array(supportedCapabilityProfiles).sorted()
             hello.clientHello.deviceID = deviceID.rawValue
             hello.clientHello.supportedFrameCompressions = [.zlib]
+            hello.clientHello.supportsAuthorPresentationDelta = supportsAuthorPresentationDelta
             let helloResponse = try await sendBootstrap(hello, version: 0, generation: generation)
             guard case .serverHello(let serverHello)? = helloResponse.body,
                   let version = UInt8(exactly: serverHello.selectedProtocolVersion),
@@ -508,6 +522,17 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
                 throw V2TLSFrameConnectionError.unsupportedCompression
             }
 
+            let authorStreamID: UUID?
+            if serverHello.authorPresentationStreamID.isEmpty {
+                authorStreamID = nil
+            } else {
+                guard supportsAuthorPresentationDelta, version >= 31,
+                      let streamID = UUID(uuidString: serverHello.authorPresentationStreamID) else {
+                    throw V2TLSFrameConnectionError.invalidHandshake
+                }
+                authorStreamID = streamID
+            }
+
             var authenticate = IMV2Envelope()
             authenticate.requestID = 2
             authenticate.protocolVersion = UInt32(version)
@@ -519,10 +544,15 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
                   response.deviceID == deviceID.rawValue,
                   response.selectedCapabilityProfile == serverHello.selectedCapabilityProfile,
                   response.selectedFrameCompression == serverHello.selectedFrameCompression,
+                  response.authorPresentationStreamID == serverHello.authorPresentationStreamID,
                   let userID = try? UserID(response.userID)
             else { throw V2TLSFrameConnectionError.authenticationFailed }
             try requireGeneration(generation)
             authenticatedVersion = version
+            if let authorStreamID {
+                guard userID.uuidValue != nil, deviceID.uuidValue != nil else { throw V2TLSFrameConnectionError.invalidHandshake }
+                authorPresentationInbox = .init(streamID: authorStreamID, actorUserID: userID, deviceID: deviceID)
+            }
             guard let connection else { throw V2TLSFrameConnectionError.connectionClosed }
             startReader(connection, generation: generation)
             return .init(
@@ -531,7 +561,8 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
                 protocolVersion: version,
                 capabilityProfile: response.selectedCapabilityProfile,
                 frameCompression: negotiatedFrameCompression,
-                connectionID: generation
+                connectionID: generation,
+                authorPresentationStreamID: authorStreamID
             )
         } catch {
             closeTransport(error: error, expectedGeneration: generation)
@@ -543,6 +574,51 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     public func request(_ frame: V2Frame) async throws -> V2Frame {
         guard let version = authenticatedVersion, frame.version == version else { throw V2TLSFrameConnectionError.notConnected }
         return try await sendAndAwaitResponse(frame)
+    }
+
+    public func beginAuthorPresentationView(roomID: RoomID) throws -> V2AuthorPresentationView {
+        try Task.checkCancellation()
+        try requireAuthorPresentationConnection()
+        guard let view = try authorPresentationInbox?.begin(roomID: roomID) else { throw V2TLSFrameConnectionError.notConnected }
+        authorPresentationWaiter?.resume(throwing: V2ProfilePresentationError.inactive)
+        authorPresentationWaiter = nil
+        return view
+    }
+
+    public func endAuthorPresentationView(_ view: V2AuthorPresentationView) {
+        guard authorPresentationInbox?.view == view else { return }
+        authorPresentationInbox?.end(view)
+        authorPresentationWaiter?.resume(throwing: V2ProfilePresentationError.inactive)
+        authorPresentationWaiter = nil
+    }
+
+    public func nextAuthorPresentationDelta(for view: V2AuthorPresentationView) async throws -> V2ReceivedAuthorPresentationDelta {
+        try Task.checkCancellation()
+        try requireAuthorPresentationConnection()
+        guard authorPresentationInbox != nil else { throw V2TLSFrameConnectionError.notConnected }
+        if let value = try authorPresentationInbox?.next(for: view) { return value }
+        let id = UUID(), generation = connectionID
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                guard !Task.isCancelled else { continuation.resume(throwing: CancellationError()); return }
+                guard authorPresentationWaiter == nil else {
+                    continuation.resume(throwing: V2TLSFrameConnectionError.concurrentAvailabilityConsumer); return
+                }
+                authorPresentationWaiter = .init(id: id, continuation: continuation)
+            }
+        }, onCancel: { Task { await self.cancelAuthorPresentationWait(id: id, generation: generation) } })
+    }
+
+    private func requireAuthorPresentationConnection() throws {
+        if let expected = V2ConnectionRequestScope.connectionID, expected != connectionID {
+            throw V2TLSFrameConnectionError.connectionClosed
+        }
+        guard authenticatedVersion != nil, connection != nil else { throw V2TLSFrameConnectionError.notConnected }
+    }
+
+    private func cancelAuthorPresentationWait(id: UUID, generation: UUID?) {
+        guard connectionID == generation, authorPresentationWaiter?.id == id else { return }
+        authorPresentationWaiter?.resume(throwing: CancellationError()); authorPresentationWaiter = nil
     }
 
     /// 等待用户同步提示，优先消费已合并的缓存并清空该缓存。
@@ -781,6 +857,41 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         }
         try Task.checkCancellation()
         let bytes = try V2FrameCodec.encode(frame, limits: limits)
+        if frame.command == .authorPresentationEnd {
+            let ending = try V2ProtobufFrameCodec.decode(frame).authorPresentationEnd
+            guard let inbox = authorPresentationInbox,
+                  UUID(uuidString: ending.streamID) == inbox.streamID,
+                  UUID(uuidString: ending.viewID) != nil, UUID(uuidString: ending.roomID) != nil else {
+                throw V2TLSFrameConnectionError.unexpectedResponse
+            }
+            // Cancellation can release the subscribe caller before its socket
+            // write completes. Retain that operation and order cleanup after it,
+            // so the old subscribe cannot arrive after its matching stop.
+            let sends = responseWaiters.values.filter {
+                $0.authorView?.viewID == UUID(uuidString: ending.viewID)
+                    && $0.authorView?.streamID == inbox.streamID
+                    && $0.authorView?.roomID == (try? RoomID(ending.roomID))
+            }.map(\.sendTask)
+            for send in sends { await send.value }
+            try requireGeneration(generation)
+            try Task.checkCancellation()
+        }
+        var authorView: V2AuthorPresentationView?
+        if frame.command == .groupEventSubscribe {
+            let envelope = try V2ProtobufFrameCodec.decode(frame)
+            let request = envelope.groupEventSubscribe
+            if !request.authorPresentationViewID.isEmpty {
+                guard let inbox = authorPresentationInbox else { throw V2TLSFrameConnectionError.unexpectedResponse }
+                authorView = try inbox.requestedView(request)
+            } else if let current = authorPresentationInbox?.view,
+                      (try? RoomID(request.roomID)) == current.roomID {
+                endAuthorPresentationView(current)
+            }
+        } else if frame.command == .groupEventUnsubscribe,
+                  let current = authorPresentationInbox?.view {
+            let envelope = try V2ProtobufFrameCodec.decode(frame)
+            if (try? RoomID(envelope.groupEventUnsubscribe.roomID)) == current.roomID { endAuthorPresentationView(current) }
+        }
         let id = UUID()
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
@@ -801,7 +912,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
                     do { try await connection.send(bytes) }
                     catch { await self?.failRequest(frame.requestID, id: id, generation: generation) }
                 }
-                responseWaiters[frame.requestID] = .init(id: id, command: frame.command, continuation: continuation, deadline: deadline, sendTask: sendTask)
+                responseWaiters[frame.requestID] = .init(id: id, command: frame.command, authorView: authorView, continuation: continuation, deadline: deadline, sendTask: sendTask)
             }
         }, onCancel: {
             Task { await self.cancelRequest(frame.requestID, id: id, generation: generation) }
@@ -853,6 +964,21 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
             }
             let envelope = try V2ProtobufFrameCodec.decode(frame, maximumMessageDepth: maximumProtobufMessageDepth)
             switch envelope.body {
+            case .authorPresentationDelta(let delta):
+                guard authorPresentationInbox != nil,
+                      frame.payload.count <= V2AuthorPresentationDelta.maximumFrameBytes - V2Frame.headerLength else {
+                    throw V2TLSFrameConnectionError.unexpectedResponse
+                }
+                try authorPresentationInbox?.accept(delta.payload)
+                if let waiter = authorPresentationWaiter, let view = authorPresentationInbox?.view {
+                    do {
+                        if let value = try authorPresentationInbox?.next(for: view) {
+                            authorPresentationWaiter = nil; waiter.resume(returning: value)
+                        }
+                    } catch V2ProfilePresentationError.inactive {
+                        endAuthorPresentationView(view)
+                    }
+                }
             case .syncAvailable(let hint):
                 let value = V2SyncAvailabilityHint(eventID: hint.eventID, highWatermark: hint.highWatermark)
                 if let availabilityWaiter {
@@ -898,6 +1024,21 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         }
         guard let waiter = responseWaiters[frame.requestID] else {
             throw V2TLSFrameConnectionError.unexpectedResponse
+        }
+        if waiter.command == .groupEventSubscribe {
+            let envelope = try V2ProtobufFrameCodec.decode(frame, maximumMessageDepth: maximumProtobufMessageDepth)
+            switch envelope.body {
+            case .groupEventSubscribed(let response):
+                if let view = waiter.authorView {
+                    // Install before a delta coalesced in this same socket read.
+                    if waiter.continuation != nil { try authorPresentationInbox?.confirm(view, response: response) }
+                } else if !response.authorPresentationViewID.isEmpty {
+                    throw V2TLSFrameConnectionError.unexpectedResponse
+                }
+            case .error:
+                if let view = waiter.authorView { endAuthorPresentationView(view) }
+            default: throw V2TLSFrameConnectionError.unexpectedResponse
+            }
         }
         if waiter.command == .accountRoomChangesStart {
             let envelope = try V2ProtobufFrameCodec.decode(frame, maximumMessageDepth: maximumProtobufMessageDepth)
@@ -998,6 +1139,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         guard connectionID == generation, responseWaiters[requestID]?.id == id else { return }
         let continuation = responseWaiters[requestID]?.continuation
         responseWaiters[requestID]?.continuation = nil
+        if let view = responseWaiters[requestID]?.authorView { endAuthorPresentationView(view) }
         continuation?.resume(throwing: CancellationError())
     }
 
@@ -1068,6 +1210,9 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         liveActivityWaiter?.resume(throwing: error)
         liveActivityWaiter = nil
         pendingLiveActivityEvents.removeAll(keepingCapacity: false)
+        authorPresentationWaiter?.resume(throwing: error)
+        authorPresentationWaiter = nil
+        authorPresentationInbox = nil
     }
 
     /// 从指定代际独占的接收缓冲读取下一帧，并规范化压缩表示。
@@ -1153,12 +1298,13 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
 /// 缺少 Apple Network 或 Security 框架时的占位连接实现。
 ///
 /// 保留纯协议与持久化测试所需的接口，所有网络操作明确报告未连接，不降级到非 TLS 传输。
-public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabilityHintSource, V2GroupEventAvailabilityHintSource, V2AccountRoomChangeSource, V2RealtimeConnection {
+public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabilityHintSource, V2GroupEventAvailabilityHintSource, V2AccountRoomChangeSource, V2AuthorPresentationSource, V2RealtimeConnection {
     /// 创建占位实现，只检查 protobuf 深度为正，不创建 socket 或保存端点配置。
     public init(
         endpoint _: V2RealtimeEndpoint,
         frameLimits _: V2FrameLimits,
-        maximumProtobufMessageDepth: Int = V2ProtobufFrameCodec.defaultMaximumMessageDepth
+        maximumProtobufMessageDepth: Int = V2ProtobufFrameCodec.defaultMaximumMessageDepth,
+        supportsAuthorPresentationDelta _: Bool = false
     ) {
         precondition(maximumProtobufMessageDepth > 0)
     }
@@ -1186,6 +1332,10 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     public func nextAccountRoomChange() async throws -> V2AccountRoomChange {
         throw V2TLSFrameConnectionError.notConnected
     }
+
+    public func beginAuthorPresentationView(roomID: RoomID) throws -> V2AuthorPresentationView { throw V2TLSFrameConnectionError.notConnected }
+    public func endAuthorPresentationView(_ view: V2AuthorPresentationView) {}
+    public func nextAuthorPresentationDelta(for view: V2AuthorPresentationView) throws -> V2ReceivedAuthorPresentationDelta { throw V2TLSFrameConnectionError.notConnected }
 
     /// 占位实现没有连接资源，断开为空操作。
     public func disconnect() {}

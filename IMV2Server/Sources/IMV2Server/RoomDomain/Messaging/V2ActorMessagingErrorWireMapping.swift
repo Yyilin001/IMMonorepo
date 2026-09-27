@@ -3,6 +3,7 @@ import IMV2Core
 
 public extension V2ActorMessagingErrorWire {
     init?(domainError: any Error) {
+        if v2IsMessageOperationClosed(domainError) { self = .sendStore(.messageOperationClosed); return }
         switch domainError {
         case let value as V2RoomWriteStoreError: self = .sendStore(.init(value))
         case let value as V2MessageEditStoreError: self = .editStore(.init(value))
@@ -43,6 +44,7 @@ public extension V2ActorMessagingErrorWire {
 public extension V2ActorMessagingSendStoreErrorWire {
     init(_ value: V2RoomWriteStoreError) {
         switch value {
+        case .messageOperationClosed: self = .messageOperationClosed
         case .roomNotFound: self = .roomNotFound
         case .actorNotEligible: self = .actorNotEligible
         case .actorMuted: self = .actorMuted
@@ -58,6 +60,7 @@ public extension V2ActorMessagingSendStoreErrorWire {
 
     func domainValue() -> V2RoomWriteStoreError {
         switch self {
+        case .messageOperationClosed: .messageOperationClosed
         case .roomNotFound: .roomNotFound
         case .actorNotEligible: .actorNotEligible
         case .actorMuted: .actorMuted
@@ -233,7 +236,6 @@ public extension V2ActorMessagingMediaErrorWire {
         case .expired: self = .expired
         case .invalidAttachmentSet: self = .invalidAttachmentSet
         case .invalidDownloadTarget: self = .invalidDownloadTarget
-        case .invalidUploadTarget: self = .invalidUploadTarget
         case .invalidPresentation: self = .invalidPresentation
         }
     }
@@ -246,7 +248,6 @@ public extension V2ActorMessagingMediaErrorWire {
         case .expired: .expired
         case .invalidAttachmentSet: .invalidAttachmentSet
         case .invalidDownloadTarget: .invalidDownloadTarget
-        case .invalidUploadTarget: .invalidUploadTarget
         case .invalidPresentation: .invalidPresentation
         }
     }

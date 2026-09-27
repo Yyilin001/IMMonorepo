@@ -577,7 +577,8 @@ public struct V2GatewayDomainCommandHandler:
                 maximumExpansionRatio: context.maximumExpansionRatio,
                 maximumGroupEventPagePayloadBytes:
                     maximumGroupEventPagePayloadBytes,
-                cache: context.cache
+                cache: context.cache,
+                captureAuthorSample: context.captureAuthorSample
             )
         )
     }
@@ -844,6 +845,8 @@ public struct V2GatewayDomainCommandHandler:
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
         } catch V2SocialRelationshipStoreError.corruptPersistenceState {
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
+        } catch V2RoomWriteStoreError.messageOperationClosed {
+            return errorEnvelope(code: "MESSAGE_OPERATION_CLOSED", retryable: false)
         } catch V2RoomWriteStoreError.actorNotEligible, V2RoomWriteStoreError.actorMuted, V2RoomWriteStoreError.roomFrozen, V2RoomWriteStoreError.directMessageBlocked, V2RoomWriteStoreError.strangerMessagePermissionDenied {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
         } catch V2RoomWriteStoreError.roomNotFound, V2RoomWriteStoreError.replyTargetNotFound {
@@ -1422,9 +1425,6 @@ public struct V2GatewayDomainCommandHandler:
             case .admin: member.role = .admin
             case .member: member.role = .member
             }
-            member.publicHandle = entry.publicIdentity.handle.rawValue
-            member.displayName = entry.publicIdentity.displayName
-            member.accountKind = entry.publicIdentity.accountKind.rawValue
             return member
         }
         return response
@@ -1559,7 +1559,9 @@ public struct V2GatewayDomainCommandHandler:
     }
 
     private func handleReadReceiptReaders(_ request: IMV2ListReadReceiptReaders, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        guard request.pageSize > 0, request.pageSize <= 100 else { return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false) }
+        guard request.pageSize > 0, request.pageSize <= 100, request.cursor.utf8.count <= 512 else {
+            return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
+        }
         let page = try await readReceipt.readers(
             roomID: try .init(request.roomID),
             messageID: try .init(request.messageID),
@@ -1573,9 +1575,6 @@ public struct V2GatewayDomainCommandHandler:
         response.readReceiptReadersPage.nextCursor = page.nextCursor ?? ""
         response.readReceiptReadersPage.readers = page.readers.map { reader in
             var wire = IMV2ReadReceiptReader(); wire.userID = reader.userID.rawValue
-            wire.publicHandle = reader.publicIdentity.handle.rawValue
-            wire.displayName = reader.publicIdentity.displayName
-            wire.accountKind = reader.publicIdentity.accountKind.rawValue
             return wire
         }
         return response

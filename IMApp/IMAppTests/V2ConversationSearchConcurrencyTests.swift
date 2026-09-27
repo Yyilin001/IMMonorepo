@@ -44,21 +44,56 @@ struct V2ConversationSearchConcurrencyTests {
         #expect(store.state == .loaded)
     }
 
-    @Test("筛选成员读公开名称，未知成员不读 UUID")
-    func senderFilterUsesPublicDisplayName() async throws {
+    @Test("筛选名称只选择完整权限上下文，不返回缓存文案或猜测未知房间")
+    func senderFilterUsesScopedLookup() async throws {
         let client = SearchPageBarrier(first: hit("first"))
-        let store = V2ConversationSearchStore(searcher: client)
-        let known = UserID(uuid: UUID()), unknown = UserID(uuid: UUID())
-        await client.setName("公开名称", for: known)
-        store.filterToSender(known)
-        await store.refreshSenderDisplayName()
-        #expect(store.senderFilterDisplayName == "公开名称")
-        store.filterToSender(unknown)
-        #expect(store.senderFilterDisplayName == "选定成员")
-        await store.refreshSenderDisplayName()
-        #expect(store.senderFilterDisplayName == "选定成员")
+        let actor = UserID(uuid: UUID()), peer = UserID(uuid: UUID()), stranger = UserID(uuid: UUID())
+        let group = RoomID(uuid: UUID()), direct = RoomID(uuid: UUID()), unknown = RoomID(uuid: UUID())
+        let store = V2ConversationSearchStore(searcher: client, actorUserID: actor)
+        await client.setContext(.group(title: "Group"), for: group)
+        await client.setContext(.direct(peerUserID: peer), for: direct)
+        for (user, room, expected) in [
+            (peer, group, V2ProfileViewLookupKey(userID: peer, context: .room(group))),
+            (peer, direct, .init(userID: peer, context: .room(direct))),
+            (actor, direct, .init(userID: actor, context: .room(direct)))
+        ] {
+            store.filterToSender(user, in: room)
+            #expect(store.senderPresentationKey == nil)
+            await store.refreshSenderPresentationContext()
+            #expect(store.senderPresentationKey == expected)
+        }
+        for (user, room) in [(stranger, direct), (peer, unknown)] {
+            store.filterToSender(user, in: room)
+            await store.refreshSenderPresentationContext()
+            #expect(store.senderPresentationKey == nil)
+        }
         store.clearSenderFilter()
-        #expect(store.senderFilter == nil)
+        #expect(store.senderFilter == nil && store.senderPresentationKey == nil)
+        let scoped = V2ConversationSearchStore(searcher: client, scope: .room(group), actorUserID: actor)
+        scoped.filterToSender(peer, in: direct)
+        await scoped.refreshSenderPresentationContext()
+        #expect(scoped.senderPresentationKey == .init(userID: peer, context: .room(group)))
+    }
+
+    @Test("迟到的资料路由查询不能跨越筛选替换和重新选择", arguments: [false, true])
+    func staleSenderContext(clears: Bool) async throws {
+        let client = SearchPageBarrier(first: hit("first")), peer = UserID(uuid: UUID())
+        let room = RoomID(uuid: UUID()), other = RoomID(uuid: UUID())
+        let store = V2ConversationSearchStore(searcher: client)
+        await client.pauseNextContext()
+        store.filterToSender(peer, in: room)
+        let old = Task { await store.refreshSenderPresentationContext() }
+        await client.waitForContext()
+        store.filterToSender(peer, in: other)
+        if clears { store.clearSenderFilter() }
+        else {
+            await client.setContext(.direct(peerUserID: peer), for: room)
+            store.filterToSender(peer, in: room)
+            await store.refreshSenderPresentationContext()
+        }
+        await client.finishContext(.group(title: "Old group"))
+        await old.value
+        #expect(store.senderPresentationKey == (clears ? nil : .init(userID: peer, context: .room(room))))
     }
 
     @Test("索引 ready 自动重查，也接收订阅前已完成的初值", arguments: [false, true])
@@ -197,7 +232,10 @@ private actor SearchPageBarrier: V2ConversationMessageSearching, V2ConversationM
     private var continuation: CheckedContinuation<V2MessageSearchPage, any Error>?
     private var started: CheckedContinuation<Void, Never>?
     private(set) var pageCalls = 0
-    private var names: [UserID: String] = [:]
+    private var contexts: [RoomID: V2ClientConversationLookupContext] = [:]
+    private var shouldPauseContext = false
+    private var contextContinuation: CheckedContinuation<V2ClientConversationLookupContext?, Never>?
+    private var contextWaiter: CheckedContinuation<Void, Never>?
     private var shouldPauseProgress = false
     private var progressContinuation: CheckedContinuation<V2MessageSearchIndexProgress, Never>?
     private var progressWaiter: CheckedContinuation<Void, Never>?
@@ -247,8 +285,22 @@ private actor SearchPageBarrier: V2ConversationMessageSearching, V2ConversationM
     func messageSearchIndexUpdates() async -> AsyncThrowingStream<V2MessageSearchIndexSnapshot, any Error> {
         AsyncThrowingStream { $0.finish() }
     }
-    func setName(_ name: String, for userID: UserID) { names[userID] = name }
-    func searchSenderDisplayName(userID: UserID) async throws -> String? { names[userID] }
+    func setContext(_ context: V2ClientConversationLookupContext, for roomID: RoomID) { contexts[roomID] = context }
+    func searchConversationContext(roomID: RoomID) async -> V2ClientConversationLookupContext? {
+        guard shouldPauseContext else { return contexts[roomID] }
+        shouldPauseContext = false
+        return await withCheckedContinuation {
+            contextContinuation = $0; contextWaiter?.resume(); contextWaiter = nil
+        }
+    }
+    func pauseNextContext() { shouldPauseContext = true }
+    func waitForContext() async {
+        guard contextContinuation == nil else { return }
+        await withCheckedContinuation { contextWaiter = $0 }
+    }
+    func finishContext(_ value: V2ClientConversationLookupContext?) {
+        contextContinuation?.resume(returning: value); contextContinuation = nil
+    }
 }
 
 private actor IndexStateSearchClient: V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading {

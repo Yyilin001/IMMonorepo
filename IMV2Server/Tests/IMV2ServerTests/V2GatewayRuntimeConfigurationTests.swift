@@ -4,6 +4,18 @@ import IMV2Core
 import Testing
 
 struct V2GatewayRuntimeConfigurationTests {
+    @Test("author supplements default off and require an explicit boolean rollout value")
+    func authorPresentationRollout() throws {
+        #expect(try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(runtimeValues)).authorPresentationsEnabled == false)
+        for (value, expected) in [("true", true), ("1", true), ("false", false), ("0", false)] {
+            var environment = runtimeValues; environment["IM_V2_AUTHOR_PRESENTATIONS_ENABLED"] = value
+            #expect(try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(environment)).authorPresentationsEnabled == expected)
+        }
+        var environment = runtimeValues; environment["IM_V2_AUTHOR_PRESENTATIONS_ENABLED"] = "automatic"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_AUTHOR_PRESENTATIONS_ENABLED")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(environment))
+        }
+    }
     @Test("Gateway frame configuration respects the wire length range")
     func framePayloadWireRange() throws {
         for limit in [-1, Int(UInt32.max) + 1, Int.max] {

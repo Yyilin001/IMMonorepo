@@ -17,14 +17,14 @@ struct V2VaporMediaEdgeRoutesTests {
             let sessionID = try MediaDownloadSessionID("session")
             let mediaStore = RouteMediaStore(grant: .init(mediaID: mediaID, downloadSessionID: sessionID, expiresAt: now.addingTimeInterval(30)))
             let sessionStore = RouteSessionStore(claim: .init(mediaID: mediaID, downloadSessionID: sessionID, expiresAt: now.addingTimeInterval(30), claimToken: UUID()))
-            let target = V2MediaProviderObjectTarget(
+            let target = try resourceDownloadTestPlan(
                 url: try #require(URL(string: "https://provider.invalid/object")),
                 headers: ["x-oss-meta-provider": "opaque"],
                 expiresAt: now.addingTimeInterval(20),
                 expectedByteCount: 5
             )
             let edge = try V2MediaEdgeDownloadService(
-                media: .init(store: mediaStore, limits: try .init(maximumBytes: 10), downloadLimits: try .init(grantLifetime: 30), now: { now }),
+                media: .init(store: mediaStore, downloadLimits: try .init(grantLifetime: 30), now: { now }),
                 providerSessions: .init(store: sessionStore, provider: RouteProvider(target: target), now: { now })
             )
             V2VaporMediaEdgeRoutes(
@@ -46,8 +46,8 @@ struct V2VaporMediaEdgeRoutesTests {
                     Issue.record("media edge did not return a decodable target envelope")
                     return
                 }
-                #expect(envelope.url == "https://provider.invalid/object")
-                #expect(envelope.expectedByteCount == 5)
+                #expect(envelope.plan.url.absoluteString == "https://provider.invalid/object")
+                #expect(envelope.plan.expectedByteCount == 5)
             }
             #expect(await mediaStore.requests() == [mediaID])
             #expect(await sessionStore.completions() == [sessionID])
@@ -84,7 +84,7 @@ struct V2VaporMediaEdgeRoutesTests {
     func routeRejectsUnauthenticatedRequest() async throws {
         try await withApp { app in
             let edge = try V2MediaEdgeDownloadService(
-                media: .init(store: UnusedMediaStore(), limits: try .init(maximumBytes: 10)),
+                media: .init(store: UnusedMediaStore()),
                 providerSessions: .init(store: UnusedSessionStore(), provider: UnusedProvider())
             )
             V2VaporMediaEdgeRoutes(
@@ -110,7 +110,7 @@ struct V2VaporMediaEdgeRoutesTests {
     func routeDoesNotExposeMediaAuthorizationFailure() async throws {
         try await withApp { app in
             let edge = try V2MediaEdgeDownloadService(
-                media: .init(store: DenyingMediaStore(), limits: try .init(maximumBytes: 10)),
+                media: .init(store: DenyingMediaStore()),
                 providerSessions: .init(store: UnusedSessionStore(), provider: UnusedProvider())
             )
             V2VaporMediaEdgeRoutes(
@@ -137,7 +137,6 @@ struct V2VaporMediaEdgeRoutesTests {
             let edge = try V2MediaEdgeDownloadService(
                 media: .init(
                     store: RouteMediaStore(grant: .init(mediaID: mediaID, downloadSessionID: sessionID, expiresAt: now.addingTimeInterval(30))),
-                    limits: try .init(maximumBytes: 10),
                     downloadLimits: try .init(grantLifetime: 30),
                     now: { now }
                 ),
@@ -167,12 +166,7 @@ private actor RouteMediaStore: V2MediaStore {
     private let grant: V2MediaDownloadGrant
     private var received: [MediaID] = []
     init(grant: V2MediaDownloadGrant) { self.grant = grant }
-    func requestUpload(_: V2RequestMediaUploadCommand, deviceID _: DeviceID, expiresAt _: Date, now _: Date) -> V2MediaUploadGrant { fatalError("unused") }
     func requestDownload(requesterUserID _: UserID, deviceID _: DeviceID, mediaID: MediaID, expiresAt _: Date, now _: Date) -> V2MediaDownloadGrant { received.append(mediaID); return grant }
-    func markUploadCompleted(ownerUserID _: UserID, deviceID _: DeviceID, mediaID _: MediaID, now _: Date) {}
-    func uploadStatus(ownerUserID _: UserID, deviceID _: DeviceID, mediaID _: MediaID, now _: Date) -> V2MediaObjectState { .available }
-    func recordScanResult(mediaID _: MediaID, passed _: Bool, now _: Date) {}
-    func assertAvailableForReference(ownerUserID _: UserID, mediaIDs _: [MediaID], now _: Date) {}
     func requests() -> [MediaID] { received }
 }
 
@@ -187,13 +181,13 @@ private actor RouteSessionStore: V2MediaDownloadSessionStore {
 }
 
 private struct RouteProvider: V2MediaObjectProvider {
-    let target: V2MediaProviderObjectTarget
-    func issueDownloadTarget(mediaID _: MediaID, expiresAt _: Date) -> V2MediaProviderObjectTarget { target }
+    let target: V2ResourceTransferPlan
+    func issueDownloadTarget(mediaID _: MediaID, expiresAt _: Date) -> V2ResourceTransferPlan { target }
 }
 
 private struct InsecureRouteProvider: V2MediaObjectProvider {
-    func issueDownloadTarget(mediaID _: MediaID, expiresAt: Date) -> V2MediaProviderObjectTarget {
-        .init(url: URL(string: "http://provider.invalid/object")!, expiresAt: expiresAt)
+    func issueDownloadTarget(mediaID _: MediaID, expiresAt: Date) throws -> V2ResourceTransferPlan {
+        try resourceDownloadTestPlan(url: URL(string: "http://provider.invalid/object")!, expiresAt: expiresAt)
     }
 }
 
@@ -207,21 +201,11 @@ private struct RouteAuthenticator: V2GatewayAuthenticator {
 private typealias RouteAuthenticationFailure = V2GatewayAuthenticationError
 
 private actor UnusedMediaStore: V2MediaStore {
-    func requestUpload(_: V2RequestMediaUploadCommand, deviceID _: DeviceID, expiresAt _: Date, now _: Date) -> V2MediaUploadGrant { fatalError("unused") }
     func requestDownload(requesterUserID _: UserID, deviceID _: DeviceID, mediaID _: MediaID, expiresAt _: Date, now _: Date) -> V2MediaDownloadGrant { fatalError("unused") }
-    func markUploadCompleted(ownerUserID _: UserID, deviceID _: DeviceID, mediaID _: MediaID, now _: Date) {}
-    func uploadStatus(ownerUserID _: UserID, deviceID _: DeviceID, mediaID _: MediaID, now _: Date) -> V2MediaObjectState { .available }
-    func recordScanResult(mediaID _: MediaID, passed _: Bool, now _: Date) {}
-    func assertAvailableForReference(ownerUserID _: UserID, mediaIDs _: [MediaID], now _: Date) {}
 }
 
 private actor DenyingMediaStore: V2MediaStore {
-    func requestUpload(_: V2RequestMediaUploadCommand, deviceID _: DeviceID, expiresAt _: Date, now _: Date) -> V2MediaUploadGrant { fatalError("unused") }
     func requestDownload(requesterUserID _: UserID, deviceID _: DeviceID, mediaID _: MediaID, expiresAt _: Date, now _: Date) throws -> V2MediaDownloadGrant { throw V2MediaStoreError.downloadNotAuthorized }
-    func markUploadCompleted(ownerUserID _: UserID, deviceID _: DeviceID, mediaID _: MediaID, now _: Date) {}
-    func uploadStatus(ownerUserID _: UserID, deviceID _: DeviceID, mediaID _: MediaID, now _: Date) -> V2MediaObjectState { .available }
-    func recordScanResult(mediaID _: MediaID, passed _: Bool, now _: Date) {}
-    func assertAvailableForReference(ownerUserID _: UserID, mediaIDs _: [MediaID], now _: Date) {}
 }
 
 private actor UnusedSessionStore: V2MediaDownloadSessionStore {
@@ -231,14 +215,14 @@ private actor UnusedSessionStore: V2MediaDownloadSessionStore {
 }
 
 private struct UnusedProvider: V2MediaObjectProvider {
-    func issueDownloadTarget(mediaID _: MediaID, expiresAt _: Date) -> V2MediaProviderObjectTarget { fatalError("unused") }
+    func issueDownloadTarget(mediaID _: MediaID, expiresAt _: Date) -> V2ResourceTransferPlan { fatalError("unused") }
 }
 
 private actor ScopedRouteResolver: V2MediaDownloadTargetResolving {
     private(set) var locations: [V2MediaMessageLocation] = []
-    func downloadTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation?) throws -> V2MediaProviderObjectTarget {
+    func downloadTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation?) throws -> V2ResourceTransferPlan {
         guard let message else { throw V2MediaEdgeHTTPHandlerError.invalidMessageLocation }
         locations.append(message)
-        return .init(url: URL(string: "https://provider.invalid/object")!, expiresAt: .now.addingTimeInterval(60))
+        return try resourceDownloadTestPlan(url: URL(string: "https://provider.invalid/object")!, expiresAt: .now.addingTimeInterval(60))
     }
 }

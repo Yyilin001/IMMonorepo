@@ -45,6 +45,22 @@ public struct PostgresV2MediaRetentionStore: V2MediaRetentionStore {
             let eligible: SQLQueryString = """
                 WHERE media.state <> 'expired'
                   AND NOT EXISTS (
+                    SELECT 1 FROM im_v2.resource_storage_migrations migration
+                    WHERE migration.media_id = media.media_id AND migration.source_released_at IS NULL
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM im_v2.resource_import_holds hold
+                    WHERE hold.media_id = media.media_id AND hold.released_at IS NULL
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM im_v2.public_user_profiles AS profile
+                    WHERE profile.avatar_media_id = media.media_id
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM im_v2.resource_group_avatars AS avatar
+                    WHERE avatar.media_id = media.media_id
+                  )
+                  AND NOT EXISTS (
                     SELECT 1 FROM im_v2.message_forward_exports AS export
                     WHERE export.media_ids @> ARRAY[media.media_id]
                       AND NOT EXISTS (SELECT 1 FROM im_v2.message_forward_export_receipts AS receipt

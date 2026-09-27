@@ -10,6 +10,23 @@ public enum V2ActorAdministrationOperationIdentity: Equatable, Sendable {
     case memberRole(GroupRoleOperationID)
     case moderation(ModerationOperationID)
     case groupNickname(GroupNicknameOperationID)
+    case groupAvatar(GroupAvatarOperationID)
+    case groupAvatarRecovery(GroupAvatarOperationID, V2GroupAvatarRecoveryRequest.Action)
+}
+
+public struct V2ActorGroupAvatarWire: Codable, Equatable, Sendable {
+    public let actorUserID: UserID
+    public let command: V2GroupAvatarCommand
+    public var roomID: RoomID { command.roomID }
+    public init(actorUserID: UserID, command: V2GroupAvatarCommand) {
+        self.actorUserID = actorUserID; self.command = command
+    }
+}
+public struct V2ActorGroupAvatarRecoveryWire: Codable, Equatable, Sendable {
+    public let actorUserID: UserID
+    public let request: V2GroupAvatarRecoveryRequest
+    public var roomID: RoomID { request.command.roomID }
+    public init(actorUserID: UserID, request: V2GroupAvatarRecoveryRequest) { self.actorUserID = actorUserID; self.request = request }
 }
 
 public struct V2ActorMembershipChangeWire: Codable, Equatable, Sendable {
@@ -164,6 +181,8 @@ public enum V2RoomAdministrationCommand: Codable, Equatable, Sendable {
     case moderation(V2ActorModerationWire)
     case trustedSafety(V2ActorTrustedSafetyWire)
     case groupNickname(V2ActorGroupNicknameUpdateWire)
+    case groupAvatar(V2ActorGroupAvatarWire)
+    case groupAvatarRecovery(V2ActorGroupAvatarRecoveryWire)
 
     public var roomID: RoomID {
         switch self {
@@ -175,6 +194,8 @@ public enum V2RoomAdministrationCommand: Codable, Equatable, Sendable {
         case .moderation(let value): value.roomID
         case .trustedSafety(let value): value.roomID
         case .groupNickname(let value): value.roomID
+        case .groupAvatar(let value): value.roomID
+        case .groupAvatarRecovery(let value): value.roomID
         }
     }
 
@@ -189,6 +210,8 @@ public enum V2RoomAdministrationCommand: Codable, Equatable, Sendable {
         case .moderation(let value): value.actorUserID
         case .trustedSafety: nil
         case .groupNickname(let value): value.actorUserID
+        case .groupAvatar(let value): value.actorUserID
+        case .groupAvatarRecovery(let value): value.actorUserID
         }
     }
 
@@ -202,6 +225,8 @@ public enum V2RoomAdministrationCommand: Codable, Equatable, Sendable {
         case .moderation(let value): .moderation(value.operationID)
         case .trustedSafety(let value): .moderation(value.operationID)
         case .groupNickname(let value): .groupNickname(value.operationID)
+        case .groupAvatar(let value): .groupAvatar(value.command.operationID)
+        case .groupAvatarRecovery(let value): .groupAvatarRecovery(value.request.command.operationID, value.request.action)
         }
     }
 

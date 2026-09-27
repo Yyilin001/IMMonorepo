@@ -297,6 +297,9 @@ public enum V2ServerProtobufFrameCodec {
         case .accountRoomResyncRequired?: return .accountRoomResyncRequired
         case .roomLatestVisibleBatch?: return .roomLatestVisibleBatch
         case .roomLatestVisibleBatchResult?: return .roomLatestVisibleBatchResult
+        case .authorPresentationDelta?: return .authorPresentationDelta
+        case .authorPresentationEnd?: return .authorPresentationEnd
+        case .authorPresentationEnded?: return .authorPresentationEnded
 
         case .changeRelationship?: return .changeRelationship
         case .relationshipChanged?: return .relationshipChanged

@@ -8,7 +8,8 @@ enum GatewayTransportAssembly {
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
         prepared: GatewayPreparedAssembly,
-        handler: V2GatewayDomainCommandHandler
+        handler: V2GatewayDomainCommandHandler,
+        authors: V2AuthorPresentationRuntime? = nil
     ) throws -> V2TLSGatewayServer {
         let authenticator = prepared.frontdoor.authenticator
         let commandRateLimiter = prepared.frontdoor.commandRateLimiter
@@ -27,9 +28,11 @@ enum GatewayTransportAssembly {
                 compressionThresholdBytes: configuration.frameCompressionThresholdBytes,
                 maximumCompressionExpansionRatio: configuration.frameCompressionMaximumExpansionRatio,
                 preparedGroupEventPageCache: preparedGroupEventPageCache,
+                supportsAuthorPresentationDelta: authors != nil,
                 commandAdmission: commandRateLimiter
             )
-            return .init(frameLimits: configuration.frameLimits, session: session, handler: handler, registry: connectionRegistry)
+            return .init(frameLimits: configuration.frameLimits, session: session, handler: handler, registry: connectionRegistry,
+                         authorPresentationDispatcher: authors?.dispatcher, authorPresentationIngress: authors?.ingress)
         }
         return try V2TLSGatewayServer(
             configuration: configuration.tls,

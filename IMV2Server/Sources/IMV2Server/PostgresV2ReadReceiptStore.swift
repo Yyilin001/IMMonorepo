@@ -679,13 +679,15 @@ public struct PostgresV2ReadReceiptStore:
                 guard let accountKind = V2AccountKind(rawValue: row.accountKind) else {
                     throw V2ReadReceiptStoreError.corruptPersistenceState
                 }
-                let identity = try V2PublicIdentity(
+                // Keep the legacy single-store account validation; profile
+                // content is never part of the reader transport result.
+                _ = try V2PublicIdentity(
                     userID: userID,
                     handle: .init(row.publicHandle),
                     displayName: row.displayName,
                     accountKind: accountKind
                 )
-                return V2ReadReceiptReader(userID: userID, publicIdentity: identity)
+                return V2ReadReceiptReader(userID: userID)
             }
             let next = rows.count > pageSize ? try receiptCursorString(
                 roomID: room,

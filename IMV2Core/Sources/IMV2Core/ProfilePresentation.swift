@@ -165,17 +165,26 @@ public struct V2ProfileUpdateCommand: Sendable {
 }
 
 /// 资料查询的授权上下文，服务端必须逐项验证，不能将内部用户 ID 查询当成无条件目录。
-public enum V2ProfileViewContext: Hashable, Sendable {
+public enum V2ProfileViewContext: Hashable, Codable, Sendable {
     /// 双方私聊关系上下文，具体可见性由服务端确认。
     case directConversation
     /// 现有待处理或已接受关系支持受限名片读取，无须为展示联系人而创建私聊房间。
     case relationship
     /// 指定房间成员上下文。
     case room(RoomID)
+    /// 当前具有邀请/审批权限的成员读取该群待审申请者资料；不要求申请者已入群。
+    case groupJoinReview(RoomID)
+
+    public var authorizationRoomID: RoomID? {
+        switch self {
+        case .room(let room), .groupJoinReview(let room): room
+        case .directConversation, .relationship: nil
+        }
+    }
 }
 
 /// 用户与授权上下文的组合查询键，同一用户在不同上下文中不能直接视为同一授权查询。
-public struct V2ProfileViewLookupKey: Hashable, Sendable {
+public struct V2ProfileViewLookupKey: Hashable, Codable, Sendable {
     /// 待查询用户。
     public let userID: UserID
     /// 需要服务端验证的访问上下文。

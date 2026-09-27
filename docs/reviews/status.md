@@ -139,7 +139,7 @@ E 类“未开始”表示尚无对应生产发布验收的关闭证据，不否
 | B26 | P2 | 审批冲突重试后未持久化实际 membership revision | 已验证 | approve 改为单事务完成成员、配额、事件与记账；旧 approving 一律返回 conflict，交 operator 按确切操作恢复，不再按申请人当前成员身份结算。 |
 | B27 | P2 | 新增邀请链路没有按群所属数据库路由 | 已验证 | Account 组装 Actor 邀请协调器；独立 control 与两个 owner 的 standard/large PostgreSQL 测试覆盖邀请完整生命周期、错误物理 owner、过期 epoch、重放、创建恢复及 HTTP 边界，并在 `6597d53b` 上通过。在线数据搬迁不在首版范围；生产多 Host 容量与故障验收仍由发布项跟踪。 |
 | B28 | P3 | VoiceOver 筛选值朗读内部 UUID | 待外部验收 | 筛选值改为 `senderFilterDisplayName`，不再向 VoiceOver 朗读内部 UUID。剩余：真机人工无障碍验收。 |
-| B29 | P3 | 当前协议版本文档已漂移 | 已验证 | 当前协议源文件与 Server/ClientKit 生成物均为 30；本表旧值 27 已校正。协议文档门禁核对 implementation-status，尚不自动覆盖所有专题文档中的历史版本叙述。 |
+| B29 | P3 | 当前协议版本文档已漂移 | 已验证 | 当前协议源文件与 Server/ClientKit 生成物均为 31；本表旧值 27 已校正。协议文档门禁核对 implementation-status，尚不自动覆盖所有专题文档中的历史版本叙述。 |
 | D01 | P2 | 旧 TLS reader 的迟到失败可能关闭新连接 | 已验证 | 连接引入 generation，`requireGeneration` 阻止旧 reader 回调影响新连接。 |
 | D02 | P2 | Push handler 依赖页面出现，无 scene 冷启动不能恢复会话 | 已实现待验证 | App delegate 可在 scene 之前构造 store 并恢复会话；后续 headless 专项已有真实 Keychain、HTTPS/TLS/SQLite 和设备撤销整轮通过记录。剩余：系统实际 APNs 无 scene 冷启动、真机锁屏；直接调用 delegate 不等同系统投递。 |
 | D03 | P2 | 后台 Push 跑完整 runtime，缺总时间预算 | 已实现待验证 | 后台同步有页数/时间预算，并接入 V2RoomRecoveryRunner.runBounded；受控取消后重新执行可恢复持久待办。剩余：真实 APNs、系统期限耗尽与非空多房间后台收敛；空正文页的取消续跑不替代这些证据。 |
@@ -174,7 +174,7 @@ E 类“未开始”表示尚无对应生产发布验收的关闭证据，不否
 | B15/B16/D02–D04 生命周期 | [App runtime](../../IMApp/IMApp/V2/V2AppRealtimeRuntime.swift)、[Push reconciler](../../IMV2ClientKit/Sources/IMV2ClientKit/V2PushIntentReconciler.swift) | 后续 headless 整轮通过见[恢复验收](client-owned-conversation-sync-acceptance.md)；不等同真实 APNs、磁盘擦除或账号切换全组合通过 |
 | B23/B24/B25/B26/D06 邀请与审批 | [申请存储](../../IMV2Server/Sources/IMV2Server/PostgresV2GroupInvitationStore.swift)、[服务接口](../../IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift)、[schema](../../IMV2/sql/schema.sql) | owner 内锁串行申请；schema 39 的 control 账本承担跨 owner 配额并保存重复操作绑定，owner 保存原子提交回执；B23 全局配额专项已通过。分页使用不可变键，审批单事务提交；申请人可取消旧 pending，终态保留重放记录 |
 | B27 owner 路由 | [Account 组装](../../IMV2Server/Sources/IMV2AccountServerApp/main.swift)、[Actor 邀请协调器](../../IMV2Server/Sources/IMV2Server/RoomCoordination/Invitations/V2ActorInvitationCoordinator.swift)、[三库测试](../../IMV2Server/Tests/IMV2ServerTests/PostgresV2RoomWriteStoreIntegrationTests+GroupCapabilities.swift) | 原邀请静态 owner 路由已验证；在线搬迁不作为关闭条件 |
-| B29 版本 | [协议版本源](../../Protocol/im_realtime/v2/protocol_version.txt)、[客户端生成物](../../IMV2ClientKit/Sources/IMV2ClientKit/Generated/IMV2ProtocolVersion.swift)、[服务端生成物](../../IMV2Server/Sources/IMV2Server/Generated/IMV2ProtocolVersion.swift) | 均为30；schema 为 im-v2-current-53，不再沿用旧表的27/30组合 |
+| B29 版本 | [协议版本源](../../Protocol/im_realtime/v2/protocol_version.txt)、[客户端生成物](../../IMV2ClientKit/Sources/IMV2ClientKit/Generated/IMV2ProtocolVersion.swift)、[服务端生成物](../../IMV2Server/Sources/IMV2Server/Generated/IMV2ProtocolVersion.swift) | 均为31；schema 为 im-v2-current-53，不再沿用旧表的27/30组合 |
 | D07/D08 新架构与组合证据 | [已完成改造](room-log-only-implementation.md)、[当前有界运行验收](room-log-current-runtime-2026-09-13.md)、[会话恢复矩阵](client-owned-conversation-sync-acceptance.md) | 旧流水线移除已完成；新恢复矩阵仍开放。自动重连漏计设备已修，三次断线、13台设备总数及该账号2台设备终验通过；历史失败保留，见[治理专项](verification-records.md#20260919-governance-recovery) |
 
 ## 修复顺序与验收要求

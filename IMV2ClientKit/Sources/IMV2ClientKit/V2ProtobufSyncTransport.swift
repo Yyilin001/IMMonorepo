@@ -213,25 +213,20 @@ public protocol V2ClientMembershipTransport: Sendable {
     func changeMembership(roomID: RoomID, operationID: MembershipOperationID, targetUserID: UserID, action: V2RoomMembershipAction, expectedMembershipRevision: UInt64) async throws -> V2ClientMembershipChange
 }
 
-/// 按需读取的群成员及公开身份，不替代持久化联系人关系或同步投影。
+/// 按需读取的群成员身份及角色；资料展示须另行取得当前许可。
 public struct V2ClientRoomMember: Equatable, Sendable {
     /// 成员用户身份。
     public let userID: UserID
     /// 成员在该房间的角色。
     public let role: V2RoomMembershipRole
-    /// 此次获授权目录读取返回的公开资料，不代表建立了联系人关系。
-    public let publicIdentity: V2PublicIdentity
-
-    /// 保存成员身份、角色与公开资料，不在此核对两个用户身份是否一致。
+    /// 保存目录事实，不包含可直接展示的个人资料。
     ///
     /// - Parameters:
     ///   - userID: 成员身份。
     ///   - role: 成员角色。
-    ///   - publicIdentity: 获授权返回的公开资料。
-    public init(userID: UserID, role: V2RoomMembershipRole, publicIdentity: V2PublicIdentity) {
+    public init(userID: UserID, role: V2RoomMembershipRole) {
         self.userID = userID
         self.role = role
-        self.publicIdentity = publicIdentity
     }
 }
 
@@ -724,6 +719,7 @@ public protocol V2ClientReadReceiptTransport: Sendable {
 public enum V2ClientReadReceiptLimits {
     /// 已读者目录单页最多请求 100 人。
     public static let maximumPageSize = 100
+    public static let maximumCursorBytes = 512
 }
 
 /// 在线与输入状态的偏好、订阅和发布接口；订阅生命周期由连接或上层运行时管理。
@@ -1309,13 +1305,13 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
         } catch { throw V2RealtimeTransportError.unexpectedResponse }
     }
 
-    /// 按游标读取成员页并核对响应房间、数量、角色与公开身份。
+    /// 按游标读取成员页并核对响应房间、数量、角色与成员身份。
     ///
     /// - Parameters:
     ///   - roomID: 待查看的房间。
     ///   - cursor: 首次为 nil；非空时必须有内容且不超过 512 个 UTF-8 字节。
     ///   - pageSize: 1 到 100 的页大小。
-    /// - Returns: 单页无重复用户、角色和公开身份有效的成员页；空后续游标转换为 nil。
+    /// - Returns: 单页无重复用户且角色有效的成员页；空后续游标转换为 nil。
     /// - Throws: 请求预算、响应一致性、身份构造、服务端或传输错误。
     ///
     /// 本方法不跨页去重，也不把成员结果保存为联系人关系。
@@ -1341,18 +1337,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
         let actorRole = try Self.membershipRole(from: page.actorRole)
         let members: [V2ClientRoomMember] = try page.members.map { member in
             let userID: UserID = try .init(member.userID)
-            guard !member.publicHandle.isEmpty, !member.displayName.isEmpty,
-                  let accountKind = V2AccountKind(rawValue: member.accountKind)
-            else {
-                throw V2RealtimeTransportError.unexpectedResponse
-            }
-            let publicIdentity = try V2PublicIdentity(
-                userID: userID,
-                handle: .init(member.publicHandle),
-                displayName: member.displayName,
-                accountKind: accountKind
-            )
-            return .init(userID: userID, role: try Self.membershipRole(from: member.role), publicIdentity: publicIdentity)
+            return .init(userID: userID, role: try Self.membershipRole(from: member.role))
         }
         guard Set(members.map(\.userID)).count == members.count else { throw V2RealtimeTransportError.unexpectedResponse }
         return try .init(roomID: .init(page.roomID), membershipRevision: page.membershipRevision, actorRole: actorRole, members: members, nextCursor: page.nextCursor.isEmpty ? nil : page.nextCursor)
@@ -1542,19 +1527,47 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
     ///
     /// 此处不要求返回高水位大于提交水位，也不自动执行补拉或续订。
     public func subscribeToGroupEvents(roomID: RoomID, afterRoomSequence: UInt64) async throws -> V2ClientGroupEventSubscription {
+        try await subscribeToGroupEvents(roomID: roomID, afterRoomSequence: afterRoomSequence, authorPresentationView: nil)
+    }
+
+    /// The view must come from this authenticated connection before subscribing.
+    public func subscribeToGroupEvents(roomID: RoomID, afterRoomSequence: UInt64,
+                                       authorPresentationView: V2AuthorPresentationView?) async throws -> V2ClientGroupEventSubscription {
+        guard authorPresentationView.map({ $0.roomID == roomID && $0.renewBy > .now }) ?? true else {
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
         var request = IMV2Envelope()
         request.groupEventSubscribe = .init()
         request.groupEventSubscribe.roomID = roomID.rawValue
         request.groupEventSubscribe.afterRoomSequence = afterRoomSequence
+        request.groupEventSubscribe.authorPresentationViewID = authorPresentationView?.viewID.uuidString ?? ""
         let response = try await requestEnvelope(request)
         guard case .groupEventSubscribed(let subscribed)? = response.body,
               subscribed.roomID == roomID.rawValue,
-              subscribed.highWatermark <= UInt64(Int64.max)
+              subscribed.highWatermark <= UInt64(Int64.max),
+              subscribed.authorPresentationViewID == request.groupEventSubscribe.authorPresentationViewID
         else {
             try throwServerErrorIfPresent(response)
             throw V2RealtimeTransportError.unexpectedResponse
         }
         return try .init(roomID: roomID, highWatermark: subscribed.highWatermark)
+    }
+
+    /// Ends an exact disposable view, including one whose subscribe caller was
+    /// cancelled. The server echoes all identities without touching room access.
+    public func stopAuthorPresentation(_ view: V2AuthorPresentationView) async throws {
+        var request = IMV2Envelope()
+        request.authorPresentationEnd.streamID = view.streamID.uuidString
+        request.authorPresentationEnd.roomID = view.roomID.rawValue
+        request.authorPresentationEnd.viewID = view.viewID.uuidString
+        let response = try await requestEnvelope(request)
+        guard case .authorPresentationEnded(let ended) = response.body,
+              UUID(uuidString: ended.streamID) == view.streamID,
+              (try? RoomID(ended.roomID)) == view.roomID,
+              UUID(uuidString: ended.viewID) == view.viewID else {
+            try throwServerErrorIfPresent(response)
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
     }
 
     /// 取消指定房间群事件订阅并要求 acknowledged 响应；本地观察者和缓存生命周期由上层负责，传输或服务端失败继续抛出。
@@ -1879,12 +1892,11 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
     ///   - messageID: 要查看的消息。
     ///   - cursor: 不透明后续游标，nil 编码为空字符串。
     ///   - pageSize: 1 到 100 的请求数量。
-    /// - Returns: 房间和消息匹配、公开资料可构造的读者页；空后续游标转换为 nil。
-    /// - Throws: 页大小、响应身份、公开资料、领域页构造或传输错误。
-    ///
-    /// 此方法不直接检查响应条数是否小于本次 pageSize，也不在请求前限制游标长度，后续模型校验按自身合同执行。
+    /// - Returns: 房间和消息匹配、有界且不重复的读者标识页；空后续游标转换为 nil。
+    /// - Throws: 页大小、游标、响应身份、领域页构造或传输错误。
     public func listReadReceiptReaders(roomID: RoomID, messageID: MessageID, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage {
-        guard (1 ... V2ClientReadReceiptLimits.maximumPageSize).contains(pageSize) else { throw V2RealtimeTransportError.unexpectedResponse }
+        guard (1 ... V2ClientReadReceiptLimits.maximumPageSize).contains(pageSize),
+              cursor.map({ !$0.isEmpty && $0.utf8.count <= V2ClientReadReceiptLimits.maximumCursorBytes }) ?? true else { throw V2RealtimeTransportError.unexpectedResponse }
         var request = IMV2Envelope(); request.listReadReceiptReaders = .init()
         request.listReadReceiptReaders.roomID = roomID.rawValue
         request.listReadReceiptReaders.messageID = messageID.rawValue
@@ -1893,22 +1905,12 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
         let response = try await requestEnvelope(request)
         guard case .readReceiptReadersPage(let page)? = response.body,
               page.roomID == roomID.rawValue,
-              page.messageID == messageID.rawValue
+              page.messageID == messageID.rawValue,
+              page.readers.count <= pageSize, page.nextCursor.utf8.count <= V2ClientReadReceiptLimits.maximumCursorBytes,
+              page.nextCursor.isEmpty || page.nextCursor != cursor
         else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
         let readers = try page.readers.map { reader -> V2ReadReceiptReader in
-            let userID = try UserID(reader.userID)
-            guard !reader.publicHandle.isEmpty, !reader.displayName.isEmpty,
-                  let accountKind = V2AccountKind(rawValue: reader.accountKind)
-            else {
-                throw V2RealtimeTransportError.unexpectedResponse
-            }
-            let identity = try V2PublicIdentity(
-                userID: userID,
-                handle: .init(reader.publicHandle),
-                displayName: reader.displayName,
-                accountKind: accountKind
-            )
-            return .init(userID: userID, publicIdentity: identity)
+            .init(userID: try UserID(reader.userID))
         }
         return try .init(
             roomID: roomID,

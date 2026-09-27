@@ -18,30 +18,59 @@ struct GatewayForwardDeliveryAssembly {
         prepared: GatewayPreparedAssembly,
         roomServices: GatewayRoomServicesAssembly,
         logger: Logger
-    ) throws -> Self {
+    ) async throws -> Self {
         let topology = prepared.topology
-        let roomOwners = prepared.roomOwners
         let forwardPort = roomServices.forwardPort
         let callTimeout = roomServices.callTimeout
-        // 仅供本地使用的字节适配器：账号边缘与 Gateway 必须共享配置的对象根目录。
-        // 此处不调用 prepare()；活动上传暂存文件由账号边缘在启动时清理。
-        let forwardMediaProvider: V2LocalFilesystemMediaProvider?
+        var storageValues: [V2StorageBinding: V2LocalResourceStorage] = [:]
+        let registry: V2ResourceStorageRegistry?
+        let transformer: V2LocalResourceTransformer?
         if let localMediaConfiguration {
-            forwardMediaProvider = try .init(rootDirectory: localMediaConfiguration.rootDirectory,
-                targetBaseURL: localMediaConfiguration.publicBaseURL, signingKey: localMediaConfiguration.signingKey)
-        } else { forwardMediaProvider = nil }
+            let backends = try V2ResourceBackendConfiguration(environment: ProcessRuntimeEnvironment(),
+                defaultDirectory: localMediaConfiguration.rootDirectory)
+            for entry in backends.entries {
+                let binding = try entry.binding
+                storageValues[binding] = try .init(root: URL(fileURLWithPath: entry.directory, isDirectory: true)
+                    .appendingPathComponent("sealed-resources"), binding: binding)
+            }
+            registry = try .init(storages: Array(storageValues.values), defaultBinding: backends.defaultBinding)
+            let path = ProcessInfo.processInfo.environment["IMV2_RESOURCE_IMAGE_WORKER"]
+                ?? URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+                    .appendingPathComponent("IMV2ResourceImageWorker").path
+            if FileManager.default.isExecutableFile(atPath: path) {
+                transformer = try .init(executable: URL(fileURLWithPath: path),
+                    temporaryDirectory: localMediaConfiguration.rootDirectory.appendingPathComponent("forward-processing"))
+                try await transformer?.verifyReadiness()
+            } else { transformer = nil }
+        } else { registry = nil; transformer = nil }
+        let storages = storageValues
         var forwardTargetEndpoints: [String: any V2ForwardExportDelivering] = [:]
         var forwardBackgroundDatabases: [String: any Database] = [:]
         for storage in configuration.roomShardStorage {
             guard let ownerDatabase = topology.databaseForRole(for: .delivery, url: storage.databaseURL)
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
             forwardBackgroundDatabases[storage.shardID] = ownerDatabase
+        }
+        for storage in configuration.roomShardStorage {
+            guard let ownerDatabase = forwardBackgroundDatabases[storage.shardID]
+            else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let mediaWorker: V2ForwardMediaImportWorker?
-            if let forwardMediaProvider, let localMediaConfiguration {
-                let sources = Dictionary(uniqueKeysWithValues: roomOwners.forwardTargetWritesByShard.keys.map { ($0, forwardMediaProvider) })
-                mediaWorker = try .init(store: .init(database: ownerDatabase),
-                    copier: V2LocalFilesystemForwardMediaCopier(sources: sources, target: forwardMediaProvider, maximumBytes: localMediaConfiguration.maximumBytes),
-                    scanner: V2LocalEICARMediaScanner(provider: forwardMediaProvider))
+            if let localMediaConfiguration, let registry {
+                try await V2ResourceStorageReadiness.verify(database: ownerDatabase, registry: registry)
+                let store = try PostgresV2ForwardMediaImportStore(database: ownerDatabase)
+                let allocate: @Sendable (V2StorageBinding) throws -> V2StoredObjectReference = { binding in
+                    guard let storage = storages[binding] else { throw V2ResourceProviderError.configurationInvalid }
+                    return try storage.allocate()
+                }
+                let variants = transformer.map {
+                    V2ResourceVariantProcessor(database: ownerDatabase, registry: registry, transformer: $0, allocate: allocate)
+                }
+                mediaWorker = try .init(store: store,
+                    copier: V2ResourceForwardMediaCopier(sources: forwardBackgroundDatabases, target: store,
+                        registry: registry, maximumBytes: localMediaConfiguration.maximumBytes, allocate: allocate),
+                    scanner: V2PlacementMediaScanner(database: ownerDatabase, registry: registry,
+                        scanner: V2LocalResourceScanner(),
+                        variants: variants))
             } else { mediaWorker = nil }
             forwardTargetEndpoints[storage.shardID] = V2ActorForwardImportEndpoint(
                 inbox: .init(database: ownerDatabase), media: mediaWorker,

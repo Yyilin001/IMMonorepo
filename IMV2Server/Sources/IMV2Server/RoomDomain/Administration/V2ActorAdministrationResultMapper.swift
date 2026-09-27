@@ -145,6 +145,15 @@ extension V2ActorGroupCapabilityOutcomeWire where Value == V2ActorPinnedMessageR
     }
 }
 
+extension V2ActorGroupCapabilityOutcomeWire where Value == V2GroupAvatarChange {
+    public init(_ outcome: V2GroupCapabilitiesOutcome<V2GroupAvatarChange>) {
+        self = v2ActorCapabilityWire(outcome, transform: { $0 })
+    }
+    public func domain() throws -> V2GroupCapabilitiesOutcome<V2GroupAvatarChange> {
+        try v2ActorCapabilityDomain(self) { $0 }
+    }
+}
+
 extension V2ActorGroupCapabilityOutcomeWire where Value == V2ActorGroupAnnouncementResultWire {
     public init(_ outcome: V2GroupCapabilitiesOutcome<V2GroupAnnouncement>) {
         self = v2ActorCapabilityWire(outcome, transform: V2ActorGroupAnnouncementResultWire.init)

@@ -281,61 +281,32 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Media session retry counters allow the final claim and reject exhaustion without writes",
-          arguments: ["upload", "upload-reclaim", "download", "download-reclaim"], 0..<3)
-    func mediaSessionRetryCounterBoundary(path: String, index: Int) async throws {
+    @Test("Download retry counters allow the final claim and reject exhaustion without writes",
+          arguments: [false, true], 0..<3)
+    func mediaSessionRetryCounterBoundary(reclaim: Bool, index: Int) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000.1234567)
             let now = base.addingTimeInterval(30)
-            let wall = Date()
             let device = DeviceID(uuid: UUID()), media = MediaID(uuid: UUID())
-            try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at, session_expires_at) VALUES (\(bind: senderUUID), \(bind: device.uuidValue!), \(bind: wall), \(bind: wall), \(bind: wall.addingTimeInterval(3600)))").run()
-            let store = PostgresV2MediaStore(database: database)
-            let command = try V2RequestMediaUploadCommand(actorUserID: senderID, operationID: .init(uuid: UUID()), mediaID: media, contentType: "image/png", byteCount: 42, limits: .init(maximumBytes: 1024))
-            let upload = try await store.requestUpload(command, deviceID: device, expiresAt: base.addingTimeInterval(600), now: base)
-            let isUpload = path.hasPrefix("upload")
-            let reclaim = path.hasSuffix("reclaim")
-            let uploads = PostgresV2MediaUploadSessionStore(database: database)
+            try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at, session_expires_at) VALUES (\(bind: senderUUID), \(bind: device.uuidValue!), \(bind: base), \(bind: base), \(bind: Date().addingTimeInterval(3600)))").run()
+            try await prepareDownloadableResource(mediaID: media, device: device, database: database)
+            let grant = try await PostgresV2MediaStore(database: database).requestDownload(requesterUserID: senderID, deviceID: device, mediaID: media, expiresAt: base.addingTimeInterval(600), now: base)
             let downloads = PostgresV2MediaDownloadSessionStore(database: database)
-            var download: V2MediaDownloadGrant?
-            if !isUpload {
-                try await sql.raw("UPDATE im_v2.media_objects SET state = 'available' WHERE media_id = \(bind: media.uuidValue!)").run()
-                try await sql.raw("UPDATE im_v2.public_user_profiles SET avatar_media_id = \(bind: media.uuidValue!) WHERE user_id = \(bind: senderUUID)").run()
-                download = try await store.requestDownload(requesterUserID: senderID, deviceID: device, mediaID: media, expiresAt: base.addingTimeInterval(600), now: base)
-            }
-            if reclaim {
-                if isUpload { _ = try await uploads.claimUpload(ownerUserID: senderID, deviceID: device, uploadSessionID: upload.uploadSessionID, now: base, leaseDuration: 30) }
-                else { _ = try await downloads.claimDownload(requesterUserID: senderID, deviceID: device, downloadSessionID: #require(download).downloadSessionID, now: base, leaseDuration: 30) }
-            }
+            if reclaim { _ = try await downloads.claimDownload(requesterUserID: senderID, deviceID: device, downloadSessionID: grant.downloadSessionID, now: base, leaseDuration: 30) }
             let starting = [Int64(0), Int64.max - 1, Int64.max][index]
-            let table = isUpload ? "media_upload_grants" : "media_download_grants"
-            try await sql.raw("UPDATE im_v2.\(unsafeRaw: table) SET retry_count = \(bind: starting)").run()
-            let initial = try #require(try await sql.raw("SELECT to_jsonb(r)::text AS value FROM im_v2.\(unsafeRaw: table) r").first(decoding: StringValueRow.self)).value
+            try await sql.raw("UPDATE im_v2.media_download_grants SET retry_count = \(bind: starting)").run()
+            let initial = try #require(try await sql.raw("SELECT to_jsonb(r)::text AS value FROM im_v2.media_download_grants r").first(decoding: StringValueRow.self)).value
             if starting == Int64.max {
-                if isUpload {
-                    await #expect(throws: V2MediaUploadSessionStoreError.sessionUnavailable) {
-                        try await uploads.claimUpload(ownerUserID: senderID, deviceID: device, uploadSessionID: upload.uploadSessionID, now: now, leaseDuration: 30)
-                    }
-                } else {
-                    let grant = try #require(download)
-                    await #expect(throws: V2MediaDownloadSessionStoreError.sessionUnavailable) {
-                        try await downloads.claimDownload(requesterUserID: senderID, deviceID: device, downloadSessionID: grant.downloadSessionID, now: now, leaseDuration: 30)
-                    }
+                await #expect(throws: V2MediaDownloadSessionStoreError.sessionUnavailable) {
+                    try await downloads.claimDownload(requesterUserID: senderID, deviceID: device, downloadSessionID: grant.downloadSessionID, now: now, leaseDuration: 30)
                 }
-                #expect(try await sql.raw("SELECT to_jsonb(r)::text AS value FROM im_v2.\(unsafeRaw: table) r").first(decoding: StringValueRow.self)?.value == initial)
+                #expect(try await sql.raw("SELECT to_jsonb(r)::text AS value FROM im_v2.media_download_grants r").first(decoding: StringValueRow.self)?.value == initial)
                 return
             }
-            if isUpload {
-                let claim = try await uploads.claimUpload(ownerUserID: senderID, deviceID: device, uploadSessionID: upload.uploadSessionID, now: now, leaseDuration: 30)
-                #expect(claim.mediaID == media && claim.expiresAt == upload.expiresAt)
-                try await uploads.completeUploadTarget(claim, now: now.addingTimeInterval(1))
-            } else {
-                let grant = try #require(download)
-                let claim = try await downloads.claimDownload(requesterUserID: senderID, deviceID: device, downloadSessionID: grant.downloadSessionID, now: now, leaseDuration: 30)
-                #expect(claim.mediaID == media && claim.expiresAt == grant.expiresAt)
-                try await downloads.completeDownload(claim, now: now.addingTimeInterval(1))
-            }
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table) WHERE state = 'consumed' AND retry_count = \(bind: starting + 1) AND redeemed_at = \(bind: now.addingTimeInterval(1)) AND claim_token IS NULL AND lease_expires_at IS NULL").first(decoding: CountRow.self)?.value == 1)
+            let claim = try await downloads.claimDownload(requesterUserID: senderID, deviceID: device, downloadSessionID: grant.downloadSessionID, now: now, leaseDuration: 30)
+            #expect(claim.mediaID == media && claim.expiresAt == grant.expiresAt)
+            try await downloads.completeDownload(claim, now: now.addingTimeInterval(1))
+            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.media_download_grants WHERE state = 'consumed' AND retry_count = \(bind: starting + 1) AND redeemed_at = \(bind: now.addingTimeInterval(1)) AND claim_token IS NULL AND lease_expires_at IS NULL").first(decoding: CountRow.self)?.value == 1)
         }
     }
 
@@ -409,14 +380,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let wall = Date()
             let device = DeviceID(uuid: UUID()), media = MediaID(uuid: UUID())
             try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at, session_expires_at) VALUES (\(bind: senderUUID), \(bind: device.uuidValue!), \(bind: wall), \(bind: wall), \(bind: wall.addingTimeInterval(3600)))").run()
-            let store = PostgresV2MediaStore(database: database)
-            let command = try V2RequestMediaUploadCommand(actorUserID: senderID, operationID: .init(uuid: UUID()), mediaID: media, contentType: "image/png", byteCount: 42, limits: .init(maximumBytes: 1024))
-            let upload = try await store.requestUpload(command, deviceID: device, expiresAt: epoch.addingTimeInterval(1), now: baseline)
-            let sessions = PostgresV2MediaUploadSessionStore(database: database)
-            let claim = try await sessions.claimUpload(ownerUserID: senderID, deviceID: device, uploadSessionID: upload.uploadSessionID, now: baseline, leaseDuration: 30)
-            try await sessions.completeUploadTarget(claim, now: baseline.addingTimeInterval(1))
+            let store = PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in })
+            let input = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: media, usage: .messageAttachment(roomID),
+                contentType: "image/png", byteCount: 42, checksum: .init(value: String(repeating: "a", count: 64)))
+            let upload = try await createResourceUpload(input, device: device, store: store, expiresAt: epoch.addingTimeInterval(1), now: baseline)
+            let claim = try await store.claimFinalize(session: upload.sessionID, generation: 1, actor: senderUUID, device: device.uuidValue!, now: baseline)
+            let facts = try V2StoredObjectFacts(reference: claim.placement, byteCount: 42, sha256: Data(repeating: 0xaa, count: 32))
+            let scans = PostgresV2MediaScanStore(database: database)
+            var scanLease: V2MediaScanLease?
             if stage != "pending" {
-                try await store.markUploadCompleted(ownerUserID: senderID, deviceID: device, mediaID: media, now: baseline.addingTimeInterval(2))
+                try await store.publish(claim, facts: facts, actor: senderUUID, device: device.uuidValue!, now: baseline.addingTimeInterval(2))
+                scanLease = try #require(try await scans.claimPending(now: baseline.addingTimeInterval(3), leaseDuration: 30, limit: 1).first)
             }
             let negative = boundary == "same-negative" || boundary == "negative-before"
             let expiryMicroseconds: Int64 = negative ? -1 : 1
@@ -431,46 +405,38 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let now = Date(timeInterval: offset, since: epoch)
             let live = ["rounded-positive", "before", "negative-before"].contains(boundary)
-            // Seed an exact persisted deadline shared by the object, operation
-            // and completed upload. No Date round trip constructs this value.
-            for table in ["media_objects", "media_upload_operations", "media_upload_grants"] {
+            // Inject the exact SQL deadline, avoiding a Date round trip.
+            for table in ["media_objects", "resource_upload_sessions"] {
                 try await sql.raw("UPDATE im_v2.\(unsafeRaw: table) SET expires_at = TIMESTAMPTZ '2000-01-01 00:00:00+00' + \(bind: expiryMicroseconds) * INTERVAL '1 microsecond'").run()
                 #expect(try await sql.raw("SELECT expires_at > \(bind: now) AS exists FROM im_v2.\(unsafeRaw: table)").first(decoding: ExistsRow.self)?.exists == live)
             }
             func snapshot() async throws -> [String] {
                 var values: [String] = []
-                for table in ["media_objects", "media_upload_operations", "media_upload_grants", "media_scan_outbox"] {
-                    let row = try #require(try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: table) r").first(decoding: StringValueRow.self))
-                    values.append(row.value)
+                for table in ["media_objects", "resource_upload_sessions", "resource_catalog", "resource_blob_placements", "media_scan_outbox"] {
+                    values.append(try #require(try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: table) r").first(decoding: StringValueRow.self)).value)
                 }
                 return values
             }
             let initial = try await snapshot()
-            let initialState: V2MediaObjectState = stage == "pending" ? .pendingUpload : .scanning
-            #expect(try await store.uploadStatus(ownerUserID: senderID, deviceID: device, mediaID: media, now: now) == (live ? initialState : .expired))
-            #expect(try await snapshot() == initial)
-            if !live {
-                if stage == "pending" {
-                    await #expect(throws: V2MediaStoreError.uploadNotAuthorized) {
-                        try await store.markUploadCompleted(ownerUserID: senderID, deviceID: device, mediaID: media, now: now)
-                    }
-                } else {
-                    await #expect(throws: V2MediaStoreError.mediaExpired) {
-                        try await store.recordScanResult(mediaID: media, passed: stage == "scan-pass", now: now)
-                    }
-                }
-                #expect(try await snapshot() == initial)
-                return
-            }
             if stage == "pending" {
-                try await store.markUploadCompleted(ownerUserID: senderID, deviceID: device, mediaID: media, now: now)
-                #expect(try await store.uploadStatus(ownerUserID: senderID, deviceID: device, mediaID: media, now: now) == .scanning)
+                if !live {
+                    await #expect(throws: V2ResourceProviderError.preconditionFailed) {
+                        try await store.publish(claim, facts: facts, actor: senderUUID, device: device.uuidValue!, now: now)
+                    }
+                    #expect(try await snapshot() == initial)
+                    return
+                }
+                try await store.publish(claim, facts: facts, actor: senderUUID, device: device.uuidValue!, now: now)
                 #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.media_objects m JOIN im_v2.media_scan_outbox scan USING (media_id) WHERE m.state = 'scanning' AND scan.state = 'pending' AND m.state_updated_at = scan.created_at AND m.state_updated_at = \(bind: now)").first(decoding: CountRow.self)?.value == 1)
             } else {
-                try await store.recordScanResult(mediaID: media, passed: stage == "scan-pass", now: now)
-                let expected: V2MediaObjectState = stage == "scan-pass" ? .available : .failed
-                #expect(try await store.uploadStatus(ownerUserID: senderID, deviceID: device, mediaID: media, now: now) == expected)
-                #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.media_objects m JOIN im_v2.media_scan_outbox scan USING (media_id) WHERE scan.state = 'completed' AND m.state_updated_at = scan.completed_at AND m.state_updated_at = \(bind: now)").first(decoding: CountRow.self)?.value == 1)
+                // Expired objects drain the job without publishing its scan result.
+                try await scans.complete(#require(scanLease), result: stage == "scan-pass" ? .passed : .failed, now: now)
+                let expected = live ? (stage == "scan-pass" ? "available" : "failed") : "scanning"
+                #expect(try await store.status(session: upload.sessionID, actor: senderUUID, device: device.uuidValue!).mediaState == expected)
+                #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.media_scan_outbox WHERE state = 'completed' AND completed_at = \(bind: now)").first(decoding: CountRow.self)?.value == 1)
+                if !live {
+                    #expect(try await sql.raw("SELECT state_updated_at AS value FROM im_v2.media_objects").first(decoding: RevocationClockDateRow.self)?.value == baseline.addingTimeInterval(2))
+                }
             }
         }
     }
@@ -485,25 +451,25 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let device = DeviceID(uuid: UUID()), mediaID = MediaID(uuid: UUID())
             let wall = Date()
             try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at, session_expires_at) VALUES (\(bind: senderUUID), \(bind: device.uuidValue!), \(bind: wall), \(bind: wall), \(bind: wall.addingTimeInterval(3600)))").run()
-            let store = PostgresV2MediaStore(database: database)
-            let command = try V2RequestMediaUploadCommand(actorUserID: senderID, operationID: .init(uuid: UUID()), mediaID: mediaID, contentType: "image/png", byteCount: 42, limits: .init(maximumBytes: 1024))
-            let upload = try await store.requestUpload(command, deviceID: device, expiresAt: expiry, now: now)
-            let saved = try #require(try await sql.raw("SELECT expires_at AS value FROM im_v2.media_upload_operations").first(decoding: RevocationClockDateRow.self)).value
+            let store = PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in })
+            let input = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: mediaID, usage: .messageAttachment(roomID),
+                contentType: "image/png", byteCount: 42, checksum: .init(value: String(repeating: "a", count: 64)))
+            let upload = try await createResourceUpload(input, device: device, store: store, expiresAt: expiry, now: now)
+            let saved = try #require(try await sql.raw("SELECT expires_at AS value FROM im_v2.resource_upload_sessions").first(decoding: RevocationClockDateRow.self)).value
             #expect(upload.expiresAt == saved)
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.media_objects m JOIN im_v2.media_upload_operations op USING (media_id) JOIN im_v2.media_upload_grants grant_row USING (media_id) WHERE m.expires_at = op.expires_at AND op.expires_at = grant_row.expires_at AND op.expires_at = \(bind: expiry) AND m.created_at = op.created_at AND op.created_at = grant_row.created_at AND op.created_at = \(bind: now)").first(decoding: CountRow.self)?.value == 1)
-            let committed = try #require(try await sql.raw("SELECT to_jsonb(op)::text AS value FROM im_v2.media_upload_operations op").first(decoding: StringValueRow.self)).value
+            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.media_objects m JOIN im_v2.resource_upload_sessions s USING (media_id) JOIN im_v2.resource_catalog c USING (media_id) WHERE m.expires_at = s.expires_at AND s.expires_at = \(bind: expiry) AND m.created_at = s.created_at AND s.created_at = c.created_at AND s.created_at = \(bind: now)").first(decoding: CountRow.self)?.value == 1)
+            let committed = try #require(try await sql.raw("SELECT to_jsonb(s)::text AS value FROM im_v2.resource_upload_sessions s").first(decoding: StringValueRow.self)).value
             for date in [Date(timeIntervalSince1970: .nan), Date(timeIntervalSince1970: .infinity), wall] {
-                #expect(try await store.requestUpload(command, deviceID: device, expiresAt: date, now: date) == upload)
-                #expect(try await sql.raw("SELECT to_jsonb(op)::text AS value FROM im_v2.media_upload_operations op").first(decoding: StringValueRow.self)?.value == committed)
+                let replay = try await createResourceUpload(input, device: device, store: store, expiresAt: date, now: date)
+                #expect(replay.sessionID == upload.sessionID && replay.expiresAt == saved)
+                #expect(try await sql.raw("SELECT to_jsonb(s)::text AS value FROM im_v2.resource_upload_sessions s").first(decoding: StringValueRow.self)?.value == committed)
             }
-            // A valid own-avatar fixture exercises the normal download path.
-            try await sql.raw("UPDATE im_v2.media_objects SET state = 'available' WHERE media_id = \(bind: mediaID.uuidValue!)").run()
-            try await sql.raw("UPDATE im_v2.public_user_profiles SET avatar_media_id = \(bind: mediaID.uuidValue!) WHERE user_id = \(bind: senderUUID)").run()
-            let download = try await store.requestDownload(requesterUserID: senderID, deviceID: device, mediaID: mediaID, expiresAt: expiry, now: now)
+            let downloadMedia = MediaID(uuid: UUID())
+            try await prepareDownloadableResource(mediaID: downloadMedia, device: device, database: database)
+            let download = try await PostgresV2MediaStore(database: database).requestDownload(requesterUserID: senderID, deviceID: device, mediaID: downloadMedia, expiresAt: expiry, now: now)
             #expect(download.expiresAt == (try await sql.raw("SELECT expires_at AS value FROM im_v2.media_download_grants").first(decoding: RevocationClockDateRow.self)?.value))
             #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.media_download_grants WHERE expires_at = \(bind: expiry) AND created_at = \(bind: now)").first(decoding: CountRow.self)?.value == 1)
-            #expect(try await count("im_v2.media_upload_operations", on: sql) == 1)
-            #expect(try await count("im_v2.media_upload_grants", on: sql) == 1)
+            #expect(try await count("im_v2.resource_upload_sessions", on: sql) == 2)
         }
     }
 
@@ -516,12 +482,21 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let device = DeviceID(uuid: UUID()), mediaID = MediaID(uuid: UUID()), otherMedia = MediaID(uuid: UUID())
             try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at, session_expires_at) VALUES (\(bind: senderUUID), \(bind: device.uuidValue!), \(bind: wall), \(bind: wall), \(bind: wall.addingTimeInterval(3600)))").run()
             let operation = MediaUploadOperationID(uuid: UUID())
-            let command = try V2RequestMediaUploadCommand(actorUserID: senderID, operationID: operation, mediaID: mediaID, contentType: "image/png", byteCount: 42, limits: .init(maximumBytes: 1024))
-            let conflict = try V2RequestMediaUploadCommand(actorUserID: senderID, operationID: operation, mediaID: path == "different-media" ? otherMedia : mediaID, contentType: "image/png", byteCount: path == "different-size" ? 43 : 42, limits: .init(maximumBytes: 1024))
-            let store = PostgresV2MediaStore(database: database)
-            func perform(_ request: V2RequestMediaUploadCommand, date: Date) async throws -> V2MediaUploadGrant? {
-                do { return try await store.requestUpload(request, deviceID: device, expiresAt: date.addingTimeInterval(60), now: date) }
-                catch V2MediaStoreError.idempotencyConflict { return nil }
+            let command = try V2ResourceUploadRequest(operationID: operation, mediaID: mediaID, usage: .messageAttachment(roomID),
+                contentType: "image/png", byteCount: 42, checksum: .init(value: String(repeating: "a", count: 64)))
+            let conflict = try V2ResourceUploadRequest(operationID: operation, mediaID: path == "different-media" ? otherMedia : mediaID,
+                usage: .messageAttachment(roomID), contentType: "image/png", byteCount: path == "different-size" ? 43 : 42, checksum: command.checksum)
+            let store = PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in })
+            struct Receipt: Equatable, Sendable { let sessionID: UUID; let expiresAt: Date }
+            func perform(_ request: V2ResourceUploadRequest, date: Date) async throws -> Receipt? {
+                do {
+                    let row = try await store.create(homeKind: "room", homeID: roomUUID, usageKind: "message_attachment", actor: senderUUID,
+                        device: device.uuidValue!, operation: operation.uuidValue!, mediaID: request.mediaID.uuidValue!, contentType: request.contentType,
+                        byteCount: request.byteCount, requestJSON: String(decoding: JSONEncoder().encode(request), as: UTF8.self),
+                        allocate: { try .init(placementID: UUID(), binding: .init(id: "concurrent-upload", configurationRevision: 1), handle: Data(UUID().uuidString.utf8)) },
+                        expiresAt: date.addingTimeInterval(60), now: date)
+                    return Receipt(sessionID: row.sessionID, expiresAt: row.expiresAt)
+                } catch V2MediaStoreError.idempotencyConflict { return nil }
             }
             let gate = PostgreSQLTransactionGate()
             let holder = Task {
@@ -544,7 +519,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 throw CancellationError()
             }
             let first = Task { try await perform(command, date: now) }
-            var second: Task<V2MediaUploadGrant?, Error>?
+            var second: Task<Receipt?, Error>?
             do {
                 try await waitForWriters(1)
                 second = Task { try await perform(conflict, date: wall) }
@@ -553,14 +528,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await holder.value
                 let issued = try #require(try await first.value)
                 #expect(try await #require(second).value == (path == "same" ? issued : nil))
-                #expect(issued.expiresAt == (try await sql.raw("SELECT expires_at AS value FROM im_v2.media_upload_operations").first(decoding: RevocationClockDateRow.self)?.value))
+                #expect(issued.expiresAt == (try await sql.raw("SELECT expires_at AS value FROM im_v2.resource_upload_sessions").first(decoding: RevocationClockDateRow.self)?.value))
                 func snapshot() async throws -> [String] {
                     var values: [String] = []
-                    for table in ["media_objects", "media_upload_operations", "media_upload_grants"] {
+                    for table in ["media_objects", "resource_upload_sessions", "resource_catalog"] {
                         #expect(try await count("im_v2." + table, on: sql) == 1)
                         let row = try #require(try await sql.raw("SELECT to_jsonb(r)::text AS value FROM im_v2.\(unsafeRaw: table) r").first(decoding: StringValueRow.self))
                         values.append(row.value)
-                        #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table) WHERE expires_at = \(bind: expiry) AND created_at = \(bind: now)").first(decoding: CountRow.self)?.value == 1)
+                        #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table) WHERE created_at = \(bind: now)").first(decoding: CountRow.self)?.value == 1)
+                        if table != "resource_catalog" {
+                            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table) WHERE expires_at = \(bind: expiry)").first(decoding: CountRow.self)?.value == 1)
+                        }
                     }
                     return values
                 }
@@ -601,6 +579,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             if !alias {
                 try await sql.raw("INSERT INTO im_v2.rooms (room_id, room_shard_id, capacity_profile_id, membership_revision) SELECT \(bind: otherRoom), room_shard_id, capacity_profile_id, 1 FROM im_v2.rooms WHERE room_id = \(bind: roomUUID)").run()
                 try await sql.raw("INSERT INTO im_v2.room_memberships (room_id, user_id, joined_revision) VALUES (\(bind: otherRoom), \(bind: senderUUID), 1)").run()
+                try await sql.raw("INSERT INTO im_v2.room_admission (room_id,eligible_member_count,command_window_limit,shard_lease_id,shard_lease_generation) SELECT \(bind: otherRoom),1,command_window_limit,shard_lease_id,shard_lease_generation FROM im_v2.room_admission WHERE room_id=\(bind: roomUUID)").run()
             }
             for resource in resources {
                 if alias {
@@ -612,7 +591,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let operation = UUID()
             func perform(resource: UUID, date: Date) async throws -> UInt64? {
-                let store = PostgresV2ProfilePresentationStore(database: database, now: { date })
+                let store = PostgresV2ProfilePresentationStore(database: database, nicknameCapacityProfile: try forwardImportTestProfile(), now: { date })
                 do {
                     if alias {
                         return try await store.updateContactAlias(ownerUserID: senderID, targetUserID: .init(uuid: resource), operationID: .init(uuid: operation), expectedRevision: expected, remarkName: "  " + desired + "  ").revision.rawValue
@@ -1854,4 +1833,72 @@ private struct TriggerRow: Decodable {
     let sourceEventID: UUID
     let planID: UUID
     enum CodingKeys: String, CodingKey { case sourceEventID = "source_event_id", planID = "plan_id" }
+}
+
+extension PostgresV2RoomWriteStoreIntegrationTests {
+    @Test("Scan publication and retry require an unexpired claim at SQL precision",
+          arguments: ["rounded-positive", "same-negative", "before", "at", "after", "negative-before"],
+          ["pass", "fail", "retry", "pause"])
+    func scanLeaseExpiryFence(boundary: String, action: String) async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
+            let epoch = Date(timeIntervalSince1970: 946_684_800)
+            let baseline = epoch.addingTimeInterval(-10)
+            let device = DeviceID(uuid: UUID()), media = MediaID(uuid: UUID())
+            let uploads = PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in })
+            let input = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: media, usage: .messageAttachment(roomID),
+                contentType: "image/png", byteCount: 42, checksum: .init(value: String(repeating: "a", count: 64)))
+            let upload = try await createResourceUpload(input, device: device, store: uploads, expiresAt: epoch.addingTimeInterval(600), now: baseline)
+            let finalized = try await uploads.claimFinalize(session: upload.sessionID, generation: 1, actor: senderUUID, device: device.uuidValue!, now: baseline)
+            try await uploads.publish(finalized, facts: .init(reference: finalized.placement, byteCount: 42, sha256: Data(repeating: 0xaa, count: 32)),
+                actor: senderUUID, device: device.uuidValue!, now: baseline)
+            let scans = PostgresV2MediaScanStore(database: database)
+            let lease = try #require(try await scans.claimPending(now: baseline, leaseDuration: 30, limit: 1).first)
+            let negative = boundary == "same-negative" || boundary == "negative-before"
+            let expiry: Int64 = negative ? -1 : 1
+            let offset: Double = switch boundary {
+            case "rounded-positive": 0.000001
+            case "same-negative": -0.00000125
+            case "before": -0.000001
+            case "at": 0.00000125
+            case "after": 0.00000225
+            default: -0.00000225
+            }
+            let now = Date(timeInterval: offset, since: epoch)
+            let live = ["rounded-positive", "before", "negative-before"].contains(boundary)
+            try await sql.raw("UPDATE im_v2.media_scan_outbox SET lease_expires_at = TIMESTAMPTZ '2000-01-01 00:00:00+00' + \(bind: expiry) * INTERVAL '1 microsecond'").run()
+            #expect(try await sql.raw("SELECT lease_expires_at > \(bind: now) AS exists FROM im_v2.media_scan_outbox").first(decoding: ExistsRow.self)?.exists == live)
+            func snapshot() async throws -> String {
+                try #require(try await sql.raw("""
+                    SELECT jsonb_build_object('media', (SELECT to_jsonb(m) FROM im_v2.media_objects m),
+                        'scan', (SELECT to_jsonb(s) FROM im_v2.media_scan_outbox s))::text AS value
+                    """).first(decoding: StringValueRow.self)).value
+            }
+            func apply(_ claim: V2MediaScanLease, at time: Date) async throws {
+                switch action {
+                case "pass": try await scans.complete(claim, result: .passed, now: time)
+                case "fail": try await scans.complete(claim, result: .failed, now: time)
+                case "retry": try await scans.scheduleRetry(claim, disposition: .retry(at: epoch.addingTimeInterval(60)), now: time)
+                default: try await scans.scheduleRetry(claim, disposition: .pause, now: time)
+                }
+            }
+            let initial = try await snapshot()
+            try await apply(lease, at: now)
+            if live {
+                let expectedState = action == "pass" ? "available" : (action == "fail" ? "failed" : "scanning")
+                let expectedJob = action == "retry" ? "pending" : (action == "pause" ? "paused" : "completed")
+                #expect(try await uploads.status(session: upload.sessionID, actor: senderUUID, device: device.uuidValue!).mediaState == expectedState)
+                #expect(try await sql.raw("SELECT state AS value FROM im_v2.media_scan_outbox").first(decoding: StringValueRow.self)?.value == expectedJob)
+            } else {
+                #expect(try await snapshot() == initial)
+                let replacement = try #require(try await scans.claimPending(now: epoch.addingTimeInterval(1), leaseDuration: 30, limit: 1).first)
+                #expect(replacement.claimToken != lease.claimToken)
+                let reclaimed = try await snapshot()
+                // Even a formerly valid timestamp cannot authorize the replaced token.
+                try await apply(lease, at: baseline)
+                #expect(try await snapshot() == reclaimed)
+                try await scans.complete(replacement, result: .passed, now: epoch.addingTimeInterval(2))
+                #expect(try await uploads.status(session: upload.sessionID, actor: senderUUID, device: device.uuidValue!).mediaState == "available")
+            }
+        }
+    }
 }

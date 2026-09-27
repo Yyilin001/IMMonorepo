@@ -503,7 +503,7 @@ private func groupEventProjectionKind(for eventType: String) -> String {
     case "membership_changed": "membership"
     case "member.muted", "room.frozen", "room.unfrozen": "moderation"
     case "message.reaction_changed": "message_reaction"
-    case "message.pinned_changed", "group.announcement_changed", "group.role_permissions_changed", "group.member_role_changed": "group_capability"
+    case "message.pinned_changed", "group.announcement_changed", "group.role_permissions_changed", "group.member_role_changed", "group.avatar_changed", "group.nickname_changed": "group_capability"
     default: "message"
     }
 }

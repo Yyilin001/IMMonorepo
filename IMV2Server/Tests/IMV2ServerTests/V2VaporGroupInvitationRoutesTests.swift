@@ -84,6 +84,10 @@ struct V2VaporGroupInvitationRoutesTests {
                     }
                     #expect((value[field] as? NSNumber)?.int64Value == expected)
                     #expect(value["room_id"] as? String == fixture.roomID.rawValue)
+                    if value["request_id"] != nil {
+                        #expect(value["applicant_user_id"] as? String == fixture.userID.rawValue)
+                        #expect(value["applicant"] == nil && value["display_name"] == nil && value["handle"] == nil)
+                    }
                     if route == "create" || route == "list" {
                         #expect(value["state"] as? String == "active")
                         #expect((value["token"] as? String)?.isEmpty == false)

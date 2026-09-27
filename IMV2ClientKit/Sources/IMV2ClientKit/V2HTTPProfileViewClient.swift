@@ -36,6 +36,7 @@ public enum V2ProfileViewClientError: Error, Equatable, Sendable {
 ///
 /// 它刻意使用禁用缓存的请求策略：持久化资料状态由本地 SQLite 投影负责，
 /// 而不是由 URLSession 的共享缓存负责。
+@available(*, deprecated, message: "Use V2ProfileProjectionReader with the account's shared V2ProfilePresentationRepository. The legacy endpoint returns HTTP 410.")
 public struct V2HTTPProfileViewClient: V2ProfileViewReading, Sendable {
     private let endpoint: URL
     private let credentials: any V2ClientPushEndpointCredentialProvider
@@ -149,6 +150,10 @@ private struct RequestKey: Encodable {
             roomID = nil
         case .room(let roomID):
             context = "room"
+            self.roomID = roomID.rawValue
+        case .groupJoinReview(let roomID):
+            // The retired endpoint has no authority for this new context.
+            context = "group_join_review"
             self.roomID = roomID.rawValue
         }
     }

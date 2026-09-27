@@ -74,18 +74,39 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
             guard current.revision == command.expectedRevision else {
                 throw V2ProfileUpdateError.revisionConflict(current: current.revision)
             }
+            let previousAvatarID = current.avatar?.mediaID.uuidValue
+            // Bind and retire under the same media-row locks used by GC. Lock
+            // both identities in canonical order before observing expiration.
+            for mediaID in Set([previousAvatarID, requestedAvatarID].compactMap { $0 }).sorted(by: { $0.uuidString < $1.uuidString }) {
+                guard try await sql.raw("SELECT 1 FROM im_v2.media_objects WHERE media_id=\(bind:mediaID) FOR UPDATE").first() != nil
+                else { throw V2ProfileUpdateError.avatarUnavailable }
+            }
+            let changedAt = now()
+            guard v2PostgresTimestampCanEncode(changedAt) else { throw V2ProfileUpdateError.corruptPersistenceState }
+            guard let observation = try await sql.raw("SELECT clock_timestamp() AS observed_at").first(decoding: ProfileResourceClock.self)
+            else { throw V2ProfileUpdateError.corruptPersistenceState }
+            let bindingObservedAt = max(changedAt, observation.observedAt)
             if let requestedAvatarID,
                try await sql.raw("""
-                    SELECT 1 FROM im_v2.media_objects
-                    WHERE media_id = \(bind: requestedAvatarID)
-                      AND owner_user_id = \(bind: actorID)
-                      AND state = 'available'
+                    SELECT 1 FROM im_v2.media_objects media
+                    WHERE media.media_id = \(bind: requestedAvatarID)
+                      AND media.owner_user_id = \(bind: actorID) AND media.state = 'available'
+                      AND EXISTS (
+                          SELECT 1 FROM im_v2.resource_catalog resource
+                          JOIN im_v2.resource_blob_placements placement ON placement.media_id=resource.media_id
+                            AND placement.generation=resource.generation AND placement.state='active'
+                          WHERE resource.media_id=media.media_id AND resource.home_kind='account'
+                            AND resource.home_id=\(bind:actorID) AND resource.usage_kind='user_avatar'
+                            AND media.content_type LIKE 'image/%'
+                            AND (media.expires_at>\(bind:bindingObservedAt) OR media.media_id=\(bind:previousAvatarID))
+                            AND (SELECT count(*) FROM im_v2.resource_variants variant WHERE variant.media_id=resource.media_id
+                              AND variant.generation=resource.generation AND variant.recipe='avatar' AND variant.recipe_version=1
+                              AND variant.size IN (128,256) AND variant.state='ready')=2
+                      )
                     """).first() == nil {
                 throw V2ProfileUpdateError.avatarUnavailable
             }
 
-            let changedAt = now()
-            guard v2PostgresTimestampCanEncode(changedAt) else { throw V2ProfileUpdateError.corruptPersistenceState }
             let changed = current.publicIdentity?.displayName != command.displayName || current.avatar != command.avatar
             let result: V2ProfileView
             if changed {
@@ -106,6 +127,11 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
                     throw V2ProfileUpdateError.unavailable
                 }
                 result = try updated.profileView()
+                if let previousAvatarID, previousAvatarID != requestedAvatarID {
+                    guard let retireAfter = v2PostgresFutureTimestamp(now: bindingObservedAt, interval: 120)
+                    else { throw V2ProfileUpdateError.corruptPersistenceState }
+                    try await sql.raw("UPDATE im_v2.media_objects SET expires_at=GREATEST(expires_at,\(bind:retireAfter)) WHERE media_id=\(bind:previousAvatarID)").run()
+                }
                 guard let identity = result.publicIdentity else {
                     throw V2ProfileUpdateError.corruptPersistenceState
                 }
@@ -188,6 +214,11 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
         guard view.state == .active else { throw V2ProfileUpdateError.unavailable }
         return view
     }
+}
+
+private struct ProfileResourceClock: Decodable {
+    let observedAt: Date
+    enum CodingKeys: String, CodingKey { case observedAt = "observed_at" }
 }
 
 private struct ProfileOperationRow: Decodable {

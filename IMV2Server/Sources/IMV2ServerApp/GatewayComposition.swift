@@ -13,7 +13,7 @@ import Vapor
 ///
 /// `build` 会启动房间 Actor，并构造 TLS 服务与后台 Worker 的依赖；
 /// 监听端口绑定和 Worker 轮询由 `GatewayRuntime.runServices` 稍后执行。
-/// Actor 启动后若装配失败，此处先排空 Actor，再关闭已创建的辅助服务。
+/// 装配失败先排空作者资料工作与 TLS，再排空 Actor 和已创建的辅助服务。
 struct GatewayComposition {
     let server: V2TLSGatewayServer
     let actors: V2RoomActorApplication
@@ -26,6 +26,8 @@ struct GatewayComposition {
     let sharedGroupWakeInterests: V2SharedGroupEventWakeInterests?
     let accountRoomChangeService: V2AccountRoomChangeService?
     let natsLiveActivityBroker: V2NATSLiveActivityBroker?
+    let authorPresentations: V2AuthorPresentationRuntime?
+    let authorDrainTimeout: Duration
 
     /// 按依赖顺序组装网关，并持有后续运行与停机所需的组件。
     ///
@@ -48,7 +50,12 @@ struct GatewayComposition {
         var accountRoomChangeService: V2AccountRoomChangeService?
         var natsLiveActivityBroker: V2NATSLiveActivityBroker?
         var roomActorApplication: V2RoomActorApplication?
+        var authorPresentations: V2AuthorPresentationRuntime?
+        var constructedServer: V2TLSGatewayServer?
         do {
+            guard !configuration.authorPresentationsEnabled || localMediaConfiguration != nil else {
+                throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_AUTHOR_PRESENTATIONS_ENABLED")
+            }
             // 1. 准备数据库拓扑、认证/限流、投影和房间归属资源，供后续装配阶段共享；
             // 此时尚未启动房间 Actor，也未绑定任何监听端口。
             let prepared = try await GatewayPreparedAssembly.build(
@@ -69,6 +76,16 @@ struct GatewayComposition {
             )
             // 从这里开始，后续任何抛错都必须先排空已启动的房间 Actor。
             roomActorApplication = actors
+            if configuration.authorPresentationsEnabled, let localMediaConfiguration {
+                // Use the configured delivery handle. With workload isolation
+                // enabled, optional SQL does not use foreground connections.
+                let delivery = try await GatewayAuthorPresentationAssembly.localDelivery(
+                    configuration: localMediaConfiguration, controlDatabase: prepared.topology.deliveryDatabase)
+                let authors = try GatewayAuthorPresentationAssembly.build(controlDatabase: prepared.topology.deliveryDatabase,
+                    actors: actors, delivery: delivery)
+                authorPresentations = authors
+                try await prepared.frontdoor.connectionRegistry.installAuthorPresentationIngress(authors.ingress)
+            }
             // 3. 用 Actor 目录装配房间创建、查询与事件服务；指标只登记为 Vapor 路由，
             // 指标 HTTP 端口要等 runServices 进入 V2HTTPService.withRunning 才会绑定。
             let roomServices = try GatewayRoomServicesAssembly.build(
@@ -129,8 +146,10 @@ struct GatewayComposition {
             let server = try GatewayTransportAssembly.build(
                 configuration: configuration,
                 prepared: prepared,
-                handler: commands.handler
+                handler: commands.handler,
+                authors: authorPresentations
             )
+            constructedServer = server
             // 8. 初始化两个持久化撤销游标，这是实际执行的启动期数据库操作，
             // 必须在 TLS 接受客户端连接、维护 Worker 开始轮询之前完成。
             // 新命名的副本尚无活动连接。客户端认证前先记录当前撤销水位，
@@ -141,7 +160,7 @@ struct GatewayComposition {
             try await maintenance.revokedDeviceProjectionCleanupWorker.initializeForStartup()
             // 9. 组装跨分片转发投递及其后台任务依赖；assemble 只返回任务集合，
             // runServices 会先绑定 TLS、再启动指标 HTTP，最后调用 backgroundWorkers.start()。
-            let forwardDelivery = try GatewayForwardDeliveryAssembly.build(
+            let forwardDelivery = try await GatewayForwardDeliveryAssembly.build(
                 configuration: configuration,
                 localMediaConfiguration: localMediaConfiguration,
                 prepared: prepared,
@@ -169,11 +188,15 @@ struct GatewayComposition {
                 natsGroupWakeBroker: natsGroupWakeBroker,
                 sharedGroupWakeInterests: sharedGroupWakeInterests,
                 accountRoomChangeService: accountRoomChangeService,
-                natsLiveActivityBroker: natsLiveActivityBroker
+                natsLiveActivityBroker: natsLiveActivityBroker,
+                authorPresentations: authorPresentations,
+                authorDrainTimeout: .milliseconds(configuration.shutdownGraceMilliseconds)
             )
         } catch {
             logger.error("IM V2 gateway composition failed; cleaning up", metadata:
                 V2SafeLogMetadata.failure(error, stage: "gateway_composition"))
+            await Self.drainAuthors(authorPresentations, timeout: .milliseconds(configuration.shutdownGraceMilliseconds), logger: logger)
+            try? await constructedServer?.shutdown()
             if let roomActorApplication {
                 await Self.drainActorsAfterFailure(roomActorApplication, logger: logger)
             }
@@ -193,10 +216,27 @@ struct GatewayComposition {
         await natsGroupWakeBroker?.shutdown()
     }
 
-    /// 完整装配之后的运行失败由 `GatewayRuntime` 调用：先排空 Actor，再关闭辅助服务。
+    /// 完整装配之后的运行失败由 `GatewayRuntime` 调用：先排空作者资料和 Actor，再关闭辅助服务。
     func shutdownAfterFailure(logger: Logger) async {
+        await shutdownAuthorPresentations(logger: logger)
         await Self.drainActorsAfterFailure(actors, logger: logger)
         await shutdownAuxiliaryServices()
+    }
+
+    func shutdownAuthorPresentations(logger: Logger) async {
+        await Self.drainAuthors(authorPresentations, timeout: authorDrainTimeout, logger: logger)
+    }
+
+    private static func drainAuthors(_ authors: V2AuthorPresentationRuntime?, timeout: Duration, logger: Logger) async {
+        guard let authors else { return }
+        let task = Task { await authors.close() }
+        guard await v2WaitForTaskDrain([task], timeout: timeout) else {
+            // A provider/SQL operation can ignore cancellation. Do not tear
+            // down its database or socket event loops while it is still alive.
+            logger.critical("IM V2 author presentation drain exceeded its shutdown deadline",
+                metadata: V2SafeLogMetadata.drainTimeout(stage: "gateway_author_shutdown"))
+            exit(EXIT_FAILURE)
+        }
     }
 
     /// 排空失败后不继续释放下层资源；活动 Actor 仍可能持有数据库工作。

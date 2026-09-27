@@ -92,6 +92,14 @@ retained floor 并分批删除前缀，不扫描历史设备。新设备或低�
 housekeeping 分批删除。控制投影的稳定
 幂等结果单独保存在 `user_projection_effects`，不再依赖可裁剪日志。
 
+## 资源系统演进
+
+当前工作分支已接入用途/逻辑 home 路由的资源上传与恢复、不可变对象 placement、基础跨 home 导入、短期资料展示 lease，以及客户端持久上传任务和发送意图。存储、上传传输、分发、扫描和衍生处理分别通过可替换协议注入；本地文件和本地分发是参考适配器，业务消息不携带物理地址。
+
+个人资料及头像新增按上下文批量读取的路径，由 control/profile 权威和 room Actor 共同核验。旧的同步资料与部分查询入口仍存在，迁移尚未完成。小图分发具有鉴权后的共享缓存与请求合并，但作者资料补充、跨接收者授权合批、真实 CDN 与万人突发验收仍未完成。
+
+最新实现边界、实测记录和未完成要求见[资源系统实施记录](proposals/resource-system-implementation.md)，完整设计见[资源系统方案](proposals/resource-system-design.md)。这些改动尚不构成完整资源系统或生产容量批准。
+
 ## 可选 NATS 提示层
 
 默认不需要 Redis 或 NATS。gateway 始终轮询 PostgreSQL durable work；启用 NATS 后，房间变化与实时活动提示仍是持久化完成后的可丢失优化。当前群房间和 presence/typing 使用每个 gateway 一条复用 Core NATS 连接，只订阅本机当前观看/观察的作用域；所有命令以 `PING`/`PONG` 确认，连接失败或 broker 重启后按当前本机兴趣重放订阅。

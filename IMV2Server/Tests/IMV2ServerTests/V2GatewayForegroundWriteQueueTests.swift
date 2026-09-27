@@ -186,6 +186,7 @@ struct V2GatewayForegroundWriteQueueTests {
         writer.submit(Data([7]))
         writer.submit(Data([8]))
         channel.embeddedEventLoop.run()
+        #expect(writer.hasPendingFrames)
         #expect(try channel.readOutbound(as: ByteBuffer.self) == nil)
 
         channel.isWritable = true
@@ -194,6 +195,7 @@ struct V2GatewayForegroundWriteQueueTests {
         let outputCandidate = try channel.readOutbound(as: ByteBuffer.self)
         let output = try #require(outputCandidate)
         #expect(Array(output.readableBytesView) == [7, 8])
+        #expect(!writer.hasPendingFrames)
         #expect(try channel.finish().isClean)
     }
 

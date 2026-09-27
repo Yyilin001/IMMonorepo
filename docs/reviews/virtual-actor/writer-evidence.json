@@ -3,14 +3,14 @@
   "claims": [
     {
       "id": "W01",
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteStore.swift",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteScalarAcceptance.swift",
       "symbol": "func acceptInTransaction",
-      "table_or_marker": "im_v2.messages"
+      "table_or_marker": "persist("
     },
     {
       "id": "W01",
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteStore.swift",
-      "symbol": "func acceptAtomically",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteScalarPersistence.swift",
+      "symbol": "func persist(",
       "table_or_marker": "im_v2.room_events"
     },
     {
@@ -84,6 +84,12 @@
       "path": "IMV2Server/Sources/IMV2Server/PostgresV2ProfilePresentationStore.swift",
       "symbol": "func updateOwnGroupNickname",
       "table_or_marker": "im_v2.room_member_nickname_operations"
+    },
+    {
+      "id": "W12",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupCapabilitiesStore.swift",
+      "symbol": "func v2AppendGroupNicknameInvalidation",
+      "table_or_marker": "im_v2.group_event_wake_outbox"
     },
     {
       "id": "W13",
@@ -177,8 +183,8 @@
     },
     {
       "id": "W22",
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteStore.swift",
-      "symbol": "func importForwardExport",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteForwardAcceptance.swift",
+      "symbol": "func completeForwardInboxInTransaction",
       "table_or_marker": "im_v2.message_forward_inbox"
     },
     {
@@ -228,6 +234,18 @@
       "path": "IMV2Server/Sources/IMV2Server/V2ModerationAuditRetentionWorker.swift",
       "symbol": "func deleteExpiredAuditEntries",
       "table_or_marker": "im_v2.moderation_audit_entries"
+    },
+    {
+      "id": "W31",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupCapabilitiesStore.swift",
+      "symbol": "func setAvatar",
+      "table_or_marker": "im_v2.resource_group_avatar_operations"
+    },
+    {
+      "id": "W31",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupCapabilitiesStore.swift",
+      "symbol": "func recoverAvatar",
+      "table_or_marker": "im_v2.resource_group_avatar_closures"
     }
   ]
 }

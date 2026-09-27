@@ -12,12 +12,13 @@ struct MediaTimestampBoundsTests {
         let expiry = Date(timeIntervalSince1970: seconds)
         let url = try #require(URL(string: "https://media.example.test/object"))
         if upload {
-            #expect(throws: V2MediaValidationError.invalidUploadTarget) {
-                try V2MediaUploadTargetEnvelope(url: url, expiresAt: expiry)
+            #expect(throws: V2ResourceValidationError.invalidTimestamp) {
+                try V2ResourceTransferPlan(mode: .httpPut, url: url, expiresAt: expiry, expectedByteCount: 1, checksum: .init(value: String(repeating: "a", count: 64)))
             }
         } else {
-            #expect(throws: V2MediaValidationError.invalidDownloadTarget) {
-                try V2MediaDownloadTargetEnvelope(url: url, expiresAt: expiry)
+            #expect(throws: V2ResourceValidationError.invalidTimestamp) {
+                try V2MediaDownloadTargetEnvelope(plan: .init(mode: .httpGet, url: url, expiresAt: expiry,
+                    expectedByteCount: 1, checksum: .init(value: String(repeating: "a", count: 64))))
             }
         }
     }
@@ -31,11 +32,12 @@ struct MediaTimestampBoundsTests {
     func preservesExpiry(sample: (Double, Int64)) throws {
         let url = try #require(URL(string: "https://media.example.test/object"))
         let expiry = Date(timeIntervalSince1970: sample.0)
-        let download = try V2MediaDownloadTargetEnvelope(url: url, expiresAt: expiry)
-        let upload = try V2MediaUploadTargetEnvelope(url: url, expiresAt: expiry)
-        #expect(download.expiresAtUnixMilliseconds == sample.1)
+        let download = try V2MediaDownloadTargetEnvelope(plan: .init(mode: .httpGet, url: url, expiresAt: expiry,
+            expectedByteCount: 1, checksum: .init(value: String(repeating: "a", count: 64))))
+        let upload = try V2ResourceTransferPlan(mode: .httpPut, url: url, expiresAt: expiry, expectedByteCount: 1, checksum: .init(value: String(repeating: "a", count: 64)))
+        #expect(download.plan.expiresAtUnixMilliseconds == sample.1)
         #expect(upload.expiresAtUnixMilliseconds == sample.1)
         #expect(try JSONDecoder().decode(V2MediaDownloadTargetEnvelope.self, from: JSONEncoder().encode(download)) == download)
-        #expect(try JSONDecoder().decode(V2MediaUploadTargetEnvelope.self, from: JSONEncoder().encode(upload)) == upload)
+        #expect(try JSONDecoder().decode(V2ResourceTransferPlan.self, from: JSONEncoder().encode(upload)) == upload)
     }
 }

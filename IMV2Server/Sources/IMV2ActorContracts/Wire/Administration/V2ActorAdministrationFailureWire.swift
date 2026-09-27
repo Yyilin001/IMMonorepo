@@ -5,6 +5,7 @@ public enum V2ActorMembershipFailureWire: String, Codable, Equatable, Sendable {
     case ownerChanged, roomNotFound, actorNotOwner, targetUnavailable, corruptPersistenceState
 }
 public enum V2ActorGroupCapabilityFailureWire: String, Codable, Equatable, Sendable {
+    case resourceUnavailable, operationClosed
     case roomNotFound, messageNotFound, actorNotMember, actorNotAuthorized
     case targetNotMember, notGroupRoom, messageWithdrawn, corruptPersistenceState
 }

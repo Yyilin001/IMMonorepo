@@ -45,8 +45,35 @@ public struct V2RoomRefAdministrationClient: Sendable,
 
     init(caller: V2RoomRefUserCaller) { self.caller = caller }
 
-    private func command(_ value: V2RoomAdministrationCommand, actor: UserID) async throws -> V2RoomAdministrationResult {
-        guard case .administration(let result) = try await caller.call(.administration(value), actor: actor) else {
+    public func recoverGroupAvatar(actorUserID: UserID, request: V2GroupAvatarRecoveryRequest,
+                                    deadline: ContinuousClock.Instant? = nil) async throws -> V2GroupAvatarRecoveryResult {
+        guard case .groupAvatarRecovery(let result) = try await command(
+            .groupAvatarRecovery(.init(actorUserID: actorUserID, request: request)), actor: actorUserID, deadline: deadline)
+        else { throw V2RoomCallFailure.outcomeUnknown }
+        if case .committed(let change) = result {
+            guard change.state.roomID == request.command.roomID, change.state.mediaID == request.command.mutation.mediaID,
+                  change.state.revision == request.command.expectedRevision + 1 else { throw V2RoomCallFailure.outcomeUnknown }
+        }
+        guard request.action != .closeIfAbsent || result != .unresolved else { throw V2RoomCallFailure.outcomeUnknown }
+        return result
+    }
+
+    public func setGroupAvatar(actorUserID: UserID, command: V2GroupAvatarCommand,
+                               deadline: ContinuousClock.Instant? = nil) async throws -> V2GroupCapabilitiesOutcome<V2GroupAvatarChange> {
+        guard case .groupAvatar(let value) = try await self.command(.groupAvatar(.init(actorUserID: actorUserID, command: command)), actor: actorUserID, deadline: deadline)
+        else { throw V2RoomCallFailure.outcomeUnknown }
+        switch value {
+        case .applied(let change), .idempotent(let change):
+            guard change.state.roomID == command.roomID, change.state.mediaID == command.mutation.mediaID,
+                  change.state.revision == command.expectedRevision + 1 else { throw V2RoomCallFailure.outcomeUnknown }
+        default: break
+        }
+        return try value.domain()
+    }
+
+    private func command(_ value: V2RoomAdministrationCommand, actor: UserID,
+                         deadline: ContinuousClock.Instant? = nil) async throws -> V2RoomAdministrationResult {
+        guard case .administration(let result) = try await caller.call(.administration(value), actor: actor, deadline: deadline) else {
             throw V2RoomCallFailure.outcomeUnknown
         }
         if case .failure(let failure) = result { throw try failure.domainError() }

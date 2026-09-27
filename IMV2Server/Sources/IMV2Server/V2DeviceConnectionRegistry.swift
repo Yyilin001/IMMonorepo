@@ -21,11 +21,14 @@ public actor V2DeviceConnectionRegistry {
     private let foregroundMaximumUncompressedPayloadBytes: Int
     private let foregroundCompressionThresholdBytes: Int
     private let foregroundMaximumCompressionExpansionRatio: Int
+    private nonisolated let authorIngress = Mutex<V2AuthorPresentationIngress?>(nil)
+    private nonisolated var authorPresentationIngress: V2AuthorPresentationIngress? { authorIngress.withLock { $0 } }
     private let connectionAdmissionPolicy: V2AuthenticatedConnectionAdmissionPolicy
     private let livePresenceRenewalConfiguration: V2LivePresenceRenewalBatcher.Configuration
     private var streamsByDevice: [DeviceID: [UUID: V2GatewayByteStream]] = [:]
     private var streamsByUser: [UserID: [UUID: V2GatewayByteStream]] = [:]
     private var identityByConnection: [UUID: V2AuthenticatedConnection] = [:]
+    private var hasStartedRegistrations = false
     private var accountChangeService: V2AccountRoomChangeService?
     private var accountChangeTickets: [UUID: V2AccountRoomCoverageIndex.Ticket] = [:]
     /// 每次注册都会获得一个新令牌。
@@ -69,7 +72,8 @@ public actor V2DeviceConnectionRegistry {
         foregroundCompressionThresholdBytes: Int = V2ServerProtobufFrameCodec
             .defaultCompressionThresholdBytes,
         foregroundMaximumCompressionExpansionRatio: Int = V2ZlibFrameCompression
-            .defaultMaximumExpansionRatio
+            .defaultMaximumExpansionRatio,
+        authorPresentationIngress: V2AuthorPresentationIngress? = nil
     ) {
         precondition(
             foregroundMaximumUncompressedPayloadBytes > 0
@@ -77,6 +81,7 @@ public actor V2DeviceConnectionRegistry {
                 && foregroundMaximumCompressionExpansionRatio > 0
         )
         self.connectionAdmissionPolicy = connectionAdmissionPolicy
+        authorIngress.withLock { $0 = authorPresentationIngress }
         self.livePresenceRenewalConfiguration = livePresenceRenewalConfiguration
         self.foregroundFrameLimits = foregroundFrameLimits
         self.foregroundFrameCompression = foregroundFrameCompression
@@ -87,8 +92,20 @@ public actor V2DeviceConnectionRegistry {
             foregroundMaximumCompressionExpansionRatio
     }
 
+    /// The composition root builds its room authorization reader after Actors
+    /// start. Install its sole ingress before accepting authenticated sockets.
+    /// Replacing a running dependency is deliberately unsupported.
+    public func installAuthorPresentationIngress(_ ingress: V2AuthorPresentationIngress) throws {
+        guard !hasStartedRegistrations, !ingress.statistics().closed else { throw V2ResourceProviderError.configurationInvalid }
+        try authorIngress.withLock {
+            guard $0 == nil else { throw V2ResourceProviderError.configurationInvalid }
+            $0 = ingress
+        }
+    }
+
     @discardableResult
     public func register(_ stream: V2GatewayByteStream, connectionID: UUID, identity: V2AuthenticatedConnection) async throws -> Bool {
+        hasStartedRegistrations = true
         // 连接 ID 是单次生命周期的令牌，不是幂等键。
         // 首次注册挂起期间若接受重复 ID，另一条流就可能继承其身份和租约。
         if identityByConnection[connectionID] != nil { return false }
@@ -362,7 +379,9 @@ public actor V2DeviceConnectionRegistry {
             roomID: event.roomID,
             highWatermark: event.highWatermark,
             directEvent: event,
-            prepared: prepared
+            prepared: prepared,
+            hints: authorPresentationIngress.flatMap { _ in V2AuthorPresentationHints(directEvent: event) },
+            ingress: authorPresentationIngress
         )
     }
 
@@ -395,7 +414,8 @@ public actor V2DeviceConnectionRegistry {
               )
         else { return false }
         let streams = foregroundRoutes.streams(for: event)
-        return Self.submitPreparedForeground(prepared, to: streams)
+        let hints = authorPresentationIngress.flatMap { _ in V2AuthorPresentationHints(directEvent: event) }
+        return Self.submitPreparedForeground(prepared, to: streams, hints: hints, ingress: authorPresentationIngress)
     }
 
     /// 私聊事件快速路径在有序混合群组微批上的对应实现。
@@ -422,7 +442,8 @@ public actor V2DeviceConnectionRegistry {
               )
         else { return false }
         let streams = foregroundRoutes.streams(for: first)
-        return Self.submitPreparedForeground(prepared, to: streams)
+        let hints = authorPresentationIngress.flatMap { _ in V2AuthorPresentationHints(events: events) }
+        return Self.submitPreparedForeground(prepared, to: streams, hints: hints, ingress: authorPresentationIngress)
     }
 
     /// 在保留逐流认证/生命周期栅栏的同时，
@@ -435,19 +456,28 @@ public actor V2DeviceConnectionRegistry {
     /// - Returns: 是否已通过快速路径完成提交。
     private nonisolated static func submitPreparedForeground(
         _ prepared: V2PreparedGatewayGroupEventAvailable,
-        to streams: [V2GatewayByteStream]
+        to streams: [V2GatewayByteStream],
+        hints: V2AuthorPresentationHints? = nil,
+        ingress: V2AuthorPresentationIngress? = nil
     ) -> Bool {
         var completed = true
         var nioSubmissions: [V2NIOGatewayForegroundWriteSubmission] = []
+        var supplementTargets: [V2GatewayByteStream] = []
         nioSubmissions.reserveCapacity(streams.count)
         for stream in streams {
             if let submission = stream.prepareNIOGroupEventAvailable(prepared) {
                 nioSubmissions.append(submission)
+                if hints != nil { supplementTargets.append(stream) }
             } else if !stream.submitGroupEventAvailable(prepared) {
                 completed = false
+            } else if let hints, let ingress {
+                stream.offerAuthorPresentation(hints, to: ingress)
             }
         }
         V2NIOGatewayForegroundWriter.submitBatch(nioSubmissions)
+        if let hints, let ingress {
+            for stream in supplementTargets { stream.offerAuthorPresentation(hints, to: ingress) }
+        }
         return completed
     }
 
@@ -473,19 +503,30 @@ public actor V2DeviceConnectionRegistry {
               )
         else { return }
         let streams = foregroundRoutes.streams(for: first)
+        let hints = authorPresentationIngress.flatMap { _ in V2AuthorPresentationHints(events: events) }
         var nioSubmissions: [V2NIOGatewayForegroundWriteSubmission] = []
+        var supplementTargets: [V2GatewayByteStream] = []
         nioSubmissions.reserveCapacity(streams.count)
         var actorFallbacks: [V2GatewayByteStream] = []
         for stream in streams {
             if let submission = stream.prepareNIOGroupEventAvailable(prepared) {
                 nioSubmissions.append(submission)
+                if hints != nil { supplementTargets.append(stream) }
             } else if !stream.submitGroupEventAvailable(prepared) {
                 actorFallbacks.append(stream)
+            } else if let hints, let authorPresentationIngress {
+                stream.offerAuthorPresentation(hints, to: authorPresentationIngress)
             }
         }
         V2NIOGatewayForegroundWriter.submitBatch(nioSubmissions)
+        if let hints, let authorPresentationIngress {
+            for stream in supplementTargets { stream.offerAuthorPresentation(hints, to: authorPresentationIngress) }
+        }
         for stream in actorFallbacks {
-            await stream.sendGroupEventAvailable(prepared)
+            let submitted = await stream.sendGroupEventAvailable(prepared)
+            if submitted, let hints, let authorPresentationIngress {
+                stream.offerAuthorPresentation(hints, to: authorPresentationIngress)
+            }
         }
     }
 
@@ -865,23 +906,27 @@ public actor V2DeviceConnectionRegistry {
         roomID: RoomID,
         highWatermark: UInt64,
         directEvent: V2DirectRoomLiveEvent? = nil,
-        prepared: V2PreparedGatewayGroupEventAvailable? = nil
+        prepared: V2PreparedGatewayGroupEventAvailable? = nil,
+        hints: V2AuthorPresentationHints? = nil,
+        ingress: V2AuthorPresentationIngress? = nil
     ) async {
         let sequentialWriteLimit = 4
         if streams.count <= sequentialWriteLimit {
             for stream in streams {
                 if Task.isCancelled { return }
+                let submitted: Bool
                 if let prepared, stream.submitGroupEventAvailable(prepared) {
-                    continue
+                    submitted = true
                 } else if let prepared {
-                    await stream.sendGroupEventAvailable(prepared)
+                    submitted = await stream.sendGroupEventAvailable(prepared)
                 } else {
-                    await stream.sendGroupEventAvailable(
+                    submitted = await stream.sendGroupEventAvailable(
                         roomID: roomID,
                         highWatermark: highWatermark,
                         directEvent: directEvent
                     )
                 }
+                if submitted, let hints, let ingress { stream.offerAuthorPresentation(hints, to: ingress) }
             }
             return
         }
@@ -895,17 +940,19 @@ public actor V2DeviceConnectionRegistry {
                 for stream in streams[lowerBound..<upperBound] {
                     group.addTask {
                         guard !Task.isCancelled else { return }
+                        let submitted: Bool
                         if let prepared, stream.submitGroupEventAvailable(prepared) {
-                            return
+                            submitted = true
                         } else if let prepared {
-                            await stream.sendGroupEventAvailable(prepared)
+                            submitted = await stream.sendGroupEventAvailable(prepared)
                         } else {
-                            await stream.sendGroupEventAvailable(
+                            submitted = await stream.sendGroupEventAvailable(
                                 roomID: roomID,
                                 highWatermark: highWatermark,
                                 directEvent: directEvent
                             )
                         }
+                        if submitted, let hints, let ingress { stream.offerAuthorPresentation(hints, to: ingress) }
                     }
                 }
             }

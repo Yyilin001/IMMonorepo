@@ -67,13 +67,18 @@ struct GatewayRoomServicesAssembly {
         let forwardSources = topology.roomShardDatabases.mapValues {
             V2ActorForwardSourceEndpoint(receipts: .init(database: $0), jobs: .init(database: $0))
         }
-        // 同址转发使用共享写入资源；跨归属方转发通过 Actor 命令和持久作业完成。
+        let importRouting = V2ResourceForwardImportRouting(sources: topology.roomShardDatabases)
+        // 资源跨房间复制与跨归属方转发都通过 Actor 命令和持久作业完成。
         let forwardMessages = try V2ActorForwardingCoordinator(router: projection.roomShardRouter,
             physicalStoreKeyByShard: roomOwners.physicalStoreKeyByShard,
             pair: .init(coordinator: actors.reservations, executorsByShard: roomOwners.forwardPairs),
             crossOwner: V2ActorCrossOwnerForwardService(sources: forwardSources,
                 sourceCommand: { try await forwardPort.execute($0, deadline: $1) },
                 deadline: { .now + callTimeout.duration }),
+            requiresImport: { actor, operation, source, target, route in
+                try await importRouting.requiresImport(actor: actor, operation: operation,
+                    source: source, target: target, route: route)
+            },
             deadline: { .now + callTimeout.duration })
         return .init(
             callTimeout: callTimeout,

@@ -21,6 +21,7 @@ public struct V2RoomMessagingExecutor: Sendable {
     private let limits: V2MessageCommandLimits
     private let identifiers: V2AcceptanceIDFactory
     private let maximumEditBytes: Int
+    private let recovery: PostgresV2MessageOperationRecoveryStore?
     private let now: @Sendable () -> Date
 
     public init(
@@ -36,7 +37,8 @@ public struct V2RoomMessagingExecutor: Sendable {
         editIdentifiers: V2MessageEditIDFactory = .init(),
         withdrawalIdentifiers: V2MessageWithdrawalIDFactory = .init(),
         reactionIdentifiers: V2MessageReactionIDFactory = .init(),
-        now: @escaping @Sendable () -> Date = Date.init
+        now: @escaping @Sendable () -> Date = Date.init,
+        recovery: PostgresV2MessageOperationRecoveryStore? = nil
     ) throws {
         guard maximumEditBytes > 0 else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
         let scope = try V2RoomActivationWriteScope(tokens: [token])
@@ -53,6 +55,7 @@ public struct V2RoomMessagingExecutor: Sendable {
         self.identifiers = identifiers
         self.maximumEditBytes = maximumEditBytes
         self.now = now
+        self.recovery = recovery
     }
 
     public func prepareSend(_ value: V2ActorSendMessageWire) throws -> V2PreparedActorSend {
@@ -71,6 +74,9 @@ public struct V2RoomMessagingExecutor: Sendable {
         guard command.roomID == token.roomID else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
         do {
             switch command {
+            case .recover(let value):
+                guard let recovery else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+                return .recovery(try await recovery.recover(value.request, actorUserID: value.actorUserID, token: token))
             case .send(let value):
                 return try await executePreparedSend(prepareSend(value))
             case .edit(let value):

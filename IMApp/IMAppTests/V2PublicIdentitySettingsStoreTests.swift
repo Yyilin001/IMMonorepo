@@ -6,14 +6,27 @@ import Testing
 
 @MainActor
 struct V2PublicIdentitySettingsStoreTests {
+    @Test("current avatar uses the own-profile presentation context and removal hides it")
+    func avatarUsesPresentationContext() async throws {
+        let avatar = V2AvatarReference(mediaID: .init(uuid: UUID()))
+        let manager = V2LateProfileManager(avatar: avatar)
+        let store = V2PublicIdentitySettingsStore(manager: manager, attachmentStager: nil, attachmentUploader: nil)
+        #expect(store.currentAvatarKey == nil)
+        await store.load()
+        #expect(store.currentAvatar == avatar)
+        #expect(store.currentAvatarKey == .init(userID: try UserID("00000000-0000-0000-0000-000000000515"), context: .relationship))
+        await store.removeAvatar()
+        #expect(store.currentAvatarKey == nil)
+        #expect(store.avatarPresentationKey == "removed")
+    }
+
     @Test("显示名保存忽略取消后的迟到成功")
     func saveIgnoresLateSuccessAfterCancellation() async throws {
         let manager = V2LateProfileManager()
         let store = V2PublicIdentitySettingsStore(
             manager: manager,
             attachmentStager: nil,
-            attachmentUploader: nil,
-            mediaDownloader: nil
+            attachmentUploader: nil
         )
         await store.load()
         store.displayName = "本地草稿"
@@ -32,8 +45,11 @@ struct V2PublicIdentitySettingsStoreTests {
 }
 
 private actor V2LateProfileManager: V2OwnProfileManaging {
+    let avatar: V2AvatarReference?
     private var responseWaiter: CheckedContinuation<V2ProfileView, Never>?
     private var responseReadyWaiter: CheckedContinuation<Void, Never>?
+
+    init(avatar: V2AvatarReference? = nil) { self.avatar = avatar }
 
     func currentProfile() async throws -> V2ProfileView {
         try profile(displayName: "当前显示名")
@@ -68,7 +84,7 @@ private actor V2LateProfileManager: V2OwnProfileManaging {
         return try .init(
             userID: userID,
             publicIdentity: .init(userID: userID, handle: .init("profile_test"), displayName: displayName, accountKind: .regular),
-            avatar: nil,
+            avatar: avatar,
             state: .active,
             revision: .init(rawValue: 1)!,
             visibilityRevision: .init(rawValue: 1)!

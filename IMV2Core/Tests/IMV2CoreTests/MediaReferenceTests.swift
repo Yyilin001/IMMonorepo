@@ -6,11 +6,13 @@ import Testing
 struct MediaReferenceTests {
     @Test("upload intent validates opaque metadata without accepting a URL")
     func uploadIntentValidation() throws {
-        let limits = try V2MediaUploadLimits(maximumBytes: 1_024)
-        let command = try V2RequestMediaUploadCommand(actorUserID: .init("user"), operationID: .init("operation"), mediaID: .init("media"), contentType: "image/png", byteCount: 128, limits: limits)
+        let checksum = try V2ResourceChecksum(value: String(repeating: "a", count: 64))
+        let command = try V2ResourceUploadRequest(operationID: .init("operation"), mediaID: .init("media"), usage: .userAvatar,
+            contentType: "image/png", byteCount: 128, checksum: checksum)
         #expect(command.contentType == "image/png")
-        #expect(throws: V2MediaValidationError.invalidUploadIntent) {
-            _ = try V2RequestMediaUploadCommand(actorUserID: .init("user"), operationID: .init("operation"), mediaID: .init("media"), contentType: "Image/PNG", byteCount: 128, limits: limits)
+        #expect(throws: V2ResourceValidationError.invalidUploadRequest) {
+            _ = try V2ResourceUploadRequest(operationID: .init("operation"), mediaID: .init("media"), usage: .userAvatar,
+                contentType: "Image/PNG", byteCount: 128, checksum: checksum)
         }
     }
 
@@ -48,44 +50,38 @@ struct MediaReferenceTests {
         }
     }
 
-    @Test("the media edge envelope is HTTPS-only and uses stable millisecond expiry")
+    @Test("download envelopes encode only a validated plan")
     func downloadTargetEnvelope() throws {
-        let expiry = Date(timeIntervalSince1970: 1_750_000_000.123)
-        let envelope = try V2MediaDownloadTargetEnvelope(
+        let plan = try V2ResourceTransferPlan(mode: .httpGet,
             url: #require(URL(string: "https://media.invalid/object")),
-            headers: ["x-provider": "opaque"],
-            expiresAt: expiry,
-            expectedByteCount: 12
-        )
-
-        #expect(envelope.url == "https://media.invalid/object")
-        #expect(envelope.expiresAtUnixMilliseconds == 1_750_000_000_123)
-        #expect(envelope.expectedByteCount == 12)
-        #expect(throws: V2MediaValidationError.invalidDownloadTarget) {
-            _ = try V2MediaDownloadTargetEnvelope(
-                url: #require(URL(string: "http://media.invalid/object")),
-                expiresAt: expiry
-            )
-        }
+            headers: [.init(name: "X-Object-Ticket", value: "opaque")],
+            expiresAt: Date(timeIntervalSince1970: 1_750_000_000.123), expectedByteCount: 12,
+            checksum: .init(value: String(repeating: "a", count: 64)))
+        let envelope = try V2MediaDownloadTargetEnvelope(plan: plan)
+        let bytes = try JSONEncoder().encode(envelope)
+        let json = try #require(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        #expect(Set(json.keys) == ["plan"])
+        #expect(envelope.plan == plan)
+        #expect(envelope.plan.expiresAtUnixMilliseconds == 1_750_000_000_123)
+        #expect(try JSONDecoder().decode(V2MediaDownloadTargetEnvelope.self, from: bytes) == envelope)
     }
 
-    @Test("the upload edge envelope is independently HTTPS-only")
-    func uploadTargetEnvelope() throws {
-        let expiry = Date(timeIntervalSince1970: 1_750_000_000.123)
-        let envelope = try V2MediaUploadTargetEnvelope(
-            url: #require(URL(string: "https://media.invalid/upload")),
-            headers: ["x-provider": "opaque"],
-            expiresAt: expiry,
-            expectedByteCount: 12
-        )
-
-        #expect(envelope.url == "https://media.invalid/upload")
-        #expect(envelope.expiresAtUnixMilliseconds == 1_750_000_000_123)
-        #expect(throws: V2MediaValidationError.invalidUploadTarget) {
-            _ = try V2MediaUploadTargetEnvelope(
-                url: #require(URL(string: "http://media.invalid/upload")),
-                expiresAt: expiry
-            )
+    @Test("download envelopes reject incomplete and wrong-purpose wire plans", arguments: ["missing-plan", "upload", "missing-checksum", "missing-length"])
+    func rejectsInvalidDownloadEnvelope(scenario: String) throws {
+        let plan = try V2ResourceTransferPlan(mode: .httpGet,
+            url: #require(URL(string: "https://media.invalid/object")), expiresAt: .now,
+            expectedByteCount: 12, checksum: .init(value: String(repeating: "a", count: 64)))
+        var json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(plan)) as? [String: Any])
+        switch scenario {
+        case "upload": json["mode"] = "http_put"
+        case "missing-checksum": json.removeValue(forKey: "checksum")
+        case "missing-length": json.removeValue(forKey: "expectedByteCount")
+        default: break
         }
+        // A URL-only response cannot silently bypass the resource contract.
+        let wire: [String: Any] = scenario == "missing-plan" ? ["url": plan.url.absoluteString] : ["plan": json]
+        let bytes = try JSONSerialization.data(withJSONObject: wire)
+        #expect(throws: (any Error).self) { try JSONDecoder().decode(V2MediaDownloadTargetEnvelope.self, from: bytes) }
     }
+
 }

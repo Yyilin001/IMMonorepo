@@ -75,6 +75,9 @@ public enum V2GroupCapabilitiesOutcome<Value: Equatable & Sendable>: Equatable, 
 
 /// 群能力存储错误。
 public enum V2GroupCapabilitiesStoreError: Error, Equatable, Sendable {
+    case operationClosed
+    /// The selected resource is not a ready group avatar in this room home.
+    case resourceUnavailable
     /// 房间不存在。
     case roomNotFound
     /// 命令引用的消息不存在。

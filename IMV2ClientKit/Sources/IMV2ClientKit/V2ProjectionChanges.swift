@@ -20,8 +20,12 @@ public struct V2ProjectionScopes: OptionSet, Equatable, Sendable {
     public static let contacts = Self(rawValue: 1 << 2)
     /// 隐私设置。
     public static let privacy = Self(rawValue: 1 << 3)
+    /// 资料、成员资格、关系或隐私变化要求终止当前展示资格。
+    public static let presentations = Self(rawValue: 1 << 4)
+    /// 群昵称版本变化；仅核对当前关注的作者，不撤销整个账户的展示。
+    public static let groupNicknames = Self(rawValue: 1 << 5)
     /// 全部作用域。
-    public static let all: Self = [.conversations, .conversationDetails, .contacts, .privacy]
+    public static let all: Self = [.conversations, .conversationDetails, .contacts, .privacy, .presentations, .groupNicknames]
 }
 
 /// 一次投影变更摘要。

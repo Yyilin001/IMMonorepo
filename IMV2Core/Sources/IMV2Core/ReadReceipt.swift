@@ -65,18 +65,13 @@ public struct V2DirectReadReceiptProjection: Equatable, Sendable {
     }
 }
 
-/// 已读列表中的公开阅读者身份，由服务端按消息受众及分页绑定的成员版本筛选。
+/// 已读列表中的阅读者标识，由服务端按消息受众与披露偏好筛选。
+/// 名称和头像须另行取得当前房间上下文的展示许可。
 public struct V2ReadReceiptReader: Equatable, Sendable {
     /// 分页及去重使用的不透明用户标识，不直接用作展示名。
     public let userID: UserID
-    /// 用于展示的公开身份，必须属于同一用户。
-    public let publicIdentity: V2PublicIdentity
-
-    /// 要求 publicIdentity.userID 与 userID 一致，不满足时触发 precondition；调用方必须先校验外部数据，不能把它当可恢复的抛错入口。
-    public init(userID: UserID, publicIdentity: V2PublicIdentity) {
-        precondition(publicIdentity.userID == userID)
+    public init(userID: UserID) {
         self.userID = userID
-        self.publicIdentity = publicIdentity
     }
 }
 

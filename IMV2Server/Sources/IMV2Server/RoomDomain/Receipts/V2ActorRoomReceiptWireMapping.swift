@@ -57,12 +57,10 @@ public extension V2ActorRecordReadReceiptResultWire {
 
 public extension V2ActorReadReceiptReaderWire {
     init(_ value: V2ReadReceiptReader) {
-        self.init(userID: value.userID, publicIdentity: .init(value.publicIdentity))
+        self.init(userID: value.userID)
     }
     func domainValue() throws -> V2ReadReceiptReader {
-        let identity = try publicIdentity.domainValue()
-        guard identity.userID == userID else { throw V2ActorRoomReceiptWireError.invalidResult }
-        return .init(userID: userID, publicIdentity: identity)
+        .init(userID: userID)
     }
 }
 

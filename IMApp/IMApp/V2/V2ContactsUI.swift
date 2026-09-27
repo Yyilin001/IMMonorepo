@@ -155,13 +155,13 @@ final class V2ContactsStore {
     enum AddFriendState: Equatable {
         case entering
         case resolving
-        case resolved(userID: String, displayName: String, handle: String)
+        case resolved(V2PublicIdentityLookupSnapshot)
         case failed
     }
 
     private let dataSource: any V2ContactsReading
     private let windowReader: (any V2ContactsWindowReading)?
-    private let identityResolver: any V2ConversationPublicIdentityResolving
+    private let identityResolver: any V2PublicIdentityPresentationResolving
     private let relationshipChanger: any V2RelationshipChanging
     private let userBlockChanger: any V2UserBlockChanging
     private let directConversationOpener: any V2DirectConversationOpening
@@ -169,7 +169,8 @@ final class V2ContactsStore {
     private let projectionChangeNotifier: V2ProjectionChangeNotifier?
     private var allItems: [V2ContactListItem] = []
     private var friendSearchResults: [V2ContactListItem] = []
-    private var resolvedAddIdentity: V2PublicIdentity?
+    private var addFriendDemand = UUID()
+    private var addFriendFlight: (id: UUID, task: Task<V2PublicIdentityLookupSnapshot, Error>)?
     private var refreshingGeneration = 0
     private var searchGeneration = 0
     private var updatingUserIDs = Set<UserID>()
@@ -196,11 +197,24 @@ final class V2ContactsStore {
     private(set) var feedback: String?
     private(set) var addFriendState: AddFriendState = .entering
     var searchQuery = ""
-    var addFriendHandle = ""
+    var addFriendHandle = "" {
+        didSet {
+            guard oldValue != addFriendHandle else { return }
+            invalidateAddFriendResolution()
+        }
+    }
+    var resolvedAddFriend: V2PublicIdentityLookupSnapshot? {
+        guard case .resolved(let snapshot) = addFriendState, snapshot.isValid() else { return nil }
+        return snapshot
+    }
+    var addFriendExpiration: ContinuousClock.Instant? {
+        guard case .resolved(let snapshot) = addFriendState else { return nil }
+        return snapshot.deadline
+    }
 
     init(
         dataSource: any V2ContactsReading,
-        identityResolver: any V2ConversationPublicIdentityResolving,
+        identityResolver: any V2PublicIdentityPresentationResolving,
         relationshipChanger: any V2RelationshipChanging,
         userBlockChanger: any V2UserBlockChanging,
         directConversationOpener: any V2DirectConversationOpening,
@@ -397,44 +411,62 @@ final class V2ContactsStore {
 
     func resolveAddFriend() async {
         let handle = addFriendHandle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !handle.isEmpty else {
+        let demand = UUID()
+        addFriendDemand = demand
+        if let previous = addFriendFlight {
+            previous.task.cancel()
+            // A noncooperative lookup still owns its slot until it returns.
+            _ = await previous.task.result
+        }
+        guard addFriendDemand == demand else { return }
+        guard !Task.isCancelled else {
+            addFriendState = .entering
+            return
+        }
+        guard let canonical = try? V2PublicHandle(handle) else {
             addFriendState = .failed
-            feedback = "请输入对方的公开 ID。"
+            feedback = "请输入有效的公开 ID。"
             return
         }
         addFriendState = .resolving
         feedback = nil
+        let resolver = identityResolver
+        let task = Task { try await resolver.resolveForPresentation(handle: canonical.rawValue) }
+        addFriendFlight = (demand, task)
+        defer { if addFriendFlight?.id == demand { addFriendFlight = nil } }
         do {
-            let identity = try await identityResolver.resolve(handle: handle)
+            let snapshot = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: { task.cancel() }
             try Task.checkCancellation()
-            guard identity.userID != currentUserID else {
+            guard addFriendDemand == demand else { return }
+            guard snapshot.isValid(), snapshot.resolution.actorUserID == currentUserID,
+                  snapshot.identity.handle == canonical else { throw V2PublicIdentityDirectoryClientError.invalidResponse }
+            guard snapshot.identity.userID != currentUserID else {
                 addFriendState = .failed
                 feedback = "不能添加自己为好友。"
                 return
             }
-            resolvedAddIdentity = identity
-            addFriendState = .resolved(
-                userID: identity.userID.rawValue,
-                displayName: identity.displayName,
-                handle: identity.handle.description
-            )
+            addFriendState = .resolved(snapshot)
         } catch is CancellationError {
-            addFriendState = .entering
+            if addFriendDemand == demand { addFriendState = .entering }
         } catch {
             // Preserve the directory's privacy boundary: the UI never says
             // whether a handle is absent, blocked, or otherwise unavailable.
-            resolvedAddIdentity = nil
+            guard addFriendDemand == demand else { return }
             addFriendState = .failed
             feedback = "无法找到此用户或当前无法添加。"
         }
     }
 
     func sendFriendRequest() async {
-        guard case .resolved = addFriendState, let identity = resolvedAddIdentity else {
+        guard let snapshot = resolvedAddFriend,
+              (try? V2PublicHandle(addFriendHandle.trimmingCharacters(in: .whitespacesAndNewlines))) == snapshot.identity.handle else {
+            invalidateAddFriendResolution()
             feedback = "请先确认要添加的用户。"
             return
         }
-        await changeRelationship(target: identity.userID, action: .request)
+        await changeRelationship(target: snapshot.identity.userID, action: .request)
     }
 
     func accept(_ item: V2ContactListItem) async {
@@ -489,9 +521,20 @@ final class V2ContactsStore {
 
     func resetAddFriend() {
         addFriendHandle = ""
-        resolvedAddIdentity = nil
+        invalidateAddFriendResolution()
+    }
+
+    func invalidateAddFriendResolution() {
+        addFriendDemand = UUID()
+        addFriendFlight?.task.cancel()
         addFriendState = .entering
         feedback = nil
+    }
+
+    func expireAddFriendResolution(at now: ContinuousClock.Instant = .now) {
+        guard case .resolved(let snapshot) = addFriendState, !snapshot.isValid(at: now) else { return }
+        invalidateAddFriendResolution()
+        feedback = "查找结果已过期，请重新查找。"
     }
 
     private func changeRelationship(target: UserID, action: V2RelationshipAction) async {
@@ -866,6 +909,7 @@ struct V2ContactsRootView: View {
     @Bindable var store: V2ContactsStore
     let rootNavigation: V2RootNavigationStore
     @State private var path = NavigationPath()
+    @State private var profilePageID = UUID()
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -956,6 +1000,7 @@ struct V2ContactsRootView: View {
             await store.refreshFriendSearch()
         }
         .accessibilityIdentifier("v2.contacts.list")
+        .authorPresentationPage(context: .list(profilePageID))
         .modifier(V2ListViewportContainer(viewport: store.friendsViewport, coordinateSpace: "v2.contacts.friends.viewport"))
     }
 
@@ -978,6 +1023,7 @@ struct V2ContactsRootView: View {
 struct V2FriendRequestsView: View {
     @Bindable var store: V2ContactsStore
     @State private var actionTask: Task<Void, Never>?
+    @State private var profilePageID = UUID()
 
     var body: some View {
         List {
@@ -1039,6 +1085,7 @@ struct V2FriendRequestsView: View {
         }
         .modifier(V2ListViewportContainer(viewport: store.requestsViewport, coordinateSpace: "v2.contacts.requests.viewport"))
         .navigationTitle("新的朋友")
+        .authorPresentationPage(context: .list(profilePageID))
         .onDisappear { actionTask?.cancel() }
     }
 
@@ -1065,6 +1112,7 @@ struct V2FriendRequestsView: View {
 
 private struct V2AddFriendView: View {
     @Bindable var store: V2ContactsStore
+    @Environment(\.scenePhase) private var scenePhase
     @State private var actionTask: Task<Void, Never>?
 
     var body: some View {
@@ -1079,16 +1127,16 @@ private struct V2AddFriendView: View {
                     .disabled(store.addFriendHandle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.addFriendState == .resolving)
                     .accessibilityIdentifier("v2.contacts.add.resolve")
             }
-            if case .resolved(let userID, _, _) = store.addFriendState,
-               let item = store.item(userID: userID) {
+            if scenePhase == .active, let snapshot = store.resolvedAddFriend,
+               let item = store.item(userID: snapshot.identity.userID.rawValue) {
                 Section("当前关系") {
                     V2ContactRow(item: item)
                 }
-            } else if case .resolved(_, let displayName, let handle) = store.addFriendState {
+            } else if scenePhase == .active, let snapshot = store.resolvedAddFriend {
                 Section("用户") {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(displayName)
-                        Text(handle).font(.footnote).foregroundStyle(.secondary)
+                        Text(snapshot.identity.displayName)
+                        Text(snapshot.identity.handle.description).font(.footnote).foregroundStyle(.secondary)
                     }
                     Button("发送好友申请") { run { await store.sendFriendRequest() } }
                         .buttonStyle(.borderedProminent)
@@ -1100,6 +1148,17 @@ private struct V2AddFriendView: View {
             }
         }
         .navigationTitle("添加好友")
+        .task(id: store.addFriendExpiration) {
+            guard let deadline = store.addFriendExpiration else { return }
+            do { try await ContinuousClock().sleep(until: deadline) } catch { return }
+            store.expireAddFriendResolution()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active {
+                actionTask?.cancel()
+                store.invalidateAddFriendResolution()
+            }
+        }
         .onDisappear {
             actionTask?.cancel()
             store.resetAddFriend()
@@ -1140,7 +1199,7 @@ private struct V2ContactDetailView: View {
                         Section { Text(feedback).foregroundStyle(.secondary) }
                     }
                 }
-                .navigationTitle(item.displayName)
+                .navigationTitle("联系人资料")
                 .confirmationDialog(
                     confirmationTitle,
                     isPresented: Binding(
@@ -1235,15 +1294,6 @@ private struct V2ContactRow: View {
     let item: V2ContactListItem
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(item.displayName).font(.body)
-            if let handle = item.handle {
-                Text(handle).font(.footnote).foregroundStyle(.secondary)
-            } else {
-                Text("资料暂不可用").font(.footnote).foregroundStyle(.secondary)
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(item.handle.map { "\(item.displayName)，\($0)" } ?? item.displayName)
+        V2AuthorizedAvatarView(key: .init(userID: item.userID, context: .relationship), showsName: true)
     }
 }

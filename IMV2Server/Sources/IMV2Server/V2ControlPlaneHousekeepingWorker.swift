@@ -357,7 +357,6 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
         // 即使申请人离开，审批决定仍保留精确的成员关系结果。
         // 匹配操作标识，避免绑定不一致时误删证据。
         .init(table: "room_membership_operations", timestamp: "created_at", additionalPredicate: "AND NOT EXISTS (SELECT 1 FROM im_v2.group_join_requests AS request WHERE request.decided_by_user_id = target.actor_user_id AND request.decision_operation_id = target.operation_id)", roomOwned: true),
-        .init(table: "media_upload_operations", timestamp: "created_at", additionalPredicate: ""),
         .init(table: "message_withdrawal_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
         .init(table: "moderation_operations", timestamp: "created_at", additionalPredicate: "AND NOT EXISTS (SELECT 1 FROM im_v2.moderation_audit_entries AS audit WHERE audit.actor_user_id = target.actor_user_id AND audit.operation_id = target.operation_id)", roomOwned: true),
         .init(table: "message_edit_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),

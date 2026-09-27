@@ -103,6 +103,18 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
         if case .messaging(.send) = self { return true }
         return false
     }
+
+    /// 仅描述可合并的输入形状，不授予成员或资料读取权限。
+    /// 每个信封仍声明自己的 actor，由入站认证逐项验证。
+    public var profileVisibilityTargetCount: Int? {
+        guard case .mediaAuthorization(.profileVisibilityBatch(let request)) = self,
+              request.roomID.uuidValue != nil, request.actorUserID.uuidValue != nil,
+              (1...100).contains(request.targetUserIDs.count) else { return nil }
+        let targets = request.targetUserIDs.compactMap(\.uuidValue)
+        guard targets.count == request.targetUserIDs.count,
+              Set(targets).count == targets.count else { return nil }
+        return targets.count
+    }
 }
 
 public enum V2RoomResponse: Codable, Equatable, Sendable {

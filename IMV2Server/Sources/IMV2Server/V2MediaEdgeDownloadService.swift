@@ -15,7 +15,7 @@ public protocol V2MediaDownloadTargetResolving: Sendable {
     ///   - message: 媒体所属消息位置；边界实现当前仅支持为空。
     /// - Returns: 仅在本进程内使用的提供方对象目标。
     /// - Throws: 设备不匹配、无可见性、媒体不可用或提供方交换失败时抛出。
-    func downloadTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation?) async throws -> V2MediaProviderObjectTarget
+    func downloadTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation?) async throws -> V2ResourceTransferPlan
 }
 
 /// 媒体边缘下载的标准实现，串联媒体授权与提供方会话交换。
@@ -45,7 +45,7 @@ public struct V2MediaEdgeDownloadService: V2MediaDownloadTargetResolving {
     /// - Returns: 仅在本进程内使用的提供方对象目标。
     /// - Throws: `message` 非空时抛出 ``V2MediaEdgeHTTPHandlerError/messageOwnerUnavailable``；
     ///   其余错误来自媒体授权或提供方会话兑换。
-    public func downloadTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation? = nil) async throws -> V2MediaProviderObjectTarget {
+    public func downloadTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation? = nil) async throws -> V2ResourceTransferPlan {
         guard message == nil else { throw V2MediaEdgeHTTPHandlerError.messageOwnerUnavailable }
         let grant = try await media.requestDownload(actorUserID: actorUserID, deviceID: deviceID, mediaID: mediaID)
         return try await providerSessions.exchangeDownload(

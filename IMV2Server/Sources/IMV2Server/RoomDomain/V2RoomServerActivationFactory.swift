@@ -140,9 +140,11 @@ private actor V2RoomServerActivation {
               zip(turn.items, turn.items.dropFirst()).allSatisfy({ pair in pair.0.ordinal < pair.1.ordinal }) else {
             return .rolledBack(.invalidRequest)
         }
-        // 通道只合并连续的发送请求。进入任何存储前先拒绝无效轮次，
-        // 避免部分执行混合的屏障。
-        guard turn.items.count == 1 || turn.items.allSatisfy({ $0.request.canShareSendTurn }) else {
+        // 资料读取只合并已逐请求准入的连续信封，不混入发送或其他屏障。
+        let profileCounts = turn.items.compactMap { $0.request.profileVisibilityTargetCount }
+        let isProfileTurn = profileCounts.count == turn.items.count
+            && profileCounts.reduce(0, +) <= 100
+        guard turn.items.count == 1 || isProfileTurn || turn.items.allSatisfy({ $0.request.canShareSendTurn }) else {
             return .rolledBack(.invalidRequest)
         }
         guard turn.items.allSatisfy({ ContinuousClock.now < $0.deadline }) else {
@@ -161,6 +163,18 @@ private actor V2RoomServerActivation {
                         callDeadline: callDeadline, using: resources.sends)
                     guard results.count == turn.items.count else { return .outcomeUnknown }
                     return .committed(results.map(V2RoomResponse.messaging))
+                }
+                if isProfileTurn {
+                    let requests = turn.items.compactMap { item -> V2ActorProfileVisibilityBatchWire? in
+                        if case .mediaAuthorization(.profileVisibilityBatch(let request)) = item.request { return request }
+                        return nil
+                    }
+                    let results = try await v2WithAdmittedRoomDatabaseWork(resources.databaseWorkAdmission,
+                        workClass: .interactiveRead, callerDeadline: callDeadline) {
+                        try await handlers.media.executeProfileVisibilityBatch(requests)
+                    }
+                    guard results.count == turn.items.count else { return .outcomeUnknown }
+                    return .committed(results.map(V2RoomResponse.mediaAuthorization))
                 }
                 let item = turn.items[0]
                 let response: V2RoomResponse
@@ -286,7 +300,8 @@ private actor V2RoomServerActivation {
             messages = try .init(token: token, writes: resources.writes, edits: resources.edits,
                 withdrawals: resources.withdrawals, reactions: resources.reactions,
                 capacityProfile: resources.capacity, limits: resources.messageLimits,
-                maximumEditBytes: resources.maximumEditBytes, now: now)
+                maximumEditBytes: resources.maximumEditBytes, now: now,
+                recovery: .init(database: resources.database))
             administration = try .init(database: resources.database, token: token,
                 capacityProfile: resources.capacity, membershipIdentities: resources.identities, now: now)
             audit = try .init(token: token, store: .init(database: resources.database), now: now)

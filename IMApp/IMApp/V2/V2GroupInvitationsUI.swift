@@ -17,8 +17,12 @@ final class V2GroupInvitationStore {
     private let client: any V2ClientGroupInvitationManaging
     private var operationIDs: [String: UUID] = [:]
     private(set) var links: [V2GroupInviteLink] = []
-    private(set) var requests: [V2GroupJoinRequest] = []
+    private(set) var requests: [V2ClientGroupJoinRequest] = []
     private(set) var nextRequestCursor: String?
+    private(set) var hasEarlierRequests = false
+    private var managementRoomID: RoomID?
+    private var managementGeneration = UUID()
+    private var managementTask: Task<Void, Error>?
     /// 已成功预览、可以与提交动作配对的邀请。
     ///
     /// 令牌只有先经过一次成功且匹配的预览，才可能进入提交阶段。
@@ -43,7 +47,7 @@ final class V2GroupInvitationStore {
     private var joinState: JoinState = .idle
     @ObservationIgnored private var joinGeneration = UUID()
     @ObservationIgnored private var previewTask: Task<V2GroupInvitePreview, any Error>?
-    @ObservationIgnored private var cancellationTask: Task<V2GroupJoinRequest, any Error>?
+    @ObservationIgnored private var cancellationTask: Task<V2ClientGroupJoinRequest, any Error>?
     @ObservationIgnored private var submissionTask: Task<V2ClientGroupJoinSubmissionOutcome, any Error>?
     @ObservationIgnored private var joinOperations: [JoinIntent: UUID] = [:]
     @ObservationIgnored private var isInvalidated = false
@@ -95,7 +99,28 @@ final class V2GroupInvitationStore {
     /// - Parameter roomID: 目标群组房间标识。
     func loadManagement(roomID: String) async {
         guard let room = try? RoomID(roomID) else { feedback = "群聊标识无效。"; return }
-        await perform { try await refreshManagement(room: room) }
+        guard !isInvalidated else { return }
+        if managementRoomID != room {
+            endManagement()
+            managementRoomID = room
+        }
+        // A refresh owns a new publication generation even within the same room.
+        // Await cancellation without allowing the old wrapper to publish its error.
+        managementGeneration = UUID()
+        let generation = managementGeneration
+        if let prior = managementTask {
+            prior.cancel()
+            _ = await prior.result
+        }
+        guard generation == managementGeneration, !isInvalidated, !Task.isCancelled else { return }
+        await perform { [self] in try await refreshManagement(room: room) }
+    }
+
+    func endManagement() {
+        managementGeneration = UUID()
+        managementRoomID = nil
+        managementTask?.cancel()
+        links = []; requests = []; nextRequestCursor = nil; hasEarlierRequests = false; feedback = nil
     }
 
     /// 创建一条群邀请。
@@ -106,8 +131,9 @@ final class V2GroupInvitationStore {
     ///   - maximumUses: 最多可被批准使用的次数，默认 100。
     func create(roomID: String, lifetimeSeconds: Int = 7 * 86_400, maximumUses: Int = 100) async {
         guard let room = try? RoomID(roomID) else { feedback = "群聊标识无效。"; return }
+        guard managementRoomID == room else { return }
         let operation = operationID(for: "create:\(roomID)")
-        await perform {
+        await perform { [self] in
             _ = try await client.create(roomID: room, operationID: .init(uuid: operation), lifetimeSeconds: lifetimeSeconds, maximumApprovedUses: maximumUses)
             operationIDs["create:\(roomID)"] = nil
             try await refreshManagement(room: room)
@@ -118,9 +144,10 @@ final class V2GroupInvitationStore {
     ///
     /// - Parameter link: 待撤销的邀请链接。
     func revoke(_ link: V2GroupInviteLink) async {
+        guard managementRoomID == link.roomID else { return }
         let key = "revoke:\(link.inviteID.rawValue)"
         let operation = operationID(for: key)
-        await perform {
+        await perform { [self] in
             try await client.revoke(inviteID: link.inviteID, roomID: link.roomID, operationID: .init(uuid: operation))
             operationIDs[key] = nil
             try await refreshManagement(room: link.roomID)
@@ -132,10 +159,11 @@ final class V2GroupInvitationStore {
     /// - Parameters:
     ///   - request: 待处理的入群申请。
     ///   - decision: 批准或拒绝。
-    func decide(_ request: V2GroupJoinRequest, decision: V2GroupJoinDecision) async {
+    func decide(_ request: V2ClientGroupJoinRequest, decision: V2GroupJoinDecision) async {
+        guard managementRoomID == request.roomID, requests.contains(where: { $0.requestID == request.requestID }) else { return }
         let key = "decision:\(request.requestID.rawValue):\(decision.rawValue)"
         let operation = request.resumableDecisionOperationID?.uuidValue ?? operationID(for: key)
-        await perform {
+        await perform { [self] in
             _ = try await client.decide(roomID: request.roomID, requestID: request.requestID, operationID: .init(uuid: operation), decision: decision)
             operationIDs[key] = nil
             try await refreshManagement(room: request.roomID)
@@ -146,11 +174,19 @@ final class V2GroupInvitationStore {
     ///
     /// - Parameter roomID: 目标群组房间标识。
     func loadMoreRequests(roomID: String) async {
-        guard let room = try? RoomID(roomID), let cursor = nextRequestCursor else { return }
-        await perform {
+        guard let room = try? RoomID(roomID), managementRoomID == room, let cursor = nextRequestCursor else { return }
+        let generation = managementGeneration
+        await perform { [self] in
             let page = try await client.pendingRequests(roomID: room, cursor: cursor, pageSize: 100)
+            try Task.checkCancellation()
+            guard managementGeneration == generation, managementRoomID == room else { return }
+            try validate(page, room: room, cursor: cursor)
             let existing = Set(requests.map(\.requestID))
             requests.append(contentsOf: page.requests.filter { !existing.contains($0.requestID) })
+            if requests.count > 1_000 {
+                requests.removeFirst(requests.count - 1_000)
+                hasEarlierRequests = true
+            }
             nextRequestCursor = page.nextCursor
         }
     }
@@ -283,6 +319,7 @@ final class V2GroupInvitationStore {
     /// 使整个容器失效；失效后不再接受新的提交动作。
     func invalidate() {
         isInvalidated = true
+        endManagement()
         dismissJoin()
         joinOperations.removeAll()
         operationIDs.removeAll()
@@ -313,7 +350,7 @@ final class V2GroupInvitationStore {
     }
 
     private func operationID(for key: String) -> UUID { if let value = operationIDs[key] { return value }; let value = UUID(); operationIDs[key] = value; return value }
-    private static func updatedPreview(_ current: V2GroupInvitePreview, request: V2GroupJoinRequest) throws -> V2GroupInvitePreview {
+    private static func updatedPreview(_ current: V2GroupInvitePreview, request: V2ClientGroupJoinRequest) throws -> V2GroupInvitePreview {
         guard request.inviteID == current.inviteID, request.roomID == current.roomID else {
             throw V2ClientGroupInvitationError.invalidResponse
         }
@@ -337,23 +374,48 @@ final class V2GroupInvitationStore {
         }
     }
     private func refreshManagement(room: RoomID) async throws {
+        try Task.checkCancellation()
+        guard managementRoomID == room else { return }
+        let generation = managementGeneration
         async let refreshedLinks = client.activeInvites(roomID: room)
         async let refreshedRequests = client.pendingRequests(roomID: room, cursor: nil, pageSize: 100)
-        links = try await refreshedLinks
-        let requestPage = try await refreshedRequests
+        let (newLinks, requestPage) = try await (refreshedLinks, refreshedRequests)
+        try Task.checkCancellation()
+        guard generation == managementGeneration, managementRoomID == room, !isInvalidated else { return }
+        guard newLinks.count <= 100, newLinks.allSatisfy({ $0.roomID == room }),
+              Set(newLinks.map(\.inviteID)).count == newLinks.count else { throw V2ClientGroupInvitationError.invalidResponse }
+        try validate(requestPage, room: room, cursor: nil)
+        links = newLinks
         requests = requestPage.requests
         nextRequestCursor = requestPage.nextCursor
+        hasEarlierRequests = false
         feedback = nil
     }
-    private func perform(_ body: () async throws -> Void) async {
+    private func validate(_ page: V2ClientGroupJoinRequestPage, room: RoomID, cursor: String?) throws {
+        guard page.requests.count <= 100, Set(page.requests.map(\.requestID)).count == page.requests.count,
+              page.requests.allSatisfy({ $0.roomID == room && $0.state == .pending }),
+              page.nextCursor == nil || (page.nextCursor != cursor && page.nextCursor?.isEmpty == false && page.nextCursor!.utf8.count <= 1_024)
+        else { throw V2ClientGroupInvitationError.invalidResponse }
+    }
+    private func perform(_ body: @escaping @MainActor () async throws -> Void) async {
         guard !isWorking, !isInvalidated else { return }
+        let generation = managementGeneration
         isWorking = true
-        defer { isWorking = false }
-        do { try await body() }
+        let task = Task {
+            defer { isWorking = false; managementTask = nil }
+            try await body()
+        }
+        managementTask = task
+        do { try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() } }
         catch is CancellationError { return }
         catch let error as V2ClientGroupInvitationError {
+            guard managementGeneration == generation else { return }
+            if error == .authorizationDenied { links = []; requests = []; nextRequestCursor = nil; hasEarlierRequests = false }
             feedback = switch error { case .authorizationDenied: "没有管理该群邀请的权限。"; case .unavailable: "邀请不存在、已撤销、已过期或次数已用完。"; case .memberLimitReached: "群成员已达上限。"; case .rateLimited: "操作过于频繁，请稍后重试。"; case .conflict: "状态已变化，请刷新后重试。"; default: "邀请服务暂不可用，请检查网络后重试。" }
-        } catch { feedback = "邀请服务暂不可用，请检查网络后重试。" }
+        } catch {
+            guard managementGeneration == generation else { return }
+            feedback = "邀请服务暂不可用，请检查网络后重试。"
+        }
     }
 }
 
@@ -364,6 +426,7 @@ struct V2GroupInvitationManagementSheet: View {
     @Bindable var store: V2GroupInvitationStore
     let roomID: String
     @Environment(\.dismiss) private var dismiss
+    @State private var profilePageID = UUID()
 
     var body: some View {
         NavigationStack {
@@ -392,8 +455,7 @@ struct V2GroupInvitationManagementSheet: View {
                     if store.requests.isEmpty { Text("暂无入群申请").foregroundStyle(.secondary) }
                     ForEach(store.requests) { request in
                         VStack(alignment: .leading, spacing: 8) {
-                            Text(request.applicant.displayName).font(.headline)
-                            Text("@\(request.applicant.handle.rawValue)").font(.subheadline).foregroundStyle(.secondary)
+                            V2AuthorizedAvatarView(key: request.presentationKey, showsName: true)
                             if let note = request.note { Text(note) }
                             HStack {
                                 Button("拒绝", role: .destructive) { Task { await store.decide(request, decision: .reject) } }.accessibilityIdentifier("v2.group-join-request.reject.\(request.requestID.rawValue)")
@@ -408,6 +470,10 @@ struct V2GroupInvitationManagementSheet: View {
                             .disabled(store.isWorking)
                             .accessibilityIdentifier("v2.group-join-request.load-more")
                     }
+                    if store.hasEarlierRequests {
+                        Button("返回列表开头") { Task { await store.loadManagement(roomID: roomID) } }
+                            .disabled(store.isWorking)
+                    }
                 }
                 if let feedback = store.feedback { Text(feedback).foregroundStyle(.secondary).accessibilityIdentifier("v2.group-invite.feedback") }
             }
@@ -416,6 +482,8 @@ struct V2GroupInvitationManagementSheet: View {
             .refreshable { await store.loadManagement(roomID: roomID) }
             .task { await store.loadManagement(roomID: roomID) }
         }
+        .authorPresentationPage(context: .list(profilePageID))
+        .onDisappear { store.endManagement() }
     }
 }
 

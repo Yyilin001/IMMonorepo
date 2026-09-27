@@ -8,6 +8,42 @@ import Testing
 
 @Suite("V2 HTTP group invitation client")
 struct V2HTTPGroupInvitationClientTests {
+    @Test("review pages expose metadata only and reject mismatched or unbounded results", arguments: ["valid", "legacy", "wrong-room", "duplicate", "oversize", "terminal", "same-cursor", "empty-cursor", "long-cursor", "invalid-user"])
+    func reviewPageContract(_ scenario: String) async throws {
+        let base = try #require(URL(string: "https://account.example"))
+        let room = RoomID(uuid: UUID()), applicant = UserID(uuid: UUID()), request = GroupJoinRequestID(uuid: UUID())
+        var item: [String: Any] = ["request_id": request.rawValue, "room_id": room.rawValue,
+            "invite_id": UUID().uuidString, "applicant_user_id": applicant.rawValue,
+            "state": "pending", "created_at_ms": 1750000000000]
+        if scenario == "legacy" { item["applicant_user_id"] = nil; item["applicant"] = ["user_id": applicant.rawValue, "display_name": "Old unleased name"] }
+        if scenario == "wrong-room" { item["room_id"] = UUID().uuidString }
+        if scenario == "invalid-user" { item["applicant_user_id"] = "" }
+        if scenario == "terminal" { item["state"] = "cancelled"; item["decided_at_ms"] = 1750000001000 }
+        var items = [item]
+        if scenario == "duplicate" { items.append(item) }
+        if scenario == "oversize" { items += (0..<2).map { _ in var copy = item; copy["request_id"] = UUID().uuidString; return copy } }
+        let next: String = switch scenario { case "same-cursor": "prior"; case "empty-cursor": ""; case "long-cursor": String(repeating: "x", count: 1_025); default: "next" }
+        let body = try JSONSerialization.data(withJSONObject: ["items": items, "next_cursor": next])
+        let transport = RecordingGroupInvitationTransport(responses: [try response(status: 200, endpoint: base, body: String(decoding: body, as: UTF8.self))])
+        let client = try V2HTTPGroupInvitationClient(baseURL: base,
+            credentials: GroupInvitationCredentials(accessToken: "edge-token", deviceID: .init(uuid: UUID())), transport: transport)
+        if scenario == "valid" {
+            let page = try await client.pendingRequests(roomID: room, cursor: "prior", pageSize: 2)
+            #expect(page.requests.first?.presentationKey == .init(userID: applicant, context: .groupJoinReview(room)))
+            #expect(page.requests.first?.requestID == request && page.nextCursor == "next")
+        } else {
+            await #expect(throws: V2ClientGroupInvitationError.invalidResponse) {
+                _ = try await client.pendingRequests(roomID: room, cursor: "prior", pageSize: 2)
+            }
+        }
+        for size in [0, 101] {
+            await #expect(throws: V2ClientGroupInvitationError.invalidRequest) {
+                _ = try await client.pendingRequests(roomID: room, cursor: nil, pageSize: size)
+            }
+        }
+        #expect(await transport.requests().count == 1)
+    }
+
     @Test("create uses authenticated no-store HTTPS and keeps the invite secret out of the URL")
     func createContract() async throws {
         let baseURL = try #require(URL(string: "https://account.example"))
@@ -97,7 +133,7 @@ struct V2HTTPGroupInvitationClientTests {
             "request_id": scenario == "wrong-request" ? UUID().uuidString : requestID.rawValue,
             "room_id": scenario == "wrong-room" ? UUID().uuidString : room.rawValue,
             "invite_id": UUID().uuidString,
-            "applicant": ["user_id": UUID().uuidString, "handle": "applicant", "display_name": "Applicant", "account_kind": "regular"],
+            "applicant_user_id": UUID().uuidString,
             "state": state, "created_at_ms": 1750000000000,
             "decided_at_ms": scenario == "missing-time" || state == "pending" || state == "approving" ? NSNull() : 1750000001000
         ]

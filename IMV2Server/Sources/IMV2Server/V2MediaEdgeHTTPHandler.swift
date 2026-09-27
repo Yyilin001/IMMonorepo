@@ -63,12 +63,7 @@ public struct V2MediaEdgeHTTPHandler: Sendable {
         }
         let target = try await edge.downloadTarget(actorUserID: actorUserID, deviceID: deviceID, mediaID: mediaID, message: message)
         do {
-            return try .init(
-                url: target.url,
-                headers: target.headers,
-                expiresAt: target.expiresAt,
-                expectedByteCount: target.expectedByteCount
-            )
+            return try .init(plan: target)
         } catch {
             // 服务商返回值若未通过稳定契约校验，绝不能进入 HTTP 响应。
             throw V2MediaEdgeHTTPHandlerError.invalidProviderTarget

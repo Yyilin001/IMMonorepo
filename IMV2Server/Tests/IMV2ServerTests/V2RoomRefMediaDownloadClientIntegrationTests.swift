@@ -57,8 +57,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let localProvider = MediaProviderProbe { _ in }
             let local = V2MediaEdgeDownloadService(media: .init(
-                store: PostgresV2MediaStore(database: controlDB),
-                limits: try .init(maximumBytes: 1_024)),
+                store: PostgresV2MediaStore(database: controlDB)),
                 providerSessions: try .init(
                     store: PostgresV2MediaDownloadSessionStore(database: controlDB),
                     provider: localProvider))
@@ -114,10 +113,10 @@ private actor MediaProviderProbe: V2MediaObjectProvider {
     let onIssue: @Sendable (MediaID) async throws -> Void
     private(set) var calls = 0
     init(onIssue: @escaping @Sendable (MediaID) async throws -> Void) { self.onIssue = onIssue }
-    func issueDownloadTarget(mediaID: MediaID, expiresAt: Date) async throws -> V2MediaProviderObjectTarget {
+    func issueDownloadTarget(mediaID: MediaID, expiresAt: Date) async throws -> V2ResourceTransferPlan {
         calls += 1
         try await onIssue(mediaID)
-        return .init(url: URL(string: "https://media.invalid/download")!,
+        return try resourceDownloadTestPlan(url: URL(string: "https://media.invalid/download")!,
                      expiresAt: expiresAt.addingTimeInterval(-1))
     }
 }

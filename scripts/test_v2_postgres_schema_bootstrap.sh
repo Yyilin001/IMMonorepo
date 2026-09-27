@@ -95,14 +95,45 @@ assert_scalar() {
 # Terminal forward inbox/export compaction adds two bounded-scan indexes.
 # Durable housekeeping adds a singleton cursor and its primary-key index.
 # Actor activation adds one durable owner-store table and its primary key.
+# Resource lifecycle and permanent message closure add six tables, fourteen
+# indexes, two triggers and two functions.
+# Retired upload operations/grants remove two tables and five indexes.
 assert_scalar 'im_v2 relation count' \
-  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '147'
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '157'
 assert_scalar 'im_v2 index count' \
-  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '345'
+  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '368'
 assert_scalar 'im_v2 application trigger count' \
-  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '25'
+  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '31'
 assert_scalar 'im_v2 function count' \
-  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '24'
+  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '28'
+
+# A same-named trigger function is not enough: replacing its body must fail
+# readiness, as must a nullable ready-variant constraint or a weakened replay key.
+for drift in \
+  "DROP TRIGGER resource_group_avatar_operations_immutable ON im_v2.resource_group_avatar_operations;" \
+  "DROP TRIGGER resource_group_avatar_closures_immutable ON im_v2.resource_group_avatar_closures;" \
+  "DROP TRIGGER resource_group_avatar_operations_close_fence ON im_v2.resource_group_avatar_operations;" \
+  "ALTER FUNCTION im_v2.fence_group_avatar_terminal_result() STABLE;" \
+  "ALTER TABLE im_v2.resource_group_avatars DROP CONSTRAINT resource_group_avatars_media_id_fkey;" \
+  "ALTER TABLE im_v2.resource_catalog DROP CONSTRAINT resource_catalog_check;" \
+  "ALTER TABLE im_v2.resource_variants DROP CONSTRAINT resource_variants_variant_id_key;" \
+  "ALTER TABLE im_v2.resource_storage_migrations DROP CONSTRAINT resource_storage_migrations_destination_placement_id_key;" \
+  "DROP INDEX im_v2.resource_storage_migrations_active_media_idx;" \
+  "DROP INDEX im_v2.resource_storage_migrations_retained_idx;" \
+  "ALTER TABLE im_v2.resource_variants ALTER COLUMN variant_id DROP NOT NULL;" \
+  "ALTER TABLE im_v2.resource_import_holds ALTER COLUMN sha256 DROP NOT NULL;" \
+  "ALTER TABLE im_v2.resource_forward_outputs DROP CONSTRAINT resource_forward_outputs_export_id_ordinal_fkey;" \
+  "ALTER TABLE im_v2.resource_upload_sessions DROP CONSTRAINT resource_upload_sessions_home_kind_home_id_actor_user_id_op_key;" \
+  "ALTER TABLE im_v2.resource_variants DROP CONSTRAINT resource_variants_check; ALTER TABLE im_v2.resource_variants ADD CONSTRAINT resource_variants_check CHECK(state <> 'ready' OR (byte_count > 0 AND octet_length(sha256)=32));" \
+  'CREATE OR REPLACE FUNCTION im_v2.reject_closed_message_acceptance() RETURNS trigger LANGUAGE plpgsql VOLATILE AS $$ BEGIN RETURN NEW; END; $$;'
+do
+  drift_result="$({
+    printf '%s\n' 'BEGIN;' "${drift}"
+    cat "${schema_contract_query}"
+    printf '%s\n' 'ROLLBACK;'
+  } | psql -qAt | tr -d '[:space:]')"
+  test "${drift_result}" = 'f'
+done
 
 normalize_schema() {
   awk '

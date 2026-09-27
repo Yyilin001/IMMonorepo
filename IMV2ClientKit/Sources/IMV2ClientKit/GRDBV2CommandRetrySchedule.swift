@@ -63,7 +63,9 @@ extension GRDBV2LocalSyncStore {
         // Fixed ordering makes both observation regions and query plans stable.
         for lane in V2DurableCommandLane.allCases where lanes.contains(lane) {
             switch lane {
-            case .messages: pending("v2_pending_message_commands")
+            case .messages:
+                pending("v2_pending_message_commands")
+                pending("v2_message_operation_recoveries")
             case .withdrawals: pending("v2_pending_message_withdrawals")
             case .redactions: pending("v2_pending_message_redactions")
             case .edits: pending("v2_pending_message_edits")

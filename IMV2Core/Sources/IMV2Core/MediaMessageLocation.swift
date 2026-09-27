@@ -1,5 +1,5 @@
 /// 定位附件所属权威消息的房间与消息身份，只提供可见性检查上下文，不直接授予访问权限。
-public struct V2MediaMessageLocation: Equatable, Hashable, Sendable {
+public struct V2MediaMessageLocation: Equatable, Hashable, Codable, Sendable {
     /// 附件关联消息所属房间。
     public let roomID: RoomID
     /// 附件关联的权威消息身份。

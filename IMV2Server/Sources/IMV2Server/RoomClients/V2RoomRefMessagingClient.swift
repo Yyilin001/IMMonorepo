@@ -32,6 +32,12 @@ public struct V2RoomRefMessagingClient: Sendable {
         return try value.toDomain()
     }
 
+    public func recover(_ request: V2MessageOperationRecoveryRequest, actorUserID: UserID) async throws -> V2MessageOperationRecoveryResult {
+        let response = try await call(.recover(.init(actorUserID: actorUserID, request: request)), actor: actorUserID)
+        guard case .recovery(let value) = response else { throw V2RoomCallFailure.outcomeUnknown }
+        return value
+    }
+
     public func edit(_ request: V2AuthenticatedMessageEdit) async throws -> V2MessageEditOutcome {
         let response = try await call(.edit(.init(request)), actor: request.actorUserID)
         guard case .edit(let value) = response else { throw V2RoomCallFailure.outcomeUnknown }

@@ -20,11 +20,13 @@ public struct V2ActorForwardingCoordinator: V2ForwardMessagesHandling {
     private let pair: V2ActorForwardPairPort
     private let crossOwner: any V2CrossOwnerForwarding
     private let maximumTargetConcurrency: Int
+    private let requiresImport: @Sendable (UserID, MessageForwardOperationID, V2ForwardMessageReference, RoomID, V2RoomShardRoute) async throws -> Bool
     private let deadline: @Sendable () -> ContinuousClock.Instant
 
     public init(router: any V2RoomShardRouting, physicalStoreKeyByShard: [String: String],
                 pair: V2ActorForwardPairPort, crossOwner: any V2CrossOwnerForwarding,
                 maximumTargetConcurrency: Int = 4,
+                requiresImport: @escaping @Sendable (UserID, MessageForwardOperationID, V2ForwardMessageReference, RoomID, V2RoomShardRoute) async throws -> Bool = { _, _, _, _, _ in false },
                 deadline: @escaping @Sendable () -> ContinuousClock.Instant) throws {
         guard !physicalStoreKeyByShard.isEmpty, (1...10).contains(maximumTargetConcurrency),
               physicalStoreKeyByShard.allSatisfy({ !$0.key.isEmpty && !$0.value.isEmpty }) else {
@@ -33,6 +35,7 @@ public struct V2ActorForwardingCoordinator: V2ForwardMessagesHandling {
         self.router = router; self.physicalKeys = physicalStoreKeyByShard
         self.pair = pair; self.crossOwner = crossOwner
         self.maximumTargetConcurrency = maximumTargetConcurrency
+        self.requiresImport = requiresImport
         self.deadline = deadline
     }
 
@@ -101,7 +104,14 @@ public struct V2ActorForwardingCoordinator: V2ForwardMessagesHandling {
             // R2 和 SQL 作用域要求精确的所有者分片身份。
             // 共享数据库的不同逻辑所有者仍使用持久化导出与收件箱；
             // 仅物理键匹配不足以授予双房间轮次。
-            if sourceKey == targetKey && sourceRoute.shardID == targetRoute.shardID {
+            let colocated = sourceKey == targetKey && sourceRoute.shardID == targetRoute.shardID
+            // A modern attachment has a room home even when both rooms share a
+            // database. Its independent copy uses the same durable import protocol.
+            var usePair = colocated
+            if colocated && source.roomID != target {
+                usePair = try await !requiresImport(actor, operation, source, target, sourceRoute)
+            }
+            if usePair {
                 let wire = try await pair.execute(.init(actorUserID: actor,
                     operationID: operation, source: source, targetRoomID: target), operationDeadline)
                 let result = try wire.toDomain()

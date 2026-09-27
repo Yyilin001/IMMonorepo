@@ -664,7 +664,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     case .updated(let view), .idempotent(let view): return view.revision
                     }
                 }
-                let store = PostgresV2ProfilePresentationStore(database: database, now: { date })
+                let store = PostgresV2ProfilePresentationStore(database: database, nicknameCapacityProfile: try forwardImportTestProfile(), now: { date })
                 if kind == "alias" {
                     return try await store.updateContactAlias(ownerUserID: senderID, targetUserID: target, operationID: .init(uuid: operation), expectedRevision: revision, remarkName: name).revision
                 }

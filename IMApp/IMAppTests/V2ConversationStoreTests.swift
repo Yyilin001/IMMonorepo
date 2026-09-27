@@ -24,7 +24,7 @@ struct V2ConversationStoreTests {
         )
 
         #expect(items == [
-            .init(id: roomID.rawValue, title: "尚未聊天的用户", preview: "暂无消息", lastActivity: updatedAt, isOutgoing: false, kind: .direct(accountKind: .regular))
+            .init(id: roomID.rawValue, title: "尚未聊天的用户", preview: "暂无消息", lastActivity: updatedAt, isOutgoing: false, kind: .direct(accountKind: .regular), presentationKey: .init(userID: identity.userID, context: .directConversation))
         ])
     }
 
@@ -54,8 +54,52 @@ struct V2ConversationStoreTests {
         )
 
         #expect(items == [
-            .init(id: roomID.rawValue, title: "空会话", preview: "暂无消息", lastActivity: updatedAt, isOutgoing: false, kind: .direct(accountKind: .regular), isPinned: true, isArchived: true, muteUntil: muteUntil)
+            .init(id: roomID.rawValue, title: "空会话", preview: "暂无消息", lastActivity: updatedAt, isOutgoing: false, kind: .direct(accountKind: .regular), isPinned: true, isArchived: true, muteUntil: muteUntil, presentationKey: .init(userID: identity.userID, context: .directConversation))
         ])
+    }
+
+    @Test("message authors use the known room kind and peer, never a row's outgoing flag", arguments: [V2ConversationKind.group, .direct(accountKind: .regular), .unknown])
+    func authorContextFollowsConversation(kind: V2ConversationKind) {
+        let actor = UserID(uuid: UUID()), peer = UserID(uuid: UUID()), stranger = UserID(uuid: UUID())
+        let room = RoomID(uuid: UUID())
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let store = V2ConversationDetailStore(
+            environment: .init(userID: actor.rawValue, projections: .init(dataSource: source)),
+            context: .init(roomID: room.rawValue, kind: kind, presentationKey: .init(userID: peer, context: .directConversation)))
+        for user in [actor, peer, stranger] {
+            for outgoing in [false, true] {
+                let message = V2ConversationMessageItem(id: "author-context", revision: 1, text: "", createdAt: .now,
+                    isOutgoing: outgoing, isWithdrawn: false, senderUserID: user)
+                let expected: V2ProfileViewLookupKey?
+                switch kind {
+                case .group: expected = .init(userID: user, context: .room(room))
+                case .direct:
+                    if user == actor || user == peer { expected = .init(userID: user, context: .room(room)) }
+                    else { expected = nil }
+                case .unknown: expected = nil
+                }
+                #expect(store.authorPresentationKey(for: message) == expected)
+            }
+        }
+        if case .direct = kind {
+            #expect(store.presentationKey == .init(userID: peer, context: .directConversation))
+        } else { #expect(store.presentationKey == nil) }
+        if case .unknown = kind { #expect(store.authorPresentationContext == nil) }
+    }
+
+    @Test("missing or mismatched private identity cannot select a display context")
+    func directAuthorRequiresPeerIdentity() {
+        let actor = UserID(uuid: UUID()), peer = UserID(uuid: UUID()), room = RoomID(uuid: UUID())
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [])
+        let invalidKeys: [V2ProfileViewLookupKey?] = [nil, .init(userID: actor, context: .directConversation),
+            .init(userID: peer, context: .relationship), .init(userID: peer, context: .room(room))]
+        for key in invalidKeys {
+            let store = V2ConversationDetailStore(
+                environment: .init(userID: actor.rawValue, projections: .init(dataSource: source)),
+                context: .init(roomID: room.rawValue, kind: .direct(accountKind: .regular), presentationKey: key))
+            #expect(store.presentationKey == nil)
+            #expect(store.authorPresentationContext == nil)
+        }
     }
 
     @Test func detailStoreExposesGroupControlsOnlyForKnownGroupRooms() async {
@@ -622,7 +666,7 @@ struct V2ConversationStoreTests {
         #expect(await sender.sentMessages() == [.init(text: "陌生消息", roomID: "room-a")])
     }
 
-    @Test func attachmentOnlyMessageWaitsForUploaderThenEnqueuesOpaqueReference() async throws {
+    @Test func attachmentOnlyMessageFreezesIntentAndTransfersFileOwnership() async throws {
         let staged = V2StagedConversationAttachment(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000601")!,
             fileURL: URL(fileURLWithPath: "/tmp/v2-attachment"),
@@ -630,31 +674,32 @@ struct V2ConversationStoreTests {
             contentType: "image/png",
             byteCount: 42
         )
-        let reference = V2MediaReference(mediaID: try .init("00000000-0000-0000-0000-000000000602"))
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let sender = V2ConversationSenderFake(result: .queuedForRetry)
         let stager = V2ConversationAttachmentStagerFake(result: .success(staged))
-        let uploader = V2ConversationAttachmentUploaderFake(result: .success(reference))
+        let uploader = V2ConversationResourceSenderFake(result: .success(()))
         let store = makeConversationDetailStore(
             dataSource: source,
             sender: sender,
             userID: "current-user",
             roomID: "room-a",
             attachmentStager: stager,
-            attachmentUploader: uploader
+            resourceSender: uploader
         )
 
         await store.stageAttachment(from: URL(fileURLWithPath: "/tmp/imported-diagram.png"))
         await store.sendDraft()
 
         #expect(await uploader.uploadedAttachments() == [staged])
-        #expect(await sender.sentMessages() == [.init(text: "", media: [reference], roomID: "room-a")])
-        #expect(await stager.discardedAttachments() == [staged])
+        #expect(await sender.sentMessages().isEmpty)
+        #expect(await uploader.frozenRooms() == [try RoomID("room-a")])
+        #expect(await stager.discardedAttachments().isEmpty)
         #expect(store.attachments.isEmpty)
-        #expect(store.sendFeedback == "已安全保存，连接恢复后会重试。")
+        #expect(store.sendFeedback == "已保存发送意图，附件准备完成后自动发送。")
     }
 
-    @Test func failedAttachmentUploadRetainsTheDraftAndNeverEnqueuesMessage() async {
+    @Test(arguments: [false, true])
+    func failedResourceIntentRetainsTheDraftAndFiles(senderUnavailable: Bool) async {
         let staged = V2StagedConversationAttachment(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000611")!,
             fileURL: URL(fileURLWithPath: "/tmp/v2-attachment"),
@@ -665,14 +710,14 @@ struct V2ConversationStoreTests {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let sender = V2ConversationSenderFake(result: .accepted)
         let stager = V2ConversationAttachmentStagerFake(result: .success(staged))
-        let uploader = V2ConversationAttachmentUploaderFake(result: .failure(V2AttachmentUploadFailure.failed))
+        let uploader = V2ConversationResourceSenderFake(result: .failure(V2AttachmentUploadFailure.failed))
         let store = makeConversationDetailStore(
             dataSource: source,
             sender: sender,
             userID: "current-user",
             roomID: "room-a",
             attachmentStager: stager,
-            attachmentUploader: uploader
+            resourceSender: senderUnavailable ? nil : uploader
         )
         store.draft = "附件说明"
 
@@ -682,8 +727,9 @@ struct V2ConversationStoreTests {
         #expect(await sender.sentMessages().isEmpty)
         #expect(store.draft == "附件说明")
         #expect(store.attachments.count == 1)
-        #expect(store.attachments.first?.state == .failed)
-        #expect(store.sendFeedback == "附件上传或安全扫描未完成，请稍后重试。")
+        #expect(store.attachments.first?.state == .staged)
+        #expect(store.sendFeedback == (senderUnavailable ? "附件发送暂不可用。" : "无法保存待发送消息。"))
+        #expect(await uploader.uploadedAttachments() == (senderUnavailable ? [] : [staged]))
         #expect(await stager.discardedAttachments().isEmpty)
     }
 
@@ -698,8 +744,7 @@ struct V2ConversationStoreTests {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let sender = V2ConversationSenderFake(result: .accepted)
         let stager = V2ConversationAttachmentStagerFake(result: .success(staged))
-        let reference = V2MediaReference(mediaID: try .init("00000000-0000-0000-0000-000000000613"))
-        let uploader = V2ConversationAttachmentUploaderFake(result: .success(reference))
+        let uploader = V2ConversationResourceSenderFake(result: .success(()))
         let store = makeConversationDetailStore(
             dataSource: source,
             sender: sender,
@@ -707,7 +752,7 @@ struct V2ConversationStoreTests {
             roomID: "room-group",
             kind: .group,
             attachmentStager: stager,
-            attachmentUploader: uploader
+            resourceSender: uploader
         )
         store.draft = "附件说明"
         store.mentionHandlesText = "@member_a"
@@ -880,11 +925,9 @@ struct V2ConversationStoreTests {
         // Media IDs are deliberately URL-path-safe. The cache name must still
         // be opaque rather than exposing even a valid identifier.
         let reference = V2MediaReference(mediaID: try .init("media-identifier-must-not-be-a-path"))
-        let target = try V2ClientMediaTransferTarget(
-            url: #require(URL(string: "https://media.invalid/object")),
-            expiresAt: .distantFuture,
-            expectedByteCount: 4
-        )
+        let target = try V2ClientMediaTransferTarget(downloadPlan: .init(mode: .httpGet,
+            url: #require(URL(string: "https://media.invalid/object")), expiresAt: .distantFuture,
+            expectedByteCount: 4, checksum: .init(value: "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a")))
         let resolver = V2MediaDownloadTargetResolverFake(target: target)
         let transfer = V2MediaByteTransferFake(downloadedData: Data([1, 2, 3, 4]))
         let client = V2ClientMediaDownloadService(targetResolver: resolver, byteTransfer: transfer)
@@ -904,7 +947,8 @@ struct V2ConversationStoreTests {
 
         try Data([9, 9, 9, 9]).write(to: downloaded.fileURL)
         let replaced = try await downloader.download(reference)
-        #expect(replaced.fileURL == downloaded.fileURL)
+        #expect(replaced.fileURL != downloaded.fileURL)
+        #expect(!fileManager.fileExists(atPath: downloaded.fileURL.path))
         #expect(try Data(contentsOf: replaced.fileURL) == Data([1, 2, 3, 4]))
         #expect(!fileManager.fileExists(atPath: replaced.fileURL.deletingLastPathComponent().appendingPathComponent(".00000000-0000-0000-0000-000000000711.partial").path))
     }
@@ -914,10 +958,9 @@ struct V2ConversationStoreTests {
         let root = fileManager.temporaryDirectory
             .appendingPathComponent("v2-media-cache-cleanup-" + UUID().uuidString, isDirectory: true)
         defer { try? fileManager.removeItem(at: root) }
-        let target = try V2ClientMediaTransferTarget(
-            url: #require(URL(string: "https://media.invalid/object")),
-            expiresAt: .distantFuture
-        )
+        let target = try V2ClientMediaTransferTarget(downloadPlan: .init(mode: .httpGet,
+            url: #require(URL(string: "https://media.invalid/object")), expiresAt: .distantFuture,
+            expectedByteCount: 0, checksum: .init(value: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")))
         let downloader = try V2ForegroundConversationMediaDownloader(
             downloader: .init(
                 targetResolver: V2MediaDownloadTargetResolverFake(target: target),
@@ -941,11 +984,9 @@ struct V2ConversationStoreTests {
         let root = fileManager.temporaryDirectory
             .appendingPathComponent("v2-media-cache-capacity-" + UUID().uuidString, isDirectory: true)
         defer { try? fileManager.removeItem(at: root) }
-        let target = try V2ClientMediaTransferTarget(
-            url: #require(URL(string: "https://media.invalid/object")),
-            expiresAt: .distantFuture,
-            expectedByteCount: 4
-        )
+        let target = try V2ClientMediaTransferTarget(downloadPlan: .init(mode: .httpGet,
+            url: #require(URL(string: "https://media.invalid/object")), expiresAt: .distantFuture,
+            expectedByteCount: 4, checksum: .init(value: "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a")))
         let downloader = try V2ForegroundConversationMediaDownloader(
             downloader: .init(
                 targetResolver: V2MediaDownloadTargetResolverFake(target: target),
@@ -1253,6 +1294,10 @@ struct V2ConversationStoreTests {
         #expect(roomID == "room-direct")
         #expect(await opener.targets() == ["other-user"])
         #expect(store.directConversationFeedback == nil)
+        let detail = store.detailStore(for: "room-direct")
+        #expect(detail.presentationKey?.userID.rawValue == "other-user")
+        #expect(detail.presentationKey?.context == .directConversation)
+        #expect(detail.authorPresentationContext != nil)
     }
 
     @Test func directConversationRejectsBlankTargetBeforeNetwork() async {
@@ -1451,15 +1496,15 @@ struct V2ConversationStoreTests {
                 membershipRevision: 3,
                 actorRole: "成员",
                 members: [
-                    .init(id: "owner", role: "群主", handle: "owner_1", displayName: "群主"),
-                    .init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")
+                    .init(id: "owner", role: "群主"),
+                    .init(id: "member-a", role: "成员")
                 ],
                 nextCursor: "member-a"
             ),
             "member-a": .init(
                 membershipRevision: 3,
                 actorRole: "成员",
-                members: [.init(id: "member-b", role: "成员", handle: "member_b", displayName: "成员 B")],
+                members: [.init(id: "member-b", role: "成员")],
                 nextCursor: nil
             )
         ])
@@ -1475,8 +1520,7 @@ struct V2ConversationStoreTests {
         await store.loadGroupMembers()
 
         #expect(store.groupMembers.map(\.id) == ["owner", "member-a", "member-b"])
-        #expect(store.groupMembers.first?.displayName == "群主")
-        #expect(store.groupMembers.first?.handle == "owner_1")
+        #expect(store.groupMembers.first?.role == "群主")
         #expect(store.groupMemberRevision == 3)
         #expect(!store.canLoadMoreGroupMembers)
         #expect(store.groupMemberFeedback == nil)
@@ -1488,7 +1532,7 @@ struct V2ConversationStoreTests {
         let reader = V2SuspendingGroupMemberDirectory(page: .init(
             membershipRevision: 3,
             actorRole: "成员",
-            members: [.init(id: "owner", role: "群主", handle: "owner_1", displayName: "群主")],
+            members: [.init(id: "owner", role: "群主")],
             nextCursor: nil
         ))
         let store = makeConversationDetailStore(
@@ -1520,7 +1564,7 @@ struct V2ConversationStoreTests {
             .success(.init(
                 membershipRevision: 3,
                 actorRole: "群主",
-                members: [.init(id: "old-owner", role: "群主", handle: "old_owner", displayName: "旧群主")],
+                members: [.init(id: "old-owner", role: "群主")],
                 nextCursor: "opaque-revision-3"
             )),
             .failure(.server(code: "REVISION_CONFLICT", retryable: false, retryAfterSeconds: 0, currentRevision: 4)),
@@ -1528,8 +1572,8 @@ struct V2ConversationStoreTests {
                 membershipRevision: 4,
                 actorRole: "群主",
                 members: [
-                    .init(id: "current-owner", role: "群主", handle: "current_owner", displayName: "当前群主"),
-                    .init(id: "current-member", role: "成员", handle: "current_member", displayName: "当前成员")
+                    .init(id: "current-owner", role: "群主"),
+                    .init(id: "current-member", role: "成员")
                 ],
                 nextCursor: nil
             ))
@@ -1556,7 +1600,7 @@ struct V2ConversationStoreTests {
     @Test(arguments: ["conflict", "changed-page", "FORBIDDEN", "NOT_FOUND", "reset", "network"])
     func groupMemberInvalidationClearsOldManagementState(scenario: String) async {
         let first = V2GroupMemberPage(membershipRevision: 3, actorRole: "管理员",
-            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
+            members: [.init(id: "member-a", role: "成员")],
             nextCursor: "revision-3")
         var results: [Result<V2GroupMemberPage, V2RealtimeTransportError>] = [.success(first)]
         if scenario == "conflict" {
@@ -1589,7 +1633,7 @@ struct V2ConversationStoreTests {
 
     @Test func groupMemberRefreshDiscardsLateRoleAndKeepsOneRequestOwner() async {
         let reader = V2SuspendingGroupMemberDirectory(page: .init(membershipRevision: 3, actorRole: "管理员",
-            members: [.init(id: "old-member", role: "管理员", handle: "old_member", displayName: "旧成员")], nextCursor: "old"),
+            members: [.init(id: "old-member", role: "管理员")], nextCursor: "old"),
             refreshedPage: .init(membershipRevision: 4, actorRole: "成员", members: [], nextCursor: nil))
         let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
             sender: nil, userID: "current-user", roomID: "room-group", kind: .group, groupMemberDirectory: reader)
@@ -1612,7 +1656,7 @@ struct V2ConversationStoreTests {
         let reader = V2ScriptedGroupMemberDirectory(results: [
             .success(.init(membershipRevision: 3, actorRole: "成员", members: [], nextCursor: "hidden-scanned")),
             .success(.init(membershipRevision: 3, actorRole: "成员", members: [
-                .init(id: "member-b", role: "成员", handle: "member_b", displayName: "成员 B")], nextCursor: nil))
+                .init(id: "member-b", role: "成员")], nextCursor: nil))
         ])
         let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
             sender: nil, userID: "current-user", roomID: "room-group", kind: .group, groupMemberDirectory: reader)
@@ -1627,8 +1671,8 @@ struct V2ConversationStoreTests {
 
     @Test(arguments: ["duplicate", "stalled"])
     func groupMemberInvalidPageDoesNotLeavePartialRoster(scenario: String) async {
-        let member = V2GroupMemberItem(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")
-        let next = V2GroupMemberItem(id: "member-b", role: "成员", handle: "member_b", displayName: "成员 B")
+        let member = V2GroupMemberItem(id: "member-a", role: "成员")
+        let next = V2GroupMemberItem(id: "member-b", role: "成员")
         let reader = V2ScriptedGroupMemberDirectory(results: [
             .success(.init(membershipRevision: 3, actorRole: "管理员", members: [member], nextCursor: "first")),
             .success(.init(membershipRevision: 3, actorRole: "管理员",
@@ -1651,7 +1695,7 @@ struct V2ConversationStoreTests {
         let page = V2GroupMemberPage(
             membershipRevision: 8,
             actorRole: "群主",
-            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
+            members: [.init(id: "member-a", role: "成员")],
             nextCursor: nil
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
@@ -1681,7 +1725,7 @@ struct V2ConversationStoreTests {
         let page = V2GroupMemberPage(
             membershipRevision: 8,
             actorRole: "群主",
-            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
+            members: [.init(id: "member-a", role: "成员")],
             nextCursor: nil
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
@@ -1717,7 +1761,7 @@ struct V2ConversationStoreTests {
         let page = V2GroupMemberPage(
             membershipRevision: 8,
             actorRole: "群主",
-            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
+            members: [.init(id: "member-a", role: "成员")],
             nextCursor: nil
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
@@ -1749,7 +1793,7 @@ struct V2ConversationStoreTests {
         let page = V2GroupMemberPage(
             membershipRevision: 8,
             actorRole: "群主",
-            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
+            members: [.init(id: "member-a", role: "成员")],
             nextCursor: nil
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
@@ -1783,7 +1827,7 @@ struct V2ConversationStoreTests {
         let page = V2GroupMemberPage(
             membershipRevision: 8,
             actorRole: "管理员",
-            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
+            members: [.init(id: "member-a", role: "成员")],
             nextCursor: nil
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
@@ -1815,7 +1859,7 @@ struct V2ConversationStoreTests {
         let page = V2GroupMemberPage(
             membershipRevision: 8,
             actorRole: "群主",
-            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
+            members: [.init(id: "member-a", role: "成员")],
             nextCursor: nil
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
@@ -1844,7 +1888,7 @@ struct V2ConversationStoreTests {
         let page = V2GroupMemberPage(
             membershipRevision: 8,
             actorRole: "群主",
-            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
+            members: [.init(id: "member-a", role: "成员")],
             nextCursor: nil
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
@@ -1881,7 +1925,7 @@ struct V2ConversationStoreTests {
         let page = V2GroupMemberPage(
             membershipRevision: 8,
             actorRole: "管理员",
-            members: [.init(id: "member-a", role: "成员", handle: "member_a", displayName: "成员 A")],
+            members: [.init(id: "member-a", role: "成员")],
             nextCursor: nil
         )
         let reader = V2GroupMemberDirectoryFake(pages: [nil: page])
@@ -2640,6 +2684,116 @@ struct V2ConversationStoreTests {
     }
 }
 
+@MainActor
+extension V2ConversationStoreTests {
+    @Test("receipt reset waits for a cancelled transport and cannot publish the old page", arguments: [false, true])
+    func readReceiptResetFencesOldPage(sameMessage: Bool) async throws {
+        let room = RoomID(uuid: UUID()), gate = ReceiptPageTestGate()
+        let reader = ReceiptPageTestReader(gate: gate)
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            sender: nil, groupReadReceiptReader: reader, userID: "current-user", roomID: room.rawValue, kind: .group)
+        let firstMessage = receiptTestMessage(), secondMessage = sameMessage ? firstMessage : receiptTestMessage()
+        let first = Task { await store.loadGroupReadReceipts(for: firstMessage, reset: true) }
+        await gate.entered()
+        let second = Task { await store.loadGroupReadReceipts(for: secondMessage, reset: true) }
+        await gate.cancelled()
+        #expect(store.groupReadReceiptPage == nil)
+        #expect(await reader.calls == 1)
+        #expect(store.isLoadingGroupReadReceipts)
+        await gate.release()
+        await first.value; await second.value
+        #expect(await reader.calls == 2)
+        #expect(store.groupReadReceiptPage?.messageID.rawValue == secondMessage.id)
+        #expect(store.groupReadReceiptPage?.readers == [.init(userID: reader.currentUser)])
+        #expect(!store.isLoadingGroupReadReceipts)
+        #expect(store.groupReadReceiptFeedback == nil)
+    }
+
+    @Test("closing a receipt sheet drains its non-cooperative read and discards its result")
+    func readReceiptCancellationDrains() async throws {
+        let gate = ReceiptPageTestGate(), reader = ReceiptPageTestReader(gate: gate)
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            sender: nil, groupReadReceiptReader: reader, userID: "current-user", roomID: UUID().uuidString, kind: .group)
+        let load = Task { await store.loadGroupReadReceipts(for: receiptTestMessage(), reset: true) }
+        await gate.entered()
+        load.cancel()
+        await gate.cancelled()
+        #expect(store.isLoadingGroupReadReceipts)
+        await gate.release()
+        await load.value
+        #expect(!store.isLoadingGroupReadReceipts)
+        #expect(store.groupReadReceiptPage == nil)
+        #expect(store.groupReadReceiptFeedback == nil)
+    }
+
+    @Test("reader retention is bounded and returning to the first page resets the window")
+    func readReceiptWindowIsBounded() async throws {
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            sender: nil, groupReadReceiptReader: ReceiptWindowTestReader(), userID: "current-user",
+            roomID: UUID().uuidString, kind: .group)
+        let message = receiptTestMessage()
+        for index in 0..<11 { await store.loadGroupReadReceipts(for: message, reset: index == 0) }
+        #expect(store.groupReadReceiptPage?.readers.count == 1_000)
+        #expect(store.hasEarlierGroupReadReceipts)
+        #expect(store.groupReadReceiptPage?.readers.first?.userID.rawValue.hasSuffix("000000000101") == true)
+        #expect(store.groupReadReceiptPage?.nextCursor == nil)
+        await store.loadGroupReadReceipts(for: message, reset: true)
+        #expect(store.groupReadReceiptPage?.readers.count == 100)
+        #expect(!store.hasEarlierGroupReadReceipts)
+        #expect(store.groupReadReceiptPage?.readers.first?.userID.rawValue.hasSuffix("000000000001") == true)
+    }
+
+    @Test("directory IDs produce only a group-scoped profile lookup")
+    func groupDirectoryProfileKey() throws {
+        let room = RoomID(uuid: UUID()), target = UserID(uuid: UUID())
+        for kind in [V2ConversationKind.group, .direct(accountKind: .regular), .unknown] {
+            let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+                sender: nil, userID: "current-user", roomID: room.rawValue, kind: kind)
+            #expect(store.groupPresentationKey(for: target) == (kind == .group ? .init(userID: target, context: .room(room)) : nil))
+        }
+    }
+
+    private func receiptTestMessage() -> V2ConversationMessageItem {
+        .init(id: UUID().uuidString, revision: 1, text: "Message", createdAt: .now, isOutgoing: true, isWithdrawn: false)
+    }
+}
+
+private actor ReceiptPageTestGate {
+    private let starts = AsyncStream<Void>.makeStream(), cancellations = AsyncStream<Void>.makeStream()
+    private var continuation: CheckedContinuation<Void, Never>?
+    func wait() async {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation = $0; starts.continuation.yield(()) }
+        } onCancel: { cancellations.continuation.yield(()) }
+    }
+    func entered() async { var iterator = starts.stream.makeAsyncIterator(); _ = await iterator.next() }
+    func cancelled() async { var iterator = cancellations.stream.makeAsyncIterator(); _ = await iterator.next() }
+    func release() { continuation?.resume(); continuation = nil }
+}
+
+private actor ReceiptPageTestReader: V2GroupReadReceiptReading {
+    let currentUser = UserID(uuid: UUID()), oldUser = UserID(uuid: UUID())
+    let gate: ReceiptPageTestGate
+    private(set) var calls = 0
+    init(gate: ReceiptPageTestGate) { self.gate = gate }
+    func readers(roomID: String, messageID: String, cursor: String?) async throws -> V2ReadReceiptReadersPage {
+        calls += 1
+        let first = calls == 1
+        if first { await gate.wait() }
+        return try .init(roomID: .init(roomID), messageID: .init(messageID),
+            readers: [.init(userID: first ? oldUser : currentUser)], nextCursor: nil)
+    }
+}
+
+private struct ReceiptWindowTestReader: V2GroupReadReceiptReading {
+    func readers(roomID: String, messageID: String, cursor: String?) throws -> V2ReadReceiptReadersPage {
+        let offset = cursor.flatMap(Int.init) ?? 0
+        return try .init(roomID: .init(roomID), messageID: .init(messageID), readers: (1...100).map { index in
+            .init(userID: try .init(String(format: "00000000-0000-0000-0000-%012d", offset + index)))
+        }, nextCursor: offset < 1_000 ? String(offset + 100) : nil)
+    }
+}
+
 /// Test-only composition helpers keep individual tests focused on the one
 /// capability they replace while production uses the grouped feature
 /// environment directly.
@@ -2673,7 +2827,7 @@ private func makeConversationDetailStore(
     moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil,
     publicIdentityResolver: (any V2ConversationPublicIdentityResolving)? = nil,
     attachmentStager: (any V2ConversationAttachmentStaging)? = nil,
-    attachmentUploader: (any V2ConversationAttachmentUploading)? = nil,
+    resourceSender: (any V2DurableConversationSending)? = nil,
     mediaDownloader: (any V2ConversationMediaDownloading)? = nil,
     projectionChangeNotifier: V2ProjectionChangeNotifier? = nil,
     activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)? = nil,
@@ -2712,7 +2866,7 @@ private func makeConversationDetailStore(
         discovery: .init(publicIdentityResolver: publicIdentityResolver),
         media: .init(
             attachmentStager: attachmentStager,
-            attachmentUploader: attachmentUploader,
+            resourceSender: resourceSender,
             downloader: mediaDownloader
         ),
         runtime: .init(
@@ -2762,7 +2916,7 @@ private func makeConversationListStore(
     groupMemberMuter: (any V2GroupMemberMuting)? = nil,
     moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil,
     attachmentStager: (any V2ConversationAttachmentStaging)? = nil,
-    attachmentUploader: (any V2ConversationAttachmentUploading)? = nil,
+    resourceSender: (any V2DurableConversationSending)? = nil,
     mediaDownloader: (any V2ConversationMediaDownloading)? = nil,
     projectionChangeNotifier: V2ProjectionChangeNotifier? = nil,
     activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)? = nil
@@ -2798,7 +2952,7 @@ private func makeConversationListStore(
         ),
         media: .init(
             attachmentStager: attachmentStager,
-            attachmentUploader: attachmentUploader,
+            resourceSender: resourceSender,
             downloader: mediaDownloader
         ),
         runtime: .init(
@@ -3262,18 +3416,29 @@ private actor V2ConversationAttachmentStagerFake: V2ConversationAttachmentStagin
     func discardedAttachments() -> [V2StagedConversationAttachment] { discarded }
 }
 
-private actor V2ConversationAttachmentUploaderFake: V2ConversationAttachmentUploading {
-    private let result: Result<V2MediaReference, Error>
-    private var uploads: [V2StagedConversationAttachment] = []
-
-    init(result: Result<V2MediaReference, Error>) { self.result = result }
-
-    func upload(_ attachment: V2StagedConversationAttachment) throws -> V2MediaReference {
-        uploads.append(attachment)
-        return try result.get()
+private actor V2ConversationResourceSenderFake: V2DurableConversationSending {
+    private let result: Result<Void, Error>
+    private var attachments: [V2StagedConversationAttachment] = []
+    private var rooms: [RoomID] = []
+    init(result: Result<Void, Error>) { self.result = result }
+    func freezeSend(text: String, mentions: [V2MentionTarget], replyTo: V2MessageReplyReference?,
+                    roomID: RoomID, attachments: [V2StagedConversationAttachment]) throws {
+        self.attachments += attachments
+        rooms.append(roomID)
+        try result.get()
     }
-
-    func uploadedAttachments() -> [V2StagedConversationAttachment] { uploads }
+    func uploadedAttachments() -> [V2StagedConversationAttachment] { attachments }
+    func frozenRooms() -> [RoomID] { rooms }
+    func upload(_ attachment: V2StagedConversationAttachment, usage: V2ResourceUsage) throws -> V2MediaReference {
+        Issue.record("chat attachments must use a room-bound send intent")
+        throw V2AttachmentUploadFailure.failed
+    }
+    func copyAttachments(sources: [V2ResourceImportSource], to room: RoomID) throws { throw V2AttachmentUploadFailure.failed }
+    func pending(in roomID: RoomID) -> [V2DurableConversationSendService.Pending] { [] }
+    func retry(intentID: UUID) throws { throw V2AttachmentUploadFailure.failed }
+    func cancel(intentID: UUID) throws { throw V2AttachmentUploadFailure.failed }
+    func startRecovery() {}
+    func close() {}
 }
 
 private enum V2ConversationMediaDownloadFailure: Error, Sendable {

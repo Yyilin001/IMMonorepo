@@ -3,7 +3,7 @@ import IMV2Core
 
 /// 资料补全所依赖的持久化边界。
 ///
-/// 界面与功能存储依赖 `V2ProfileRepository`，而不直接依赖 GRDB 行。
+/// 仅提供本地内容事实；界面展示仍须取得当前上下文的限期许可。
 public protocol V2ClientProfileProjectionStore: Sendable {
     /// 读取指定用户的资料视图。
     ///
@@ -52,6 +52,7 @@ public protocol V2ClientProfileProjectionStore: Sendable {
 public actor V2ProfileRepository {
     private let store: any V2ClientProfileProjectionStore
     private let reader: any V2ProfileViewReading
+    private let operations = V2ResourceOperationScope(limit: 4)
 
     /// 组合本地投影存储与远端读取实现。
     ///
@@ -69,7 +70,7 @@ public actor V2ProfileRepository {
     /// - Returns: 资料视图；本地不存在时返回 `nil`。
     /// - Throws: 持久化失败时抛出。
     public func profileView(userID: UserID) async throws -> V2ProfileView? {
-        try await store.profileView(userID: userID)
+        try await operations.run { [store] in try await store.profileView(userID: userID) }
     }
 
     /// 仅补全请求中给出的上下文。
@@ -82,6 +83,14 @@ public actor V2ProfileRepository {
     ///   ``V2ProfileRepositoryError/invalidResponse``；其余失败来自远端读取或本地存储。
     @discardableResult
     public func hydrate(_ keys: [V2ProfileViewLookupKey]) async throws -> Set<UserID> {
+        try await operations.run { [self] in try await hydrateAdmitted(keys) }
+    }
+
+    private func hydrateAdmitted(_ keys: [V2ProfileViewLookupKey]) async throws -> Set<UserID> {
+        try Task.checkCancellation()
+        guard keys.count <= V2ProfileViewLookupLimits.maximumKeys, Set(keys).count == keys.count else {
+            throw V2ProfileViewClientError.invalidRequest
+        }
         guard !keys.isEmpty else { return [] }
         let results = try await reader.readProfileViews(keys)
         guard results.count == keys.count,
@@ -114,13 +123,17 @@ public actor V2ProfileRepository {
     /// - Throws: 与 ``hydrate(_:)`` 相同的错误。
     @discardableResult
     public func refreshPendingInvalidations(limit: Int = V2ProfileViewLookupLimits.maximumKeys) async throws -> Set<UserID> {
-        let invalidations = try await store.pendingProfileInvalidations(limit: limit)
-        return try await hydrate(invalidations.map {
-            .init(userID: $0.userID, context: .directConversation)
-        })
+        guard (1...V2ProfileViewLookupLimits.maximumKeys).contains(limit) else { throw V2ProfileViewClientError.invalidRequest }
+        return try await operations.run { [self, store] in
+            let invalidations = try await store.pendingProfileInvalidations(limit: limit)
+            try Task.checkCancellation()
+            return try await hydrateAdmitted(invalidations.map {
+                .init(userID: $0.userID, context: .directConversation)
+            })
+        }
     }
 
-    /// 结合本地资料与展示上下文解析出可展示的资料。
+    /// 结合本地内容解析检索/路由线索，不授予界面展示权限。
     ///
     /// - Parameters:
     ///   - userID: 目标用户。
@@ -137,12 +150,17 @@ public actor V2ProfileRepository {
     ) async throws -> V2ResolvedProfile {
         V2ProfileResolver.resolve(
             userID: userID,
-            profile: try await store.profileView(userID: userID),
+            profile: try await profileView(userID: userID),
             alias: alias,
             groupMember: groupMember,
             surface: surface
         )
     }
+
+    /// Terminal: drain both remote refresh and any admitted projection write
+    /// before the account database is closed. Shared presentations have their
+    /// own owner and are closed separately after this operation scope drains.
+    public func close() async { await operations.close() }
 }
 
 /// 一次资料查询结果批次的汇总。

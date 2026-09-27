@@ -7,37 +7,41 @@ import IMV2Core
 extension GRDBV2LocalSyncStore {
     public func enqueue(_ command: V2PendingMessageCommand) throws {
         try databasePool.write { db in
-            guard (!command.text.isEmpty || !command.media.isEmpty),
-                  command.media.count <= V2MessageCommandLimits.maxMediaAttachments,
-                  Set(command.media).count == command.media.count,
-                  command.mentions.count <= V2MessageCommandLimits.maxMentions,
-                  Set(command.mentions).count == command.mentions.count,
-                  command.state == .pending, command.attemptCount == 0,
-                  command.acceptedMessageID == nil, command.acceptedRoomSequence == nil, command.terminalCode == nil
-            else { throw V2ClientCommandError.commandConflict }
-            let mediaIDs = try Self.encodeMedia(command.media)
-            let mentionTargets = try Self.encodeMentions(command.mentions)
-            let entities = try Self.encodeEntities(command.entities, text: command.text)
-            let replyToMessageID = command.replyTo?.messageID.rawValue
-            if let existing = try Row.fetchOne(db, sql: "SELECT room_id, text, media_ids, mention_targets, entities, reply_to_message_id FROM v2_pending_message_commands WHERE client_message_id = ?", arguments: [command.clientMessageID.rawValue]) {
-                let roomID: String = existing["room_id"]
-                let text: String = existing["text"]
-                let existingMedia: String = existing["media_ids"]
-                let existingMentions: String = existing["mention_targets"]
-                let existingEntities: String = existing["entities"]
-                let existingReplyToMessageID: String? = existing["reply_to_message_id"]
-                guard roomID == command.roomID.rawValue, text == command.text, existingMedia == mediaIDs, existingMentions == mentionTargets, existingEntities == entities, existingReplyToMessageID == replyToMessageID else { throw V2ClientCommandError.commandConflict }
-                return
-            }
-            try db.execute(
-                sql: """
-                INSERT INTO v2_pending_message_commands
-                    (client_message_id, room_id, text, media_ids, mention_targets, entities, reply_to_message_id, state, attempt_count, next_attempt_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
-                """,
-                arguments: [command.clientMessageID.rawValue, command.roomID.rawValue, command.text, mediaIDs, mentionTargets, entities, replyToMessageID, try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)]
-            )
+            try Self.enqueueMessage(command, db: db)
         }
+    }
+
+    static func enqueueMessage(_ command: V2PendingMessageCommand, db: Database) throws {
+        guard (!command.text.isEmpty || !command.media.isEmpty),
+              command.media.count <= V2MessageCommandLimits.maxMediaAttachments,
+              Set(command.media).count == command.media.count,
+              command.mentions.count <= V2MessageCommandLimits.maxMentions,
+              Set(command.mentions).count == command.mentions.count,
+              command.state == .pending, command.attemptCount == 0,
+              command.acceptedMessageID == nil, command.acceptedRoomSequence == nil, command.terminalCode == nil
+        else { throw V2ClientCommandError.commandConflict }
+        let mediaIDs = try Self.encodeMedia(command.media)
+        let mentionTargets = try Self.encodeMentions(command.mentions)
+        let entities = try Self.encodeEntities(command.entities, text: command.text)
+        let replyToMessageID = command.replyTo?.messageID.rawValue
+        if let existing = try Row.fetchOne(db, sql: "SELECT room_id, text, media_ids, mention_targets, entities, reply_to_message_id FROM v2_pending_message_commands WHERE client_message_id = ?", arguments: [command.clientMessageID.rawValue]) {
+            let roomID: String = existing["room_id"]
+            let text: String = existing["text"]
+            let existingMedia: String = existing["media_ids"]
+            let existingMentions: String = existing["mention_targets"]
+            let existingEntities: String = existing["entities"]
+            let existingReplyToMessageID: String? = existing["reply_to_message_id"]
+            guard roomID == command.roomID.rawValue, text == command.text, existingMedia == mediaIDs, existingMentions == mentionTargets, existingEntities == entities, existingReplyToMessageID == replyToMessageID else { throw V2ClientCommandError.commandConflict }
+            return
+        }
+        try db.execute(
+            sql: """
+            INSERT INTO v2_pending_message_commands
+                (client_message_id, room_id, text, media_ids, mention_targets, entities, reply_to_message_id, state, attempt_count, next_attempt_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+            """,
+            arguments: [command.clientMessageID.rawValue, command.roomID.rawValue, command.text, mediaIDs, mentionTargets, entities, replyToMessageID, try Self.commandRetryTimestamp(command.nextAttemptAt), try Self.commandRetryTimestamp(command.nextAttemptAt)]
+        )
     }
 
     public func nextReadyMessage(now: Date) throws -> V2PendingMessageCommand? {
@@ -98,8 +102,17 @@ extension GRDBV2LocalSyncStore {
         try databasePool.write { db in
             let cutoffValue = try Self.commandRetryTimestamp(cutoff)
             for table in Self.terminalCommandTables where table != "v2_pending_group_room_creations" {
+                let recoveryProtection = table == "v2_pending_message_commands"
+                    ? """
+                        AND NOT EXISTS (SELECT 1 FROM v2_message_operation_recoveries recovery WHERE recovery.client_message_id = v2_pending_message_commands.client_message_id)
+                        AND NOT EXISTS (SELECT 1 FROM v2_send_intents i WHERE i.client_message_id=v2_pending_message_commands.client_message_id
+                            AND i.stage='handedOff' AND v2_pending_message_commands.state='rejected')
+                        AND NOT EXISTS (SELECT 1 FROM v2_send_intents i JOIN v2_send_intent_dependencies d USING(intent_id)
+                            JOIN v2_resource_transfer_jobs j USING(job_id)
+                            WHERE i.client_message_id=v2_pending_message_commands.client_message_id AND j.staging_released=0)
+                        """ : ""
                 try db.execute(
-                    sql: "DELETE FROM \(table) WHERE state <> 'pending' AND terminal_at <= ?",
+                    sql: "DELETE FROM \(table) WHERE state <> 'pending' AND terminal_at <= ? \(recoveryProtection)",
                     arguments: [cutoffValue]
                 )
             }
@@ -139,6 +152,10 @@ extension GRDBV2LocalSyncStore {
             let cutoff = now.addingTimeInterval(-V2IdempotencyPolicy.maximumClientRetryAge)
             let cutoffValue = try Self.commandRetryTimestamp(cutoff)
             guard cutoffValue < nowValue else { throw V2ClientCommandError.commandConflict }
+            try db.execute(sql: """
+                INSERT OR IGNORE INTO v2_message_operation_recoveries(client_message_id,next_attempt_at)
+                SELECT client_message_id,? FROM v2_pending_message_commands WHERE state='pending' AND created_at <= ?
+                """, arguments: [nowValue, cutoffValue])
             for table in Self.terminalCommandTables {
                 try db.execute(
                     sql: "UPDATE \(table) SET state = 'rejected', terminal_code = ?, terminal_at = ? WHERE state = 'pending' AND created_at <= ?",

@@ -39,7 +39,8 @@ public struct V2RoomAdministrationDomainExecutor: Sendable {
         self.membership = .init(database: database, activationScope: scope)
         self.capabilities = .init(database: database, activationScope: scope)
         self.moderation = .init(database: database, activationScope: scope)
-        self.presentation = .init(database: database, activationScope: scope, now: now)
+        self.presentation = .init(database: database, activationScope: scope,
+            nicknameCapacityProfile: capacityProfile, makeEventID: makeEventID, now: now)
         self.makeEventID = makeEventID
         self.now = now
     }
@@ -52,6 +53,11 @@ public struct V2RoomAdministrationDomainExecutor: Sendable {
     public func executeUser(_ command: V2RoomAdministrationCommand) async throws -> V2RoomAdministrationResult {
         try requireRoom(command.roomID)
         switch command {
+        case .groupAvatarRecovery(let request):
+            return .groupAvatarRecovery(try await capabilities.recoverAvatar(actorUserID: request.actorUserID, request: request.request))
+        case .groupAvatar(let request):
+            return .groupAvatar(.init(try await capabilities.setAvatar(actorUserID: request.actorUserID,
+                command: request.command, capacityProfile: capacityProfile, eventID: makeEventID(), now: now())))
         case .membership(let request):
             let domain = try request.domainCommand()
             let snapshot = try await membershipIdentities.snapshot(

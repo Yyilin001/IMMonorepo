@@ -197,4 +197,5 @@ public enum V2RoomMessagingResult: Codable, Equatable, Sendable {
     case edit(V2ActorMessageEditResultWire)
     case withdraw(V2ActorMessageWithdrawalResultWire)
     case reaction(V2ActorMessageReactionResultWire)
+    case recovery(V2MessageOperationRecoveryResult)
 }

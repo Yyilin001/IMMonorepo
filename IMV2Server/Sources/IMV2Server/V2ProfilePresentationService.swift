@@ -20,7 +20,7 @@ public protocol V2ProfilePresentationManaging: Sendable {
     ///   - ownerUserID: 拥有该备注的用户。
     ///   - targetUserID: 被备注的目标用户。
     ///   - operationID: 该次操作的稳定标识，用于幂等重试。
-    ///   - expectedRevision: 期望的当前修订，`nil` 表示不校验。
+    ///   - expectedRevision: 期望的当前修订，`nil` 表示此前不存在该记录。
     ///   - remarkName: 新的备注名；传 `nil` 表示清除。
     /// - Returns: 写入后的备注记录。
     /// - Throws: 修订冲突、载荷不匹配或存储失败时抛出。
@@ -41,7 +41,7 @@ public protocol V2ProfilePresentationManaging: Sendable {
     ///   - actorUserID: 发起更新的成员。
     ///   - roomID: 目标群组房间。
     ///   - operationID: 该次操作的稳定标识，用于幂等重试。
-    ///   - expectedRevision: 期望的当前修订，`nil` 表示不校验。
+    ///   - expectedRevision: 期望的当前修订，`nil` 表示此前不存在该记录。
     ///   - nickname: 新的群昵称；传 `nil` 表示清除。
     /// - Returns: 更新后的群成员展示。
     /// - Throws: 修订冲突、载荷不匹配或存储失败时抛出。
@@ -65,7 +65,8 @@ public struct V2ContactAliasPage: Equatable, Sendable {
     }
 }
 
-/// 群昵称展示的一页结果。
+/// 房间权威内部的昵称候选页，不代表控制域资料可见性或展示授权。
+/// HTTP 必须再次经过 V2ResourceProfilePresentationService，不得直接返回本值。
 public struct V2GroupNicknamePage: Equatable, Sendable {
     /// 本页群成员展示记录。
     public let values: [V2GroupMemberPresentation]

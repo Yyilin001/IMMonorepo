@@ -111,6 +111,7 @@ struct V2PreparedGroupEventCommandContext: Sendable {
     let maximumExpansionRatio: Int
     /// 可复用编码页面的共享缓存。
     let cache: V2PreparedGroupEventPageCache
+    var captureAuthorSample: Bool = false
 }
 
 /// 当前有效认证连接的版本与压缩协商快照。
@@ -161,6 +162,7 @@ struct V2GatewaySessionExchange: Sendable {
     let response: V2Frame
     /// 明确的终止认证原因；传输层应先发送关联拒绝响应，再结束连接。
     var terminalAuthenticationError: V2GatewayAuthenticationError? = nil
+    var authorSample: V2AuthorPresentationPageSample? = nil
 }
 
 /// 会话内部生成的响应及可要求传输层在发送后终止连接的认证错误。
@@ -171,6 +173,7 @@ private struct V2GatewaySessionResponse: Sendable {
     let frame: V2Frame
     /// 明确的终止认证原因；传输层应先发送关联拒绝响应，再结束连接。
     var terminalAuthenticationError: V2GatewayAuthenticationError? = nil
+    var authorSample: V2AuthorPresentationPageSample? = nil
 }
 
 /// 管理单条 Gateway 连接的握手、认证、请求关联与响应编码。
@@ -209,6 +212,8 @@ public actor V2GatewaySession {
     private var negotiatedFrameCompression: V2NegotiatedFrameCompression?
     /// 握手中可选绑定的设备，认证时若存在则必须匹配。
     private var helloDeviceID: DeviceID?
+    private let supportsAuthorPresentationDelta: Bool
+    private var authorPresentationStreamID: UUID?
 
     /// 创建尚未握手的 Gateway 会话，不在初始化时执行认证或网络操作。
     ///
@@ -223,6 +228,7 @@ public actor V2GatewaySession {
     ///   - compressionThresholdBytes: 启用压缩的大小阈值，必须非负。
     ///   - maximumCompressionExpansionRatio: 最大解压扩展比，必须大于零。
     ///   - preparedGroupEventPageCache: 可选的共享群事件页面缓存。
+    ///   - supportsAuthorPresentationDelta: 仅在分发器、授权 reader 与可选 writer 完整组装后启用，默认关闭。
     ///   - commandAdmission: 已认证命令的准入策略。
     ///   - now: 可注入的服务器墙上时钟。
     ///
@@ -238,6 +244,7 @@ public actor V2GatewaySession {
         compressionThresholdBytes: Int = V2ServerProtobufFrameCodec.defaultCompressionThresholdBytes,
         maximumCompressionExpansionRatio: Int = V2ZlibFrameCompression.defaultMaximumExpansionRatio,
         preparedGroupEventPageCache: V2PreparedGroupEventPageCache? = nil,
+        supportsAuthorPresentationDelta: Bool = false,
         commandAdmission: any V2AuthenticatedGatewayCommandAdmitting,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
@@ -256,6 +263,7 @@ public actor V2GatewaySession {
         self.maximumCompressionExpansionRatio = maximumCompressionExpansionRatio
         self.preparedGroupEventPageCache = preparedGroupEventPageCache
         self.commandAdmission = commandAdmission
+        self.supportsAuthorPresentationDelta = supportsAuthorPresentationDelta
         self.now = now
     }
 
@@ -270,7 +278,8 @@ public actor V2GatewaySession {
     func receive(
         _ frame: V2Frame,
         handler: any V2GatewayCommandHandler,
-        originatingConnectionID: UUID? = nil
+        originatingConnectionID: UUID? = nil,
+        captureAuthorSample: Bool = false
     ) async throws -> V2GatewaySessionExchange {
         let envelope = try decode(frame)
         let response: V2GatewaySessionResponse
@@ -280,7 +289,8 @@ public actor V2GatewaySession {
                 frame,
                 envelope: envelope,
                 handler: handler,
-                originatingConnectionID: originatingConnectionID
+                originatingConnectionID: originatingConnectionID,
+                captureAuthorSample: captureAuthorSample
             )
         default:
             response = try await receiveBootstrap(frame, envelope: envelope)
@@ -289,7 +299,8 @@ public actor V2GatewaySession {
             request: envelope,
             responseEnvelope: response.envelope,
             response: response.frame,
-            terminalAuthenticationError: response.terminalAuthenticationError
+            terminalAuthenticationError: response.terminalAuthenticationError,
+            authorSample: response.authorSample
         )
     }
 
@@ -341,6 +352,11 @@ public actor V2GatewaySession {
             response.serverHello.selectedCapabilityProfile = capabilityProfile
             response.serverHello.serverTimeMs = clock.milliseconds
             response.serverHello.selectedFrameCompression = negotiatedFrameCompression == .zlib ? .zlib : .unspecified
+            if selected >= 31, supportsAuthorPresentationDelta, hello.supportsAuthorPresentationDelta,
+               helloDeviceID?.uuidValue != nil {
+                authorPresentationStreamID = UUID()
+                response.serverHello.authorPresentationStreamID = authorPresentationStreamID!.uuidString
+            }
             return try .init(
                 envelope: response,
                 frame: V2ServerProtobufFrameCodec.encode(response, frameVersion: selected)
@@ -393,6 +409,7 @@ public actor V2GatewaySession {
             response.authenticated.deviceID = deviceID.rawValue
             response.authenticated.selectedCapabilityProfile = capabilityProfile
             response.authenticated.selectedFrameCompression = negotiatedFrameCompression == .zlib ? .zlib : .unspecified
+            response.authenticated.authorPresentationStreamID = authorPresentationStreamID?.uuidString ?? ""
             return try .init(
                 envelope: response,
                 frame: V2ServerProtobufFrameCodec.encode(response, frameVersion: version)
@@ -420,6 +437,36 @@ public actor V2GatewaySession {
             protocolVersion: connection.version,
             compression: negotiatedFrameCompression
         )
+    }
+
+    /// Negotiation is usable only while this exact authenticated session is live.
+    func authenticatedAuthorPresentationStreamID() -> UUID? {
+        guard currentAuthenticatedConnection() != nil else { return nil }
+        return authorPresentationStreamID
+    }
+
+    /// Capture the current authentication expiry check for actual socket enqueue.
+    /// Page/connection revocation is separately fenced by the transport gate.
+    func authorPresentationSessionCheck() -> (@Sendable () -> Bool)? {
+        guard currentAuthenticatedConnection() != nil, authorPresentationStreamID != nil else { return nil }
+        let expiry = authenticatedSessionExpiresAt
+        return { [now] in expiry.map { $0 > now() } ?? true }
+    }
+
+    /// Encode an optional supplement independently of shared message frames.
+    /// The transport still checks its generation/view/deadline at actual enqueue.
+    func authorPresentationFrame(_ payload: Data) throws -> V2Frame? {
+        guard let connection = currentAuthenticatedConnection(), let streamID = authorPresentationStreamID else { return nil }
+        let delta = try V2AuthorPresentationDelta.decode(payload)
+        guard delta.streamID == streamID, delta.actorUserID == connection.identity.userID,
+              delta.deviceID == connection.identity.deviceID else { throw V2GatewaySessionError.unsupportedCommand }
+        var envelope = IMV2Envelope()
+        envelope.protocolVersion = UInt32(connection.version)
+        envelope.authorPresentationDelta = .init()
+        envelope.authorPresentationDelta.payload = payload
+        return try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: connection.version,
+            maximumUncompressedPayloadBytes: min(maximumUncompressedPayloadBytes,
+                V2AuthorPresentationDelta.maximumFrameBytes - V2Frame.headerLength))
     }
 
     /// 检查阶段、当前时间及会话期限，返回有效连接快照；检查失败返回 `nil`，不在此修改连接阶段。
@@ -458,7 +505,8 @@ public actor V2GatewaySession {
         _ frame: V2Frame,
         envelope: IMV2Envelope,
         handler: any V2GatewayCommandHandler,
-        originatingConnectionID: UUID?
+        originatingConnectionID: UUID?,
+        captureAuthorSample: Bool = false
     ) async throws -> V2GatewaySessionResponse {
         guard case .authenticated(let version, let identity) = state.phase else {
             throw V2GatewaySessionError.unsupportedCommand
@@ -468,11 +516,32 @@ public actor V2GatewaySession {
             state.close()
             throw V2GatewaySessionError.sessionExpired
         }
+        guard frame.command != .authorPresentationDelta, frame.command != .authorPresentationEnded else {
+            throw V2GatewaySessionError.unsupportedCommand
+        }
+        if case .authorPresentationEnd(let request) = envelope.body {
+            guard let streamID = authorPresentationStreamID, UUID(uuidString: request.streamID) == streamID,
+                  UUID(uuidString: request.roomID) != nil, UUID(uuidString: request.viewID) != nil else {
+                throw V2GatewaySessionError.unsupportedCommand
+            }
+        }
+        if case .groupEventSubscribe(let request) = envelope.body, !request.authorPresentationViewID.isEmpty {
+            guard authorPresentationStreamID != nil, UUID(uuidString: request.authorPresentationViewID) != nil,
+                  UUID(uuidString: request.roomID) != nil else { throw V2GatewaySessionError.unsupportedCommand }
+        }
         try state.receiveAuthenticatedRequest(frame)
         do {
             var response: IMV2Envelope
             var preparedFrame: V2Frame?
-            if !(await commandAdmission.admit(
+            var authorSample: V2AuthorPresentationPageSample?
+            if case .authorPresentationEnd(let request) = envelope.body {
+                // Cleanup consumes normal frame/request budgets but needs no
+                // domain I/O or rate-limit token after access has been revoked.
+                response = IMV2Envelope()
+                response.authorPresentationEnded.streamID = request.streamID
+                response.authorPresentationEnded.roomID = request.roomID
+                response.authorPresentationEnded.viewID = request.viewID
+            } else if !(await commandAdmission.admit(
                 identity: identity,
                 cost: commandAdmissionCost(for: envelope),
                 now: clock.date
@@ -501,7 +570,8 @@ public actor V2GatewaySession {
                         maximumUncompressedPayloadBytes: maximumUncompressedPayloadBytes,
                         compressionThresholdBytes: compressionThresholdBytes,
                         maximumExpansionRatio: maximumCompressionExpansionRatio,
-                        cache: preparedGroupEventPageCache
+                        cache: preparedGroupEventPageCache,
+                        captureAuthorSample: captureAuthorSample && authorPresentationStreamID != nil
                     )
                 ) {
                 case .envelope(let ordinary):
@@ -512,6 +582,7 @@ public actor V2GatewaySession {
                           prepared.frame.command == .groupEventPage
                     else { throw V2GatewaySessionError.unsupportedCommand }
                     preparedFrame = prepared.frame
+                    authorSample = prepared.authorSample
                     // 生命周期簿记不会检查拉取响应。此处只保留公开的游标摘要；
                     // 实际客户端帧包含完整的共享事件页面。
                     response = IMV2Envelope()
@@ -526,6 +597,15 @@ public actor V2GatewaySession {
                     identity: identity,
                     originatingConnectionID: originatingConnectionID
                 )
+            }
+            if case .groupEventSubscribe(let request) = envelope.body,
+               case .groupEventSubscribed(var subscribed) = response.body {
+                guard let requestedRoom = try? RoomID(request.roomID),
+                      let subscribedRoom = try? RoomID(subscribed.roomID), requestedRoom == subscribedRoom else {
+                    throw V2GatewaySessionError.unsupportedCommand
+                }
+                subscribed.authorPresentationViewID = request.authorPresentationViewID
+                response.groupEventSubscribed = subscribed
             }
             response.requestID = envelope.requestID
             response.protocolVersion = UInt32(version)
@@ -550,7 +630,11 @@ public actor V2GatewaySession {
                 maximumExpansionRatio: maximumCompressionExpansionRatio
             )
             try state.completeResponse(requestID: envelope.requestID)
-            return .init(envelope: response, frame: encoded)
+            if captureAuthorSample, authorPresentationStreamID != nil, preparedFrame == nil,
+               case .groupEventPull = envelope.body, case .groupEventPage(let page) = response.body {
+                authorSample = .init(page: page)
+            }
+            return .init(envelope: response, frame: encoded, authorSample: authorSample)
         } catch {
             // 处理器尚未生成响应；在连接决定重试或关闭前，
             // 先释放请求关联信息。
@@ -614,7 +698,7 @@ public actor V2GatewaySession {
     }
 
     /// 撤销本连接的设备会话并清除缓存的会话到期时间。
-    public func revokeDevice() { state.revokeDevice(); authenticatedSessionExpiresAt = nil }
+    public func revokeDevice() { state.revokeDevice(); authenticatedSessionExpiresAt = nil; authorPresentationStreamID = nil }
     /// 终止本连接状态并清除会话期限；socket 资源由外层连接所有者关闭。
-    public func close() { state.close(); authenticatedSessionExpiresAt = nil }
+    public func close() { state.close(); authenticatedSessionExpiresAt = nil; authorPresentationStreamID = nil }
 }

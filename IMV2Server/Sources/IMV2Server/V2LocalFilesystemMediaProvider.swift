@@ -122,7 +122,7 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         contentType: String,
         byteCount: Int64,
         expiresAt: Date
-    ) async throws -> V2MediaProviderObjectTarget {
+    ) async throws -> V2MediaProviderUploadTarget {
         guard byteCount >= 0, !contentType.isEmpty else {
             throw V2LocalFilesystemMediaProviderError.invalidTarget
         }
@@ -149,7 +149,7 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
     ///   - expiresAt: 目标到期时刻。
     /// - Returns: 提供方对象目标。
     /// - Throws: 媒体标识非法或对象不可用时抛出。
-    public func issueDownloadTarget(mediaID: MediaID, expiresAt: Date) async throws -> V2MediaProviderObjectTarget {
+    public func issueDownloadTarget(mediaID: MediaID, expiresAt: Date) async throws -> V2ResourceTransferPlan {
         _ = try validatedExpiryMilliseconds(expiresAt)
         let objectURL = try objectURL(for: mediaID)
         let byteCount = try await Self.performBlocking { () throws -> Int64 in
@@ -170,7 +170,11 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
             byteCount: byteCount,
             expiresAt: expiresAt
         )
-        return .init(url: url, expiresAt: expiresAt, expectedByteCount: byteCount)
+        let digest = try await Self.performBlocking {
+            try ForwardMediaFileIO.digest(objectURL, byteCount: byteCount)
+        }
+        return try .init(mode: .httpGet, url: url, expiresAt: expiresAt, expectedByteCount: byteCount,
+                         checksum: .init(value: digest.map { String(format: "%02x", $0) }.joined()))
     }
 
     /// 在接收 HTTP 正文之前校验上传目标的签名声明，并在私有暂存目录中预留随机文件。
@@ -248,7 +252,17 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
                     [.posixPermissions: 0o600],
                     ofItemAtPath: upload.fileURL.path
                 )
-                try FileManager.default.moveItem(at: upload.fileURL, to: objectURL)
+                if FileManager.default.fileExists(atPath: objectURL.path) {
+                    // Lost upload responses retry the same immutable identity. Equal bytes replay;
+                    // different bytes can never replace a file that may already be under verification.
+                    guard try ForwardMediaFileIO.digest(objectURL, byteCount: actualByteCount)
+                        == ForwardMediaFileIO.digest(upload.fileURL, byteCount: actualByteCount)
+                    else { throw V2LocalFilesystemMediaProviderError.byteCountMismatch }
+                    try FileManager.default.removeItem(at: upload.fileURL)
+                } else {
+                    try FileManager.default.moveItem(at: upload.fileURL, to: objectURL)
+                }
+                try ForwardMediaFileIO.syncDirectory(rootDirectory)
             }
         }
     }

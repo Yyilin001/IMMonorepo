@@ -11,7 +11,7 @@ final class V2PublicIdentitySettingsStore {
     private let manager: any V2OwnProfileManaging
     private let attachmentStager: (any V2ConversationAttachmentStaging)?
     private let attachmentUploader: (any V2ConversationAttachmentUploading)?
-    private let mediaDownloader: (any V2ConversationMediaDownloading)?
+    private(set) var profileUserID: UserID?
 
     private(set) var handle = ""
     var displayName = ""
@@ -26,13 +26,11 @@ final class V2PublicIdentitySettingsStore {
     init(
         manager: any V2OwnProfileManaging,
         attachmentStager: (any V2ConversationAttachmentStaging)?,
-        attachmentUploader: (any V2ConversationAttachmentUploading)?,
-        mediaDownloader: (any V2ConversationMediaDownloading)? = nil
+        attachmentUploader: (any V2ConversationAttachmentUploading)?
     ) {
         self.manager = manager
         self.attachmentStager = attachmentStager
         self.attachmentUploader = attachmentUploader
-        self.mediaDownloader = mediaDownloader
     }
 
     func load() async {
@@ -122,14 +120,8 @@ final class V2PublicIdentitySettingsStore {
     /// 视图既不会保留原始压缩文件，也不会保留全分辨率图像。
     func avatarPreviewImage(cache: V2LocalMediaThumbnailCache) async -> UIImage? {
         do {
-            let fileURL: URL
-            if let stagedAvatar {
-                fileURL = stagedAvatar.fileURL
-            } else if let currentAvatar, let mediaDownloader {
-                fileURL = try await mediaDownloader.download(.init(mediaID: currentAvatar.mediaID), message: nil).fileURL
-            } else {
-                return nil
-            }
+            guard let stagedAvatar else { return nil }
+            let fileURL = stagedAvatar.fileURL
             try Task.checkCancellation()
             let preview = await cache.thumbnail(
                 fileURL: fileURL,
@@ -145,11 +137,18 @@ final class V2PublicIdentitySettingsStore {
     }
 
     var avatarPresentationKey: String {
+        if removesAvatar { return "removed" }
         if let stagedAvatar { return "staged-\(stagedAvatar.id.uuidString)" }
         return currentAvatar?.mediaID.rawValue ?? "none"
     }
 
+    var currentAvatarKey: V2ProfileViewLookupKey? {
+        guard !removesAvatar, currentAvatar != nil, let profileUserID else { return nil }
+        return .init(userID: profileUserID, context: .relationship)
+    }
+
     private func apply(_ profile: V2ProfileView) {
+        profileUserID = profile.userID
         handle = profile.publicIdentity?.handle.description ?? ""
         displayName = profile.publicIdentity?.displayName ?? ""
         currentAvatar = profile.avatar
@@ -159,6 +158,7 @@ final class V2PublicIdentitySettingsStore {
 
 struct V2PublicIdentitySettingsView: View {
     @Environment(\.v2MediaThumbnailCache) private var thumbnailCache
+    @Environment(\.v2AvatarPipeline) private var avatarPipeline
     @Bindable var store: V2PublicIdentitySettingsStore
     @State private var isImportingAvatar = false
     @State private var saveTask: Task<Void, Never>?
@@ -220,7 +220,11 @@ struct V2PublicIdentitySettingsView: View {
         .navigationTitle("我的资料")
         .task { await store.load() }
         .task(id: store.avatarPresentationKey) {
-            guard let thumbnailCache else { return }
+            avatarPreviewImage = nil
+            if let key = store.currentAvatarKey, let avatarPipeline {
+                await avatarPipeline.profiles.invalidate([key])
+            }
+            guard !Task.isCancelled, let thumbnailCache else { return }
             let preview = await store.avatarPreviewImage(cache: thumbnailCache)
             guard !Task.isCancelled else { return }
             avatarPreviewImage = preview
@@ -234,7 +238,7 @@ struct V2PublicIdentitySettingsView: View {
 
     private var avatarDescription: String {
         if let staged = store.stagedAvatar { return "已选择 \(staged.displayName)" }
-        return store.currentAvatar == nil ? "未设置" : "已设置"
+        return store.currentAvatarKey == nil ? "未设置" : "已设置"
     }
 
     @ViewBuilder
@@ -246,6 +250,9 @@ struct V2PublicIdentitySettingsView: View {
                 .frame(width: 56, height: 56)
                 .clipShape(Circle())
                 .accessibilityLabel("当前头像")
+        } else if store.stagedAvatar == nil, let key = store.currentAvatarKey {
+            V2AuthorizedAvatarView(key: key, size: 56)
+                .id(store.avatarPresentationKey)
         } else {
             Image(systemName: "person.crop.circle.fill")
                 .font(.system(size: 56))

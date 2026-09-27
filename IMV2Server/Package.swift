@@ -11,6 +11,7 @@ let package = Package(
         .library(name: "IMV2ActorApplication", targets: ["IMV2ActorApplication"]),
         .library(name: "IMV2Server", targets: ["IMV2Server"]),
         .library(name: "IMV2ServerHTTP", targets: ["IMV2ServerHTTP"]),
+        .executable(name: "IMV2ResourceImageWorker", targets: ["IMV2ResourceImageWorker"]),
         .executable(name: "IMV2ServerApp", targets: ["IMV2ServerApp"]),
         .executable(name: "IMV2AccountServerApp", targets: ["IMV2AccountServerApp"]),
         .executable(name: "IMV2OperatorServerApp", targets: ["IMV2OperatorServerApp"]),
@@ -45,6 +46,7 @@ let package = Package(
         .package(path: "Vendor/swift-distributed-actors"),
     ],
     targets: [
+        .executableTarget(name: "IMV2ResourceImageWorker"),
         .target(
             name: "IMV2ActorContracts",
             dependencies: ["IMV2Core"]

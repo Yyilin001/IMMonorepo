@@ -750,4 +750,205 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
          AND convalidated AND conname = 'group_room_creation_drafts_check'
          AND pg_get_constraintdef(oid) = 'CHECK (((state = ''completed''::text) = (room_id IS NOT NULL)))')
    AND to_regclass('im_v2.local_schema_migrations') IS NULL)))
+AND (NOT EXISTS (
+    SELECT 1 FROM (VALUES
+      ('resource_group_avatar_closures','actor_user_id','uuid','NO'),
+      ('resource_group_avatar_closures','operation_id','uuid','NO'),
+      ('resource_group_avatar_closures','room_id','uuid','NO'),
+      ('resource_group_avatar_closures','requested_media_id','uuid','YES'),
+      ('resource_group_avatar_closures','expected_revision','int8','NO'),
+      ('resource_group_avatar_closures','closed_at','timestamptz','NO'),
+      ('resource_group_avatars','room_id','uuid','NO'),
+      ('resource_group_avatars','media_id','uuid','YES'),
+      ('resource_group_avatars','revision','int8','NO'),
+      ('resource_group_avatars','updated_by_user_id','uuid','NO'),
+      ('resource_group_avatars','updated_at','timestamptz','NO'),
+      ('resource_group_avatar_operations','actor_user_id','uuid','NO'),
+      ('resource_group_avatar_operations','operation_id','uuid','NO'),
+      ('resource_group_avatar_operations','room_id','uuid','NO'),
+      ('resource_group_avatar_operations','requested_media_id','uuid','YES'),
+      ('resource_group_avatar_operations','expected_revision','int8','NO'),
+      ('resource_group_avatar_operations','resulting_revision','int8','NO'),
+      ('resource_group_avatar_operations','room_sequence','int8','NO'),
+      ('resource_group_avatar_operations','event_id','uuid','NO'),
+      ('resource_group_avatar_operations','created_at','timestamptz','NO'),
+      ('resource_catalog','media_id','uuid','NO'),
+      ('resource_catalog','home_kind','text','NO'),
+      ('resource_catalog','home_id','uuid','NO'),
+      ('resource_catalog','usage_kind','text','NO'),
+      ('resource_catalog','generation','int8','NO'),
+      ('resource_forward_outputs','export_id','uuid','NO'),
+      ('resource_forward_outputs','ordinal','int4','NO'),
+      ('resource_forward_outputs','target_media_id','uuid','NO'),
+      ('resource_forward_outputs','reference_json','jsonb','NO'),
+      ('resource_forward_outputs','byte_count','int8','NO'),
+      ('resource_forward_outputs','sha256','bytea','NO'),
+      ('resource_upload_sessions','session_id','uuid','NO'),
+      ('resource_upload_sessions','media_id','uuid','NO'),
+      ('resource_upload_sessions','home_kind','text','NO'),
+      ('resource_upload_sessions','home_id','uuid','NO'),
+      ('resource_upload_sessions','actor_user_id','uuid','NO'),
+      ('resource_upload_sessions','device_id','uuid','NO'),
+      ('resource_upload_sessions','operation_id','uuid','NO'),
+      ('resource_upload_sessions','request_json','jsonb','NO'),
+      ('resource_upload_sessions','generation','int8','NO'),
+      ('resource_upload_sessions','storage_binding_id','text','NO'),
+      ('resource_upload_sessions','storage_configuration_revision','int4','NO'),
+      ('resource_upload_sessions','placement_json','jsonb','NO'),
+      ('resource_blob_placements','reference_json','jsonb','NO'),
+      ('resource_blob_placements','byte_count','int8','NO'),
+      ('resource_blob_placements','sha256','bytea','NO'),
+      ('resource_variants','reference_json','jsonb','NO'),
+      ('resource_variants','variant_id','uuid','NO'),
+      ('resource_storage_migrations','operation_id','uuid','NO'),
+      ('resource_storage_migrations','media_id','uuid','NO'),
+      ('resource_storage_migrations','generation','int8','NO'),
+      ('resource_storage_migrations','variant_id','uuid','YES'),
+      ('resource_storage_migrations','request_json','jsonb','NO'),
+      ('resource_storage_migrations','source_json','jsonb','NO'),
+      ('resource_storage_migrations','destination_json','jsonb','NO'),
+      ('resource_storage_migrations','destination_placement_id','uuid','NO'),
+      ('resource_storage_migrations','byte_count','int8','NO'),
+      ('resource_storage_migrations','sha256','bytea','NO'),
+      ('resource_storage_migrations','source_released_at','timestamptz','YES'),
+      ('resource_storage_migrations','state','text','NO'),
+      ('resource_storage_migrations','claim_token','uuid','YES'),
+      ('resource_storage_migrations','lease_expires_at','timestamptz','YES'),
+      ('resource_storage_migrations','attempt_count','int8','NO'),
+      ('resource_storage_migrations','retry_at','timestamptz','NO'),
+      ('resource_storage_migrations','switched_at','timestamptz','YES'),
+      ('resource_storage_migrations','created_at','timestamptz','NO'),
+      ('resource_storage_migrations','updated_at','timestamptz','NO'),
+      ('resource_imports','home_json','jsonb','NO'),
+      ('resource_imports','request_json','jsonb','NO'),
+      ('resource_imports','target_media_id','uuid','NO'),
+      ('resource_import_holds','reference_json','jsonb','NO'),
+      ('resource_import_holds','request_json','jsonb','NO'),
+      ('resource_import_holds','byte_count','int8','NO'),
+      ('resource_import_holds','sha256','bytea','NO'),
+      ('resource_import_holds','content_type','text','NO'),
+      ('message_operation_closures','fingerprint_version','int2','NO'),
+      ('message_operation_closures','request_fingerprint','bytea','NO'),
+      ('message_operation_closures','closed_at','timestamptz','NO')
+    ) expected(table_name,column_name,udt_name,is_nullable)
+    LEFT JOIN information_schema.columns actual
+      ON actual.table_schema = 'im_v2' AND actual.table_name=expected.table_name
+      AND actual.column_name=expected.column_name AND actual.udt_name=expected.udt_name
+      AND actual.is_nullable=expected.is_nullable
+    WHERE actual.column_name IS NULL
+) AND NOT EXISTS (
+    SELECT 1 FROM (VALUES
+      ('resource_group_avatar_closures','PRIMARY KEY (actor_user_id, operation_id)'),
+      ('resource_group_avatar_closures','CHECK ((expected_revision >= 0))'),
+      ('resource_group_avatar_closures','CHECK (isfinite(closed_at))'),
+      ('resource_group_avatars','PRIMARY KEY (room_id)'),
+      ('resource_group_avatars','FOREIGN KEY (room_id) REFERENCES im_v2.group_rooms(room_id)'),
+      ('resource_group_avatars','FOREIGN KEY (media_id) REFERENCES im_v2.media_objects(media_id)'),
+      ('resource_group_avatars','CHECK ((revision > 0))'),
+      ('resource_group_avatar_operations','PRIMARY KEY (actor_user_id, operation_id)'),
+      ('resource_group_avatar_operations','UNIQUE (event_id)'),
+      ('resource_group_avatar_operations','CHECK ((expected_revision >= 0))'),
+      ('resource_group_avatar_operations','CHECK ((resulting_revision > 0))'),
+      ('resource_group_avatar_operations','CHECK ((room_sequence > 0))'),
+      ('resource_catalog','PRIMARY KEY (media_id)'),
+      ('resource_catalog','CHECK ((generation > 0))'),
+      ('resource_catalog','FOREIGN KEY (media_id) REFERENCES im_v2.media_objects(media_id)'),
+      ('resource_catalog','CHECK ((((usage_kind = ''user_avatar''::text) AND (home_kind = ''account''::text)) OR ((usage_kind = ANY (ARRAY[''message_attachment''::text, ''group_avatar''::text])) AND (home_kind = ''room''::text))))'),
+      ('resource_forward_outputs','PRIMARY KEY (export_id, ordinal)'),
+      ('resource_forward_outputs','UNIQUE (target_media_id)'),
+      ('resource_forward_outputs','FOREIGN KEY (target_media_id) REFERENCES im_v2.media_objects(media_id)'),
+      ('resource_forward_outputs','FOREIGN KEY (export_id, ordinal) REFERENCES im_v2.message_forward_media_imports(export_id, ordinal)'),
+      ('resource_forward_outputs','CHECK ((byte_count > 0))'),
+      ('resource_forward_outputs','CHECK ((octet_length(sha256) = 32))'),
+      ('resource_upload_sessions','PRIMARY KEY (session_id)'),
+      ('resource_upload_sessions','UNIQUE (media_id)'),
+      ('resource_upload_sessions','UNIQUE (home_kind, home_id, actor_user_id, operation_id)'),
+      ('resource_upload_sessions','CHECK ((generation > 0))'),
+      ('resource_upload_sessions','CHECK ((storage_configuration_revision > 0))'),
+      ('resource_blob_placements','PRIMARY KEY (placement_id)'),
+      ('resource_blob_placements','UNIQUE (media_id, generation)'),
+      ('resource_blob_placements','CHECK ((octet_length(sha256) = 32))'),
+      ('resource_blob_placements','CHECK ((byte_count > 0))'),
+      ('resource_variants','PRIMARY KEY (media_id, generation, recipe, recipe_version, size)'),
+      ('resource_variants','UNIQUE (variant_id)'),
+      ('resource_storage_migrations','PRIMARY KEY (operation_id)'),
+      ('resource_storage_migrations','UNIQUE (destination_placement_id)'),
+      ('resource_storage_migrations','FOREIGN KEY (media_id) REFERENCES im_v2.media_objects(media_id)'),
+      ('resource_storage_migrations','CHECK ((generation > 0))'),
+      ('resource_storage_migrations','CHECK ((byte_count > 0))'),
+      ('resource_storage_migrations','CHECK ((octet_length(sha256) = 32))'),
+      ('resource_storage_migrations','CHECK (((state = ''copying''::text) = (claim_token IS NOT NULL)))'),
+      ('resource_storage_migrations','CHECK (((state = ''copying''::text) = (lease_expires_at IS NOT NULL)))'),
+      ('resource_storage_migrations','CHECK (((state = ''switched''::text) = (switched_at IS NOT NULL)))'),
+      ('resource_storage_migrations','CHECK (((source_released_at IS NULL) OR ((state = ''switched''::text) AND isfinite(source_released_at))))'),
+      ('resource_variants','CHECK (((state <> ''ready''::text) OR ((byte_count IS NOT NULL) AND (sha256 IS NOT NULL) AND (byte_count > 0) AND (octet_length(sha256) = 32))))'),
+      ('resource_imports','PRIMARY KEY (actor_user_id, operation_id)'),
+      ('resource_import_holds','PRIMARY KEY (actor_user_id, operation_id)'),
+      ('resource_import_holds','CHECK ((byte_count > 0))'),
+      ('resource_import_holds','CHECK ((octet_length(sha256) = 32))'),
+      ('resource_import_holds','CHECK (((length(content_type) >= 1) AND (length(content_type) <= 127)))'),
+      ('message_operation_closures','PRIMARY KEY (room_id, sender_user_id, client_message_id)'),
+      ('message_operation_closures','CHECK ((fingerprint_version = 3))'),
+      ('message_operation_closures','CHECK ((octet_length(request_fingerprint) = 32))'),
+      ('message_operation_closures','CHECK (isfinite(closed_at))')
+    ) expected(table_name,definition)
+    WHERE NOT EXISTS (SELECT 1 FROM pg_constraint c
+      WHERE c.conrelid=to_regclass('im_v2.' || expected.table_name)
+      AND c.convalidated AND NOT c.condeferrable AND pg_get_constraintdef(c.oid)=expected.definition)
+) AND NOT EXISTS (SELECT 1 FROM pg_constraint
+    WHERE conrelid=to_regclass('im_v2.message_operation_closures') AND contype='f'))
+AND EXISTS (
+                SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+                WHERE t.tgrelid=to_regclass('im_v2.resource_group_avatar_operations')
+                  AND t.tgname='resource_group_avatar_operations_immutable' AND t.tgenabled='O'
+                  AND NOT t.tgisinternal AND t.tgtype=27 AND t.tgqual IS NULL
+                  AND p.pronamespace=(SELECT oid FROM pg_namespace WHERE nspname='im_v2')
+                  AND p.proname='reject_group_avatar_operation_mutation'
+                  AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='4296ae3a368755188ceb1df59239b3860fe445da8ab147d948b411c1645aa542'
+            )
+AND (SELECT count(*)=3 FROM pg_index
+    WHERE indrelid=to_regclass('im_v2.resource_storage_migrations') AND indisvalid AND indisready
+      AND pg_get_indexdef(indexrelid) IN (
+        'CREATE UNIQUE INDEX resource_storage_migrations_active_media_idx ON im_v2.resource_storage_migrations USING btree (media_id) WHERE (state = ANY (ARRAY[''pending''::text, ''copying''::text]))',
+        'CREATE INDEX resource_storage_migrations_recovery_idx ON im_v2.resource_storage_migrations USING btree (updated_at, operation_id) WHERE (state = ANY (ARRAY[''pending''::text, ''copying''::text]))',
+        'CREATE INDEX resource_storage_migrations_retained_idx ON im_v2.resource_storage_migrations USING btree (media_id) WHERE (source_released_at IS NULL)'))
+AND (current_setting('transaction_isolation') = 'read committed'
+            AND EXISTS (
+                SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+                WHERE t.tgrelid = to_regclass('im_v2.message_send_completions')
+                  AND t.tgname = 'message_send_completion_close_fence' AND t.tgenabled = 'O'
+                  AND NOT t.tgisinternal AND t.tgtype = 7 AND p.provolatile = 'v'
+                  AND p.proname = 'reject_closed_message_acceptance' AND t.tgqual IS NULL
+                  AND p.pronamespace = (SELECT oid FROM pg_namespace WHERE nspname='im_v2')
+                  AND encode(sha256(convert_to(p.prosrc, 'UTF8')), 'hex') = '850907a41605b48365e5f6da0089c27ede4dae4750ac5a76966f2026488a529f'
+            ) AND EXISTS (
+                SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+                WHERE t.tgrelid = to_regclass('im_v2.message_operation_closures')
+                  AND t.tgname = 'message_operation_closures_immutable' AND t.tgenabled = 'O'
+                  AND NOT t.tgisinternal AND t.tgtype = 27 AND p.proname = 'reject_message_operation_closure_mutation' AND t.tgqual IS NULL
+                  AND p.pronamespace = (SELECT oid FROM pg_namespace WHERE nspname='im_v2')
+                  AND encode(sha256(convert_to(p.prosrc, 'UTF8')), 'hex') = '8bc2b89a38e9de088284a7f3befcb22591bcf204a4ffc267b103844e343a1a53'
+            ))
+AND (current_setting('transaction_isolation') = 'read committed'
+            AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('im_v2.resource_group_avatar_closures') AND contype='f')
+            AND NOT EXISTS(
+                SELECT 1 FROM (VALUES
+                    ('resource_group_avatar_operations','resource_group_avatar_operations_close_fence'),
+                    ('resource_group_avatar_closures','resource_group_avatar_closures_commit_fence')
+                ) expected(table_name,trigger_name)
+                WHERE NOT EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+                    WHERE t.tgrelid=to_regclass('im_v2.' || expected.table_name) AND t.tgname=expected.trigger_name
+                      AND t.tgenabled='O' AND NOT t.tgisinternal AND t.tgtype=7 AND t.tgqual IS NULL
+                      AND p.pronamespace=(SELECT oid FROM pg_namespace WHERE nspname='im_v2')
+                      AND p.proname='fence_group_avatar_terminal_result' AND p.provolatile='v'
+                      AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='e480bc5dcdcd3f5640cae14ca8ad77c1c25d93d80f5ecc5894696757935144e4')
+            ) AND EXISTS(
+                SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+                WHERE t.tgrelid=to_regclass('im_v2.resource_group_avatar_closures')
+                  AND t.tgname='resource_group_avatar_closures_immutable' AND t.tgenabled='O'
+                  AND NOT t.tgisinternal AND t.tgtype=27 AND t.tgqual IS NULL
+                  AND p.pronamespace=(SELECT oid FROM pg_namespace WHERE nspname='im_v2')
+                  AND p.proname='reject_group_avatar_operation_mutation'
+                  AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='4296ae3a368755188ceb1df59239b3860fe445da8ab147d948b411c1645aa542'
+            ))
 FROM schema_visibility WHERE active_path = '';

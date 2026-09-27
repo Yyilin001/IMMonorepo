@@ -4,7 +4,7 @@ import Foundation
 ///
 /// 多个 value 等待者独立取消，不会因一个消费者超时而取消其他调用者仍需要的刷新或读取。
 /// 整体取消由所有者调用 cancel，result 则用于等待实际任务结束。
-final class V2SharedOperation<Value: Sendable>: Sendable {
+public final class V2SharedOperation<Value: Sendable>: Sendable {
     /// 缓存最终结果并管理可独立取消的等待者。
     private let completion: Completion
     /// 实际执行操作的所有者任务。
@@ -15,7 +15,7 @@ final class V2SharedOperation<Value: Sendable>: Sendable {
     /// - Parameter operation: 可发送的异步工作，错误作为共享结果保存并交付等待者。
     ///
     /// 初始化后任务已运行，不需要先读取 value；此类型没有自动在析构时取消任务的逻辑。
-    init(_ operation: @escaping @Sendable () async throws -> Value) {
+    public init(_ operation: @escaping @Sendable () async throws -> Value) {
         let completion = Completion()
         self.completion = completion
         task = Task {
@@ -28,11 +28,11 @@ final class V2SharedOperation<Value: Sendable>: Sendable {
     }
 
     /// 等待共享结果，当前等待者可通过取消独立退出；操作完成与取消同时到达时，以 actor 实际处理顺序决定结果。
-    var value: Value { get async throws { try await completion.wait() } }
+    public var value: Value { get async throws { try await completion.wait() } }
     /// 等待底层任务终结并返回成功或失败，用于排空；不使用独立等待者取消路径。
-    var result: Result<Value, Error> { get async { await task.result } }
+    public var result: Result<Value, Error> { get async { await task.result } }
     /// 向底层共享任务发出取消请求，不同步结束任务或直接恢复等待者；操作需响应取消，结束后才发布结果。
-    func cancel() { task.cancel() }
+    public func cancel() { task.cancel() }
 
     /// 串行管理一次结果发布和多个等待者的注册、取消与恢复。
     private actor Completion {

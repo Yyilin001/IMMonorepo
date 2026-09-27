@@ -175,18 +175,16 @@ private struct PreviewResponse: Content {
     enum CodingKeys: String, CodingKey { case inviteID = "invite_id", roomID = "room_id", roomTitle = "room_title", expiresAtMilliseconds = "expires_at_ms", requestState = "request_state", requestID = "request_id", isAlreadyMember = "is_already_member" }
 }
 
-/// 公开身份信息响应模型（用于申请列表中的申请方视图）。
-private struct PublicIdentityResponse: Content { let userID, handle, displayName, accountKind: String; init(_ value: V2PublicIdentity) { userID = value.userID.rawValue; handle = value.handle.rawValue; displayName = value.displayName; accountKind = value.accountKind.rawValue }; enum CodingKeys: String, CodingKey { case userID = "user_id", handle, displayName = "display_name", accountKind = "account_kind" } }
 
 /// 入群申请单条返回模型。
 private struct RequestResponse: Content {
     let requestID, inviteID, roomID: String
-    let applicant: PublicIdentityResponse
+    let applicantUserID: String
     let note: String?, state: String
     let createdAtMilliseconds: Int64, decidedAtMilliseconds: Int64?
-    init(_ value: V2GroupJoinRequest) throws { requestID = value.requestID.rawValue; inviteID = value.inviteID.rawValue; roomID = value.roomID.rawValue; applicant = .init(value.applicant); note = value.note; state = value.state.rawValue; createdAtMilliseconds = try value.createdAt.millisecondsSince1970; decidedAtMilliseconds = try value.decidedAt?.millisecondsSince1970 }
-    init(_ value: V2GroupJoinRequestRecord) throws { requestID = value.requestID.rawValue; inviteID = value.inviteID.rawValue; roomID = value.roomID.rawValue; applicant = .init(value.applicant); note = value.note; state = value.state.rawValue; createdAtMilliseconds = try value.createdAt.millisecondsSince1970; decidedAtMilliseconds = try value.decidedAt?.millisecondsSince1970 }
-    enum CodingKeys: String, CodingKey { case requestID = "request_id", inviteID = "invite_id", roomID = "room_id", applicant, note, state, createdAtMilliseconds = "created_at_ms", decidedAtMilliseconds = "decided_at_ms" }
+    init(_ value: V2GroupJoinRequest) throws { requestID = value.requestID.rawValue; inviteID = value.inviteID.rawValue; roomID = value.roomID.rawValue; applicantUserID = value.applicant.userID.rawValue; note = value.note; state = value.state.rawValue; createdAtMilliseconds = try value.createdAt.millisecondsSince1970; decidedAtMilliseconds = try value.decidedAt?.millisecondsSince1970 }
+    init(_ value: V2GroupJoinRequestRecord) throws { requestID = value.requestID.rawValue; inviteID = value.inviteID.rawValue; roomID = value.roomID.rawValue; applicantUserID = value.applicant.userID.rawValue; note = value.note; state = value.state.rawValue; createdAtMilliseconds = try value.createdAt.millisecondsSince1970; decidedAtMilliseconds = try value.decidedAt?.millisecondsSince1970 }
+    enum CodingKeys: String, CodingKey { case requestID = "request_id", inviteID = "invite_id", roomID = "room_id", applicantUserID = "applicant_user_id", note, state, createdAtMilliseconds = "created_at_ms", decidedAtMilliseconds = "decided_at_ms" }
 }
 
 /// 入群申请提交的统一返回模型，包含分支状态。

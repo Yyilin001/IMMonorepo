@@ -14,6 +14,8 @@ extension V2ActorAdministrationFailureWire {
             }
         } else if let value = error as? V2GroupCapabilitiesStoreError {
             switch value {
+            case .resourceUnavailable: self = .groupCapability(.resourceUnavailable)
+            case .operationClosed: self = .groupCapability(.operationClosed)
             case .roomNotFound: self = .groupCapability(.roomNotFound)
             case .messageNotFound: self = .groupCapability(.messageNotFound)
             case .actorNotMember: self = .groupCapability(.actorNotMember)
@@ -97,6 +99,8 @@ extension V2ActorAdministrationFailureWire {
             }
         case .groupCapability(let value):
             switch value {
+            case .resourceUnavailable: return V2GroupCapabilitiesStoreError.resourceUnavailable
+            case .operationClosed: return V2GroupCapabilitiesStoreError.operationClosed
             case .roomNotFound: return V2GroupCapabilitiesStoreError.roomNotFound
             case .messageNotFound: return V2GroupCapabilitiesStoreError.messageNotFound
             case .actorNotMember: return V2GroupCapabilitiesStoreError.actorNotMember

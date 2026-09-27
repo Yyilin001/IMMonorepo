@@ -18,7 +18,7 @@ struct V2AttachmentUploadLifecycleTests {
         let entered = AsyncStream<Void>.makeStream()
         let cancelled = AsyncStream<Void>.makeStream()
         let transport = LateAttachmentUpload(entered: entered.continuation, cancelled: cancelled.continuation)
-        let uploader = V2ForegroundConversationAttachmentUploader(uploader: .init(targetResolver: transport, byteTransfer: transport, completer: transport, statusReader: transport))
+        let uploader = V2ForegroundConversationAttachmentUploader(durable: transport)
         let request = Task { try await uploader.upload(attachment) }
         var starts = entered.stream.makeAsyncIterator()
         _ = await starts.next()
@@ -34,7 +34,7 @@ struct V2AttachmentUploadLifecycleTests {
         try await close.value
         await #expect(throws: CancellationError.self) { try await request.value }
         await #expect(throws: CancellationError.self) { try await uploader.upload(attachment) }
-        #expect(await transport.calls == ["resolve", "transfer"])
+        #expect(await transport.calls == ["user-avatar"])
         #expect(!FileManager.default.fileExists(atPath: attachment.fileURL.path))
         #expect(FileManager.default.fileExists(atPath: source.path))
         await uploader.close()
@@ -43,7 +43,7 @@ struct V2AttachmentUploadLifecycleTests {
     }
 }
 
-private actor LateAttachmentUpload: V2ClientMediaUploadTargetResolver, V2ClientMediaByteTransfer, V2ClientMediaUploadCompleting, V2ClientMediaUploadStatusReading {
+private actor LateAttachmentUpload: V2DurableConversationSending {
     let entered: AsyncStream<Void>.Continuation
     let cancelled: AsyncStream<Void>.Continuation
     private var continuation: CheckedContinuation<Void, Never>?
@@ -52,12 +52,9 @@ private actor LateAttachmentUpload: V2ClientMediaUploadTargetResolver, V2ClientM
         self.entered = entered
         self.cancelled = cancelled
     }
-    func resolveUploadTarget(operationID: MediaUploadOperationID, mediaID: MediaID, contentType: String, byteCount: Int64) throws -> V2ClientMediaTransferTarget {
-        calls.append("resolve")
-        return try .init(url: URL(string: "https://media.invalid/upload")!, expiresAt: .distantFuture, expectedByteCount: byteCount)
-    }
-    func upload(fileURL: URL, target: V2ClientMediaTransferTarget) async throws {
-        calls.append("transfer")
+    func upload(_ attachment: V2StagedConversationAttachment, usage: V2ResourceUsage) async throws -> V2MediaReference {
+        #expect(usage == .userAvatar)
+        calls.append("user-avatar")
         await withTaskCancellationHandler {
             await withCheckedContinuation {
                 continuation = $0
@@ -65,10 +62,16 @@ private actor LateAttachmentUpload: V2ClientMediaUploadTargetResolver, V2ClientM
             }
         } onCancel: { cancelled.yield(()) }
         // Model a transfer that keeps reading the file after cancellation.
-        #expect(try Data(contentsOf: fileURL) == Data([1]))
+        #expect(try Data(contentsOf: attachment.fileURL) == Data([1]))
+        return .init(mediaID: .init(uuid: UUID()))
     }
-    func download(target: V2ClientMediaTransferTarget, destinationURL: URL) throws { throw CancellationError() }
-    func completeUpload(mediaID: MediaID) { calls.append("complete") }
-    func uploadStatus(mediaID: MediaID) -> V2MediaObjectState { calls.append("status"); return .available }
+    func freezeSend(text: String, mentions: [V2MentionTarget], replyTo: V2MessageReplyReference?, roomID: RoomID,
+                    attachments: [V2StagedConversationAttachment]) throws { throw CancellationError() }
+    func copyAttachments(sources: [V2ResourceImportSource], to room: RoomID) throws { throw CancellationError() }
+    func pending(in roomID: RoomID) -> [V2DurableConversationSendService.Pending] { [] }
+    func retry(intentID: UUID) throws { throw CancellationError() }
+    func cancel(intentID: UUID) throws { throw CancellationError() }
+    func startRecovery() {}
+    func close() {}
     func release() { continuation?.resume(); continuation = nil }
 }

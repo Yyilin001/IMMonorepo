@@ -121,6 +121,10 @@ message Envelope {
     AccountRoomResyncRequired account_room_resync_required = 118;
     RoomLatestVisibleBatch room_latest_visible_batch = 119;
     RoomLatestVisibleBatchResult room_latest_visible_batch_result = 120;
+    // Optional, recipient-specific, ephemeral supplement; never a message ACK.
+    AuthorPresentationDelta author_presentation_delta = 121;
+    AuthorPresentationEnd author_presentation_end = 122;
+    AuthorPresentationEnded author_presentation_ended = 123;
   }
 }
 
@@ -197,6 +201,7 @@ message ClientHello {
   // for pre-binding protocol fixtures.
   string device_id = 3;
   repeated FrameCompression supported_frame_compressions = 4;
+  bool supports_author_presentation_delta = 5;
 }
 
 message ServerHello {
@@ -204,6 +209,8 @@ message ServerHello {
   string selected_capability_profile = 2;
   int64 server_time_ms = 3;
   FrameCompression selected_frame_compression = 4;
+  // Empty unless explicitly negotiated; repeated exactly by Authenticated.
+  string author_presentation_stream_id = 5;
 }
 
 message Authenticate {
@@ -216,6 +223,8 @@ message Authenticated {
   string device_id = 2;
   string selected_capability_profile = 3;
   FrameCompression selected_frame_compression = 4;
+  // Empty unless explicitly negotiated; repeated exactly by Authenticated.
+  string author_presentation_stream_id = 5;
 }
 
 // Heartbeats carry no delivery or cursor semantics. They only keep a live
@@ -600,13 +609,10 @@ enum RoomMembershipRole {
 message RoomMember {
   string user_id = 1;
   RoomMembershipRole role = 2;
-  // A roster page is returned only to an active room member.  These fields
-  // contain the member's required public chat identity, never an account
-  // identifier or authentication factor. Members without a currently visible
-  // public identity are omitted from the bounded directory response.
-  string public_handle = 3;
-  string display_name = 4;
-  string account_kind = 5;
+  // Directory facts do not grant permission to display profile content.
+  // Visible rows resolve names/avatars through profile-presentations/batch.
+  reserved 3, 4, 5;
+  reserved "public_handle", "display_name", "account_kind";
 }
 
 message RoomMembersPage {
@@ -744,6 +750,8 @@ message GroupEventPage {
 message GroupEventSubscribe {
   string room_id = 1;
   uint64 after_room_sequence = 2;
+  // Fresh client nonce; omit when author supplements are not negotiated.
+  string author_presentation_view_id = 3;
 }
 
 message GroupEventSubscribed {
@@ -755,6 +763,25 @@ message GroupEventSubscribed {
   // value; otherwise the server sends a metadata wake and the client pulls
   // the durable room log.
   uint64 membership_revision = 3;
+  // Echo only after the normal room authorization succeeds.
+  string author_presentation_view_id = 4;
+}
+
+// request_id = 0; JSON follows the validated IMV2Core contract (at most 32 KiB).
+// The complete uncompressed envelope/frame has its own transport budget.
+message AuthorPresentationDelta { bytes payload = 1; }
+
+// Connection-local cleanup only. It does not unsubscribe room events or read
+// room authority. An old view cannot end its replacement on the same stream.
+message AuthorPresentationEnd {
+  string stream_id = 1;
+  string room_id = 2;
+  string view_id = 3;
+}
+message AuthorPresentationEnded {
+  string stream_id = 1;
+  string room_id = 2;
+  string view_id = 3;
 }
 
 message GroupEventUnsubscribe {
@@ -846,12 +873,10 @@ message ListReadReceiptReaders {
 
 message ReadReceiptReader {
   string user_id = 1;
-  // Same bounded public identity policy as RoomMember. Reader rows are emitted
-  // only for active accounts that belonged to the message audience and remain
-  // members at the membership revision bound into this page.
-  string public_handle = 2;
-  string display_name = 3;
-  string account_kind = 4;
+  // Receipt disclosure and profile presentation have separate authorization.
+  // The page discloses reader IDs; names/avatars need a current room lease.
+  reserved 2, 3, 4;
+  reserved "public_handle", "display_name", "account_kind";
 }
 
 message ReadReceiptReadersPage {

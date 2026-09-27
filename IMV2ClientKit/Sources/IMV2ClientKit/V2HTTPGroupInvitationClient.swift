@@ -35,25 +35,25 @@ public enum V2ClientGroupInvitationError: Error, Equatable, Sendable {
 /// 提交入群申请的结果。
 public enum V2ClientGroupJoinSubmissionOutcome: Equatable, Sendable {
     /// 申请已新提交。
-    case submitted(V2GroupJoinRequest)
+    case submitted(V2ClientGroupJoinRequest)
     /// 该申请此前已提交且仍在待处理。
-    case alreadyPending(V2GroupJoinRequest)
+    case alreadyPending(V2ClientGroupJoinRequest)
     /// 申请人已是群成员，无需再申请。
     case alreadyMember(V2GroupInvitePreview)
     /// 原提交已被申请人取消，重放不会重新创建。
-    case cancelled(V2GroupJoinRequest)
+    case cancelled(V2ClientGroupJoinRequest)
     /// 申请被拒绝。
-    case rejected(V2GroupJoinRequest)
+    case rejected(V2ClientGroupJoinRequest)
 }
 
 /// 处理入群申请的结果。
 public enum V2ClientGroupJoinDecisionOutcome: Equatable, Sendable {
     /// 申请已批准。
-    case approved(V2GroupJoinRequest)
+    case approved(V2ClientGroupJoinRequest)
     /// 申请已拒绝。
-    case rejected(V2GroupJoinRequest)
+    case rejected(V2ClientGroupJoinRequest)
     /// 该申请此前已作出决定，本次为重放。
-    case alreadyDecided(V2GroupJoinRequest)
+    case alreadyDecided(V2ClientGroupJoinRequest)
 }
 
 /// 群邀请与入群申请的客户端能力边界。
@@ -105,9 +105,9 @@ public protocol V2ClientGroupInvitationManaging: Sendable {
     ///   - pageSize: 本页最多返回的条数。
     /// - Returns: 待处理申请分页。
     /// - Throws: 无权限、游标非法或网络失败时抛出。
-    func pendingRequests(roomID: RoomID, cursor: String?, pageSize: Int) async throws -> V2GroupJoinRequestPage
+    func pendingRequests(roomID: RoomID, cursor: String?, pageSize: Int) async throws -> V2ClientGroupJoinRequestPage
     /// 取消本人的申请；重复调用返回持久终态，审批已完成时返回实际结果。
-    func cancel(roomID: RoomID, requestID: GroupJoinRequestID) async throws -> V2GroupJoinRequest
+    func cancel(roomID: RoomID, requestID: GroupJoinRequestID) async throws -> V2ClientGroupJoinRequest
     /// 批准或拒绝一条入群申请。
     ///
     /// - Parameters:
@@ -218,17 +218,28 @@ public struct V2HTTPGroupInvitationClient: V2ClientGroupInvitationManaging, Send
         catch { throw V2ClientGroupInvitationError.invalidResponse }
     }
 
-    public func pendingRequests(roomID: RoomID, cursor: String?, pageSize: Int) async throws -> V2GroupJoinRequestPage {
-        guard (1 ... 100).contains(pageSize) else { throw V2ClientGroupInvitationError.invalidRequest }
+    public func pendingRequests(roomID: RoomID, cursor: String?, pageSize: Int) async throws -> V2ClientGroupJoinRequestPage {
+        guard (1 ... 100).contains(pageSize), cursor == nil || (cursor?.isEmpty == false && cursor!.utf8.count <= 1_024)
+        else { throw V2ClientGroupInvitationError.invalidRequest }
         var query = [URLQueryItem(name: "room_id", value: roomID.rawValue), .init(name: "page_size", value: String(pageSize))]
         if let cursor { query.append(.init(name: "cursor", value: cursor)) }
         let data = try await execute(path: ["v2", "group-join-requests"], method: "GET", query: query)
-        do { let body = try JSONDecoder().decode(RequestPageBody.self, from: data); return .init(requests: try body.items.map(decodeRequest), nextCursor: body.nextCursor) }
+        do {
+            let body = try JSONDecoder().decode(RequestPageBody.self, from: data)
+            guard body.items.count <= pageSize,
+                  body.nextCursor == nil || (body.nextCursor != cursor && body.nextCursor?.isEmpty == false && body.nextCursor!.utf8.count <= 1_024)
+            else { throw V2ClientGroupInvitationError.invalidResponse }
+            let items = try body.items.map(decodeRequest)
+            guard Set(items.map(\.requestID)).count == items.count,
+                  items.allSatisfy({ $0.roomID == roomID && $0.state == .pending })
+            else { throw V2ClientGroupInvitationError.invalidResponse }
+            return .init(requests: items, nextCursor: body.nextCursor)
+        }
         catch let error as V2ClientGroupInvitationError { throw error }
         catch { throw V2ClientGroupInvitationError.invalidResponse }
     }
 
-    public func cancel(roomID: RoomID, requestID: GroupJoinRequestID) async throws -> V2GroupJoinRequest {
+    public func cancel(roomID: RoomID, requestID: GroupJoinRequestID) async throws -> V2ClientGroupJoinRequest {
         let data = try await execute(path: ["v2", "group-join-requests", requestID.rawValue, "cancel"], method: "POST", body: CancelBody(roomID: roomID.rawValue))
         do {
             let value = try decodeRequest(JSONDecoder().decode(RequestBody.self, from: data))
@@ -312,8 +323,7 @@ private struct DecisionRequestBody: Encodable { let roomID, operationID, decisio
 private struct LinksBody: Decodable { let items: [LinkBody] }
 private struct LinkBody: Decodable { let inviteID, roomID, roomTitle, token, state: String; let expiresAtMilliseconds: Int64; let maximumApprovedUses, approvedUseCount: Int; let createdAtMilliseconds: Int64; enum CodingKeys: String, CodingKey { case inviteID = "invite_id", roomID = "room_id", roomTitle = "room_title", token, state, expiresAtMilliseconds = "expires_at_ms", maximumApprovedUses = "maximum_approved_uses", approvedUseCount = "approved_use_count", createdAtMilliseconds = "created_at_ms" } }
 private struct PreviewBody: Decodable { let inviteID, roomID, roomTitle: String; let expiresAtMilliseconds: Int64; let requestState: String?, requestID: String?; let isAlreadyMember: Bool; enum CodingKeys: String, CodingKey { case inviteID = "invite_id", roomID = "room_id", roomTitle = "room_title", expiresAtMilliseconds = "expires_at_ms", requestState = "request_state", requestID = "request_id", isAlreadyMember = "is_already_member" } }
-private struct IdentityBody: Decodable { let userID, handle, displayName, accountKind: String; enum CodingKeys: String, CodingKey { case userID = "user_id", handle, displayName = "display_name", accountKind = "account_kind" } }
-private struct RequestBody: Decodable { let requestID, inviteID, roomID: String; let applicant: IdentityBody; let note: String?, state: String, resumableDecisionOperationID: String?; let createdAtMilliseconds: Int64, decidedAtMilliseconds: Int64?; enum CodingKeys: String, CodingKey { case requestID = "request_id", inviteID = "invite_id", roomID = "room_id", applicant, note, state, resumableDecisionOperationID = "resumable_decision_operation_id", createdAtMilliseconds = "created_at_ms", decidedAtMilliseconds = "decided_at_ms" } }
+private struct RequestBody: Decodable { let requestID, inviteID, roomID: String; let applicantUserID: String; let note: String?, state: String, resumableDecisionOperationID: String?; let createdAtMilliseconds: Int64, decidedAtMilliseconds: Int64?; enum CodingKeys: String, CodingKey { case requestID = "request_id", inviteID = "invite_id", roomID = "room_id", applicantUserID = "applicant_user_id", note, state, resumableDecisionOperationID = "resumable_decision_operation_id", createdAtMilliseconds = "created_at_ms", decidedAtMilliseconds = "decided_at_ms" } }
 private struct SubmissionBody: Decodable { let kind: String; let request: RequestBody?; let preview: PreviewBody? }
 private struct RequestPageBody: Decodable { let items: [RequestBody]; let nextCursor: String?; enum CodingKeys: String, CodingKey { case items, nextCursor = "next_cursor" } }
 private struct DecisionBody: Decodable { let kind: String; let request: RequestBody }
@@ -321,4 +331,4 @@ private struct DecisionBody: Decodable { let kind: String; let request: RequestB
 private func decodeLink(_ body: LinkBody) throws -> V2GroupInviteLink { guard let state = V2GroupInviteState(rawValue: body.state) else { throw V2ClientGroupInvitationError.invalidResponse }; return try .init(inviteID: .init(body.inviteID), roomID: .init(body.roomID), roomTitle: body.roomTitle, secret: .init(body.token), state: state, expiresAt: Date(timeIntervalSince1970: Double(body.expiresAtMilliseconds) / 1_000), maximumApprovedUses: body.maximumApprovedUses, approvedUseCount: body.approvedUseCount, createdAt: Date(timeIntervalSince1970: Double(body.createdAtMilliseconds) / 1_000)) }
 private func decodeLink(_ data: Data) throws -> V2GroupInviteLink { do { return try decodeLink(JSONDecoder().decode(LinkBody.self, from: data)) } catch let error as V2ClientGroupInvitationError { throw error } catch { throw V2ClientGroupInvitationError.invalidResponse } }
 private func decodePreview(_ body: PreviewBody) throws -> V2GroupInvitePreview { guard let state = try body.requestState.map({ guard let value = V2GroupJoinRequestState(rawValue: $0) else { throw V2ClientGroupInvitationError.invalidResponse }; return value }) else { return try .init(inviteID: .init(body.inviteID), roomID: .init(body.roomID), roomTitle: body.roomTitle, expiresAt: Date(timeIntervalSince1970: Double(body.expiresAtMilliseconds) / 1_000), requestState: nil, requestID: nil, isAlreadyMember: body.isAlreadyMember) }; guard let requestID = body.requestID else { throw V2ClientGroupInvitationError.invalidResponse }; return try .init(inviteID: .init(body.inviteID), roomID: .init(body.roomID), roomTitle: body.roomTitle, expiresAt: Date(timeIntervalSince1970: Double(body.expiresAtMilliseconds) / 1_000), requestState: state, requestID: .init(requestID), isAlreadyMember: body.isAlreadyMember) }
-private func decodeRequest(_ body: RequestBody) throws -> V2GroupJoinRequest { guard let state = V2GroupJoinRequestState(rawValue: body.state), let kind = V2AccountKind(rawValue: body.applicant.accountKind) else { throw V2ClientGroupInvitationError.invalidResponse }; return try .init(requestID: .init(body.requestID), inviteID: .init(body.inviteID), roomID: .init(body.roomID), applicant: .init(userID: .init(body.applicant.userID), handle: .init(body.applicant.handle), displayName: body.applicant.displayName, accountKind: kind), note: body.note, state: state, resumableDecisionOperationID: try body.resumableDecisionOperationID.map(GroupJoinDecisionOperationID.init), createdAt: Date(timeIntervalSince1970: Double(body.createdAtMilliseconds) / 1_000), decidedAt: body.decidedAtMilliseconds.map { Date(timeIntervalSince1970: Double($0) / 1_000) }) }
+private func decodeRequest(_ body: RequestBody) throws -> V2ClientGroupJoinRequest { guard let state = V2GroupJoinRequestState(rawValue: body.state) else { throw V2ClientGroupInvitationError.invalidResponse }; return try .init(requestID: .init(body.requestID), inviteID: .init(body.inviteID), roomID: .init(body.roomID), applicantUserID: .init(body.applicantUserID), note: body.note, state: state, resumableDecisionOperationID: try body.resumableDecisionOperationID.map(GroupJoinDecisionOperationID.init), createdAt: Date(timeIntervalSince1970: Double(body.createdAtMilliseconds) / 1_000), decidedAt: body.decidedAtMilliseconds.map { Date(timeIntervalSince1970: Double($0) / 1_000) }) }

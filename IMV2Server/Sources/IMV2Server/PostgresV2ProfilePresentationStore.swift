@@ -12,33 +12,46 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
     private let now: @Sendable () -> Date
     private let nicknameScope: (roomID: RoomID, route: V2RoomShardRoute)?
     private let activationScope: V2RoomActivationWriteScope?
+    private let nicknameCapacityProfile: V2CapacityProfile?
+    private let makeEventID: @Sendable () throws -> EventID
 
     /// 创建资料展示存储。
     ///
     /// - Parameters:
     ///   - database: 控制面数据库连接。
     ///   - now: 服务端时钟，默认取当前时间。
-    public init(database: any Database, now: @escaping @Sendable () -> Date = Date.init) {
+    public init(database: any Database, nicknameCapacityProfile: V2CapacityProfile? = nil,
+                makeEventID: @escaping @Sendable () throws -> EventID = { .init(uuid: UUID()) },
+                now: @escaping @Sendable () -> Date = Date.init) {
         self.database = database
         self.now = now
         self.nicknameScope = nil
         self.activationScope = nil
+        self.nicknameCapacityProfile = nicknameCapacityProfile
+        self.makeEventID = makeEventID
     }
 
     /// 仅用于固定的房间 Actor 轮次；所有昵称读写都会重新校验完整令牌。
     public init(database: any Database, activationScope: V2RoomActivationWriteScope,
+                nicknameCapacityProfile: V2CapacityProfile,
+                makeEventID: @escaping @Sendable () throws -> EventID = { .init(uuid: UUID()) },
                 now: @escaping @Sendable () -> Date = Date.init) {
         self.database = database
         self.now = now
         self.nicknameScope = nil
         self.activationScope = activationScope
+        self.nicknameCapacityProfile = nicknameCapacityProfile
+        self.makeEventID = makeEventID
     }
 
-    init(database: any Database, roomID: RoomID, ownerRoute: V2RoomShardRoute, now: @escaping @Sendable () -> Date) {
+    init(database: any Database, roomID: RoomID, ownerRoute: V2RoomShardRoute,
+         nicknameCapacityProfile: V2CapacityProfile, now: @escaping @Sendable () -> Date) {
         self.database = database
         self.now = now
         self.nicknameScope = (roomID, ownerRoute)
         self.activationScope = nil
+        self.nicknameCapacityProfile = nicknameCapacityProfile
+        self.makeEventID = { .init(uuid: UUID()) }
     }
 
     /// 按目标用户游标分页读取联系人备注。
@@ -78,7 +91,7 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
     ///   - ownerUserID: 拥有该备注的用户。
     ///   - targetUserID: 被备注的目标用户。
     ///   - operationID: 该次操作的稳定标识，用于幂等重试。
-    ///   - expectedRevision: 期望的当前修订，`nil` 表示不校验。
+    ///   - expectedRevision: 期望的当前修订，`nil` 表示此前不存在该记录。
     ///   - remarkName: 新的备注名；传 `nil` 表示清除。
     /// - Returns: 写入后的备注记录。
     /// - Throws: 修订冲突、载荷不匹配、内容非法或持久化失败时抛出。
@@ -201,7 +214,7 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
     ///   - actorUserID: 发起更新的成员。
     ///   - roomID: 目标群组房间。
     ///   - operationID: 该次操作的稳定标识，用于幂等重试。
-    ///   - expectedRevision: 期望的当前修订，`nil` 表示不校验。
+    ///   - expectedRevision: 期望的当前修订，`nil` 表示此前不存在该记录。
     ///   - nickname: 新的群昵称；传 `nil` 表示清除。
     /// - Returns: 更新后的群成员展示。
     /// - Throws: 修订冲突、载荷不匹配、内容非法或持久化失败时抛出。
@@ -231,7 +244,7 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
                 return try .init(roomID: roomID, userID: actorUserID, groupNickname: saved.nickname, revision: revision)
             }
             guard try await sql.raw("""
-                SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: room) FOR SHARE
+                SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: room) FOR NO KEY UPDATE
                 """).first(decoding: NicknameRoomFenceRow.self) != nil else { throw V2ProfilePresentationError.forbidden }
             guard try await activeMember(userID: actor, roomID: room, sql: sql) else { throw V2ProfilePresentationError.forbidden }
             let current = try await nicknameRow(room: room, user: actor, sql: sql)
@@ -239,6 +252,11 @@ public struct PostgresV2ProfilePresentationStore: V2ProfilePresentationManaging 
             let revision = try nextPresentationRevision(current: current?.revision, unchanged: current?.nickname == normalizedNickname)
             let changedAt = now()
             guard v2PostgresTimestampCanEncode(changedAt) else { throw V2ProfilePresentationError.corruptPersistenceState }
+            if current?.revision != revision {
+                guard let nicknameCapacityProfile else { throw V2ProfilePresentationError.corruptPersistenceState }
+                try await v2AppendGroupNicknameInvalidation(room: room, actor: actor, revision: revision,
+                    capacityProfile: nicknameCapacityProfile, eventID: makeEventID(), now: changedAt, sql: sql)
+            }
             try await sql.raw("INSERT INTO im_v2.room_member_nicknames (room_id, user_id, nickname, revision, updated_at) VALUES (\(bind: room), \(bind: actor), \(bind: normalizedNickname), \(bind: revision), \(bind: changedAt)) ON CONFLICT (room_id, user_id) DO UPDATE SET nickname = EXCLUDED.nickname, revision = EXCLUDED.revision, updated_at = EXCLUDED.updated_at").run()
             try await sql.raw("INSERT INTO im_v2.room_member_nickname_operations (actor_user_id, operation_id, room_id, expected_revision, requested_nickname, result_revision, created_at) VALUES (\(bind: actor), \(bind: operation), \(bind: room), \(bind: expectedSignedRevision), \(bind: normalizedNickname), \(bind: revision), \(bind: changedAt))").run()
             return try V2GroupMemberPresentation(roomID: roomID, userID: actorUserID, groupNickname: normalizedNickname, revision: .init(rawValue: UInt64(revision))!)

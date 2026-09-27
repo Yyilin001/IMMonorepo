@@ -11,22 +11,25 @@ import HTTPTypes
 public struct V2VaporProfilePresentationRoutes: Sendable {
     private let authenticator: any V2GatewayAuthenticator
     private let presentations: any V2ProfilePresentationManaging
+    private let authorizedProfiles: V2ResourceProfilePresentationService?
 
     /// 初始化路由。
     ///
     /// - Parameters:
     ///   - authenticator: 请求上下文鉴权器。
     ///   - presentations: 展示名服务依赖。
-    public init(authenticator: any V2GatewayAuthenticator, presentations: any V2ProfilePresentationManaging) {
+    public init(authenticator: any V2GatewayAuthenticator, presentations: any V2ProfilePresentationManaging,
+                authorizedProfiles: V2ResourceProfilePresentationService? = nil) {
         self.authenticator = authenticator
         self.presentations = presentations
+        self.authorizedProfiles = authorizedProfiles
     }
 
     /// 注册展示名路由。
     ///
     /// - GET `/v2/profile-presentations/contact-aliases`：分页读取联系人别名。
     /// - PUT `/v2/profile-presentations/contact-aliases/:target`：更新联系人备注。
-    /// - GET `/v2/profile-presentations/groups/:room/nicknames`：分页读取群昵称。
+    /// - GET `/v2/profile-presentations/groups/:room/nicknames`：分页读取带授权期限的资料，每页最多 100 项。
     /// - PUT `/v2/profile-presentations/groups/:room/nickname`：更新自己在群里的昵称。
     ///
     /// 所有异常统一转为 HTTP 错误码，其中鉴权和参数错误优先返回 4xx。
@@ -54,11 +57,23 @@ public struct V2VaporProfilePresentationRoutes: Sendable {
             let actor = try await authenticate(request)
             guard let rawRoom = request.parameters.get("room"), let room = try? RoomID(rawRoom) else { throw Abort(.badRequest) }
             let cursor = try paginationCursor(request)
-            let limit = try paginationLimit(request)
+            let rawLimit = request.query[String.self, at: "limit"]
+            guard let limit = rawLimit.map(Int.init) ?? V2ProfileViewLookupLimits.maximumKeys,
+                  (1...V2ProfileViewLookupLimits.maximumKeys).contains(limit) else { throw Abort(.badRequest) }
+            guard let authorizedProfiles else { throw Abort(.serviceUnavailable) }
             do {
-                let page = try await presentations.groupNicknames(actorUserID: actor.userID, roomID: room, afterUserID: cursor, limit: limit)
-                return try response(NicknameListResponse(values: page.values, nextCursor: page.nextCursor?.rawValue))
+                let page = try await authorizedProfiles.readGroupNicknames(roomID: room, afterUserID: cursor,
+                    limit: limit, actorUserID: actor.userID, deviceID: actor.deviceID) {
+                    try await presentations.groupNicknames(actorUserID: actor.userID, roomID: room, afterUserID: cursor, limit: limit)
+                }
+                return try response(page)
             }
+            catch V2ResourceProviderError.throttled {
+                var headers = HTTPFields(); headers[.retryAfter] = "1"; headers[.cacheControl] = "no-store"
+                throw Abort(.tooManyRequests, headers: headers)
+            }
+            catch V2ProfileViewReadError.invalidRequest { throw Abort(.badRequest) }
+            catch V2MediaStoreError.downloadNotAuthorized { throw Abort(.forbidden) }
             catch { throw map(error) }
         }
         routes.put("v2", "profile-presentations", "groups", ":room", "nickname") { request async throws -> Response in
@@ -120,7 +135,7 @@ public struct V2VaporProfilePresentationRoutes: Sendable {
     }
 
     /// 统一编码 JSON 响应体。
-    private func response<T: Content>(_ value: T) throws -> Response {
+    private func response<T: Encodable>(_ value: T) throws -> Response {
         let data = try JSONEncoder().encode(value)
         var headers = HTTPFields()
         headers[.contentType] = "application/json"
@@ -173,17 +188,6 @@ private struct AliasResponse: Content {
 
     enum CodingKeys: String, CodingKey {
         case value = "alias"
-    }
-}
-
-/// 群昵称列表响应。
-private struct NicknameListResponse: Content {
-    let values: [V2GroupMemberPresentation]
-    let nextCursor: String?
-
-    enum CodingKeys: String, CodingKey {
-        case values = "nicknames"
-        case nextCursor = "next_cursor"
     }
 }
 

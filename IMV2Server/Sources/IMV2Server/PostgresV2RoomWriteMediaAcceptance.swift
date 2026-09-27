@@ -50,7 +50,7 @@ enum RoomWriteMediaAcceptance {
             else { throw V2RoomWriteStoreError.actorNotEligible }
             mediaAuthority = .forwardedFrom(sourceMessageID)
         } else { mediaAuthority = .ownedBy(senderID) }
-        let mediaPresentations = try await assertAvailableMedia(command.media, authority: mediaAuthority, now: now, sql: sql)
+        let mediaPresentations = try await assertAvailableMedia(command.media, roomID: try mediaAcceptanceUUID(command.roomID), authority: mediaAuthority, now: now, sql: sql)
         if let importedForward {
             guard mediaPresentations.count == importedForward.export.intent.media.count,
                   zip(mediaPresentations, importedForward.export.intent.media).allSatisfy({ actual, expected in
@@ -61,11 +61,16 @@ enum RoomWriteMediaAcceptance {
         return mediaPresentations
     }
 
-    private static func assertAvailableMedia(_ media: [V2MediaReference], authority: MessageMediaAcceptanceAuthority, now: Date, sql: any SQLDatabase) async throws -> [V2MediaPresentation] {
+    private static func assertAvailableMedia(_ media: [V2MediaReference], roomID: UUID, authority: MessageMediaAcceptanceAuthority, now: Date, sql: any SQLDatabase) async throws -> [V2MediaPresentation] {
         guard !media.isEmpty else { return [] }
         guard Set(media).count == media.count else { throw V2MediaStoreError.invalidReferenceSet }
         let requested = try media.enumerated().map { ordinal, reference in
             OrderedMediaReferenceInput(ordinal: ordinal, mediaID: try mediaAcceptanceUUID(reference.mediaID))
+        }
+        let reusesSourceBinding: Bool
+        switch authority {
+        case .ownedBy: reusesSourceBinding = false
+        case .forwardedFrom: reusesSourceBinding = true
         }
         let authorization: SQLQueryString = switch authority {
         case .ownedBy(let ownerID):
@@ -95,7 +100,15 @@ enum RoomWriteMediaAcceptance {
               ON media.media_id = requested.media_id
              AND (\(authorization))
              AND media.state = 'available'
-             AND media.expires_at > \(bind: now)
+             AND (media.expires_at > \(bind: now) OR \(bind:reusesSourceBinding))
+             AND EXISTS (
+                 SELECT 1 FROM im_v2.resource_catalog resource
+                 JOIN im_v2.resource_blob_placements placement
+                   ON placement.media_id=resource.media_id AND placement.generation=resource.generation
+                  AND placement.state='active'
+                 WHERE resource.media_id=media.media_id AND resource.home_kind='room'
+                   AND resource.home_id=\(bind: roomID) AND resource.usage_kind='message_attachment'
+             )
             -- Lock shared media in a canonical order so two concurrent sends
             -- cannot deadlock merely because their attachment order differs.
             ORDER BY media.media_id

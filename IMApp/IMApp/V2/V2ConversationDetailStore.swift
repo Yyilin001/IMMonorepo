@@ -41,6 +41,7 @@ final class V2ConversationDetailStore {
     let forwardTargets: [V2ConversationForwardTarget]
     private let groupAnnouncementReader: (any V2GroupAnnouncementReading)?
     private let groupAnnouncementManager: (any V2GroupAnnouncementManaging)?
+    private let groupAvatarManager: (any V2GroupAvatarManaging)?
     private let groupMemberRoleChanger: (any V2GroupMemberRoleChanging)?
     private let groupRolePolicyReader: (any V2GroupRolePolicyAccessing)?
     private let groupRolePolicyChanger: (any V2GroupRolePolicyChanging)?
@@ -53,16 +54,33 @@ final class V2ConversationDetailStore {
     private let moderatedGroupMemberRemover: (any V2ModeratedGroupMemberRemoving)?
     private let publicIdentityResolver: (any V2ConversationPublicIdentityResolving)?
     private let attachmentStager: (any V2ConversationAttachmentStaging)?
-    private let attachmentUploader: (any V2ConversationAttachmentUploading)?
+    private let resourceSender: (any V2DurableConversationSending)?
     private let mediaDownloader: (any V2ConversationMediaDownloading)?
     private let projectionChangeNotifier: V2ProjectionChangeNotifier?
     private let roomSubscriptions: V2RoomSubscriptionCoordinator?
     private let activeHybridGroupSynchronizer: (any V2ActiveHybridGroupSynchronizing)?
     let roomID: String
-    let title: String
+    let presentationKey: V2ProfileViewLookupKey?
+    private(set) var title: String
     let kind: V2ConversationKind
     var isGroupConversation: Bool { kind.isGroup }
     var directAccountKind: V2AccountKind? { kind.directAccountKind }
+
+    var authorPresentationContext: V2AuthorPresentationPageScope.Context? {
+        guard let roomID = try? RoomID(roomID) else { return nil }
+        switch kind {
+        case .group: return .group(roomID)
+        case .direct:
+            guard let actor = try? UserID(userID), let presentationKey else { return nil }
+            return .direct(roomID: roomID, actorUserID: actor, peerUserID: presentationKey.userID)
+        case .unknown: return nil
+        }
+    }
+
+    func authorPresentationKey(for message: V2ConversationMessageItem) -> V2ProfileViewLookupKey? {
+        guard let sender = message.senderUserID else { return nil }
+        return authorPresentationContext?.key(for: sender)
+    }
     private(set) var messages: [V2ConversationMessageItem] = []
     private(set) var timeline: [V2ConversationTimelineItem] = []
     private(set) var timelineRevision: UInt64 = 0
@@ -80,6 +98,7 @@ final class V2ConversationDetailStore {
     private(set) var isSending = false
     private(set) var messageActionFeedback: String?
     private(set) var groupMembers: [V2GroupMemberItem] = []
+    private(set) var hasEarlierGroupMembers = false
     private(set) var groupMemberRevision: UInt64?
     private(set) var groupActorRole: String?
     private(set) var canLoadMoreGroupMembers = false
@@ -90,9 +109,12 @@ final class V2ConversationDetailStore {
     private(set) var attachments: [V2ConversationAttachmentItem] = []
     private(set) var mediaDownloadStates: [MediaID: V2ConversationMediaDownloadState] = [:]
     private(set) var groupReadReceiptPage: V2ReadReceiptReadersPage?
+    private(set) var hasEarlierGroupReadReceipts = false
     private(set) var isLoadingGroupReadReceipts = false
     private(set) var groupReadReceiptFeedback: String?
     private var groupReadReceiptMessageID: String?
+    private var groupReadReceiptDemand = UUID()
+    private var groupReadReceiptFlight: (id: UUID, task: Task<V2ReadReceiptReadersPage, Error>)?
     private var typingLeaseTask: Task<Void, Never>?
     private var typingLeaseID: UUID?
     private var activityConsumerID: UUID?
@@ -132,6 +154,13 @@ final class V2ConversationDetailStore {
     var mentionHandlesText = ""
     private(set) var replyTarget: V2ConversationMessageItem?
 
+    var hasGroupAvatarManagement: Bool { isGroupConversation && groupAvatarManager != nil && attachmentStager != nil }
+
+    func groupAvatarManagementStore() -> V2GroupAvatarManagementStore? {
+        guard isGroupConversation, let groupAvatarManager, let attachmentStager, let room = try? RoomID(roomID) else { return nil }
+        return .init(roomID: room, manager: groupAvatarManager, stager: attachmentStager, notifier: projectionChangeNotifier)
+    }
+
     let reactionPresets = ["👍", "❤️", "😂", "🎉", "😢", "😡"]
 
     init(environment: V2ConversationFeatureEnvironment, context: V2ConversationDetailContext) {
@@ -150,6 +179,7 @@ final class V2ConversationDetailStore {
         groupAnnouncementReader = environment.projections.groupAnnouncementReader
             ?? (environment.projections.dataSource as? any V2GroupAnnouncementReading)
         groupAnnouncementManager = environment.groups.announcementManager
+        groupAvatarManager = environment.groups.avatarManager
         groupMemberRoleChanger = environment.groups.memberRoleChanger
         groupRolePolicyReader = environment.projections.groupRolePolicyReader
             ?? (environment.projections.dataSource as? any V2GroupRolePolicyAccessing)
@@ -159,6 +189,14 @@ final class V2ConversationDetailStore {
         userID = environment.userID
         roomID = context.roomID
         title = context.title
+        // A cached identity selects the lookup context; only the repository's
+        // current lease permits display. Unknown rooms cannot infer a context.
+        if case .direct = context.kind, let key = context.presentationKey, let actor = try? UserID(environment.userID),
+           key.context == .directConversation, key.userID != actor {
+            presentationKey = key
+        } else {
+            presentationKey = nil
+        }
         kind = context.kind
         groupMemberDirectory = environment.groups.memberDirectory
         groupMembershipChanger = environment.groups.membershipChanger
@@ -166,7 +204,7 @@ final class V2ConversationDetailStore {
         moderatedGroupMemberRemover = environment.groups.moderatedMemberRemover
         publicIdentityResolver = environment.discovery.publicIdentityResolver
         attachmentStager = environment.media.attachmentStager
-        attachmentUploader = environment.media.attachmentUploader
+        resourceSender = environment.media.resourceSender
         mediaDownloader = environment.media.downloader
         projectionChangeNotifier = environment.runtime.projectionChangeNotifier
         activeHybridGroupSynchronizer = environment.runtime.activeHybridGroupSynchronizer
@@ -177,7 +215,7 @@ final class V2ConversationDetailStore {
 
     func messageSearchStore() -> V2ConversationSearchStore? {
         guard let messageSearcher, let roomID = try? RoomID(roomID) else { return nil }
-        return .init(searcher: messageSearcher, scope: .room(roomID))
+        return .init(searcher: messageSearcher, scope: .room(roomID), actorUserID: try? .init(userID))
     }
 
     func refresh() async {
@@ -203,6 +241,12 @@ final class V2ConversationDetailStore {
             let refreshedHistoryIncomplete = (try? await dataSource.roomLogHistoryIsIncomplete(roomID: roomID)) ?? isHistoryIncomplete
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
+            if let titles = dataSource as? any V2ConversationTitleReading,
+               let updatedTitle = try await titles.currentTitle(in: RoomID(roomID)) {
+                try Task.checkCancellation()
+                guard generation == refreshGeneration else { return }
+                title = updatedTitle
+            }
             let refreshedTimeline = page.items
             let refreshedMessages = Self.messages(in: refreshedTimeline)
             let refreshedCanSend: Bool? = if !isGroupConversation, let sendingCapabilityReader {
@@ -854,21 +898,46 @@ final class V2ConversationDetailStore {
 
     func loadGroupReadReceipts(for message: V2ConversationMessageItem, reset: Bool = false) async {
         guard isGroupConversation, message.isOutgoing, !message.isWithdrawn,
-              let groupReadReceiptReader, !isLoadingGroupReadReceipts
+              let groupReadReceiptReader, !Task.isCancelled
         else { return }
         let isNewMessage = groupReadReceiptMessageID != message.id
         if !reset, !isNewMessage, groupReadReceiptPage?.nextCursor == nil { return }
-        isLoadingGroupReadReceipts = true
-        defer { isLoadingGroupReadReceipts = false }
-        do {
-            let cursor = reset || isNewMessage ? nil : groupReadReceiptPage?.nextCursor
-            let page = try await groupReadReceiptReader.readers(
-                roomID: roomID,
-                messageID: message.id,
-                cursor: cursor
-            )
+        if !reset, !isNewMessage, isLoadingGroupReadReceipts { return }
+        let demand = UUID()
+        groupReadReceiptDemand = demand
+        if reset || isNewMessage {
+            groupReadReceiptMessageID = message.id
+            groupReadReceiptPage = nil
+            groupReadReceiptFeedback = nil
+            hasEarlierGroupReadReceipts = false
+        }
+        // A superseding message/reset owns the next read only after the old
+        // transport actually returns. Multiple resets retain only the latest.
+        if let previous = groupReadReceiptFlight {
+            previous.task.cancel()
+            _ = await previous.task.result
+            guard !Task.isCancelled, demand == groupReadReceiptDemand else { return }
+        }
+        let cursor = reset || isNewMessage ? nil : groupReadReceiptPage?.nextCursor
+        let roomID = self.roomID
+        let task = Task {
             try Task.checkCancellation()
-            guard page.roomID.rawValue == roomID, page.messageID.rawValue == message.id else {
+            return try await groupReadReceiptReader.readers(roomID: roomID, messageID: message.id, cursor: cursor)
+        }
+        groupReadReceiptFlight = (demand, task)
+        isLoadingGroupReadReceipts = true
+        defer {
+            if groupReadReceiptFlight?.id == demand {
+                groupReadReceiptFlight = nil
+                isLoadingGroupReadReceipts = false
+            }
+        }
+        do {
+            let page = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+            try Task.checkCancellation()
+            guard demand == groupReadReceiptDemand else { return }
+            guard page.roomID.rawValue == roomID, page.messageID.rawValue == message.id,
+                  page.readers.count <= 100, page.nextCursor == nil || page.nextCursor != cursor else {
                 groupReadReceiptFeedback = "已读详情返回异常，请稍后重试。"
                 return
             }
@@ -882,10 +951,12 @@ final class V2ConversationDetailStore {
                     groupReadReceiptFeedback = "已读详情返回重复数据，请刷新后重试。"
                     return
                 }
+                let readers = existing.readers + page.readers
+                if readers.count > 1_000 { hasEarlierGroupReadReceipts = true }
                 groupReadReceiptPage = try .init(
                     roomID: page.roomID,
                     messageID: page.messageID,
-                    readers: existing.readers + page.readers,
+                    readers: Array(readers.suffix(1_000)),
                     nextCursor: page.nextCursor
                 )
             }
@@ -893,8 +964,54 @@ final class V2ConversationDetailStore {
         } catch is CancellationError {
             return
         } catch {
+            guard !Task.isCancelled, demand == groupReadReceiptDemand else { return }
             groupReadReceiptFeedback = "无法读取已读详情，请检查网络后重试。"
         }
+    }
+
+    func groupPresentationKey(for target: UserID) -> V2ProfileViewLookupKey? {
+        guard isGroupConversation, let room = try? RoomID(roomID) else { return nil }
+        return .init(userID: target, context: .room(room))
+    }
+
+    private(set) var pendingResourceSends: [V2DurableConversationSendService.Pending] = []
+
+    func observeResourceSends() async {
+        guard let durable = resourceSender, let room = try? RoomID(roomID) else { return }
+        while !Task.isCancelled {
+            do {
+                let values = try await durable.pending(in: room)
+                try Task.checkCancellation()
+                pendingResourceSends = values
+                try await Task.sleep(for: .seconds(2))
+            } catch { if Task.isCancelled { return }; try? await Task.sleep(for: .seconds(5)) }
+        }
+    }
+    func copyAttachments(_ message: V2ConversationMessageItem, to targetRoomID: String) async -> Bool {
+        guard !message.isWithdrawn, !message.media.isEmpty,
+              let durable = resourceSender else {
+            messageActionFeedback = "暂时无法复制附件。"
+            return false
+        }
+        do {
+            let source = try V2MediaMessageLocation(roomID: .init(roomID), messageID: .init(message.id))
+            let sources = message.media.map { V2ResourceImportSource.message(location: source, mediaID: $0.mediaID, variantID: nil) }
+            try await durable.copyAttachments(sources: sources, to: .init(targetRoomID))
+            messageActionFeedback = "已保存附件复制意图，准备完成后发送到目标会话。"
+            return true
+        } catch is CancellationError { return false }
+        catch { messageActionFeedback = "暂时无法复制附件。"; return false }
+    }
+
+    func retryResourceSend(_ id: UUID) async {
+        guard let durable = resourceSender else { return }
+        do { try await durable.retry(intentID: id) }
+        catch { sendFeedback = "暂时无法恢复上传。" }
+    }
+    func cancelResourceSend(_ id: UUID) async {
+        guard let durable = resourceSender else { return }
+        do { try await durable.cancel(intentID: id); pendingResourceSends.removeAll { $0.id == id } }
+        catch { sendFeedback = "取消已请求，将在连接恢复后确认。" }
     }
 
     func sendDraft() async {
@@ -909,6 +1026,8 @@ final class V2ConversationDetailStore {
             sendFeedback = "实时网关尚未可用，无法发送。"
             return
         }
+        let frozenAttachments = attachments.map(\.attachment)
+        let frozenReplyTarget = replyTarget
         isSending = true
         defer { isSending = false }
         do {
@@ -917,17 +1036,23 @@ final class V2ConversationDetailStore {
             // staged attachment state.
             let mentions = try await resolvedMentions()
             try Task.checkCancellation()
-            guard await uploadPendingAttachments() else { return }
-            let media = attachments.compactMap { item -> V2MediaReference? in
-                guard case .available(let reference) = item.state else { return nil }
-                return reference
-            }
-            guard media.count == attachments.count else {
-                sendFeedback = "附件尚未准备完成。"
+            if !attachments.isEmpty {
+                guard let durable = resourceSender else {
+                    sendFeedback = "附件发送暂不可用。"
+                    return
+                }
+                let frozenReply = try frozenReplyTarget.map { try V2MessageReplyReference(messageID: .init($0.id)) }
+                try await durable.freezeSend(text: text, mentions: mentions, replyTo: frozenReply, roomID: .init(roomID), attachments: frozenAttachments)
+                // The journal now owns these files, including across process death.
+                attachments = []
+                draft = ""
+                mentionHandlesText = ""
+                replyTarget = nil
+                sendFeedback = "已保存发送意图，附件准备完成后自动发送。"
                 return
             }
             let replyTo = replyTarget.flatMap { try? V2MessageReplyReference(messageID: .init($0.id)) }
-            let outcome = try await sender.send(text: text, media: media, mentions: mentions, entities: [], replyTo: replyTo, in: roomID)
+            let outcome = try await sender.send(text: text, media: [], mentions: mentions, entities: [], replyTo: replyTo, in: roomID)
             try Task.checkCancellation()
             switch outcome {
             case .accepted:
@@ -950,6 +1075,12 @@ final class V2ConversationDetailStore {
             return
         } catch is V2ConversationMentionInputError {
             return
+        } catch V2ResourceCapabilityError.fileTooLarge(let maximumBytes) {
+            sendFeedback = "当前服务支持的附件上限为 \(ByteCountFormatter.string(fromByteCount: maximumBytes, countStyle: .file))。"
+        } catch V2ResourceCapabilityError.usageUnavailable {
+            sendFeedback = "当前服务暂未开放这种资源用途。"
+        } catch V2ResourceCapabilityError.uploadModeUnavailable {
+            sendFeedback = "当前服务暂不支持此设备的上传方式。"
         } catch {
             sendFeedback = "无法保存待发送消息。"
         }
@@ -1077,45 +1208,6 @@ final class V2ConversationDetailStore {
         await attachmentStager?.discard(attachment)
     }
 
-    private func uploadPendingAttachments() async -> Bool {
-        let pendingIDs = attachments.compactMap { item -> UUID? in
-            switch item.state {
-            case .staged, .failed: return item.id
-            case .uploading, .available: return nil
-            }
-        }
-        guard !pendingIDs.isEmpty else {
-            return !attachments.contains(where: { $0.state == .uploading })
-        }
-        guard let attachmentUploader else {
-            sendFeedback = "附件上传暂不可用。"
-            return false
-        }
-        for id in pendingIDs {
-            guard let index = attachments.firstIndex(where: { $0.id == id }) else { continue }
-            let attachment = attachments[index].attachment
-            attachments[index].state = .uploading
-            do {
-                let reference = try await attachmentUploader.upload(attachment)
-                try Task.checkCancellation()
-                guard let completedIndex = attachments.firstIndex(where: { $0.id == id }) else { continue }
-                attachments[completedIndex].state = .available(reference)
-            } catch is CancellationError {
-                if let cancelledIndex = attachments.firstIndex(where: { $0.id == id }) {
-                    attachments[cancelledIndex].state = .staged
-                }
-                return false
-            } catch {
-                if let failedIndex = attachments.firstIndex(where: { $0.id == id }) {
-                    attachments[failedIndex].state = .failed
-                }
-                sendFeedback = "附件上传或安全扫描未完成，请稍后重试。"
-                return false
-            }
-        }
-        return true
-    }
-
     private func discardAttachmentsAfterDurableSend() async {
         let staged = attachments.map(\.attachment)
         attachments = []
@@ -1126,6 +1218,12 @@ final class V2ConversationDetailStore {
 
     func mediaDownloadState(for media: V2MediaReference) -> V2ConversationMediaDownloadState {
         mediaDownloadStates[media.mediaID] ?? .notDownloaded
+    }
+
+    func mediaFileUnavailable(_ downloaded: V2DownloadedConversationMedia) {
+        guard mediaDownloadStates[downloaded.mediaID] == .downloaded(downloaded) else { return }
+        mediaDownloadStates[downloaded.mediaID] = .notDownloaded
+        messageActionFeedback = "本地附件已不可用，请重新下载。"
     }
 
     func downloadMedia(_ media: V2MediaReference, from message: V2ConversationMessageItem) async {
@@ -1534,6 +1632,7 @@ final class V2ConversationDetailStore {
 
     private func invalidateGroupMemberDirectory() {
         groupMembers = []
+        hasEarlierGroupMembers = false
         groupMemberRevision = nil
         groupActorRole = nil
         nextGroupMemberCursor = nil
@@ -1592,6 +1691,10 @@ final class V2ConversationDetailStore {
                     return
                 }
                 groupMembers += page.members
+                if groupMembers.count > 1_000 {
+                    groupMembers.removeFirst(groupMembers.count - 1_000)
+                    hasEarlierGroupMembers = true
+                }
                 groupMemberRevision = page.membershipRevision
                 groupActorRole = page.actorRole
                 nextGroupMemberCursor = page.nextCursor

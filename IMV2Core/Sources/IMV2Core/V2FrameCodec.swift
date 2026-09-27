@@ -209,6 +209,11 @@ public struct V2FrameCommand: RawRepresentable, Equatable, Hashable, Sendable {
     public static let accountRoomResyncRequired = Self(rawValue: 118)
     public static let roomLatestVisibleBatch = Self(rawValue: 119)
     public static let roomLatestVisibleBatchResult = Self(rawValue: 120)
+    /// Recipient-specific, negotiated, ephemeral author supplement.
+    public static let authorPresentationDelta = Self(rawValue: 121)
+    /// 按精确 stream、room、view 停止可选补充，不取消房间订阅。
+    public static let authorPresentationEnd = Self(rawValue: 122)
+    public static let authorPresentationEnded = Self(rawValue: 123)
 
 }
 

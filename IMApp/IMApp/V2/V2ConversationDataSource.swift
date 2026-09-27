@@ -5,12 +5,20 @@ import IMV2Core
 /// 界面功能到 V2 SQLite 投影的边界。
 ///
 /// 所有标识都在该边界完成解析，非法数据绝不会变成可导航的路由。
-actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationWindowReading, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyAccessing {
+protocol V2ConversationTitleReading: Sendable {
+    func currentTitle(in roomID: RoomID) async throws -> String?
+}
+
+actor V2GRDBConversationDataSource: V2ConversationTitleReading, V2ConversationDataSource, V2ConversationWindowReading, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyAccessing {
     private let localStore: GRDBV2LocalSyncStore
     private let requestLatestVisible: @Sendable ([RoomID]) async throws -> Void
     init(localStore: GRDBV2LocalSyncStore, requestLatestVisible: @escaping @Sendable ([RoomID]) async throws -> Void) {
         self.localStore = localStore
         self.requestLatestVisible = requestLatestVisible
+    }
+
+    func currentTitle(in roomID: RoomID) async throws -> String? {
+        try await localStore.conversationTitles(for: [roomID])[roomID]
     }
 
     private func requestMissingSummaries(_ entries: [V2ClientConversationListEntry]) async throws {
@@ -116,7 +124,8 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationWind
                 isPinned: entry.isPinned,
                 isArchived: entry.isArchived,
                 muteUntil: entry.muteUntil,
-                unreadCount: unread[entry.roomID]
+                unreadCount: unread[entry.roomID],
+                presentationKey: entry.directIdentity.map { .init(userID: $0.publicIdentity.userID, context: .directConversation) }
             )
         }
         return .init(items: items, nextCursor: page.nextCursor)
@@ -160,7 +169,8 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationWind
                 kind: .direct(accountKind: identity.publicIdentity.accountKind),
                 isPinned: conversationStates[identity.roomID]?.isPinned ?? false,
                 isArchived: conversationStates[identity.roomID]?.isArchived ?? false,
-                muteUntil: conversationStates[identity.roomID]?.muteUntil
+                muteUntil: conversationStates[identity.roomID]?.muteUntil,
+                presentationKey: .init(userID: identity.publicIdentity.userID, context: .directConversation)
             )
         }
         return (messageItems + emptyProfileItems + emptyDirectItems).sorted { lhs, rhs in
@@ -255,12 +265,8 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationWind
         try await localStore.searchMessages(request)
     }
 
-    func searchSenderDisplayName(userID: UserID) async throws -> String? {
-        guard let profile = try await localStore.profileView(userID: userID) else { return nil }
-        return V2ProfileResolver.resolve(
-            userID: userID, profile: profile, alias: nil, groupMember: nil,
-            surface: .groupMessage(allowsPrivateAlias: false)
-        ).displayName
+    func searchConversationContext(roomID: RoomID) async throws -> V2ClientConversationLookupContext? {
+        try await localStore.conversationLookupContexts(for: [roomID])[roomID]
     }
 
     func messageSearchIndexUpdates() async -> AsyncThrowingStream<V2MessageSearchIndexSnapshot, any Error> {
@@ -277,12 +283,12 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationWind
         limit: Int
     ) async throws -> V2ConversationFavoriteMessagesPage {
         let page = try await localStore.favoritedMessages(before: cursor, limit: limit)
-        let titles = try await localStore.conversationTitles(for: Array(Set(page.messages.map(\.roomID))))
+        let contexts = try await localStore.conversationLookupContexts(for: Array(Set(page.messages.map(\.roomID))))
         let items: [V2FavoriteConversationMessageItem] = page.messages.map { message in
             V2FavoriteConversationMessageItem(
                 id: message.messageID.rawValue,
                 roomID: message.roomID.rawValue,
-                roomTitle: titles[message.roomID] ?? Self.roomTitle(message.roomID.rawValue),
+                label: .init(context: contexts[message.roomID]),
                 text: Self.preview(for: message),
                 createdAt: message.createdAt
             )
@@ -331,7 +337,8 @@ actor V2GRDBConversationDataSource: V2ConversationDataSource, V2ConversationWind
                 && (directReceipt?.readThroughRoomSequence ?? 0) >= message.roomSequence,
             isFavorited: favoritedMessageIDs.contains(message.messageID),
             isPinnedInGroup: pinnedMessageIDs.contains(message.messageID),
-            isForwarded: !message.isWithdrawn && message.forwardedFrom != nil
+            isForwarded: !message.isWithdrawn && message.forwardedFrom != nil,
+            senderUserID: message.senderUserID
         )
     }
 

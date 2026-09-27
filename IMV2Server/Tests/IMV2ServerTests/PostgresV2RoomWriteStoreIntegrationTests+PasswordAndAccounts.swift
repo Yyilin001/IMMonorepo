@@ -487,25 +487,34 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let endpoint = try V2PushDeviceEndpointRegistration(provider: .apns, environment: .development, token: "expiry-test-token")
             try await push.register(actorUserID: user, deviceID: device, endpoint: endpoint, now: start)
             #expect(try await push.endpoint(for: device) != nil)
-            let media = PostgresV2MediaStore(database: resources.database(.psql))
-            let uploads = PostgresV2MediaUploadSessionStore(database: resources.database(.psql))
-            let uploadCommand = try V2RequestMediaUploadCommand(actorUserID: user, operationID: .init(UUID().uuidString),
-                mediaID: .init(UUID().uuidString), contentType: "text/plain", byteCount: 1, limits: .init(maximumBytes: 16))
-            let upload = try await media.requestUpload(uploadCommand, deviceID: device, expiresAt: start.addingTimeInterval(300), now: start)
-            let claim = try await uploads.claimUpload(ownerUserID: user, deviceID: device, uploadSessionID: upload.uploadSessionID, now: start, leaseDuration: 60)
-            let completedCommand = try V2RequestMediaUploadCommand(actorUserID: user, operationID: .init(UUID().uuidString),
-                mediaID: .init(UUID().uuidString), contentType: "text/plain", byteCount: 1, limits: .init(maximumBytes: 16))
-            let completedUpload = try await media.requestUpload(completedCommand, deviceID: device, expiresAt: start.addingTimeInterval(300), now: start)
-            let completedClaim = try await uploads.claimUpload(ownerUserID: user, deviceID: device, uploadSessionID: completedUpload.uploadSessionID, now: start, leaseDuration: 60)
-            try await uploads.completeUploadTarget(completedClaim, now: start)
+            let uploads = PostgresV2ResourceLifecycleStore(database: resources.database(.psql), authorize: { transaction in
+                guard try await V2PostgresDeviceAvailabilityChecker(database: transaction).isAvailable(userID: user, deviceID: device)
+                else { throw V2MediaStoreError.uploadNotAuthorized }
+            })
+            let uploadCommand = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()), usage: .userAvatar,
+                contentType: "image/png", byteCount: 1, checksum: .init(value: String(repeating: "a", count: 64)))
+            func createUpload(_ input: V2ResourceUploadRequest) async throws -> V2PersistedResourceUpload {
+                try await uploads.create(homeKind: "account", homeID: user.uuidValue!, usageKind: "user_avatar", actor: user.uuidValue!,
+                    device: deviceUUID, operation: input.operationID.uuidValue!, mediaID: input.mediaID.uuidValue!, contentType: input.contentType,
+                    byteCount: input.byteCount, requestJSON: String(decoding: JSONEncoder().encode(input), as: UTF8.self),
+                    allocate: { try .init(placementID: UUID(), binding: .init(id: "device-expiry", configurationRevision: 1), handle: Data(input.mediaID.rawValue.utf8)) },
+                    expiresAt: start.addingTimeInterval(300), now: start)
+            }
+            let upload = try await createUpload(uploadCommand)
+            let claim = try await uploads.claimFinalize(session: upload.sessionID, generation: 1, actor: user.uuidValue!, device: deviceUUID, now: start)
+            let completedCommand = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()), usage: .userAvatar,
+                contentType: "image/png", byteCount: 1, checksum: uploadCommand.checksum)
+            let completedUpload = try await createUpload(completedCommand)
+            let completedClaim = try await uploads.claimFinalize(session: completedUpload.sessionID, generation: 1, actor: user.uuidValue!, device: deviceUUID, now: start)
+            let facts = try V2StoredObjectFacts(reference: claim.placement, byteCount: 1, sha256: Data(repeating: 0xaa, count: 32))
+            try await uploads.publish(completedClaim, facts: .init(reference: completedClaim.placement, byteCount: 1, sha256: facts.sha256), actor: user.uuidValue!, device: deviceUUID, now: start)
             try await sql.raw("UPDATE im_v2.auth_devices SET session_expires_at = CURRENT_TIMESTAMP - interval '1 second' WHERE device_id = \(bind: deviceUUID)").run()
             #expect(try await push.endpoint(for: device) == nil)
-            await #expect(throws: V2MediaUploadSessionStoreError.sessionUnavailable) { try await uploads.completeUploadTarget(claim, now: start) }
-            try await uploads.releaseUploadTarget(claim)
-            await #expect(throws: V2MediaUploadSessionStoreError.sessionUnavailable) { try await uploads.claimUpload(ownerUserID: user, deviceID: device, uploadSessionID: upload.uploadSessionID, now: start, leaseDuration: 60) }
-            await #expect(throws: V2MediaStoreError.uploadNotAuthorized) { try await media.requestUpload(uploadCommand, deviceID: device, expiresAt: start.addingTimeInterval(300), now: start) }
-            await #expect(throws: V2MediaStoreError.uploadNotAuthorized) { try await media.uploadStatus(ownerUserID: user, deviceID: device, mediaID: uploadCommand.mediaID, now: start) }
-            await #expect(throws: V2MediaStoreError.uploadNotAuthorized) { try await media.markUploadCompleted(ownerUserID: user, deviceID: device, mediaID: completedCommand.mediaID, now: start) }
+            await #expect(throws: V2MediaStoreError.uploadNotAuthorized) { try await uploads.publish(claim, facts: facts, actor: user.uuidValue!, device: deviceUUID, now: start) }
+            await #expect(throws: V2MediaStoreError.uploadNotAuthorized) { try await uploads.claimFinalize(session: upload.sessionID, generation: 1, actor: user.uuidValue!, device: deviceUUID, now: start) }
+            await #expect(throws: V2MediaStoreError.uploadNotAuthorized) { try await createUpload(uploadCommand) }
+            await #expect(throws: V2MediaStoreError.uploadNotAuthorized) { try await uploads.status(session: completedUpload.sessionID, actor: user.uuidValue!, device: deviceUUID) }
+            await #expect(throws: V2MediaStoreError.uploadNotAuthorized) { try await uploads.cancel(session: upload.sessionID, generation: 1, actor: user.uuidValue!, device: deviceUUID, now: start) }
             await #expect(throws: V2PushDeviceEndpointError.deviceUnavailable) { try await push.intentEpoch(actorUserID: user, deviceID: device) }
             await #expect(throws: V2PushDeviceEndpointError.deviceUnavailable) { try await push.register(actorUserID: user, deviceID: device, endpoint: endpoint, now: Date()) }
             #expect(try await V2PostgresDeviceAvailabilityChecker(database: resources.database(.psql)).isAvailable(userID: user, deviceID: device) == false)

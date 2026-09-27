@@ -10,12 +10,50 @@ import IMV2Core
 struct V2DownloadedConversationMedia: Hashable, Identifiable, Sendable {
     let mediaID: MediaID
     let fileURL: URL
+    private let owner: V2ForegroundConversationMediaDownloader?
+
+    init(mediaID: MediaID, fileURL: URL, owner: V2ForegroundConversationMediaDownloader? = nil) {
+        self.mediaID = mediaID; self.fileURL = fileURL; self.owner = owner
+    }
+
+    /// A path is only a cache hint. Each file consumer must acquire its own use.
+    func borrowFile() async throws -> V2ConversationMediaFileLease {
+        guard let owner else { throw V2MediaFileAccessError.unavailable }
+        return try await owner.borrowFile(mediaID: mediaID, fileURL: fileURL)
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.mediaID == rhs.mediaID && lhs.fileURL == rhs.fileURL && lhs.owner === rhs.owner
+    }
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(mediaID); hasher.combine(fileURL); hasher.combine(owner.map(ObjectIdentifier.init))
+    }
 
     var id: MediaID { mediaID }
 }
 
+enum V2MediaFileAccessError: Error, Equatable { case unavailable, overloaded }
+
+/// Owned by exactly one decode, player or share operation. release() is
+/// idempotent; copying this value does not create another ownership claim.
+nonisolated final class V2ConversationMediaFileLease: Sendable, Identifiable {
+    let id: UUID
+    let fileURL: URL
+    fileprivate let owner: V2ForegroundConversationMediaDownloader
+    fileprivate init(id: UUID, fileURL: URL, owner: V2ForegroundConversationMediaDownloader) {
+        self.id = id; self.fileURL = fileURL; self.owner = owner
+    }
+    func release() async { await owner.releaseLease(id) }
+    deinit {
+        let owner = owner, id = id
+        // Backstop for a sheet removed before its controller was constructed.
+        // Normal consumers explicitly release after their real I/O has ended.
+        Task { await owner.releaseLease(id) }
+    }
+}
+
 protocol V2ConversationMediaDownloading: Sendable {
-    /// 在返回可分享的本地文件之前，先重新授权并替换本地缓存条目。
+    /// 在返回可借用的本地文件之前，先重新授权并发布新的缓存代次。
     ///
     /// 实现绝不能返回提供方目标地址。
     ///
@@ -117,6 +155,7 @@ enum V2DeviceLocalStoragePolicy {
 actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V2ConversationMediaCacheDiscarding {
     private var isClosed = false
     private var transfers: [UUID: Task<V2DownloadedConversationMedia, Error>] = [:]
+    private var transferMedia: [UUID: MediaID] = [:]
     private let downloader: V2ClientMediaDownloadService
     private let directory: URL
     private let fileManager: FileManager
@@ -133,7 +172,10 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         now: @escaping @Sendable () -> Date = Date.init
     ) throws {
         self.downloader = downloader
-        self.directory = try V2DeviceLocalStoragePolicy.prepareManagedDirectory(directory, fileManager: fileManager)
+        let prepared = try V2DeviceLocalStoragePolicy.prepareManagedDirectory(directory, fileManager: fileManager)
+        // URL directory hints affect equality even when paths name the same
+        // directory. Canonicalize once for both borrowing and cleanup guards.
+        self.directory = URL(fileURLWithPath: prepared.path, isDirectory: true)
         self.fileManager = fileManager
         self.cachePolicy = cachePolicy
         self.makeUUID = makeUUID
@@ -151,12 +193,14 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
     func download(_ media: V2MediaReference, message: V2MediaMessageLocation? = nil) async throws -> V2DownloadedConversationMedia {
         try Task.checkCancellation()
         guard !isClosed else { throw CancellationError() }
+        guard transfers.count + avatarFlights.count < 4 else { throw V2ClientMediaTransferError.serverStatus(429) }
         let id = UUID()
         // The account owns and drains the transfer; caller cancellation is
         // explicitly forwarded to this shared lifetime boundary.
         let task = Task { try await self.performDownload(media, message: message) }
         transfers[id] = task
-        defer { transfers.removeValue(forKey: id) }
+        transferMedia[id] = media.mediaID
+        defer { transfers.removeValue(forKey: id); transferMedia.removeValue(forKey: id) }
         return try await withTaskCancellationHandler {
             let result = try await task.value
             try Task.checkCancellation()
@@ -172,24 +216,166 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
     /// - Throws: 目录删除失败时返回文件系统错误；可再次调用以重试清理。
     func close() async throws {
         isClosed = true
+        let avatarTasks = Array(avatarFlights.values)
+        for task in avatarTasks { task.cancel() }
+        for task in avatarTasks { _ = await task.result }
+        avatarFlights.removeAll()
         let pending = Array(transfers.values)
         for task in pending { task.cancel() }
         for task in pending { _ = await task.result }
+        // The UI is removed before account cleanup starts. Its player teardown,
+        // completed share, and thumbnail decoder release actual file uses.
+        if !filePins.isEmpty { await withCheckedContinuation { fileDrainWaiters.append($0) } }
         if fileManager.fileExists(atPath: directory.path) {
             do { try fileManager.removeItem(at: directory) }
             catch { throw V2DeviceLocalStorageError.fileSystemFailure }
         }
+        publishedFiles.removeAll(); verifiedAvatars.removeAll(); pendingDeletion.removeAll()
+    }
+
+    private var reservedBytes: Int64 = 0
+    private var avatarFlights: [String: V2SharedOperation<V2DownloadedConversationMedia>] = [:]
+    private var filePins: [URL: Int] = [:]
+    private var verifiedAvatars: Set<URL> = []
+    private var publishedFiles: [URL: MediaID] = [:]
+    private var fileLeases: [UUID: URL] = [:]
+    private var pendingDeletion: Set<URL> = []
+    private var activeTemporaryFiles: Set<URL> = []
+    private var fileDrainWaiters: [CheckedContinuation<Void, Never>] = []
+
+    fileprivate func borrowFile(mediaID: MediaID, fileURL: URL) throws -> V2ConversationMediaFileLease {
+        try Task.checkCancellation()
+        let url = fileURL.standardizedFileURL
+        guard !isClosed, publishedFiles[url] == mediaID, !pendingDeletion.contains(url),
+              url.deletingLastPathComponent() == directory,
+              let facts = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+              facts.isRegularFile == true, facts.isSymbolicLink != true
+        else { throw V2MediaFileAccessError.unavailable }
+        guard fileLeases.count < 64 else { throw V2MediaFileAccessError.overloaded }
+        let id = UUID()
+        fileLeases[id] = url; filePins[url, default: 0] += 1
+        try? fileManager.setAttributes([.modificationDate: now()], ofItemAtPath: url.path)
+        return .init(id: id, fileURL: url, owner: self)
+    }
+
+    fileprivate func releaseLease(_ id: UUID) {
+        guard let url = fileLeases.removeValue(forKey: id) else { return }
+        releaseFile(url)
+    }
+
+    func releaseFile(_ url: URL) {
+        let count = filePins[url, default: 0]
+        if count <= 1 { filePins.removeValue(forKey: url) } else { filePins[url] = count - 1 }
+        if filePins[url] == nil, pendingDeletion.contains(url) { removeCachedFile(url) }
+        if filePins.isEmpty {
+            let waiters = fileDrainWaiters; fileDrainWaiters.removeAll()
+            for waiter in waiters { waiter.resume() }
+        }
+    }
+
+    func avatar(_ access: V2ResourceAvatarAccess) async throws -> V2DownloadedConversationMedia {
+        try Task.checkCancellation()
+        guard !isClosed else { throw CancellationError() }
+        let key = access.mediaID.rawValue + ":" + access.variantID.rawValue + ":" + String(access.version) + ":" + access.checksum.value
+        let digest = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
+        let destination = directory.appendingPathComponent(digest + ".media")
+        if fileManager.fileExists(atPath: destination.path),
+           (verifiedAvatars.contains(destination) || (try? V2ResourceFileDigest.sha256(fileURL: destination, expectedByteCount: access.plan.expectedByteCount)) == access.checksum.value) {
+            verifiedAvatars.insert(destination)
+            filePins[destination, default: 0] += 1
+            try? fileManager.setAttributes([.modificationDate: now()], ofItemAtPath: destination.path)
+            return .init(mediaID: access.mediaID, fileURL: destination)
+        }
+        let flight: V2SharedOperation<V2DownloadedConversationMedia>
+        if let existing = avatarFlights[key] { flight = existing }
+        else {
+            guard transfers.count + avatarFlights.count < 4 else { throw V2ClientMediaTransferError.serverStatus(429) }
+            flight = V2SharedOperation { try await self.performAvatar(access, key: key, destination: destination) }
+            avatarFlights[key] = flight
+        }
+        filePins[destination, default: 0] += 1
+        do {
+            let result = try await flight.value
+            try Task.checkCancellation()
+            guard !isClosed else { throw CancellationError() }
+            return result
+        } catch {
+            releaseFile(destination)
+            throw error
+        }
+    }
+
+    private func performAvatar(_ access: V2ResourceAvatarAccess, key: String, destination: URL) async throws -> V2DownloadedConversationMedia {
+        defer { avatarFlights.removeValue(forKey: key) }
+        let expected = access.plan.expectedByteCount
+        guard expected > 0, expected <= 2 * 1_024 * 1_024 else { throw V2ClientMediaTransferError.invalidTarget }
+        guard access.plan.expiresAt > now() else { throw V2ClientMediaTransferError.targetExpired }
+        let reservation = try reserve(bytes: expected)
+        defer { reservedBytes -= reservation }
+        let temporary = directory.appendingPathComponent("." + UUID().uuidString + ".partial")
+        activeTemporaryFiles.insert(temporary)
+        defer { activeTemporaryFiles.remove(temporary); try? fileManager.removeItem(at: temporary) }
+        guard fileManager.createFile(atPath: temporary.path, contents: nil) else { throw V2DeviceLocalStorageError.fileSystemFailure }
+        try V2DeviceLocalStoragePolicy.applyToManagedFile(temporary, fileManager: fileManager)
+        let handle = try FileHandle(forWritingTo: temporary)
+        defer { try? handle.close() }
+        var request = URLRequest(url: access.plan.url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 30)
+        request.httpMethod = "GET"
+        for header in access.plan.headers { request.setValue(header.value, forHTTPHeaderField: header.name) }
+        let (stream, response) = try await V2SecureURLSession.mediaProvider.bytes(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw V2ClientMediaTransferError.invalidResponse }
+        var count: Int64 = 0, chunk = Data()
+        for try await byte in stream {
+            try Task.checkCancellation()
+            guard !isClosed, count < expected else { throw V2ClientMediaTransferError.byteCountMismatch }
+            chunk.append(byte); count += 1
+            if chunk.count == 64 * 1_024 { try handle.write(contentsOf: chunk); chunk.removeAll(keepingCapacity: true) }
+        }
+        if !chunk.isEmpty { try handle.write(contentsOf: chunk) }
+        try handle.synchronize()
+        try Task.checkCancellation()
+        guard !isClosed, count == expected,
+              try V2ResourceFileDigest.sha256(fileURL: temporary, expectedByteCount: expected) == access.checksum.value else { throw V2ClientMediaTransferError.byteCountMismatch }
+        if fileManager.fileExists(atPath: destination.path) { try fileManager.removeItem(at: destination) }
+        try fileManager.moveItem(at: temporary, to: destination)
+        verifiedAvatars.insert(destination)
+        return .init(mediaID: access.mediaID, fileURL: destination)
+    }
+
+    /// Reserve both transfer/temp and final publication peaks before starting I/O.
+    private func reserve(bytes: Int64) throws -> Int64 {
+        guard bytes > 0, bytes <= cachePolicy.maximumByteCount / 2 else { throw V2ConversationAttachmentStagingError.stagingQuotaExceeded }
+        let peak = bytes * 2
+        guard reservedBytes <= cachePolicy.maximumByteCount - peak else { throw V2ConversationAttachmentStagingError.stagingQuotaExceeded }
+        try enforceCachePolicy(excluding: nil, reservedAddition: peak)
+        let files = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey])
+        let used = try files.reduce(Int64(0)) { value, url in
+            let facts = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            return value + (facts.isRegularFile == true ? Int64(facts.fileSize ?? 0) : 0)
+        }
+        guard used <= cachePolicy.maximumByteCount - reservedBytes - peak else { throw V2ConversationAttachmentStagingError.stagingQuotaExceeded }
+        let free = try directory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage ?? 0
+        guard free >= reservedBytes + peak + 16 * 1_024 * 1_024 else { throw V2ConversationAttachmentStagingError.stagingQuotaExceeded }
+        reservedBytes += peak
+        return peak
     }
 
     private func performDownload(_ media: V2MediaReference, message: V2MediaMessageLocation?) async throws -> V2DownloadedConversationMedia {
         try Task.checkCancellation()
         guard !isClosed else { throw CancellationError() }
-        let destination = cacheURL(for: media.mediaID)
+        // Immutable local generations keep an existing player/share and its
+        // decoded thumbnail bound to the original bytes during a fresh download.
+        let destination = directory.appendingPathComponent(cacheStem(for: media.mediaID) + "." + UUID().uuidString + ".media")
         let temporary = directory
             .appendingPathComponent("." + makeUUID().uuidString + ".partial", isDirectory: false)
-        defer { try? fileManager.removeItem(at: temporary) }
+        activeTemporaryFiles.insert(temporary)
+        defer { activeTemporaryFiles.remove(temporary); try? fileManager.removeItem(at: temporary) }
 
-        try await downloader.download(mediaID: media.mediaID, message: message, to: temporary)
+        let target = try await downloader.authorizedTarget(mediaID: media.mediaID, message: message)
+        let expected = target.expectedByteCount
+        let reservation = try reserve(bytes: expected)
+        defer { reservedBytes -= reservation }
+        try await downloader.download(target: target, to: temporary)
         try Task.checkCancellation()
         guard !isClosed else { throw CancellationError() }
 
@@ -199,34 +385,42 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
             // is no later fallible step that can report failure while leaving
             // a partially configured cache entry behind.
             try V2DeviceLocalStoragePolicy.applyToManagedFile(temporary, fileManager: fileManager)
-            if fileManager.fileExists(atPath: destination.path) {
-                _ = try fileManager.replaceItemAt(
-                    destination,
-                    withItemAt: temporary,
-                    backupItemName: nil,
-                    options: [.usingNewMetadataOnly]
-                )
-            } else {
-                // Both URLs are in the same managed directory, so rename is
-                // the atomic first-publication operation for a new cache key.
-                try fileManager.moveItem(at: temporary, to: destination)
-            }
-            try fileManager.setAttributes([.modificationDate: now()], ofItemAtPath: destination.path)
+            try fileManager.setAttributes([.modificationDate: now()], ofItemAtPath: temporary.path)
+            try fileManager.moveItem(at: temporary, to: destination)
         } catch {
             throw V2DeviceLocalStorageError.fileSystemFailure
         }
-        // Cache cleanup is best-effort after the atomic publication. Keep the
-        // file being returned even if one server-authorized object is larger
-        // than the aggregate target; the upload policy still bounds a single
-        // object, and a later maintenance pass may remove it.
+        publishedFiles[destination] = media.mediaID
+        for (url, id) in publishedFiles where id == media.mediaID && url != destination {
+            retireCachedFile(url)
+        }
+        // Admission already reserved the byte peak. Keep this generation for
+        // the caller; policy cleanup never removes a consumer's pinned file.
         try? enforceCachePolicy(excluding: destination)
-        return .init(mediaID: media.mediaID, fileURL: destination)
+        return .init(mediaID: media.mediaID, fileURL: destination, owner: self)
     }
 
     func discard(_ media: V2MediaReference) async {
-        let candidate = cacheURL(for: media.mediaID).standardizedFileURL
-        guard candidate.deletingLastPathComponent() == directory else { return }
-        try? fileManager.removeItem(at: candidate)
+        for (id, target) in transferMedia where target == media.mediaID { transfers[id]?.cancel() }
+        let stem = cacheStem(for: media.mediaID)
+        guard let files = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
+        for file in files where file.pathExtension == "media"
+            && (file.lastPathComponent == stem + ".media" || file.lastPathComponent.hasPrefix(stem + ".")) {
+            retireCachedFile(file.standardizedFileURL)
+        }
+    }
+
+    private func retireCachedFile(_ url: URL) {
+        publishedFiles.removeValue(forKey: url)
+        pendingDeletion.insert(url)
+        if filePins[url] == nil { removeCachedFile(url) }
+    }
+
+    private func removeCachedFile(_ url: URL) {
+        do {
+            if fileManager.fileExists(atPath: url.path) { try fileManager.removeItem(at: url) }
+            publishedFiles.removeValue(forKey: url); verifiedAvatars.remove(url); pendingDeletion.remove(url)
+        } catch { /* Keep the retirement marker; maintenance retries deletion. */ }
     }
 
     /// 清理被中断的临时下载文件。
@@ -244,6 +438,7 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
             guard candidate.deletingLastPathComponent() == directory,
                   candidate.lastPathComponent.hasPrefix("."),
                   candidate.pathExtension == "partial",
+                  !activeTemporaryFiles.contains(candidate),
                   (try? candidate.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
             else { continue }
             try? fileManager.removeItem(at: candidate)
@@ -257,10 +452,11 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
     /// 绝不跟随指向受管目录之外的路径。
     func performMaintenance() {
         discardOrphanedTemporaryFiles()
+        for url in pendingDeletion where filePins[url] == nil { removeCachedFile(url) }
         try? enforceCachePolicy(excluding: nil)
     }
 
-    private func enforceCachePolicy(excluding retainedURL: URL?) throws {
+    private func enforceCachePolicy(excluding retainedURL: URL?, reservedAddition: Int64 = 0) throws {
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
         let entries = try fileManager.contentsOfDirectory(
             at: directory,
@@ -283,9 +479,10 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         var retainedEntries: [MediaCacheEntry] = []
         for entry in entries {
             if entry.lastAccessedAt < expirationBoundary,
-               entry.url != retainedURL?.standardizedFileURL {
+               entry.url != retainedURL?.standardizedFileURL, filePins[entry.url] == nil {
                 do {
                     try fileManager.removeItem(at: entry.url)
+                    publishedFiles.removeValue(forKey: entry.url); verifiedAvatars.remove(entry.url)
                 } catch {
                     retainedEntries.append(entry)
                 }
@@ -301,10 +498,12 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         }
         var totalEntries = retainedEntries.count
         for entry in retainedEntries.sorted(by: MediaCacheEntry.olderFirst) {
-            guard totalEntries > cachePolicy.maximumEntryCount || totalBytes > cachePolicy.maximumByteCount else { break }
-            guard entry.url != retainedURL?.standardizedFileURL else { continue }
+            guard totalEntries > cachePolicy.maximumEntryCount || totalBytes > cachePolicy.maximumByteCount - reservedBytes - reservedAddition else { break }
+            guard entry.url != retainedURL?.standardizedFileURL, filePins[entry.url] == nil else { continue }
             do {
                 try fileManager.removeItem(at: entry.url)
+                publishedFiles.removeValue(forKey: entry.url)
+                verifiedAvatars.remove(entry.url)
                 totalEntries -= 1
                 totalBytes = max(0, totalBytes - entry.byteCount)
             } catch {
@@ -313,11 +512,10 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         }
     }
 
-    private func cacheURL(for mediaID: MediaID) -> URL {
-        let digest = SHA256.hash(data: Data(mediaID.rawValue.utf8))
+    private func cacheStem(for mediaID: MediaID) -> String {
+        SHA256.hash(data: Data(mediaID.rawValue.utf8))
             .map { String(format: "%02x", $0) }
             .joined()
-        return directory.appendingPathComponent(digest + ".media", isDirectory: false)
     }
 }
 

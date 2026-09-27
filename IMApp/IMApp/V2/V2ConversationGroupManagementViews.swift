@@ -262,25 +262,31 @@ struct V2GroupReadReceiptsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable var store: V2ConversationDetailStore
     let message: V2ConversationMessageItem
+    @State private var profilePageID = UUID()
+    @State private var readRequest = ReadRequest(reset: true)
+
+    private struct ReadRequest: Equatable {
+        let id = UUID()
+        let reset: Bool
+    }
 
     var body: some View {
         NavigationStack {
             Group {
-                if let page = store.groupReadReceiptPage {
+                if let page = store.groupReadReceiptPage, page.messageID.rawValue == message.id {
                     List {
                         Section("已读成员") {
+                            if store.hasEarlierGroupReadReceipts {
+                                Button("返回列表开头") { readRequest = .init(reset: true) }
+                            }
                             ForEach(page.readers, id: \.userID) { reader in
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(reader.publicIdentity.displayName)
-                                    Text("@\(reader.publicIdentity.handle.rawValue)")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                if let key = store.groupPresentationKey(for: reader.userID) {
+                                    V2AuthorizedAvatarView(key: key, showsName: true)
+                                        .accessibilityValue("已读")
                                 }
-                                .accessibilityElement(children: .combine)
-                                .accessibilityLabel("\(reader.publicIdentity.displayName)已读")
                             }
                             if page.nextCursor != nil {
-                                Button("加载更多") { Task { await store.loadGroupReadReceipts(for: message) } }
+                                Button("加载更多") { readRequest = .init(reset: false) }
                                     .disabled(store.isLoadingGroupReadReceipts)
                                     .accessibilityIdentifier("v2.message.group-readers.more.\(message.id)")
                             }
@@ -300,9 +306,15 @@ struct V2GroupReadReceiptsSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") { dismiss() }
                 }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("刷新") { readRequest = .init(reset: true) }
+                        .disabled(store.isLoadingGroupReadReceipts)
+                }
             }
-            .task(id: message.id) { await store.loadGroupReadReceipts(for: message, reset: true) }
+            .task(id: readRequest) { await store.loadGroupReadReceipts(for: message, reset: readRequest.reset) }
         }
+        .id(message.id)
+        .authorPresentationPage(context: .list(profilePageID))
     }
 }
 
@@ -316,6 +328,7 @@ struct V2GroupMembersSheet: View {
     @State private var membershipChangeTask: Task<Void, Never>?
     @State private var moderationTask: Task<Void, Never>?
     @State private var pendingModeratedRemoval: V2GroupMemberItem?
+    @State private var profilePageID = UUID()
 
     var body: some View {
         NavigationStack {
@@ -362,13 +375,13 @@ struct V2GroupMembersSheet: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                if store.hasEarlierGroupMembers {
+                    Button("返回成员列表开头") { Task { await store.loadGroupMembers(reset: true) } }
+                }
                 ForEach(store.groupMembers) { member in
                     HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(member.displayName)
-                            Text("@\(member.handle)")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
+                        if let user = try? UserID(member.id), let key = store.groupPresentationKey(for: user) {
+                            V2AuthorizedAvatarView(key: key, showsName: true)
                         }
                         Spacer()
                         Text(member.role).foregroundStyle(.secondary)
@@ -386,7 +399,7 @@ struct V2GroupMembersSheet: View {
                                     .contentShape(.rect)
                             }
                             .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership || store.isApplyingGroupModeration)
-                            .accessibilityLabel("修改 \(member.displayName) 的角色")
+                            .accessibilityLabel("修改此成员的角色")
                             .accessibilityHint("可设为管理员或普通成员")
                             .accessibilityIdentifier("v2.group.member.role.\(member.id)")
                         }
@@ -406,7 +419,7 @@ struct V2GroupMembersSheet: View {
                                     .contentShape(.rect)
                             }
                             .disabled(store.isLoadingGroupMembers || store.isChangingGroupMembership || store.isApplyingGroupModeration)
-                            .accessibilityLabel("群管理 \(member.displayName)")
+                            .accessibilityLabel("管理此成员")
                             .accessibilityHint("可禁言一小时或执行带审计记录的管理员移除")
                             .accessibilityIdentifier("v2.group.member.moderation.\(member.id)")
                             Button("移除", role: .destructive) {
@@ -457,22 +470,14 @@ struct V2GroupMembersSheet: View {
                 }
             }
             .task { await store.loadGroupMembers(reset: true) }
-            .confirmationDialog(
-                "确认管理员移除？",
-                isPresented: Binding(
-                    get: { pendingModeratedRemoval != nil },
-                    set: { if !$0 { pendingModeratedRemoval = nil } }
-                ),
-                presenting: pendingModeratedRemoval
-            ) { member in
-                Button("管理员移除", role: .destructive) {
+            .sheet(item: $pendingModeratedRemoval) { member in
+                V2GroupMemberRemovalConfirmation(key: (try? UserID(member.id)).flatMap(store.groupPresentationKey)) {
                     pendingModeratedRemoval = nil
                     runModeratedRemoval(member)
                 }
-            } message: { member in
-                Text("将移除 \(member.displayName)，并写入管理员审计记录。")
             }
         }
+        .authorPresentationPage(context: .list(profilePageID))
     }
 
     private func runMembershipChange(target: String, action: V2RoomMembershipAction) {
@@ -509,6 +514,35 @@ struct V2GroupMembersSheet: View {
             guard !Task.isCancelled else { return }
             moderationTask = nil
         }
+    }
+}
+
+/// A real sheet keeps the selected member's name reactive to lease expiry and
+/// invalidation. Native confirmation text would capture a stale private string.
+private struct V2GroupMemberRemovalConfirmation: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var profilePageID = UUID()
+    let key: V2ProfileViewLookupKey?
+    let remove: @MainActor () -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("所选成员") {
+                    if let key { V2AuthorizedAvatarView(key: key, showsName: true) }
+                    else { Text("成员资料暂不可用") }
+                }
+                Section {
+                    Text("该成员将被移出群聊，操作会写入管理员审计记录。")
+                    Button("管理员移除", role: .destructive, action: remove)
+                        .accessibilityIdentifier("v2.group.member.moderated-remove.confirm")
+                }
+            }
+            .navigationTitle("确认移除成员")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } } }
+        }
+        .authorPresentationPage(context: .list(profilePageID))
+        .presentationDetents([.medium, .large])
     }
 }
 

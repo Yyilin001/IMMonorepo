@@ -250,7 +250,7 @@ public struct V2RoomRefReadReceiptClient: V2GatewayReadReceiptHandling {
                     guard identity.userID == candidate.userID else {
                         throw V2ReadReceiptStoreError.corruptPersistenceState
                     }
-                    readers.append(.init(userID: candidate.userID, publicIdentity: identity))
+                    readers.append(.init(userID: candidate.userID))
                 }
             }
             scanCursor = page.nextCursor

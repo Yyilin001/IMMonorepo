@@ -1,11 +1,20 @@
 import Foundation
 import IMV2ActorContracts
 
-/// 只有连续的发送请求可共享一个轮次。其他所有能力（包括读取）都是屏障：
-/// 处理器中的 await 不会因此放入第二个轮次。
-public enum V2RoomTurnSchedulingClass: Sendable {
+/// 相邻发送或相邻资料可见性读取各自可以共享轮次；两类不能混合。
+/// 其余能力和预留都是屏障。处理器 await 期间不放入第二个轮次。
+public enum V2RoomTurnSchedulingClass: Equatable, Sendable {
     case send
+    case profileVisibility(targetCount: Int)
     case barrier
+}
+
+public extension V2RoomRequest {
+    var turnSchedulingClass: V2RoomTurnSchedulingClass {
+        if canShareSendTurn { return .send }
+        if let count = profileVisibilityTargetCount { return .profileVisibility(targetCount: count) }
+        return .barrier
+    }
 }
 
 /// 由本地运行时创建的执行权限，绝不从 RPC 解码得来。
@@ -96,6 +105,10 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             let request: Request
             do { request = try JSONDecoder().decode(Request.self, from: permit.encodedRequest) }
             catch {
+                await budget.release(permit)
+                throw V2RoomCallFailure.notAccepted(.invalidRequest)
+            }
+            if case .profileVisibility = classify(request), permit.byteCount > 64 * 1_024 {
                 await budget.release(permit)
                 throw V2RoomCallFailure.notAccepted(.invalidRequest)
             }
@@ -280,18 +293,33 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
                 continuation?.resume(returning: grant)
                 break
             }
-            let canBatch = isSend(head)
+            let headClass = schedulingClass(head)
             var count = 1
             var bytes = head.permit.byteCount
-            if canBatch {
+            if headClass == .send {
                 for entry in queue.dropFirst() {
-                    guard isSend(entry),
+                    guard schedulingClass(entry) == .send,
                           entry.deadline > clock.now,
                           count < configuration.maximumCommandsPerTurn,
                           entry.permit.byteCount <= configuration.maximumBytesPerTurn - bytes
                     else { break }
                     count += 1
                     bytes += entry.permit.byteCount
+                }
+            } else if case .profileVisibility(let headTargets) = headClass,
+                      (1...100).contains(headTargets) {
+                var targets = headTargets
+                let byteLimit = min(configuration.maximumBytesPerTurn, 64 * 1_024)
+                for entry in queue.dropFirst() {
+                    guard case .profileVisibility(let nextTargets) = schedulingClass(entry),
+                          (1...100).contains(nextTargets), nextTargets <= 100 - targets,
+                          entry.deadline > clock.now,
+                          count < configuration.maximumCommandsPerTurn,
+                          bytes <= byteLimit, entry.permit.byteCount <= byteLimit - bytes
+                    else { break }
+                    count += 1
+                    bytes += entry.permit.byteCount
+                    targets += nextTargets
                 }
             }
             executing = Array(queue.prefix(count))
@@ -383,8 +411,8 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         }
     }
 
-    private func isSend(_ entry: Entry) -> Bool {
-        entry.request.map { classify($0) == .send } ?? false
+    private func schedulingClass(_ entry: Entry) -> V2RoomTurnSchedulingClass {
+        entry.request.map(classify) ?? .barrier
     }
 
     private func quarantineReservation() {

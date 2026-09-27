@@ -5,7 +5,7 @@ import Foundation
 ///
 /// 在已验证命令构造时计算 SHA-256，使存储适配器在持锁期间只需绑定固定长度摘要。
 /// 摘要表达输入一致性，不证明发送者权限，也不替代房间／actor／命令 ID 的去重范围。
-public struct V2SendMessageFingerprint: Equatable, Encodable, Sendable {
+public struct V2SendMessageFingerprint: Equatable, Codable, Sendable {
     /// 房间日志发送的统一编码版本，普通发送与转发使用同一合同。
     public static let currentVersion: UInt16 = 3
     /// 决定摘要编码合同的版本，必须与 digest 一起持久化和比较。
@@ -27,6 +27,12 @@ public struct V2SendMessageFingerprint: Equatable, Encodable, Sendable {
         }
         self.version = version
         self.digest = digest
+    }
+
+    private enum CodingKeys: String, CodingKey { case version, digest }
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(version: values.decode(UInt16.self, forKey: .version), digest: values.decode(Data.self, forKey: .digest))
     }
 
     /// 从已经验证的命令字段计算原始输入指纹。

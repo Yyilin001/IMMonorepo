@@ -10,9 +10,10 @@ public struct V2RoomMembershipDirectoryEntry: Equatable, Sendable {
     public let userID: UserID
     /// 成员在房间内的角色。
     public let role: V2RoomMembershipRole
-    /// 本次名册读取所授权的当前公开聊天身份。
+    /// 服务端内部读取/筛选使用的当前身份事实，不是客户端展示许可。
     ///
-    /// 资料未生效的成员会被省略，而不会用只有内部标识、无法展示身份的记录占位。
+    /// 资料未生效的成员会被省略。Gateway 只返回成员 ID 与角色；
+    /// 名称和头像通过独立资料接口取得有期限的展示许可。
     public let publicIdentity: V2PublicIdentity
 
     /// 保存名录记录。

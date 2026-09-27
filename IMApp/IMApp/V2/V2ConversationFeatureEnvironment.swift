@@ -81,6 +81,7 @@ struct V2ConversationGroupDependencies {
     let membershipChanger: (any V2GroupMembershipChanging)?
     let memberMuter: (any V2GroupMemberMuting)?
     let moderatedMemberRemover: (any V2ModeratedGroupMemberRemoving)?
+    let avatarManager: (any V2GroupAvatarManaging)?
 
     init(
         announcementManager: (any V2GroupAnnouncementManaging)? = nil,
@@ -91,7 +92,8 @@ struct V2ConversationGroupDependencies {
         memberDirectory: (any V2GroupMemberDirectoryReading)? = nil,
         membershipChanger: (any V2GroupMembershipChanging)? = nil,
         memberMuter: (any V2GroupMemberMuting)? = nil,
-        moderatedMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil
+        moderatedMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil,
+        avatarManager: (any V2GroupAvatarManaging)? = nil
     ) {
         self.announcementManager = announcementManager
         self.memberRoleChanger = memberRoleChanger
@@ -102,6 +104,7 @@ struct V2ConversationGroupDependencies {
         self.membershipChanger = membershipChanger
         self.memberMuter = memberMuter
         self.moderatedMemberRemover = moderatedMemberRemover
+        self.avatarManager = avatarManager
     }
 }
 
@@ -120,16 +123,16 @@ struct V2ConversationDiscoveryDependencies {
 
 struct V2ConversationMediaDependencies {
     let attachmentStager: (any V2ConversationAttachmentStaging)?
-    let attachmentUploader: (any V2ConversationAttachmentUploading)?
+    let resourceSender: (any V2DurableConversationSending)?
     let downloader: (any V2ConversationMediaDownloading)?
 
     init(
         attachmentStager: (any V2ConversationAttachmentStaging)? = nil,
-        attachmentUploader: (any V2ConversationAttachmentUploading)? = nil,
+        resourceSender: (any V2DurableConversationSending)? = nil,
         downloader: (any V2ConversationMediaDownloading)? = nil
     ) {
         self.attachmentStager = attachmentStager
-        self.attachmentUploader = attachmentUploader
+        self.resourceSender = resourceSender
         self.downloader = downloader
     }
 }
@@ -186,6 +189,7 @@ struct V2ConversationFeatureEnvironment {
 }
 
 struct V2ConversationDetailContext {
+    let presentationKey: V2ProfileViewLookupKey?
     let roomID: String
     let title: String
     let kind: V2ConversationKind
@@ -199,8 +203,10 @@ struct V2ConversationDetailContext {
         kind: V2ConversationKind,
         forwardTargets: [V2ConversationForwardTarget] = [],
         initialDraft: String? = nil,
-        initialMentionHandles: String? = nil
+        initialMentionHandles: String? = nil,
+        presentationKey: V2ProfileViewLookupKey? = nil
     ) {
+        self.presentationKey = presentationKey
         self.roomID = roomID
         self.title = title
         self.kind = kind

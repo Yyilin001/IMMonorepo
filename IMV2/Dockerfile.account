@@ -35,12 +35,14 @@ RUN set -eu; \
     && swift build --disable-automatic-resolution -c release --jobs 1 --package-path IMV2Server --product IMV2ServerApp \
     && swift build --disable-automatic-resolution -c release --jobs 1 --package-path IMV2Server --product IMV2OperatorServerApp \
     && swift build --disable-automatic-resolution -c release --jobs 1 --package-path IMV2Server --product IMV2LocalGatewayProbe \
+    && swift build --disable-automatic-resolution -c release --jobs 1 --package-path IMV2Server --product IMV2ResourceImageWorker \
     && bin_path="$(swift build --disable-automatic-resolution -c release --package-path IMV2Server --show-bin-path)" \
     && mkdir -p /runtime/IMV2Server/.build/release \
     && cp "${bin_path}/IMV2AccountServerApp" \
           "${bin_path}/IMV2ServerApp" \
           "${bin_path}/IMV2OperatorServerApp" \
           "${bin_path}/IMV2LocalGatewayProbe" \
+          "${bin_path}/IMV2ResourceImageWorker" \
           /runtime/IMV2Server/.build/release/ \
     && rm -rf /workspace/IMV2Server/.build /root/.cache/org.swift.swiftpm
 
@@ -48,8 +50,10 @@ FROM swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84
 
 RUN sed -i 's|http://ports.ubuntu.com/ubuntu-ports/|https://ports.ubuntu.com/ubuntu-ports/|g' /etc/apt/sources.list \
     && apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl imagemagick \
     && rm -rf /var/lib/apt/lists/*
+
+COPY IMV2Server/Resources/imagemagick-policy.xml /etc/ImageMagick-6/policy.xml
 
 WORKDIR /workspace
 # The package products statically contain their SwiftPM dependencies; the

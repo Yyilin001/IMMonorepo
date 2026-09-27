@@ -62,67 +62,6 @@ public struct V2MediaPresentation: Hashable, Codable, Sendable {
     }
 }
 
-/// 上传字节上限与临时对象寿命配置。
-public struct V2MediaUploadLimits: Equatable, Sendable {
-    /// 上传最大字节数，必须为正。
-    public let maximumBytes: Int64
-    /// 临时对象寿命，单位秒，默认一天。
-    public let temporaryLifetime: TimeInterval
-
-    /// 要求字节上限及寿命均大于零，否则抛出 invalidLimits；未额外要求寿命有限，因此正无穷可通过此构造检查。
-    public init(maximumBytes: Int64, temporaryLifetime: TimeInterval = 86_400) throws {
-        guard maximumBytes > 0, temporaryLifetime > 0 else { throw V2MediaValidationError.invalidLimits }
-        self.maximumBytes = maximumBytes
-        self.temporaryLifetime = temporaryLifetime
-    }
-}
-
-/// 持久化上传意图，包含稳定操作身份及媒体元数据，不包含提供方上传地址。
-public struct V2RequestMediaUploadCommand: Equatable, Sendable {
-    /// 上传意图发起者。
-    public let actorUserID: UserID
-    /// 本次上传意图的稳定幂等身份。
-    public let operationID: MediaUploadOperationID
-    /// 预分配媒体身份。
-    public let mediaID: MediaID
-    /// 已经规范化的内容类型。
-    public let contentType: String
-    /// 声明的正文件字节数。
-    public let byteCount: Int64
-
-    /// 校验内容类型已小写并裁剪、含斜线、无 ASCII 控制字符且不超过 127 字节，同时要求字节数为正且不超过 limits.maximumBytes；失败抛出 invalidUploadIntent，不检查临时寿命。
-    public init(actorUserID: UserID, operationID: MediaUploadOperationID, mediaID: MediaID, contentType: String, byteCount: Int64, limits: V2MediaUploadLimits) throws {
-        let normalizedContentType = contentType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard normalizedContentType == contentType,
-              normalizedContentType.contains("/"),
-              !normalizedContentType.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }),
-              normalizedContentType.utf8.count <= 127,
-              byteCount > 0, byteCount <= limits.maximumBytes
-        else { throw V2MediaValidationError.invalidUploadIntent }
-        self.actorUserID = actorUserID
-        self.operationID = operationID
-        self.mediaID = mediaID
-        self.contentType = normalizedContentType
-        self.byteCount = byteCount
-    }
-}
-
-/// 聊天后端授权的不透明上传会话，由媒体服务换取短期提供方上传目标。
-public struct V2MediaUploadGrant: Equatable, Sendable {
-    /// 授权关联的媒体身份。
-    public let mediaID: MediaID
-    /// 不透明上传会话身份。
-    public let uploadSessionID: MediaUploadSessionID
-    /// 上传会话期限。
-    public let expiresAt: Date
-    /// 保存上传会话字段，不验证期限、授权或对象状态。
-    public init(mediaID: MediaID, uploadSessionID: MediaUploadSessionID, expiresAt: Date) {
-        self.mediaID = mediaID
-        self.uploadSessionID = uploadSessionID
-        self.expiresAt = expiresAt
-    }
-}
-
 /// 经授权取得的不透明短期下载会话，媒体服务将其换取具体对象目标。
 ///
 /// 对象地址及 Bearer 凭证不属于持久聊天状态。
@@ -142,128 +81,21 @@ public struct V2MediaDownloadGrant: Equatable, Sendable {
     }
 }
 
-/// 媒体服务返回的临时下载目标，URL 与请求头可能包含提供方凭证。
-///
-/// 不得写入消息、同步投影、本地发件箱、备份或日志。上传与下载使用不同类型，避免混用读写能力。
-/// 合成 Codable 解码不执行普通构造器校验，消费响应时需单独验证。
+/// 已认证边缘返回的临时下载计划；不可写入消息、投影、journal、备份或日志。
+/// 下载只接受完整 GET，并要求长度和摘要，解码与普通构造使用同一校验。
 public struct V2MediaDownloadTargetEnvelope: Codable, Equatable, Sendable {
-    /// 完整 HTTPS 目标字符串，可能携带签名凭证。
-    public let url: String
-    /// 提供方要求的请求头，可能含敏感授权内容。
-    public let headers: [String: String]
-    /// 期限的 Unix 毫秒值，向下取整。
-    public let expiresAtUnixMilliseconds: Int64
-    /// 可选预期字节数，普通构造器要求非负。
-    public let expectedByteCount: Int64?
+    public let plan: V2ResourceTransferPlan
 
-    /// 构造临时目标并校验传输字段。
-    ///
-    /// - Parameters:
-    ///   - url: HTTPS 地址，要求 host 非 nil，不额外排除用户信息、查询或片段。
-    ///   - headers: 默认空；名称非空，名称与值不能含 ASCII 控制字符。
-    ///   - expiresAt: 有限日期，转换后的向下取整 Unix 毫秒必须可表示为 Int64。
-    ///   - expectedByteCount: 可选非负字节数。
-    /// - Throws: 任一字段无效时抛出对应目标校验错误。
-    ///
-    /// 不要求期限晚于当前时钟，不验证完整 HTTP 头名语法或主机允许列表。
-    public init(
-        url: URL,
-        headers: [String: String] = [:],
-        expiresAt: Date,
-        expectedByteCount: Int64? = nil
-    ) throws {
-        guard url.scheme?.lowercased() == "https",
-              url.host != nil,
-              expiresAt.timeIntervalSince1970.isFinite,
-              expectedByteCount.map({ $0 >= 0 }) ?? true,
-              headers.allSatisfy({ name, value in
-                  !name.isEmpty
-                      && !name.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
-                      && !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
-              })
+    public init(plan: V2ResourceTransferPlan) throws {
+        guard plan.mode == .httpGet, plan.checksum != nil
         else { throw V2MediaValidationError.invalidDownloadTarget }
-
-        let milliseconds = (expiresAt.timeIntervalSince1970 * 1_000).rounded(.down)
-        guard let signedMilliseconds = Int64(exactly: milliseconds)
-        else { throw V2MediaValidationError.invalidDownloadTarget }
-
-        self.url = url.absoluteString
-        self.headers = headers
-        self.expiresAtUnixMilliseconds = signedMilliseconds
-        self.expectedByteCount = expectedByteCount
+        self.plan = plan
     }
 
-    /// 将保存的 Unix 毫秒期限转换为 Date，不执行到期判断。
-    public var expiresAt: Date {
-        Date(timeIntervalSince1970: TimeInterval(expiresAtUnixMilliseconds) / 1_000)
-    }
-}
-
-/// 媒体服务返回的临时上传目标，URL 与请求头可能包含提供方凭证。
-///
-/// 不得写入消息、同步投影、本地发件箱、备份或日志。上传与下载使用不同类型，避免混用读写能力。
-/// 合成 Codable 解码不执行普通构造器校验，消费响应时需单独验证。
-public struct V2MediaUploadTargetEnvelope: Codable, Equatable, Sendable {
-    /// 完整 HTTPS 目标字符串，可能携带签名凭证。
-    public let url: String
-    /// 提供方要求的请求头，可能含敏感授权内容。
-    public let headers: [String: String]
-    /// 期限的 Unix 毫秒值，向下取整。
-    public let expiresAtUnixMilliseconds: Int64
-    /// 可选预期字节数，普通构造器要求非负。
-    public let expectedByteCount: Int64?
-
-    /// 构造临时目标并校验传输字段。
-    ///
-    /// - Parameters:
-    ///   - url: HTTPS 地址，要求 host 非 nil，不额外排除用户信息、查询或片段。
-    ///   - headers: 默认空；名称非空，名称与值不能含 ASCII 控制字符。
-    ///   - expiresAt: 有限日期，转换后的向下取整 Unix 毫秒必须可表示为 Int64。
-    ///   - expectedByteCount: 可选非负字节数。
-    /// - Throws: 任一字段无效时抛出对应目标校验错误。
-    ///
-    /// 不要求期限晚于当前时钟，不验证完整 HTTP 头名语法或主机允许列表。
-    public init(
-        url: URL,
-        headers: [String: String] = [:],
-        expiresAt: Date,
-        expectedByteCount: Int64? = nil
-    ) throws {
-        guard url.scheme?.lowercased() == "https",
-              url.host != nil,
-              expiresAt.timeIntervalSince1970.isFinite,
-              expectedByteCount.map({ $0 >= 0 }) ?? true,
-              headers.allSatisfy({ name, value in
-                  !name.isEmpty
-                      && !name.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
-                      && !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
-              })
-        else { throw V2MediaValidationError.invalidUploadTarget }
-
-        let milliseconds = (expiresAt.timeIntervalSince1970 * 1_000).rounded(.down)
-        guard let signedMilliseconds = Int64(exactly: milliseconds)
-        else { throw V2MediaValidationError.invalidUploadTarget }
-
-        self.url = url.absoluteString
-        self.headers = headers
-        self.expiresAtUnixMilliseconds = signedMilliseconds
-        self.expectedByteCount = expectedByteCount
-    }
-
-    /// 将保存的 Unix 毫秒期限转换为 Date，不执行到期判断。
-    public var expiresAt: Date {
-        Date(timeIntervalSince1970: TimeInterval(expiresAtUnixMilliseconds) / 1_000)
-    }
-}
-
-/// 上传所有者轮询使用的临时生命周期响应，不包含对象地址、扫描诊断或其他用户信息。
-public struct V2MediaUploadStatusEnvelope: Codable, Equatable, Sendable {
-    /// 服务端返回的媒体生命周期状态。
-    public let state: V2MediaObjectState
-
-    /// 包装生命周期状态，不执行状态转换。
-    public init(state: V2MediaObjectState) {
-        self.state = state
+    private enum CodingKeys: String, CodingKey { case plan }
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(plan: values.decode(V2ResourceTransferPlan.self, forKey: .plan))
     }
 }
 
@@ -381,8 +213,6 @@ public enum V2MediaValidationError: Error, Equatable, Sendable {
     case invalidAttachmentSet
     /// 临时下载目标字段无效。
     case invalidDownloadTarget
-    /// 临时上传目标字段无效。
-    case invalidUploadTarget
     /// 持久展示资料字段无效。
     case invalidPresentation
 }

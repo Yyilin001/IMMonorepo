@@ -140,7 +140,8 @@ public struct V2MediaScanWorker: Sendable {
 
     /// 执行一轮有界扫描。
     ///
-    /// 认领到的租约按并发上限分批处理；提供方失败会按重试策略安排重试或暂停，
+    /// 每批按可立即执行的并发上限认领，完成后再取下一批；每轮仍受 limit 限制。
+    /// 提供方失败会按重试策略安排重试或暂停，
     /// 任务取消则向上传播并让运行时的正常取消语义接管。
     ///
     /// - Parameter limit: 本轮最多认领的媒体数，需大于零。
@@ -150,11 +151,15 @@ public struct V2MediaScanWorker: Sendable {
     ///   ``V2RoomWriteStoreError/corruptPersistenceState``。
     public func runOnce(limit: Int) async throws -> V2MediaScanReport {
         guard limit > 0 else { throw V2MediaScanWorkerError.invalidLimit }
-        let leases = try await store.claimPending(now: now(), leaseDuration: leaseDuration, limit: limit)
+        var claimedCount = 0
         var outcomes: [V2MediaWorkOutcome] = []
-        for start in stride(from: 0, to: leases.count, by: maximumConcurrency) {
-            let end = Swift.min(start + maximumConcurrency, leases.count)
-            let batch = Array(leases[start..<end])
+        while claimedCount < limit {
+            try Task.checkCancellation()
+            // Do not age leases in this worker's own execution queue.
+            let batch = try await store.claimPending(now: now(), leaseDuration: leaseDuration,
+                limit: Swift.min(maximumConcurrency, limit - claimedCount))
+            guard !batch.isEmpty else { break }
+            claimedCount += batch.count
             let batchOutcomes = try await withThrowingTaskGroup(
                 of: V2MediaWorkOutcome.self,
                 returning: [V2MediaWorkOutcome].self
@@ -190,7 +195,7 @@ public struct V2MediaScanWorker: Sendable {
             outcomes.append(contentsOf: batchOutcomes)
         }
         return .init(
-            claimedCount: leases.count,
+            claimedCount: claimedCount,
             completedCount: outcomes.count(where: { $0 == .completed }),
             releasedCount: outcomes.count(where: { $0 == .released }),
             pausedCount: outcomes.count(where: { $0 == .paused })

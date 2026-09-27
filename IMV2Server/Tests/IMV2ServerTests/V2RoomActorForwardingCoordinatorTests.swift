@@ -7,6 +7,49 @@ import Testing
 
 @Suite("V2 room actor forwarding coordinator")
 struct V2RoomActorForwardingCoordinatorTests {
+    @Test func colocatedResourceUsesDurableCopyButSameRoomKeepsPair() async throws {
+        let actor = UserID(uuid: UUID()), room = RoomID(uuid: UUID()), target = RoomID(uuid: UUID())
+        let source = try V2ForwardMessageReference(roomID: room, messageID: .init(uuid: UUID()), revision: .init(1))
+        let seen = ForwardPairCalls(), checks = Mutex<Int>(0)
+        let route = try V2RoomShardRoute(shardID: "same", epoch: 0)
+        let coordinator = try V2ActorForwardingCoordinator(
+            router: ForwardTestRoutes(values: [room: route, target: route]),
+            physicalStoreKeyByShard: ["same": "db"], pair: .init { pair, _ in
+                await seen.append(pair)
+                return .init(sourceMessageID: pair.source.messageID, targetRoomID: pair.targetRoomID,
+                    messageID: .init(uuid: UUID()), roomSequence: 1, errorCode: nil)
+            }, crossOwner: ForwardPendingTarget(), requiresImport: { _, _, _, selected, _ in
+                #expect(selected == target)
+                checks.withLock { $0 += 1 }
+                return true
+            }, deadline: { .now + .seconds(5) })
+        await #expect(throws: V2ForwardPendingError.pending) {
+            _ = try await coordinator.forward(actorUserID: actor, command: .init(operationID: .init(uuid: UUID()),
+                sources: [source], targetRoomIDs: [room, target]))
+        }
+        #expect(checks.withLock { $0 } == 1)
+        #expect(await seen.values().map(\.targetRoomID) == [room])
+    }
+
+    @Test func resourceRoutingFailureNeverFallsBackToSharedReference() async throws {
+        let room = RoomID(uuid: UUID()), target = RoomID(uuid: UUID()), seen = ForwardPairCalls()
+        let route = try V2RoomShardRoute(shardID: "same", epoch: 0)
+        let coordinator = try V2ActorForwardingCoordinator(
+            router: ForwardTestRoutes(values: [room: route, target: route]),
+            physicalStoreKeyByShard: ["same": "db"], pair: .init { pair, _ in
+                await seen.append(pair)
+                throw V2ForwardInboxError.corruptPersistenceState
+            }, crossOwner: ForwardPendingTarget(), requiresImport: { _, _, _, _, _ in
+                throw V2ResourceProviderError.temporarilyUnavailable
+            }, deadline: { .now + .seconds(5) })
+        await #expect(throws: V2ResourceProviderError.temporarilyUnavailable) {
+            _ = try await coordinator.forward(actorUserID: .init(uuid: UUID()),
+                command: .init(operationID: .init(uuid: UUID()), sources: [.init(roomID: room,
+                    messageID: .init(uuid: UUID()), revision: .init(1))], targetRoomIDs: [target]))
+        }
+        #expect(await seen.values().isEmpty)
+    }
+
     @Test func pendingTargetDoesNotCancelSameOwnerSibling() async throws {
         let actor = UserID(uuid: UUID())
         let sourceRoom = RoomID(uuid: UUID())

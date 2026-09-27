@@ -20,12 +20,12 @@ struct V2ActorRoomReceiptMapperTests {
                 from: JSONEncoder().encode(wire))
             #expect(try decoded.domainValue() == outcome)
         }
-        let identity = try V2PublicIdentity(userID: user, handle: V2PublicHandle("reader_1"),
-            displayName: "Reader", accountKind: .regular)
-        let reader = V2ReadReceiptReader(userID: user, publicIdentity: identity)
+        let reader = V2ReadReceiptReader(userID: user)
         let page = try V2ReadReceiptReadersPage(roomID: room,
             messageID: MessageID("message-1"), readers: [reader], nextCursor: "next")
         let pageWire = V2ActorReadReceiptReadersPageWire(page)
+        let encodedReader = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(pageWire.readers[0])) as? [String: Any])
+        #expect(Set(encodedReader.keys) == ["userID"])
         #expect(try pageWire.domainValue() == page)
         #expect(try JSONDecoder().decode(V2ActorReadReceiptReadersPageWire.self,
             from: JSONEncoder().encode(pageWire)) == pageWire)
@@ -43,18 +43,11 @@ struct V2ActorRoomReceiptMapperTests {
         #expect(stamped[0].now == time)
     }
 
-    @Test("reader identity mismatch, duplicate reader and invalid sequence throw")
+    @Test("duplicate reader and invalid sequence throw; profile content is a separate contract")
     func invalid() throws {
         let room = try RoomID("room-1")
         let user = try UserID("user-1")
-        let other = try UserID("user-2")
-        let identity = V2ActorPublicIdentityWire(userID: other, handle: "reader_2",
-            displayName: "Reader", accountKind: .regular)
-        let bad = V2ActorReadReceiptReaderWire(userID: user, publicIdentity: identity)
-        #expect(throws: V2ActorRoomReceiptWireError.invalidResult) { try bad.domainValue() }
-        let validIdentity = V2ActorPublicIdentityWire(userID: user, handle: "reader_1",
-            displayName: "Reader", accountKind: .regular)
-        let valid = V2ActorReadReceiptReaderWire(userID: user, publicIdentity: validIdentity)
+        let valid = V2ActorReadReceiptReaderWire(userID: user)
         let duplicate = V2ActorReadReceiptReadersPageWire(roomID: room,
             messageID: try MessageID("message-1"), readers: [valid, valid], nextCursor: nil)
         #expect(throws: V2ReadReceiptValidationError.invalidReaderPage) {

@@ -12,6 +12,15 @@ public enum V2ActorMessagingOperationID: Codable, Equatable, Sendable {
     case edit(MessageEditOperationID)
     case withdraw(MessageWithdrawalOperationID)
     case reaction(MessageReactionOperationID)
+    case recover(ClientMessageID)
+}
+
+public struct V2ActorMessageRecoveryWire: Codable, Equatable, Sendable {
+    public let actorUserID: UserID
+    public let request: V2MessageOperationRecoveryRequest
+    public init(actorUserID: UserID, request: V2MessageOperationRecoveryRequest) {
+        self.actorUserID = actorUserID; self.request = request
+    }
 }
 
 public struct V2ActorSendMessageWire: Codable, Equatable, Sendable {
@@ -94,6 +103,7 @@ public enum V2RoomMessagingCommand: Codable, Equatable, Sendable {
     case edit(V2ActorEditMessageWire)
     case withdraw(V2ActorWithdrawMessageWire)
     case reaction(V2ActorReactionMessageWire)
+    case recover(V2ActorMessageRecoveryWire)
 
     public var roomID: RoomID {
         switch self {
@@ -101,6 +111,7 @@ public enum V2RoomMessagingCommand: Codable, Equatable, Sendable {
         case .edit(let value): value.roomID
         case .withdraw(let value): value.roomID
         case .reaction(let value): value.roomID
+        case .recover(let value): value.request.roomID
         }
     }
     public var actorUserID: UserID {
@@ -109,6 +120,7 @@ public enum V2RoomMessagingCommand: Codable, Equatable, Sendable {
         case .edit(let value): value.actorUserID
         case .withdraw(let value): value.actorUserID
         case .reaction(let value): value.actorUserID
+        case .recover(let value): value.actorUserID
         }
     }
     public var operationID: V2ActorMessagingOperationID {
@@ -117,6 +129,7 @@ public enum V2RoomMessagingCommand: Codable, Equatable, Sendable {
         case .edit(let value): .edit(value.operationID)
         case .withdraw(let value): .withdraw(value.operationID)
         case .reaction(let value): .reaction(value.operationID)
+        case .recover(let value): .recover(value.request.clientMessageID)
         }
     }
     /// 四种操作都具有持久化、限定范围的幂等身份。

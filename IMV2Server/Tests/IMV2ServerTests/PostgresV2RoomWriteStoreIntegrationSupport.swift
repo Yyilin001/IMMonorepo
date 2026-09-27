@@ -141,9 +141,37 @@ func postgresStatements(in source: String) -> [String] {
     var statements: [String] = []
     var buffer = ""
     var dollarQuote: String?
+    var quote: Character?
     var index = source.startIndex
     while index < source.endIndex {
         let character = source[index]
+        let next = source.index(after: index)
+        if let active = quote {
+            buffer.append(character)
+            if character == active {
+                if next < source.endIndex, source[next] == active {
+                    buffer.append(active)
+                    index = source.index(after: next)
+                    continue
+                }
+                quote = nil
+            }
+            index = next
+            continue
+        }
+        if dollarQuote == nil {
+            if source[index...].hasPrefix("--") {
+                index = source[index...].firstIndex(of: "\n") ?? source.endIndex
+                buffer.append("\n")
+                continue
+            }
+            if character == "'" || character == "\"" {
+                quote = character
+                buffer.append(character)
+                index = next
+                continue
+            }
+        }
         if character == "$" {
             let remainder = source[index...]
             if let closing = remainder.dropFirst().firstIndex(of: "$") {
@@ -164,7 +192,7 @@ func postgresStatements(in source: String) -> [String] {
         } else {
             buffer.append(character)
         }
-        index = source.index(after: index)
+        index = next
     }
     let tail = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
     if !tail.isEmpty { statements.append(tail) }

@@ -137,6 +137,8 @@ private struct ProfileViewLookupInput: Encodable {
         case .room(let roomID):
             contextKind = "room"
             self.roomID = roomID.rawValue
+        case .groupJoinReview:
+            throw V2ProfileViewReadError.invalidRequest
         }
     }
 

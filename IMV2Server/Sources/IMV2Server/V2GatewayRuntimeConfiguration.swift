@@ -209,6 +209,9 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let messageLimits: V2MessageCommandLimits
     public let frameLimits: V2FrameLimits
     public let maximumProtobufMessageDepth: Int
+    /// Optional author supplements require the complete configured resource
+    /// reader/delivery runtime. Disabled by default for deployment rollout.
+    public let authorPresentationsEnabled: Bool
     public let frameCompression: V2NegotiatedFrameCompression?
     public let frameCompressionThresholdBytes: Int
     public let frameCompressionMaximumExpansionRatio: Int
@@ -454,6 +457,9 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         messageLimits = try .init(maxUTF8Bytes: try Self.integer("IM_V2_MAX_MESSAGE_UTF8_BYTES", environment: environment))
         frameLimits = try .init(maximumPayloadBytes: try Self.integer("IM_V2_MAX_FRAME_BYTES", environment: environment), acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)])
         maximumProtobufMessageDepth = try Self.positive("IM_V2_MAX_PROTOBUF_MESSAGE_DEPTH", environment: environment)
+        if Self.optional("IM_V2_AUTHOR_PRESENTATIONS_ENABLED", environment: environment) != nil {
+            authorPresentationsEnabled = try Self.explicitBoolean("IM_V2_AUTHOR_PRESENTATIONS_ENABLED", environment: environment)
+        } else { authorPresentationsEnabled = false }
         switch Self.optional("IM_V2_FRAME_COMPRESSION", environment: environment)?.lowercased() {
         case nil, "none", "disabled": frameCompression = nil
         case "zlib": frameCompression = .zlib

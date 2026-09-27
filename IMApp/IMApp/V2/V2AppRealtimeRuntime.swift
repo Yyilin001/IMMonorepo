@@ -178,17 +178,13 @@ protocol V2GroupConversationCreating: Sendable {
 }
 
 struct V2GroupMemberItem: Equatable, Identifiable, Sendable {
-    /// 仅用于后续已认证成员命令的不透明标识；界面必须改为渲染下方的公开字段。
+    /// 目录只提供命令目标；名称与头像通过当前房间展示许可获取。
     let id: String
     let role: String
-    let handle: String
-    let displayName: String
 
-    init(id: String, role: String, handle: String, displayName: String) {
+    init(id: String, role: String) {
         self.id = id
         self.role = role
-        self.handle = handle
-        self.displayName = displayName
     }
 }
 
@@ -668,9 +664,7 @@ actor V2RealtimeGroupMemberDirectory: V2GroupMemberDirectoryReading {
             members: page.members.map {
                 .init(
                     id: $0.userID.rawValue,
-                    role: Self.displayRole($0.role),
-                    handle: $0.publicIdentity.handle.rawValue,
-                    displayName: $0.publicIdentity.displayName
+                    role: Self.displayRole($0.role)
                 )
             },
             nextCursor: page.nextCursor
@@ -1048,29 +1042,45 @@ struct V2AppRealtimeRuntime {
     let groupReadReceiptReader: any V2GroupReadReceiptReading
     let conversationLiveActivity: any V2ConversationLiveActivityManaging
     let attachmentUploader: V2ForegroundConversationAttachmentUploader
+    let groupAvatarIntents: V2GroupAvatarIntentEngine
+    let groupAvatarManager: V2GroupAvatarManagementService
     let mediaDownloader: any V2ConversationMediaDownloading
     let mediaCacheMaintenance: V2ForegroundConversationMediaDownloader
     let activeHybridGroupSynchronizer: any V2ActiveHybridGroupSynchronizing
     let roomSubscriptions: V2RoomSubscriptionCoordinator
+    let makeAuthorPresentationCoordinator: @Sendable (V2ProfilePresentationRepository) -> V2AuthorPresentationPageCoordinator
     let profileRepository: V2ProfileRepository
+    let profilePresentations: V2ProfilePresentationRepository
 
     init(
         configuration: V2AppConfiguration,
+        actorUserID: UserID,
+        deviceID: DeviceID,
         authSession: V2AuthSession,
         authEpoch: V2AuthSessionEpoch,
         localStore: GRDBV2LocalSyncStore,
-        mediaCacheDirectory: URL
+        mediaCacheDirectory: URL,
+        mediaStagingDirectory: URL
     ) throws {
         let frameLimits = try V2FrameLimits(
             maximumPayloadBytes: 65_536,
             acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]
         )
-        let connection = V2TLSFrameConnection(endpoint: configuration.realtimeEndpoint, frameLimits: frameLimits)
+        let connection = V2TLSFrameConnection(endpoint: configuration.realtimeEndpoint, frameLimits: frameLimits,
+                                              supportsAuthorPresentationDelta: true)
         let transport = V2ProtobufSyncTransport(
             wire: connection,
             protocolVersion: UInt8(IMV2ProtocolVersion.current)
         )
-        let outbox = V2CommandOutboxEngine(store: localStore, transport: transport)
+        let accountHTTP = V2SessionHTTPAuthorization(session: authSession, epoch: authEpoch)
+        let operationRecovery = V2MessageOperationRecoveryController(store: localStore,
+            remote: try V2HTTPMessageOperationRecoveryClient(endpoint: configuration.endpoint("v2/message-operations/recover"),
+                credentials: accountHTTP, transport: accountHTTP), actorUserID: {
+                    let credentials = try await authSession.realtimeCredentials()
+                    try await authSession.requireAuthenticatedEpoch(authEpoch)
+                    return credentials.userID
+                })
+        let outbox = V2CommandOutboxEngine(store: localStore, transport: transport, recovery: operationRecovery)
         let socialOutbox = V2SocialCommandOutboxEngine(
             store: localStore,
             socialTransport: transport,
@@ -1088,17 +1098,6 @@ struct V2AppRealtimeRuntime {
         let conversationCapabilitiesOutbox = V2ConversationCapabilitiesOutboxEngine(store: localStore, transport: transport)
         let groupCapabilitiesOutbox = V2GroupCapabilitiesOutboxEngine(store: localStore, transport: transport)
         let forwardMessagesOutbox = V2BulkForwardMessagesOutboxEngine(store: localStore, transport: transport)
-        let accountHTTP = V2SessionHTTPAuthorization(session: authSession, epoch: authEpoch)
-        let mediaEdge = try V2HTTPMediaUploadEdgeClient(
-            endpoint: configuration.mediaEdgeEndpoint,
-            credentials: accountHTTP, transport: accountHTTP
-        )
-        let mediaUploader = V2ClientMediaUploadService(
-            targetResolver: mediaEdge,
-            byteTransfer: V2URLSessionMediaByteTransfer(),
-            completer: mediaEdge,
-            statusReader: mediaEdge
-        )
         let mediaDownloadResolver = try V2HTTPMediaDownloadTargetResolver(
             endpoint: configuration.mediaEdgeEndpoint,
             credentials: accountHTTP, transport: accountHTTP
@@ -1107,13 +1106,13 @@ struct V2AppRealtimeRuntime {
             targetResolver: mediaDownloadResolver,
             byteTransfer: V2URLSessionMediaByteTransfer()
         )
-        let profileRepository = V2ProfileRepository(
-            store: localStore,
-            reader: try V2HTTPProfileViewClient(
-                endpoint: configuration.endpoint("v2/profile-views/batch"),
-                credentials: accountHTTP, transport: accountHTTP
-            )
-        )
+        let profilePresentations = V2ProfilePresentationRepository(actorUserID: actorUserID, deviceID: deviceID,
+            reader: try V2HTTPProfilePresentationClient(endpoint: configuration.endpoint("v2/profile-presentations/batch"),
+                credentials: accountHTTP, transport: accountHTTP),
+            nicknameRevisions: { try await localStore.groupNicknameRevisions(keys: $0) })
+        self.profilePresentations = profilePresentations
+        let profileRepository = V2ProfileRepository(store: localStore,
+            reader: V2ProfileProjectionReader(presentations: profilePresentations))
         self.profileRepository = profileRepository
         let syncOwnership = V2SyncOperationGate()
         let syncEngine = V2SyncEngine(transport: transport, store: localStore, capabilityProfile: "base", operationGate: syncOwnership)
@@ -1154,6 +1153,10 @@ struct V2AppRealtimeRuntime {
             }
         )
         self.roomSubscriptions = roomSubscriptions
+        makeAuthorPresentationCoordinator = { profiles in
+            .init(rooms: roomSubscriptions, source: connection, subscriptions: transport, profiles: profiles,
+                roomCursor: { try await localStore.groupEventCursor(roomID: $0) })
+        }
         let coordinator = V2RealtimeSessionCoordinator(
             authSession: authSession,
             connection: connection,
@@ -1264,7 +1267,24 @@ struct V2AppRealtimeRuntime {
         groupRolePolicyChanger = V2OutboxGroupRolePolicyChanger(outbox: groupCapabilitiesOutbox)
         groupReadReceiptReader = V2RealtimeGroupReadReceiptReader(transport: transport)
         conversationLiveActivity = V2RealtimeConversationLiveActivity(transport: transport, events: connection)
-        attachmentUploader = V2ForegroundConversationAttachmentUploader(uploader: mediaUploader)
+        let resourceControl = try V2HTTPResourceUploadClient(endpoint: configuration.endpoint("v2/resource-uploads"), credentials: accountHTTP, transport: accountHTTP)
+        let resourceEngine = V2ResourceTransferEngine(store: localStore, control: resourceControl, executor: V2URLSessionResourcePlanExecutor(), directory: mediaStagingDirectory,
+            capabilities: V2ResourceCapabilitiesCache(reader: resourceControl))
+        let resourceImports = try V2HTTPResourceImportClient(endpoint: configuration.endpoint("v2/resource-imports"), credentials: accountHTTP, transport: accountHTTP)
+        let groupAvatarCommands = try V2HTTPGroupAvatarCommandClient(roomsEndpoint: configuration.endpoint("v2/rooms"),
+            actorUserID: actorUserID, credentials: accountHTTP, transport: accountHTTP)
+        let groupAvatarIntents = V2GroupAvatarIntentEngine(actorUserID: actorUserID, store: localStore,
+            transfers: resourceEngine, submissions: groupAvatarCommands, recovery: groupAvatarCommands)
+        self.groupAvatarIntents = groupAvatarIntents
+        let groupReader = try V2HTTPGroupAvatarPresentationClient(roomsEndpoint: configuration.endpoint("v2/rooms"),
+            actorUserID: actorUserID, credentials: accountHTTP, transport: accountHTTP)
+        let groupAvatarManager = V2GroupAvatarManagementService(actorUserID: actorUserID, deviceID: deviceID,
+            store: localStore, intents: groupAvatarIntents, reader: groupReader,
+            capabilities: resourceControl, directory: mediaStagingDirectory)
+        self.groupAvatarManager = groupAvatarManager
+        let durableSender = V2DurableConversationSendService(store: localStore, engine: resourceEngine, outbox: outbox,
+            imports: resourceImports, groupAvatars: groupAvatarIntents, groupAvatarManager: groupAvatarManager)
+        attachmentUploader = V2ForegroundConversationAttachmentUploader(durable: durableSender)
         let foregroundMediaDownloader = try V2ForegroundConversationMediaDownloader(
             downloader: mediaDownloader,
             directory: mediaCacheDirectory

@@ -87,7 +87,7 @@ struct V2RoomRefClientsTests {
         let client = V2RoomRefReadReceiptClient(rooms: .init(caller: caller), control: control)
         let page = try await client.readers(roomID: room, messageID: message,
             actorUserID: actor, cursor: nil, pageSize: 1)
-        #expect(page.readers == [.init(userID: visible, publicIdentity: identity)])
+        #expect(page.readers == [.init(userID: visible)])
         #expect(page.nextCursor == nil)
         #expect(await calls.values() == [nil, "next-page"])
         #expect(await control.visibilityCallCount() == 2)

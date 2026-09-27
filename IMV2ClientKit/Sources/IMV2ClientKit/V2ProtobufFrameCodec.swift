@@ -248,6 +248,9 @@ public enum V2ProtobufFrameCodec {
         case .accountRoomResyncRequired?: return .accountRoomResyncRequired
         case .roomLatestVisibleBatch?: return .roomLatestVisibleBatch
         case .roomLatestVisibleBatchResult?: return .roomLatestVisibleBatchResult
+        case .authorPresentationDelta?: return .authorPresentationDelta
+        case .authorPresentationEnd?: return .authorPresentationEnd
+        case .authorPresentationEnded?: return .authorPresentationEnded
 
         case .groupEventPull?: return .groupEventPull
         case .groupEventPage?: return .groupEventPage

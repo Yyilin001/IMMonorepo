@@ -9,6 +9,34 @@ import Vapor
 
 // Shared database topology and canonical room seed for the serialized room-write suite.
 extension PostgresV2RoomWriteStoreIntegrationTests {
+    /// SQL lifecycle fixture; byte verification belongs to adapter/service tests.
+    internal func createResourceUpload(_ input: V2ResourceUploadRequest, device: DeviceID,
+        store: PostgresV2ResourceLifecycleStore, expiresAt: Date, now: Date
+    ) async throws -> V2PersistedResourceUpload {
+        try await store.create(homeKind: "room", homeID: roomUUID, usageKind: "message_attachment", actor: senderUUID,
+            device: device.uuidValue!, operation: input.operationID.uuidValue!, mediaID: input.mediaID.uuidValue!, contentType: input.contentType,
+            byteCount: input.byteCount, requestJSON: String(decoding: JSONEncoder().encode(input), as: UTF8.self),
+            allocate: { try .init(placementID: UUID(), binding: .init(id: "room-resource-fixture", configurationRevision: 1), handle: Data(input.mediaID.rawValue.utf8)) },
+            expiresAt: expiresAt, now: now)
+    }
+
+    internal func prepareDownloadableResource(mediaID: MediaID, device: DeviceID, database: any Database) async throws {
+        let base = Date(timeIntervalSince1970: 1_750_000_000)
+        let uploads = PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in })
+        let input = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: mediaID, usage: .messageAttachment(roomID),
+            contentType: "image/png", byteCount: 42, checksum: .init(value: String(repeating: "a", count: 64)))
+        let upload = try await createResourceUpload(input, device: device, store: uploads, expiresAt: base.addingTimeInterval(600), now: base)
+        let claim = try await uploads.claimFinalize(session: upload.sessionID, generation: 1, actor: senderUUID, device: device.uuidValue!, now: base)
+        try await uploads.publish(claim, facts: .init(reference: claim.placement, byteCount: 42, sha256: Data(repeating: 0xaa, count: 32)),
+            actor: senderUUID, device: device.uuidValue!, now: base)
+        let scans = PostgresV2MediaScanStore(database: database)
+        let lease = try #require(try await scans.claimPending(now: base, leaseDuration: 30, limit: 1).first)
+        try await scans.complete(lease, result: .passed, now: base)
+        let sender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { base })
+        guard case .accepted = try await sender.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "resource fixture", media: [.init(mediaID: mediaID)]))
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+    }
+
     internal func withForwardOwnerDatabases(mode: V2GroupCapacityClass,
         _ operation: (any Database, any Database, any SQLDatabase, any SQLDatabase, RoomID) async throws -> Void
     ) async throws {
@@ -129,11 +157,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         let schemaURL = repositoryRoot.appending(path: "IMV2/sql/schema.sql")
         let source = try String(contentsOf: schemaURL, encoding: .utf8)
             .replacingOccurrences(of: "im_v2", with: schema)
-        let executableSQL = source
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("--") }
-            .joined(separator: "\n")
-        for statement in postgresStatements(in: executableSQL) {
+        for statement in postgresStatements(in: source) {
             guard !statement.isEmpty, statement != "BEGIN", statement != "COMMIT" else { continue }
             try await sql.raw("\(unsafeRaw: statement)").run()
         }

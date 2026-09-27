@@ -102,6 +102,7 @@ services:
     env_file:
       - .env.local
     environment:
+      IM_V2_AUTHOR_PRESENTATIONS_ENABLED: ${IM_V2_AUTHOR_PRESENTATIONS_ENABLED:-false}
       IMV2_ROOM_ACTOR_CONFIGURATION_FILE: /run/im-v2-room-actor/configuration.json
       IM_V2_LOCAL_MEDIA_MODE: filesystem
       IM_V2_LOCAL_MEDIA_UNSAFE_TEST_ONLY: "1"

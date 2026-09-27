@@ -844,6 +844,19 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     public func acceptAtomically(
         requests: [V2RoomWriteRequest]
     ) async throws -> [V2SendMessageOutcome] {
+        do {
+            return try await acceptAtomicallyWithStorageChecks(requests:requests)
+        } catch where v2IsMessageOperationClosed(error) {
+            // The named PostgreSQL trigger aborted this transaction. Its permanent
+            // negative receipt belongs to one operation, never to every batch member.
+            // The batcher preserves room order when falling back to individual writes.
+            throw V2AtomicRoomWriteBatchError(reason:.preflightMismatch)
+        }
+    }
+
+    private func acceptAtomicallyWithStorageChecks(
+        requests: [V2RoomWriteRequest]
+    ) async throws -> [V2SendMessageOutcome] {
         for request in requests { _ = try activationScope?.token(for: uuid(request.command.roomID)) }
         for request in requests { try validateAuthorizationCommand(request.command) }
         if let controlDatabase, controlPolicyScope == nil {

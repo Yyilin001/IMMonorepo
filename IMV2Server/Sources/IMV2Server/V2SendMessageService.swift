@@ -343,6 +343,8 @@ public struct V2AtomicRoomWriteBatchError: Error, Equatable, Sendable {
 
 /// 消息接受存储的领域与持久化一致性错误，由传输边缘映射为协议响应。
 public enum V2RoomWriteStoreError: Error, Equatable, Sendable {
+    /// 原操作已被 owner 永久关闭，迟到重试不得被接受。
+    case messageOperationClosed
     /// 目标房间不存在。
     case roomNotFound
     /// 发送者不具备当前房间写入资格。

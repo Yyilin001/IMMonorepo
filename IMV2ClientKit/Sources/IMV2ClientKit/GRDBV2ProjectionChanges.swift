@@ -65,7 +65,7 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
             table.hasPrefix("v2_contact_profile_search") || table.hasPrefix("sqlite_") { return .none }
         let conversation: V2ProjectionScopes = [.conversations, .conversationDetails]
         switch table {
-        case "v2_room_recovery_work", "v2_room_recovery_scan":
+        case "v2_room_recovery_work", "v2_room_recovery_scan", "v2_resource_transfer_jobs", "v2_send_intent_dependencies", "v2_resource_import_jobs", "v2_send_intent_import_dependencies":
             return .none
         case "v2_room_sync_states", "v2_room_latest_visible":
             return .init(scopes: conversation, requiresImmediateRefresh: kind == .delete)
@@ -80,23 +80,32 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
         case "v2_message_projections", "v2_room_profile_projections", "v2_direct_room_profile_projections", "v2_direct_room_identities":
             return .init(scopes: conversation, requiresImmediateRefresh: kind != .insert)
         case "v2_profile_views":
-            return .init(scopes: [.contacts, .conversations, .conversationDetails], requiresImmediateRefresh: kind != .insert)
+            return .init(scopes: [.contacts, .conversations, .conversationDetails, .presentations], requiresImmediateRefresh: kind != .insert)
         case "v2_role_policy_recovery_requests":
             return .init(scopes: .conversationDetails, requiresImmediateRefresh: false)
         case "v2_message_reactions", "v2_direct_read_receipt_projections", "v2_room_read_watermarks", "v2_pending_message_reactions", "v2_pending_read_receipts":
             return .init(scopes: .conversationDetails, requiresImmediateRefresh: false)
-        case "v2_pending_message_commands", "v2_forward_message_plans", "v2_forward_message_chunks", "v2_pending_group_room_creations":
+        case "v2_send_intents", "v2_pending_message_commands", "v2_forward_message_plans", "v2_forward_message_chunks", "v2_pending_group_room_creations":
             return .init(scopes: conversation, requiresImmediateRefresh: false)
+        case "v2_group_avatar_effects", "v2_group_nickname_effects": return .none
+        case "v2_group_nickname_invalidations":
+            return .init(scopes: .groupNicknames, requiresImmediateRefresh: true)
+        case "v2_group_avatar_intents":
+            // Local retries/claims only change management status. They cannot
+            // invalidate every visible avatar's authorization and cause refetches.
+            return .init(scopes: .conversationDetails, requiresImmediateRefresh: true)
+        case "v2_room_event_authorizations", "v2_group_member_roles", "v2_room_control_projections", "v2_group_avatar_invalidations":
+            return .init(scopes: [.conversations, .conversationDetails, .presentations], requiresImmediateRefresh: true)
         case "v2_conversation_states", "v2_pending_conversation_states", "v2_message_favorites", "v2_pending_message_favorites",
              "v2_group_announcements", "v2_group_pinned_messages", "v2_pending_group_capabilities",
-             "v2_message_tombstones", "v2_moderation_projections", "v2_room_control_projections",
-             "v2_room_event_authorizations", "v2_group_member_roles", "v2_group_permission_revisions", "v2_group_role_policies", "v2_group_role_policy_baselines",
+             "v2_message_tombstones", "v2_moderation_projections",
+             "v2_group_permission_revisions", "v2_group_role_policies", "v2_group_role_policy_baselines",
              "v2_direct_sending_capabilities", "v2_timeline_activity_projections", "v2_pending_message_edits",
              "v2_pending_message_redactions", "v2_pending_message_withdrawals", "v2_pending_member_mutes",
              "v2_pending_membership_commands", "v2_pending_moderated_member_removals":
             return .init(scopes: conversation, requiresImmediateRefresh: true)
         case "v2_relationship_projections", "v2_pending_social_commands", "v2_profile_invalidations":
-            return .init(scopes: [.contacts, .conversations, .conversationDetails], requiresImmediateRefresh: true)
+            return .init(scopes: [.contacts, .conversations, .conversationDetails, .presentations], requiresImmediateRefresh: true)
         case "v2_read_receipt_preference", "v2_stranger_message_preference", "v2_user_add_preference":
             return .init(scopes: [.privacy, .conversationDetails], requiresImmediateRefresh: true)
         case "v2_user_block_projections", "v2_snapshots":

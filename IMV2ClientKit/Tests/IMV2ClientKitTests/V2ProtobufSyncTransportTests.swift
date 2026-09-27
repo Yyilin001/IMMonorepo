@@ -253,10 +253,7 @@ struct V2ProtobufSyncTransportTests {
         #expect(page.membershipRevision == 6)
         #expect(page.actorRole == .owner)
         #expect(page.members.map(\.role) == [.owner, .member])
-        #expect(page.members.first?.publicIdentity.handle.rawValue == "owner_1")
-        #expect(page.members.first?.publicIdentity.displayName == "群主")
-        #expect(page.members.first?.publicIdentity.accountKind == .regular)
-        #expect(page.members.last?.publicIdentity.handle.rawValue == "member_2")
+        #expect(page.members.map(\.userID.rawValue) == ["00000000-0000-0000-0000-000000000341", "00000000-0000-0000-0000-000000000342"])
         #expect(page.nextCursor == "00000000-0000-0000-0000-000000000342")
         #expect(await wire.requestedPageSize() == 100)
     }
@@ -267,10 +264,10 @@ struct V2ProtobufSyncTransportTests {
 
 
 
-    @Test("member directory rejects a row without its current public identity")
-    func membershipDirectoryRejectsMissingIdentity() async throws {
+    @Test("member directory rejects an unknown role even when the user ID is valid")
+    func membershipDirectoryRejectsUnknownRole() async throws {
         let transport = V2ProtobufSyncTransport(
-            wire: MembershipDirectoryWire(includesIdentity: false),
+            wire: MembershipDirectoryWire(validRole: false),
             protocolVersion: 1
         )
 
@@ -304,8 +301,7 @@ struct V2ProtobufSyncTransportTests {
 
         #expect(first.messageID == messageID)
         #expect(first.readers.count == 1)
-        #expect(first.readers[0].publicIdentity.displayName == "成员一")
-        #expect(first.readers[0].publicIdentity.accountKind == .regular)
+        #expect(first.readers[0].userID.rawValue == "00000000-0000-0000-0000-000000000344")
         #expect(second.readers.count == 1)
         #expect(second.nextCursor == nil)
     }
@@ -322,6 +318,57 @@ struct V2ProtobufSyncTransportTests {
         #expect(subscription == (try .init(roomID: roomID, highWatermark: 34)))
         #expect(await wire.commands() == [.groupEventSubscribe, .groupEventUnsubscribe])
         #expect(await wire.afterRoomSequence() == 21)
+    }
+}
+
+@Suite("Receipt directory wire bounds")
+struct V2ReceiptDirectoryBoundsTests {
+    @Test("reader pages reject invalid routing, duplicate identities and unbounded/non-advancing cursors",
+          arguments: ["wrong-room", "wrong-message", "oversized", "duplicate", "long-cursor", "same-cursor", "invalid-id"])
+    func invalidPages(_ scenario: String) async throws {
+        let wire = InvalidReceiptPageWire(scenario: scenario)
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1)
+        await #expect(throws: (any Error).self) {
+            _ = try await transport.listReadReceiptReaders(roomID: .init(uuid: UUID()), messageID: .init(uuid: UUID()),
+                cursor: "cursor", pageSize: 2)
+        }
+    }
+
+    @Test("oversized input is rejected before transport admission")
+    func oversizedInput() async throws {
+        let wire = InvalidReceiptPageWire(scenario: "unexpected")
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1)
+        for cursor in ["", String(repeating: "a", count: 513)] {
+            await #expect(throws: V2RealtimeTransportError.unexpectedResponse) {
+                _ = try await transport.listReadReceiptReaders(roomID: .init(uuid: UUID()), messageID: .init(uuid: UUID()),
+                    cursor: cursor, pageSize: 2)
+            }
+        }
+        #expect(await wire.calls == 0)
+    }
+}
+
+private actor InvalidReceiptPageWire: V2AuthenticatedFrameTransport {
+    let scenario: String
+    private(set) var calls = 0
+    init(scenario: String) { self.scenario = scenario }
+    func request(_ frame: V2Frame) throws -> V2Frame {
+        calls += 1
+        let request = try V2ProtobufFrameCodec.decode(frame)
+        let command = request.listReadReceiptReaders
+        var response = IMV2Envelope()
+        response.requestID = request.requestID; response.protocolVersion = request.protocolVersion
+        var page = IMV2ReadReceiptReadersPage()
+        page.roomID = scenario == "wrong-room" ? UUID().uuidString : command.roomID
+        page.messageID = scenario == "wrong-message" ? UUID().uuidString : command.messageID
+        let reader = IMV2ReadReceiptReader.with { $0.userID = scenario == "invalid-id" ? "" : UUID().uuidString }
+        page.readers = [reader]
+        if scenario == "oversized" { page.readers += (0..<2).map { _ in .with { $0.userID = UUID().uuidString } } }
+        if scenario == "duplicate" { page.readers.append(reader) }
+        if scenario == "long-cursor" { page.nextCursor = String(repeating: "a", count: 513) }
+        if scenario == "same-cursor" { page.nextCursor = command.cursor }
+        response.readReceiptReadersPage = page
+        return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
     }
 }
 
@@ -361,10 +408,10 @@ private actor GroupEventSubscriptionWire: V2AuthenticatedFrameTransport {
 
 private actor MembershipDirectoryWire: V2AuthenticatedFrameTransport {
     private var pageSize: UInt32 = 0
-    private let includesIdentity: Bool
+    private let validRole: Bool
 
-    init(includesIdentity: Bool = true) {
-        self.includesIdentity = includesIdentity
+    init(validRole: Bool = true) {
+        self.validRole = validRole
     }
 
     func request(_ frame: V2Frame) throws -> V2Frame {
@@ -381,21 +428,11 @@ private actor MembershipDirectoryWire: V2AuthenticatedFrameTransport {
         response.roomMembersPage.members = [
             .with {
                 $0.userID = "00000000-0000-0000-0000-000000000341"
-                $0.role = .owner
-                if includesIdentity {
-                    $0.publicHandle = "owner_1"
-                    $0.displayName = "群主"
-                    $0.accountKind = "regular"
-                }
+                $0.role = validRole ? .owner : .UNRECOGNIZED(99)
             },
             .with {
                 $0.userID = "00000000-0000-0000-0000-000000000342"
                 $0.role = .member
-                if includesIdentity {
-                    $0.publicHandle = "member_2"
-                    $0.displayName = "成员二"
-                    $0.accountKind = "regular"
-                }
             }
         ]
         response.roomMembersPage.nextCursor = "00000000-0000-0000-0000-000000000342"
@@ -422,9 +459,6 @@ private actor ReadReceiptReadersWire: V2AuthenticatedFrameTransport {
             $0.userID = isFirstPage
                 ? "00000000-0000-0000-0000-000000000344"
                 : "00000000-0000-0000-0000-000000000345"
-            $0.publicHandle = isFirstPage ? "member_1" : "member_2"
-            $0.displayName = isFirstPage ? "成员一" : "成员二"
-            $0.accountKind = "regular"
         }]
         response.readReceiptReadersPage.nextCursor = isFirstPage ? "opaque-cursor" : ""
         return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)

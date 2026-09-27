@@ -18,6 +18,8 @@ struct V2RootView: View {
     @State private var pendingGroupInvitationURL: URL?
     #if DEBUG
     private let revocationVisualAccessibility: Bool
+    private let groupAvatarRecoveryTestScope: UUID?
+    private let mediaFileTestScope: UUID?
     @State private var revocationVisualFixture: V2DeviceRevocationPresentation?
     #endif
 
@@ -26,6 +28,10 @@ struct V2RootView: View {
         #if DEBUG
         let arguments = ProcessInfo.processInfo.arguments
         let startupMode = appPushDelegate.store.startupMode
+        groupAvatarRecoveryTestScope = startupMode == .uiTestingSignedOut
+            ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-resource-scope").flatMap(UUID.init(uuidString:)) : nil
+        mediaFileTestScope = startupMode == .uiTestingSignedOut
+            ? Self.launchArgumentValue(arguments, named: "-v2-ui-testing-media-scope").flatMap(UUID.init(uuidString:)) : nil
         revocationVisualAccessibility = startupMode == .uiTestingSignedOut && arguments.contains("-v2-ui-testing-revocation-accessibility")
         _revocationVisualFixture = State(initialValue: startupMode == .uiTestingSignedOut && arguments.contains("-v2-ui-testing-revocation-paused") ? .paused : nil)
         initialPasswordMode = arguments.contains("-v2-ui-testing-password-register") ? .register : .signIn
@@ -68,15 +74,7 @@ struct V2RootView: View {
                 case .launching:
                     ProgressView("正在恢复 V2 会话…")
                 case .signedOut:
-                    V2SignInView(
-                        store: store,
-                        authenticationMessage: store.authenticationMessage,
-                        initialPasswordMode: initialPasswordMode,
-                        initialAccountHandle: initialLocalE2ETestAccountHandle,
-                        initialPassword: initialLocalE2ETestPassword,
-                        initialPublicHandle: initialLocalE2ETestPublicHandle,
-                        initialDisplayName: initialLocalE2ETestDisplayName
-                    )
+                    signedOutContent
                 case .authenticating:
                     ProgressView("正在验证身份…")
                 case .signedIn:
@@ -92,11 +90,13 @@ struct V2RootView: View {
                             pushWakeSettingsStore: store.pushWakeSettingsStore,
                             deviceSessionsStore: store.deviceSessionsStore,
                             groupInvitationStore: store.groupInvitationStore,
+                            pendingGroupAvatarsStore: store.pendingGroupAvatarsStore,
                             localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
                             passwordLifecycleClient: store.passwordLifecycleClient(),
                             signOut: { await store.signOut() }
                         )
                         .environment(\.v2MediaThumbnailCache, store.mediaThumbnailCache)
+                        .environment(\.v2AvatarPipeline, store.avatarPipeline)
                     } else {
                         ProgressView("正在打开本地会话…")
                     }
@@ -174,6 +174,27 @@ struct V2RootView: View {
             guard isAvailable else { return }
             openPendingGroupInvitationIfPossible()
         }
+    }
+
+    @ViewBuilder private var signedOutContent: some View {
+        #if DEBUG
+        if let scope = mediaFileTestScope {
+            V2MediaFileUsageUITestView(scope: scope,
+                cleanup: ProcessInfo.processInfo.arguments.contains("-v2-ui-testing-media-cleanup"))
+        } else if let scope = groupAvatarRecoveryTestScope {
+            V2GroupAvatarRecoveryUITestView(scope: scope,
+                cleanup: ProcessInfo.processInfo.arguments.contains("-v2-ui-testing-resource-cleanup"))
+        } else { signInContent }
+        #else
+        signInContent
+        #endif
+    }
+
+    private var signInContent: some View {
+        V2SignInView(store: store, authenticationMessage: store.authenticationMessage,
+            initialPasswordMode: initialPasswordMode, initialAccountHandle: initialLocalE2ETestAccountHandle,
+            initialPassword: initialLocalE2ETestPassword, initialPublicHandle: initialLocalE2ETestPublicHandle,
+            initialDisplayName: initialLocalE2ETestDisplayName)
     }
 
     private var revocationTypeSize: DynamicTypeSize {
@@ -373,6 +394,7 @@ private struct V2SignedInRootView: View {
         case privacy
         case publicIdentity
         case deviceSessions
+        case pendingGroupAvatars
 
         var id: String { rawValue }
     }
@@ -385,6 +407,7 @@ private struct V2SignedInRootView: View {
     let pushWakeSettingsStore: V2PushWakeSettingsStore?
     let deviceSessionsStore: V2DeviceSessionsStore?
     let groupInvitationStore: V2GroupInvitationStore?
+    let pendingGroupAvatarsStore: V2PendingGroupAvatarsStore?
     let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
     let passwordLifecycleClient: V2PasswordLifecycleClient?
     let signOut: @MainActor @Sendable () async -> Void
@@ -401,8 +424,10 @@ private struct V2SignedInRootView: View {
                 accountMenu: V2ConversationAccountMenu(
                     canOpenPublicIdentity: publicIdentitySettingsStore != nil,
                     canOpenDeviceSessions: deviceSessionsStore != nil,
+                    canOpenPendingGroupAvatars: pendingGroupAvatarsStore != nil,
                     openPublicIdentity: { presentedSettingsSheet = .publicIdentity },
                     openDeviceSessions: { presentedSettingsSheet = .deviceSessions },
+                    openPendingGroupAvatars: { presentedSettingsSheet = .pendingGroupAvatars },
                     openPrivacySettings: { presentedSettingsSheet = .privacy },
                     openAccountSecurity: { presentedSettingsSheet = .accountSecurity },
                     signOut: {
@@ -428,6 +453,8 @@ private struct V2SignedInRootView: View {
             .onDisappear { signOutTask?.cancel() }
             .sheet(item: $presentedSettingsSheet) { sheet in
                 switch sheet {
+                case .pendingGroupAvatars:
+                    if let pendingGroupAvatarsStore { V2PendingGroupAvatarsView(store: pendingGroupAvatarsStore) }
                 case .accountSecurity:
                     if let passwordLifecycleClient {
                         NavigationStack { V2AccountSecurityView(client: passwordLifecycleClient, passwordChanged: signOut) }

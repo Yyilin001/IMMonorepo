@@ -5,6 +5,24 @@ import Testing
 
 @Suite("Closed room capability envelope")
 struct V2RoomRequestTests {
+    @Test("profile cohort eligibility checks shape without changing the per-user principal")
+    func profileCohortEligibility() throws {
+        let room = RoomID(uuid: UUID()), actor = UserID(uuid: UUID()), target = UserID(uuid: UUID())
+        func request(_ targets: [UserID], actor: UserID) -> V2RoomRequest {
+            .mediaAuthorization(.profileVisibilityBatch(.init(roomID: room, actorUserID: actor,
+                roomKind: .group, targetUserIDs: targets)))
+        }
+        let valid = request([target], actor: actor)
+        #expect(valid.profileVisibilityTargetCount == 1)
+        #expect(valid.actorUserID == actor && valid.replayPolicy == .readOnly && !valid.canShareSendTurn)
+        #expect(try JSONDecoder().decode(V2RoomRequest.self, from: JSONEncoder().encode(valid)) == valid)
+        #expect(request([], actor: actor).profileVisibilityTargetCount == nil)
+        #expect(request([target, target], actor: actor).profileVisibilityTargetCount == nil)
+        #expect(request((0..<101).map { _ in UserID(uuid: UUID()) }, actor: actor).profileVisibilityTargetCount == nil)
+        #expect(request([try UserID("malformed")], actor: actor).profileVisibilityTargetCount == nil)
+        #expect(request([target], actor: try UserID("malformed")).profileVisibilityTargetCount == nil)
+    }
+
     @Test("retry and batching policy come from the typed capability")
     func policyAndIdentity() throws {
         let room = RoomID(uuid: UUID())

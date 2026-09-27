@@ -959,7 +959,9 @@ private actor V2DirectRoomLogEventCacheShard {
             frame: frame,
             roomID: roomID,
             nextRoomSequence: last.roomSequence,
-            hasMore: finalHasMore
+            hasMore: finalHasMore,
+            authorSample: context.captureAuthorSample ? .init(roomID: roomID,
+                events: includedRange.lazy.map { room.events[$0].entry }) : nil
         ))
     }
 

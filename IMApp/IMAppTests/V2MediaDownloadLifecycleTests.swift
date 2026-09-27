@@ -49,7 +49,7 @@ private actor LifecycleMediaResolver: V2ClientMediaDownloadTargetResolver {
     private(set) var count = 0
     func resolveDownloadTarget(mediaID: MediaID, message: V2MediaMessageLocation?) throws -> V2ClientMediaTransferTarget {
         count += 1
-        return try .init(url: URL(string: "https://media.invalid/object")!, expiresAt: .distantFuture, expectedByteCount: 1)
+        return try .init(downloadPlan: .init(mode: .httpGet, url: URL(string: "https://media.invalid/object")!, expiresAt: .distantFuture, expectedByteCount: 1, checksum: .init(value: "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a")))
     }
 }
 

@@ -1,6 +1,8 @@
 # R2 FIFO 与双房间预约证据
 
-基于固定 main 的隔离分支实施。本文只记录调度器与协调器的实际验证；没有将 fake executor 视为 PostgreSQL fence 或跨进程通过证据。
+基于固定 main 的隔离分支实施。本文只记录当时调度器与协调器的实际验证；没有将 fake executor 视为 PostgreSQL fence 或跨进程通过证据。
+
+2026-09-27 后续增量：资料可见性读取现已成为单独的有界合批类别，仅合并同房间相邻且逐请求准入的用户信封，遇到发送、其他查询/写入或 reservation 即停止。下面的“其他查询都是屏障”是原 R2 基线；当前行为和真实 PostgreSQL 验证见[资源实施记录](../../proposals/resource-system-implementation.md)。
 
 ## 实现边界
 

@@ -519,6 +519,18 @@
       "owner": "C0"
     },
     {
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteScalarAcceptance.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteScalarPersistence.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteForwardAcceptance.swift",
+      "owner": "D5"
+    },
+    {
       "path": "IMV2Server/Sources/IMV2Server/PostgresV2SendCompletion.swift",
       "owner": "D1"
     },
@@ -1545,6 +1557,70 @@
     {
       "path": "scripts/generate_v2_protobuf.sh",
       "owner": "V1"
+    },
+    {
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatar.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatarPresentation.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Core/Tests/IMV2CoreTests/GroupAvatarContractTests.swift",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2Server/Resources/Application/V2ResourceGroupAvatarPresentationService.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2ResourceGroupAvatarPostgresTests.swift",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerHTTP/V2VaporGroupAvatarPresentationRoutes.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatarCommandResponse.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2Server/Resources/Application/V2ResourceGroupAvatarCommandService.swift",
+      "owner": "D2"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerHTTP/V2VaporGroupAvatarCommandRoutes.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatarRecovery.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerHTTP/V2VaporGroupAvatarRecoveryRoutes.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2Server/Resources/Application/V2AuthorPresentationIngress.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2AuthorPresentationIngressTests.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2Server/Resources/Application/V2AuthorPresentationRuntime.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApp/GatewayAuthorPresentationAssembly.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2AuthorPresentationRuntimeTests.swift",
+      "owner": "I1"
     }
   ]
 }

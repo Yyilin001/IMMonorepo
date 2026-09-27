@@ -147,6 +147,57 @@ public struct PostgresV2ForwardMediaImportStore: Sendable {
         }
     }
 
+    /// Reuses the exact destination reserved before storage I/O, under the current job lease.
+    public func resourceCopyOutput(_ lease: V2ForwardMediaImportLease, now: Date) async throws -> V2StoredObjectFacts? {
+        guard let result = try await withClaim(lease, now: now, { sql, _, _ in
+            try await readResourceOutput(lease, sql: sql)
+        }) else { throw V2ResourceProviderError.preconditionFailed }
+        return result
+    }
+
+    /// The closure allocates an identity only; no provider I/O is allowed inside this transaction.
+    public func prepareResourceCopy(_ lease: V2ForwardMediaImportLease, source: V2StoredObjectFacts,
+                                    allocate: @escaping @Sendable () throws -> V2StoredObjectReference,
+                                    now: Date) async throws -> V2StoredObjectFacts {
+        guard source.byteCount == lease.source.byteCount else { throw V2ForwardMediaCopyError.byteCountMismatch }
+        guard let result = try await withClaim(lease, now: now, { sql, job, _ in
+            if let prior = try await readResourceOutput(lease, sql: sql) {
+                guard prior.byteCount == source.byteCount, prior.sha256 == source.sha256
+                else { throw V2ForwardMediaCopyError.contentConflict }
+                return prior
+            }
+            guard job.digest == nil || job.digest == source.sha256 else { throw V2ForwardMediaCopyError.contentConflict }
+            let reference = try allocate()
+            guard reference.placementID != source.reference.placementID else { throw V2ForwardMediaCopyError.contentConflict }
+            let encoded = String(decoding: try JSONEncoder().encode(reference), as: UTF8.self)
+            // Media locking shares the binding/GC fence. An uncompleted forward job also retains it.
+            guard try await sql.raw("""
+                SELECT 1 FROM im_v2.media_objects WHERE media_id=\(bind:job.targetID)
+                  AND upload_session_id=\(bind:job.uploadID) AND state IN ('pending_upload','scanning') FOR UPDATE
+                """).first() != nil else { throw V2ResourceProviderError.preconditionFailed }
+            try await sql.raw("""
+                INSERT INTO im_v2.resource_catalog(media_id,home_kind,home_id,usage_kind,generation,created_at)
+                VALUES(\(bind:job.targetID),'room',\(bind:lease.export.intent.targetRoomID),'message_attachment',1,\(bind:now))
+                """).run()
+            try await sql.raw("""
+                INSERT INTO im_v2.resource_forward_outputs(export_id,ordinal,target_media_id,reference_json,byte_count,sha256,created_at)
+                VALUES(\(bind:lease.export.intent.exportID),\(bind:lease.ordinal),\(bind:job.targetID),\(bind:encoded)::jsonb,
+                    \(bind:source.byteCount),\(bind:source.sha256),\(bind:now))
+                """).run()
+            return try V2StoredObjectFacts(reference:reference,byteCount:source.byteCount,sha256:source.sha256)
+        }) else { throw V2ResourceProviderError.preconditionFailed }
+        return result
+    }
+
+    private func readResourceOutput(_ lease: V2ForwardMediaImportLease, sql: any SQLDatabase) async throws -> V2StoredObjectFacts? {
+        guard let row = try await sql.raw("""
+            SELECT reference_json::text AS reference,byte_count,sha256 FROM im_v2.resource_forward_outputs
+            WHERE export_id=\(bind:lease.export.intent.exportID) AND ordinal=\(bind:lease.ordinal)
+              AND target_media_id=\(bind:lease.targetMediaID.uuidValue!)
+            """).first(decoding:ForwardResourceOutputRow.self) else { return nil }
+        return try .init(reference:JSONDecoder().decode(V2StoredObjectReference.self,from:Data(row.reference.utf8)),byteCount:row.byteCount,sha256:row.sha256)
+    }
+
     /// 记录已完成的字节复制，并按租约栅栏判断是否仍然有效。
     ///
     /// - Parameters:
@@ -159,6 +210,21 @@ public struct PostgresV2ForwardMediaImportStore: Sendable {
         guard receipt.byteCount == lease.source.byteCount else { throw V2ForwardMediaCopyError.byteCountMismatch }
         return try await mutate(lease, now: now) { sql, job, _ in
             guard job.digest == nil || job.digest == receipt.digest else { throw V2ForwardMediaCopyError.contentConflict }
+            if let output = try await readResourceOutput(lease, sql: sql) {
+                guard output.byteCount == receipt.byteCount, output.sha256 == receipt.digest else { throw V2ForwardMediaCopyError.contentConflict }
+                let encoded=String(decoding:try JSONEncoder().encode(output.reference),as:UTF8.self)
+                try await sql.raw("""
+                    INSERT INTO im_v2.resource_blob_placements(placement_id,media_id,generation,reference_json,byte_count,sha256,state,verified_at)
+                    VALUES(\(bind:output.reference.placementID),\(bind:job.targetID),1,\(bind:encoded)::jsonb,
+                        \(bind:output.byteCount),\(bind:output.sha256),'active',\(bind:now))
+                    ON CONFLICT(placement_id) DO NOTHING
+                    """).run()
+                guard try await sql.raw("""
+                    SELECT 1 FROM im_v2.resource_blob_placements WHERE placement_id=\(bind:output.reference.placementID)
+                      AND media_id=\(bind:job.targetID) AND generation=1 AND reference_json=\(bind:encoded)::jsonb
+                      AND byte_count=\(bind:output.byteCount) AND sha256=\(bind:output.sha256) AND state='active'
+                    """).first() != nil else { throw V2ForwardMediaCopyError.contentConflict }
+            }
             try await sql.raw("""
                 UPDATE im_v2.message_forward_media_imports SET copied_digest = \(bind: receipt.digest), copied_at = COALESCE(copied_at, \(bind: now))
                 WHERE export_id = \(bind: lease.export.intent.exportID) AND ordinal = \(bind: lease.ordinal)
@@ -257,21 +323,28 @@ public struct PostgresV2ForwardMediaImportStore: Sendable {
 
     private func mutate(_ lease: V2ForwardMediaImportLease, now: Date,
                         _ action: @escaping @Sendable (any SQLDatabase, ImportJobRow, ForwardInboxRow) async throws -> Void) async throws -> Bool {
+        try await withClaim(lease,now:now) { sql,job,inbox in
+            try await action(sql,job,inbox)
+            return true
+        } ?? false
+    }
+
+    private func withClaim<Value:Sendable>(_ lease:V2ForwardMediaImportLease,now:Date,
+                        _ action:@escaping @Sendable (any SQLDatabase,ImportJobRow,ForwardInboxRow) async throws -> Value) async throws -> Value? {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ForwardInboxError.corruptPersistenceState }
             let inbox = try await v2LockForwardInbox(exportID: lease.export.intent.exportID, sql: sql)
-            guard inbox.state == "pending", inbox.payload == lease.export.payload, inbox.digest == lease.export.digest else { return false }
+            guard inbox.state == "pending", inbox.payload == lease.export.payload, inbox.digest == lease.export.digest else { return nil }
             guard try await sql.raw("SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: lease.export.intent.targetRoomID) FOR UPDATE").first() != nil else { throw V2ForwardInboxError.targetNotFound }
             try await v2AssertForwardInboxOwner(.init(export: lease.export, mediaIDs: []), sql: sql)
             guard let job = try await readJob(exportID: lease.export.intent.exportID, ordinal: lease.ordinal, sql: sql),
                   job.state == "claimed", job.token == lease.claimToken, job.targetID == lease.targetMediaID.uuidValue,
                   job.uploadID == lease.targetUploadSessionID, let deadline = job.expiresAt
-            else { return false }
+            else { return nil }
             guard v2PostgresTimestampCanEncode(now) else { throw V2ForwardInboxError.corruptPersistenceState }
             let currentTime = try V2PostgresTimestamp(date: now)
-            guard deadline.microseconds > currentTime.microseconds else { return false }
-            try await action(sql, job, inbox)
-            return true
+            guard deadline.microseconds > currentTime.microseconds else { return nil }
+            return try await action(sql, job, inbox)
         }
     }
 
@@ -281,6 +354,11 @@ public struct PostgresV2ForwardMediaImportStore: Sendable {
             FROM im_v2.message_forward_media_imports WHERE export_id = \(bind: exportID) AND ordinal = \(bind: ordinal) FOR UPDATE
             """).first(decoding: ImportJobRow.self)
     }
+}
+
+private struct ForwardResourceOutputRow:Decodable,Sendable {
+    let reference:String;let byteCount:Int64;let sha256:Data
+    enum CodingKeys:String,CodingKey { case reference,byteCount="byte_count",sha256 }
 }
 
 private struct ImportJobRow: Decodable, Sendable {

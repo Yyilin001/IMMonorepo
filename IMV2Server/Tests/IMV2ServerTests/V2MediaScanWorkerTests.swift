@@ -100,3 +100,54 @@ private struct FailingMediaScanner: V2MediaScanProvider { func scan(mediaID _: M
 private struct InvariantFailingMediaScanner: V2MediaScanProvider {
     func scan(mediaID _: MediaID) throws -> V2MediaScanResult { throw V2RoomWriteStoreError.corruptPersistenceState }
 }
+
+extension V2MediaScanWorkerTests {
+    @Test("scan batches acquire fresh leases only when execution slots are available")
+    func leasesStartAtExecution() async throws {
+        let base = Date(timeIntervalSince1970: 1_750_000_000)
+        let clock = TestSequenceClock([base, base.addingTimeInterval(20), base.addingTimeInterval(20),
+            base.addingTimeInterval(20), base.addingTimeInterval(40)])
+        let store = BoundedScanClaimStore(count: 4)
+        let worker = try V2MediaScanWorker(store: store, provider: PassingMediaScanner(), leaseDuration: 30,
+            maximumConcurrency: 2, now: { clock.now() })
+        #expect(try await worker.runOnce(limit: 3) == .init(claimedCount: 3, completedCount: 3, releasedCount: 0))
+        let evidence = await store.evidence()
+        #expect(evidence.limits == [2, 1])
+        #expect(evidence.times == [base, base.addingTimeInterval(20)])
+        #expect(evidence.remaining == 1)
+        #expect(evidence.active == 0)
+        #expect(!evidence.claimedWhileBusy)
+        #expect(evidence.expired == 0)
+    }
+}
+
+private actor BoundedScanClaimStore: V2MediaScanStore {
+    private var pending: [V2MediaScanLease]
+    private var active: [UUID: Date] = [:]
+    private var limits: [Int] = []
+    private var times: [Date] = []
+    private var claimedWhileBusy = false
+    private var expired = 0
+    init(count: Int) {
+        pending = (0..<count).map { _ in .init(mediaID: .init(uuid: UUID()), claimToken: UUID()) }
+    }
+    func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) -> [V2MediaScanLease] {
+        if !active.isEmpty { claimedWhileBusy = true }
+        limits.append(limit); times.append(now)
+        let result = Array(pending.prefix(limit))
+        pending.removeFirst(result.count)
+        for lease in result { active[lease.claimToken] = now.addingTimeInterval(leaseDuration) }
+        return result
+    }
+    func complete(_ lease: V2MediaScanLease, result: V2MediaScanResult, now: Date) throws {
+        let savedDeadline = active.removeValue(forKey: lease.claimToken)
+        let deadline = try #require(savedDeadline)
+        if now >= deadline { expired += 1 }
+    }
+    func scheduleRetry(_ lease: V2MediaScanLease, disposition: V2DurableRetryDisposition, now: Date) {
+        active.removeValue(forKey: lease.claimToken)
+    }
+    func evidence() -> (limits: [Int], times: [Date], remaining: Int, active: Int, claimedWhileBusy: Bool, expired: Int) {
+        (limits, times, pending.count, active.count, claimedWhileBusy, expired)
+    }
+}

@@ -84,6 +84,7 @@ struct V2PreparedGroupEventPageEncodingContext: Sendable {
     let maximumExpansionRatio: Int
     let maximumGroupEventPagePayloadBytes: Int
     let cache: V2PreparedGroupEventPageCache
+    var captureAuthorSample: Bool = false
 }
 
 /// 已编码的事件分页响应。
@@ -92,6 +93,7 @@ struct V2PreparedGroupEventPageResponse: Sendable {
     let roomID: RoomID
     let nextRoomSequence: UInt64
     let hasMore: Bool
+    var authorSample: V2AuthorPresentationPageSample? = nil
 }
 
 /// 预编码拉取的结果。
