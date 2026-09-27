@@ -647,6 +647,16 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
        JOIN pg_class AS relation ON relation.oid = definition.indrelid
        JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
        WHERE namespace.nspname = 'im_v2' AND relation.relname = 'messages'
+         AND index_record.relname = 'messages_room_log_candidates_idx'
+         AND definition.indisvalid AND definition.indisready
+         AND pg_get_indexdef(definition.indexrelid) LIKE '%USING btree (room_id, timeline_sequence) WHERE (accepted_event_storage = ''message_row''::text)'
+   )
+   AND EXISTS (
+       SELECT 1 FROM pg_index AS definition
+       JOIN pg_class AS index_record ON index_record.oid = definition.indexrelid
+       JOIN pg_class AS relation ON relation.oid = definition.indrelid
+       JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+       WHERE namespace.nspname = 'im_v2' AND relation.relname = 'messages'
          AND index_record.relname = 'messages_visible_membership_idx'
          AND definition.indisvalid AND definition.indisready
          AND pg_get_indexdef(definition.indexrelid) LIKE '%USING btree (room_id, accepted_membership_revision, room_sequence DESC) WHERE ((accepted_event_storage = ''message_row''::text) AND (withdrawn_at IS NULL))'

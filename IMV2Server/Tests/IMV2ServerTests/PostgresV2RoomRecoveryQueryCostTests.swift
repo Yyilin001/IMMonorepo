@@ -90,7 +90,7 @@ private struct RecoveryExplain: SQLExpression {
 
 /// A forwarding SQL boundary: every captured query still executes against the
 /// real database. Mutex ownership covers counts and captured Sendable expressions.
-private final class RecoveryQueryRecorder: Database, SQLDatabase, Sendable {
+final class RecoveryQueryRecorder: Database, SQLDatabase, Sendable {
     struct Capture: Sendable {
         var queries: [any SQLExpression] = []
         var active = 0

@@ -94,44 +94,46 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
                        ) AS actor_is_active_member
                 FROM im_v2.rooms AS rooms
                 WHERE rooms.room_id = \(bind: roomUUID)
-            ), visible_event_candidates AS MATERIALIZED (
-                -- Legacy/group events retain their immutable event row.
+            ), event_candidates AS MATERIALIZED (
                 SELECT event.event_id, event.room_id, event.room_sequence, event.event_type,
                        event.payload, event.committed_membership_revision,
                        NULL::uuid AS message_id, FALSE AS is_message_row
                 FROM im_v2.room_events AS event
                 WHERE event.room_id = \(bind: roomUUID)
-                  -- Keep the cursor predicate inside the indexed source.  It
-                  -- is logically identical to the visibility fence below,
-                  -- but prevents a recovery miss from materializing the
-                  -- room's complete legacy-event history before filtering.
                   AND event.room_sequence > \(bind: cursor.signedValue)
-
-                UNION ALL
-
-                -- Plain direct room-log messages materialize their accepted
-                -- event in the messages row itself. They retain an explicit
-                -- event ID and membership revision, so cursor and visibility
-                -- semantics are identical to the legacy room-event form.
-                SELECT message.accepted_event_id, message.room_id, message.room_sequence,
-                       'message.accepted', NULL::jsonb,
-                       message.accepted_membership_revision,
-                       message.message_id, TRUE
+                ORDER BY event.room_sequence
+                LIMIT \(bind: pageSize + 1)
+            ), message_candidates AS MATERIALIZED (
+                SELECT message.accepted_event_id AS event_id, message.room_id, message.room_sequence,
+                       'message.accepted' AS event_type, NULL::jsonb AS payload,
+                       message.accepted_membership_revision AS committed_membership_revision,
+                       message.message_id, TRUE AS is_message_row
                 FROM im_v2.messages AS message
                 WHERE message.room_id = \(bind: roomUUID)
                   AND message.accepted_event_storage = 'message_row'
-                  -- `message_row` is constrained to use the same room and
-                  -- timeline sequence.  Keep the cursor predicate on the
-                  -- existing unique `(room_id, timeline_sequence)` index so
-                  -- direct event pulls do not need a second write index.
                   AND message.timeline_sequence > \(bind: cursor.signedValue)
+                ORDER BY message.timeline_sequence
+                LIMIT \(bind: pageSize + 1)
+            ), candidates AS MATERIALIZED (
+                SELECT * FROM event_candidates
+                UNION ALL
+                SELECT * FROM message_candidates
+                ORDER BY room_sequence
+                LIMIT \(bind: pageSize + 1)
+            ), scan_window AS MATERIALIZED (
+                -- The extra candidate proves there is more work; it is not
+                -- authorized, hydrated or consumed by this page.
+                SELECT * FROM candidates ORDER BY room_sequence LIMIT \(bind: pageSize)
+            ), scan_progress AS MATERIALIZED (
+                SELECT (SELECT count(*) FROM candidates) > \(bind: pageSize) AS has_more,
+                       (SELECT max(room_sequence) FROM scan_window) AS scanned_through
             ), visible_events AS MATERIALIZED (
                 SELECT event.event_id, event.room_sequence, event.event_type,
                        event.payload, event.message_id, event.is_message_row,
                        (event.event_type NOT IN ('message.edited', 'message.withdrawn', 'message.reaction_changed')
                         OR accepted.message_id IS NOT NULL) AS authority_complete
                 FROM room
-                JOIN visible_event_candidates AS event ON TRUE
+                JOIN scan_window AS event ON TRUE
                 LEFT JOIN LATERAL (\(acceptance)) AS accepted ON TRUE
                 WHERE room.room_kind IN ('group', 'direct')
                   AND room.actor_is_active_member
@@ -158,10 +160,11 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
                       )
                   )
                 ORDER BY event.room_sequence
-                LIMIT \(bind: pageSize + 1)
             )
             SELECT room.room_kind, room.actor_is_active_member,
-                   room.room_sequence AS scanned_through_room_sequence,
+                   CASE WHEN scan_progress.has_more THEN scan_progress.scanned_through
+                        ELSE room.room_sequence END AS scanned_through_room_sequence,
+                   scan_progress.has_more AS has_more_candidates,
                    room.log_trimmed_through_room_sequence AS trimmed_through_room_sequence,
                    event.event_id, event.room_sequence, event.event_type,
                    CASE
@@ -225,6 +228,7 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
                        ELSE TRUE
                    END) AND COALESCE(event.authority_complete, TRUE) AS payload_is_complete
             FROM room
+            CROSS JOIN scan_progress
             LEFT JOIN visible_events AS event ON TRUE
             LEFT JOIN im_v2.messages AS message
               ON message.message_id = COALESCE(
@@ -248,9 +252,8 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
         guard room.actorIsActiveMember else { throw V2GroupEventLogError.actorNotMember }
 
         let eventRows = rows.compactMap { $0.eventID == nil ? nil : $0 }
-        let hasMore = eventRows.count > pageSize
-        let pageRows = hasMore ? Array(eventRows.prefix(pageSize)) : eventRows
-        let entries: [V2GroupEventLogEntry] = try pageRows.map { row in
+        let hasMore = room.hasMoreCandidates
+        let entries: [V2GroupEventLogEntry] = try eventRows.map { row in
             guard let eventID = row.eventID,
                   let roomSequence = row.roomSequence,
                   let eventType = row.eventType,
@@ -265,12 +268,10 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
                 payload: payload
             )
         }
-        // 已耗尽的快照检查过完整尾部，包括已授权范围内的序号缺口。
-        // 仍有可见记录或权限尚未确认的记录时，不能宣称该尾部已消费完。
+        // Advance through the inspected candidate window, including invisible
+        // events. Only an exhausted pair of sources may advance to the room head.
         let trimmedThrough = try groupEventUnsigned(room.trimmedThroughRoomSequence)
-        let next = hasMore
-            ? (entries.last?.roomSequence ?? afterRoomSequence)
-            : max(afterRoomSequence, try groupEventUnsigned(room.scannedThroughRoomSequence))
+        let next = max(afterRoomSequence, try groupEventUnsigned(room.scannedThroughRoomSequence))
         return try V2GroupEventLogPage(
             roomID: roomID,
             events: entries,
@@ -470,6 +471,7 @@ private struct DirectRoomCacheAccessRow: Decodable {
 }
 
 private struct GroupEventLogRow: Decodable {
+    let hasMoreCandidates: Bool
     let scannedThroughRoomSequence: Int64
     let trimmedThroughRoomSequence: Int64
     let roomKind: String
@@ -480,6 +482,7 @@ private struct GroupEventLogRow: Decodable {
     let payloadJSON: String?
     let payloadIsComplete: Bool
     enum CodingKeys: String, CodingKey {
+        case hasMoreCandidates = "has_more_candidates"
         case scannedThroughRoomSequence = "scanned_through_room_sequence"
         case trimmedThroughRoomSequence = "trimmed_through_room_sequence"
         case roomKind = "room_kind"

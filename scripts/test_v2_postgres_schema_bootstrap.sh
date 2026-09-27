@@ -101,7 +101,7 @@ assert_scalar() {
 assert_scalar 'im_v2 relation count' \
   "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '157'
 assert_scalar 'im_v2 index count' \
-  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '368'
+  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '369'
 assert_scalar 'im_v2 application trigger count' \
   "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '31'
 assert_scalar 'im_v2 function count' \
@@ -191,6 +191,14 @@ psql -c 'CREATE INDEX messages_latest_visible_idx ON im_v2.messages(room_id)' >/
 test "$(current_schema_contract)" = 'f'
 psql -c 'DROP INDEX im_v2.messages_latest_visible_idx' >/dev/null
 psql -c 'CREATE INDEX messages_latest_visible_idx ON im_v2.messages(room_id, room_sequence DESC, message_id DESC) WHERE withdrawn_at IS NULL' >/dev/null
+test "$(current_schema_contract)" = 't'
+
+psql -c 'DROP INDEX im_v2.messages_room_log_candidates_idx' >/dev/null
+test "$(current_schema_contract)" = 'f'
+psql -c 'CREATE INDEX messages_room_log_candidates_idx ON im_v2.messages(room_id, timeline_sequence)' >/dev/null
+test "$(current_schema_contract)" = 'f'
+psql -c 'DROP INDEX im_v2.messages_room_log_candidates_idx' >/dev/null
+psql -c "CREATE INDEX messages_room_log_candidates_idx ON im_v2.messages(room_id, timeline_sequence) WHERE accepted_event_storage = 'message_row'" >/dev/null
 test "$(current_schema_contract)" = 't'
 
 psql -c 'DROP INDEX im_v2.messages_visible_membership_idx' >/dev/null

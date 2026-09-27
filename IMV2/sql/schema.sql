@@ -1430,6 +1430,12 @@ CREATE TABLE im_v2.messages (
 CREATE INDEX messages_room_sender_sequence_idx
     ON im_v2.messages (room_id, sender_user_id, room_sequence DESC);
 
+-- Bounded room-log reads must skip room_event-backed messages in the index,
+-- including withdrawn message_row entries whose accepted event remains readable.
+CREATE INDEX messages_room_log_candidates_idx
+    ON im_v2.messages (room_id, timeline_sequence)
+    WHERE accepted_event_storage = 'message_row';
+
 -- Latest authorized summary candidates skip withdrawn history and avoid per-room sorting.
 CREATE INDEX messages_latest_visible_idx
     ON im_v2.messages (room_id, room_sequence DESC, message_id DESC)

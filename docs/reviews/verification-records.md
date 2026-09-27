@@ -26,7 +26,7 @@ bash scripts/verify_v2.sh
 ## 记录清单
 
 
-共 89 条运行记录。
+共 109 条运行记录。
 
 ### 20260905-forward-delivery
 
@@ -2704,3 +2704,42 @@ B01 仍有成员/角色收据和其他投影的内部版本比较待核对。
 - 真实入口增量构建通过（2.93 秒）；最终仓库脚本全部通过，证据目录 `/tmp/imv2-auth-gateway-abb8e085-ab13-4711-9839-18f49312d37e`，含四次进程日志、schema 日志与 report.json。总日志 `/tmp/imv2-auth-gateway-lifecycle-repository-20260920.log`，源码/日志指纹 `/tmp/imv2-auth-gateway-lifecycle-sources-20260920.json`。没有运行全仓测试。
 - 首次临时夹具错误地把数据库线程数改为 1 却保留 4 线程的并发预算，启动检查拒绝；恢复正确配置后，强杀夹具仅终止 psql，数据库 sleep 事务仍持锁，重启恢复按预期延后但探针超时。修正为仅终止本次独立数据库内的持锁后端后通过；两次失败日志保留，不计通过。最终仓库脚本又加入在途 SIGTERM 场景并整体通过。
 - 限制：这是 macOS、本机单物理库、预置 held 授权的真实 Gateway 后台生命周期；没有通过 TLS 发消息，不能替代前台普通/批量/转发的全进程故障矩阵、跨物理库部署、Linux、安全认证、生产容量或迁移接管验收。D07 保持实施中，关闭数不变。
+
+
+### 20260927-bounded-room-log-pagination
+
+- 日期：2026-09-27；对象：本次工作区的有界房间日志分页、候选部分索引与游标修改。
+- 环境：本机 Apple Silicon、Swift 6.4、PostgreSQL 16.13；独立临时 PostgreSQL 实例及每轮新建的三个 disposable 数据库。
+- 合同：[历史读取与扫描游标](message-mutation-read-contract.md)。
+- 服务端定向回归：15 个测试函数通过（包含参数化场景），覆盖混合来源、空授权窗口、成员重入、撤回后的 accepted 记录、尾部空洞、不完整 lookahead、缺失接受事实、编辑/撤回/reaction 历史权限、Actor 读取与围栏、索引漂移及分页响应边界。
+- 客户端：6 个 catch-up/已应用序号测试，以及空/非空两种扫描游标持久化、重开和坏载荷回滚场景通过；未修改客户端生产实现。
+- schema：canonical 空库建库、索引缺失/错误谓词拒绝、结构漂移、pg_dump/restore、readiness 表覆盖均通过；文档链接和结构检查通过。
+- 查询计划来自捕获后重新执行的实际生产 SQL 与参数，`EXPLAIN (ANALYZE, BUFFERS)`；每个序号有一条 message 行，仅每 100 条中的一条使用 `message_row`，其余事件走 `room_events`，用来验证部分索引确实跳过其他存储模式。
+
+| 历史记录数 | 起始游标 | room_events 实际候选行 | messages 实际候选行 | shared hit | SQL 执行时间（ms） |
+| --- | --- | --- | --- | --- | --- |
+| 1,000 | 0 | 101 | 10（已耗尽） | 25 | 0.335 |
+| 1,000 | 500 | 101 | 5（已耗尽） | 20 | 0.304 |
+| 50,000 | 0 | 101 | 101 | 118 | 0.431 |
+| 50,000 | 25,000 | 101 | 101 | 119 | 0.434 |
+
+页大小均为 100。候选来源使用有序索引；未出现 messages/room_events 全表扫描。
+另以真实 `V2RoomTurnLane` 排入同房间读取和发送，读取走 `V2ActorRoomQueryExecutor`，发送走带同一激活围栏的写入存储。
+1,000/50,000 条历史下，发送从读取轮次开始到取得轮次分别等待 10.047/9.395ms，读取加发送完成分别为 23.206/18.403ms；两次发送均成功提交。
+这些是单次本机 Debug、热缓存和同期存在编译工作的结果，不代表生产 p95/p99、冷磁盘、多用户负载或整体容量。
+
+复现（指向允许创建测试数据库的独立 PostgreSQL 实例）：
+
+```sh
+PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
+  bash scripts/test_v2_server_native_postgres.sh \
+  --filter 'boundedRoomLog|currentSchemaRequiresRoomLogCandidateIndex|roomMutationHistoricalRead|V2GroupEventPageBoundsTests|V2ActorRoomQueryExecutorIntegrationTests'
+bash scripts/run_v2_clientkit_native_tests.sh \
+  --filter 'V2RoomLogCatchUpTests|V2RoomAppliedSequenceTests|scannedRoomCursorPersistence'
+IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
+  bash scripts/test_v2_postgres_schema_bootstrap.sh
+```
+
+本机原始日志位于 `/tmp/imv2-pagination-pg.5qoJw8/` 的 `tests-final.log`、`client.log`、`client-cursor.log`、`schema-r2.log`。
+前几轮测试曾因夹具更新 append-only 事件、未同步时间线计数和过宽查询计划断言而失败；最终验证已修正这些夹具/断言。
+索引 readiness 测试使用 canonical `im_v2` 夹具，避免无关资源合同对随机 schema 的既有硬编码限制；没有扩大修复范围去修改该资源合同。
