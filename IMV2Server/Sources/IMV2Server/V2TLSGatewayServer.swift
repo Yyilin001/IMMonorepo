@@ -58,6 +58,10 @@ public enum V2TLSGatewayServerError: Error, Equatable, Sendable {
     case alreadyBound
     /// 服务尚未绑定监听地址。
     case notBound
+    /// 连接清理在期限内未结束，底层依赖必须继续存活。
+    case drainTimedOut
+    /// 已停止接入的服务不能重新绑定；重新启动须创建新的服务实例。
+    case stopped
 }
 
 /// 进程内连接准入。
@@ -110,26 +114,16 @@ private final class V2GatewayConnectionLease: Sendable {
 private final class V2GatewayConnectionLeaseHandler: ChannelInboundHandler, Sendable {
     typealias InboundIn = ByteBuffer
     private let lease: V2GatewayConnectionLease
-    private let registry: V2GatewayChildChannelRegistry
-    private let channel: V2GatewayTrackedChannel
 
-    init(
-        lease: V2GatewayConnectionLease,
-        registry: V2GatewayChildChannelRegistry,
-        channel: any Channel
-    ) {
+    init(lease: V2GatewayConnectionLease) {
         self.lease = lease
-        self.registry = registry
-        self.channel = .init(channel)
     }
     func channelInactive(context: ChannelHandlerContext) {
         lease.release()
-        registry.remove(channel)
         context.fireChannelInactive()
     }
     func handlerRemoved(context _: ChannelHandlerContext) {
         lease.release()
-        registry.remove(channel)
     }
 }
 
@@ -138,7 +132,7 @@ private final class V2GatewayConnectionLeaseHandler: ChannelInboundHandler, Send
 /// 通道本身限定在事件循环内，但其 `close()` 明确是线程安全的。
 /// 该窄包装让关闭流程只保留它需要的操作，而不必把处理器或应用状态标记为
 /// `@unchecked Sendable`。
-private struct V2GatewayTrackedChannel: @unchecked Sendable {
+fileprivate struct V2GatewayTrackedChannel: @unchecked Sendable {
     let channel: any Channel
     let identity: ObjectIdentifier
 
@@ -148,24 +142,55 @@ private struct V2GatewayTrackedChannel: @unchecked Sendable {
     }
 }
 
-private final class V2GatewayChildChannelRegistry: Sendable {
-    private let channels = Mutex([ObjectIdentifier: V2GatewayTrackedChannel]())
+final class V2GatewayConnectionDrainCompletion: Sendable {
+    private let completed = Mutex(false)
+    let promise: EventLoopPromise<Void>
 
-    func insert(_ channel: any Channel) {
+    init(eventLoop: any EventLoop) { promise = eventLoop.makePromise(of: Void.self) }
+
+    func complete() {
+        let shouldComplete = completed.withLock { completed in
+            guard !completed else { return false }
+            completed = true
+            return true
+        }
+        if shouldComplete { promise.succeed(()) }
+    }
+}
+
+final class V2GatewayChildChannelRegistry: Sendable {
+    private struct Entry: @unchecked Sendable {
+        let channel: V2GatewayTrackedChannel
+        let drained: EventLoopFuture<Void>
+    }
+    private struct State: Sendable {
+        var accepting = true
+        var channels: [ObjectIdentifier: Entry] = [:]
+    }
+    private let state = Mutex(State())
+
+    func insert(_ channel: any Channel, drained: EventLoopFuture<Void>) -> Bool {
         let tracked = V2GatewayTrackedChannel(channel)
-        channels.withLock { $0[tracked.identity] = tracked }
+        return state.withLock {
+            guard $0.accepting else { return false }
+            $0.channels[tracked.identity] = Entry(channel: tracked, drained: drained)
+            return true
+        }
     }
 
-    func remove(_ channel: V2GatewayTrackedChannel) {
-        _ = channels.withLock { $0.removeValue(forKey: channel.identity) }
+    fileprivate func remove(_ channel: V2GatewayTrackedChannel) {
+        _ = state.withLock { $0.channels.removeValue(forKey: channel.identity) }
     }
+
+    func stopAccepting() { state.withLock { $0.accepting = false } }
 
     func closeAll() async {
-        let snapshot = channels.withLock { Array($0.values) }
+        let snapshot = state.withLock { Array($0.channels.values) }
         await withTaskGroup(of: Void.self) { group in
-            for tracked in snapshot {
+            for entry in snapshot {
                 group.addTask {
-                    try? await tracked.channel.close().get()
+                    try? await entry.channel.channel.close().get()
+                    try? await entry.drained.get()
                 }
             }
         }
@@ -210,6 +235,7 @@ public final class V2TLSGatewayServer {
     private let acceptorGroup: MultiThreadedEventLoopGroup
     private let group: MultiThreadedEventLoopGroup
     private var channel: Channel?
+    private var stopped = false
 
     /// 构造 TLS 网关服务。
     ///
@@ -286,6 +312,7 @@ public final class V2TLSGatewayServer {
     /// - Throws: 监听地址无法绑定，或构造子通道失败时抛出
     ///   ``V2TLSGatewayServerError/alreadyBound`` 或底层 NIO 错误。
     public func bind() async throws {
+        guard !stopped else { throw V2TLSGatewayServerError.stopped }
         guard channel == nil else { throw V2TLSGatewayServerError.alreadyBound }
         let sslContext = sslContext
         let factory = connectionFactory
@@ -315,16 +342,17 @@ public final class V2TLSGatewayServer {
                     return channel.close()
                 }
                 let lease = V2GatewayConnectionLease(admission: admission)
-                childChannels.insert(channel)
+                let drained = V2GatewayConnectionDrainCompletion(eventLoop: channel.eventLoop)
+                guard childChannels.insert(channel, drained: drained.promise.futureResult) else {
+                    lease.release()
+                    drained.complete()
+                    return channel.close()
+                }
                 // 此闭包已在子 EventLoop 上调用。两个处理器都有意限制在该循环内，
                 // 因而须使用 NIO 的同步流水线视图，
                 // 而非跨并发域的 `ChannelHandler & Sendable` 重载。
                 return channel.eventLoop.makeCompletedFuture {
-                    try channel.pipeline.syncOperations.addHandler(V2GatewayConnectionLeaseHandler(
-                        lease: lease,
-                        registry: childChannels,
-                        channel: channel
-                    ))
+                    try channel.pipeline.syncOperations.addHandler(V2GatewayConnectionLeaseHandler(lease: lease))
                     try channel.pipeline.syncOperations.addHandler(NIOSSLServerHandler(context: sslContext))
                     try channel.pipeline.syncOperations.addHandler(
                         V2NIOGatewayChannelHandler(
@@ -334,12 +362,15 @@ public final class V2TLSGatewayServer {
                             authenticationTimeoutMilliseconds: authenticationTimeoutMilliseconds,
                             idleTimeoutMilliseconds: idleTimeoutMilliseconds,
                             transportMetrics: transportMetrics,
-                            foregroundWriteScheduler: foregroundWriteScheduler
+                            foregroundWriteScheduler: foregroundWriteScheduler,
+                            drained: drained,
+                            onDrained: { childChannels.remove(.init(channel)) }
                         )
                     )
                 }.flatMapError { error in
                     lease.release()
                     childChannels.remove(.init(channel))
+                    drained.complete()
                     return channel.eventLoop.makeFailedFuture(error)
                 }
             }
@@ -348,16 +379,27 @@ public final class V2TLSGatewayServer {
         self.channel = channel
     }
 
-    /// 关闭监听、子通道与事件循环组。
+    /// 关闭监听和子通道，并等待连接拥有的请求与清理任务退出。
     ///
-    /// 顺序为停止接受新连接、关闭全部子通道、再依次优雅关闭连接与接入事件循环组，
-    /// 使在途命令有界完成后再释放线程资源。
+    /// 保留事件循环与外部依赖，供后台通知者及辅助服务随后排空。
+    /// 超时不代表工作已结束，调用方不得继续释放这些依赖。
     ///
-    /// - Throws: 关闭监听或事件循环组失败时抛出。
-    public func shutdown() async throws {
+    /// - Throws: 连接排空超时或监听关闭失败。
+    public func closeConnectionsAndDrain(timeout: Duration) async throws {
+        var listenerError: (any Error)?
+        do { try await stopAccepting() }
+        catch { listenerError = error }
+        let drain = Task { [childChannels] in await childChannels.closeAll() }
+        guard await v2WaitForTaskDrain([drain], timeout: timeout) else {
+            throw V2TLSGatewayServerError.drainTimedOut
+        }
+        if let listenerError { throw listenerError }
+    }
+
+    /// 排空连接后关闭事件循环；生产调用方先完成后台任务及辅助服务的排空。
+    public func shutdown(drainTimeout: Duration = .seconds(30)) async throws {
+        try await closeConnectionsAndDrain(timeout: drainTimeout)
         eventLoopLagMetrics?.stop()
-        try await stopAccepting()
-        await childChannels.closeAll()
         try await group.shutdownGracefully()
         try await acceptorGroup.shutdownGracefully()
     }
@@ -367,6 +409,8 @@ public final class V2TLSGatewayServer {
     /// 既有子通道会保持存活直到 ``shutdown()``，使在途命令能在有界的应用排水期内完成，
     /// 同时不再有新工作进入进程。
     public func stopAccepting() async throws {
+        stopped = true
+        childChannels.stopAccepting()
         guard let channel else { return }
         self.channel = nil
         try await channel.close().get()

@@ -239,10 +239,47 @@ public actor V2DeviceConnectionRegistry {
     }
 
     public func revoke(deviceID: DeviceID) async {
-        let connectionIDs = streamsByDevice[deviceID].map { Array($0.keys) } ?? []
-        let streams = connectionIDs.compactMap { streamsByDevice[deviceID]?[$0] }
-        for connectionID in connectionIDs { await unregister(connectionID: connectionID) }
-        for stream in streams { await stream.revokeDevice() }
+        let connections = streamsByDevice[deviceID].map { Array($0) } ?? []
+        // Invalidate every queued foreground write before any cleanup can suspend.
+        // A slow lease or broker teardown must not leave another socket authorized.
+        for (_, stream) in connections { stream.invalidateForegroundAuthorization() }
+
+        // The stream waits for its transport's close promise before returning.
+        // Keep the worker's durable cursor behind all local socket closures, while
+        // allowing one slow cleanup to make progress alongside the other sockets.
+        await withTaskGroup(of: Void.self) { group in
+            var nextIndex = 0
+            let maximumConcurrency = min(16, connections.count)
+            for index in 0..<maximumConcurrency {
+                let (connectionID, stream) = connections[index]
+                group.addTask {
+                    await stream.revokeDevice()
+                    await self.unregisterRevokedConnection(connectionID: connectionID, deviceID: deviceID, stream: stream)
+                }
+                nextIndex += 1
+            }
+            while await group.next() != nil {
+                if nextIndex < connections.count {
+                    let (connectionID, stream) = connections[nextIndex]
+                    group.addTask {
+                        await stream.revokeDevice()
+                        await self.unregisterRevokedConnection(connectionID: connectionID, deviceID: deviceID, stream: stream)
+                    }
+                    nextIndex += 1
+                }
+            }
+        }
+    }
+
+    private func unregisterRevokedConnection(
+        connectionID: UUID,
+        deviceID: DeviceID,
+        stream: V2GatewayByteStream
+    ) async {
+        // An old close continuation must not remove a new registration using
+        // the same connection ID after this revocation snapshot was taken.
+        guard streamsByDevice[deviceID]?[connectionID] === stream else { return }
+        await unregister(connectionID: connectionID)
     }
 
     public func notifySyncAvailable(userID: UserID, eventID: UInt64, highWatermark: UInt64) async {

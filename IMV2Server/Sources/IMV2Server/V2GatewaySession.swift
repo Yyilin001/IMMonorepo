@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import IMV2Compression
 import IMV2Core
 
@@ -176,12 +177,23 @@ private struct V2GatewaySessionResponse: Sendable {
     var authorSample: V2AuthorPresentationPageSample? = nil
 }
 
+final class V2GatewayTerminalGate: Sendable {
+    private let active = Mutex(true)
+
+    func isActive() -> Bool { active.withLock { $0 } }
+    func invalidate() { active.withLock { $0 = false } }
+}
+
 /// 管理单条 Gateway 连接的握手、认证、请求关联与响应编码。
 ///
 /// 传输层负责实际收发和关闭 socket；本 actor 在进入业务路径前校验连接阶段、期限和帧合同。
 /// 异步认证结束后通过状态机完成认证，业务响应编码后通过状态机释放请求关联。
 /// 这些状态检查不撤销已发生的业务副作用，也不替代领域存储的权威检查。
 public actor V2GatewaySession {
+    private nonisolated let terminalGate = V2GatewayTerminalGate()
+
+    /// Synchronously reject new work while actor cleanup is still pending.
+    nonisolated func invalidateImmediately() { terminalGate.invalidate() }
     /// 本连接的握手阶段、身份和在途请求关联状态。
     private var presencePublicationSuppressed=true
     public func initialPresencePublicationSuppressed()->Bool {presencePublicationSuppressed}
@@ -283,6 +295,7 @@ public actor V2GatewaySession {
         originatingConnectionID: UUID? = nil,
         captureAuthorSample: Bool = false
     ) async throws -> V2GatewaySessionExchange {
+        guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
         let envelope = try decode(frame)
         let response: V2GatewaySessionResponse
         switch state.phase {
@@ -314,7 +327,8 @@ public actor V2GatewaySession {
     ///
     /// 此入口不返回额外的终止认证错误标记；生产传输层使用内部交换入口统一处理响应后的连接生命周期。
     public func receiveBootstrap(_ frame: V2Frame) async throws -> V2Frame {
-        try await receiveBootstrap(frame, envelope: decode(frame)).frame
+        guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
+        return try await receiveBootstrap(frame, envelope: decode(frame)).frame
     }
 
     /// 按已解码载荷执行版本协商或认证。
@@ -326,6 +340,7 @@ public actor V2GatewaySession {
         _ frame: V2Frame,
         envelope: IMV2Envelope
     ) async throws -> V2GatewaySessionResponse {
+        guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
         switch envelope.body {
         case .clientHello(let hello):
             let versions = Set(hello.supportedProtocolVersions.compactMap { UInt8(exactly: $0) })
@@ -395,6 +410,7 @@ public actor V2GatewaySession {
                 )
             }
             let userID = authentication.userID
+            guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
             let expiresAt = authentication.expiresAt
             let clock = try currentServerTime()
             guard expiresAt.map({ $0 > clock.date }) ?? true else { throw V2GatewaySessionError.sessionExpired }
@@ -440,6 +456,21 @@ public actor V2GatewaySession {
         )
     }
 
+    /// Capture the authenticated lease for synchronous foreground socket writes.
+    /// Revocation and transport closure are fenced separately by the stream.
+    func authenticatedForegroundSessionCheck() -> (@Sendable () -> Bool)? {
+        guard currentAuthenticatedConnection() != nil else { return nil }
+        let expiry = authenticatedSessionExpiresAt
+        return { [now, terminalGate] in
+            guard terminalGate.isActive() else { return false }
+            let date = now()
+            guard Int64(exactly: (date.timeIntervalSince1970 * 1_000).rounded(.towardZero)) != nil else {
+                return false
+            }
+            return expiry.map { $0 > date } ?? true
+        }
+    }
+
     /// Negotiation is usable only while this exact authenticated session is live.
     func authenticatedAuthorPresentationStreamID() -> UUID? {
         guard currentAuthenticatedConnection() != nil else { return nil }
@@ -472,7 +503,7 @@ public actor V2GatewaySession {
 
     /// 检查阶段、当前时间及会话期限，返回有效连接快照；检查失败返回 `nil`，不在此修改连接阶段。
     private func currentAuthenticatedConnection() -> (version: UInt8, identity: V2AuthenticatedConnection)? {
-        guard case .authenticated(let version, let identity) = state.phase,
+        guard terminalGate.isActive(), case .authenticated(let version, let identity) = state.phase,
               let clock = try? currentServerTime(),
               authenticatedSessionExpiresAt.map({ $0 > clock.date }) ?? true else { return nil }
         return (version, identity)
@@ -488,7 +519,8 @@ public actor V2GatewaySession {
     ///
     /// 此入口没有来源连接提示；需要精确抑制同连接回声的生产路径使用内部交换入口。
     public func receiveAuthenticated(_ frame: V2Frame, handler: any V2GatewayCommandHandler) async throws -> V2Frame {
-        try await receiveAuthenticated(
+        guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
+        return try await receiveAuthenticated(
             frame,
             envelope: decode(frame),
             handler: handler,
@@ -509,6 +541,7 @@ public actor V2GatewaySession {
         originatingConnectionID: UUID?,
         captureAuthorSample: Bool = false
     ) async throws -> V2GatewaySessionResponse {
+        guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
         guard case .authenticated(let version, let identity) = state.phase else {
             throw V2GatewaySessionError.unsupportedCommand
         }
@@ -553,6 +586,7 @@ public actor V2GatewaySession {
                 response.error.retryable = true
                 response.error.retryAfterSeconds = 1
             } else if case .heartbeat = envelope.body {
+                guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
                 response = IMV2Envelope()
                 response.heartbeatAck = .init()
                 response.heartbeatAck.serverTimeMs = try currentServerTime().milliseconds
@@ -560,6 +594,7 @@ public actor V2GatewaySession {
                       version >= 21,
                       let preparedGroupEventPageCache,
                       let preparedHandler = handler as? any V2PreparedGroupEventCommandHandling {
+                guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
                 switch try await preparedHandler.handlePreparedGroupEventPull(
                     request,
                     identity: identity,
@@ -593,6 +628,7 @@ public actor V2GatewaySession {
                     response.groupEventPage.hasMore_p = prepared.hasMore
                 }
             } else {
+                guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
                 response = try await handler.handle(
                     envelope: envelope,
                     identity: identity,
@@ -609,6 +645,7 @@ public actor V2GatewaySession {
                 response.groupEventSubscribed = subscribed
             }
             response.requestID = envelope.requestID
+            guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
             response.protocolVersion = UInt32(version)
             let responseCompression: V2NegotiatedFrameCompression? = if case .groupEventPage? = response.body {
                 negotiatedFrameCompression
@@ -694,7 +731,7 @@ public actor V2GatewaySession {
     }
 
     /// 撤销本连接的设备会话并清除缓存的会话到期时间。
-    public func revokeDevice() { state.revokeDevice(); authenticatedSessionExpiresAt = nil; authorPresentationStreamID = nil }
+    public func revokeDevice() { terminalGate.invalidate(); state.revokeDevice(); authenticatedSessionExpiresAt = nil; authorPresentationStreamID = nil }
     /// 终止本连接状态并清除会话期限；socket 资源由外层连接所有者关闭。
-    public func close() { state.close(); authenticatedSessionExpiresAt = nil; authorPresentationStreamID = nil }
+    public func close() { terminalGate.invalidate(); state.close(); authenticatedSessionExpiresAt = nil; authorPresentationStreamID = nil }
 }

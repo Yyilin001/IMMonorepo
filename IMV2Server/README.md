@@ -188,9 +188,20 @@ evidence remains local-stack coverage, not a production deployment approval.
   per-connection bounds; queue pressure closes the connection and clients
   recover by sync.
 - `IM_V2_AUTHENTICATION_TIMEOUT_MS` is an absolute accepted-to-authenticated
-  deadline. Sending a slow stream of fragments cannot extend it.
+  deadline. Sending a slow stream of fragments cannot extend it. Successful
+  authentication and connection admission end this deadline before subsequent
+  commands in the same decoded batch execute.
 - `IM_V2_IDLE_TIMEOUT_MS` closes a silent TLS session. Foreground clients send
   application-owned heartbeats; background clients rely on reconnect and sync.
+  The deadline follows the last inbound byte, including incomplete frames; it
+  is not a deadline for completing a command or assembling a frame.
+- Foreground push authorization is checked again when queued frames are written.
+  Expired authentication or a revoked connection invalidates pending fast-path
+  frames; clients recover missing events through their durable room cursors.
+- Shutdown first closes and drains connection work while its dependencies and
+  event loops remain available, then drains workers and auxiliary services before
+  releasing the event loops. Exceeding the configured shutdown grace fails the
+  process instead of releasing resources beneath unfinished connection work.
 - `IM_V2_WORKER_BATCH_SIZE` and `IM_V2_WORKER_POLL_INTERVAL_MS` bound and
   schedule the current durable workers, including personal-event projection,
   room wake, review, media and cleanup work.

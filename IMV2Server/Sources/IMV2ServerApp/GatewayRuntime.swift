@@ -110,38 +110,87 @@ enum GatewayRuntime {
                     waitForShutdown: V2ProcessTerminationSignal.wait) { shutdown in
                     logger.notice("IM V2 metrics listener bound", metadata: ["host": "\(configuration.metrics.host)", "port": "\(configuration.metrics.port)"])
                     let workers = try composition.backgroundWorkers.start()
-                    await shutdown.wait()
-                    logger.notice("IM V2 shutdown signal received")
+                    do {
+                        await shutdown.wait()
+                        logger.notice("IM V2 shutdown signal received")
 
-                    let listenerShutdownError = await stopAcceptingAndDrainWorkers(
-                        composition: composition,
-                        workers: workers,
-                        configuration: configuration,
-                        logger: logger
-                    )
-                    await composition.shutdownAuthorPresentations(logger: logger)
-                    await shutdownPresenceAndAuxiliaryServices(composition: composition, logger: logger)
-                    try await server.shutdown()
-                    serverIsShutdown = true
-                    try await stopRoomActors(composition: composition, logger: logger)
-                    if let listenerShutdownError {
-                        // 停止接纳新连接失败时，也要先完成后续排空与清理再上抛。
-                        throw V2StagedOperationalError(
-                            stage: "gateway_listener_shutdown", error: listenerShutdownError
+                        let connectionDrainError = await drainConnections(
+                            server: server,
+                            timeout: .milliseconds(configuration.shutdownGraceMilliseconds),
+                            logger: logger
                         )
+                        let listenerShutdownError = await stopAcceptingAndDrainWorkers(
+                            composition: composition,
+                            workers: workers,
+                            configuration: configuration,
+                            logger: logger
+                        )
+                        await composition.shutdownAuthorPresentations(logger: logger)
+                        await shutdownPresenceAndAuxiliaryServices(composition: composition, logger: logger)
+                        try await server.shutdown()
+                        serverIsShutdown = true
+                        try await stopRoomActors(composition: composition, logger: logger)
+                        if let connectionDrainError {
+                            throw V2StagedOperationalError(
+                                stage: "gateway_connection_shutdown", error: connectionDrainError
+                            )
+                        }
+                        if let listenerShutdownError {
+                            // 停止接纳新连接失败时，也要先完成后续排空与清理再上抛。
+                            throw V2StagedOperationalError(
+                                stage: "gateway_listener_shutdown", error: listenerShutdownError
+                            )
+                        }
+                    } catch {
+                        // HTTP 或后续停机失败时，仍保留 worker 对事件循环的依赖直到其退出。
+                        workers.cancelAll()
+                        composition.foregroundGroupEventHints.finish()
+                        await composition.directRoomLogEventCache?.finish()
+                        guard await workers.drain(
+                            timeout: .milliseconds(configuration.shutdownGraceMilliseconds)
+                        ) else {
+                            logger.critical("IM V2 service-task drain exceeded its shutdown deadline",
+                                metadata: V2SafeLogMetadata.drainTimeout(stage: "gateway_worker_shutdown"))
+                            exit(EXIT_FAILURE)
+                        }
+                        throw error
                     }
                 }
             } catch {
                 throw V2StagedOperationalError(stage: "gateway_http_runtime", error: error)
             }
         } catch {
+            if !serverIsShutdown {
+                _ = await drainConnections(
+                    server: server,
+                    timeout: .milliseconds(configuration.shutdownGraceMilliseconds),
+                    logger: logger
+                )
+            }
             await composition.shutdownAuthorPresentations(logger: logger)
-            if !serverIsShutdown { try? await server.shutdown() }
+            if !serverIsShutdown { try await server.shutdown() }
             throw error
         }
     }
 
-    /// 停止接纳新连接、取消后台任务，并在期限内等待任务退出。
+    private static func drainConnections(
+        server: V2TLSGatewayServer,
+        timeout: Duration,
+        logger: Logger
+    ) async -> (any Error)? {
+        do {
+            try await server.closeConnectionsAndDrain(timeout: timeout)
+            return nil
+        } catch V2TLSGatewayServerError.drainTimedOut {
+            logger.critical("IM V2 connection drain exceeded its shutdown deadline",
+                metadata: V2SafeLogMetadata.drainTimeout(stage: "gateway_connection_shutdown"))
+            exit(EXIT_FAILURE)
+        } catch {
+            return error
+        }
+    }
+
+    /// 连接已排空后，取消后台任务并在期限内等待任务退出。
     ///
     /// 监听关闭错误暂存到排空完成后再报告；若任务未能排空，则立即退出进程，
     /// 避免在仍有任务使用数据库时释放连接池和事件循环。
@@ -153,7 +202,7 @@ enum GatewayRuntime {
         configuration: V2GatewayRuntimeConfiguration,
         logger: Logger
     ) async -> (any Error)? {
-        // 先停止接纳新连接；现有通道在工作排空期间继续存活。
+        // 再次关闭监听是幂等的，也保留首次关闭错误以便最终报告。
         var listenerShutdownError: (any Error)?
         do { try await composition.server.stopAccepting() }
         catch { listenerShutdownError = error }

@@ -175,6 +175,20 @@ struct V2PreparedGatewayGroupEventAvailable: Sendable {
 /// 这第二道栅栏则防止过期的路由快照在注销、吊销或传输关闭之后继续写入。
 /// 同步写者只在该通道自身的 EventLoop 上入队有界的尽力而为工作。
 /// 持久房间日志游标拉取仍是每一次丢弃的恢复路径。
+final class V2GatewayForegroundAuthorization: Sendable {
+    private let active = Mutex(true)
+    private let sessionIsLive: @Sendable () -> Bool
+
+    init(sessionIsLive: @escaping @Sendable () -> Bool) {
+        self.sessionIsLive = sessionIsLive
+    }
+
+    func invalidate() { active.withLock { $0 = false } }
+    func isAuthorizedToWrite() -> Bool {
+        active.withLock { $0 } && sessionIsLive()
+    }
+}
+
 private final class V2GatewayForegroundTransport: Sendable {
     private enum Writer: Sendable {
         case callback(@Sendable (ByteBuffer) -> Void)
@@ -185,6 +199,7 @@ private final class V2GatewayForegroundTransport: Sendable {
         var protocolVersion: UInt8?
         var compression: V2NegotiatedFrameCompression?
         var writer: Writer?
+        var authorization: V2GatewayForegroundAuthorization?
     }
 
     private let state = Mutex(State())
@@ -199,16 +214,21 @@ private final class V2GatewayForegroundTransport: Sendable {
 
     func activate(
         protocolVersion: UInt8,
-        compression: V2NegotiatedFrameCompression?
+        compression: V2NegotiatedFrameCompression?,
+        sessionIsLive: @escaping @Sendable () -> Bool
     ) {
         state.withLock {
+            $0.authorization?.invalidate()
             $0.protocolVersion = protocolVersion
             $0.compression = compression
+            $0.authorization = .init(sessionIsLive: sessionIsLive)
         }
     }
 
     func deactivate() {
         state.withLock {
+            $0.authorization?.invalidate()
+            $0.authorization = nil
             $0.protocolVersion = nil
             $0.compression = nil
         }
@@ -216,6 +236,8 @@ private final class V2GatewayForegroundTransport: Sendable {
 
     func detach() {
         state.withLock {
+            $0.authorization?.invalidate()
+            $0.authorization = nil
             $0.protocolVersion = nil
             $0.compression = nil
             $0.writer = nil
@@ -225,18 +247,21 @@ private final class V2GatewayForegroundTransport: Sendable {
     func submit(_ prepared: V2PreparedGatewayGroupEventAvailable) -> Bool {
         let submission = state.withLock { state -> (
             writer: Writer,
-            bytes: ByteBuffer
+            bytes: ByteBuffer,
+            authorization: V2GatewayForegroundAuthorization
         )? in
             guard state.protocolVersion == prepared.protocolVersion else { return nil }
-            guard let writer = state.writer else { return nil }
-            return (writer, prepared.bytes(for: state.compression))
+            guard let writer = state.writer, let authorization = state.authorization else { return nil }
+            return (writer, prepared.bytes(for: state.compression), authorization)
         }
-        guard let submission else { return false }
+        guard let submission, submission.authorization.isAuthorizedToWrite() else { return false }
         switch submission.writer {
         case .callback(let writer):
+            guard submission.authorization.isAuthorizedToWrite() else { return false }
             writer(submission.bytes)
         case .nio(let writer):
-            writer.submit(submission.bytes)
+            let authorization = submission.authorization
+            writer.submit(submission.bytes, isAuthorizedToWrite: { authorization.isAuthorizedToWrite() })
         }
         return true
     }
@@ -251,11 +276,14 @@ private final class V2GatewayForegroundTransport: Sendable {
     ) -> V2NIOGatewayForegroundWriteSubmission? {
         state.withLock { state in
             guard state.protocolVersion == prepared.protocolVersion,
-                  case .nio(let writer)? = state.writer
+                  case .nio(let writer)? = state.writer,
+                  let authorization = state.authorization,
+                  authorization.isAuthorizedToWrite()
             else { return nil }
             return .init(
                 writer: writer,
-                bytes: prepared.bytes(for: state.compression)
+                bytes: prepared.bytes(for: state.compression),
+                isAuthorizedToWrite: { authorization.isAuthorizedToWrite() }
             )
         }
     }
@@ -285,6 +313,8 @@ public actor V2GatewayByteStream {
     private let registry: V2DeviceConnectionRegistry
     private nonisolated let foregroundTransport = V2GatewayForegroundTransport()
     private var registeredIdentity: V2AuthenticatedConnection?
+    private var unregisterTask: Task<Void, Never>?
+    private var revocationTask: Task<Void, Never>?
     private let authorPresentationDispatcher: V2AuthorPresentationDispatcher?
     private let authorPresentationIngress: V2AuthorPresentationIngress?
     private let authorPresentationTransport = V2AuthorPresentationTransport()
@@ -304,6 +334,13 @@ public actor V2GatewayByteStream {
     ///
     /// 它同时为 handlerAdded/channelInactive 之间的竞态建立围栏。
     private var transportClosed = false
+
+    /// Registry/device shutdown can invalidate every selected connection before
+    /// awaiting any actor or database cleanup.
+    nonisolated func invalidateForegroundAuthorization() {
+        session.invalidateImmediately()
+        foregroundTransport.deactivate()
+    }
 
     public init(
         frameLimits: V2FrameLimits,
@@ -374,11 +411,14 @@ public actor V2GatewayByteStream {
     /// - Throws: 分帧或命令处理失败时抛出。
     func receiveFrames(
         _ bytes: Data,
+        authenticationCompleted: (@Sendable () async -> Void)? = nil,
         respond: (V2Frame) async throws -> Void
     ) async throws -> Bool {
         do {
+            guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
             let inbound = try decoder.append(bytes)
             for frame in inbound {
+                guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
                 // Capture before the handler suspends. A late page must not
                 // become optional work for a replacement view of the same room.
                 let authorView = authorPresentationIngress == nil ? nil : authorPresentationView
@@ -388,7 +428,10 @@ public actor V2GatewayByteStream {
                     originatingConnectionID: connectionID,
                     captureAuthorSample: authorView != nil
                 )
-                try await registerAuthenticatedDeviceIfNeeded()
+                guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
+                let newlyAuthenticated = try await registerAuthenticatedDeviceIfNeeded()
+                if newlyAuthenticated { await authenticationCompleted?() }
+                guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
                 try await updateHybridGroupSubscription(
                     inbound: exchange.request,
                     response: exchange.responseEnvelope
@@ -416,8 +459,9 @@ public actor V2GatewayByteStream {
             // 分帧失败可能在缓冲区留下无效前缀。会话关闭会阻止后续命令；
             // 重置解析器还可防止之后的接收再次抛出过期的分帧数据。
             decoder = .init(limits: frameLimits)
-            await unregisterAuthenticatedDevice()
+            beginClosing()
             await session.close()
+            await unregisterAuthenticatedDevice()
             throw error
         }
     }
@@ -428,25 +472,34 @@ public actor V2GatewayByteStream {
     ///
     /// - Throws: 末尾存在不完整帧时抛出。
     public func finish() async throws {
-        detachTransport()
+        beginClosing()
         do {
             try decoder.finish()
-            await unregisterAuthenticatedDevice()
             await session.close()
+            await unregisterAuthenticatedDevice()
         } catch {
-            await unregisterAuthenticatedDevice()
             await session.close()
+            await unregisterAuthenticatedDevice()
             throw error
         }
     }
 
+    func finishSilently() async { try? await finish() }
+
     public func revokeDevice() async {
-        await unregisterAuthenticatedDevice()
-        await session.revokeDevice()
-        if let deviceRevocationHandler {
-            await deviceRevocationHandler()
+        if let revocationTask {
+            await revocationTask.value
+            return
         }
-        detachTransport()
+        let revocationHandler = deviceRevocationHandler
+        beginClosing()
+        let task = Task {
+            await session.revokeDevice()
+            if let revocationHandler { await revocationHandler() }
+            await unregisterAuthenticatedDevice()
+        }
+        revocationTask = task
+        await task.value
     }
 
     public func setDeviceRevocationHandler(_ handler: @escaping @Sendable () async -> Void) {
@@ -674,9 +727,15 @@ public actor V2GatewayByteStream {
     }
 
     func closeForAccountRecovery() async {
-        if let requiredNotificationClose { await requiredNotificationClose() }
-        await unregisterAuthenticatedDevice()
+        let close = requiredNotificationClose
+        beginClosing()
+        if let close { await close() }
         await session.close()
+        await unregisterAuthenticatedDevice()
+    }
+
+    private func beginClosing() {
+        invalidateForegroundAuthorization()
         detachTransport()
     }
 
@@ -691,8 +750,9 @@ public actor V2GatewayByteStream {
         authorPresentationWriter = nil
     }
 
-    private func registerAuthenticatedDeviceIfNeeded() async throws {
-        guard registeredIdentity == nil, let identity = await session.authenticatedIdentity() else { return }
+    private func registerAuthenticatedDeviceIfNeeded() async throws -> Bool {
+        guard !transportClosed, registeredIdentity == nil,
+              let identity = await session.authenticatedIdentity() else { return false }
         registeredIdentity = identity
         let accepted = try await registry.register(self, connectionID: connectionID, identity: identity,publicationSuppressed:await session.initialPresencePublicationSuppressed())
         guard accepted, registeredIdentity == identity, !transportClosed else {
@@ -701,7 +761,9 @@ public actor V2GatewayByteStream {
             await registry.unregister(connectionID: connectionID)
             throw V2GatewaySessionError.authenticatedConnectionLimit
         }
-        guard let contract = await session.authenticatedFrameContract() else {
+        guard let contract = await session.authenticatedFrameContract(),
+              let sessionIsLive = await session.authenticatedForegroundSessionCheck(),
+              !transportClosed else {
             registeredIdentity = nil
             foregroundTransport.deactivate()
             await registry.unregister(connectionID: connectionID)
@@ -731,18 +793,31 @@ public actor V2GatewayByteStream {
         }
         foregroundTransport.activate(
             protocolVersion: contract.protocolVersion,
-            compression: contract.compression
+            compression: contract.compression,
+            sessionIsLive: sessionIsLive
         )
+        return true
     }
 
     private func unregisterAuthenticatedDevice() async {
+        if let unregisterTask {
+            await unregisterTask.value
+            return
+        }
         guard registeredIdentity != nil else { return }
         registeredIdentity = nil
         foregroundTransport.deactivate()
         authorPresentationTransport.deactivate(); authorPresentationView = nil
         authorPresentationRegistered = false
-        await authorPresentationDispatcher?.unregister(connectionID: connectionID)
-        await registry.unregister(connectionID: connectionID)
+        let dispatcher = authorPresentationDispatcher
+        let registry = registry
+        let connectionID = connectionID
+        let task = Task {
+            await dispatcher?.unregister(connectionID: connectionID)
+            await registry.unregister(connectionID: connectionID)
+        }
+        unregisterTask = task
+        await task.value
     }
 
     /// Start resource work only after the subscription response crosses the

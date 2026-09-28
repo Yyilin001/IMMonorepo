@@ -17,6 +17,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private let timeouts: V2GatewayConnectionTimeouts
     private let transportMetrics: any V2GatewayTransportMetricsRecorder
     private let foregroundWriteScheduler: V2NIOForegroundWriteScheduler
+    private let now: @Sendable () -> NIODeadline
     private let logger = Logger(label: "imv2.gateway.transport")
     private var pending: V2GatewayInboundQueue
     private var processing = false
@@ -25,6 +26,11 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     /// EOF、超时、吊销以及所有显式关闭路径都会在丢弃排队输入之前先取消它，
     /// 因此对已经消失的客户端不会继续执行数据库或连接池获取。
     private var processingTask: Task<Void, Never>?
+    private var attachmentTask: Task<Void, Never>?
+    private var revocationTask: Task<Void, Never>?
+    private var cleanupStarted = false
+    private let drained: V2GatewayConnectionDrainCompletion?
+    private let onDrained: (@Sendable () -> Void)?
     /// 尽力而为的前台推送没有请求承诺，因而可以合并。
     ///
     /// 它们的事件循环切换与有序命令应答分开处理，使一次实时事件突发不会为每个接收者
@@ -63,7 +69,10 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             authenticationTimeoutMilliseconds: authenticationTimeoutMilliseconds,
             idleTimeoutMilliseconds: idleTimeoutMilliseconds,
             transportMetrics: transportMetrics,
-            foregroundWriteScheduler: .init()
+            foregroundWriteScheduler: .init(),
+            drained: nil,
+            onDrained: nil,
+            now: { .now() }
         )
     }
 
@@ -74,7 +83,10 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         authenticationTimeoutMilliseconds: Int,
         idleTimeoutMilliseconds: Int,
         transportMetrics: any V2GatewayTransportMetricsRecorder,
-        foregroundWriteScheduler: V2NIOForegroundWriteScheduler
+        foregroundWriteScheduler: V2NIOForegroundWriteScheduler,
+        drained: V2GatewayConnectionDrainCompletion? = nil,
+        onDrained: (@Sendable () -> Void)? = nil,
+        now: @escaping @Sendable () -> NIODeadline = { .now() }
     ) throws {
         self.timeouts = try .init(authenticationMilliseconds: authenticationTimeoutMilliseconds,
                                   idleMilliseconds: idleTimeoutMilliseconds)
@@ -89,10 +101,13 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         )
         self.transportMetrics = transportMetrics
         self.foregroundWriteScheduler = foregroundWriteScheduler
+        self.now = now
+        self.drained = drained
+        self.onDrained = onDrained
     }
 
     public func handlerAdded(context: ChannelHandlerContext) {
-        lastInboundAt = .now()
+        lastInboundAt = now()
         transportMetrics.connectionOpened()
         scheduleIdleCheck(context: context)
         scheduleAuthenticationDeadline(context: context)
@@ -106,14 +121,14 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             metrics: transportMetrics
         )
         self.foregroundWriter = foregroundWriter
-        Task {
+        attachmentTask = Task {
             let attached = await stream.attachNIOTransport(deviceRevocationHandler: {
                 await withCheckedContinuation { continuation in
                     eventLoop.execute {
                         let handler = boundHandler.value
                         let context = boundContext.value
                         guard !handler.closed else {
-                            continuation.resume()
+                            context.channel.closeFuture.whenComplete { _ in continuation.resume() }
                             return
                         }
                         let closePromise = eventLoop.makePromise(of: Void.self)
@@ -217,7 +232,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     }
 
     public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        lastInboundAt = .now()
+        lastInboundAt = now()
         let buffer = unwrapInboundIn(data)
         let bytes = Data(buffer.readableBytesView)
         guard pending.append(bytes) else {
@@ -230,6 +245,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
 
     public func channelInactive(context: ChannelHandlerContext) {
         closed = true
+        stream.invalidateForegroundAuthorization()
         foregroundWriter?.finish()
         foregroundWriter = nil
         idleCheck?.cancel()
@@ -239,10 +255,25 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         pending.removeAll()
         failPendingResponse(V2GatewayTransportWriteError.channelClosed)
         processingTask?.cancel()
-        processingTask = nil
+        attachmentTask?.cancel()
         processing = false
         let stream = stream
-        Task { await stream.finishSilently() }
+        if !cleanupStarted {
+            cleanupStarted = true
+            let processingTask = processingTask
+            let attachmentTask = attachmentTask
+            let revocationTask = revocationTask
+            let drained = drained
+            let onDrained = onDrained
+            Task {
+                await processingTask?.value
+                await attachmentTask?.value
+                await revocationTask?.value
+                await stream.finishSilently()
+                onDrained?()
+                drained?.complete()
+            }
+        }
         let reason = closeReason ?? .peerDisconnected
         transportMetrics.connectionClosed(reason: reason)
         context.fireChannelInactive()
@@ -283,7 +314,16 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             let outcome: V2GatewayProcessingOutcome
             do {
                 try Task.checkCancellation()
-                let needsFrameDrain = try await stream.receiveFrames(inbound) { response in
+                let needsFrameDrain = try await stream.receiveFrames(inbound, authenticationCompleted: {
+                    await withCheckedContinuation { continuation in
+                        eventLoop.execute {
+                            let handler = boundHandler.value
+                            handler.authenticationDeadline?.cancel()
+                            handler.authenticationDeadline = nil
+                            continuation.resume()
+                        }
+                    }
+                }) { response in
                     try Task.checkCancellation()
                     try await eventLoop.flatSubmit {
                         boundHandler.value.writeFrameWhenWritable(
@@ -323,8 +363,8 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         _ outcome: V2GatewayProcessingOutcome,
         context: ChannelHandlerContext
     ) {
-        processingTask = nil
         guard !closed else { return }
+        processingTask = nil
         processing = false
         switch outcome {
         case .success(let authenticated, let needsFrameDrain):
@@ -350,6 +390,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             return
         }
         closed = true
+        stream.invalidateForegroundAuthorization()
         closeReason = reason
         foregroundWriter?.finish()
         foregroundWriter = nil
@@ -360,11 +401,10 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         pending.removeAll()
         failPendingResponse(V2GatewayTransportWriteError.channelClosed)
         processingTask?.cancel()
-        processingTask = nil
         processing = false
         if revokeDevice {
             let stream = stream
-            Task { await stream.revokeDevice() }
+            revocationTask = Task { await stream.revokeDevice() }
         }
         context.close(promise: closePromise)
     }
@@ -418,10 +458,10 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         pending?.promise.fail(error)
     }
 
-    private func scheduleIdleCheck(context: ChannelHandlerContext) {
+    private func scheduleIdleCheck(context: ChannelHandlerContext, after delay: TimeAmount? = nil) {
         let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
         let boundContext = context.loopBound
-        idleCheck = context.eventLoop.scheduleTask(in: timeouts.idle) {
+        idleCheck = context.eventLoop.scheduleTask(in: delay ?? timeouts.idle) {
             handler.value.checkIdle(context: boundContext.value)
         }
     }
@@ -440,12 +480,12 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
 
     private func checkIdle(context: ChannelHandlerContext) {
         guard !closed, let lastInboundAt else { return }
-        let elapsed = NIODeadline.now().uptimeNanoseconds - lastInboundAt.uptimeNanoseconds
+        let elapsed = now().uptimeNanoseconds - lastInboundAt.uptimeNanoseconds
         let timeout = UInt64(timeouts.idle.nanoseconds)
         if elapsed >= timeout {
             close(context: context, reason: .idleTimeout)
         } else {
-            scheduleIdleCheck(context: context)
+            scheduleIdleCheck(context: context, after: .nanoseconds(Int64(timeout - elapsed)))
         }
     }
 }
@@ -555,6 +595,14 @@ final class V2NIOForegroundWriteScheduler: @unchecked Sendable {
 struct V2NIOGatewayForegroundWriteSubmission: Sendable {
     let writer: V2NIOGatewayForegroundWriter
     let bytes: ByteBuffer
+    let isAuthorizedToWrite: @Sendable () -> Bool
+
+    init(writer: V2NIOGatewayForegroundWriter, bytes: ByteBuffer,
+         isAuthorizedToWrite: @escaping @Sendable () -> Bool = { true }) {
+        self.writer = writer
+        self.bytes = bytes
+        self.isAuthorizedToWrite = isAuthorizedToWrite
+    }
 }
 
 /// 单个前台连接写者使用的 FIFO。
@@ -563,22 +611,27 @@ struct V2NIOGatewayForegroundWriteSubmission: Sendable {
 /// 则单独保留一个最新的恢复帧：前缀排空后，其更高的水位线会刻意暴露一个游标缺口，
 /// 从而驱动持久拉取路径。这样可在不悄悄假设后缀连续的前提下限制内存占用。
 struct V2GatewayForegroundWriteQueue: Sendable {
+    struct Entry: Sendable {
+        let bytes: ByteBuffer
+        let isAuthorizedToWrite: @Sendable () -> Bool
+    }
     enum AppendOutcome: Equatable, Sendable {
         case queued
         case recoveryQueued
         case recoveryReplaced
     }
 
-    struct Drain: Equatable, Sendable {
-        let frames: [ByteBuffer]
+    struct Drain: Sendable {
+        let entries: [Entry]
         let bytes: Int
+        var frames: [ByteBuffer] { entries.map(\.bytes) }
     }
 
     private let maximumQueuedBytes: Int
     private let maximumQueuedFrames: Int
-    private var frames: CircularBuffer<ByteBuffer>
+    private var frames: CircularBuffer<Entry>
     private var frameBytes = 0
-    private var recoveryFrame: ByteBuffer?
+    private var recoveryFrame: Entry?
 
     init(maximumQueuedBytes: Int, maximumQueuedFrames: Int) {
         precondition(maximumQueuedBytes > 0 && maximumQueuedFrames > 0)
@@ -589,21 +642,23 @@ struct V2GatewayForegroundWriteQueue: Sendable {
 
     var isEmpty: Bool { frames.isEmpty && recoveryFrame == nil }
     var count: Int { frames.count + (recoveryFrame == nil ? 0 : 1) }
-    var queuedBytes: Int { frameBytes + (recoveryFrame?.readableBytes ?? 0) }
+    var queuedBytes: Int { frameBytes + (recoveryFrame?.bytes.readableBytes ?? 0) }
 
-    mutating func append(_ bytes: ByteBuffer) -> AppendOutcome {
+    mutating func append(_ bytes: ByteBuffer,
+                         isAuthorizedToWrite: @escaping @Sendable () -> Bool = { true }) -> AppendOutcome {
+        let entry = Entry(bytes: bytes, isAuthorizedToWrite: isAuthorizedToWrite)
         if recoveryFrame != nil {
-            recoveryFrame = bytes
+            recoveryFrame = entry
             return .recoveryReplaced
         }
         if frames.count < maximumQueuedFrames,
            bytes.readableBytes <= maximumQueuedBytes,
            frameBytes <= maximumQueuedBytes - bytes.readableBytes {
-            frames.append(bytes)
+            frames.append(entry)
             frameBytes += bytes.readableBytes
             return .queued
         }
-        recoveryFrame = bytes
+        recoveryFrame = entry
         return .recoveryQueued
     }
 
@@ -613,27 +668,27 @@ struct V2GatewayForegroundWriteQueue: Sendable {
     ) -> Drain? {
         precondition(maximumFrames > 0 && maximumBytes > 0)
         guard !isEmpty else { return nil }
-        var drained: [ByteBuffer] = []
+        var drained: [Entry] = []
         drained.reserveCapacity(min(maximumFrames, count))
         var drainedBytes = 0
         while drained.count < maximumFrames, let first = frames.first {
-            if !drained.isEmpty, drainedBytes + first.readableBytes > maximumBytes { break }
+            if !drained.isEmpty, drainedBytes + first.bytes.readableBytes > maximumBytes { break }
             _ = frames.removeFirst()
-            frameBytes -= first.readableBytes
+            frameBytes -= first.bytes.readableBytes
             drained.append(first)
-            drainedBytes += first.readableBytes
+            drainedBytes += first.bytes.readableBytes
             if drainedBytes >= maximumBytes { break }
         }
         if frames.isEmpty,
            drained.count < maximumFrames,
            let recoveryFrame,
-           drained.isEmpty || drainedBytes + recoveryFrame.readableBytes <= maximumBytes {
+           drained.isEmpty || drainedBytes + recoveryFrame.bytes.readableBytes <= maximumBytes {
             self.recoveryFrame = nil
             drained.append(recoveryFrame)
-            drainedBytes += recoveryFrame.readableBytes
+            drainedBytes += recoveryFrame.bytes.readableBytes
         }
         guard !drained.isEmpty else { return nil }
-        return .init(frames: drained, bytes: drainedBytes)
+        return .init(entries: drained, bytes: drainedBytes)
     }
 
     mutating func removeAll() {
@@ -718,7 +773,12 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
     }
 
     func submit(_ bytes: ByteBuffer) {
-        if append(bytes) { schedulerLane.enqueue(self) }
+        submit(bytes, isAuthorizedToWrite: { true })
+    }
+
+    func submit(_ bytes: ByteBuffer,
+                isAuthorizedToWrite: @escaping @Sendable () -> Bool) {
+        if append(bytes, isAuthorizedToWrite: isAuthorizedToWrite) { schedulerLane.enqueue(self) }
     }
 
     /// 接纳一个已准备好的帧，但不立即进入共享通道。
@@ -728,14 +788,16 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
     ///
     /// - Parameter bytes: 待接纳的已准备帧。
     /// - Returns: 是否需要将本写者加入调度通道。
-    private func append(_ bytes: ByteBuffer) -> Bool {
+    private func append(_ bytes: ByteBuffer,
+                        isAuthorizedToWrite: @escaping @Sendable () -> Bool) -> Bool {
+        guard isAuthorizedToWrite() else { return false }
         let submission = state.withLock { state -> (
             shouldEnqueue: Bool,
             outcome: V2GatewayForegroundWriteQueue.AppendOutcome,
             queuedBytes: Int
         )? in
             guard !state.finished else { return nil }
-            let outcome = state.queue.append(bytes)
+            let outcome = state.queue.append(bytes, isAuthorizedToWrite: isAuthorizedToWrite)
             guard !state.scheduled, !state.waitingForWritability else {
                 return (false, outcome, state.queue.queuedBytes)
             }
@@ -766,7 +828,8 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
         batches.reserveCapacity(min(submissions.count, 8))
         for submission in submissions {
             let writer = submission.writer
-            guard writer.append(submission.bytes) else { continue }
+            guard writer.append(submission.bytes,
+                                isAuthorizedToWrite: submission.isAuthorizedToWrite) else { continue }
             let identity = ObjectIdentifier(writer.schedulerLane)
             if batches[identity] == nil {
                 batches[identity] = .init(lane: writer.schedulerLane, writers: [])
@@ -832,18 +895,24 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
             return (batch, reschedule)
         }
         guard let batch = result.0 else { return }
+        let frames = batch.entries.filter { $0.isAuthorizedToWrite() }.map(\.bytes)
+        guard !frames.isEmpty else {
+            if result.1 { schedulerLane.enqueue(self) }
+            return
+        }
+        let bytes = frames.reduce(0) { $0 + $1.readableBytes }
         let buffer: ByteBuffer
-        if batch.frames.count == 1 {
+        if frames.count == 1 {
             // 常规群组广播路径直接写入共享的不可变写时复制存储。
             // 读索引变化只影响本地值；下游处理器真正修改字节时会自动分离存储。
-            buffer = batch.frames[0]
+            buffer = frames[0]
         } else {
-            var combined = channel.allocator.buffer(capacity: batch.bytes)
-            for frame in batch.frames { combined.writeImmutableBuffer(frame) }
+            var combined = channel.allocator.buffer(capacity: bytes)
+            for frame in frames { combined.writeImmutableBuffer(frame) }
             buffer = combined
         }
         channel.writeAndFlush(buffer, promise: nil)
-        metrics?.foregroundWriteBatch(frames: batch.frames.count, bytes: batch.bytes)
+        metrics?.foregroundWriteBatch(frames: frames.count, bytes: bytes)
         if result.1 { schedulerLane.enqueue(self) }
     }
 }
@@ -935,10 +1004,6 @@ private enum V2GatewayTransportWriteError: Error {
 private enum V2GatewayProcessingOutcome: Sendable {
     case success(authenticated: Bool, needsFrameDrain: Bool)
     case failure(reason: V2GatewayConnectionClosure)
-}
-
-private extension V2GatewayByteStream {
-    func finishSilently() async { try? await finish() }
 }
 
 func v2GatewayClosureReason(for error: Error) -> V2GatewayConnectionClosure {
