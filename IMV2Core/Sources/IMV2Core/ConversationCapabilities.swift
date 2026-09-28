@@ -1,100 +1,151 @@
 import Foundation
 
-/// 用户个人会话状态的不可变意图，操作身份用于重试。
-///
-/// 命令包含用户选择的免打扰期限，不包含服务端生成的更新时间；不改变其他成员的会话偏好。
-public struct V2ConversationStateCommand: Equatable, Sendable {
-    /// 稳定会话偏好操作身份。
+/// A frozen target state with a revision fence. Mute timestamps use wire millisecond precision.
+public struct V2ConversationStateCommand: Equatable, Codable, Sendable {
     public let operationID: ConversationPreferenceOperationID
-    /// 目标会话房间。
     public let roomID: RoomID
-    /// 期望个人置顶状态。
     public let isPinned: Bool
-    /// 期望个人归档状态。
     public let isArchived: Bool
-    /// 可选免打扰截止时间，nil 表示无截止时间设置。
     public let muteUntil: Date?
-
-    /// 构造业务命令。
-    ///
-    /// - Parameters:
-    ///   - operationID: 稳定会话偏好操作身份。
-    ///   - roomID: 目标会话房间。
-    ///   - isPinned: 期望个人置顶状态。
-    ///   - isArchived: 期望个人归档状态。
-    ///   - muteUntil: 可选免打扰截止时间，nil 表示无截止时间设置。
-    ///
-    /// 有期限时，Unix 毫秒向零截断后必须可表示为正 Int64，否则抛出 invalidPositiveValue；保存原 Date，不要求期限晚于当前时间，也不对其毫秒精度进行归一化。
-    public init(operationID: ConversationPreferenceOperationID, roomID: RoomID, isPinned: Bool, isArchived: Bool, muteUntil: Date?) throws {
+    public let expectedRevision: V2PersonalPreferenceRevision
+    public let firstSubmissionDeadlineMilliseconds: UInt64
+    public init(
+        operationID: ConversationPreferenceOperationID, roomID: RoomID, isPinned: Bool, isArchived: Bool,
+        muteUntil: Date?,
+        expectedRevision: V2PersonalPreferenceRevision, firstSubmissionDeadlineMilliseconds: UInt64
+    ) throws {
+        guard firstSubmissionDeadlineMilliseconds > 0, firstSubmissionDeadlineMilliseconds <= UInt64(Int64.max) else {
+            throw V2PersonalPreferenceOperationError.invalidDeadline
+        }
         if let muteUntil {
-            guard let milliseconds = Int64(exactly: (muteUntil.timeIntervalSince1970 * 1_000).rounded(.towardZero)),
-                  milliseconds > 0
-            else { throw V2CoreError.invalidPositiveValue }
+            guard let ms = Int64(exactly: (muteUntil.timeIntervalSince1970 * 1000).rounded(.towardZero)), ms > 0 else {
+                throw V2CoreError.invalidPositiveValue
+            }
+            self.muteUntil = Date(timeIntervalSince1970: Double(ms) / 1000)
+        } else {
+            self.muteUntil = nil
         }
         self.operationID = operationID
         self.roomID = roomID
         self.isPinned = isPinned
         self.isArchived = isArchived
-        self.muteUntil = muteUntil
+        self.expectedRevision = expectedRevision
+        self.firstSubmissionDeadlineMilliseconds = firstSubmissionDeadlineMilliseconds
+    }
+    public func identity(actorUserID: UserID) throws -> V2OperationIdentity {
+        try .init(accountID: actorUserID, scope: .room(roomID), operation: .conversationPreference(operationID))
+    }
+    public func fingerprint(actorUserID: UserID) throws -> V2OperationFingerprint {
+        try .init(
+            kind: .conversationPreference,
+            fields: [
+                .init("actor", .text(actorUserID.rawValue)), .init("operation", .text(operationID.rawValue)),
+                .init("room", .text(roomID.rawValue)), .init("pinned", .flag(isPinned)),
+                .init("archived", .flag(isArchived)),
+                .init(
+                    "muteUntil",
+                    muteUntil.map { .unsigned(UInt64(($0.timeIntervalSince1970 * 1000).rounded())) } ?? .absent),
+                .init("expectedRevision", .unsigned(expectedRevision.rawValue)),
+                .init("firstSubmissionDeadline", .unsigned(firstSubmissionDeadlineMilliseconds)),
+            ])
+    }
+    private enum CodingKeys: String, CodingKey {
+        case operationID, roomID, isPinned, isArchived, muteUntil, expectedRevision, firstSubmissionDeadlineMilliseconds
+    }
+    public init(from decoder: any Decoder) throws {
+        let v = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            operationID: v.decode(ConversationPreferenceOperationID.self, forKey: .operationID),
+            roomID: v.decode(RoomID.self, forKey: .roomID),
+            isPinned: v.decode(Bool.self, forKey: .isPinned), isArchived: v.decode(Bool.self, forKey: .isArchived),
+            muteUntil: v.decodeIfPresent(Date.self, forKey: .muteUntil),
+            expectedRevision: v.decode(V2PersonalPreferenceRevision.self, forKey: .expectedRevision),
+            firstSubmissionDeadlineMilliseconds: v.decode(UInt64.self, forKey: .firstSubmissionDeadlineMilliseconds))
     }
 }
-
-/// 个人消息收藏或取消收藏的稳定操作意图。
-public struct V2MessageFavoriteCommand: Equatable, Sendable {
-    /// 本次收藏变更的稳定身份。
+public struct V2MessageFavoriteCommand: Equatable, Codable, Sendable {
     public let operationID: MessageFavoriteOperationID
-    /// 消息所在房间。
     public let roomID: RoomID
-    /// 目标消息。
     public let messageID: MessageID
-    /// 期望收藏状态。
     public let isFavorited: Bool
-
-    /// 构造业务命令。
-    ///
-    /// - Parameters:
-    ///   - operationID: 本次收藏变更的稳定身份。
-    ///   - roomID: 消息所在房间。
-    ///   - messageID: 目标消息。
-    ///   - isFavorited: 期望收藏状态。
-    ///
-    /// 保存字段，不检查消息可见性或读取旧收藏状态。
-    public init(operationID: MessageFavoriteOperationID, roomID: RoomID, messageID: MessageID, isFavorited: Bool) {
-        self.operationID = operationID; self.roomID = roomID; self.messageID = messageID; self.isFavorited = isFavorited
+    public let expectedRevision: V2PersonalPreferenceRevision
+    public let firstSubmissionDeadlineMilliseconds: UInt64
+    public init(
+        operationID: MessageFavoriteOperationID, roomID: RoomID, messageID: MessageID, isFavorited: Bool,
+        expectedRevision: V2PersonalPreferenceRevision, firstSubmissionDeadlineMilliseconds: UInt64
+    ) throws {
+        guard firstSubmissionDeadlineMilliseconds > 0, firstSubmissionDeadlineMilliseconds <= UInt64(Int64.max) else {
+            throw V2PersonalPreferenceOperationError.invalidDeadline
+        }
+        self.operationID = operationID
+        self.roomID = roomID
+        self.messageID = messageID
+        self.isFavorited = isFavorited
+        self.expectedRevision = expectedRevision
+        self.firstSubmissionDeadlineMilliseconds = firstSubmissionDeadlineMilliseconds
+    }
+    public func identity(actorUserID: UserID) throws -> V2OperationIdentity {
+        try .init(accountID: actorUserID, scope: .message(roomID, messageID), operation: .messageFavorite(operationID))
+    }
+    public func fingerprint(actorUserID: UserID) throws -> V2OperationFingerprint {
+        try .init(
+            kind: .messageFavorite,
+            fields: [
+                .init("actor", .text(actorUserID.rawValue)), .init("operation", .text(operationID.rawValue)),
+                .init("room", .text(roomID.rawValue)), .init("message", .text(messageID.rawValue)),
+                .init("favorited", .flag(isFavorited)),
+                .init("expectedRevision", .unsigned(expectedRevision.rawValue)),
+                .init("firstSubmissionDeadline", .unsigned(firstSubmissionDeadlineMilliseconds)),
+            ])
+    }
+    private enum CodingKeys: String, CodingKey {
+        case operationID, roomID, messageID, isFavorited, expectedRevision, firstSubmissionDeadlineMilliseconds
+    }
+    public init(from decoder: any Decoder) throws {
+        let v = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            operationID: v.decode(MessageFavoriteOperationID.self, forKey: .operationID),
+            roomID: v.decode(RoomID.self, forKey: .roomID),
+            messageID: v.decode(MessageID.self, forKey: .messageID),
+            isFavorited: v.decode(Bool.self, forKey: .isFavorited),
+            expectedRevision: v.decode(V2PersonalPreferenceRevision.self, forKey: .expectedRevision),
+            firstSubmissionDeadlineMilliseconds: v.decode(UInt64.self, forKey: .firstSubmissionDeadlineMilliseconds))
     }
 }
-
-/// 服务端返回的个人会话状态及更新时间。
-public struct V2ConversationState: Equatable, Sendable {
-    /// 不可变结果字段，具体语义见构造参数说明。
-    public let roomID: RoomID; public let isPinned: Bool; public let isArchived: Bool; public let muteUntil: Date?; public let updatedAt: Date
-    /// 构造领域值。
-    ///
-    /// - Parameters:
-    ///   - roomID: 会话房间。
-    ///   - isPinned: 个人置顶状态。
-    ///   - isArchived: 个人归档状态。
-    ///   - muteUntil: 可选免打扰期限。
-    ///   - updatedAt: 服务端更新时间。
-    ///
-    /// 直接保存字段，不重复检查免打扰期限或日期。
-    public init(roomID: RoomID, isPinned: Bool, isArchived: Bool, muteUntil: Date?, updatedAt: Date) { self.roomID = roomID; self.isPinned = isPinned; self.isArchived = isArchived; self.muteUntil = muteUntil; self.updatedAt = updatedAt }
+public struct V2ConversationState: Equatable, Codable, Sendable {
+    public let roomID: RoomID
+    public let isPinned: Bool
+    public let isArchived: Bool
+    public let muteUntil: Date?
+    public let updatedAt: Date
+    public let revision: V2PersonalPreferenceRevision
+    public init(
+        roomID: RoomID, isPinned: Bool, isArchived: Bool, muteUntil: Date?, updatedAt: Date,
+        revision: V2PersonalPreferenceRevision
+    ) {
+        self.roomID = roomID
+        self.isPinned = isPinned
+        self.isArchived = isArchived
+        self.muteUntil = muteUntil
+        self.updatedAt = updatedAt
+        self.revision = revision
+    }
 }
-
-/// 个人消息收藏结果及更新时间。
-public struct V2MessageFavorite: Equatable, Sendable {
-    /// 不可变结果字段，具体语义见构造参数说明。
-    public let roomID: RoomID; public let messageID: MessageID; public let isFavorited: Bool; public let updatedAt: Date
-    /// 构造领域值。
-    ///
-    /// - Parameters:
-    ///   - roomID: 消息房间。
-    ///   - messageID: 目标消息。
-    ///   - isFavorited: 最终收藏状态。
-    ///   - updatedAt: 变更时间。
-    ///
-    /// 保存收藏结果，不验证日期或持久化状态。
-    public init(roomID: RoomID, messageID: MessageID, isFavorited: Bool, updatedAt: Date) { self.roomID = roomID; self.messageID = messageID; self.isFavorited = isFavorited; self.updatedAt = updatedAt }
+public struct V2MessageFavorite: Equatable, Codable, Sendable {
+    public let roomID: RoomID
+    public let messageID: MessageID
+    public let isFavorited: Bool
+    public let updatedAt: Date
+    public let revision: V2PersonalPreferenceRevision
+    public init(
+        roomID: RoomID, messageID: MessageID, isFavorited: Bool, updatedAt: Date, revision: V2PersonalPreferenceRevision
+    ) {
+        self.roomID = roomID
+        self.messageID = messageID
+        self.isFavorited = isFavorited
+        self.updatedAt = updatedAt
+        self.revision = revision
+    }
 }
 
 /// 用户选定的源消息及其当时观察的内容版本。
@@ -141,7 +192,7 @@ public struct V2ForwardMessageReference: Equatable, Hashable, Codable, Sendable 
 }
 
 /// 多源多目标的转发意图，每个源消息与目标房间组合具有独立持久结果。
-public struct V2ForwardMessagesCommand: Equatable, Sendable {
+public struct V2ForwardMessagesCommand: Equatable, Codable, Sendable {
     /// 单次转发最多 100 条源消息。
     public static let maximumSourceMessages = 100
     /// 单次转发最多 10 个目标房间。
@@ -173,6 +224,13 @@ public struct V2ForwardMessagesCommand: Equatable, Sendable {
         self.sources = sources
         self.targetRoomIDs = targetRoomIDs
     }
+    private enum CodingKeys: String, CodingKey { case operationID, sources, targetRoomIDs }
+    public init(from decoder: any Decoder) throws {
+        let v=try decoder.container(keyedBy:CodingKeys.self)
+        try self.init(operationID:v.decode(MessageForwardOperationID.self,forKey:.operationID),
+            sources:v.decode([V2ForwardMessageReference].self,forKey:.sources),targetRoomIDs:v.decode([RoomID].self,forKey:.targetRoomIDs))
+    }
+
 }
 
 /// 单个源消息与目标房间组合的互斥成功或失败结果。

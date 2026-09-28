@@ -10,6 +10,8 @@ public enum V2UserStateEventKind: String, Codable, CaseIterable, Sendable {
     case directReadReceipt = "direct_read_receipt"
     case readReceiptPreferences = "read_receipt_preferences"
     case conversationState = "conversation_state"
+    case messageFavorite = "message_favorite"
+    case contactAlias = "contact_alias"
     case timelineActivity = "timeline_activity"
     case directSendingCapability = "direct_sending_capability"
 }

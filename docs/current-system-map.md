@@ -10,16 +10,26 @@
 | `IMV2Core` | 领域 ID、帧/命令、准入与同步规则 | 网络、数据库、UI、密钥存储 |
 | `IMV2Server` | V2 TLS gateway、PostgreSQL store、房间日志与个人事件 outbox、账户/设备服务、operator 控制面 | 将 broker 作为业务真相 |
 | `IMV2ActorContracts/Runtime/Cluster/Application` | 房间逻辑引用、租约激活、FIFO/回收、认证集群调用与应用生命周期 | 把内存 Actor 或 membership 当持久完成事实 |
-| `IMV2ClientKit` | Keychain 会话、独立 SQLite 同步投影、持久化命令 outbox、TLS/HTTPS 适配器 | SwiftUI 展示、直接访问服务端数据库 |
+| `IMV2ClientKit` | Keychain 会话、独立 SQLite 同步投影、持久领域意图与公共 operation work、专属安全 journal、TLS/HTTPS 适配器 | SwiftUI 展示、直接访问服务端数据库 |
 | `IMApp` | SwiftUI 状态与用户交互、依赖注入、iOS Push/文件导入边界 | 直接持有 bearer token、直接操作协议或数据库 |
 | `IMV2` | PostgreSQL 当前 canonical schema、隔离测试 Compose、本机账户栈、Prometheus 规则与运行文档 | 生产编排或容量批准 |
+
+## 账户网络与专属安全恢复
+
+App 的账户 HTTP clients 共享 `V2SessionHTTPAuthorization` 和账户 `V2HTTPExecutor`；端点登记约束请求/响应大小、服务与权限边界。绝对请求期限覆盖凭据、排队及 I/O，leaf permit 只获取一次，取消后等待真实传输排空。认证恢复与 Push 条件意图保持各自 epoch/journal，业务写入不由 HTTP 自动重放。查询合并只覆盖合同允许的读取，授权 lease 不因缓存或 stale 内容延长。
+
+远程设备撤销独立于本机退出凭据兑换：页面读取完整、最多 256 个目标的 120 秒 baseline，确认后先保存账户/当前设备绑定的 Keychain metadata，再由账户 activity 执行原 ID。重启或显式继续只核对/关闭原操作，不能刷新授权或扩大目标；页面离开仅解除观察。账号撤下会关闭旧 service 和页面写回围栏，原 journal/proof 保留。当前专属链路与最新关闭围栏待集中回归，不能据此宣称真机锁屏或端到端验收完成。
+
+protocol 43 的 `presencePublicationControl` 是保留容量的瞬时控制，ACK 有界，不进入持久业务重放。后台连接初始 publication mode 为 suppressed；前台只在当前策略允许时恢复发布，服务端持久 lease suppression 与当前隐私检查共同决定在线状态。此控制不修改账号长期偏好。
 
 ## 消息与同步事实链
 
 ```mermaid
 flowchart LR
-    C["App / ClientKit 本地 outbox"] --> G["TLS gateway"]
+    C["App / ClientKit 持久领域意图与 operation work"] --> G["Account HTTPS submit / recover"]
     G --> V["RoomRef / Directory"]
+    C --> L["TLS gateway 同步 / 查询 / 瞬时控制"]
+    L --> V
     V --> H["房间 Host / FIFO turn"]
     H --> T["PostgreSQL activation fence 原子事务"]
     T --> R["公共房间日志"]
@@ -95,6 +105,8 @@ housekeeping 分批删除。控制投影的稳定
 ## 资源系统演进
 
 当前工作分支已接入用途/逻辑 home 路由的资源上传与恢复、不可变对象 placement、基础跨 home 导入、短期资料展示 lease，以及客户端持久上传任务和发送意图。存储、上传传输、分发、扫描和衍生处理分别通过可替换协议注入；本地文件和本地分发是参考适配器，业务消息不携带物理地址。
+
+本人资料写入采用强类型字段 patch 与持久意图；服务端在相同操作锁下提交或关闭，永久原回执与最新资料快照分开，具体范围见[本人资料当前合同](proposals/resource-system-implementation.md#个人资料更新恢复与头像保留)。这条领域链路不代表全部应用弱网工作已经收敛。
 
 个人资料及头像新增按上下文批量读取的路径，由 control/profile 权威和 room Actor 共同核验。旧的同步资料与部分查询入口仍存在，迁移尚未完成。小图分发具有鉴权后的共享缓存与请求合并，但作者资料补充、跨接收者授权合批、真实 CDN 与万人突发验收仍未完成。
 

@@ -53,55 +53,6 @@ public struct V2ActorCancelGroupJoinWire: Codable, Equatable, Sendable {
         self.roomID = roomID; self.requestID = requestID; self.applicantUserID = applicantUserID
     }
 }
-public enum V2RoomInvitationOperationIdentity: Equatable, Sendable {
-    case invite(GroupInviteOperationID)
-    case decision(GroupJoinDecisionOperationID)
-    case submission(GroupJoinRequestOperationID, generation: Int64)
-}
-public enum V2RoomInvitationCommand: Codable, Equatable, Sendable {
-    case create(V2ActorCreateGroupInviteWire)
-    case commitCreation(V2ActorInviteCreatePersistenceWire)
-    case revoke(V2ActorRevokeGroupInviteWire)
-    case decide(V2ActorDecideGroupJoinWire)
-    case cancel(V2ActorCancelGroupJoinWire)
-    case submitReserved(V2ActorGroupJoinQuotaIntentWire)
-    public var roomID: RoomID {
-        switch self {
-        case .create(let v): v.roomID
-        case .commitCreation(let v): v.roomID
-        case .revoke(let v): v.roomID
-        case .decide(let v): v.roomID
-        case .cancel(let v): v.roomID
-        case .submitReserved(let v): v.roomID
-        }
-    }
-    public var actorUserID: UserID {
-        switch self {
-        case .create(let v): v.actorUserID
-        case .commitCreation(let v): v.actorUserID
-        case .revoke(let v): v.actorUserID
-        case .decide(let v): v.reviewerUserID
-        case .cancel(let v): v.applicantUserID
-        case .submitReserved(let v): v.applicantUserID
-        }
-    }
-    public var stableOperationIdentity: V2RoomInvitationOperationIdentity? {
-        switch self {
-        case .create(let v): .invite(v.operationID)
-        case .commitCreation(let v): .invite(v.operationID)
-        case .revoke(let v): .invite(v.operationID)
-        case .decide(let v): .decision(v.operationID)
-        case .cancel: nil
-        case .submitReserved(let v): .submission(v.operationID, generation: v.generation)
-        }
-    }
-    public var retryPolicy: V2RoomReplayPolicy {
-        switch self {
-        case .cancel: .noAutomaticRetry
-        case .create, .commitCreation, .revoke, .decide, .submitReserved: .durableIdempotent
-        }
-    }
-}
 public struct V2ActorActiveGroupInvitesQueryWire: Codable, Equatable, Sendable {
     public let roomID: RoomID
     public let actorUserID: UserID
@@ -131,6 +82,7 @@ public enum V2RoomInvitationQuery: Codable, Equatable, Sendable {
     case pending(V2ActorPendingGroupJoinsQueryWire)
     case resolvedPreview(V2ActorResolvedInvitePreviewQueryWire)
     case preflightCreation(V2ActorInviteCreatePersistenceWire)
+    case reservedObservation(V2ActorGroupJoinQuotaIntentWire)
     case reservedSubmissionResponse(V2ActorReservedSubmissionResponseQueryWire)
     public var roomID: RoomID {
         switch self {
@@ -138,6 +90,7 @@ public enum V2RoomInvitationQuery: Codable, Equatable, Sendable {
         case .pending(let v): v.roomID
         case .resolvedPreview(let v): v.roomID
         case .preflightCreation(let v): v.roomID
+        case .reservedObservation(let v): v.roomID
         case .reservedSubmissionResponse(let v): v.intent.roomID
         }
     }
@@ -147,6 +100,7 @@ public enum V2RoomInvitationQuery: Codable, Equatable, Sendable {
         case .pending(let v): v.reviewerUserID
         case .resolvedPreview(let v): v.applicantUserID
         case .preflightCreation(let v): v.actorUserID
+        case .reservedObservation(let v): v.applicantUserID
         case .reservedSubmissionResponse(let v): v.intent.applicantUserID
         }
     }
@@ -296,6 +250,7 @@ public enum V2RoomInvitationResult: Codable, Equatable, Sendable {
     case rejection(V2ActorGroupJoinDecisionPreparationOutcomeWire)
     case cancelled(V2ActorGroupJoinRequestWire)
     case cancelledRecord(V2ActorGroupJoinRequestRecordWire)
+    case reservedObservation(V2ActorGroupJoinOwnerSubmissionWire?)
     case reservedSubmission(V2ActorGroupJoinOwnerSubmissionWire)
     case preflightStored(V2ActorStoredGroupInviteWire?)
     case submission(V2ActorGroupJoinSubmissionOutcomeWire)

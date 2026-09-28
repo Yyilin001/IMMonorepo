@@ -13,7 +13,7 @@ extension GRDBV2LocalSyncStore {
             if value.recoveryAction == action && value.stage != .needsAttention { return }
             try db.execute(sql: """
                 UPDATE v2_group_avatar_intents SET stage='submitted',submission_started=1,recovery_action=?,
-                    attempts=0,retry_at=0,issue=NULL WHERE operation_id=?
+                    attempts=0,retry_at=server_retry_not_before,issue=NULL WHERE operation_id=?
                 """, arguments: [action.rawValue, id.rawValue])
         }
     }
@@ -83,11 +83,7 @@ extension GRDBV2LocalSyncStore {
                     usage: job.request.usage, contentType: job.request.contentType, byteCount: job.request.byteCount,
                     checksum: job.request.checksum, clientModes: job.request.clientModes)
                 let newJobID = UUID()
-                try db.execute(sql: """
-                    INSERT INTO v2_resource_transfer_jobs(job_id,operation_id,media_id,request,local_file_token,stage,created_at)
-                    VALUES(?,?,?,?,?,'prepared',?)
-                    """, arguments: [newJobID.uuidString, request.operationID.rawValue, request.mediaID.rawValue,
-                        try JSONEncoder().encode(request), job.localFileToken, time])
+                _ = try Self.prepareResourceTransfer(id: newJobID, request: request, localFileToken: job.localFileToken, now: now, db: db)
                 jobID = newJobID; mutation = .set(request.mediaID)
             } else { jobID = nil; mutation = .remove }
             let command = try V2GroupAvatarCommand(operationID: operation, roomID: original.command.roomID,

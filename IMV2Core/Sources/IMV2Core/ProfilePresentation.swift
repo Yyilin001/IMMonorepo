@@ -124,46 +124,6 @@ public struct V2ProfileInvalidation: Codable, Equatable, Sendable {
     }
 }
 
-/// 完整目标可变资料状态，预期版本防止旧编辑表单覆盖较新资料，稳定操作身份支持响应丢失重试。
-public struct V2ProfileUpdateCommand: Sendable {
-    /// 修改资料的用户。
-    public let actorUserID: UserID
-    /// 稳定资料更新操作身份。
-    public let operationID: ProfileUpdateOperationID
-    /// 编辑者观察到的资料版本。
-    public let expectedRevision: V2ProfileRevision
-    /// 按公开显示名规则规范化的名称。
-    public let displayName: String
-    /// 期望头像引用，nil 表示目标状态不含头像。
-    public let avatar: V2AvatarReference?
-
-    /// 构造资料领域值。
-    ///
-    /// - Parameters:
-    ///   - actorUserID: 修改资料的用户。
-    ///   - operationID: 稳定资料更新操作身份。
-    ///   - expectedRevision: 编辑者观察到的资料版本。
-    ///   - displayName: 按公开显示名规则规范化的名称。
-    ///   - avatar: 期望头像引用，nil 表示目标状态不含头像。
-    ///
-    /// 复用 V2PublicIdentity 规范化与验证显示名，相关错误直接传播；内部占位 handle 仅用于复用校验，不修改真实公开账号。头像权限与预期版本比较由服务端执行。
-    public init(
-        actorUserID: UserID,
-        operationID: ProfileUpdateOperationID,
-        expectedRevision: V2ProfileRevision,
-        displayName: String,
-        avatar: V2AvatarReference?
-    ) throws {
-        // Reuse the established public-name validation and normalization.
-        let identity = try V2PublicIdentity(userID: actorUserID, handle: .init("profile_update"), displayName: displayName, accountKind: .regular)
-        self.actorUserID = actorUserID
-        self.operationID = operationID
-        self.expectedRevision = expectedRevision
-        self.displayName = identity.displayName
-        self.avatar = avatar
-    }
-}
-
 /// 资料查询的授权上下文，服务端必须逐项验证，不能将内部用户 ID 查询当成无条件目录。
 public enum V2ProfileViewContext: Hashable, Codable, Sendable {
     /// 双方私聊关系上下文，具体可见性由服务端确认。

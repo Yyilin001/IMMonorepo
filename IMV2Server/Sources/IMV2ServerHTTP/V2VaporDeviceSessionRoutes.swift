@@ -90,15 +90,27 @@ public struct V2VaporDeviceSessionRoutes: Sendable {
             }
         }
 
-        routes.post("v2", "devices", "revoke") { request async throws -> Response in
-            let identity = try await authenticate(request)
-            let input = try await request.content.decode(V2DeviceSessionMutationHTTPRequest.self)
-            guard let rawDeviceID = input.deviceID, let target = try? DeviceID(rawDeviceID) else { throw Abort(.badRequest) }
-            let result: V2DeviceSessionMutationOutcome
-            do { result = try await sessions.revokeDevice(actorUserID: identity.userID, currentDeviceID: identity.deviceID, targetDeviceID: target, operationID: input.operationID) }
-            catch { throw Abort(.serviceUnavailable, headers: noStoreHeaders()) }
-            guard result != .targetUnavailable else { throw Abort(.notFound) }
-            return noStoreNoContent()
+
+
+        routes.get("v2","devices","revocation-baseline") { request async throws -> Response in
+            let identity=try await authenticate(request)
+            do { return try remoteJSON(await sessions.remoteRevocationBaseline(actorUserID:identity.userID,currentDeviceID:identity.deviceID)) }
+            catch V2DeviceSessionServiceError.authorizationDenied { throw Abort(.forbidden,headers:noStoreHeaders()) }
+            catch { throw Abort(.serviceUnavailable,headers:noStoreHeaders()) }
+        }
+        routes.on(.post,"v2","devices","remote-revocations","submit",maxBodySize:"32kb") { request async throws -> Response in
+            let identity=try await authenticate(request)
+            let command:V2RemoteDeviceRevocationCommand=try await decodeRemote(request)
+            try authorizeRemote(command,identity:identity)
+            do { return try remoteJSON(await sessions.submitRemoteRevocation(command)) }
+            catch { throw Abort(.serviceUnavailable,headers:noStoreHeaders()) }
+        }
+        routes.on(.post,"v2","devices","remote-revocations","operations","recover",maxBodySize:"32kb") { request async throws -> Response in
+            let identity=try await authenticate(request)
+            let input:V2RemoteDeviceRevocationRecoveryRequest=try await decodeRemote(request)
+            try authorizeRemote(input.command,identity:identity)
+            do { return try remoteJSON(await sessions.recoverRemoteRevocation(input)) }
+            catch { throw Abort(.serviceUnavailable,headers:noStoreHeaders()) }
         }
 
         routes.post("v2", "devices", "revoke-current") { request async throws -> Response in
@@ -112,16 +124,17 @@ public struct V2VaporDeviceSessionRoutes: Sendable {
             return noStoreNoContent()
         }
 
-        routes.post("v2", "devices", "revoke-others") { request async throws -> Response in
-            let identity = try await authenticate(request)
-            let input = try await request.content.decode(V2DeviceSessionMutationHTTPRequest.self)
-            guard input.deviceID == nil else { throw Abort(.badRequest) }
-            let result: V2DeviceSessionMutationOutcome
-            do { result = try await sessions.revokeOtherDevices(actorUserID: identity.userID, currentDeviceID: identity.deviceID, operationID: input.operationID) }
-            catch { throw Abort(.serviceUnavailable, headers: noStoreHeaders()) }
-            guard result != .targetUnavailable else { throw Abort(.unauthorized) }
-            return noStoreNoContent()
-        }
+
+    }
+
+    private func decodeRemote<T:Decodable>(_ request:Request) async throws -> T {
+        do {return try await request.content.decode(T.self,using:JSONDecoder())} catch {throw Abort(.badRequest,headers:noStoreHeaders())}
+    }
+    private func authorizeRemote(_ command:V2RemoteDeviceRevocationCommand,identity:V2AuthenticatedConnection) throws {
+        guard command.baseline.actorUserID==identity.userID,command.baseline.currentDeviceID==identity.deviceID else {throw Abort(.forbidden,headers:noStoreHeaders())}
+    }
+    private func remoteJSON<T:Encodable>(_ value:T) throws -> Response {
+        Response(status:.ok,headers:[.cacheControl:"no-store",.contentType:"application/json"],body:.init(data:try JSONEncoder().encode(value)))
     }
 
     /// 鉴权解析。

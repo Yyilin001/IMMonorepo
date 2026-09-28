@@ -59,7 +59,6 @@ public protocol V2ReadReceiptStore: Sendable {
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 变更结果。
     /// - Throws: 持久化失败时抛出。
-    func setPreferences(command: V2SetReadReceiptPreferencesCommand, now: Date) async throws -> V2SetReadReceiptPreferencesOutcome
 
     /// 分页读取读者列表。
     ///
@@ -354,9 +353,7 @@ public struct V2ReadReceiptService: Sendable {
     ///   - allowsGroupReadReceipts: 是否允许群回执。
     /// - Returns: 变更结果。
     /// - Throws: 命令构造失败或存储失败时抛出。
-    public func setPreferences(actorUserID: UserID, operationID: ReadReceiptPreferenceOperationID, allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2SetReadReceiptPreferencesOutcome {
-        try await store.setPreferences(command: .init(actorUserID: actorUserID, operationID: operationID, allowsDirectReadReceipts: allowsDirectReadReceipts, allowsGroupReadReceipts: allowsGroupReadReceipts), now: now())
-    }
+
 
     /// 分页读取读者列表。
     ///

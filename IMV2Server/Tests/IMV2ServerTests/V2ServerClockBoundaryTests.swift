@@ -20,12 +20,14 @@ struct V2ServerClockBoundaryTests {
             let session = V2GatewaySession(limits: try .init(maximumInFlightRequests: 1),
                 authenticator: adapter, capabilityProfile: "base",
                 commandAdmission: V2AllowingGatewayCommandAdmission(), now: { clock.value })
+            let handshakeDeviceID = UUID().uuidString
             var hello = IMV2Envelope(); hello.requestID = 1
             hello.clientHello.supportedProtocolVersions = [UInt32(version)]
             hello.clientHello.supportedCapabilityProfiles = ["base"]
+            hello.clientHello.deviceID = handshakeDeviceID
             _ = try await session.receiveBootstrap(V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0))
             var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(version)
-            auth.authenticate.accessToken = "local-clock-fixture"; auth.authenticate.deviceID = "device-a"
+            auth.authenticate.accessToken = "local-clock-fixture"; auth.authenticate.deviceID = handshakeDeviceID
             let authFrame = try V2ServerProtobufFrameCodec.encode(auth, frameVersion: version)
             var heartbeat = IMV2Envelope(); heartbeat.requestID = 3; heartbeat.protocolVersion = UInt32(version)
             heartbeat.heartbeat = .init()
@@ -57,7 +59,7 @@ struct V2ServerClockBoundaryTests {
             } else {
                 if stage == "before-lookup" {
                     let response = try await session.receiveBootstrap(authFrame)
-                    #expect(try V2ServerProtobufFrameCodec.decode(response).authenticated.deviceID == "device-a")
+                    #expect(try V2ServerProtobufFrameCodec.decode(response).authenticated.deviceID == handshakeDeviceID)
                 }
                 let response = try await session.receiveAuthenticated(heartbeatFrame, handler: BoundaryHandler())
                 #expect(try V2ServerProtobufFrameCodec.decode(response).heartbeatAck.serverTimeMs == 2_500)
@@ -105,9 +107,11 @@ struct V2ServerClockBoundaryTests {
         let version = UInt8(IMV2ProtocolVersion.current)
         let session = V2GatewaySession(limits: try .init(maximumInFlightRequests: 1), authenticator: BoundaryAuthenticator(),
             capabilityProfile: "base", commandAdmission: admission, now: { clock.value })
+        let handshakeDeviceID = UUID().uuidString
         var hello = IMV2Envelope(); hello.requestID = 1
         hello.clientHello.supportedProtocolVersions = [UInt32(version)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
+        hello.clientHello.deviceID = handshakeDeviceID
         let helloFrame = try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0)
         clock.value = Date(timeIntervalSince1970: .nan)
         await #expect(throws: V2GatewaySessionError.invalidServerClock) { try await session.receiveBootstrap(helloFrame) }
@@ -115,7 +119,7 @@ struct V2ServerClockBoundaryTests {
         let helloResponse = try await session.receiveBootstrap(helloFrame)
         #expect(try V2ServerProtobufFrameCodec.decode(helloResponse).serverHello.serverTimeMs == 1_250)
         var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(version)
-        auth.authenticate.accessToken = "fixture-token"; auth.authenticate.deviceID = UUID().uuidString
+        auth.authenticate.accessToken = "fixture-token"; auth.authenticate.deviceID = handshakeDeviceID
         _ = try await session.receiveBootstrap(V2ServerProtobufFrameCodec.encode(auth, frameVersion: version))
         var heartbeat = IMV2Envelope(); heartbeat.requestID = 3; heartbeat.protocolVersion = UInt32(version)
         heartbeat.heartbeat = .init()

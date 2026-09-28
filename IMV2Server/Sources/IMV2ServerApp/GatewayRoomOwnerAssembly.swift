@@ -178,6 +178,7 @@ struct GatewayRoomOwnerAssembly {
                 }
                 resourcesForOwner = try .init(database: owner, writes: write, sendBatcher: batcher,
                     membershipIdentities: membershipIdentities, invitationIdentities: invitationIdentities,
+                    invitationSecretIssuer: configuration.groupInviteSecretIssuer,
                     receiptProjectionDelivery: userShardProjectionDelivery,
                     capacityProfile: configuration.capacityProfile, messageLimits: configuration.messageLimits,
                     maximumEditBytes: configuration.messageLimits.maxUTF8Bytes,
@@ -187,7 +188,8 @@ struct GatewayRoomOwnerAssembly {
                         maximumDelay: .milliseconds(configuration.readReceiptBatchMaximumDelayMilliseconds),
                         maximumInFlightBatches: configuration.readReceiptBatchMaximumInFlightBatches,
                         maximumPendingRequests: configuration.readReceiptBatchMaximumPendingRequests),
-                    databaseWorkAdmission: databaseWorkAdmission)
+                    databaseWorkAdmission: databaseWorkAdmission,
+                    committedMessageObserver: committedHybridGroupEvents)
                 physicalResources[physicalKey] = resourcesForOwner
                 physicalWrites[physicalKey] = write
                 ownerBatchers[physicalKey] = batcher
@@ -195,7 +197,7 @@ struct GatewayRoomOwnerAssembly {
             ownerResources[storage.shardID] = resourcesForOwner
             forwardTargetWritesByShard[storage.shardID] = write
             bootstraps[storage.shardID] = try .init(shardID: storage.shardID,
-                direct: PostgresV2DirectMessagingStore(database: owner, projectionDelivery: userShardProjectionDelivery),
+                direct: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: authorizationControlDatabase), projectionDelivery: userShardProjectionDelivery),
                 group: PostgresV2GroupMessagingStore(database: owner), capacityProfile: configuration.capacityProfile)
             forwardPairs[storage.shardID] = .init(database: owner, write: write,
                 capacityProfile: configuration.capacityProfile, limits: configuration.messageLimits,

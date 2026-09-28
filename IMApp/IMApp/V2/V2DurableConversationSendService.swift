@@ -6,9 +6,10 @@ protocol V2DurableConversationSending: Sendable {
     func upload(_ attachment: V2StagedConversationAttachment, usage: V2ResourceUsage) async throws -> V2MediaReference
     func copyAttachments(sources: [V2ResourceImportSource], to room: RoomID) async throws
     func pending(in roomID: RoomID) async throws -> [V2DurableConversationSendService.Pending]
+    func pendingPageUpdates(in roomID:RoomID,page:Int) -> AsyncThrowingStream<V2DurableConversationSendService.PendingPage,any Error>
     func retry(intentID: UUID) async throws
     func cancel(intentID: UUID) async throws
-    func startRecovery() async
+    func runRecovery() async throws
     func close() async
     func freezeSend(text: String, mentions: [V2MentionTarget], replyTo: V2MessageReplyReference?, roomID: RoomID, attachments: [V2StagedConversationAttachment]) async throws
 }
@@ -18,18 +19,19 @@ protocol V2DurableConversationSending: Sendable {
 actor V2DurableConversationSendService: V2DurableConversationSending {
     private let store: GRDBV2LocalSyncStore
     private let engine: V2ResourceTransferEngine
-    private let outbox: V2CommandOutboxEngine
+    private let messageOperations: V2MessageSendOperationService
     private let imports: any V2ResourceImportControlling
     private let groupAvatars: V2GroupAvatarIntentEngine
     private let groupAvatarManager: V2GroupAvatarManagementService?
-    private var recovery: Task<Void, Never>?
     private var closed = false
+    private var recoveryRunning = false
+    private(set) var recoveryError: String?
     private let operations = V2ResourceOperationScope()
 
-    init(store: GRDBV2LocalSyncStore, engine: V2ResourceTransferEngine, outbox: V2CommandOutboxEngine,
+    init(store: GRDBV2LocalSyncStore, engine: V2ResourceTransferEngine, messageOperations: V2MessageSendOperationService,
          imports: any V2ResourceImportControlling, groupAvatars: V2GroupAvatarIntentEngine,
          groupAvatarManager: V2GroupAvatarManagementService? = nil) {
-        self.store = store; self.engine = engine; self.outbox = outbox; self.imports = imports
+        self.store = store; self.engine = engine; self.messageOperations = messageOperations; self.imports = imports
         self.groupAvatars = groupAvatars
         self.groupAvatarManager = groupAvatarManager
     }
@@ -47,7 +49,7 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
         }
         try requireOpen()
         let checksum = try V2ResourceFileDigest.sha256(fileURL: attachment.fileURL, expectedByteCount: attachment.byteCount)
-        let request = try V2ResourceUploadRequest(operationID: .init(attachment.id.uuidString), mediaID: .init(attachment.id.uuidString), usage: usage, contentType: attachment.contentType, byteCount: attachment.byteCount, checksum: .init(value: checksum), clientModes: [.httpPut])
+        let request = try V2ResourceUploadRequest(operationID: .init(attachment.id.uuidString), mediaID: .init(attachment.id.uuidString), usage: usage, contentType: attachment.contentType, byteCount: attachment.byteCount, checksum: .init(value: checksum), clientModes: [.httpPartPut, .httpPut])
         _ = try await engine.prepare(id: attachment.id, request: request)
         return attachment.id
     }
@@ -60,10 +62,16 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
     private func performUpload(_ attachment: V2StagedConversationAttachment, usage: V2ResourceUsage) async throws -> V2MediaReference {
         try requireOpen()
         let id = try await performPrepare(attachment, usage: usage)
-        let job = try await engine.resume(id: id)
-        try Task.checkCancellation()
-        guard !closed, job.stage == .ready else { throw V2ClientMediaTransferError.scanPending }
-        return .init(mediaID: job.request.mediaID)
+        // Persistence is the handoff. The account activity advances work;
+        // this page owns only a bounded database observation.
+        for try await value in store.resourceTransferUpdates(id: id) {
+            try Task.checkCancellation()
+            guard !closed, let job = value else { throw CancellationError() }
+            if job.stage == .ready { return .init(mediaID: job.request.mediaID) }
+            if job.needsAttention { throw V2ClientMediaTransferError.scanPending }
+            if [.rejected,.cancelled,.expired].contains(job.stage) { throw V2ClientMediaTransferError.mediaRejected }
+        }
+        throw CancellationError()
     }
 
     func freezeSend(text: String, mentions: [V2MentionTarget], replyTo: V2MessageReplyReference?, roomID: RoomID, attachments: [V2StagedConversationAttachment]) async throws {
@@ -73,15 +81,18 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
 
     private func performFreezeSend(text: String, mentions: [V2MentionTarget], replyTo: V2MessageReplyReference?, roomID: RoomID, attachments: [V2StagedConversationAttachment]) async throws {
         try requireOpen()
-        var jobs: [UUID] = []
+        var resources: [V2ResourcePreparedUpload] = []
         for attachment in attachments {
-            jobs.append(try await performPrepare(attachment, usage: .messageAttachment(roomID)))
+            try Task.checkCancellation()
+            let checksum = try V2ResourceFileDigest.sha256(fileURL: attachment.fileURL, expectedByteCount: attachment.byteCount)
+            let request = try V2ResourceUploadRequest(operationID: .init(attachment.id.uuidString), mediaID: .init(attachment.id.uuidString), usage: .messageAttachment(roomID), contentType: attachment.contentType, byteCount: attachment.byteCount, checksum: .init(value: checksum), clientModes: [.httpPartPut, .httpPut])
+            resources.append(try .init(id: attachment.id, request: request, localFileToken: attachment.id.uuidString))
         }
-        let intent = try V2SendIntent(id: UUID(), roomID: roomID, clientMessageID: .init(UUID().uuidString), text: text, mentions: mentions, replyTo: replyTo, attachmentJobIDs: jobs)
+        let intent = try V2SendIntent(id: UUID(), roomID: roomID, clientMessageID: .init(UUID().uuidString), text: text, mentions: mentions, replyTo: replyTo, attachmentJobIDs: resources.map(\.id))
         try Task.checkCancellation()
         guard !closed else { throw CancellationError() }
-        try await store.freezeSendIntent(intent)
-        startRecovery()
+        // All uploads and their consumer become recoverable in one transaction.
+        try await engine.prepareSend(intent, resources: resources)
     }
 
     func copyAttachments(sources: [V2ResourceImportSource], to room: RoomID) async throws {
@@ -93,26 +104,32 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
         try requireOpen()
         guard !sources.isEmpty, sources.count <= V2MessageCommandLimits.maxMediaAttachments else { throw V2ResourceJournalError.invalidRecord }
         var jobs: [UUID] = []
+        var prepared: [UUID: V2ResourceImportRequest] = [:]
         for source in sources {
             try Task.checkCancellation()
             let id = UUID()
             let request = try V2ResourceImportRequest(operationID: .init(id.uuidString), source: source, targetUsage: .messageAttachment(room), targetMediaID: .init(UUID().uuidString))
             try requireOpen()
-            try await store.prepareResourceImport(id: id, request: request)
+            prepared[id] = request
             jobs.append(id)
         }
         let intent = try V2SendIntent(id: UUID(), roomID: room, clientMessageID: .init(UUID().uuidString), text: "", attachmentJobIDs: jobs)
         try Task.checkCancellation()
         guard !closed else { throw CancellationError() }
-        try await store.freezeSendIntent(intent)
-        startRecovery()
+        try await store.freezeSendIntent(intent, imports: prepared)
     }
     private func advanceImport(_ job: V2ResourceImportJob) async throws -> Bool {
         try requireOpen()
-        guard !job.cancellationRequested, job.attempts < 5, job.retryAt <= Date() else { return false }
+        guard !job.cancellationRequested, try await store.claimResourceImport(job.id) else { return false }
         let status: V2ResourceImportStatus
-        if let saved = job.status { status = try await imports.status(saved.locator) }
-        else { status = try await imports.create(job.request) }
+        let due = try await store.resourceImportDeadline(job.id) ?? Date()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(max(0,due.timeIntervalSinceNow)))
+        status = try await V2NetworkWorkScope.$context.withValue(.init(service: "resources", priority: .recovery, isRetry: job.attempts>0)) {
+            try await V2HTTPRequestDeadline.$current.withValue(deadline) {
+                if let saved = job.status { return try await self.imports.status(saved.locator) }
+                return try await self.imports.create(job.request)
+            }
+        }
         try Task.checkCancellation()
         guard !closed else { throw CancellationError() }
         try await store.saveResourceImport(status, id: job.id)
@@ -140,17 +157,41 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
         let total: Int
         let status: String
         let canRetry: Bool
+        let retryTitle: String
         let canCancel: Bool
     }
+    struct PendingPage: Sendable {
+        let items:[Pending]
+        let hasNext:Bool
+    }
     func pending(in roomID: RoomID) async throws -> [Pending] {
+        try await pendingPage(in:roomID,page:0).items
+    }
+    private func pendingPage(in roomID:RoomID,page:Int) async throws -> PendingPage {
         try requireOpen()
-        return try await operations.run { try await self.performPending(in: roomID) }
+        guard page >= 0 && page <= Int.max / 200 - 1 else { throw V2ResourceJournalError.invalidRecord }
+        return try await operations.run { try await self.performPending(in:roomID,page:page) }
+    }
+    nonisolated func pendingPageUpdates(in roomID:RoomID,page:Int) -> AsyncThrowingStream<PendingPage,any Error> {
+        AsyncThrowingStream(bufferingPolicy:.bufferingNewest(1)) { continuation in
+            let observer=Task {
+                do {
+                    for try await _ in self.store.resourceSendChanges(in:roomID,page:page) {
+                        continuation.yield(try await self.pendingPage(in:roomID,page:page))
+                    }
+                    continuation.finish()
+                } catch { continuation.finish(throwing:error) }
+            }
+            continuation.onTermination = { _ in observer.cancel() }
+        }
     }
 
-    private func performPending(in roomID: RoomID) async throws -> [Pending] {
+    private func performPending(in roomID: RoomID,page:Int) async throws -> PendingPage {
         try requireOpen()
         var result: [Pending] = []
-        for intent in try await store.preparingSendIntents(in: roomID) {
+        let preparing:[V2SendIntent]
+        if page == 0 { preparing=try await store.preparingSendIntents(in:roomID,limit:200) } else { preparing=[] }
+        for intent in preparing {
             try requireOpen()
             var jobs: [V2ResourceTransferJob] = []
             var imported: [V2ResourceImportJob] = []
@@ -159,24 +200,38 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
                 if let job = try await store.resourceTransfer(id: id) { jobs.append(job) }
                 else if let job = try await store.resourceImport(id: id) { imported.append(job) }
             }
-            let paused = jobs.contains { $0.stage == .paused } || imported.contains { $0.attempts >= 5 }
+            let handoffPaused = try await store.preparedSendRequiresAttention(intent.id)
+            let paused = handoffPaused || jobs.contains { $0.stage == .paused } || imported.contains { $0.attempts >= 5 }
             let expired = jobs.contains { $0.stage == .expired || ($0.session?.bindableUntil.map { $0 <= Date() } ?? false) }
             let rejected = jobs.contains { $0.stage == .rejected } || imported.contains { $0.status?.state == .failed }
-            let status = expired ? "资源已过期，等待确认终态" : rejected ? "附件未通过安全处理" : paused ? "上传已暂停，可重试" : jobs.contains { $0.stage == .processing } ? "正在安全处理" : "正在准备附件"
-            result.append(.init(id: intent.id, text: intent.text, completed: jobs.filter { $0.stage == .ready }.count + imported.filter { $0.status?.state == .ready }.count, total: intent.attachmentJobIDs.count, status: status, canRetry: paused && !expired && !rejected, canCancel: true))
+            let status = recoveryError ?? (expired ? "资源已过期，等待确认终态" : rejected ? "附件未通过安全处理" : paused ? "上传已暂停，可重试" : jobs.contains { $0.stage == .processing } ? "正在安全处理" : "正在准备附件")
+            result.append(.init(id: intent.id, text: intent.text, completed: jobs.filter { $0.stage == .ready }.count + imported.filter { $0.status?.state == .ready }.count, total: intent.attachmentJobIDs.count, status: status, canRetry: paused && !expired && !rejected, retryTitle:"重试准备", canCancel: true))
         }
         try requireOpen()
-        for submitted in try await store.submittedSendIntents(in: roomID) {
+        let submittedPage=try await store.submittedSendIntents(in:roomID,limit:201,offset:page*200)
+        if !preparing.isEmpty {
+            // Attachment lookups above suspend. A draft may have handed off (and
+            // even converged its projection) before this final page is assembled.
+            // Recheck the bounded current preparation set, then let a submitted
+            // row for the same intent take its place in this result.
+            let stillPreparing=Set(try await store.preparingSendIntents(in:roomID,limit:200).map(\.id))
+            let submittedIDs=Set(submittedPage.prefix(200).map(\.id))
+            result.removeAll { !stillPreparing.contains($0.id) || submittedIDs.contains($0.id) }
+        }
+        for submitted in submittedPage.prefix(200) {
             let status = switch submitted.status {
             case .pending: "正在发送，等待服务器确认"
+            case .acceptedAwaitingProjection: "服务器已受理，等待消息同步"
             case .confirmingOutcome: "正在确认原消息的发送结果"
+            case .needsAttention: "原消息结果未知，确认已暂停"
+            case .expiredUnsubmitted: "消息尚未提交，已超过发送确认期限"
             case .closed: "服务器已确认这条消息未发送"
             case .rejected: "这条消息未能发送"
             }
             result.append(.init(id: submitted.id,text: submitted.text,completed: 0,total: 0,status: status,
-                canRetry: submitted.status == .closed,canCancel: submitted.status == .closed))
+                canRetry: submitted.status == .closed || submitted.status == .rejected || submitted.status == .expiredUnsubmitted || submitted.status == .needsAttention,retryTitle:submitted.status == .needsAttention ? "继续确认" : "重新发送",canCancel: submitted.status == .closed || submitted.status == .rejected || submitted.status == .expiredUnsubmitted))
         }
-        return result
+        return .init(items:result,hasNext:submittedPage.count>200)
     }
     func retry(intentID: UUID) async throws {
         try requireOpen()
@@ -185,19 +240,20 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
 
     private func performRetry(intentID: UUID) async throws {
         try requireOpen()
-        guard let intent = try await store.preparingSendIntents().first(where: { $0.id == intentID }) else {
+        guard let intent = try await store.preparingSendIntent(id:intentID) else {
             try requireOpen()
-            _ = try await store.replacePermanentlyClosedSendIntent(intentID)
-            startRecovery()
+            if try await store.sendIntentNeedsAttention(id:intentID) {
+                try await messageOperations.resumeConfirmation(intentID:intentID)
+            } else { _ = try await store.replaceProvenUnsentSendIntent(intentID) }
             return
         }
+        try await store.retryPreparedSendIntent(intentID)
         for id in intent.attachmentJobIDs {
             try requireOpen()
             try await store.retryResourceTransfer(id: id)
             try requireOpen()
             try await store.retryResourceImport(id: id)
         }
-        startRecovery()
     }
     func cancel(intentID: UUID) async throws {
         try requireOpen()
@@ -206,9 +262,9 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
 
     private func performCancel(intentID: UUID) async throws {
         try requireOpen()
-        guard let intent = try await store.preparingSendIntents().first(where: { $0.id == intentID }) else {
+        guard let intent = try await store.preparingSendIntent(id:intentID) else {
             try requireOpen()
-            try await store.abandonPermanentlyClosedSendIntent(intentID)
+            try await store.abandonProvenUnsentSendIntent(intentID)
             try await engine.releaseAcceptedStaging()
             return
         }
@@ -216,26 +272,17 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
         try requireOpen()
         try await store.cancelSendIntent(intentID)
         for id in intent.attachmentJobIDs {
-            if try await store.resourceImport(id: id) != nil { try await cancelImport(id) }
+            if try await store.resourceImport(id: id) != nil { try await store.requestImportCancellation(id: id) }
             else { try await engine.cancel(id: id) }
         }
     }
 
-    func startRecovery() {
-        guard !closed, recovery == nil else { return }
-        // This task is explicitly owned and drained by the account service.
-        recovery = Task { await self.recover() }
-    }
-
     func close() async {
         closed = true
-        recovery?.cancel()
         async let drainOperations: Void = operations.close()
         async let drainGroupManagement: Void = groupAvatarManager?.close() ?? ()
         await groupAvatars.close()
         await engine.close()
-        await recovery?.value
-        recovery = nil
         await drainOperations
         await drainGroupManagement
     }
@@ -245,52 +292,58 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
         guard !closed else { throw CancellationError() }
     }
 
-    private func recover() async {
-        while !closed && !Task.isCancelled {
-            do {
-                try await engine.refreshCapabilitiesIfNeeded()
-                for intent in try await store.preparingSendIntents() {
-                    try Task.checkCancellation()
-                    var ready = true
-                    for id in intent.attachmentJobIDs {
-                        if let imported = try await store.resourceImport(id: id) {
-                            do { if try await !advanceImport(imported) { ready = false; break } }
-                            catch is CancellationError { throw CancellationError() }
-                            catch { try requireOpen(); try await store.pauseResourceImport(id: id); ready = false; break }
-                            continue
-                        }
-                        guard let job = try await store.resourceTransfer(id: id), job.attempts < 5,
-                              job.retryAt <= Date(), ![.rejected, .cancelled, .expired].contains(job.stage) else { ready = false; break }
-                        do { _ = try await engine.resume(id: id) }
-                        catch is CancellationError { throw CancellationError() }
-                        catch { ready = false; break }
-                    }
-                    if ready {
-                        do {
-                            try requireOpen()
-                            _ = try await store.handOffSendIntent(intent.id)
-                            try requireOpen()
-                            _ = try await outbox.flushOnce()
-                        } catch is CancellationError { throw CancellationError() }
-                        catch { /* Persisted intent keeps its exact identity for the next pass. */ }
-                    }
-                }
-                try await groupAvatars.recoverOnce()
-                try await engine.releaseAcceptedStaging()
-                for id in try await store.pendingImportCancellations() {
-                    try Task.checkCancellation()
-                    do { try await cancelImport(id) }
-                    catch is CancellationError { throw CancellationError() }
-                    catch { }
-                }
-                for id in try await store.pendingResourceCancellations() {
-                    try Task.checkCancellation()
-                    do { try await engine.cancel(id: id) }
-                    catch is CancellationError { throw CancellationError() }
-                    catch { /* Durable cancellation retries on the next pass. */ }
-                }
-                try await Task.sleep(for: .seconds(5))
-            } catch { if Task.isCancelled || closed { break }; try? await Task.sleep(for: .seconds(5)) }
+    /// The account runtime may own this activity directly and report infrastructure failures.
+    func runRecovery() async throws {
+        try requireOpen()
+        guard !recoveryRunning else { throw V2ResourceOperationScopeError.busy }
+        recoveryRunning = true
+        recoveryError = nil
+        defer { recoveryRunning = false }
+        do {
+            try await operations.run {
+                try await self.store.runResourcePreparation { try await self.recoverDue() }
+            }
+            try Task.checkCancellation()
+        } catch {
+            if Task.isCancelled || closed { await groupAvatars.stopRecoveryAndDrain() }
+            else { recoveryError = "附件恢复已暂停，请重新连接账户后重试" }
+            throw error
         }
+    }
+
+    private func recoverDue() async throws {
+        try requireOpen()
+        for job in try await store.dueResourceImports() {
+            try requireOpen()
+            do {
+                if job.cancellationRequested {
+                    if try await store.claimResourceImport(job.id) {
+                        let due = try await store.resourceImportDeadline(job.id) ?? Date()
+                        let deadline = ContinuousClock.now.advanced(by: .seconds(max(0,due.timeIntervalSinceNow)))
+                        try await V2NetworkWorkScope.$context.withValue(.init(service: "resources", priority: .recovery, isRetry: job.attempts>0)) {
+                            try await V2HTTPRequestDeadline.$current.withValue(deadline) { try await self.cancelImport(job.id) }
+                        }
+                    }
+                } else { _ = try await advanceImport(job) }
+            } catch is CancellationError { throw CancellationError() }
+            catch {
+                try requireOpen()
+                let http = error as? V2HTTPFailure
+                let transient: Bool
+                if let http {
+                    transient = http.kind == .transport || http.kind == .deadlineExceeded || http.statusCode == 401 || http.statusCode == 408 || http.statusCode == 429 || (http.statusCode ?? 0)>=500
+                } else { transient = error is URLError || (error as? V2ClientMediaTransferError) == .authorizationUnavailable }
+                try await store.pauseResourceImport(id: job.id, retryNotBefore: http?.retryAfter, needsAttention: !transient)
+            }
+        }
+        for intent in try await store.duePreparedSendIntents() {
+            try requireOpen()
+            do { _ = try await store.handOffSendIntent(intent.id) }
+            catch is CancellationError { throw CancellationError() }
+            catch { try requireOpen(); try await store.deferPreparedSendIntent(intent.id) }
+        }
+        // The outbox and byte journal have their own owners and DB schedules.
+        try await groupAvatars.recoverOnce()
+        try await engine.releaseAcceptedStaging()
     }
 }

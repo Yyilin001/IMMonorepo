@@ -1,10 +1,27 @@
 import Foundation
+@testable import IMV2ClientKit
 import Testing
 @testable import IMApp
 
 @MainActor
 @Suite("Projection refresh ownership", .timeLimit(.minutes(1)))
 struct V2ProjectionRefreshObserverTests {
+    @Test("projection notifier and refresh owner preserve the real commit stamp")
+    func committedStampReachesSnapshotBoundary() async {
+        let diagnostics = V2NetworkDiagnostics()
+        let notifier = V2ProjectionChangeNotifier()
+        let owner = V2ProjectionRefreshObserver {
+            V2ProjectionVisibilityScope.conversationCommit?.didPublishSnapshot()
+        }
+        let subscription = await notifier.updates(scopes: .conversations)
+        let task = Task { await owner.run(subscription) }
+        let stamp = V2ConversationCommitMeasurement(committedAt: .now, diagnostics: diagnostics)
+        await notifier.publish(.init(scopes: .conversations, requiresImmediateRefresh: true, conversationCommit: stamp))
+        for _ in 0..<10_000 { if !diagnostics.snapshot().projections.isEmpty { break }; await Task.yield() }
+        #expect(diagnostics.snapshot().projections.first?.phase == .didCommitToConversationSnapshot)
+        await notifier.finish(); await task.value
+    }
+
     @Test("ordinary updates merge into one follow-up without cancelling the active read")
     func ordinaryUpdatesAreBounded() async throws {
         let probe = ProjectionRefreshProbe()

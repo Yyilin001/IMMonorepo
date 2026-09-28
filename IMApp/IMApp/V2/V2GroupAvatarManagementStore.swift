@@ -11,6 +11,8 @@ final class V2GroupAvatarManagementStore {
     private(set) var feedback: String?
     private(set) var isPerformingAction = false
     private(set) var didReadPending = false
+    private(set) var isStale = false
+    private(set) var presentationInvalidationGeneration: UInt64 = 0
     let roomID: RoomID
     let focusedOperationID: GroupAvatarOperationID?
     private let manager: any V2GroupAvatarManaging
@@ -31,9 +33,13 @@ final class V2GroupAvatarManagementStore {
 
     var snapshot: V2GroupAvatarManagementSnapshot? { if case .loaded(let value) = state { value } else { nil } }
     var pending: [V2GroupAvatarIntent] { snapshot?.pending ?? [] }
-    var authority: V2GroupAvatarManagementSnapshot.Authority? {
+    var displayAuthority: V2GroupAvatarManagementSnapshot.Authority? {
         guard case .authorized(let value) = snapshot?.access, value.deadline > now(), activation != nil else { return nil }
         return value
+    }
+    var authority: V2GroupAvatarManagementSnapshot.Authority? {
+        guard !isStale else { return nil }
+        return displayAuthority
     }
     var deadline: ContinuousClock.Instant? {
         guard case .authorized(let value) = snapshot?.access else { return nil }
@@ -58,11 +64,12 @@ final class V2GroupAvatarManagementStore {
     func suspend() {
         activation = nil; authorityRead = nil; pendingRead = nil
         actionTask?.cancel()
-        state = .inactive; feedback = nil; didReadPending = false
+        state = .inactive; feedback = nil; didReadPending = false; isStale = false
     }
 
     func expirePermission(_ deadline: ContinuousClock.Instant) {
         guard self.deadline == deadline, deadline <= now(), let snapshot else { return }
+        presentationInvalidationGeneration &+= 1
         state = .loaded(.init(access: .unavailable, pending: snapshot.pending))
     }
 
@@ -140,7 +147,7 @@ final class V2GroupAvatarManagementStore {
     private func observePermissions(_ notifier: V2ProjectionChangeNotifier, epoch: UUID) async {
         for await _ in await notifier.updates(scopes: .presentations) {
             guard activation == epoch, !Task.isCancelled else { return }
-            await reload(epoch: epoch)
+            await reload(epoch: epoch, authorizationChanged: true)
         }
     }
 
@@ -151,22 +158,41 @@ final class V2GroupAvatarManagementStore {
         }
     }
 
-    private func reload(epoch: UUID) async {
+    private func reload(epoch: UUID, authorizationChanged: Bool = false) async {
         guard activation == epoch, !Task.isCancelled else { return }
         let read = UUID(), pendingAtStart = pendingRead
         authorityRead = read
-        state = .loaded(.init(access: .unavailable, pending: pending))
+        isStale = true
+        if authorizationChanged { presentationInvalidationGeneration &+= 1 }
+        if authorizationChanged || displayAuthority == nil {
+            state = .loaded(.init(access: .unavailable, pending: pending))
+        }
         do {
             let value = try await manager.load(roomID: roomID)
             let values = try await includingFocus(value.pending)
             guard activation == epoch, authorityRead == read, !Task.isCancelled else { return }
-            didReadPending = true
+            didReadPending = true; isStale = false
+            if case .forbidden = value.access { presentationInvalidationGeneration &+= 1 }
             state = .loaded(.init(access: value.access, pending: pendingAtStart == pendingRead ? values : pending))
         } catch is CancellationError { }
         catch {
             guard activation == epoch, authorityRead == read, !Task.isCancelled else { return }
+            if Self.revokesAccess(error) { presentationInvalidationGeneration &+= 1 }
+            if Self.revokesAccess(error) || displayAuthority == nil {
+                state = .loaded(.init(access: Self.revokesAccess(error) ? .forbidden : .unavailable, pending: pending))
+            }
             feedback = Self.message(for: error)
+            await reloadPending(epoch: epoch)
         }
+    }
+
+    private static func revokesAccess(_ error: Error) -> Bool {
+        if let error = error as? V2AuthSessionError {
+            return error != .credentialsUnavailable
+        }
+        if let error = error as? V2HTTPFailure { return error.statusCode == 403 }
+        return (error as? V2GroupAvatarReadError) == .forbidden
+            || (error as? V2GroupAvatarManagementError) == .forbidden
     }
 
     private func reloadPending(epoch: UUID) async {

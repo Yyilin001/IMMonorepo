@@ -60,7 +60,7 @@ struct V2HTTPPushEndpointClientTests {
             credentials: FixedPushCredentials(accessToken: "edge-access-token", deviceID: deviceID),
             transport: RecordingPushEndpointTransport(response: try response(status: 401, endpoint: endpoint))
         )
-        await #expect(throws: V2ClientPushEndpointError.authorizationDenied) {
+        await #expect(throws: V2ClientPushEndpointError.authorizationUnavailable) {
             try await denied.remove()
         }
 
@@ -69,8 +69,26 @@ struct V2HTTPPushEndpointClientTests {
             credentials: FixedPushCredentials(accessToken: "edge-access-token", deviceID: deviceID),
             transport: RecordingPushEndpointTransport(response: try response(status: 503, endpoint: endpoint))
         )
-        await #expect(throws: V2ClientPushEndpointError.serverStatus(503)) {
+        await #expect(throws: V2HTTPFailure(kind: .httpStatus, service: "pushEndpoints", statusCode: 503, certainty: .responseReceived)) {
             try await unavailable.remove()
+        }
+    }
+
+    @Test(arguments: [429, 503])
+    func longHTTPDateCooldownSurvivesPushWrite(status: Int) async throws {
+        let endpoint = try #require(URL(string: "https://account.example/v2/push-endpoint"))
+        let formatter = DateFormatter(); formatter.locale = .init(identifier: "en_US_POSIX"); formatter.timeZone = .init(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss 'GMT'"
+        let response = try #require(HTTPURLResponse(url: endpoint, statusCode: status, httpVersion: nil,
+            headerFields: ["Retry-After": formatter.string(from: Date().addingTimeInterval(7200))]))
+        let client = try V2HTTPPushEndpointClient(endpoint: endpoint,
+            credentials: FixedPushCredentials(accessToken: "token", deviceID: .init(uuid: UUID())),
+            transport: RecordingPushEndpointTransport(response: response))
+        do { try await client.remove(); Issue.record("expected throttle") }
+        catch V2ClientPushEndpointError.rateLimited(let seconds) { #expect(status == 429 && seconds >= 7198) }
+        catch let failure as V2HTTPFailure {
+            #expect(status == 503 && failure.statusCode == 503 && failure.certainty == .responseReceived)
+            #expect((failure.retryAfter?.timeIntervalSinceNow ?? 0) >= 7198)
         }
     }
 

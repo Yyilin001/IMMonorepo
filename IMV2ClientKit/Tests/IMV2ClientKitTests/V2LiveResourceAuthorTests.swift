@@ -15,6 +15,100 @@ import UniformTypeIdentifiers
 @Suite("Live resource and author delivery", .serialized, .timeLimit(.minutes(2)),
        .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_RESOURCE_GATEWAY_PORT"] != nil))
 struct V2LiveResourceAuthorTests {
+    @Test("slowResourceUploadKeepsControlAndCursorProgress",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_RESOURCE_SLOW_UPLOAD"] == "1"))
+    func slowResourceUploadKeepsControlAndCursorProgress() async throws {
+        let fixture = try LiveAccountFixture(); defer { fixture.close() }
+        let author = try await fixture.register().credentials, viewer = try await fixture.register().credentials
+        let room = try await seedRoom(fixture, viewer: viewer.userID, author: author.userID)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let bytes = Data(repeating: 65, count: 256 * 1024), file = directory.appendingPathComponent("slow.txt")
+        try bytes.write(to: file)
+        // One account owner, with an independently bounded byte lane. All three
+        // production leaf executors below share this exact scheduler instance.
+        let scheduler = V2AccountWorkScheduler(configuration: .init(ordinaryLimit: 1, serviceLimit: 1, byteTransferLimit: 1))
+        let http = V2URLSessionMediaEdgeHTTPTransport(executor: .init(session: fixture.http, scheduler: scheduler))
+        let credentials = ResourceLiveCredentials(value: author)
+        let uploads = try V2HTTPResourceUploadClient(endpoint: fixture.url("v2/resource-uploads"), credentials: credentials, transport: http)
+        let session = try await uploads.create(.init(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()),
+            usage: .messageAttachment(room), contentType: "text/plain", byteCount: Int64(bytes.count),
+            checksum: .init(value: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())))
+        let plan = try #require(try await uploads.target(session))
+        try #require(plan.mode == .httpPut)
+        let connection = try connection(authorSupplements: false, scheduler: scheduler)
+        let local = try GRDBV2LocalSyncStore(databaseURL: directory.appendingPathComponent("author.sqlite"),
+            installationBinding: .init(value: UUID()), userID: author.userID)
+        var uploadTask: Task<Void, Error>?
+        do {
+            let authenticated = try await authenticate(connection, author)
+            let transport = V2ProtobufSyncTransport(wire: connection, protocolVersion: authenticated.protocolVersion)
+            _ = try await transport.subscribeToGroupEvents(roomID: room, afterRoomSequence: 0)
+            _ = try await slowUploadControl(fixture, action: "arm", method: "POST")
+            let executor = V2URLSessionResourcePlanExecutor(session: fixture.http, scheduler: scheduler)
+            let task = Task { try await executor.upload(fileURL: file, plan: plan) }
+            uploadTask = task
+            let deadline = ContinuousClock.now + .seconds(10)
+            var state = try await slowUploadControl(fixture, action: "state", method: "GET")
+            while !state.waiting && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(50))
+                state = try await slowUploadControl(fixture, action: "state", method: "GET")
+            }
+            try #require(state.waiting && state.active == 1 && state.hits == 1 && state.bodyBytesRead >= 16 * 1024 && state.completed == 0 && state.expired == 0)
+            // The held upload owns a permit; concurrent TLS maintenance may
+            // legitimately own another permit in its independent lane.
+            #expect(await scheduler.snapshot().active >= 1)
+            let client = try V2HTTPMessageSendOperationClient(baseURL: fixture.url(""), credentials: credentials, transport: http)
+            let command = try V2MessageSendOperationCommand(command: .init(roomID: room, senderUserID: author.userID,
+                clientMessageID: .init(uuid: UUID()), text: "control progresses while bytes remain blocked", media: [], mentions: [],
+                limits: .init(maxUTF8Bytes: 4096)), firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 86400000)
+            guard case .receipt(let receipt) = try await client.submit(command),
+                  try receipt.validates(identity: command.identity, fingerprint: command.fingerprint),
+                  case .accepted(let accepted) = receipt.outcome else { throw ResourceLiveFailure.presentation }
+            guard case .receipt(let recovered) = try await client.recover(.init(identity: command.identity,
+                fingerprint: command.fingerprint, domainFingerprint: command.command.fingerprint, action: .query)) else { throw ResourceLiveFailure.presentation }
+            #expect(recovered == receipt)
+            let hint = try await bounded { try await connection.nextGroupEventAvailabilityHint() }
+            #expect(hint.roomID == room && hint.highWatermark == accepted.roomSequence)
+            let page = try await transport.pullGroupEvents(roomID: room, afterRoomSequence: 0, pageSize: 20)
+            _ = try await local.applyGroupEventPage(page)
+            #expect(try await local.messages(in: room).contains { $0.messageID == accepted.messageID && $0.roomSequence == accepted.roomSequence })
+            // HTTP receipt/query and this uploading account's own TCP pull all
+            // completed before the held body can resume, not on a viewer lane.
+            state = try await slowUploadControl(fixture, action: "state", method: "GET")
+            try #require(state.waiting && state.active == 1 && state.completed == 0 && !state.released && state.expired == 0)
+            _ = try await slowUploadControl(fixture, action: "release", method: "POST")
+            try await task.value
+            uploadTask = nil
+            let completed = try await slowUploadControl(fixture, action: "state", method: "GET")
+            #expect(completed.completed == 1 && completed.active == 0 && completed.expired == 0)
+            _ = try await uploads.finalize(session)
+            await connection.disconnect()
+            await scheduler.closeAndDrain()
+            #expect(await scheduler.snapshot().active == 0)
+            try await local.close()
+        } catch {
+            _ = try? await slowUploadControl(fixture, action: "release", method: "POST")
+            uploadTask?.cancel()
+            if let uploadTask { _ = await uploadTask.result }
+            await connection.disconnect()
+            await scheduler.closeAndDrain()
+            try? await local.close()
+            throw error
+        }
+    }
+
+    private func slowUploadControl(_ fixture: LiveAccountFixture, action: String, method: String) async throws -> SlowResourceUploadState {
+        var request = URLRequest(url: fixture.url("__fixture__/slow-upload/" + action))
+        request.httpMethod = method
+        if method == "POST" { request.setValue("0", forHTTPHeaderField: "Content-Length") }
+        request.setValue(try #require(ProcessInfo.processInfo.environment["IMV2_LIVE_RESOURCE_FIXTURE_TOKEN"]), forHTTPHeaderField: "X-Resource-Fixture")
+        let (data, response) = try await fixture.http.data(for: request)
+        try #require((response as? HTTPURLResponse)?.statusCode == 200)
+        return try JSONDecoder().decode(SlowResourceUploadState.self, from: data)
+    }
+
     @Test("real resource upload, author delivery, byte access and block revocation")
     func resourceLifecycle() async throws {
         let fixture = try LiveAccountFixture()
@@ -36,8 +130,13 @@ struct V2LiveResourceAuthorTests {
         let checksum = try V2ResourceChecksum(value: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
         var session = try await upload.create(.init(operationID: .init(uuid: UUID()), mediaID: mediaID,
             usage: .userAvatar, contentType: "image/png", byteCount: Int64(bytes.count), checksum: checksum))
-        let plan = try await upload.target(session)
-        try await V2URLSessionResourcePlanExecutor(session: fixture.http).upload(fileURL: source, plan: plan)
+        let uploadDeadline = ContinuousClock.now + .seconds(120)
+        while let plan = try await upload.target(session) {
+            guard ContinuousClock.now < uploadDeadline else { throw ResourceLiveFailure.processing }
+            try await V2URLSessionResourcePlanExecutor(session: fixture.http).upload(fileURL: source, plan: plan)
+            if plan.mode == .httpPut { break }
+            session = try await upload.status(session.locator)
+        }
         session = try await upload.finalize(session)
         let processingDeadline = ContinuousClock.now + .seconds(20)
         while session.resourceState != .ready && ContinuousClock.now < processingDeadline {
@@ -49,8 +148,9 @@ struct V2LiveResourceAuthorTests {
         let ownProfile = try V2HTTPOwnProfileClient(endpoint: fixture.url("v2/profile/me"),
             credentials: ResourceLiveCredentials(value: author), transport: V2URLSessionPushEndpointHTTPTransport(session: fixture.http))
         let before = try await ownProfile.currentProfile()
-        let updated = try await ownProfile.updateProfile(operationID: .init(uuid: UUID()), expectedRevision: before.revision,
-            displayName: "Resource author", avatar: .init(mediaID: mediaID))
+        let result = try await ownProfile.patchProfile(.init(actorUserID: before.userID, operationID: .init(uuid: UUID()), expectedRevision: before.revision,
+            patch: .init(displayName: .set("Resource author"), avatar: .set(.init(mediaID: mediaID))), firstSubmissionDeadlineMilliseconds: UInt64(Date().addingTimeInterval(120).timeIntervalSince1970 * 1000)))
+        let updated = try #require(result.currentSnapshot)
         #expect(updated.avatar?.mediaID == mediaID)
         let authorHandle = try #require(updated.publicIdentity?.handle)
         let discovery = try V2HTTPPublicIdentityDirectory(endpoint: fixture.url("v2/public-identities/resolve"),
@@ -77,21 +177,23 @@ struct V2LiveResourceAuthorTests {
             let viewerSession = try await authenticate(viewerConnection, viewer)
             let authorTransport = V2ProtobufSyncTransport(wire: authorConnection, protocolVersion: authorSession.protocolVersion)
             let viewerTransport = V2ProtobufSyncTransport(wire: viewerConnection, protocolVersion: viewerSession.protocolVersion)
-            _ = try await authorTransport.changeRelationship(operationID: .init(uuid: UUID()),
-                targetUserID: viewer.userID, action: .request)
-            _ = try await viewerTransport.changeRelationship(operationID: .init(uuid: UUID()),
-                targetUserID: author.userID, action: .accept)
-            let directRoom = try await authorTransport.openDirectRoom(operationID: .init(uuid: UUID()), targetUserID: viewer.userID)
+            _ = try await resourceRelationship(fixture,account:author,target:viewer.userID,action:.request)
+            _ = try await resourceRelationship(fixture,account:viewer,target:author.userID,action:.accept)
+            let directRoom = try await resourceOpenDirect(fixture,account:author,target:viewer.userID)
             let directView = try await viewerConnection.beginAuthorPresentationView(roomID: directRoom.roomID)
             _ = try await viewerTransport.subscribeToGroupEvents(roomID: directRoom.roomID,
                 afterRoomSequence: 0, authorPresentationView: directView)
-            let directSent = try await authorTransport.sendMessage(roomID: directRoom.roomID,
+            let directSent = try await resourceSend(fixture,account:author,roomID: directRoom.roomID,
                 clientMessageID: .init(uuid: UUID()), text: "A direct author with an avatar", media: [], mentions: [])
+            print("Live resource stage: awaiting direct availability hint.")
             let directHint = try await bounded { try await viewerConnection.nextGroupEventAvailabilityHint() }
+            print("Live resource stage: received direct availability hint.")
             #expect(directHint.roomID == directRoom.roomID && directHint.highWatermark == directSent.roomSequence)
             // No history pull or profile HTTP read occurs between this send and
             // receive: this presentation must come from committed direct delivery.
+            print("Live resource stage: awaiting direct author presentation delta.")
             let directDelta = try await bounded { try await viewerConnection.nextAuthorPresentationDelta(for: directView) }
+            print("Live resource stage: received direct author presentation delta.")
             try #require(directDelta.entries.count == 1)
             guard case .presentation(let directProfile, let directAvatar, let directDeadline, let directAvatarDeadline) = directDelta.entries[0] else {
                 throw ResourceLiveFailure.presentation
@@ -107,11 +209,15 @@ struct V2LiveResourceAuthorTests {
             print("Live resource: direct-message TLS supplement authorized for its viewer, device and room without a profile pull.")
             let liveView = try await viewerConnection.beginAuthorPresentationView(roomID: room)
             _ = try await viewerTransport.subscribeToGroupEvents(roomID: room, afterRoomSequence: 1, authorPresentationView: liveView)
-            let sent = try await authorTransport.sendMessage(roomID: room, clientMessageID: .init(uuid: UUID()),
+            let sent = try await resourceSend(fixture,account:author,roomID: room, clientMessageID: .init(uuid: UUID()),
                 text: "An author with a new avatar", media: [], mentions: [])
+            print("Live resource stage: awaiting group availability hint.")
             let hint = try await bounded { try await viewerConnection.nextGroupEventAvailabilityHint() }
+            print("Live resource stage: received group availability hint.")
             #expect(hint.roomID == room && hint.highWatermark == 2)
+            print("Live resource stage: awaiting group author presentation delta.")
             let live = try await bounded { try await viewerConnection.nextAuthorPresentationDelta(for: liveView) }
+            print("Live resource stage: received group author presentation delta.")
             try #require(live.entries.count == 1)
             guard case .presentation(let livePresentation, let liveAvatar, _, _) = live.entries[0] else {
                 Issue.record("Live broadcast author did not produce an authorized presentation")
@@ -196,8 +302,13 @@ struct V2LiveResourceAuthorTests {
             let rawReader = try #require(rawReaders.readReceiptReadersPage.readers.first)
             let readerFields = try #require(JSONSerialization.jsonObject(with: rawReader.jsonUTF8Data()) as? [String: Any])
             #expect(Set(readerFields.keys) == ["userId"] && rawReader.unknownFields.data.isEmpty)
-            _ = try await viewerTransport.setReadReceiptPreferences(operationID: .init(uuid: UUID()),
-                allowsDirectReadReceipts: true, allowsGroupReadReceipts: false)
+            let preferences = try V2HTTPAccountPreferenceOperationClient(baseURL: fixture.url(""),
+                credentials: ResourceLiveCredentials(value: viewer), transport: mediaHTTP)
+            let preferenceBaseline = try await preferences.baseline(kind: .readReceiptPreference)
+            let preferenceCommand = try V2AccountPreferenceCommand(identity: .init(accountID: viewer.userID, scope: .account(viewer.userID),
+                operation: .readReceiptPreference(.init(uuid: UUID()))), value: .readReceipt(allowsDirectReadReceipts: true, allowsGroupReadReceipts: false),
+                expectedRevision: preferenceBaseline.revision, firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1_000) + 120_000)
+            guard case .receipt(let preferenceProof) = try await preferences.submit(preferenceCommand), preferenceProof.validates(command: preferenceCommand) else { Issue.record("Expected original preference proof"); return }
             #expect(try await authorTransport.listReadReceiptReaders(roomID: room, messageID: sent.messageID, cursor: nil, pageSize: 50).readers.isEmpty)
             print("Live resource: TLS roster and reader pages contain IDs only; changing disclosure preferences still hides the reader.")
             #expect(visible.presentations[key]?.groupMember?.groupNickname == "Room author")
@@ -235,7 +346,7 @@ struct V2LiveResourceAuthorTests {
             try await repository.ingest(cleared, binding: binding)
             #expect(await repository.cachedPresentation(for: key, activation: activation)?.groupMember == clearedValue.groupMember)
             try await updateNickname(fixture, author: author, room: room, expectedRevision: 3, name: "Private group name")
-            _ = try await authorTransport.changeUserBlock(operationID: .init(uuid: UUID()), targetUserID: viewer.userID, action: .block)
+            try await resourceBlock(fixture, account: author, target: viewer.userID)
             let blockedPage = try await viewerTransport.pullGroupEvents(roomID: room, afterRoomSequence: 0, pageSize: 20)
             _ = try await local.applyGroupEventPage(blockedPage)
             #expect(try await local.groupNicknameRevisions(keys: [key])[key] == 4)
@@ -303,8 +414,13 @@ struct V2LiveResourceAuthorTests {
         let checksum = try V2ResourceChecksum(value: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
         var session = try await uploads.create(.init(operationID: .init(uuid: UUID()), mediaID: media,
             usage: .messageAttachment(room), contentType: "text/plain", byteCount: Int64(bytes.count), checksum: checksum))
-        let plan = try await uploads.target(session)
-        try await V2URLSessionResourcePlanExecutor(session: fixture.http).upload(fileURL: file, plan: plan)
+        let uploadDeadline = ContinuousClock.now + .seconds(120)
+        while let plan = try await uploads.target(session) {
+            guard ContinuousClock.now < uploadDeadline else { throw ResourceLiveFailure.processing }
+            try await V2URLSessionResourcePlanExecutor(session: fixture.http).upload(fileURL: file, plan: plan)
+            if plan.mode == .httpPut { break }
+            session = try await uploads.status(session.locator)
+        }
         session = try await uploads.finalize(session)
         let deadline = ContinuousClock.now + .seconds(20)
         while session.resourceState != .ready && ContinuousClock.now < deadline {
@@ -313,7 +429,7 @@ struct V2LiveResourceAuthorTests {
             session = try await uploads.status(session.locator)
         }
         try #require(session.resourceState == .ready)
-        let sent = try await transport.sendMessage(roomID: room, clientMessageID: .init(uuid: UUID()),
+        let sent = try await resourceSend(fixture,account:credentials.value,roomID: room, clientMessageID: .init(uuid: UUID()),
             text: "Attachment download contract", media: [.init(mediaID: media)], mentions: [])
         let message = V2MediaMessageLocation(roomID: room, messageID: sent.messageID)
         let resolver = try V2HTTPMediaDownloadTargetResolver(endpoint: fixture.url("v2/media"), credentials: credentials, transport: http)
@@ -322,8 +438,8 @@ struct V2LiveResourceAuthorTests {
         let downloaded = directory.appendingPathComponent("downloaded-attachment.txt")
         try await V2URLSessionMediaByteTransfer(session: fixture.http).download(target: target, destinationURL: downloaded)
         #expect(try Data(contentsOf: downloaded) == bytes)
-        _ = try await transport.withdrawMessage(roomID: room, operationID: .init(uuid: UUID()),
-            messageID: sent.messageID, expectedMessageRevision: 1)
+        // This newly accepted attachment has had no edits; its initial content revision is 1.
+        _ = try await resourceWithdraw(fixture,account:credentials.value,roomID:room,messageID:sent.messageID,expectedMessageRevision:1)
         await #expect(throws: V2ClientMediaTransferError.serverStatus(404)) {
             _ = try await resolver.resolveDownloadTarget(mediaID: media, message: message)
         }
@@ -338,14 +454,19 @@ struct V2LiveResourceAuthorTests {
             credentials: ResourceLiveCredentials(value: manager), transport: http)
         let applicantInvites = try V2HTTPGroupInvitationClient(baseURL: fixture.url(""),
             credentials: ResourceLiveCredentials(value: applicant), transport: http)
-        let invite = try await ownerInvites.create(roomID: room, operationID: .init(uuid: UUID()),
-            lifetimeSeconds: 600, maximumApprovedUses: 10)
-        guard case .submitted(let request) = try await applicantInvites.submit(secret: invite.secret,
-            operationID: .init(uuid: UUID()), note: "Review fixture") else { throw ResourceLiveFailure.presentation }
-        let pending = try await ownerInvites.pendingRequests(roomID: room, cursor: nil, pageSize: 100)
-        #expect(pending.requests.map(\.requestID) == [request.requestID])
-        #expect(request.applicantUserID == applicant.userID)
-        let bytesHTTP = V2URLSessionMediaEdgeHTTPTransport(session: fixture.http)
+        let bytesHTTP=V2URLSessionMediaEdgeHTTPTransport(session:fixture.http)
+        let ownerOperations=try V2HTTPInvitationOperationClient(baseURL:fixture.url(""),credentials:ResourceLiveCredentials(value:manager),transport:bytesHTTP)
+        let applicantOperations=try V2HTTPInvitationOperationClient(baseURL:fixture.url(""),credentials:ResourceLiveCredentials(value:applicant),transport:bytesHTTP)
+        let baseline=try await ownerOperations.baseline(roomID:room)
+        let created=try await resourceInvitation(ownerOperations,account:manager,room:room,action:.create(lifetimeSeconds:600,maximumApprovedUses:10,expectedMembershipRevision:baseline.membershipRevision))
+        guard case .applied(.inviteCreated(let inviteID,_,_,_))=created.outcome else {throw ResourceLiveFailure.presentation}
+        let invite=try #require(try await ownerInvites.activeInvites(roomID:room).first(where:{$0.inviteID==inviteID}))
+        let bearer=V2GroupInvitationSecretAuthorization(secret:invite.secret)
+        let submitted=try await resourceInvitation(applicantOperations,account:applicant,room:room,action:.submit(inviteID:inviteID,tokenDigest:bearer.tokenDigest,note:"Review fixture"),authorization:bearer)
+        guard case .applied(.requestSubmitted(let requestID,_))=submitted.outcome else {throw ResourceLiveFailure.presentation}
+        let pending=try await ownerInvites.pendingRequests(roomID:room,cursor:nil,pageSize:100)
+        let request=try #require(pending.requests.first(where:{$0.requestID==requestID}))
+        #expect(pending.requests.map(\.requestID)==[requestID]);#expect(request.applicantUserID==applicant.userID)
         let ownerProfiles = try V2HTTPProfilePresentationClient(endpoint: fixture.url("v2/profile-presentations/batch"),
             credentials: ResourceLiveCredentials(value: manager), transport: bytesHTTP)
         let memberProfiles = try V2HTTPProfilePresentationClient(endpoint: fixture.url("v2/profile-presentations/batch"),
@@ -356,8 +477,8 @@ struct V2LiveResourceAuthorTests {
         #expect(granted.unavailable == [memberKey])
         let denied = try await readReviewPage(memberProfiles, keys: [request.presentationKey])
         #expect(denied.unavailable == [request.presentationKey] && denied.presentations.isEmpty)
-        let cancelled = try await applicantInvites.cancel(roomID: room, requestID: request.requestID)
-        #expect(cancelled.state == .cancelled)
+        let cancelled=try await resourceInvitation(applicantOperations,account:applicant,room:room,action:.cancel(requestID:request.requestID))
+        #expect(cancelled.outcome == .applied(.requestCancelled(requestID:request.requestID)))
         let after = try await readReviewPage(ownerProfiles, keys: [request.presentationKey])
         #expect(after.unavailable == [request.presentationKey] && after.presentations.isEmpty)
         print("Live resource: join requests carry applicant IDs only; owner review authorizes a nonmember, ordinary membership does not, and cancellation stops new issuance.")
@@ -380,17 +501,29 @@ struct V2LiveResourceAuthorTests {
 
     private func updateNickname(_ fixture: LiveAccountFixture, author: V2AuthCredentials, room: RoomID,
                                 expectedRevision: Int?, name: String?) async throws {
-        var request = URLRequest(url: fixture.url("v2/profile-presentations/groups/\(room.rawValue)/nickname"))
-        request.httpMethod = "PUT"
-        request.setValue("Bearer " + author.accessToken, forHTTPHeaderField: "Authorization")
-        request.setValue(author.deviceID.rawValue, forHTTPHeaderField: "X-IM-Device-ID")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        var fields: [String: Any] = ["operation_id": UUID().uuidString]
-        fields["expected_revision"] = expectedRevision
-        fields["nickname"] = name ?? NSNull() as Any
-        request.httpBody = try JSONSerialization.data(withJSONObject: fields)
-        let (_, response) = try await fixture.http.data(for: request)
-        try #require((response as? HTTPURLResponse)?.statusCode == 200)
+        let client = try V2HTTPNameOperationClient(
+            endpoint: fixture.url("v2/profile-presentations"),
+            credentials: ResourceLiveCredentials(value: author),
+            transport: V2URLSessionPushEndpointHTTPTransport(session: fixture.http))
+        let revision: V2ProfileRevision?
+        if let expectedRevision {
+            revision = try #require(V2ProfileRevision(rawValue: UInt64(expectedRevision)))
+        } else { revision = nil }
+        let command = try V2GroupNicknameUpdateCommand(actorUserID: author.userID,
+            roomID: room, operationID: .init(uuid: UUID()), expectedRevision: revision,
+            nickname: name, firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 600_000)
+        let proof = try await client.submit(command)
+        try V2FrozenNameOperation.group(command).validate(.group(proof))
+        guard case .committed(let value) = proof.outcome else { throw ResourceLiveFailure.presentation }
+        #expect(value.groupNickname == command.nickname)
+        // Recovery must verify the same frozen identity and fingerprint, without
+        // replacing its original deadline or authorizing another write.
+        let recovery = try V2GroupNicknameRecoveryRequest(identity: command.identity,
+            fingerprint: command.fingerprint, action: .query)
+        guard case .receipt(let original) = try await client.recover(recovery) else {
+            throw ResourceLiveFailure.presentation
+        }
+        #expect(original == proof)
     }
 
     private func seedRoom(_ fixture: LiveAccountFixture, viewer: UserID, author: UserID) async throws -> RoomID {
@@ -405,7 +538,7 @@ struct V2LiveResourceAuthorTests {
         return try RoomID(#require(JSONDecoder().decode([String: String].self, from: data)["roomID"]))
     }
 
-    private func connection(authorSupplements: Bool) throws -> V2TLSFrameConnection {
+    private func connection(authorSupplements: Bool, scheduler: V2AccountWorkScheduler? = nil) throws -> V2TLSFrameConnection {
         let environment = ProcessInfo.processInfo.environment
         let port = try #require(environment["IMV2_LIVE_RESOURCE_GATEWAY_PORT"].flatMap(UInt16.init).flatMap(NWEndpoint.Port.init(rawValue:)))
         let ca = try Data(contentsOf: URL(fileURLWithPath: #require(environment["IMV2_LIVE_ACCOUNT_CA_DER"])))
@@ -425,7 +558,7 @@ struct V2LiveResourceAuthorTests {
             let network = NWConnection(host: "localhost", port: port, using: NWParameters(tls: tls, tcp: .init()))
             return V2NetworkTLSByteConnection(connection: network, queue: .global(qos: .utility))
         }, frameLimits: try .init(maximumPayloadBytes: 65_536, acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]),
-           requestTimeout: .seconds(10), supportsAuthorPresentationDelta: authorSupplements)
+           requestTimeout: .seconds(10), supportsAuthorPresentationDelta: authorSupplements, workScheduler: scheduler)
     }
 
     private func authenticate(_ connection: V2TLSFrameConnection, _ credentials: V2AuthCredentials) async throws -> V2AuthenticatedClientSession {
@@ -465,5 +598,46 @@ private struct ResourceLiveCredentials: V2ClientMediaEdgeCredentialProvider, V2C
     func pushEndpointCredentials() -> V2ClientPushEndpointCredentials { .init(accessToken: value.accessToken, deviceID: value.deviceID) }
 }
 
+private struct SlowResourceUploadState: Decodable {
+    let hits: Int, bodyBytesRead: Int, completed: Int, active: Int, expired: Int
+    let waiting: Bool, released: Bool
+}
+
 private enum ResourceLiveFailure: Error { case processing, presentation, revocation, timeout }
+private struct ResourceLiveOpenedRoom {let roomID:RoomID}
+private func resourceOpenDirect(_ fixture:LiveAccountFixture,account:V2AuthCredentials,target:UserID) async throws -> ResourceLiveOpenedRoom {
+    let client=try V2HTTPDirectRoomOperationClient(baseURL:fixture.url(""),credentials:ResourceLiveCredentials(value:account),transport:V2URLSessionMediaEdgeHTTPTransport(session:fixture.http))
+    let command=try V2DirectRoomOperationCommand(actorUserID:account.userID,operationID:.init(uuid:UUID()),targetUserID:target,firstSubmissionDeadlineMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+600000)
+    guard case .receipt(let proof)=try await client.submit(command),proof.validates(command:command),case .opened(let room,_)=proof.outcome else {throw ResourceLiveFailure.presentation};return .init(roomID:room)
+}
+private func resourceRelationship(_ fixture:LiveAccountFixture,account:V2AuthCredentials,target:UserID,action:V2RelationshipAction) async throws {
+    let client=try V2HTTPSocialOperationClient(baseURL:fixture.url(""),credentials:ResourceLiveCredentials(value:account),transport:V2URLSessionMediaEdgeHTTPTransport(session:fixture.http))
+    let baseline=try await client.baseline(targetUserID:target)
+    let command=try V2SocialOperationCommand(identity:.init(accountID:account.userID,scope:.userPair(account.userID,target),operation:.relationship(.init(uuid:UUID()))),action:.relationship(action),expectedRevision:baseline.relationshipRevision,firstSubmissionDeadlineMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+600000)
+    guard case .receipt(let proof)=try await client.submit(command),proof.validates(command:command),case .applied=proof.outcome else {throw ResourceLiveFailure.presentation}
+}
+private func resourceBlock(_ fixture:LiveAccountFixture,account:V2AuthCredentials,target:UserID) async throws {
+    let client=try V2HTTPSocialOperationClient(baseURL:fixture.url(""),credentials:ResourceLiveCredentials(value:account),transport:V2URLSessionMediaEdgeHTTPTransport(session:fixture.http))
+    let baseline=try await client.baseline(targetUserID:target)
+    let command=try V2SocialOperationCommand(identity:.init(accountID:account.userID,scope:.userPair(account.userID,target),operation:.userBlock(.init(uuid:UUID()))),action:.userBlock(.block),expectedRevision:baseline.blockRevision,firstSubmissionDeadlineMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+120000)
+    guard case .receipt(let proof)=try await client.submit(command),proof.validates(command:command),case .applied(.userBlock(isBlocked:true,revision:_))=proof.outcome else {throw ResourceLiveFailure.presentation}
+}
+private func resourceSend(_ fixture:LiveAccountFixture,account:V2AuthCredentials,roomID:RoomID,clientMessageID:ClientMessageID,text:String,media:[V2MediaReference],mentions:[V2MentionTarget]) async throws -> V2MessageOperationAcceptance {
+    let client=try V2HTTPMessageSendOperationClient(baseURL:fixture.url(""),credentials:ResourceLiveCredentials(value:account),transport:V2URLSessionMediaEdgeHTTPTransport(session:fixture.http))
+    let command=try V2MessageSendOperationCommand(command:.init(roomID:roomID,senderUserID:account.userID,clientMessageID:clientMessageID,text:text,media:media,mentions:mentions,limits:.init(maxUTF8Bytes:4096)),firstSubmissionDeadlineMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+86400000)
+    guard case .receipt(let proof)=try await client.submit(command),try proof.validates(identity:command.identity,fingerprint:command.fingerprint),case .accepted(let value)=proof.outcome else {throw ResourceLiveFailure.presentation};return value
+}
+private func resourceWithdraw(_ fixture:LiveAccountFixture,account:V2AuthCredentials,roomID:RoomID,messageID:MessageID,expectedMessageRevision:UInt64) async throws {
+    let client=try V2HTTPMessageMutationOperationClient(baseURL:fixture.url(""),credentials:ResourceLiveCredentials(value:account),transport:V2URLSessionMediaEdgeHTTPTransport(session:fixture.http))
+    let command=try V2MessageWithdrawalOperationCommand(command:.init(roomID:roomID,actorUserID:account.userID,operationID:.init(uuid:UUID()),messageID:messageID,expectedMessageRevision:expectedMessageRevision),firstSubmissionDeadlineMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+600000)
+    guard case .receipt(let proof)=try await client.submit(.withdraw(command)),try proof.validates(identity:command.identity,fingerprint:command.fingerprint),case .committed=proof.outcome else {throw ResourceLiveFailure.presentation}
+}
+private func resourceInvitation(_ client:V2HTTPInvitationOperationClient,account:V2AuthCredentials,room:RoomID,action:V2GroupInvitationOperationAction,authorization:V2GroupInvitationSecretAuthorization?=nil) async throws -> V2GroupInvitationOperationReceipt {
+    let reference:V2OperationReference
+    switch action.kind {case .groupInvite:reference = .groupInvite(.init(uuid:UUID()));case .groupJoinRequest:reference = .groupJoinRequest(.init(uuid:UUID()));case .groupJoinDecision:reference = .groupJoinDecision(.init(uuid:UUID()));default:throw ResourceLiveFailure.presentation}
+    let intent=try V2GroupInvitationOperationIntent(identity:.init(accountID:account.userID,scope:.room(room),operation:reference),action:action,confirmedUntilMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+120000)
+    guard case .admitted(let admission)=try await client.admit(.init(intent:intent,secretAuthorization:authorization)) else {throw ResourceLiveFailure.presentation}
+    let submission=try V2GroupInvitationSubmission(command:.init(intent:intent,admission:admission),secretAuthorization:authorization)
+    guard case .receipt(let proof)=try await client.submit(submission),proof.validates(intent:intent) else {throw ResourceLiveFailure.presentation};return proof
+}
 #endif

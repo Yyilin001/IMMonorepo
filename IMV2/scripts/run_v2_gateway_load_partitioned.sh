@@ -96,6 +96,7 @@ for index in "${!credentials[@]}"; do
   label="$(printf '%02d' "${index}")"
   LD_LIBRARY_PATH="${base}/swift-runtime/linux" "${binary}" \
     --host 172.17.22.48 --port 443 --server-name localhost \
+    --account-base-url "${IM_V2_LOAD_ACCOUNT_BASE_URL:-https://localhost:8443}" \
     --ca-path "${base}/root.crt" --credentials "${credential_file}" \
     --report "${base}/reports/${stage}/partition-${label}.json" \
     --revision "${stage}-${HOSTNAME}-${label}" \

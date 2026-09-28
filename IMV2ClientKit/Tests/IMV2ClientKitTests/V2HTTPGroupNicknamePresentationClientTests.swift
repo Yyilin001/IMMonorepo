@@ -57,7 +57,7 @@ struct V2HTTPGroupNicknamePresentationClientTests {
             }
         }
         #expect(await transport.request == nil)
-        await #expect(throws: V2ProfilePresentationError.throttled(retryAfter: 60)) {
+        await #expect(throws: V2ProfilePresentationError.throttled(retryAfter: 120)) {
             _ = try await f.client(NicknamePageHTTP(data: Data(), status: 429)).read(roomID: f.room)
         }
         for status in [401, 403] {

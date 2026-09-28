@@ -192,7 +192,7 @@ public actor V2AuthorPresentationPageCoordinator {
                 // account. Page replacement/reconnect cannot reset its cooldown.
                 if let domain = error as? V2RealtimeTransportError,
                    case .server(_, let retryable, let seconds, _) = domain, retryable, seconds > 0 {
-                    let until = ContinuousClock.now + .seconds(min(60, seconds)) + retryJitter()
+                    let until = ContinuousClock.now + .seconds(seconds) + retryJitter()
                     retryNotBefore = max(retryNotBefore ?? until, until)
                 }
                 if let binding = lastBinding {

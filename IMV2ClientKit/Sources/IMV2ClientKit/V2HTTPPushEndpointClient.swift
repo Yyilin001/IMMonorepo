@@ -31,15 +31,17 @@ public struct V2ClientPushEndpointCredentials: Sendable {
     public let accessToken: String
     /// 当前设备标识。
     public let deviceID: DeviceID
+    /// Local monotonic request budget; never encoded or persisted with credentials.
+    public let requestDeadline: ContinuousClock.Instant?
 
     /// 保存边缘凭据。
     ///
     /// - Parameters:
     ///   - accessToken: 访问令牌。
     ///   - deviceID: 当前设备标识。
-    public init(accessToken: String, deviceID: DeviceID) {
+    public init(accessToken: String, deviceID: DeviceID, requestDeadline: ContinuousClock.Instant? = nil) {
         self.accessToken = accessToken
-        self.deviceID = deviceID
+        self.deviceID = deviceID; self.requestDeadline = requestDeadline
     }
 }
 
@@ -67,29 +69,13 @@ public protocol V2ClientPushEndpointHTTPTransport: Sendable {
 
 /// 基于 URLSession 的推送端点传输实现。
 public actor V2URLSessionPushEndpointHTTPTransport: V2ClientPushEndpointHTTPTransport {
-    private let session: URLSession
-
-    /// 以会话构造传输实现。
-    ///
-    /// - Parameter session: 使用的 URL 会话，默认使用账号安全会话配置。
-    public init(session: URLSession = V2SecureURLSession.account) {
-        self.session = session
-    }
-
-    /// 执行请求并要求返回 HTTP 响应。
-    ///
-    /// - Parameter request: 待发送请求。
-    /// - Returns: 响应体与 HTTP 响应。
-    /// - Throws: 任务取消时抛出 `CancellationError`；响应不是 HTTP 响应时抛出
-    ///   ``V2ClientPushEndpointError/invalidResponse``。
+    private let executor: V2HTTPExecutor
+    public init(session: URLSession = V2SecureURLSession.account) { executor = .init(session: session) }
+    public init(executor: V2HTTPExecutor) { self.executor = executor }
     public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        try Task.checkCancellation()
-        let (data, response) = try await session.data(for: request)
-        guard let response = response as? HTTPURLResponse else {
-            throw V2ClientPushEndpointError.invalidResponse
-        }
-        return (data, response)
+        try await executor.execute(request, budget: .init(timeout: 15, maximumResponseBytes: 1_024), service: "pushEndpoints")
     }
+
 }
 
 /// 设备自有端点的框架无关账号边缘契约。
@@ -234,7 +220,7 @@ public struct V2HTTPPushEndpointClient: V2ClientPushEndpointRegistering, V2Clien
             edgeCredentials = try await credentials.pushEndpointCredentials()
         } catch is CancellationError {
             throw CancellationError()
-        } catch {
+        } catch let failure as V2HTTPFailure { throw failure } catch let auth as V2AuthSessionError { throw auth } catch {
             throw V2ClientPushEndpointError.authorizationUnavailable
         }
         try Task.checkCancellation()
@@ -255,6 +241,7 @@ public struct V2HTTPPushEndpointClient: V2ClientPushEndpointRegistering, V2Clien
         request.httpMethod = method
         request.setValue("Bearer \(edgeCredentials.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue(edgeCredentials.deviceID.rawValue, forHTTPHeaderField: "X-IM-Device-ID")
+        V2HTTPRequestDeadline.attach(edgeCredentials.requestDeadline, to: &request)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         request.setValue("no-cache", forHTTPHeaderField: "Pragma")
@@ -349,6 +336,8 @@ public struct V2HTTPPushEndpointClient: V2ClientPushEndpointRegistering, V2Clien
         do { return try await transport.data(for: request) }
         catch is CancellationError { throw CancellationError() }
         catch let error as V2ClientPushEndpointError { throw error }
+        catch let failure as V2HTTPFailure { throw failure }
+        catch let auth as V2AuthSessionError { throw auth }
         catch { throw V2ClientPushEndpointError.networkFailure }
     }
 
@@ -357,10 +346,12 @@ public struct V2HTTPPushEndpointClient: V2ClientPushEndpointRegistering, V2Clien
         if status == expected { return }
         switch status {
         case 400: throw V2ClientPushEndpointError.invalidRegistration
-        case 401, 403: throw V2ClientPushEndpointError.authorizationDenied
+        case 401: throw V2ClientPushEndpointError.authorizationUnavailable
+        case 403: throw V2ClientPushEndpointError.authorizationDenied
         case 429:
-            let seconds = response.value(forHTTPHeaderField: "Retry-After").flatMap(Int64.init).map { max(1, $0) } ?? 60
-            throw V2ClientPushEndpointError.rateLimited(retryAfter: Double(seconds))
+            let seconds = V2RetryAfter.date(from: response.value(forHTTPHeaderField: "Retry-After")).map { ceil(max(0, $0.timeIntervalSinceNow)) } ?? 60
+            throw V2ClientPushEndpointError.rateLimited(retryAfter: seconds)
+        case 503: throw V2HTTPFailure.status(response, service: "pushEndpoints")
         case 428: throw V2ClientPushEndpointError.intentVersionRequired
         case 409:
             struct Failure: Decodable { let code: String }

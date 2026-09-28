@@ -26,7 +26,7 @@ struct V2ConversationPresentationTests {
                     "sender_user_id": peer.rawValue, "room_sequence": 1, "timeline_sequence": 1, "message_revision": 1,
                     "text": "Favorite message", "server_created_at_ms": 1_750_000_000_000]),
                 ("message_favorite", ["room_id": direct.rawValue, "message_id": message.rawValue,
-                    "is_favorited": true, "updated_at_ms": 1_750_000_000_000])
+                    "is_favorited": true, "updated_at_ms": 1_750_000_000_000, "revision": 1])
             ]
             let records = try payloads.enumerated().map { index, entry in
                 try V2ClientSyncRecord(sequence: UInt64(index + 1), sourceEventID: .init(uuid: UUID()),

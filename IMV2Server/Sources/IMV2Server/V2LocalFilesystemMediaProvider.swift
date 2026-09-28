@@ -25,6 +25,31 @@ public struct V2LocalFilesystemStagedUpload: Sendable {
 public struct V2LocalFilesystemDownloadedObject: Sendable {
     package let fileURL: URL
     package let byteCount: Int64
+
+    package func strongETag() async throws -> String {
+        try Task.checkCancellation()
+        let file = fileURL
+        // FileHandle reads are blocking. Keep them outside the HTTP actor and
+        // explicitly transfer cancellation to this owned hashing task.
+        let hashing = Task.detached(priority: .utility) {
+            let handle = try FileHandle(forReadingFrom: file)
+            defer { try? handle.close() }
+            var hash = SHA256()
+            while let bytes = try handle.read(upToCount: 128 * 1024), !bytes.isEmpty {
+                try Task.checkCancellation()
+                hash.update(data: bytes)
+            }
+            let hex = hash.finalize().map { String(format: "%02x", $0) }.joined()
+            return "\"\(hex)\""
+        }
+        return try await withTaskCancellationHandler {
+            let result = try await hashing.value
+            try Task.checkCancellation()
+            return result
+        } onCancel: {
+            hashing.cancel()
+        }
+    }
 }
 
 /// 仅用于本地、可重复的开发者与隔离测试验证的对象提供方。
@@ -142,6 +167,17 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         )
     }
 
+    /// Only the resource authority calls this after allocating and reauthorizing an attachment session.
+    /// The new delegated PUT is signed independently of a short room activation.
+    public func issueBackgroundUploadTarget(mediaID: MediaID, contentType: String, byteCount: Int64,
+                                            authorization: V2ResourceBackgroundAuthorization) async throws -> V2MediaProviderUploadTarget {
+        guard byteCount>0,byteCount<=8*1_024*1_024,!contentType.isEmpty else { throw V2LocalFilesystemMediaProviderError.invalidTarget }
+        _ = try objectURL(for:mediaID)
+        let url = try signedTarget(kind:.upload,mediaID:mediaID,contentType:contentType,byteCount:byteCount,
+                                   expiresAt:authorization.expiresAt,backgroundAuthorization:authorization)
+        return .init(url:url,headers:["Content-Type":contentType],expiresAt:authorization.expiresAt,expectedByteCount:byteCount)
+    }
+
     /// 为一个下载会话签发短时下载目标。
     ///
     /// - Parameters:
@@ -222,7 +258,7 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
     ///
     /// - Parameters:
     ///   - upload: 暂存上传句柄。
-    ///   - receipt: 已完成的复制回执。
+    ///   - actualByteCount: 暂存上传实际写入的字节数。
     /// - Throws: 目标已过期、字节数不符或移动失败时抛出。
     public func commitUploadedObject(
         _ upload: V2LocalFilesystemStagedUpload,
@@ -263,49 +299,6 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
                     try FileManager.default.moveItem(at: upload.fileURL, to: objectURL)
                 }
                 try ForwardMediaFileIO.syncDirectory(rootDirectory)
-            }
-        }
-    }
-
-    package func verifyForwardImportedObject(mediaID: MediaID, byteCount: Int64, digest: Data) async throws -> Bool {
-        let object = try objectURL(for: mediaID)
-        return try await Self.performBlocking {
-            try Self.requireNotPurged(object)
-            guard FileManager.default.fileExists(atPath: object.path) else { return false }
-            guard try ForwardMediaFileIO.digest(object, byteCount: byteCount) == digest else { throw V2ForwardMediaCopyError.contentConflict }
-            return true
-        }
-    }
-
-    /// 原子地安装转发导入对象，且不做替换。
-    ///
-    /// 若进程在完成链接之后、确认之前崩溃，可通过校验同一对象的哈希来恢复。
-    ///
-    /// - Parameters:
-    ///   - upload: 已完成暂存的本地上传对象。
-    ///   - receipt: 转发媒体复制回执，用于校验字节数与内容类型。
-    /// - Throws: 目标或回执不合法、哈希不一致或写入失败时抛出。
-    package func commitForwardImportedObject(_ upload: V2LocalFilesystemStagedUpload, receipt: V2ForwardMediaCopyReceipt) async throws {
-        let claims = try verify(targetURL: upload.targetURL, kind: .upload, mediaID: upload.mediaID)
-        guard claims.contentType == upload.contentType, claims.byteCount == receipt.byteCount,
-              receipt.byteCount == upload.expectedByteCount, isValidStagingURL(upload.fileURL)
-        else { throw V2ForwardMediaCopyError.byteCountMismatch }
-        let object = try objectURL(for: upload.mediaID)
-        let root = rootDirectory
-        try await Self.performBlocking {
-            try Self.withObjectMutationLock(object) { marker in
-                guard !FileManager.default.fileExists(atPath: marker.path) else { throw V2LocalFilesystemMediaProviderError.objectUnavailable }
-                guard try ForwardMediaFileIO.digest(upload.fileURL, byteCount: receipt.byteCount) == receipt.digest else { throw V2ForwardMediaCopyError.contentConflict }
-                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-                do {
-                    // 若其他工作器先完成，link(2) 会失败；
-                    // 不同于替换操作，它不会覆盖此前安装的其他数据块。
-                    try FileManager.default.linkItem(at: upload.fileURL, to: object)
-                } catch {
-                    guard FileManager.default.fileExists(atPath: object.path) else { throw error }
-                }
-                guard try ForwardMediaFileIO.digest(object, byteCount: receipt.byteCount) == receipt.digest else { throw V2ForwardMediaCopyError.contentConflict }
-                try ForwardMediaFileIO.syncDirectory(root)
             }
         }
     }
@@ -475,7 +468,7 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         mediaID: MediaID,
         contentType: String?,
         byteCount: Int64,
-        expiresAt: Date
+        expiresAt: Date, backgroundAuthorization: V2ResourceBackgroundAuthorization? = nil
     ) throws -> URL {
         // 下载元数据查询会挂起 Actor。此处再次校验，
         // 确保目标在实际签名时仍可使用。
@@ -485,7 +478,7 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
             mediaID: mediaID.rawValue,
             contentType: contentType,
             byteCount: byteCount,
-            expiresAtMilliseconds: milliseconds
+            expiresAtMilliseconds: milliseconds, backgroundAuthorization: backgroundAuthorization
         )
         let payload = try JSONEncoder().encode(claims)
         let encodedPayload = Self.base64URL(payload)
@@ -529,6 +522,11 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         else { throw V2LocalFilesystemMediaProviderError.invalidTarget }
         guard Double(claims.expiresAtMilliseconds) > (try currentMilliseconds()) else {
             throw V2LocalFilesystemMediaProviderError.invalidTarget
+        }
+        if let grant = claims.backgroundAuthorization {
+            guard kind == .upload, claims.byteCount>0,claims.byteCount<=8*1_024*1_024,
+                  grant.expiresAtMilliseconds == claims.expiresAtMilliseconds
+            else { throw V2LocalFilesystemMediaProviderError.invalidTarget }
         }
         return claims
     }
@@ -594,6 +592,7 @@ public actor V2LocalFilesystemMediaProvider: V2MediaObjectProvider, V2MediaUploa
         let contentType: String?
         let byteCount: Int64
         let expiresAtMilliseconds: Int64
+        let backgroundAuthorization: V2ResourceBackgroundAuthorization?
     }
 }
 

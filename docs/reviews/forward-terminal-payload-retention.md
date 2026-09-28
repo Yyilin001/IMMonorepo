@@ -1,7 +1,19 @@
 # 跨 owner 转发终态载荷保留与清理
 
-日期：2026-09-19。B04 的实施中子项，当前 schema 42、协议 30。
+日期：2026-09-27。当前 schema 59、协议 37；账户 HTTP 父计划沿用本主题的最小原回执与正文分离规则。
 目标 inbox 与源 export 均已接入有界正文清理，清理事务提交前后 SIGKILL 专项已通过；运行器/外部副作用组合、成本与完整 owner 迁移仍未完成。
+
+## 账户父计划与永久证明
+
+生产提交入口为账户 HTTP `POST /v2/forward-plans/submit`，恢复入口为 `POST /v2/forward-plans/operations/recover`。两者最多 64 KiB，认证账户必须等于冻结命令 actor；返回 no-store。完整 manifest 限 100 条来源、10 个目标，每 20 条来源按目标形成稳定子块。恢复携带相同冻结命令，不依据摘要反推不存在的 manifest。
+
+`forward_plan_operations` 保存有界强类型 manifest/progress 和最小终态摘要。公共 work 的终态回执仍最多 64 KiB；完整结果最多 1 MiB，按有序子身份与结果摘要校验。终态和 manifest 禁止修改或删除。每账户最多 64 个活跃父计划；耗尽返回绑定身份的非终态 admissionUnavailable 与 5 秒调度下限，不伪造原拒绝。
+
+父提交、首次子交接、query、closeIfUnstarted、cancelRemaining 共父身份锁。24 小时首次窗口只限制首次交接，已交接子任务继续核对。cancelRemaining 只将尚未交接子任务记为 cancelledBeforeStart；处理中子任务必须向源 RoomRef 核对原 export。源尚无 export 时，共 export pair 锁持久保存 CLOSED_BEFORE_EXECUTION；已有 export 时，继续向目标 RoomRef 导入/核对原 inbox 结果并记录源回执。ACK 丢失、delivery job 暂停、当前权限改变均不允许将旧已执行结果猜成未执行。
+
+`forward_preparation_rejections` 保存在原 export pair 锁内、无 export 时产生的永久来源拒绝或关闭证明，绑定 actor/child operation/source room/source revision/target。它不保存消息正文、不授予公开资料 lease，也不参与正文清理。查询既存原证明优先于当前来源可见性，但仍受当前精确 owner activation fence 限定。
+
+账户 runtime 启动有界持久 worker；control store 只保存父元数据，所有来源准备、查询、关闭、目标导入和来源回执记录均经过 RoomRef。原 export/inbox 的媒体处理和持久投递仍有效。新无首次窗口的旧 TLS forward 入口停止准入。真实部署还需按配置的 accountBaseURL 验证可达与跨进程 owner 调用；当前专项夹具不能代替部署验收。
 
 ## 当前实现
 

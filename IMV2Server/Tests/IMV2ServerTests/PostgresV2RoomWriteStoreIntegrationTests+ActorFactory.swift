@@ -29,6 +29,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 sendBatcher: batcher,
                 membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
+                invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
                 receiptProjectionDelivery: ActorFactoryProjectionDelivery(), capacityProfile: forwardImportTestProfile(),
                 messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
                 contentReviewMode: .disabled, queryBatchConfiguration: .init(),
@@ -49,16 +50,20 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             do {
                 guard case .ready(let token) = try await first.activate(roomID: roomID, owner: owner,
                     deadline: .now + .seconds(10)) else { throw V2RoomCallFailure.notAccepted(.notReady) }
-                let request = V2RoomRequest.messaging(.send(.init(roomID: roomID, actorUserID: senderID,
-                    clientMessageID: .init(uuid: UUID()), text: "factory send", media: [], mentions: [],
-                    entities: [], replyTo: nil)))
+                let command = try V2MessageSendOperationCommand(command: .init(roomID: roomID, senderUserID: senderID,
+                    clientMessageID: .init(uuid: UUID()), text: "factory send", limits: .init(maxUTF8Bytes: 64)),
+                    firstSubmissionDeadlineMilliseconds: UInt64(now.timeIntervalSince1970 * 1000) + 600_000)
+                let request = V2RoomRequest.messaging(.sendOperation(command))
                 let bytes = try JSONEncoder().encode(request)
                 let response = try await first.invoke(token: token, encodedRequest: bytes,
                     deadline: .now + .seconds(10))
-                guard case .messaging(.send(let sent)) = response,
-                      let receipt = try sent.toDomain().acceptanceReceipt else {
+                guard case .messaging(.sendOperation(.receipt(let originalProof))) = response,
+                      case .accepted(let receipt) = originalProof.outcome else {
                     throw V2RoomWriteStoreError.corruptPersistenceState
                 }
+                let sendAdmission = await admission.snapshot()
+                #expect(sendAdmission.foregroundWrite.admittedRequests == 1)
+                #expect(sendAdmission.foregroundWrite.inFlight == 0)
                 let read = try V2ActorRecordReadReceiptWire(roomID: roomID, actorUserID: senderID,
                     operationID: .init(uuid: UUID()), readThroughRoomSequence: receipt.roomSequence)
                 let recorded = try await first.invoke(token: token,
@@ -83,7 +88,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 // An Account-style direct invoke has no Gateway permit. The
                 // physical Host still admits its recovery and room-log SQL.
                 let admissionSnapshot = await admission.snapshot()
-                #expect(admissionSnapshot.foregroundWrite.admittedRequests == 1)
+                #expect(admissionSnapshot.foregroundWrite.admittedRequests == 2)
                 #expect(admissionSnapshot.interactiveRead.admittedRequests == 2)
                 #expect(admissionSnapshot.interactiveRead.inFlight == 0)
                 #expect(await first.stop(deadline: .now + .seconds(10)).completed)
@@ -92,10 +97,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(replacement.activationEpoch.rawValue > token.activationEpoch.rawValue)
                 let repeated = try await next.invoke(token: replacement, encodedRequest: bytes,
                     deadline: .now + .seconds(10))
-                guard case .messaging(.send(let wire)) = repeated,
-                      case .idempotent(let recovered) = try wire.toDomain() else {
+                guard case .messaging(.sendOperation(.receipt(let replay))) = repeated,
+                      case .accepted(let recovered) = replay.outcome else {
                     throw V2RoomWriteStoreError.corruptPersistenceState
                 }
+                #expect(replay == originalProof)
                 #expect(recovered.messageID == receipt.messageID)
                 #expect(try await count("im_v2.messages", on: sql) == 1)
                 #expect(await next.stop(deadline: .now + .seconds(10)).completed)
@@ -107,16 +113,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("readiness rejects a control draft foreign key to the local owner rooms",
+    @Test("readiness rejects a retired control draft table",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func actorCreationDraftReadiness() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             try await V2SchemaReadiness.verify(database: database)
             try await sql.raw("""
-                ALTER TABLE im_v2.group_room_creation_drafts
-                ADD CONSTRAINT invalid_control_room_fk FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id)
+                CREATE TABLE im_v2.group_room_creation_drafts (
+                    room_id UUID REFERENCES im_v2.rooms(room_id)
+                )
                 """).run()
-            await #expect(throws: V2SchemaReadinessError.unavailableTable("im_v2.group_room_creation_drafts[remote-owner]")) {
+            await #expect(throws: V2SchemaReadinessError.unavailableTable("im_v2.group_room_creation_drafts.retired")) {
                 try await V2SchemaReadiness.verify(database: database)
             }
         }
@@ -156,6 +163,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 database: ownerDatabase, writes: writes, sendBatcher: batcher,
                 membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: control),
+                invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
                 receiptProjectionDelivery: ActorFactoryProjectionDelivery(), capacityProfile: forwardImportTestProfile(),
                 messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
                 contentReviewMode: .disabled, queryBatchConfiguration: .init(),
@@ -177,17 +185,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 guard case .ready(let token) = try await host.activate(
                     roomID: room, owner: selectedOwner, deadline: .now + .seconds(10)
                 ) else { throw V2RoomCallFailure.notAccepted(.notReady) }
-                let request = V2RoomRequest.messaging(.send(.init(
-                    roomID: room, actorUserID: senderID,
-                    clientMessageID: .init(uuid: UUID()), text: "remote owner send",
-                    media: [], mentions: [], entities: [], replyTo: nil
-                )))
+                let command = try V2MessageSendOperationCommand(command: .init(roomID: room, senderUserID: senderID,
+                    clientMessageID: .init(uuid: UUID()), text: "remote owner send", limits: .init(maxUTF8Bytes: 64)),
+                    firstSubmissionDeadlineMilliseconds: UInt64(now.timeIntervalSince1970 * 1000) + 600_000)
+                let request = V2RoomRequest.messaging(.sendOperation(command))
                 let response = try await host.invoke(
                     token: token, encodedRequest: JSONEncoder().encode(request),
                     deadline: .now + .seconds(10)
                 )
-                guard case .messaging(.send(let sent)) = response,
-                      case .accepted = try sent.toDomain() else {
+                guard case .messaging(.sendOperation(.receipt(let proof))) = response,
+                      case .accepted = proof.outcome else {
                     throw V2RoomWriteStoreError.corruptPersistenceState
                 }
                 #expect(try await count("im_v2.messages", on: ownerSQL) == 1)

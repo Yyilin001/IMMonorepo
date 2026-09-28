@@ -238,8 +238,7 @@ struct V2LocalPushIntentTests {
     @Test("reopening preserves account, cursor and pending commands without inventing push intent")
     func reopenPreservesOutbox() async throws {
         let f = try Fixture(); let store = try f.open()
-        let outbox = V2CommandOutboxEngine(store: store, transport: NoPushTestSend())
-        let command = try await outbox.enqueueMessage(roomID: .init(uuid: UUID()), text: "pending during restart")
+        let command = try await persistDurableMessage(in: store, roomID: .init(uuid: UUID()), clientMessageID: .init(uuid: UUID()), text: "pending during restart")
         try await store.beginReset(.init(snapshotID: .init(uuid: UUID()), generation: 2, baseSequence: 0, expiresAt: .distantFuture))
         let cursor = try #require(try await store.cursor())
         #expect(cursor.pendingReset != nil)
@@ -247,7 +246,7 @@ struct V2LocalPushIntentTests {
         let reopened = try f.open()
         #expect(try await reopened.boundAccountID() == f.scope.userID)
         #expect(try await reopened.cursor() == cursor)
-        #expect(try await reopened.pendingMessageCommands().first?.clientMessageID == command.clientMessageID)
+        #expect(try await savedDurableMessages(in: reopened).first?.clientMessageID == command.clientMessageID)
         let reopenedPool = await reopened.databasePool
         #expect(try await reopenedPool.read { try Int.fetchOne($0, sql: "SELECT count(*) FROM v2_push_intent") } == 0)
         let state = try await reopened.activatePushIntent(scope: f.scope, ownerID: UUID(), initialPreference: false)
@@ -261,8 +260,4 @@ struct V2LocalPushIntentTests {
         init() throws { scope = try .init(userID: .init(uuid: UUID()), deviceID: .init(uuid: UUID()), installation: .init(value: UUID())) }
         func open() throws -> GRDBV2LocalSyncStore { try .init(databaseURL: url, installationBinding: scope.installation, userID: scope.userID) }
     }
-}
-
-private struct NoPushTestSend: V2ClientMessageTransport {
-    func sendMessage(roomID: RoomID, clientMessageID: ClientMessageID, text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?) async throws -> V2ClientMessageAcceptance { throw V2ClientPushEndpointError.networkFailure }
 }

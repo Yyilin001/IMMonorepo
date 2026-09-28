@@ -181,12 +181,7 @@ public actor V2ActorSessionAuthenticator {
                 guard call.principal == .service, peer.permissions.contains(.roomMaintenance) else { throw V2ActorAuthenticationError.forbidden }
             case .specialAccountAudit:
                 guard call.principal == .service, peer.permissions.contains(.specialAccountAudit) else { throw V2ActorAuthenticationError.forbidden }
-            case .invitation(.create):
-                // 密钥签发和持久化创建意图属于控制协调器，
-                // 绝不由直接房间调用负责。
-                throw V2ActorAuthenticationError.forbidden
-            case .invitation(.commitCreation), .invitation(.submitReserved),
-                 .invitationQuery(.preflightCreation), .invitationQuery(.reservedSubmissionResponse):
+            case .invitationQuery(.preflightCreation), .invitationQuery(.reservedObservation), .invitationQuery(.reservedSubmissionResponse):
                 guard call.principal == .service, peer.permissions.contains(.roomCoordination) else { throw V2ActorAuthenticationError.forbidden }
             default:
                 guard let user = request.actorUserID, call.principal == .user(user),

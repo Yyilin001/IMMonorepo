@@ -82,53 +82,11 @@ public extension V2ActorSendMessageWire {
     }
 }
 
-public extension V2ActorEditMessageWire {
-    init(_ value: V2AuthenticatedMessageEdit) {
-        self.init(roomID: value.roomID, actorUserID: value.actorUserID,
-                  operationID: value.operationID, messageID: value.messageID,
-                  expectedMessageRevision: value.expectedMessageRevision, text: value.text)
-    }
 
-    func toAuthenticated(maximumTextUTF8Bytes: Int) throws -> V2AuthenticatedMessageEdit {
-        _ = try V2EditMessageCommand(roomID: roomID, actorUserID: actorUserID,
-                                      operationID: operationID, messageID: messageID,
-                                      expectedMessageRevision: expectedMessageRevision, text: text,
-                                      maximumUTF8Bytes: maximumTextUTF8Bytes)
-        return .init(roomID: roomID, actorUserID: actorUserID, operationID: operationID,
-                     messageID: messageID, expectedMessageRevision: expectedMessageRevision, text: text)
-    }
-}
 
-public extension V2ActorWithdrawMessageWire {
-    init(_ value: V2AuthenticatedMessageWithdrawal) {
-        self.init(roomID: value.roomID, actorUserID: value.actorUserID,
-                  operationID: value.operationID, messageID: value.messageID,
-                  expectedMessageRevision: value.expectedMessageRevision)
-    }
 
-    func toAuthenticated() throws -> V2AuthenticatedMessageWithdrawal {
-        _ = try V2WithdrawMessageCommand(roomID: roomID, actorUserID: actorUserID,
-                                          operationID: operationID, messageID: messageID,
-                                          expectedMessageRevision: expectedMessageRevision)
-        return .init(roomID: roomID, actorUserID: actorUserID, operationID: operationID,
-                     messageID: messageID, expectedMessageRevision: expectedMessageRevision)
-    }
-}
 
-public extension V2ActorReactionMessageWire {
-    init(_ value: V2AuthenticatedMessageReaction) {
-        self.init(roomID: value.roomID, actorUserID: value.actorUserID, operationID: value.operationID,
-                  messageID: value.messageID, reaction: value.reaction, action: value.action)
-    }
 
-    func toAuthenticated() throws -> V2AuthenticatedMessageReaction {
-        let command = try V2ChangeMessageReactionCommand(roomID: roomID, actorUserID: actorUserID,
-                         operationID: operationID, messageID: messageID, reaction: reaction, action: action)
-        guard command.reaction.utf8.elementsEqual(reaction.utf8) else { throw V2ActorMessagingMappingError.noncanonicalReaction }
-        return .init(roomID: roomID, actorUserID: actorUserID, operationID: operationID,
-                     messageID: messageID, reaction: reaction, action: action)
-    }
-}
 
 public extension V2ActorAcceptedMessageWire {
     init(_ value: V2AcceptedMessage) {

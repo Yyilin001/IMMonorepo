@@ -89,12 +89,13 @@ public actor V2LocalResourceDelivery: V2ResourceDelivery {
     }
     /// Large attachments bypass the small-image cache and stream with bounded memory.
     /// A permit is retained by the stream and released on EOF, failure or abandonment.
-    public func stream(placementID:UUID,capability:String) async throws -> (byteCount:Int64,bytes:V2ResourceByteStream) {
+    public func stream(placementID:UUID,capability:String) async throws -> (byteCount:Int64,etag:String,bytes:V2ResourceByteStream,close:@Sendable () async -> Void) {
         let claims=try verify(placementID:placementID,capability:capability)
+        let etag = "\"" + claims.sha256.map { String(format:"%02x",$0) }.joined() + "\""
         if claims.byteCount <= 512*1_024 {
             let cached = try await bytes(placementID:placementID,capability:capability)
             let reader = CachedResourceReader(cached,expiresAt:claims.expiresAt,now:now)
-            return (claims.byteCount, .init { try await reader.next() })
+            return (claims.byteCount, etag, .init { try await reader.next() }, { await reader.close() })
         }
         let permit = try streamAdmissions.acquire()
         do {
@@ -104,7 +105,7 @@ public actor V2LocalResourceDelivery: V2ResourceDelivery {
             _ = try verify(placementID:placementID,capability:capability)
             let input=try await storage.read(claims.reference)
             let reader=VerifiedResourceReader(input:input,claims:claims,permit:permit,now:now)
-            return (claims.byteCount,.init { try await reader.next() })
+            return (claims.byteCount,etag,.init { try await reader.next() }, { await reader.close() })
         } catch { permit.release(); throw error }
     }
     package func originReadCount() -> Int { originReads }
@@ -119,7 +120,7 @@ public actor V2LocalResourceDelivery: V2ResourceDelivery {
               let plaintext=try? AES.GCM.open(box,using:SymmetricKey(data:key)),
               let claims=try? JSONDecoder().decode(DeliveryClaims.self,from:plaintext),
               claims.reference.placementID==placementID,claims.audience=="resource-bytes-v1",claims.method=="GET",
-              claims.expiresAt>now().timeIntervalSince1970,claims.byteCount>0,claims.byteCount<=maximumObjectBytes
+              claims.expiresAt>now().timeIntervalSince1970,claims.sha256.count==32,claims.byteCount>0,claims.byteCount<=maximumObjectBytes
         else { throw V2ResourceProviderError.notFound }
         return claims
     }
@@ -146,6 +147,7 @@ private actor CachedResourceReader {
     init(_ data:Data,expiresAt:TimeInterval,now:@escaping @Sendable () -> Date) {
         self.data=data;self.expiresAt=expiresAt;self.now=now
     }
+    func close() { offset=data.count }
     func next() throws -> Data? {
         try Task.checkCancellation()
         guard expiresAt>now().timeIntervalSince1970 else { throw V2ResourceProviderError.notFound }
@@ -187,15 +189,35 @@ private actor VerifiedResourceReader {
     var count:Int64=0
     var digest=SHA256()
     var finished=false
+    var reading=false
+    var closeWaiters:[CheckedContinuation<Void,Never>]=[]
     init(input:V2ResourceByteStream,claims:DeliveryClaims,permit:ResourceStreamPermit,now:@escaping @Sendable () -> Date) {
         self.input=input;self.claims=claims;self.permit=permit;self.now=now
     }
+    /// Close waits for an outstanding storage read instead of releasing its slot early.
+    func close() async {
+        finished=true
+        if reading {
+            await withCheckedContinuation { closeWaiters.append($0) }
+        } else { permit.release() }
+    }
     func next() async throws -> Data? {
         guard !finished else { return nil }
+        guard !reading else { throw V2ResourceProviderError.preconditionFailed }
+        reading=true
+        defer {
+            reading=false
+            if finished {
+                permit.release()
+                let waiters=closeWaiters;closeWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+        }
         do {
             try Task.checkCancellation()
             guard claims.expiresAt > now().timeIntervalSince1970 else { throw V2ResourceProviderError.notFound }
             let next=try await input.next()
+            guard !finished else { throw CancellationError() }
             try Task.checkCancellation()
             guard claims.expiresAt > now().timeIntervalSince1970 else { throw V2ResourceProviderError.notFound }
             guard let chunk=next else {

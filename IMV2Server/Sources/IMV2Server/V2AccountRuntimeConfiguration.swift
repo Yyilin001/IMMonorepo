@@ -94,6 +94,8 @@ public struct V2AccountRuntimeConfiguration: Sendable {
     public let deviceRegistrationPolicy: V2DeviceRegistrationPolicy
     /// 房间分片存储配置。
     public let roomShardStorage: [V2RoomShardStorageConfiguration]
+    public let directRoomShardIDs:[String]
+    public let groupRoomShardIDs:[String]
     /// 用户分片存储配置；未配置时为空。
     public let userShardStorage: [V2UserShardStorageConfiguration]
 
@@ -111,9 +113,18 @@ public struct V2AccountRuntimeConfiguration: Sendable {
     public init(environment: any V2RuntimeEnvironment) throws {
         databaseURL = try Self.required("IM_V2_DATABASE_URL", environment: environment)
         databasePolicy = try .init(environment: environment)
+        // Pair-route fencing holds a connection across an owner callback.
+        // Reserve one route connection without consuming nested coordination capacity.
+        guard databasePolicy.maximumConnectionsPerEventLoop >= 2 else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP")
+        }
+        directRoomShardIDs=try V2DirectRoomShardRouter(rawValue:Self.required("IM_V2_DIRECT_ROOM_SHARD_ID",environment:environment)).shardIDs
+        groupRoomShardIDs=try V2GroupRoomShardSelector(rawValue:Self.required("IM_V2_GROUP_ROOM_SHARD_ID",environment:environment)).shardIDs
         if let raw = environment.value(for: "IM_V2_ROOM_SHARD_STORES_JSON") {
             roomShardStorage = try V2RoomShardStorageConfiguration.parseRegistryJSON(raw)
         } else { throw V2GatewayRuntimeConfigurationError.missing("IM_V2_ROOM_SHARD_STORES_JSON") }
+        guard Set(directRoomShardIDs).isSubset(of:Set(roomShardStorage.map(\.shardID))) else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DIRECT_ROOM_SHARD_ID") }
+        guard Set(groupRoomShardIDs).isSubset(of:Set(roomShardStorage.map(\.shardID))) else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_ROOM_SHARD_ID") }
         if let raw = environment.value(for: "IM_V2_USER_SHARD_STORES_JSON") {
             userShardStorage = try V2UserShardStorageConfiguration.parseRegistryJSON(raw)
         } else { userShardStorage = [] }

@@ -327,11 +327,12 @@ private func withCreditFenceDatabase(_ operation: (CreditFenceContext) async thr
         try await fixture.seedRoom(on: sql)
         let now = Date(timeIntervalSince1970: 1_750_000_000)
         let profile = try fixture.forwardImportTestProfile()
-        let direct = try V2DirectMessagingService(
-            store: PostgresV2DirectMessagingStore(database: database),
-            capacityProfile: profile, roomShardID: "room-a", now: { now })
-        guard case .opened(let room) = try await direct.open(actorUserID: senderID,
-            operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID)) else {
+        let direct = V2DirectRoomOperationTestFixture(database: database, capacityProfile: profile,
+            roomShardID: "room-a", now: { now })
+        let receipt = try await direct.openedReceipt(actorUserID: senderID,
+            operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID),
+            firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
+        guard case .opened(let openedRoomID, _) = receipt.outcome else {
             throw CreditFenceFailure.activationUnavailable
         }
         // Keep the direct policy stable and eligible for the production fast
@@ -342,7 +343,7 @@ private func withCreditFenceDatabase(_ operation: (CreditFenceContext) async thr
             VALUES (\(bind: senderUUID), \(bind: memberTwoUUID), 'accepted',
                     \(bind: senderUUID), \(bind: now))
             """).run()
-        let roomUUID = try #require(room.roomID.uuidValue)
+        let roomUUID = try #require(openedRoomID.uuidValue)
         // Keep only the heat hint's monotonic clock fixed so slow CI setup
         // cannot age four real committed warm-up appends out of its 5s window.
         let heatClock = ContinuousClock.now
@@ -359,7 +360,7 @@ private func withCreditFenceDatabase(_ operation: (CreditFenceContext) async thr
             generation: 1, validUntil: now.addingTimeInterval(100),
             commandWindow: .init(limit: 10, used: 0)))
         let context = CreditFenceContext(database: database, sql: sql, fixture: fixture,
-            roomID: room.roomID, roomUUID: roomUUID, now: now, profile: profile,
+            roomID: openedRoomID, roomUUID: roomUUID, now: now, profile: profile,
             shard: shard, writer: writer, credits: credits, cache: cache,
             leases: .init(database: database))
         try await operation(context)

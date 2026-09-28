@@ -104,14 +104,26 @@ struct V2GroupAvatarManagementTests {
         try await f.close()
     }
 
+    @Test("capability lookup cannot mask invalidation after the presentation read")
+    func capabilitySessionInvalidation() async throws {
+        let f = try AvatarManagementFixture()
+        await f.authority.invalidateCapabilitySession()
+        await #expect(throws: V2AuthSessionError.sessionInvalidated) { try await f.manager.load(roomID: f.room) }
+        #expect(try await f.manager.pending(roomID: f.room).isEmpty)
+        try await f.close()
+    }
+
     @Test("expired or wrong-device presentations cannot admit a new command", arguments: [false, true])
     func presentationFences(wrongDevice: Bool) async throws {
         let clock = Mutex(ContinuousClock.now)
         let f = try AvatarManagementFixture(now: { clock.withLock { $0 } })
         if wrongDevice { await f.authority.configure(wrongDevice: true) }
         else { await f.authority.configure(onRead: { clock.withLock { $0 = $0.advanced(by: .seconds(301)) } }) }
-        let loaded = try await f.manager.load(roomID: f.room)
-        guard case .unavailable = loaded.access else { Issue.record("invalid presentation admitted"); try await f.close(); return }
+        if wrongDevice {
+            await #expect(throws: V2GroupAvatarReadError.invalidResponse) { try await f.manager.load(roomID: f.room) }
+        } else {
+            await #expect(throws: V2GroupAvatarManagementError.unavailable) { try await f.manager.load(roomID: f.room) }
+        }
         if wrongDevice {
             await #expect(throws: V2GroupAvatarReadError.invalidResponse) { try await f.manager.change(roomID: f.room, expectedRevision: 0, image: nil) }
         } else {
@@ -160,6 +172,7 @@ private actor ManagementAuthority: V2GroupAvatarPresentationReading, V2ResourceC
     let actor: UserID, device: DeviceID, room: RoomID
     var uploads = true, canManage = true, denied = false, wrongDevice = false
     var revision: UInt64 = 0
+    var capabilityInvalidated = false
     var onRead: (@Sendable () -> Void)?
     init(actor: UserID, device: DeviceID, room: RoomID) { self.actor = actor; self.device = device; self.room = room }
     func configure(uploads: Bool? = nil, canManage: Bool? = nil, revision: UInt64? = nil, denied: Bool? = nil,
@@ -176,8 +189,10 @@ private actor ManagementAuthority: V2GroupAvatarPresentationReading, V2ResourceC
             state: .init(roomID: room, mediaID: nil, revision: revision), membershipRevision: 1, resourceGeneration: nil,
             canManage: canManage, avatar: nil, observedAt: time, validUntil: time.addingTimeInterval(300), serverNow: time)
     }
+    func invalidateCapabilitySession() { capabilityInvalidated = true }
     func capabilities() throws -> V2ResourceCapabilities {
-        try .init(uploadModes: [.httpPut], maximumBytes: 10 * 1_024 * 1_024,
+        if capabilityInvalidated { throw V2AuthSessionError.sessionInvalidated }
+        return try .init(uploadModes: [.httpPut], maximumBytes: 10 * 1_024 * 1_024,
             allowedUsages: uploads ? [.messageAttachment, .groupAvatar] : [.messageAttachment], maximumParts: 0, backgroundTransfer: false)
     }
 }
@@ -200,7 +215,7 @@ private struct ManagementResourceControl: V2ResourceUploadControlling, V2Resourc
             expiresAt: Date().addingTimeInterval(60), bindableUntil: Date().addingTimeInterval(60))
     }
     func status(_ locator: V2ResourceUploadLocator) throws -> V2ResourceUploadSession { throw CancellationError() }
-    func target(_ session: V2ResourceUploadSession) throws -> V2ResourceTransferPlan { throw CancellationError() }
+    func target(_ session: V2ResourceUploadSession) throws -> V2ResourceTransferPlan? { throw CancellationError() }
     func finalize(_ session: V2ResourceUploadSession) throws -> V2ResourceUploadSession { throw CancellationError() }
     func cancel(_ session: V2ResourceUploadSession) -> V2ResourceUploadSession { session }
     func upload(fileURL: URL, plan: V2ResourceTransferPlan) throws { throw CancellationError() }

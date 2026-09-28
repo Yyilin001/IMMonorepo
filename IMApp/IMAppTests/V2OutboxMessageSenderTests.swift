@@ -5,99 +5,66 @@ import Testing
 @testable import IMApp
 
 @MainActor
-struct V2OutboxMessageSenderTests {
-    @Test("sending behind older work reports the new command as queued", arguments: [false, true])
-    func olderCommandDoesNotDetermineSendOutcome(rejectOld: Bool) async throws {
-        let directory = FileManager.default.temporaryDirectory.appending(path: "im-app-send-correlation-\(UUID())")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
-        do {
-            let transport = SuspendedSendTransport(rejectOld: rejectOld)
-            let olderOutbox = V2CommandOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: 999) })
-            let room = RoomID(uuid: UUID())
-            let older = try await olderOutbox.enqueueMessage(roomID: room, text: "old")
-            let outbox = V2CommandOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: 1_000) })
-            let sender = V2OutboxConversationSender(outbox: outbox)
-            #expect(try await sender.send(text: "new", media: [], mentions: [], in: room.rawValue) == .queuedForRetry)
-            let commands = try await store.pendingMessageCommands()
-            let current = try #require(commands.first { $0.text == "new" })
-            #expect(current.state == .pending)
-            #expect(commands.first { $0.clientMessageID == older.clientMessageID }?.state == (rejectOld ? .rejected : .accepted))
-            #expect(await transport.calls == 1)
-            #expect(try await outbox.flushOnce() == .accepted(current.clientMessageID))
-            #expect(await transport.calls == 2)
-            try await store.close()
-        } catch {
-            try? await store.close()
-            throw error
-        }
+@Suite("App durable message sender")
+struct V2OperationMessageSenderTests {
+    @Test("the page persists a new send independently of older results",arguments:[false,true])
+    func olderCommandDoesNotDetermineSendOutcome(rejectOld:Bool) async throws {
+        let f=try V2AppMessageWorkFixture(rejectOld:rejectOld);defer { f.remove() }
+        let first=try await f.send.enqueueMessage(roomID:f.room,text:"old")
+        try await f.store.handOffSendIntent(first)
+        let older=try #require(try await f.store.dueOperationWork(now:.now,kinds:[.sendMessage]).first)
+        try await f.send.execute(f.claim(older))
+        let sender=V2OperationConversationSender(service:f.send)
+        #expect(try await sender.send(text:"new",media:[],in:f.room.rawValue) == .queuedForRetry)
+        #expect(try await f.store.preparingSendIntents().first?.text=="new")
+        #expect(try await f.store.operationWork(id:older.id)?.execution == (rejectOld ? .rejected : .committed))
+        #expect(await f.remote.calls==1)
+        try await f.store.close()
     }
-
-    @Test("a cancelled sender does not enqueue a new message")
+    @Test("page cancellation before sending cannot write an intent")
     func cancelledSendDoesNotEnqueue() async throws {
-        let directory = FileManager.default.temporaryDirectory.appending(path: "im-app-cancelled-send-\(UUID())")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
-        do {
-            let transport = SuspendedSendTransport()
-            let outbox = V2CommandOutboxEngine(store: store, transport: transport)
-            let sender = V2OutboxConversationSender(outbox: outbox)
-            let room = RoomID(uuid: UUID())
-            let task = Task {
-                withUnsafeCurrentTask { $0?.cancel() }
-                return try await sender.send(text: "cancelled", media: [], mentions: [], in: room.rawValue)
-            }
-            await #expect(throws: CancellationError.self) { try await task.value }
-            #expect(try await store.pendingMessageCommands().isEmpty)
-            #expect(await transport.calls == 0)
-            #expect(try await sender.send(text: "new send", media: [], mentions: [], in: room.rawValue) == .accepted)
-            #expect(await transport.calls == 1)
-            try await store.close()
-        } catch {
-            try? await store.close()
-            throw error
-        }
-    }
-
-    @Test("a suspended runtime still reports a durably queued message and resumes its original command")
-    func suspendedSendReportsQueued() async throws {
-        let directory = FileManager.default.temporaryDirectory.appending(path: "im-app-suspended-send-\(UUID())")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
-        do {
-            let transport = SuspendedSendTransport()
-            let outbox = V2CommandOutboxEngine(store: store, transport: transport)
-            let sender = V2OutboxConversationSender(outbox: outbox)
-            await outbox.suspendCommandFlushing()
-            let room = RoomID(uuid: UUID())
-            #expect(try await sender.send(text: "queued", media: [], mentions: [], in: room.rawValue) == .queuedForRetry)
-            let pending = try #require(try await store.pendingMessageCommands().first)
-            #expect(pending.state == .pending && pending.text == "queued")
-            #expect(await transport.calls == 0)
-            await outbox.resumeCommandFlushing()
-            #expect(try await outbox.flushOnce() == .accepted(pending.clientMessageID))
-            #expect(try await store.pendingMessageCommands().first?.state == .accepted)
-            #expect(await transport.calls == 1)
-            try await store.close()
-        } catch {
-            try? await store.close()
-            throw error
-        }
+        let f=try V2AppMessageWorkFixture();defer { f.remove() }
+        let sender=V2OperationConversationSender(service:f.send)
+        let task=Task { withUnsafeCurrentTask { $0?.cancel() };return try await sender.send(text:"cancelled",media:[],in:f.room.rawValue) }
+        await #expect(throws:CancellationError.self) { try await task.value }
+        #expect(try await f.store.preparingSendIntents().isEmpty)
+        #expect(await f.remote.calls==0)
+        try await f.store.close()
     }
 }
-
-private actor SuspendedSendTransport: V2ClientMessageTransport {
-    var calls = 0
-    let rejectOld: Bool
-    init(rejectOld: Bool = false) { self.rejectOld = rejectOld }
-    func sendMessage(roomID: RoomID, clientMessageID: ClientMessageID, text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?) throws -> V2ClientMessageAcceptance {
-        calls += 1
-        if rejectOld && text == "old" {
-            throw V2RealtimeTransportError.server(code: "FORBIDDEN", retryable: false, retryAfterSeconds: 0, currentRevision: 0)
-        }
-        return try .init(messageID: .init(uuid: UUID()), roomID: roomID, roomSequence: 1, createdAt: Date())
+struct V2AppMessageWorkFixture {
+    let root:URL,binding=V2LocalInstallationBinding(value:UUID()),account=UserID(uuid:UUID()),room=RoomID(uuid:UUID())
+    let store:GRDBV2LocalSyncStore,remote:V2AppMessageWorkClient,send:V2MessageSendOperationService,mutation:V2MessageMutationOperationService
+    init(rejectOld:Bool=false) throws {
+        root=FileManager.default.temporaryDirectory.appending(path:"app-message-work-"+UUID().uuidString)
+        store=try .init(databaseURL:root.appending(path:"state.sqlite"),installationBinding:binding,userID:account)
+        remote=V2AppMessageWorkClient(rejectOld:rejectOld)
+        send = .init(accountID:account,store:store,client:remote)
+        mutation = .init(accountID:account,store:store,client:remote)
     }
+    func claim(_ work:V2OperationWork) async throws -> V2OperationWorkClaim {
+        guard case .claimed(let claim)=try await store.claimOperationWork(id:work.id,ownerID:UUID(),action:work.nextAction,now:work.nextActionAt) else { throw V2OperationWorkError.invalidTransition }
+        return claim
+    }
+    func remove() { try? FileManager.default.removeItem(at:root) }
+}
+actor V2AppMessageWorkClient:V2MessageSendOperationClient,V2MessageMutationOperationClient {
+    let rejectOld:Bool
+    var calls=0
+    init(rejectOld:Bool) { self.rejectOld=rejectOld }
+    func submit(_ command:V2MessageSendOperationCommand) async throws -> V2MessageSendOperationRecoveryResult {
+        calls += 1
+        let outcome:V2MessageSendOperationTerminalOutcome = rejectOld ? .rejected(.permissionDenied)
+            : .accepted(try .init(messageID:.init(uuid:UUID()),roomSequence:1))
+        return .receipt(try .init(identity:command.identity,fingerprint:command.fingerprint,outcome:outcome,resolvedAtMilliseconds:UInt64(Date().timeIntervalSince1970*1_000)))
+    }
+    func submit(_ payload:V2MessageMutationPayload) async throws -> V2MessageMutationRecoveryResult {
+        calls += 1
+        guard case .message(_,let message)=try payload.identity.scope else { throw V2OperationWorkError.invalidRecord }
+        let outcome:V2MessageMutationTerminalOutcome = rejectOld ? .rejected(.permissionDenied)
+            : .committed(try .init(messageID:message,messageRevision:2,roomSequence:1,eventID:.init(uuid:UUID())))
+        return .receipt(try .init(identity:payload.identity,fingerprint:payload.fingerprint,outcome:outcome,resolvedAtMilliseconds:UInt64(Date().timeIntervalSince1970*1_000)))
+    }
+    func recover(_ request:V2MessageSendOperationRecoveryRequest) async throws -> V2MessageSendOperationRecoveryResult { .unresolved }
+    func recover(_ request:V2MessageMutationRecoveryRequest) async throws -> V2MessageMutationRecoveryResult { .unresolved }
 }

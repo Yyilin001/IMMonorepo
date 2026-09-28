@@ -44,14 +44,21 @@ public struct V2VaporProfilePresentationRoutes: Sendable {
             }
             catch { throw map(error) }
         }
-        routes.put("v2", "profile-presentations", "contact-aliases", ":target") { request async throws -> Response in
-            let actor = try await authenticate(request)
-            guard let rawTarget = request.parameters.get("target"), let target = try? UserID(rawTarget) else { throw Abort(.badRequest) }
-            let input = try await request.content.decode(AliasUpdateRequest.self)
-            do {
-                let value = try await presentations.updateContactAlias(ownerUserID: actor.userID, targetUserID: target, operationID: try .init(input.operationID), expectedRevision: validatedRevision(input.expectedRevision), remarkName: input.remarkName)
-                return try response(AliasResponse(value: value))
-            } catch { throw map(error) }
+        routes.get("v2","profile-presentations","contact-aliases",":target") { request async throws -> Response in
+            let actor=try await authenticate(request),target=try aliasTarget(request)
+            do { return try response(await presentations.contactAliasSnapshot(ownerUserID:actor.userID,targetUserID:target)) } catch { throw map(error) }
+        }
+        routes.on(.put,"v2","profile-presentations","contact-aliases",":target",maxBodySize:"4kb") { request async throws -> Response in
+            let actor=try await authenticate(request),target=try aliasTarget(request)
+            let command:V2ContactAliasUpdateCommand=try await input(request)
+            guard command.ownerUserID==actor.userID,command.targetUserID==target else { throw noStoreAbort(.forbidden) }
+            do { return try response(await presentations.updateContactAlias(command)) } catch { throw map(error) }
+        }
+        routes.on(.post,"v2","profile-presentations","contact-aliases",":target","operations","recover",maxBodySize:"4kb") { request async throws -> Response in
+            let actor=try await authenticate(request),target=try aliasTarget(request)
+            let value:V2ContactAliasRecoveryRequest=try await input(request)
+            guard value.identity.accountID==actor.userID,case .userPair(let owner,let scopedTarget)=value.identity.scope,owner==actor.userID,scopedTarget==target else { throw noStoreAbort(.forbidden) }
+            do { return try response(await presentations.recoverContactAlias(value)) } catch { throw map(error) }
         }
         routes.get("v2", "profile-presentations", "groups", ":room", "nicknames") { request async throws -> Response in
             let actor = try await authenticate(request)
@@ -76,15 +83,23 @@ public struct V2VaporProfilePresentationRoutes: Sendable {
             catch V2MediaStoreError.downloadNotAuthorized { throw Abort(.forbidden) }
             catch { throw map(error) }
         }
-        routes.put("v2", "profile-presentations", "groups", ":room", "nickname") { request async throws -> Response in
-            let actor = try await authenticate(request)
-            guard let rawRoom = request.parameters.get("room"), let room = try? RoomID(rawRoom) else { throw Abort(.badRequest) }
-            let input = try await request.content.decode(NicknameUpdateRequest.self)
-            do {
-                let value = try await presentations.updateOwnGroupNickname(actorUserID: actor.userID, roomID: room, operationID: try .init(input.operationID), expectedRevision: validatedRevision(input.expectedRevision), nickname: input.nickname)
-                return try response(NicknameResponse(value: value))
-            } catch { throw map(error) }
+        routes.get("v2","profile-presentations","groups",":room","nickname") { request async throws -> Response in
+            let actor=try await authenticate(request),room=try nicknameRoom(request)
+            do { return try response(await presentations.ownGroupNicknameSnapshot(actorUserID:actor.userID,roomID:room)) } catch { throw map(error) }
         }
+        routes.on(.put,"v2","profile-presentations","groups",":room","nickname",maxBodySize:"4kb") { request async throws -> Response in
+            let actor=try await authenticate(request),room=try nicknameRoom(request)
+            let command:V2GroupNicknameUpdateCommand=try await input(request)
+            guard command.actorUserID==actor.userID,command.roomID==room else { throw noStoreAbort(.forbidden) }
+            do { return try response(await presentations.updateOwnGroupNickname(command)) } catch { throw map(error) }
+        }
+        routes.on(.post,"v2","profile-presentations","groups",":room","nickname","operations","recover",maxBodySize:"4kb") { request async throws -> Response in
+            let actor=try await authenticate(request),room=try nicknameRoom(request)
+            let value:V2GroupNicknameRecoveryRequest=try await input(request)
+            guard value.actorUserID==actor.userID,value.roomID==room else { throw noStoreAbort(.forbidden) }
+            do { return try response(await presentations.recoverGroupNickname(value)) } catch { throw map(error) }
+        }
+
     }
 
     /// 解析可选的乐观锁版本。
@@ -92,11 +107,17 @@ public struct V2VaporProfilePresentationRoutes: Sendable {
     /// - Parameter raw: 请求中的版本整数。
     /// - Returns: 解析后的版本。
     /// - Throws: 当版本非法时报 `invalidPresentation`。
-    private func validatedRevision(_ raw: UInt64?) throws -> V2ProfileRevision? {
-        guard let raw else { return nil }
-        guard let revision = V2ProfileRevision(rawValue: raw) else { throw V2ProfilePresentationError.invalidPresentation }
-        return revision
+    private func aliasTarget(_ request:Request) throws -> UserID {
+        guard let raw=request.parameters.get("target"),let id=UUID(uuidString:raw) else { throw noStoreAbort(.badRequest) };return .init(uuid:id)
     }
+    private func nicknameRoom(_ request:Request) throws -> RoomID {
+        guard let raw=request.parameters.get("room"),let id=UUID(uuidString:raw) else { throw noStoreAbort(.badRequest) };return .init(uuid:id)
+    }
+    private func input<Value:Decodable>(_ request:Request) async throws -> Value {
+        guard let bytes=try await request.body.collect(),bytes.count<=4096 else { throw noStoreAbort(.contentTooLarge) }
+        do { return try await request.content.decode(Value.self,using:JSONDecoder()) } catch { throw noStoreAbort(.badRequest) }
+    }
+    private func noStoreAbort(_ status:HTTPResponse.Status) -> Abort { Abort(status,headers:[.cacheControl:"no-store"]) }
 
     /// 获取 `cursor` 分页参数。
     ///
@@ -124,13 +145,14 @@ public struct V2VaporProfilePresentationRoutes: Sendable {
 
     /// 映射业务错误为 HTTP 错误码。
     private func map(_ error: Error) -> Abort {
-        guard let error = error as? V2ProfilePresentationError else { return Abort(.serviceUnavailable) }
+        guard let error = error as? V2ProfilePresentationError else { return noStoreAbort(.serviceUnavailable) }
         switch error {
-        case .forbidden: return Abort(.forbidden)
-        case .unavailable: return Abort(.notFound)
-        case .revisionConflict: return Abort(.conflict)
-        case .operationPayloadMismatch, .invalidPresentation: return Abort(.badRequest)
-        case .corruptPersistenceState: return Abort(.serviceUnavailable)
+        case .forbidden: return noStoreAbort(.forbidden)
+        case .unavailable: return noStoreAbort(.notFound)
+        case .revisionConflict: return noStoreAbort(.conflict)
+        case .operationPayloadMismatch: return noStoreAbort(.conflict)
+        case .invalidPresentation: return noStoreAbort(.badRequest)
+        case .corruptPersistenceState: return noStoreAbort(.serviceUnavailable)
         }
     }
 
@@ -145,32 +167,6 @@ public struct V2VaporProfilePresentationRoutes: Sendable {
     }
 }
 
-/// 联系人别名更新请求。
-private struct AliasUpdateRequest: Content {
-    let operationID: String
-    let expectedRevision: UInt64?
-    let remarkName: String?
-
-    enum CodingKeys: String, CodingKey {
-        case operationID = "operation_id"
-        case expectedRevision = "expected_revision"
-        case remarkName = "remark_name"
-    }
-}
-
-/// 群昵称更新请求。
-private struct NicknameUpdateRequest: Content {
-    let operationID: String
-    let expectedRevision: UInt64?
-    let nickname: String?
-
-    enum CodingKeys: String, CodingKey {
-        case operationID = "operation_id"
-        case expectedRevision = "expected_revision"
-        case nickname
-    }
-}
-
 /// 联系人别名列表响应。
 private struct AliasListResponse: Content {
     let values: [V2ContactAlias]
@@ -179,23 +175,5 @@ private struct AliasListResponse: Content {
     enum CodingKeys: String, CodingKey {
         case values = "aliases"
         case nextCursor = "next_cursor"
-    }
-}
-
-/// 单条联系人别名响应。
-private struct AliasResponse: Content {
-    let value: V2ContactAlias
-
-    enum CodingKeys: String, CodingKey {
-        case value = "alias"
-    }
-}
-
-/// 单条群昵称响应。
-private struct NicknameResponse: Content {
-    let value: V2GroupMemberPresentation
-
-    enum CodingKeys: String, CodingKey {
-        case value = "nickname"
     }
 }

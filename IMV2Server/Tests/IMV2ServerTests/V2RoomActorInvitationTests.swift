@@ -54,60 +54,76 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 identities: PostgresV2GroupInvitationIdentityReader(database: controlDB),
                 capacityProfile: profile, now: { fixedNow })
             let drop = D4InviteResponseDrop()
-            let port = V2ActorInvitationRoomPort(command: { command, _ in
-                let result = try await executor.execute(command)
-                if await drop.consume(command) { throw D4InviteSimulatedResponseLoss() }
-                return result
-            }, query: { query, _ in try await executor.execute(query) })
             let issuer = try V2GroupInviteSecretIssuer(rawKey: Data(repeating: 0x37, count: 32))
+            @Sendable func operationStore(_ intent: V2GroupInvitationOperationIntent) throws -> PostgresV2GroupInvitationOperationStore {
+                let invite: GroupInviteID?
+                switch intent.action { case .submit(let id, _, _), .revoke(let id, _): invite = id; default: invite = nil }
+                return try .init(database: ownerDB, activationToken: grant.token,
+                    identities: PostgresV2GroupInvitationIdentityReader(database: controlDB), issuer: issuer,
+                    policy: .standard, capacity: profile, inviteID: invite)
+            }
+            let readStore = try PostgresV2GroupInvitationOperationStore(database: ownerDB, activationToken: grant.token,
+                identities: PostgresV2GroupInvitationIdentityReader(database: controlDB), issuer: issuer, policy: .standard, capacity: profile)
+            let port = V2ActorInvitationRoomPort(query: { query, _ in try await executor.execute(query) })
+            let operationPort = V2GroupInvitationOperationRoomPort(baseline: { query, _ in
+                try await readStore.baseline(roomID: query.roomID, actorUserID: query.actorUserID)
+            }, admit: { intent, _ in try await operationStore(intent).admit(intent, now: fixedNow) }, submit: { request, _ in
+                let result = try await operationStore(request.command.intent).submit(request, now: fixedNow)
+                if await drop.consume(request.command.intent.action) { throw D4InviteSimulatedResponseLoss() }
+                return result
+            }, recover: { request, _ in try await operationStore(request.intent).recover(request, now: fixedNow) })
             let coordinator = V2ActorInvitationCoordinator(controlDatabase: controlDB,
-                room: port, secretIssuer: issuer, now: { fixedNow })
-            let deadline = ContinuousClock().now.advanced(by: .seconds(30))
-            let create = V2ActorCreateGroupInviteWire(roomID: room, actorUserID: actor,
-                operationID: .init(uuid: UUID()), lifetime: 3600, maximumApprovedUses: 1)
+                room: port, operations: operationPort, secretIssuer: issuer, now: { fixedNow })
+            let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+            let baseline = try await coordinator.operationBaseline(roomID: room, actorUserID: actor, deadline: deadline)
+            func intent(_ principal: UserID, reference: V2OperationReference, action: V2GroupInvitationOperationAction) throws -> V2GroupInvitationOperationIntent {
+                try .init(identity: .init(accountID: principal, scope: .room(room), operation: reference), action: action,
+                    confirmedUntilMilliseconds: UInt64(fixedNow.timeIntervalSince1970 * 1_000) + 120_000)
+            }
+            func admitted(_ value: V2GroupInvitationOperationIntent, secret: V2GroupInvitationSecretAuthorization? = nil) async throws -> V2GroupInvitationOperationCommand {
+                guard case .admitted(let admission) = try await coordinator.admitOperation(.init(intent: value, secretAuthorization: secret), deadline: deadline) else { throw V2GroupInviteDirectoryError.ownerResultMismatch }
+                return try .init(intent: value, admission: admission)
+            }
+            let create = try intent(actor, reference: .groupInvite(.init(uuid: UUID())),
+                action: .create(lifetimeSeconds: 3_600, maximumApprovedUses: 1, expectedMembershipRevision: baseline.membershipRevision))
+            let createCommand = try await admitted(create)
             await drop.arm(.creation)
             await #expect(throws: D4InviteSimulatedResponseLoss.self) {
-                _ = try await coordinator.create(create, deadline: deadline)
+                _ = try await coordinator.submitOperation(.init(command: createCommand), deadline: deadline)
             }
             #expect(try await owner.raw("SELECT count(*)::bigint AS value FROM im_v2.group_invite_links")
                 .first(decoding: D4InviteCountRow.self)?.value == 1)
-            let creationWorker = V2GroupInviteCreationRecoveryWorker(
-                jobs: PostgresV2GroupInviteDirectory(database: controlDB), coordinator: coordinator,
+            let creationWorker = V2GroupInviteCreationRecoveryWorker(jobs: PostgresV2GroupInviteDirectory(database: controlDB), coordinator: coordinator,
                 deadline: { deadline }, now: { fixedNow.addingTimeInterval(31) })
             let creationReport = try await creationWorker.runOnce(limit: 1)
             #expect(creationReport.attempted == 1 && creationReport.completed == 1 && creationReport.deferred == 0)
-            guard case .created(let link) = try await coordinator.create(create, deadline: deadline) else {
-                throw V2GroupInviteDirectoryError.ownerResultMismatch
-            }
-            let digest = issuer.digest(try link.secret.toDomain())
-            #expect(try await PostgresV2GroupInviteDirectory(database: controlDB)
-                .resolve(tokenDigest: digest)?.inviteID == link.inviteID)
-            let submit = V2ActorSubmitGroupJoinWire(applicantUserID: applicant,
-                operationID: .init(uuid: UUID()), secret: link.secret, note: "Please admit")
+            guard case .receipt(let created) = try await coordinator.recoverOperation(.init(intent: create, action: .query), deadline: deadline),
+                  case .applied(.inviteCreated(let inviteID, _, _, _)) = created.outcome else { throw V2GroupInviteDirectoryError.ownerResultMismatch }
+            #expect(created.validates(intent: create))
+            let secret = try issuer.secret(actorUserID: actor, operationID: .init(create.identity.operation.rawOperationID))
+            let digest = issuer.digest(secret)
+            #expect(try await PostgresV2GroupInviteDirectory(database: controlDB).resolve(tokenDigest: digest)?.inviteID == inviteID)
+            let submit = try intent(applicant, reference: .groupJoinRequest(.init(uuid: UUID())), action: .submit(inviteID: inviteID, tokenDigest: digest, note: "Please admit"))
+            let authorization = V2GroupInvitationSecretAuthorization(secret: secret)
+            let submitCommand = try await admitted(submit, secret: authorization)
             await drop.arm(.submission)
             await #expect(throws: D4InviteSimulatedResponseLoss.self) {
-                _ = try await coordinator.submitBySecret(submit, deadline: deadline)
+                _ = try await coordinator.submitOperation(.init(command: submitCommand, secretAuthorization: authorization), deadline: deadline)
             }
-            let recovery = V2GroupJoinQuotaRecoveryWorker(controlDatabase: controlDB,
-                coordinator: coordinator, deadline: { deadline }, now: { fixedNow })
+            let recovery = V2GroupJoinQuotaRecoveryWorker(controlDatabase: controlDB, coordinator: coordinator, deadline: { deadline }, now: { fixedNow })
             let report = try await recovery.runOnce(limit: 1)
             #expect(report.attempted == 1 && report.reconciled == 1 && report.deferred == 0)
-            guard case .submission(let settled) = try await coordinator.submitBySecret(submit, deadline: deadline) else {
-                throw V2GroupInviteDirectoryError.ownerResultMismatch
-            }
-            let request: V2ActorGroupJoinRequestRecordWire
-            switch settled {
-            case .submitted(let value), .alreadyPending(let value): request = value
-            default: throw V2GroupInviteDirectoryError.ownerResultMismatch
-            }
-            let approve = V2ActorDecideGroupJoinWire(roomID: room, requestID: request.requestID,
-                reviewerUserID: actor, operationID: .init(uuid: UUID()), decision: .approve)
-            let cancel = V2ActorCancelGroupJoinWire(roomID: room, requestID: request.requestID,
-                applicantUserID: applicant)
-            async let approval = coordinator.decide(approve, deadline: deadline)
-            async let cancellation = coordinator.cancel(cancel, deadline: deadline)
+            guard case .receipt(let submitted) = try await coordinator.recoverOperation(.init(intent: submit, action: .query), deadline: deadline),
+                  case .applied(.requestSubmitted(let requestID, _)) = submitted.outcome else { throw V2GroupInviteDirectoryError.ownerResultMismatch }
+            #expect(submitted.validates(intent: submit))
+            let decisionBaseline = try await coordinator.operationBaseline(roomID: room, actorUserID: actor, deadline: deadline)
+            let approve = try intent(actor, reference: .groupJoinDecision(.init(uuid: UUID())), action: .decide(requestID: requestID, decision: .approve, expectedMembershipRevision: decisionBaseline.membershipRevision))
+            let cancel = try intent(applicant, reference: .groupJoinRequest(.init(uuid: UUID())), action: .cancel(requestID: requestID))
+            let approvalCommand = try await admitted(approve), cancellationCommand = try await admitted(cancel)
+            async let approval = coordinator.submitOperation(.init(command: approvalCommand), deadline: deadline)
+            async let cancellation = coordinator.submitOperation(.init(command: cancellationCommand), deadline: deadline)
             _ = try await (approval, cancellation)
-            let state = try await owner.raw("SELECT state FROM im_v2.group_join_requests WHERE request_id = \(bind: request.requestID.uuidValue!)")
+            let state = try await owner.raw("SELECT state FROM im_v2.group_join_requests WHERE request_id = \(bind: requestID.uuidValue!)")
                 .first(decoding: D4InviteStateRow.self)?.state
             #expect(state == "approved" || state == "cancelled")
             let membershipCount = try await owner.raw("""
@@ -118,11 +134,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await control.raw("SELECT count(*)::bigint AS value FROM im_v2.group_join_quota_intents WHERE phase IN ('held','tracking')")
                 .first(decoding: D4InviteCountRow.self)?.value == 0)
             #expect(try await leases.release(token: grant.token))
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
-                _ = try await executor.execute(.revoke(.init(roomID: room,
-                    actorUserID: actor, operationID: .init(uuid: UUID()), inviteID: link.inviteID)))
-            }
-            #expect(try await owner.raw("SELECT state FROM im_v2.group_invite_links WHERE invite_id = \(bind: link.inviteID.uuidValue!)")
+            let revoke = try intent(actor, reference: .groupInvite(.init(uuid: UUID())), action: .revoke(inviteID: inviteID, expectedMembershipRevision: decisionBaseline.membershipRevision))
+            await #expect(throws: V2RoomActivationLeaseError.activationChanged) { try await operationStore(revoke).admit(revoke, now: fixedNow) }
+            #expect(try await owner.raw("SELECT state FROM im_v2.group_invite_links WHERE invite_id = \(bind: inviteID.uuidValue!)")
                 .first(decoding: D4InviteStateRow.self)?.state == "active")
             try await control.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await owner.raw("DROP SCHEMA im_v2 CASCADE").run()
@@ -144,10 +158,10 @@ private actor D4InviteResponseDrop {
     enum Mode { case creation, submission }
     private var mode: Mode?
     func arm(_ next: Mode) { mode = next }
-    func consume(_ command: V2RoomInvitationCommand) -> Bool {
+    func consume(_ command: V2GroupInvitationOperationAction) -> Bool {
         let shouldDrop: Bool
         switch (mode, command) {
-        case (.creation?, .commitCreation), (.submission?, .submitReserved): shouldDrop = true
+        case (.creation?, .create), (.submission?, .submit): shouldDrop = true
         default: shouldDrop = false
         }
         if shouldDrop { mode = nil }

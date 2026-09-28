@@ -27,6 +27,7 @@ public enum V2ActorAdministrationInputFailureWire: String, Codable, Equatable, S
     case trustedActionOnUserLane, unsupportedAuthenticatedRevision
 }
 public enum V2ActorAdministrationFailureWire: Codable, Equatable, Sendable, Error {
+    case invitation(V2ActorInvitationErrorWire)
     case membership(V2ActorMembershipFailureWire)
     case groupCapability(V2ActorGroupCapabilityFailureWire)
     case moderation(V2ActorModerationFailureWire)

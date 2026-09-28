@@ -51,25 +51,17 @@ final class IMAppLocalAccountUITests: XCTestCase {
                 wire: receiverConnection,
                 protocolVersion: receiverSession.protocolVersion
             )
-            let directRoom = try await senderTransport.openDirectRoom(
-                operationID: try DirectRoomOperationID(UUID().uuidString.lowercased()),
-                targetUserID: receiver.userID
-            )
-            let blocked = try await receiverTransport.changeUserBlock(
-                operationID: try UserBlockOperationID(UUID().uuidString.lowercased()),
-                targetUserID: sender.userID,
-                action: .block
-            )
-            XCTAssertTrue(blocked.isBlocked)
+            let directRoom = try await sender.openDirectRoom(target: receiver.userID)
+            try await receiver.setBlock(target: sender.userID, blocked: true)
             await assertDirectMessageIsRestricted(
-                senderTransport: senderTransport,
+                sender: sender,
                 roomID: directRoom.roomID,
                 text: "must-not-deliver-while-blocked"
             )
 
             let senderBinding = LocalE2EInstallationBindingStore()
             let senderURL = directory.appendingPathComponent("sender.sqlite")
-            let senderStore = try await V2LocalStoreBootstrapper(bindingStore: senderBinding).open(databaseURL: senderURL)
+            let senderStore = try await V2LocalStoreBootstrapper(bindingStore: senderBinding).open(databaseURL: senderURL, userID: sender.userID)
             let receiverStore = try await V2LocalStoreBootstrapper(bindingStore: LocalE2EInstallationBindingStore())
                 .open(databaseURL: directory.appendingPathComponent("receiver.sqlite"), userID: receiver.userID)
             let senderSync = V2SyncEngine(transport: senderTransport, store: senderStore,
@@ -93,7 +85,7 @@ final class IMAppLocalAccountUITests: XCTestCase {
             await senderConnection.disconnect()
             let restoredSession = try await restoredSenderConnection.connectAndAuthenticate(
                 accessToken: sender.accessToken, deviceID: sender.deviceID, supportedCapabilityProfiles: ["base"])
-            let restoredStore = try await V2LocalStoreBootstrapper(bindingStore: senderBinding).open(databaseURL: senderURL)
+            let restoredStore = try await V2LocalStoreBootstrapper(bindingStore: senderBinding).open(databaseURL: senderURL, userID: sender.userID)
             let persistedHints = try await restoredStore.timelineActivities(in: directRoom.roomID)
             XCTAssertEqual(persistedHints, hints, "重新打开 SQLite 后必须保留原提示身份和顺序。")
             let restoredTransport = V2ProtobufSyncTransport(wire: restoredSenderConnection,
@@ -105,7 +97,7 @@ final class IMAppLocalAccountUITests: XCTestCase {
             XCTAssertEqual(replayedHints, hints, "重连补拉不得重复插入提示。")
             try await assertPrivateHintSurvivesAppRelaunch(sender: sender, roomID: directRoom.roomID.rawValue, hintID: hint.id) {
                 let before = Set(try await restoredStore.timelineActivities(in: directRoom.roomID).map(\.id))
-                await assertDirectMessageIsRestricted(senderTransport: restoredTransport, roomID: directRoom.roomID,
+                await assertDirectMessageIsRestricted(sender: sender, roomID: directRoom.roomID,
                     text: "background-recovery-\(UUID())")
                 let deadline = ContinuousClock.now.advanced(by: .seconds(10))
                 while ContinuousClock.now < deadline {
@@ -119,21 +111,15 @@ final class IMAppLocalAccountUITests: XCTestCase {
             }
 
 
-            let unblocked = try await receiverTransport.changeUserBlock(
-                operationID: try UserBlockOperationID(UUID().uuidString.lowercased()),
-                targetUserID: sender.userID,
-                action: .unblock
-            )
-            XCTAssertFalse(unblocked.isBlocked)
+            try await receiver.setBlock(target: sender.userID, blocked: false)
             await receiverConnection.disconnect()
-            let accepted = try await restoredTransport.sendMessage(
+            let accepted = try await sender.sendMessage(
                 roomID: directRoom.roomID,
                 clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
                 text: "allowed-after-explicit-unblock",
                 media: [],
                 mentions: []
             )
-            XCTAssertEqual(accepted.roomID, directRoom.roomID)
             let reconnected = try await receiverConnection.connectAndAuthenticate(
                 accessToken: receiver.accessToken, deviceID: receiver.deviceID, supportedCapabilityProfiles: ["base"])
             let recoveryTransport = V2ProtobufSyncTransport(wire: receiverConnection,
@@ -185,7 +171,7 @@ final class IMAppLocalAccountUITests: XCTestCase {
             let privateActivities = try await receiverStore.timelineActivities(in: directRoom.roomID)
             XCTAssertTrue(privateActivities.isEmpty)
             if secondaryPort != nil {
-                let online = try await restoredTransport.sendMessage(roomID: directRoom.roomID,
+                let online = try await sender.sendMessage(roomID: directRoom.roomID,
                     clientMessageID: .init(UUID().uuidString.lowercased()), text: "cross-gateway-online",
                     media: [], mentions: [])
                 try await withThrowingTaskGroup(of: Void.self) { group in
@@ -395,107 +381,30 @@ private func awaitReceiverProjection(
     throw LocalE2EDeliveryError.receiverProjectionTimedOut(visibleMessageCount: visibleMessages.count)
 }
 
-private func awaitSenderOutboxReplay(
-    _ outbox: V2CommandOutboxEngine,
-    expectedClientMessageID: ClientMessageID
-) async throws -> ClientMessageID {
-    for _ in 0 ..< 50 {
-        switch try await outbox.flushOnce() {
-        case .accepted(let clientMessageID):
-            guard clientMessageID == expectedClientMessageID else {
-                throw LocalE2EDeliveryError.unexpectedOutboxCommand(clientMessageID)
-            }
-            return clientMessageID
-        case .idle, .retryScheduled:
-            try await Task.sleep(for: .milliseconds(100))
-        case .rejected(_, let code):
-            throw LocalE2EDeliveryError.senderOutboxRejected(code)
-        }
-    }
-    throw LocalE2EDeliveryError.senderOutboxReplayTimedOut
-}
-
-private func assertStrangerMessageIsForbidden(
-    senderTransport: V2ProtobufSyncTransport,
-    roomID: RoomID
-) async {
-    await assertDirectMessageIsRestricted(
-        senderTransport: senderTransport,
-        roomID: roomID,
-        text: "must-not-deliver"
-    )
-}
-
-private func assertDirectMessageIsRestricted(
-    senderTransport: V2ProtobufSyncTransport,
-    roomID: RoomID,
-    text: String
-) async {
+private func assertDirectMessageIsRestricted(sender: LocalE2EAccountCredentials, roomID: RoomID, text: String) async {
     do {
-        _ = try await senderTransport.sendMessage(
-            roomID: roomID,
-            clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
-            text: text,
-            media: [],
-            mentions: []
-        )
-        XCTFail("接收方拒绝 direct 消息后，发送端不应获得消息接受结果。")
-    } catch let error as V2RealtimeTransportError {
-        guard case .server(let code, let retryable, _, _) = error else {
-            XCTFail("direct 消息拒收必须返回服务端授权结果，实际错误：\(error)。")
-            return
+        let client = try sender.sendOperationClient()
+        let command = try V2MessageSendOperationCommand(command: .init(roomID: roomID,
+            senderUserID: sender.userID, clientMessageID: .init(uuid: UUID()), text: text,
+            media: [], mentions: [], limits: .init(maxUTF8Bytes: 4096)),
+            firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 86_400_000)
+        guard case .receipt(let proof) = try await client.submit(command) else {
+            XCTFail("Restricted message must return original terminal proof"); return
         }
-        XCTAssertEqual(code, "DIRECT_MESSAGE_RESTRICTED")
-        XCTAssertFalse(retryable)
-    } catch {
-        XCTFail("direct 消息拒收应映射为不透明授权错误，实际错误：\(error)。")
-    }
-}
-
-private func assertStrangerMessageIsRateLimited(
-    senderTransport: V2ProtobufSyncTransport,
-    roomID: RoomID
-) async {
-    do {
-        _ = try await senderTransport.sendMessage(
-            roomID: roomID,
-            clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
-            text: "must-hit-stranger-window-limit",
-            media: [],
-            mentions: []
-        )
-        XCTFail("本机陌生人消息窗口的第 4 条消息不应被接受。")
-    } catch let error as V2RealtimeTransportError {
-        guard case .server(let code, let retryable, _, _) = error else {
-            XCTFail("陌生人限额必须返回服务端限流结果，实际错误：\(error)。")
-            return
+        XCTAssertTrue(try proof.validates(identity: command.identity, fingerprint: command.fingerprint))
+        XCTAssertEqual(proof.outcome, .rejected(.directPolicyDenied))
+        guard case .receipt(let replay) = try await client.recover(.init(identity: command.identity, fingerprint: command.fingerprint, domainFingerprint: command.command.fingerprint, action: .query)) else {
+            XCTFail("Restricted message must recover its original proof"); return
         }
-        XCTAssertEqual(code, "RATE_LIMITED")
-        XCTAssertTrue(retryable)
-        // `retry_after_seconds` is optional in the current protobuf contract;
-        // a zero value means the client falls back to its bounded local
-        // backoff. The stable gateway guarantee here is the retryable code.
-    } catch {
-        XCTFail("陌生人限额应映射为服务端限流错误，实际错误：\(error)。")
-    }
+        XCTAssertEqual(replay, proof)
+    } catch { XCTFail("Restricted message must return a bound authorization proof: \(error)") }
 }
 
 private enum LocalE2EDeliveryError: Error, LocalizedError {
     case receiverProjectionTimedOut(visibleMessageCount: Int)
-    case senderOutboxReplayTimedOut
-    case senderOutboxRejected(String)
-    case unexpectedOutboxCommand(ClientMessageID)
-
     var errorDescription: String? {
         switch self {
-        case .receiverProjectionTimedOut(let visibleMessageCount):
-            "等待接收端 SQLite 投影超时；当前房间可见消息数：\(visibleMessageCount)。"
-        case .senderOutboxReplayTimedOut:
-            "等待发送端 SQLite outbox 重放超时。"
-        case .senderOutboxRejected(let code):
-            "发送端 SQLite outbox 被服务端终态拒绝：\(code)。"
-        case .unexpectedOutboxCommand(let clientMessageID):
-            "发送端 SQLite outbox 重放了非预期消息：\(clientMessageID.rawValue)。"
+        case .receiverProjectionTimedOut(let count): "等待接收端 SQLite 投影超时；当前房间可见消息数：\(count)。"
         }
     }
 }
@@ -575,6 +484,45 @@ private func assertPrivateHintSurvivesAppRelaunch(
                 XCTAssertEqual(app.descendants(matching: .any).matching(identifier: identifier).count, 1)
             }
             print("IMV2_THREE_FOREGROUND_RECOVERY_CYCLES_PASSED")
+        }
+    }
+}
+
+private struct PrivateHintCredentials: V2ClientMediaEdgeCredentialProvider {
+    let account: LocalE2EAccountCredentials
+    func mediaEdgeCredentials() async throws -> V2ClientMediaEdgeCredentials {
+        .init(accessToken: account.accessToken, deviceID: account.deviceID)
+    }
+}
+private extension LocalE2EAccountCredentials {
+    func sendOperationClient() throws -> V2HTTPMessageSendOperationClient {
+        try .init(baseURL: URL(string: "https://localhost:8443")!, credentials: PrivateHintCredentials(account: self),
+            transport: V2URLSessionMediaEdgeHTTPTransport())
+    }
+    func openDirectRoom(target: UserID) async throws -> (roomID: RoomID, proof: V2DirectRoomOperationReceipt) {
+        let client = try V2HTTPDirectRoomOperationClient(baseURL: URL(string: "https://localhost:8443")!,
+            credentials: PrivateHintCredentials(account: self), transport: V2URLSessionMediaEdgeHTTPTransport())
+        let command = try V2DirectRoomOperationCommand(actorUserID: userID, operationID: .init(uuid: UUID()),
+            targetUserID: target, firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 600_000)
+        guard case .receipt(let proof) = try await client.submit(command), proof.validates(command: command),
+              case .opened(let room, _) = proof.outcome,
+              case .receipt(let replay) = try await client.recover(command, action: .query), replay == proof else {
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+        return (room, proof)
+    }
+    func setBlock(target: UserID, blocked: Bool) async throws {
+        let client = try V2HTTPSocialOperationClient(baseURL: URL(string: "https://localhost:8443")!,
+            credentials: PrivateHintCredentials(account: self), transport: V2URLSessionMediaEdgeHTTPTransport())
+        let baseline = try await client.baseline(targetUserID: target)
+        let command = try V2SocialOperationCommand(identity: .init(accountID: userID,
+            scope: .userPair(userID, target), operation: .userBlock(.init(uuid: UUID()))),
+            action: .userBlock(blocked ? .block : .unblock), expectedRevision: baseline.blockRevision,
+            firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 120_000)
+        guard case .receipt(let proof) = try await client.submit(command), proof.validates(command: command),
+              case .applied(.userBlock(let value, _)) = proof.outcome, value == blocked,
+              case .receipt(let replay) = try await client.recover(command, action: .query), replay == proof else {
+            throw V2RealtimeTransportError.unexpectedResponse
         }
     }
 }

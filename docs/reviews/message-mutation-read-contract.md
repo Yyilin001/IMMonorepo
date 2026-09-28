@@ -17,7 +17,7 @@ writer 与 room pull 共享从 message 唯一索引及 completion 主键读取�
 ClientKit 传输、持久存储、前台预览存储及预览 engine 均接受最后事件序号小于 continuation。仍拒绝乱序、越界、倒退及无进展的后续页。持久流在同一 SQLite 事务中写可见事件、物化投影和扫描游标；无权空洞不制造事件或消息，坏 payload 回滚整个事务。重开数据库保留游标，精确重复页保持幂等。前台预览只更新内存 continuation，不写 durable room cursor 或 personal ACK。
 
 这一 continuation 语义始于历史 protocol 26；当前 wire contract 为 protocol 32，
-服务端 PostgreSQL schema 为 `im-v2-current-53`。客户端与服务端必须使用同一当前协议。
+服务端 PostgreSQL schema 为 `im-v2-current-55`。客户端与服务端必须使用同一当前协议。
 
 ## 有界候选窗口
 

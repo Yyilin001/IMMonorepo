@@ -29,7 +29,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await installSchema(on: sql)
             }
             let actor = UserID(uuid: UUID()), member = UserID(uuid: UUID())
-            for sql in [control, owner] {
+            for sql in [control] {
                 try await sql.raw("""
                     INSERT INTO im_v2.public_user_profiles
                         (user_id, public_handle, display_name, created_at, updated_at)
@@ -46,7 +46,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try V2CapacityProfile(id: "standard", limits: .init(
                 maxEligibleMembers: 100, maxCommandsPerWindow: 1000, retryAfterSeconds: 1))
             let bootstrap = try V2RoomBootstrapDomainExecutor(shardID: "rooms-01",
-                direct: PostgresV2DirectMessagingStore(database: ownerDB),
+                direct: PostgresV2DirectMessagingStore(database: ownerDB, identityReader: PostgresV2DirectRoomIdentityReader(database: controlDB),
+                    projectionDelivery: V2DiscardingUserShardProjectionDelivery()),
                 group: PostgresV2GroupMessagingStore(database: ownerDB),
                 capacityProfile: profile)
             let drop = D4BootstrapResponseDrop()
@@ -57,53 +58,49 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }, stage: { intent, page, _ in
                 try await bootstrap.stage(intent: intent, page: page)
             })
-            let coordinator = V2ActorRoomCreationCoordinator(controlDatabase: controlDB,
-                directRoutes: V2PostgresRoomShardRouter(database: controlDB),
-                directSelector: try .init(shardIDs: ["rooms-01"]),
-                groupSelector: try .init(shardIDs: ["rooms-01"]),
-                bootstrap: port, capacityProfile: profile)
-            let deadline = ContinuousClock().now.advanced(by: .seconds(30))
-            let groupOperation = GroupRoomOperationID(uuid: UUID())
-            let group = V2ActorRoomCreationCommand.createGroup(.init(actorUserID: actor,
-                operationID: groupOperation, title: "Recovery Group",
-                initialMemberUserIDs: [member]))
+            let fixedNow = Date()
+            let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+            let groups = PostgresV2GroupCreationOperationStore(database: controlDB,
+                selector: try .init(shardIDs: ["rooms-01"]), bootstrap: port, capacityProfile: profile)
+            func groupIntent(title: String) throws -> V2GroupCreationIntent {
+                try .init(identity: .init(accountID: actor, scope: .account(actor), operation: .groupRoom(.init(uuid: UUID()))),
+                    title: title, capacityClass: .standard, initialMemberCount: 1,
+                    audienceDigest: V2GroupCreationAudience.digest([member]), firstSubmissionDeadlineMilliseconds: UInt64(fixedNow.timeIntervalSince1970 * 1_000) + 600_000)
+            }
+            let group = try groupIntent(title: "Recovery Group")
+            _ = try await groups.begin(group, now: fixedNow)
+            _ = try await groups.append(.init(intent: group, offset: 0, memberUserIDs: [member]), now: fixedNow)
             await drop.arm()
             await #expect(throws: D4SimulatedResponseLoss.self) {
-                _ = try await coordinator.execute(group, deadline: deadline)
+                _ = try await groups.finalize(group, now: fixedNow, deadline: deadline)
             }
             #expect(try await owner.raw("SELECT count(*)::bigint AS value FROM im_v2.rooms")
                 .first(decoding: D4CountRow.self)?.value == 1)
-            guard case .group(.idempotent(let recovered)) = try await coordinator.execute(group, deadline: deadline) else {
-                throw V2GroupRoomCreationIntentStoreError.routeConflict
-            }
-            #expect(try await owner.raw("SELECT count(*)::bigint AS value FROM im_v2.rooms WHERE room_id = \(bind: recovered.roomID.uuidValue!)")
+            guard case .receipt(let recovered) = try await groups.recover(.init(intent: group, action: .query), now: fixedNow),
+                  case .created(let recoveredRoom, _, _, _) = recovered.outcome else { throw V2GroupRoomCreationIntentStoreError.routeConflict }
+            #expect(recovered.validates(intent: group))
+            #expect(try await owner.raw("SELECT count(*)::bigint AS value FROM im_v2.rooms WHERE room_id = \(bind: recoveredRoom.uuidValue!)")
                 .first(decoding: D4CountRow.self)?.value == 1)
-            let direct = V2ActorRoomCreationCommand.openDirect(.init(actorUserID: actor,
-                operationID: .init(uuid: UUID()), targetUserID: member))
-            guard case .direct(.opened(let opened)) = try await coordinator.execute(direct, deadline: deadline),
-                  case .direct(.idempotent(let reopened)) = try await coordinator.execute(direct, deadline: deadline)
-            else { throw V2GroupRoomCreationIntentStoreError.routeConflict }
-            #expect(opened.roomID == reopened.roomID)
-            let stagedOperation = GroupRoomOperationID(uuid: UUID())
-            let stagedBase = V2ActorStagedGroupOperationWire(actorUserID: actor, operationID: stagedOperation)
-            guard case .draft = try await coordinator.execute(.beginStaged(.init(
-                actorUserID: actor, operationID: stagedOperation, title: "Staged Recovery")),
-                deadline: deadline) else { throw V2GroupAudienceImportError.invalidInput }
-            guard case .draft = try await coordinator.execute(.appendStaged(.init(
-                actorUserID: actor, operationID: stagedOperation, memberUserIDs: [member])),
-                deadline: deadline) else { throw V2GroupAudienceImportError.invalidInput }
+            let direct = PostgresV2DirectRoomOperationStore(database: controlDB,
+                routes: V2PostgresRoomShardRouter(database: controlDB), selector: try .init(shardIDs: ["rooms-01"]), bootstrap: port)
+            let command = try V2DirectRoomOperationCommand(actorUserID: actor, operationID: .init(uuid: UUID()),
+                targetUserID: member, firstSubmissionDeadlineMilliseconds: UInt64(fixedNow.timeIntervalSince1970 * 1_000) + 600_000)
+            let first = try await direct.submit(command, now: fixedNow, deadline: deadline)
+            guard case .receipt(let opened) = first, case .opened = opened.outcome else { throw V2GroupRoomCreationIntentStoreError.routeConflict }
+            #expect(opened.validates(command: command))
+            #expect(try await direct.submit(command, now: fixedNow, deadline: deadline) == first)
+            let staged = try groupIntent(title: "Staged Recovery")
+            _ = try await groups.begin(staged, now: fixedNow)
+            _ = try await groups.append(.init(intent: staged, offset: 0, memberUserIDs: [member]), now: fixedNow)
             await drop.arm()
             await #expect(throws: D4SimulatedResponseLoss.self) {
-                _ = try await coordinator.execute(.finalizeStaged(stagedBase), deadline: deadline)
+                _ = try await groups.finalize(staged, now: fixedNow, deadline: deadline)
             }
-            try await control.raw("""
-                UPDATE im_v2.group_room_creation_drafts
-                SET updated_at = CURRENT_TIMESTAMP - INTERVAL '1 day'
-                WHERE actor_user_id = \(bind: actor.uuidValue!)
-                  AND operation_id = \(bind: stagedOperation.uuidValue!)
-                """).run()
-            let report = try await coordinator.recoverFinalizing(limit: 8, deadline: deadline)
-            #expect(report.claimedCount == 1 && report.recoveredCount == 1 && report.failedCount == 0)
+            // Recovery progresses the already frozen owner operation after its
+            // original admission expires, rather than creating a new identity.
+            guard case .receipt(let resumed) = try await groups.recover(.init(intent: staged, action: .closeIfAbsent), now: fixedNow.addingTimeInterval(601)),
+                  case .created = resumed.outcome else { throw V2GroupRoomCreationIntentStoreError.routeConflict }
+            #expect(resumed.validates(intent: staged))
             #expect(try await owner.raw("SELECT count(*)::bigint AS value FROM im_v2.rooms")
                 .first(decoding: D4CountRow.self)?.value == 3)
             try await control.raw("DROP SCHEMA im_v2 CASCADE").run()

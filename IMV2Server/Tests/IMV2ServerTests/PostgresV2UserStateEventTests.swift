@@ -679,9 +679,9 @@ private var userStateRepoRoot: URL {
         .deletingLastPathComponent().deletingLastPathComponent()
 }
 private func executeUserStateSQL(_ source: String, on sql: any SQLDatabase) async throws {
-    let executable = source.split(separator: "\n", omittingEmptySubsequences: false)
-        .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("--") }.joined(separator: "\n")
-    for statement in postgresStatements(in: executable) where !statement.isEmpty && statement != "BEGIN" && statement != "COMMIT" {
+    // The parser removes SQL comments outside dollar-quoted bodies. Preserve
+    // comments inside function source so readiness verifies the canonical hash.
+    for statement in postgresStatements(in: source) where !statement.isEmpty && statement != "BEGIN" && statement != "COMMIT" {
         try await sql.raw("\(unsafeRaw: statement)").run()
     }
 }

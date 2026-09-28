@@ -1,6 +1,8 @@
 # 仅撤销凭据的 HTTP 与 ClientKit 合同
 
-日期：2026-09-07；B08 仍为实施中。基于 [schema 27 存储合同](device-revocation-capability-storage-contract.md)，本批接通 HTTP 路由、Account 组装及独立 ClientKit 传输。**登录事务尚未交付该凭据，App 的持久退出交接与补偿执行器尚未实现。**
+当前范围：本文的 `POST /v2/device-credentials/revoke` 只处理本机退出时的仅撤销凭据兑换。凭据已在注册事务原子交付；App 已接持久退出交接、独立 runner 和状态观察。下方 2026-09-07 验证数字是当时批次记录，不代表最新整批回归或真机生命周期验收。
+
+远程撤销另走认证账户入口 `GET /v2/devices/revocation-baseline`、`POST /v2/devices/remote-revocations/submit` 与 `POST /v2/devices/remote-revocations/operations/recover`。完整 baseline 最多 256 个其他设备，用户确认窗口最长 120 秒；冻结目标、原 ID、deadline 与 fingerprint，32 KiB 请求/64 KiB 回执。服务端业务撤销及永久原回执同事务，query/close 共锁；后登录设备不扩入原目标。客户端专属 Keychain metadata 不保存 access/refresh/capability，账户 activity 拥有执行，重启不恢复首次 submit 授权；页面离开不取消已保存意图，账号关闭阻止旧页面及 service 新增操作。此最新链路仍待集中验证。
 
 ## 服务端入口
 
@@ -28,7 +30,7 @@
 
 仅接受无 userinfo/query/fragment 的 HTTPS endpoint；默认使用禁用 cookie、HTTP credential storage、缓存和跳转的现有安全 URLSession。每次请求最长 15 秒，并在发送前和返回后检查任务取消。请求体只有 capability 与 operationID，不携带 Authorization、设备头或 cookie。
 
-204 才返回 revoked；410、401、409 分别返回 expired、invalidCredential、operationConflict。其他状态保持错误，429 保留有效的 Retry-After 秒数。网络失败不等于撤销成功；取消继续向上抛出 CancellationError。未来持久执行器必须区分这些状态，不能把 401/410 记为已撤销；410 可作为服务端确认旧会话期限结束的独立结果，按退出 checkpoint 合同收尾。
+204 才返回 revoked；410、401、409 分别返回 expired、invalidCredential、operationConflict。其他状态保持结构化错误，429/503 保留合法 Retry-After 秒数或 HTTP 日期。网络失败不等于撤销成功；取消继续向上抛出 CancellationError。现有持久执行器必须区分这些状态，不能把 401/410 记为已撤销；410 可作为服务端确认旧会话期限结束的独立结果，按退出 checkpoint 合同收尾。
 
 ## 验证边界
 

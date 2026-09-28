@@ -10,7 +10,7 @@ struct ConversationTimestampBoundsTests {
     func rejectsInvalidMuteExpiry(seconds: Double) throws {
         #expect(throws: V2CoreError.invalidPositiveValue) {
             try V2ConversationStateCommand(operationID: .init("operation"), roomID: .init("room"),
-                isPinned: false, isArchived: false, muteUntil: Date(timeIntervalSince1970: seconds))
+                isPinned: false, isArchived: false, muteUntil: Date(timeIntervalSince1970: seconds),expectedRevision:.initial,firstSubmissionDeadlineMilliseconds:1000)
         }
     }
 
@@ -20,7 +20,7 @@ struct ConversationTimestampBoundsTests {
     func preservesValidMuteExpiry(seconds: Double?) throws {
         let date = seconds.map { Date(timeIntervalSince1970: $0) }
         let command = try V2ConversationStateCommand(operationID: .init("operation"), roomID: .init("room"),
-            isPinned: true, isArchived: false, muteUntil: date)
-        #expect(command.muteUntil == date)
+            isPinned: true, isArchived: false, muteUntil: date,expectedRevision:.initial,firstSubmissionDeadlineMilliseconds:1000)
+        #expect(command.muteUntil == date.map { Date(timeIntervalSince1970:($0.timeIntervalSince1970*1000).rounded(.towardZero)/1000) })
     }
 }

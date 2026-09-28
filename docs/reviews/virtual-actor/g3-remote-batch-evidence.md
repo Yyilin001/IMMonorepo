@@ -1,5 +1,7 @@
 # G3 caller-only Gateway remote atomic append
 
+Historical evidence only: protocol44 retires the TCP send/Host shared-send entry point and removes the `--remote-batch` runner mode. Current public sends use typed HTTP operations with independent permanent-proof transactions. The recorded result below applies only to its named historical revision; it does not validate the current public send path. Internal granted-send batching remains a separate implementation boundary.
+
 Status: **passed on real Linux containers and PostgreSQL 16**. The verified run is
 `/Users/yyl/.codex/virtual-actor-builds/g3-remote-batch/run-7e5b5bb1666d47fd85f1f39aa70d0392/result.json` (`passed: true`, exit 0). The seven Release ELF products were built from clean `4a1c6af1030a2534d2f8e3f0c4ef76ff335b7e17`, with source, lockfile, image and per-product SHA-256 recorded in `/Users/yyl/.codex/virtual-actor-builds/candidate-release-remote-batch-4a1c6af1/result.json`. The runner-only HTTP metrics framing fix is `7d236d1f2b3b4d84a3a3f25328b973709f6f7c27`; its business product inputs are unchanged from the binary source.
 

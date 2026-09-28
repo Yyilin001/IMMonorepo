@@ -44,12 +44,14 @@ struct V2AccountRoomGatewayTests {
         do {
         #expect(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
             requiredNotificationWriter: { bytes in await recorder.record(bytes); return true }))
+        let handshakeDeviceID = UUID().uuidString
         var hello = IMV2Envelope(); hello.requestID = 1
         hello.clientHello.supportedProtocolVersions = [UInt32(version)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
+        hello.clientHello.deviceID = handshakeDeviceID
         _ = try await exchange(hello, stream: stream, version: 0)
         var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(version)
-        auth.authenticate.accessToken = "test-token"; auth.authenticate.deviceID = UUID().uuidString
+        auth.authenticate.accessToken = "test-token"; auth.authenticate.deviceID = handshakeDeviceID
         _ = try await exchange(auth, stream: stream)
         var start = IMV2Envelope(); start.requestID = 3; start.protocolVersion = UInt32(version)
         start.accountRoomChangesStart = .init()

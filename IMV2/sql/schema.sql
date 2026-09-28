@@ -454,8 +454,8 @@ CREATE TABLE im_v2.device_session_operations (
     operation_kind text NOT NULL,
     target_device_id uuid,
     created_at timestamp with time zone NOT NULL,
-    CONSTRAINT device_session_operations_check CHECK ((((operation_kind = 'revoke_device'::text) AND (target_device_id IS NOT NULL)) OR ((operation_kind = 'revoke_other_devices'::text) AND (target_device_id IS NULL)))),
-    CONSTRAINT device_session_operations_operation_kind_check CHECK ((operation_kind = ANY (ARRAY['revoke_device'::text, 'revoke_other_devices'::text])))
+    CONSTRAINT device_session_operations_check CHECK ((target_device_id IS NOT NULL)),
+    CONSTRAINT device_session_operations_operation_kind_check CHECK ((operation_kind = 'revoke_device'::text))
 );
 
 CREATE TABLE im_v2.device_snapshot_resets (
@@ -510,13 +510,6 @@ CREATE TABLE im_v2.direct_message_denials (
     CONSTRAINT direct_message_denials_timeline_sequence_check CHECK ((timeline_sequence > 0))
 );
 
-CREATE TABLE im_v2.direct_room_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    target_user_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    created_at timestamp with time zone NOT NULL
-);
 
 CREATE TABLE im_v2.direct_room_pairs (
     lower_user_id uuid NOT NULL,
@@ -603,21 +596,6 @@ CREATE TABLE im_v2.gateway_worker_cursors (
     CONSTRAINT gateway_worker_cursors_last_event_id_check CHECK ((last_event_id >= 0))
 );
 
-CREATE TABLE im_v2.group_announcement_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    body text NOT NULL,
-    expected_revision bigint NOT NULL,
-    resulting_revision bigint NOT NULL,
-    room_sequence bigint NOT NULL,
-    event_id uuid NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    CONSTRAINT group_announcement_operations_body_check CHECK (((length(body) > 0) AND (octet_length(body) <= 4096))),
-    CONSTRAINT group_announcement_operations_expected_revision_check CHECK ((expected_revision >= 0)),
-    CONSTRAINT group_announcement_operations_resulting_revision_check CHECK ((resulting_revision > 0)),
-    CONSTRAINT group_announcement_operations_room_sequence_check CHECK ((room_sequence > 0))
-);
 
 CREATE TABLE im_v2.group_announcements (
     room_id uuid NOT NULL,
@@ -653,40 +631,7 @@ CREATE TABLE im_v2.group_role_policies (
     CONSTRAINT group_role_policies_role_check CHECK (role IN ('admin', 'member'))
 );
 
-CREATE TABLE im_v2.group_permission_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    expected_revision bigint NOT NULL,
-    resulting_revision bigint NOT NULL,
-    role text NOT NULL,
-    permissions jsonb NOT NULL,
-    room_sequence bigint NOT NULL,
-    event_id uuid NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    CONSTRAINT group_permission_operations_check CHECK ((resulting_revision > expected_revision)),
-    CONSTRAINT group_permission_operations_expected_revision_check CHECK ((expected_revision > 0)),
-    CONSTRAINT group_permission_operations_role_check CHECK ((role = ANY (ARRAY['admin'::text, 'member'::text]))),
-    CONSTRAINT group_permission_operations_room_sequence_check CHECK ((room_sequence > 0))
-);
 
-CREATE TABLE im_v2.group_role_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    target_user_id uuid NOT NULL,
-    role text NOT NULL,
-    expected_membership_revision bigint NOT NULL,
-    resulting_membership_revision bigint NOT NULL,
-    room_sequence bigint NOT NULL,
-    event_id uuid NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    CONSTRAINT group_role_operations_check CHECK ((resulting_membership_revision > expected_membership_revision)),
-    CONSTRAINT group_role_operations_check1 CHECK ((actor_user_id <> target_user_id)),
-    CONSTRAINT group_role_operations_expected_membership_revision_check CHECK ((expected_membership_revision > 0)),
-    CONSTRAINT group_role_operations_role_check CHECK ((role = ANY (ARRAY['admin'::text, 'member'::text]))),
-    CONSTRAINT group_role_operations_room_sequence_check CHECK ((room_sequence > 0))
-);
 
 CREATE TABLE im_v2.group_role_permissions (
     room_id uuid NOT NULL,
@@ -696,49 +641,12 @@ CREATE TABLE im_v2.group_role_permissions (
     CONSTRAINT group_role_permissions_role_check CHECK ((role = ANY (ARRAY['admin'::text, 'member'::text])))
 );
 
-CREATE TABLE im_v2.group_room_creation_draft_members (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    user_id uuid NOT NULL,
-    CONSTRAINT group_room_creation_draft_members_check CHECK ((user_id <> actor_user_id))
-);
 
-CREATE TABLE im_v2.group_room_creation_drafts (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    title text NOT NULL,
-    state text NOT NULL,
-    room_id uuid,
-    created_at timestamp with time zone NOT NULL,
-    updated_at timestamp with time zone NOT NULL,
-    expires_at timestamp with time zone NOT NULL,
-    CONSTRAINT group_room_creation_drafts_check CHECK (((state = 'completed'::text) = (room_id IS NOT NULL))),
-    CONSTRAINT group_room_creation_drafts_state_check CHECK ((state = ANY (ARRAY['staging'::text, 'finalizing'::text, 'completed'::text]))),
-    CONSTRAINT group_room_creation_drafts_title_check CHECK (((octet_length(title) >= 1) AND (octet_length(title) <= 120)))
-);
 
 -- This is a control-plane draft. Its completed room belongs to the selected
 -- owner database; fixed creation intents and owner receipts establish identity.
 -- A local rooms foreign key would reject every remote-owner completion.
 
-CREATE TABLE im_v2.group_room_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    title text NOT NULL,
-    initial_member_user_ids uuid[] NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    capacity_class text DEFAULT 'standard'::text NOT NULL,
-    audience_kind text DEFAULT 'inline'::text NOT NULL,
-    initial_member_count integer NOT NULL,
-    CONSTRAINT group_room_operations_audience_fingerprint_check CHECK ((((audience_kind = 'inline'::text) AND (initial_member_count = (cardinality(initial_member_user_ids) + 1))) OR ((audience_kind = 'staged'::text) AND (cardinality(initial_member_user_ids) = 0)))),
-    CONSTRAINT group_room_operations_audience_kind_check CHECK ((audience_kind = ANY (ARRAY['inline'::text, 'staged'::text]))),
-    CONSTRAINT group_room_operations_check CHECK ((array_position(initial_member_user_ids, actor_user_id) IS NULL)),
-    CONSTRAINT group_room_operations_capacity_class_check CHECK ((capacity_class = ANY (ARRAY['standard'::text, 'large'::text]))),
-    CONSTRAINT group_room_operations_initial_member_count_check CHECK (((initial_member_count >= 1) AND (initial_member_count <= 100000))),
-    CONSTRAINT group_room_operations_initial_member_user_ids_check CHECK ((cardinality(initial_member_user_ids) >= 0)),
-    CONSTRAINT group_room_operations_title_check CHECK (((octet_length(title) >= 1) AND (octet_length(title) <= 120)))
-);
 
 CREATE TABLE im_v2.group_rooms (
     room_id uuid NOT NULL,
@@ -941,22 +849,6 @@ CREATE TABLE im_v2.media_scan_outbox (
     CONSTRAINT media_scan_outbox_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'claimed'::text, 'completed'::text, 'paused'::text])))
 );
 
-CREATE TABLE im_v2.message_edit_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    message_id uuid NOT NULL,
-    expected_message_revision bigint NOT NULL,
-    text_body text NOT NULL,
-    resulting_message_revision bigint NOT NULL,
-    room_sequence bigint NOT NULL,
-    event_id uuid NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    CONSTRAINT message_edit_operations_expected_message_revision_check CHECK ((expected_message_revision > 0)),
-    CONSTRAINT message_edit_operations_resulting_message_revision_check CHECK ((resulting_message_revision > 0)),
-    CONSTRAINT message_edit_operations_room_sequence_check CHECK ((room_sequence > 0)),
-    CONSTRAINT message_edit_operations_text_body_check CHECK ((octet_length(text_body) > 0))
-);
 
 -- Immutable source authorization envelopes double as the durable export outbox.
 -- No source/target message FK: source retention cannot erase committed evidence,
@@ -1357,19 +1249,6 @@ CREATE VIEW im_v2.message_projection_state_values AS
      LEFT JOIN im_v2.room_events event ON (((state.payload_storage = 'room_event'::text) AND (event.event_id = state.state_event_id) AND (event.room_id = state.room_id) AND (event.event_type = 'message.accepted'::text) AND (lower((event.payload ->> 'message_id'::text)) = (state.message_id)::text) AND (lower((event.payload ->> 'room_id'::text)) = (state.room_id)::text) AND (((event.payload ->> 'message_revision'::text))::bigint = state.message_revision))))
   WHERE ((state.payload_storage = 'inline'::text) OR (event.event_id IS NOT NULL));
 
-CREATE TABLE im_v2.message_reaction_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    message_id uuid NOT NULL,
-    reaction text NOT NULL,
-    action text NOT NULL,
-    room_sequence bigint NOT NULL,
-    event_id uuid NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    CONSTRAINT message_reaction_operations_action_check CHECK ((action = ANY (ARRAY['add'::text, 'remove'::text]))),
-    CONSTRAINT message_reaction_operations_room_sequence_check CHECK ((room_sequence > 0))
-);
 
 CREATE TABLE im_v2.message_reactions (
     message_id uuid NOT NULL,
@@ -1379,20 +1258,6 @@ CREATE TABLE im_v2.message_reactions (
     CONSTRAINT message_reactions_reaction_check CHECK (((octet_length(reaction) > 0) AND (octet_length(reaction) <= 16)))
 );
 
-CREATE TABLE im_v2.message_withdrawal_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    message_id uuid NOT NULL,
-    expected_message_revision bigint NOT NULL,
-    resulting_message_revision bigint NOT NULL,
-    room_sequence bigint NOT NULL,
-    event_id uuid NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    CONSTRAINT message_withdrawal_operations_expected_message_revision_check CHECK ((expected_message_revision > 0)),
-    CONSTRAINT message_withdrawal_operations_resulting_message_revision_check CHECK ((resulting_message_revision > 0)),
-    CONSTRAINT message_withdrawal_operations_room_sequence_check CHECK ((room_sequence > 0))
-);
 
 CREATE TABLE im_v2.messages (
     message_id uuid NOT NULL,
@@ -1474,7 +1339,7 @@ CREATE FUNCTION im_v2.reject_message_send_completion_mutation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    IF NEW IS DISTINCT FROM OLD THEN
+    IF TG_OP = 'DELETE' OR NEW IS DISTINCT FROM OLD THEN
         RAISE EXCEPTION 'send completion identity and result are immutable'
             USING ERRCODE = '23514';
     END IF;
@@ -1483,7 +1348,7 @@ END;
 $$;
 
 CREATE TRIGGER message_send_completions_immutable
-    BEFORE UPDATE ON im_v2.message_send_completions
+    BEFORE UPDATE OR DELETE ON im_v2.message_send_completions
     FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_send_completion_mutation();
 
 -- Control authorization and its recovery obligation are one durable row.
@@ -1653,11 +1518,11 @@ CREATE TABLE im_v2.moderation_operations (
     room_sequence bigint NOT NULL,
     event_id uuid NOT NULL,
     created_at timestamp with time zone NOT NULL,
-    CONSTRAINT moderation_operations_action_check CHECK ((action = ANY (ARRAY['redact_message'::text, 'remove_member'::text, 'mute_member'::text, 'freeze_room'::text, 'unfreeze_room'::text]))),
-    CONSTRAINT moderation_operations_check CHECK ((((action = 'redact_message'::text) AND (target_user_id IS NULL) AND (message_id IS NOT NULL) AND (mute_until IS NULL)) OR ((action = ANY (ARRAY['remove_member'::text, 'mute_member'::text])) AND (target_user_id IS NOT NULL) AND (message_id IS NULL)) OR ((action = ANY (ARRAY['freeze_room'::text, 'unfreeze_room'::text])) AND (target_user_id IS NULL) AND (message_id IS NULL) AND (mute_until IS NULL)))),
-    CONSTRAINT moderation_operations_check1 CHECK ((((action = 'mute_member'::text) AND (mute_until IS NOT NULL)) OR ((action <> 'mute_member'::text) AND (mute_until IS NULL)))),
+    CONSTRAINT moderation_operations_action_check CHECK ((action = ANY (ARRAY['redact_message'::text, 'freeze_room'::text, 'unfreeze_room'::text]))),
+    CONSTRAINT moderation_operations_check CHECK ((((action = 'redact_message'::text) AND (target_user_id IS NULL) AND (message_id IS NOT NULL) AND (mute_until IS NULL)) OR ((action = ANY (ARRAY['freeze_room'::text, 'unfreeze_room'::text])) AND (target_user_id IS NULL) AND (message_id IS NULL) AND (mute_until IS NULL)))),
+    CONSTRAINT moderation_operations_check1 CHECK ((mute_until IS NULL)),
     CONSTRAINT moderation_operations_check2 CHECK ((((action = 'redact_message'::text) AND (resulting_message_revision IS NOT NULL)) OR ((action <> 'redact_message'::text) AND (resulting_message_revision IS NULL)))),
-    CONSTRAINT moderation_operations_check3 CHECK ((((action = 'remove_member'::text) AND (resulting_membership_revision IS NOT NULL)) OR ((action <> 'remove_member'::text) AND (resulting_membership_revision IS NULL)))),
+    CONSTRAINT moderation_operations_check3 CHECK ((resulting_membership_revision IS NULL)),
     CONSTRAINT moderation_operations_reason_code_check CHECK (((octet_length(reason_code) > 0) AND (octet_length(reason_code) <= 64))),
     CONSTRAINT moderation_operations_resulting_membership_revision_check CHECK ((resulting_membership_revision > 0)),
     CONSTRAINT moderation_operations_resulting_message_revision_check CHECK ((resulting_message_revision > 0)),
@@ -1675,15 +1540,26 @@ CREATE TABLE im_v2.public_identity_lookup_rate_limits (
 CREATE TABLE im_v2.public_profile_update_operations (
     actor_user_id uuid NOT NULL,
     operation_id uuid NOT NULL,
-    expected_revision bigint NOT NULL,
-    requested_display_name text NOT NULL,
-    requested_avatar_media_id uuid,
-    result_revision bigint NOT NULL,
+    fingerprint_version smallint NOT NULL CHECK (fingerprint_version = 1),
+    request_fingerprint bytea NOT NULL CHECK (octet_length(request_fingerprint) = 32),
+    outcome_kind text NOT NULL CHECK (outcome_kind IN ('committed', 'rejected', 'closed')),
+    result_revision bigint,
+    receipt jsonb NOT NULL CHECK (jsonb_typeof(receipt) = 'object'),
     created_at timestamp with time zone NOT NULL,
-    CONSTRAINT public_profile_update_operations_expected_revision_check CHECK ((expected_revision > 0)),
-    CONSTRAINT public_profile_update_operations_requested_display_name_check CHECK (((octet_length(requested_display_name) >= 1) AND (octet_length(requested_display_name) <= 240))),
-    CONSTRAINT public_profile_update_operations_result_revision_check CHECK ((result_revision > 0))
+    CONSTRAINT public_profile_update_operations_result_check CHECK (
+        (outcome_kind = 'committed' AND result_revision IS NOT NULL AND result_revision > 0) OR
+        (outcome_kind IN ('rejected', 'closed') AND result_revision IS NULL))
 );
+
+CREATE FUNCTION im_v2.protect_profile_operation_receipt() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'profile operation receipts are immutable';
+END;
+$$;
+CREATE TRIGGER public_profile_operation_immutable
+BEFORE UPDATE OR DELETE ON im_v2.public_profile_update_operations
+FOR EACH ROW EXECUTE FUNCTION im_v2.protect_profile_operation_receipt();
 
 CREATE TABLE im_v2.public_profile_update_outbox (
     source_event_id uuid NOT NULL,
@@ -1811,14 +1687,6 @@ CREATE TABLE im_v2.read_receipt_operations (
     CONSTRAINT read_receipt_operations_resulting_room_sequence_check CHECK ((resulting_room_sequence > 0))
 );
 
-CREATE TABLE im_v2.read_receipt_preference_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    allows_direct_read_receipts boolean NOT NULL,
-    allows_group_read_receipts boolean NOT NULL,
-    preference_revision bigint NOT NULL CHECK (preference_revision > 0),
-    updated_at timestamp with time zone NOT NULL
-);
 
 CREATE TABLE im_v2.read_receipt_preference_propagation_outbox (
     actor_user_id uuid NOT NULL,
@@ -1873,18 +1741,6 @@ CREATE TABLE im_v2.room_member_mutes (
     CONSTRAINT room_member_mutes_check CHECK ((mute_until > created_at))
 );
 
-CREATE TABLE im_v2.room_member_nickname_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    expected_revision bigint,
-    requested_nickname text,
-    result_revision bigint NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    CONSTRAINT room_member_nickname_operations_expected_revision_check CHECK (((expected_revision IS NULL) OR (expected_revision > 0))),
-    CONSTRAINT room_member_nickname_operations_requested_nickname_check CHECK (((requested_nickname IS NULL) OR ((octet_length(requested_nickname) >= 1) AND (octet_length(requested_nickname) <= 80)))),
-    CONSTRAINT room_member_nickname_operations_result_revision_check CHECK ((result_revision > 0))
-);
 
 CREATE TABLE im_v2.room_member_nicknames (
     room_id uuid NOT NULL,
@@ -1924,17 +1780,6 @@ CREATE TABLE im_v2.room_memberships (
     CONSTRAINT room_memberships_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'admin'::text, 'member'::text])))
 );
 
-CREATE TABLE im_v2.room_pinned_message_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    message_id uuid NOT NULL,
-    is_pinned boolean NOT NULL,
-    room_sequence bigint NOT NULL,
-    event_id uuid NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    CONSTRAINT room_pinned_message_operations_room_sequence_check CHECK ((room_sequence > 0))
-);
 
 CREATE TABLE im_v2.room_pinned_messages (
     room_id uuid NOT NULL,
@@ -2152,14 +1997,14 @@ CREATE TABLE im_v2.control_housekeeping_cursor (
 INSERT INTO im_v2.control_housekeeping_cursor (singleton, rotation) VALUES (true, 0);
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-53'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-53'::text))
+    schema_id text DEFAULT 'im-v2-current-63'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-63'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-53');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-63');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
@@ -2213,12 +2058,6 @@ CREATE TABLE im_v2.special_accounts (
     CONSTRAINT special_accounts_status_check CHECK ((status = ANY (ARRAY['active'::text, 'paused'::text, 'retired'::text])))
 );
 
-CREATE TABLE im_v2.stranger_message_preference_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    allows_stranger_messages boolean NOT NULL,
-    updated_at timestamp with time zone NOT NULL
-);
 
 CREATE TABLE im_v2.stranger_message_windows (
     sender_user_id uuid NOT NULL,
@@ -2323,12 +2162,6 @@ CREATE TABLE im_v2.sync_tokens (
     CONSTRAINT sync_tokens_watermark_check CHECK ((watermark >= 0))
 );
 
-CREATE TABLE im_v2.user_add_preference_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    allows_being_added boolean NOT NULL,
-    updated_at timestamp with time zone NOT NULL
-);
 
 CREATE TABLE im_v2.user_add_preferences (
     user_id uuid NOT NULL,
@@ -2336,17 +2169,6 @@ CREATE TABLE im_v2.user_add_preferences (
     updated_at timestamp with time zone NOT NULL
 );
 
-CREATE TABLE im_v2.user_block_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    target_user_id uuid NOT NULL,
-    action text NOT NULL,
-    is_blocked boolean NOT NULL,
-    updated_at timestamp with time zone NOT NULL,
-    CONSTRAINT user_block_operations_action_check CHECK ((action = ANY (ARRAY['block'::text, 'unblock'::text]))),
-    CONSTRAINT user_block_operations_check CHECK ((actor_user_id <> target_user_id)),
-    CONSTRAINT user_block_operations_check1 CHECK ((((action = 'block'::text) AND is_blocked) OR ((action = 'unblock'::text) AND (NOT is_blocked))))
-);
 
 CREATE TABLE im_v2.user_blocks (
     blocker_user_id uuid NOT NULL,
@@ -2355,18 +2177,6 @@ CREATE TABLE im_v2.user_blocks (
     CONSTRAINT user_blocks_check CHECK ((blocker_user_id <> blocked_user_id))
 );
 
-CREATE TABLE im_v2.user_contact_alias_operations (
-    owner_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    target_user_id uuid NOT NULL,
-    expected_revision bigint,
-    requested_remark_name text,
-    result_revision bigint NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    CONSTRAINT user_contact_alias_operations_expected_revision_check CHECK (((expected_revision IS NULL) OR (expected_revision > 0))),
-    CONSTRAINT user_contact_alias_operations_requested_remark_name_check CHECK (((requested_remark_name IS NULL) OR ((octet_length(requested_remark_name) >= 1) AND (octet_length(requested_remark_name) <= 80)))),
-    CONSTRAINT user_contact_alias_operations_result_revision_check CHECK ((result_revision > 0))
-);
 
 CREATE TABLE im_v2.user_contact_aliases (
     owner_user_id uuid NOT NULL,
@@ -2379,13 +2189,6 @@ CREATE TABLE im_v2.user_contact_aliases (
     CONSTRAINT user_contact_aliases_revision_check CHECK ((revision > 0))
 );
 
-CREATE TABLE im_v2.user_live_activity_preference_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    allows_online_presence boolean NOT NULL,
-    allows_typing_indicators boolean NOT NULL,
-    updated_at timestamp with time zone NOT NULL
-);
 
 CREATE TABLE im_v2.user_live_activity_preferences (
     user_id uuid NOT NULL,
@@ -2396,22 +2199,17 @@ CREATE TABLE im_v2.user_live_activity_preferences (
 
 CREATE TABLE im_v2.user_live_presence_leases (
     connection_id uuid NOT NULL,
+    publication_suppressed boolean NOT NULL DEFAULT true,
     user_id uuid NOT NULL,
     device_id uuid NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     updated_at timestamp with time zone NOT NULL
 );
 
-CREATE TABLE im_v2.user_message_favorite_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    message_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    is_favorited boolean NOT NULL,
-    updated_at timestamp with time zone NOT NULL
-);
 
 CREATE TABLE im_v2.user_message_favorites (
+    is_favorited boolean NOT NULL,
+    revision bigint NOT NULL CHECK(revision>0),
     user_id uuid NOT NULL,
     message_id uuid NOT NULL,
     room_id uuid NOT NULL,
@@ -2481,17 +2279,6 @@ CREATE TABLE im_v2.user_read_receipt_preferences (
     updated_at timestamp with time zone NOT NULL
 );
 
-CREATE TABLE im_v2.user_relationship_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    target_user_id uuid NOT NULL,
-    action text NOT NULL,
-    resulting_state text NOT NULL,
-    updated_at timestamp with time zone NOT NULL,
-    CONSTRAINT user_relationship_operations_action_check CHECK ((action = ANY (ARRAY['request'::text, 'accept'::text, 'reject'::text, 'remove'::text]))),
-    CONSTRAINT user_relationship_operations_check CHECK ((actor_user_id <> target_user_id)),
-    CONSTRAINT user_relationship_operations_resulting_state_check CHECK ((resulting_state = ANY (ARRAY['none'::text, 'pending'::text, 'accepted'::text])))
-);
 
 CREATE TABLE im_v2.user_relationships (
     lower_user_id uuid NOT NULL,
@@ -2504,17 +2291,9 @@ CREATE TABLE im_v2.user_relationships (
     CONSTRAINT user_relationships_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'accepted'::text])))
 );
 
-CREATE TABLE im_v2.user_room_preference_operations (
-    actor_user_id uuid NOT NULL,
-    operation_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    pinned_at timestamp with time zone,
-    archived_at timestamp with time zone,
-    mute_until timestamp with time zone,
-    updated_at timestamp with time zone NOT NULL
-);
 
 CREATE TABLE im_v2.user_room_preferences (
+    revision bigint NOT NULL CHECK(revision>0),
     user_id uuid NOT NULL,
     room_id uuid NOT NULL,
     pinned_at timestamp with time zone,
@@ -2553,7 +2332,7 @@ CREATE TABLE im_v2.user_state_event_outbox (
     CONSTRAINT user_state_event_outbox_room_binding CHECK (source_room_id IS NULL OR COALESCE(lower(payload->>'room_id') = source_room_id::text, false)),
     source_event_id uuid NOT NULL,
     user_id uuid NOT NULL,
-    projection_kind text NOT NULL CHECK (projection_kind IN ('room', 'membership', 'direct_room_profile', 'own_read_watermark', 'direct_read_receipt', 'read_receipt_preferences', 'conversation_state', 'timeline_activity', 'direct_sending_capability')),
+    projection_kind text NOT NULL CHECK (projection_kind IN ('room', 'membership', 'direct_room_profile', 'own_read_watermark', 'direct_read_receipt', 'read_receipt_preferences', 'conversation_state', 'message_favorite', 'contact_alias', 'timeline_activity', 'direct_sending_capability')),
     payload jsonb NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
     created_at timestamptz NOT NULL CHECK (isfinite(created_at)),
     state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'leased', 'delivered', 'paused')),
@@ -2583,7 +2362,7 @@ CREATE INDEX user_state_event_outbox_delivered_idx
 CREATE TABLE im_v2.user_state_event_receipts (
     user_id uuid NOT NULL,
     source_event_id uuid NOT NULL,
-    projection_kind text NOT NULL CHECK (projection_kind IN ('room', 'membership', 'direct_room_profile', 'own_read_watermark', 'direct_read_receipt', 'read_receipt_preferences', 'conversation_state', 'timeline_activity', 'direct_sending_capability')),
+    projection_kind text NOT NULL CHECK (projection_kind IN ('room', 'membership', 'direct_room_profile', 'own_read_watermark', 'direct_read_receipt', 'read_receipt_preferences', 'conversation_state', 'message_favorite', 'contact_alias', 'timeline_activity', 'direct_sending_capability')),
     payload jsonb NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
     projection_payload jsonb NOT NULL CHECK (jsonb_typeof(projection_payload) = 'object'),
     source_created_at timestamptz NOT NULL CHECK (isfinite(source_created_at)),
@@ -2695,8 +2474,6 @@ ALTER TABLE ONLY im_v2.direct_message_denials
 ALTER TABLE ONLY im_v2.direct_message_denials
     ADD CONSTRAINT direct_message_denials_source_event_id_key UNIQUE (source_event_id);
 
-ALTER TABLE ONLY im_v2.direct_room_operations
-    ADD CONSTRAINT direct_room_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
 ALTER TABLE ONLY im_v2.direct_room_pairs
     ADD CONSTRAINT direct_room_pairs_pkey PRIMARY KEY (lower_user_id, higher_user_id);
@@ -2710,11 +2487,7 @@ ALTER TABLE ONLY im_v2.durable_work_replay_audit
 ALTER TABLE ONLY im_v2.gateway_worker_cursors
     ADD CONSTRAINT gateway_worker_cursors_pkey PRIMARY KEY (worker_name, node_id);
 
-ALTER TABLE ONLY im_v2.group_announcement_operations
-    ADD CONSTRAINT group_announcement_operations_event_id_key UNIQUE (event_id);
 
-ALTER TABLE ONLY im_v2.group_announcement_operations
-    ADD CONSTRAINT group_announcement_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
 ALTER TABLE ONLY im_v2.group_announcements
     ADD CONSTRAINT group_announcements_pkey PRIMARY KEY (room_id);
@@ -2722,35 +2495,17 @@ ALTER TABLE ONLY im_v2.group_announcements
 ALTER TABLE ONLY im_v2.group_event_wake_outbox
     ADD CONSTRAINT group_event_wake_outbox_pkey PRIMARY KEY (room_id);
 
-ALTER TABLE ONLY im_v2.group_permission_operations
-    ADD CONSTRAINT group_permission_operations_event_id_key UNIQUE (event_id);
 
-ALTER TABLE ONLY im_v2.group_permission_operations
-    ADD CONSTRAINT group_permission_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
-ALTER TABLE ONLY im_v2.group_role_operations
-    ADD CONSTRAINT group_role_operations_event_id_key UNIQUE (event_id);
 
-ALTER TABLE ONLY im_v2.group_role_operations
-    ADD CONSTRAINT group_role_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
 ALTER TABLE ONLY im_v2.group_role_permissions
     ADD CONSTRAINT group_role_permissions_pkey PRIMARY KEY (room_id, role, permission);
 
-ALTER TABLE ONLY im_v2.group_room_creation_draft_members
-    ADD CONSTRAINT group_room_creation_draft_members_pkey PRIMARY KEY (actor_user_id, operation_id, user_id);
 
-ALTER TABLE ONLY im_v2.group_room_creation_drafts
-    ADD CONSTRAINT group_room_creation_drafts_pkey PRIMARY KEY (actor_user_id, operation_id);
 
-ALTER TABLE ONLY im_v2.group_room_creation_drafts
-    ADD CONSTRAINT group_room_creation_drafts_room_id_key UNIQUE (room_id);
 
-ALTER TABLE ONLY im_v2.group_room_operations
-    ADD CONSTRAINT group_room_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
-ALTER TABLE ONLY im_v2.group_room_operations
-    ADD CONSTRAINT group_room_operations_room_id_key UNIQUE (room_id);
 
 ALTER TABLE ONLY im_v2.group_rooms
     ADD CONSTRAINT group_rooms_pkey PRIMARY KEY (room_id);
@@ -2801,11 +2556,7 @@ ALTER TABLE ONLY im_v2.media_purge_outbox
 ALTER TABLE ONLY im_v2.media_scan_outbox
     ADD CONSTRAINT media_scan_outbox_pkey PRIMARY KEY (media_id);
 
-ALTER TABLE ONLY im_v2.message_edit_operations
-    ADD CONSTRAINT message_edit_operations_event_id_key UNIQUE (event_id);
 
-ALTER TABLE ONLY im_v2.message_edit_operations
-    ADD CONSTRAINT message_edit_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
 ALTER TABLE ONLY im_v2.message_forward_operations
     ADD CONSTRAINT message_forward_operations_actor_user_id_target_client_mess_key UNIQUE (actor_user_id, target_client_message_id);
@@ -2834,20 +2585,12 @@ ALTER TABLE ONLY im_v2.message_projection_states
 ALTER TABLE ONLY im_v2.message_projection_states
     ADD CONSTRAINT message_projection_states_state_room_key UNIQUE (state_id, room_id);
 
-ALTER TABLE ONLY im_v2.message_reaction_operations
-    ADD CONSTRAINT message_reaction_operations_event_id_key UNIQUE (event_id);
 
-ALTER TABLE ONLY im_v2.message_reaction_operations
-    ADD CONSTRAINT message_reaction_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
 ALTER TABLE ONLY im_v2.message_reactions
     ADD CONSTRAINT message_reactions_pkey PRIMARY KEY (message_id, actor_user_id, reaction);
 
-ALTER TABLE ONLY im_v2.message_withdrawal_operations
-    ADD CONSTRAINT message_withdrawal_operations_event_id_key UNIQUE (event_id);
 
-ALTER TABLE ONLY im_v2.message_withdrawal_operations
-    ADD CONSTRAINT message_withdrawal_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
 ALTER TABLE ONLY im_v2.messages
     ADD CONSTRAINT messages_pkey PRIMARY KEY (message_id);
@@ -2900,8 +2643,6 @@ ALTER TABLE ONLY im_v2.push_wake_outbox
 ALTER TABLE ONLY im_v2.read_receipt_operations
     ADD CONSTRAINT read_receipt_operations_pkey PRIMARY KEY (user_id, operation_id);
 
-ALTER TABLE ONLY im_v2.read_receipt_preference_operations
-    ADD CONSTRAINT read_receipt_preference_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
 ALTER TABLE ONLY im_v2.read_receipt_preference_propagation_outbox
     ADD CONSTRAINT read_receipt_preference_propagation_outbox_pkey PRIMARY KEY (actor_user_id, operation_id);
@@ -2924,8 +2665,6 @@ ALTER TABLE ONLY im_v2.room_member_mutes
 ALTER TABLE ONLY im_v2.room_member_mutes
     ADD CONSTRAINT room_member_mutes_pkey PRIMARY KEY (room_id, user_id);
 
-ALTER TABLE ONLY im_v2.room_member_nickname_operations
-    ADD CONSTRAINT room_member_nickname_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
 ALTER TABLE ONLY im_v2.room_member_nicknames
     ADD CONSTRAINT room_member_nicknames_pkey PRIMARY KEY (room_id, user_id);
@@ -2939,11 +2678,7 @@ ALTER TABLE ONLY im_v2.room_membership_operations
 ALTER TABLE ONLY im_v2.room_memberships
     ADD CONSTRAINT room_memberships_pkey PRIMARY KEY (room_id, user_id, joined_revision);
 
-ALTER TABLE ONLY im_v2.room_pinned_message_operations
-    ADD CONSTRAINT room_pinned_message_operations_event_id_key UNIQUE (event_id);
 
-ALTER TABLE ONLY im_v2.room_pinned_message_operations
-    ADD CONSTRAINT room_pinned_message_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
 ALTER TABLE ONLY im_v2.room_pinned_messages
     ADD CONSTRAINT room_pinned_messages_pkey PRIMARY KEY (room_id, message_id);
@@ -2998,8 +2733,6 @@ ALTER TABLE ONLY im_v2.special_accounts
 ALTER TABLE ONLY im_v2.special_accounts
     ADD CONSTRAINT special_accounts_stable_key_key UNIQUE (stable_key);
 
-ALTER TABLE ONLY im_v2.stranger_message_preference_operations
-    ADD CONSTRAINT stranger_message_preference_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
 ALTER TABLE ONLY im_v2.stranger_message_windows
     ADD CONSTRAINT stranger_message_windows_pkey PRIMARY KEY (sender_user_id, recipient_user_id);
@@ -3022,14 +2755,10 @@ ALTER TABLE ONLY im_v2.sync_snapshot_pages
 ALTER TABLE ONLY im_v2.sync_tokens
     ADD CONSTRAINT sync_tokens_pkey PRIMARY KEY (token);
 
-ALTER TABLE ONLY im_v2.user_add_preference_operations
-    ADD CONSTRAINT user_add_preference_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
 ALTER TABLE ONLY im_v2.user_add_preferences
     ADD CONSTRAINT user_add_preferences_pkey PRIMARY KEY (user_id);
 
-ALTER TABLE ONLY im_v2.user_block_operations
-    ADD CONSTRAINT user_block_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
 ALTER TABLE ONLY im_v2.user_blocks
     ADD CONSTRAINT user_blocks_pkey PRIMARY KEY (blocker_user_id, blocked_user_id);
@@ -3037,14 +2766,10 @@ ALTER TABLE ONLY im_v2.user_blocks
 ALTER TABLE ONLY im_v2.user_direct_send_policy_versions
     ADD CONSTRAINT user_direct_send_policy_versions_pkey PRIMARY KEY (user_id);
 
-ALTER TABLE ONLY im_v2.user_contact_alias_operations
-    ADD CONSTRAINT user_contact_alias_operations_pkey PRIMARY KEY (owner_user_id, operation_id);
 
 ALTER TABLE ONLY im_v2.user_contact_aliases
     ADD CONSTRAINT user_contact_aliases_pkey PRIMARY KEY (owner_user_id, target_user_id);
 
-ALTER TABLE ONLY im_v2.user_live_activity_preference_operations
-    ADD CONSTRAINT user_live_activity_preference_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
 ALTER TABLE ONLY im_v2.user_live_activity_preferences
     ADD CONSTRAINT user_live_activity_preferences_pkey PRIMARY KEY (user_id);
@@ -3052,8 +2777,6 @@ ALTER TABLE ONLY im_v2.user_live_activity_preferences
 ALTER TABLE ONLY im_v2.user_live_presence_leases
     ADD CONSTRAINT user_live_presence_leases_pkey PRIMARY KEY (connection_id);
 
-ALTER TABLE ONLY im_v2.user_message_favorite_operations
-    ADD CONSTRAINT user_message_favorite_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
 ALTER TABLE ONLY im_v2.user_message_favorites
     ADD CONSTRAINT user_message_favorites_pkey PRIMARY KEY (user_id, message_id);
@@ -3073,14 +2796,10 @@ ALTER TABLE ONLY im_v2.user_projection_versions
 ALTER TABLE ONLY im_v2.user_read_receipt_preferences
     ADD CONSTRAINT user_read_receipt_preferences_pkey PRIMARY KEY (user_id);
 
-ALTER TABLE ONLY im_v2.user_relationship_operations
-    ADD CONSTRAINT user_relationship_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
 ALTER TABLE ONLY im_v2.user_relationships
     ADD CONSTRAINT user_relationships_pkey PRIMARY KEY (lower_user_id, higher_user_id);
 
-ALTER TABLE ONLY im_v2.user_room_preference_operations
-    ADD CONSTRAINT user_room_preference_operations_pkey PRIMARY KEY (actor_user_id, operation_id);
 
 ALTER TABLE ONLY im_v2.user_room_preferences
     ADD CONSTRAINT user_room_preferences_pkey PRIMARY KEY (user_id, room_id);
@@ -3137,13 +2856,11 @@ CREATE INDEX device_snapshot_resets_cleanup_idx ON im_v2.device_snapshot_resets 
 
 CREATE INDEX device_snapshot_resets_snapshot_idx ON im_v2.device_snapshot_resets USING btree (snapshot_id, state);
 
-CREATE INDEX direct_room_operations_cleanup_idx ON im_v2.direct_room_operations USING btree (created_at);
 
 CREATE INDEX direct_room_pairs_higher_user_idx ON im_v2.direct_room_pairs USING btree (higher_user_id, room_id, lower_user_id);
 
 CREATE INDEX durable_work_replay_audit_requested_at_idx ON im_v2.durable_work_replay_audit USING btree (requested_at DESC);
 
-CREATE INDEX group_announcement_operations_cleanup_idx ON im_v2.group_announcement_operations USING btree (created_at);
 
 CREATE INDEX group_invite_links_room_active_idx ON im_v2.group_invite_links USING btree (room_id, created_at DESC, invite_id DESC) WHERE (state = 'active'::text);
 
@@ -3154,17 +2871,11 @@ CREATE INDEX group_join_requests_applicant_pending_idx ON im_v2.group_join_reque
 
 CREATE INDEX group_event_wake_outbox_claim_idx ON im_v2.group_event_wake_outbox USING btree (next_attempt_at, updated_at) WHERE (state = 'pending'::text);
 
-CREATE INDEX group_permission_operations_cleanup_idx ON im_v2.group_permission_operations USING btree (created_at);
 
-CREATE INDEX group_role_operations_cleanup_idx ON im_v2.group_role_operations USING btree (created_at);
 
-CREATE INDEX group_room_creation_drafts_actor_state_idx ON im_v2.group_room_creation_drafts USING btree (actor_user_id, state, expires_at);
 
-CREATE INDEX group_room_creation_drafts_expiry_idx ON im_v2.group_room_creation_drafts USING btree (state, expires_at);
 
-CREATE INDEX group_room_creation_drafts_finalizing_recovery_idx ON im_v2.group_room_creation_drafts USING btree (updated_at) WHERE (state = 'finalizing'::text);
 
-CREATE INDEX group_room_operations_cleanup_idx ON im_v2.group_room_operations USING btree (created_at);
 
 CREATE INDEX media_download_grants_claim_idx ON im_v2.media_download_grants USING btree (state, lease_expires_at, expires_at) WHERE (state <> 'consumed'::text);
 
@@ -3180,7 +2891,6 @@ CREATE INDEX media_scan_outbox_claim_idx ON im_v2.media_scan_outbox USING btree 
 
 CREATE INDEX media_scan_outbox_completed_cleanup_idx ON im_v2.media_scan_outbox USING btree (completed_at, media_id) WHERE (state = 'completed'::text);
 
-CREATE INDEX message_edit_operations_cleanup_idx ON im_v2.message_edit_operations USING btree (created_at);
 
 CREATE INDEX message_forward_operations_cleanup_idx ON im_v2.message_forward_operations USING btree (created_at);
 
@@ -3192,9 +2902,7 @@ CREATE INDEX message_projection_states_gc_idx ON im_v2.message_projection_states
 
 CREATE INDEX message_projection_states_inline_accepted_idx ON im_v2.message_projection_states USING btree (state_event_id, state_id) WHERE ((payload_storage = 'inline'::text) AND (message_revision = 1) AND (variant_key = 0) AND (state_event_id IS NOT NULL));
 
-CREATE INDEX message_reaction_operations_cleanup_idx ON im_v2.message_reaction_operations USING btree (created_at);
 
-CREATE INDEX message_withdrawal_operations_cleanup_idx ON im_v2.message_withdrawal_operations USING btree (created_at);
 
 CREATE INDEX messages_forwarded_from_idx ON im_v2.messages USING btree (forwarded_from_message_id) WHERE (forwarded_from_message_id IS NOT NULL);
 
@@ -3224,7 +2932,6 @@ CREATE INDEX push_wake_outbox_terminal_cleanup_idx ON im_v2.push_wake_outbox USI
 
 CREATE INDEX read_receipt_operations_cleanup_idx ON im_v2.read_receipt_operations USING btree (recorded_at);
 
-CREATE INDEX read_receipt_preference_operations_cleanup_idx ON im_v2.read_receipt_preference_operations USING btree (updated_at);
 
 CREATE INDEX read_receipt_preference_propagation_claim_idx ON im_v2.read_receipt_preference_propagation_outbox USING btree (state, next_attempt_at, lease_expires_at, created_at, actor_user_id, operation_id) WHERE (state = ANY (ARRAY['pending'::text, 'claimed'::text]));
 
@@ -3232,7 +2939,6 @@ CREATE INDEX read_receipt_preference_propagation_completed_cleanup_idx ON im_v2.
 
 CREATE INDEX room_member_mutes_active_idx ON im_v2.room_member_mutes USING btree (room_id, user_id, mute_until);
 
-CREATE INDEX room_member_nickname_operations_cleanup_idx ON im_v2.room_member_nickname_operations USING btree (created_at);
 
 CREATE INDEX room_membership_operations_cleanup_idx ON im_v2.room_membership_operations USING btree (created_at);
 
@@ -3240,7 +2946,6 @@ CREATE INDEX room_memberships_current_user_rooms_idx ON im_v2.room_memberships U
 
 CREATE INDEX room_memberships_eligible_at_revision_idx ON im_v2.room_memberships USING btree (room_id, joined_revision, left_revision, user_id);
 
-CREATE INDEX room_pinned_message_operations_cleanup_idx ON im_v2.room_pinned_message_operations USING btree (created_at);
 
 CREATE INDEX room_pinned_messages_order_idx ON im_v2.room_pinned_messages USING btree (room_id, pinned_at DESC, message_id);
 
@@ -3252,7 +2957,6 @@ CREATE INDEX special_account_message_audit_account_created_idx ON im_v2.special_
 
 CREATE INDEX special_account_message_operations_cleanup_idx ON im_v2.special_account_message_operations USING btree (created_at);
 
-CREATE INDEX stranger_message_preference_operations_cleanup_idx ON im_v2.stranger_message_preference_operations USING btree (updated_at);
 
 CREATE INDEX support_conversation_sessions_customer_idx ON im_v2.support_conversation_sessions USING btree (customer_user_id, last_activity_at DESC);
 
@@ -3274,21 +2978,16 @@ CREATE INDEX sync_tokens_expiry_idx ON im_v2.sync_tokens USING btree (expires_at
 
 CREATE INDEX sync_tokens_scope_idx ON im_v2.sync_tokens USING btree (user_id, device_id, reset_generation, expires_at);
 
-CREATE INDEX user_add_preference_operations_cleanup_idx ON im_v2.user_add_preference_operations USING btree (updated_at);
 
-CREATE INDEX user_block_operations_cleanup_idx ON im_v2.user_block_operations USING btree (updated_at);
 
 CREATE INDEX user_blocks_blocked_blocker_idx ON im_v2.user_blocks USING btree (blocked_user_id, blocker_user_id);
 
-CREATE INDEX user_contact_alias_operations_cleanup_idx ON im_v2.user_contact_alias_operations USING btree (created_at);
 
-CREATE INDEX user_live_activity_preference_operations_cleanup_idx ON im_v2.user_live_activity_preference_operations USING btree (updated_at);
 
 CREATE INDEX user_live_presence_leases_expiry_idx ON im_v2.user_live_presence_leases USING btree (expires_at, connection_id);
 
 CREATE INDEX user_live_presence_leases_lookup_idx ON im_v2.user_live_presence_leases USING btree (user_id, expires_at DESC);
 
-CREATE INDEX user_message_favorite_operations_cleanup_idx ON im_v2.user_message_favorite_operations USING btree (updated_at);
 
 CREATE INDEX user_message_favorites_room_idx ON im_v2.user_message_favorites USING btree (user_id, room_id, created_at DESC, message_id);
 
@@ -3312,9 +3011,7 @@ CREATE INDEX user_projection_versions_current_room_idx ON im_v2.user_projection_
 
 CREATE INDEX user_projection_versions_gc_idx ON im_v2.user_projection_versions USING btree (valid_to_sequence, user_id) WHERE (valid_to_sequence IS NOT NULL);
 
-CREATE INDEX user_relationship_operations_cleanup_idx ON im_v2.user_relationship_operations USING btree (updated_at);
 
-CREATE INDEX user_room_preference_operations_cleanup_idx ON im_v2.user_room_preference_operations USING btree (updated_at);
 
 CREATE INDEX user_room_preferences_visible_idx ON im_v2.user_room_preferences USING btree (user_id, archived_at, pinned_at DESC, updated_at DESC);
 
@@ -3379,14 +3076,10 @@ ALTER TABLE ONLY im_v2.direct_message_denials
 ALTER TABLE ONLY im_v2.direct_message_denials
     ADD CONSTRAINT direct_message_denials_source_event_id_fkey FOREIGN KEY (source_event_id) REFERENCES im_v2.room_timeline_activities(source_event_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY im_v2.direct_room_operations
-    ADD CONSTRAINT direct_room_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY im_v2.direct_room_pairs
     ADD CONSTRAINT direct_room_pairs_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY im_v2.group_announcement_operations
-    ADD CONSTRAINT group_announcement_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY im_v2.group_announcements
     ADD CONSTRAINT group_announcements_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
@@ -3397,20 +3090,12 @@ ALTER TABLE ONLY im_v2.group_event_wake_outbox
 ALTER TABLE ONLY im_v2.group_role_policies
     ADD CONSTRAINT group_role_policies_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY im_v2.group_permission_operations
-    ADD CONSTRAINT group_permission_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY im_v2.group_role_operations
-    ADD CONSTRAINT group_role_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY im_v2.group_role_permissions
     ADD CONSTRAINT group_role_permissions_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY im_v2.group_room_creation_draft_members
-    ADD CONSTRAINT group_room_creation_draft_membe_actor_user_id_operation_id_fkey FOREIGN KEY (actor_user_id, operation_id) REFERENCES im_v2.group_room_creation_drafts(actor_user_id, operation_id) ON DELETE CASCADE;
 
-ALTER TABLE ONLY im_v2.group_room_operations
-    ADD CONSTRAINT group_room_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY im_v2.group_rooms
     ADD CONSTRAINT group_rooms_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
@@ -3461,11 +3146,7 @@ ALTER TABLE ONLY im_v2.media_purge_outbox
 ALTER TABLE ONLY im_v2.media_scan_outbox
     ADD CONSTRAINT media_scan_outbox_media_id_fkey FOREIGN KEY (media_id) REFERENCES im_v2.media_objects(media_id);
 
-ALTER TABLE ONLY im_v2.message_edit_operations
-    ADD CONSTRAINT message_edit_operations_message_id_fkey FOREIGN KEY (message_id) REFERENCES im_v2.messages(message_id);
 
-ALTER TABLE ONLY im_v2.message_edit_operations
-    ADD CONSTRAINT message_edit_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);
 
 ALTER TABLE ONLY im_v2.message_forward_operations
     ADD CONSTRAINT message_forward_operations_result_message_id_fkey FOREIGN KEY (result_message_id) REFERENCES im_v2.messages(message_id) ON DELETE RESTRICT;
@@ -3485,20 +3166,12 @@ ALTER TABLE ONLY im_v2.message_media_references
 ALTER TABLE ONLY im_v2.message_mentions
     ADD CONSTRAINT message_mentions_message_id_fkey FOREIGN KEY (message_id) REFERENCES im_v2.messages(message_id);
 
-ALTER TABLE ONLY im_v2.message_reaction_operations
-    ADD CONSTRAINT message_reaction_operations_message_id_fkey FOREIGN KEY (message_id) REFERENCES im_v2.messages(message_id);
 
-ALTER TABLE ONLY im_v2.message_reaction_operations
-    ADD CONSTRAINT message_reaction_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);
 
 ALTER TABLE ONLY im_v2.message_reactions
     ADD CONSTRAINT message_reactions_message_id_fkey FOREIGN KEY (message_id) REFERENCES im_v2.messages(message_id);
 
-ALTER TABLE ONLY im_v2.message_withdrawal_operations
-    ADD CONSTRAINT message_withdrawal_operations_message_id_fkey FOREIGN KEY (message_id) REFERENCES im_v2.messages(message_id);
 
-ALTER TABLE ONLY im_v2.message_withdrawal_operations
-    ADD CONSTRAINT message_withdrawal_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);
 
 -- Forward attribution may name a message in another physical owner. Its
 -- authorization is the source transaction/export, not a local message FK.
@@ -3512,8 +3185,7 @@ ALTER TABLE ONLY im_v2.messages
 ALTER TABLE ONLY im_v2.message_content_versions
     ADD CONSTRAINT message_content_versions_message_id_fkey FOREIGN KEY (message_id) REFERENCES im_v2.messages(message_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY im_v2.moderation_audit_entries
-    ADD CONSTRAINT moderation_audit_entries_actor_user_id_operation_id_fkey FOREIGN KEY (actor_user_id, operation_id) REFERENCES im_v2.moderation_operations(actor_user_id, operation_id);
+
 
 ALTER TABLE ONLY im_v2.moderation_audit_entries
     ADD CONSTRAINT moderation_audit_entries_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);
@@ -3542,8 +3214,6 @@ ALTER TABLE ONLY im_v2.push_wake_outbox
 ALTER TABLE ONLY im_v2.read_receipt_operations
     ADD CONSTRAINT read_receipt_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);
 
-ALTER TABLE ONLY im_v2.read_receipt_preference_propagation_outbox
-    ADD CONSTRAINT read_receipt_preference_propaga_actor_user_id_operation_id_fkey FOREIGN KEY (actor_user_id, operation_id) REFERENCES im_v2.read_receipt_preference_operations(actor_user_id, operation_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY im_v2.room_admission
     ADD CONSTRAINT room_admission_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);
@@ -3569,11 +3239,7 @@ ALTER TABLE ONLY im_v2.room_membership_operations
 ALTER TABLE ONLY im_v2.room_memberships
     ADD CONSTRAINT room_memberships_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);
 
-ALTER TABLE ONLY im_v2.room_pinned_message_operations
-    ADD CONSTRAINT room_pinned_message_operations_message_id_fkey FOREIGN KEY (message_id) REFERENCES im_v2.messages(message_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY im_v2.room_pinned_message_operations
-    ADD CONSTRAINT room_pinned_message_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY im_v2.room_pinned_messages
     ADD CONSTRAINT room_pinned_messages_message_id_fkey FOREIGN KEY (message_id) REFERENCES im_v2.messages(message_id) ON DELETE RESTRICT;
@@ -3626,11 +3292,7 @@ ALTER TABLE ONLY im_v2.user_contact_aliases
 ALTER TABLE ONLY im_v2.user_live_presence_leases
     ADD CONSTRAINT user_live_presence_leases_user_id_device_id_fkey FOREIGN KEY (user_id, device_id) REFERENCES im_v2.auth_devices(user_id, device_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY im_v2.user_message_favorite_operations
-    ADD CONSTRAINT user_message_favorite_operations_message_id_fkey FOREIGN KEY (message_id) REFERENCES im_v2.messages(message_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY im_v2.user_message_favorite_operations
-    ADD CONSTRAINT user_message_favorite_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY im_v2.user_message_favorites
     ADD CONSTRAINT user_message_favorites_message_id_fkey FOREIGN KEY (message_id) REFERENCES im_v2.messages(message_id) ON DELETE RESTRICT;
@@ -3638,8 +3300,6 @@ ALTER TABLE ONLY im_v2.user_message_favorites
 ALTER TABLE ONLY im_v2.user_message_favorites
     ADD CONSTRAINT user_message_favorites_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY im_v2.user_room_preference_operations
-    ADD CONSTRAINT user_room_preference_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY im_v2.user_room_preferences
     ADD CONSTRAINT user_room_preferences_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
@@ -3728,7 +3388,41 @@ CREATE TABLE im_v2.device_revocation_capabilities (
         AND expires_at = session_expires_at + interval '10 minutes')
 );
 
-COMMIT;
+
+-- Permanent minimal edit/withdraw evidence, independent of message body retention.
+CREATE TABLE im_v2.message_mutation_receipts (
+    actor_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    message_id uuid NOT NULL,
+    kind text NOT NULL CHECK (kind IN ('editMessage','withdrawMessage')),
+    fingerprint_version smallint NOT NULL CHECK (fingerprint_version=1),
+    request_fingerprint bytea NOT NULL CHECK (octet_length(request_fingerprint)=32),
+    receipt jsonb NOT NULL CHECK (jsonb_typeof(receipt)='object'),
+    resolved_at timestamptz NOT NULL CHECK (isfinite(resolved_at)),
+    PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE FUNCTION im_v2.reject_message_mutation_receipt_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'message mutation receipt is permanent' USING ERRCODE='23514';
+END;
+$$;
+CREATE TRIGGER message_mutation_receipts_immutable BEFORE UPDATE OR DELETE ON im_v2.message_mutation_receipts
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
+
+
+CREATE TABLE im_v2.message_send_operation_receipts (
+    room_id uuid NOT NULL,actor_user_id uuid NOT NULL,operation_id uuid NOT NULL,
+    fingerprint_version smallint NOT NULL CHECK(fingerprint_version=1),
+    request_fingerprint bytea NOT NULL CHECK(octet_length(request_fingerprint)=32),
+    domain_fingerprint bytea NOT NULL CHECK(octet_length(domain_fingerprint)=32),
+    receipt jsonb NOT NULL CHECK(jsonb_typeof(receipt)='object'),
+    resolved_at timestamptz NOT NULL CHECK(isfinite(resolved_at)),
+    PRIMARY KEY(room_id,actor_user_id,operation_id)
+);
+CREATE TRIGGER message_send_operation_receipts_immutable BEFORE UPDATE OR DELETE ON im_v2.message_send_operation_receipts
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
+
 
 CREATE TABLE im_v2.device_registration_cancellations (
     request_digest text PRIMARY KEY,
@@ -4008,3 +3702,321 @@ CREATE TRIGGER resource_group_avatar_closures_commit_fence BEFORE INSERT ON im_v
 DROP TRIGGER IF EXISTS resource_group_avatar_closures_immutable ON im_v2.resource_group_avatar_closures;
 CREATE TRIGGER resource_group_avatar_closures_immutable BEFORE UPDATE OR DELETE ON im_v2.resource_group_avatar_closures
     FOR EACH ROW EXECUTE FUNCTION im_v2.reject_group_avatar_operation_mutation();
+
+-- Immutable room-owned receipt. No entity FK: rejected/closed absence is a durable fact.
+CREATE TABLE im_v2.personal_preference_operation_receipts (
+    identity_key text PRIMARY KEY,
+    actor_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    kind text NOT NULL CHECK(kind IN ('conversationPreference','messageFavorite')),
+    fingerprint_version smallint NOT NULL CHECK(fingerprint_version=1),
+    request_fingerprint bytea NOT NULL CHECK(octet_length(request_fingerprint)=32),
+    outcome_kind text NOT NULL CHECK(outcome_kind IN ('committed','rejected','closed')),
+    receipt jsonb NOT NULL CHECK(jsonb_typeof(receipt)='object'),
+    created_at timestamptz NOT NULL CHECK(isfinite(created_at))
+);
+CREATE TRIGGER personal_preference_operation_immutable BEFORE UPDATE OR DELETE ON im_v2.personal_preference_operation_receipts
+FOR EACH ROW EXECUTE FUNCTION im_v2.protect_profile_operation_receipt();
+
+CREATE TABLE im_v2.contact_alias_operation_receipts (
+    target_user_id uuid NOT NULL,
+    UNIQUE(actor_user_id,operation_id),
+    identity_key text PRIMARY KEY,
+    actor_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    fingerprint_version smallint NOT NULL CHECK(fingerprint_version=1),
+    request_fingerprint bytea NOT NULL CHECK(octet_length(request_fingerprint)=32),
+    receipt jsonb NOT NULL CHECK(jsonb_typeof(receipt)='object'),
+    created_at timestamptz NOT NULL CHECK(isfinite(created_at))
+);
+CREATE TRIGGER contact_alias_operation_immutable BEFORE UPDATE OR DELETE ON im_v2.contact_alias_operation_receipts
+FOR EACH ROW EXECUTE FUNCTION im_v2.protect_profile_operation_receipt();
+
+CREATE TABLE im_v2.group_nickname_operation_receipts (
+    room_id uuid NOT NULL,
+    UNIQUE(actor_user_id,operation_id),
+    identity_key text PRIMARY KEY,
+    actor_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    fingerprint_version smallint NOT NULL CHECK(fingerprint_version=1),
+    request_fingerprint bytea NOT NULL CHECK(octet_length(request_fingerprint)=32),
+    receipt jsonb NOT NULL CHECK(jsonb_typeof(receipt)='object'),
+    created_at timestamptz NOT NULL CHECK(isfinite(created_at))
+);
+CREATE TRIGGER group_nickname_operation_immutable BEFORE UPDATE OR DELETE ON im_v2.group_nickname_operation_receipts
+FOR EACH ROW EXECUTE FUNCTION im_v2.protect_profile_operation_receipt();
+
+CREATE TABLE im_v2.message_reaction_key_revisions (
+    room_id uuid NOT NULL REFERENCES im_v2.rooms(room_id),
+    message_id uuid NOT NULL REFERENCES im_v2.messages(message_id) ON DELETE CASCADE,
+    actor_user_id uuid NOT NULL,
+    reaction text NOT NULL CHECK (octet_length(reaction)>0 AND octet_length(reaction)<=16),
+    revision bigint NOT NULL CHECK (revision>0),
+    target_state text NOT NULL CHECK (target_state IN ('present','absent')),
+    PRIMARY KEY(message_id,actor_user_id,reaction)
+);
+CREATE TABLE im_v2.message_reaction_receipts (
+    actor_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    message_id uuid NOT NULL,
+    fingerprint_version smallint NOT NULL CHECK (fingerprint_version=1),
+    request_fingerprint bytea NOT NULL CHECK (octet_length(request_fingerprint)=32),
+    receipt jsonb NOT NULL CHECK (jsonb_typeof(receipt)='object'),
+    resolved_at timestamptz NOT NULL CHECK (isfinite(resolved_at)),
+    PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE TRIGGER message_reaction_receipts_immutable BEFORE UPDATE OR DELETE ON im_v2.message_reaction_receipts FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
+
+-- Permanent bounded account-owned forward manifests. No room content or room writer authority.
+CREATE TABLE im_v2.forward_plan_operations (
+ next_action_at timestamptz NOT NULL DEFAULT now() CHECK(isfinite(next_action_at)),
+ actor_user_id uuid NOT NULL,
+ operation_id uuid NOT NULL,
+ command_json jsonb NOT NULL CHECK (jsonb_typeof(command_json)='object' AND octet_length(command_json::text)<=65536),
+ progress_json jsonb NOT NULL CHECK (jsonb_typeof(progress_json)='object' AND octet_length(progress_json::text)<=1048576),
+ resolved_json jsonb CHECK (resolved_json IS NULL OR (jsonb_typeof(resolved_json)='object' AND octet_length(resolved_json::text)<=1048576)),
+ PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE INDEX forward_plan_operations_active ON im_v2.forward_plan_operations(next_action_at,actor_user_id,operation_id) WHERE resolved_json IS NULL;
+CREATE INDEX forward_plan_operations_active_owner ON im_v2.forward_plan_operations(actor_user_id) WHERE resolved_json IS NULL;
+CREATE FUNCTION im_v2.protect_forward_plan_original() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP='DELETE' OR OLD.resolved_json IS NOT NULL OR NEW.actor_user_id IS DISTINCT FROM OLD.actor_user_id OR NEW.operation_id IS DISTINCT FROM OLD.operation_id OR NEW.command_json IS DISTINCT FROM OLD.command_json THEN
+  RAISE EXCEPTION 'forward plan original is permanent' USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
+END;
+$$;
+CREATE TRIGGER forward_plan_operations_original BEFORE UPDATE OR DELETE ON im_v2.forward_plan_operations FOR EACH ROW EXECUTE FUNCTION im_v2.protect_forward_plan_original();
+
+CREATE TABLE im_v2.forward_preparation_rejections (
+ actor_user_id uuid NOT NULL, operation_id uuid NOT NULL, source_message_id uuid NOT NULL,
+ target_room_id uuid NOT NULL, source_room_id uuid NOT NULL,
+ source_content_revision bigint NOT NULL CHECK(source_content_revision>0),
+ error_code text NOT NULL CHECK(error_code IN ('NOT_FOUND','SOURCE_CHANGED','MEDIA_UNAVAILABLE','INVALID_ARGUMENT','CLOSED_BEFORE_EXECUTION')),
+ PRIMARY KEY(actor_user_id,operation_id,source_message_id,target_room_id)
+);
+CREATE TRIGGER forward_preparation_rejections_immutable BEFORE UPDATE OR DELETE ON im_v2.forward_preparation_rejections FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
+-- Permanent minimal admission and original proof. No cascading user/room foreign keys.
+CREATE TABLE im_v2.member_administration_admissions (
+ actor_user_id uuid NOT NULL,operation_id uuid NOT NULL,room_id uuid NOT NULL,
+ admission jsonb NOT NULL CHECK(jsonb_typeof(admission)='object' AND octet_length(admission::text)<=4096),
+ PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE TABLE im_v2.member_administration_receipts (
+ actor_user_id uuid NOT NULL,operation_id uuid NOT NULL,room_id uuid NOT NULL,
+ receipt jsonb NOT NULL CHECK(jsonb_typeof(receipt)='object' AND octet_length(receipt::text)<=4096),
+ PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE TRIGGER member_administration_admissions_immutable BEFORE UPDATE OR DELETE ON im_v2.member_administration_admissions FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
+CREATE TRIGGER member_administration_receipts_immutable BEFORE UPDATE OR DELETE ON im_v2.member_administration_receipts FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
+-- Permanent minimal admission and original proof. No cascading user/room foreign keys.
+CREATE TABLE im_v2.membership_operation_admissions (
+ actor_user_id uuid NOT NULL,operation_id uuid NOT NULL,room_id uuid NOT NULL,
+ admission jsonb NOT NULL CHECK(jsonb_typeof(admission)='object' AND octet_length(admission::text)<=4096),
+ PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE TABLE im_v2.membership_operation_receipts (
+ actor_user_id uuid NOT NULL,operation_id uuid NOT NULL,room_id uuid NOT NULL,
+ receipt jsonb NOT NULL CHECK(jsonb_typeof(receipt)='object' AND octet_length(receipt::text)<=4096),
+ PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE TRIGGER membership_operation_admissions_immutable BEFORE UPDATE OR DELETE ON im_v2.membership_operation_admissions FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
+CREATE TRIGGER membership_operation_receipts_immutable BEFORE UPDATE OR DELETE ON im_v2.membership_operation_receipts FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
+CREATE TABLE im_v2.group_capability_admissions (
+ actor_user_id uuid NOT NULL,operation_id uuid NOT NULL,room_id uuid NOT NULL,
+ kind text NOT NULL CHECK(kind IN ('pinnedMessage','groupAnnouncement','groupPermission','groupRole')),
+ admission jsonb NOT NULL CHECK(jsonb_typeof(admission)='object' AND octet_length(admission::text)<=65536),
+ PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE TRIGGER group_capability_admissions_immutable BEFORE UPDATE OR DELETE ON im_v2.group_capability_admissions FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
+CREATE TABLE im_v2.group_capability_receipts (
+ actor_user_id uuid NOT NULL,operation_id uuid NOT NULL,room_id uuid NOT NULL,
+ kind text NOT NULL CHECK(kind IN ('pinnedMessage','groupAnnouncement','groupPermission','groupRole')),
+ receipt jsonb NOT NULL CHECK(jsonb_typeof(receipt)='object' AND octet_length(receipt::text)<=65536),
+ PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE TRIGGER group_capability_receipts_immutable BEFORE UPDATE OR DELETE ON im_v2.group_capability_receipts FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
+CREATE TABLE im_v2.social_relationship_revisions (
+ lower_user_id uuid NOT NULL,higher_user_id uuid NOT NULL,revision bigint NOT NULL CHECK(revision>0),
+ PRIMARY KEY(lower_user_id,higher_user_id),CHECK(lower_user_id<>higher_user_id)
+);
+CREATE TABLE im_v2.social_block_revisions (
+ actor_user_id uuid NOT NULL,target_user_id uuid NOT NULL,revision bigint NOT NULL CHECK(revision>0),
+ PRIMARY KEY(actor_user_id,target_user_id),CHECK(actor_user_id<>target_user_id)
+);
+CREATE TABLE im_v2.social_operation_receipts (
+ actor_user_id uuid NOT NULL,operation_id uuid NOT NULL,kind text NOT NULL CHECK(kind IN ('relationship','userBlock')),
+ receipt jsonb NOT NULL CHECK(jsonb_typeof(receipt)='object' AND octet_length(receipt::text)<=4096),
+ PRIMARY KEY(actor_user_id,operation_id,kind)
+);
+CREATE TRIGGER social_operation_receipts_immutable BEFORE UPDATE OR DELETE ON im_v2.social_operation_receipts FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
+CREATE TABLE im_v2.account_preference_revisions (
+ user_id uuid NOT NULL,kind text NOT NULL CHECK(kind IN ('strangerMessagePreference','userAddPreference','liveActivityPreference')),
+ revision bigint NOT NULL CHECK(revision>0),PRIMARY KEY(user_id,kind)
+);
+CREATE TABLE im_v2.account_preference_receipts (
+ actor_user_id uuid NOT NULL,operation_id uuid NOT NULL,kind text NOT NULL CHECK(kind IN ('strangerMessagePreference','userAddPreference','readReceiptPreference','liveActivityPreference')),
+ receipt jsonb NOT NULL CHECK(jsonb_typeof(receipt)='object' AND octet_length(receipt::text)<=4096),PRIMARY KEY(actor_user_id,operation_id,kind)
+);
+CREATE TRIGGER account_preference_receipts_immutable BEFORE UPDATE OR DELETE ON im_v2.account_preference_receipts FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
+
+CREATE TABLE im_v2.group_creation_operations (
+ actor_user_id UUID NOT NULL,
+ operation_id UUID NOT NULL,
+ intent JSONB NOT NULL CHECK (jsonb_typeof(intent)='object' AND octet_length(intent::text)<=4096),
+ room_id UUID NOT NULL UNIQUE,
+ event_id UUID NOT NULL UNIQUE,
+ room_shard_id TEXT NOT NULL CHECK(length(room_shard_id)>0),
+ phase TEXT NOT NULL CHECK(phase IN ('staging','finalizing','committed','closed','rejected')),
+ accepted_member_count INTEGER NOT NULL CHECK(accepted_member_count BETWEEN 0 AND 99999),
+ copied_member_count INTEGER NOT NULL DEFAULT 0 CHECK(copied_member_count BETWEEN 0 AND 100000),
+ receipt JSONB CHECK(receipt IS NULL OR (jsonb_typeof(receipt)='object' AND octet_length(receipt::text)<=65536)),
+ created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY(actor_user_id,operation_id),
+ CHECK ((phase IN ('committed','closed','rejected'))=(receipt IS NOT NULL)),
+ CHECK (phase <> 'staging' OR copied_member_count=0)
+);
+CREATE INDEX group_creation_operations_actor_phase_idx ON im_v2.group_creation_operations(actor_user_id,phase);
+CREATE TABLE im_v2.group_creation_pages (
+ actor_user_id UUID NOT NULL, operation_id UUID NOT NULL,
+ page_offset INTEGER NOT NULL CHECK(page_offset BETWEEN 0 AND 99998),
+ page_fingerprint JSONB NOT NULL CHECK(jsonb_typeof(page_fingerprint)='object' AND octet_length(page_fingerprint::text)<=256),
+ members JSONB NOT NULL CHECK(jsonb_typeof(members)='array' AND jsonb_array_length(members) BETWEEN 1 AND 512 AND octet_length(members::text)<=32768),
+ PRIMARY KEY(actor_user_id,operation_id,page_offset),
+ FOREIGN KEY(actor_user_id,operation_id) REFERENCES im_v2.group_creation_operations(actor_user_id,operation_id)
+);
+CREATE TABLE im_v2.group_creation_owner_receipts (
+ actor_user_id UUID NOT NULL, operation_id UUID NOT NULL, room_id UUID NOT NULL REFERENCES im_v2.rooms(room_id),
+ receipt JSONB NOT NULL CHECK(jsonb_typeof(receipt)='object' AND octet_length(receipt::text)<=65536),
+ PRIMARY KEY(actor_user_id,operation_id), UNIQUE(room_id)
+);
+CREATE FUNCTION im_v2.protect_group_creation_operation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP='DELETE' THEN RAISE EXCEPTION 'group creation identity is permanent'; END IF;
+ IF ROW(NEW.actor_user_id,NEW.operation_id,NEW.intent,NEW.room_id,NEW.event_id,NEW.room_shard_id,NEW.created_at)
+ IS DISTINCT FROM ROW(OLD.actor_user_id,OLD.operation_id,OLD.intent,OLD.room_id,OLD.event_id,OLD.room_shard_id,OLD.created_at)
+ THEN RAISE EXCEPTION 'group creation identity is immutable'; END IF;
+ IF OLD.phase IN ('committed','closed','rejected') THEN RAISE EXCEPTION 'group creation outcome is immutable'; END IF;
+ IF OLD.phase='finalizing' AND NEW.phase NOT IN ('finalizing','committed') THEN RAISE EXCEPTION 'finalizing cannot close'; END IF;
+ IF NEW.accepted_member_count<OLD.accepted_member_count OR NEW.copied_member_count<OLD.copied_member_count THEN RAISE EXCEPTION 'group creation cursor cannot regress'; END IF;
+ IF OLD.phase='finalizing' AND NEW.accepted_member_count<>OLD.accepted_member_count THEN RAISE EXCEPTION 'group creation audience is frozen'; END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER group_creation_operations_immutable BEFORE UPDATE OR DELETE ON im_v2.group_creation_operations FOR EACH ROW EXECUTE FUNCTION im_v2.protect_group_creation_operation();
+CREATE FUNCTION im_v2.protect_group_creation_page() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP='UPDATE' THEN RAISE EXCEPTION 'group creation page is immutable'; END IF;
+ IF NOT EXISTS(SELECT 1 FROM im_v2.group_creation_operations WHERE actor_user_id=OLD.actor_user_id AND operation_id=OLD.operation_id AND phase IN ('committed','closed','rejected')) THEN RAISE EXCEPTION 'active group creation page is retained'; END IF;
+ RETURN OLD;
+END $$;
+CREATE TRIGGER group_creation_pages_immutable BEFORE UPDATE OR DELETE ON im_v2.group_creation_pages FOR EACH ROW EXECUTE FUNCTION im_v2.protect_group_creation_page();
+CREATE TRIGGER group_creation_owner_receipts_immutable BEFORE UPDATE OR DELETE ON im_v2.group_creation_owner_receipts FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
+
+-- Direct-room fixed control handoff and minimal permanent owner proof.
+CREATE TABLE im_v2.direct_room_operation_handoffs (
+    actor_user_id UUID NOT NULL,
+    operation_id UUID NOT NULL,
+    fingerprint JSONB NOT NULL CHECK (jsonb_typeof(fingerprint) = 'object'),
+    command JSONB CHECK (command IS NULL OR (jsonb_typeof(command) = 'object' AND octet_length(command::text) <= 4096)),
+    room_id UUID,
+    room_shard_id TEXT,
+    phase TEXT NOT NULL CHECK (phase IN ('processing','resolved')),
+    receipt JSONB CHECK (receipt IS NULL OR (jsonb_typeof(receipt) = 'object' AND octet_length(receipt::text) <= 4096)),
+    PRIMARY KEY(actor_user_id,operation_id),
+    CHECK ((phase = 'processing' AND command IS NOT NULL AND room_id IS NOT NULL AND room_shard_id IS NOT NULL AND receipt IS NULL)
+        OR (phase = 'resolved' AND receipt IS NOT NULL))
+);
+CREATE TABLE im_v2.direct_room_owner_receipts (
+    actor_user_id UUID NOT NULL,
+    operation_id UUID NOT NULL,
+    receipt JSONB NOT NULL CHECK (jsonb_typeof(receipt) = 'object' AND octet_length(receipt::text) <= 4096),
+    PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE TRIGGER direct_room_owner_receipts_immutable BEFORE UPDATE OR DELETE ON im_v2.direct_room_owner_receipts
+FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
+CREATE FUNCTION im_v2.protect_direct_room_handoff() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'direct-room operation proof is permanent'; END IF;
+    IF OLD.phase <> 'processing' OR NEW.phase <> 'resolved'
+       OR NEW.actor_user_id IS DISTINCT FROM OLD.actor_user_id
+       OR NEW.operation_id IS DISTINCT FROM OLD.operation_id
+       OR NEW.fingerprint IS DISTINCT FROM OLD.fingerprint
+       OR NEW.command IS DISTINCT FROM OLD.command
+       OR NEW.room_id IS DISTINCT FROM OLD.room_id
+       OR NEW.room_shard_id IS DISTINCT FROM OLD.room_shard_id
+       OR NEW.receipt IS NULL THEN
+        RAISE EXCEPTION 'direct-room handoff is immutable except terminal owner proof';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER direct_room_handoff_protected BEFORE UPDATE OR DELETE ON im_v2.direct_room_operation_handoffs
+FOR EACH ROW EXECUTE FUNCTION im_v2.protect_direct_room_handoff();
+
+CREATE TABLE im_v2.message_moderation_admissions (
+    actor_user_id UUID NOT NULL,
+    operation_id UUID NOT NULL,
+    room_id UUID NOT NULL,
+    admission JSONB NOT NULL CHECK (jsonb_typeof(admission)='object' AND octet_length(admission::text)<=4096),
+    PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE TABLE im_v2.message_moderation_receipts (
+    actor_user_id UUID NOT NULL,
+    operation_id UUID NOT NULL,
+    room_id UUID NOT NULL,
+    receipt JSONB NOT NULL CHECK (jsonb_typeof(receipt)='object' AND octet_length(receipt::text)<=4096),
+    PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE TRIGGER message_moderation_admissions_immutable BEFORE UPDATE OR DELETE ON im_v2.message_moderation_admissions
+FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
+CREATE TRIGGER message_moderation_receipts_immutable BEFORE UPDATE OR DELETE ON im_v2.message_moderation_receipts
+FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
+
+CREATE TABLE im_v2.group_invitation_admissions (
+ actor_user_id UUID NOT NULL, operation_id UUID NOT NULL, room_id UUID NOT NULL,
+ kind TEXT NOT NULL CHECK (kind IN ('groupInvite','groupJoinRequest','groupJoinDecision')),
+ admission JSONB NOT NULL CHECK (jsonb_typeof(admission) = 'object' AND octet_length(admission::text) <= 8192),
+ PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE TABLE im_v2.group_invitation_receipts (
+ actor_user_id UUID NOT NULL, operation_id UUID NOT NULL, room_id UUID NOT NULL,
+ kind TEXT NOT NULL CHECK (kind IN ('groupInvite','groupJoinRequest','groupJoinDecision')),
+ receipt JSONB NOT NULL CHECK (jsonb_typeof(receipt) = 'object' AND octet_length(receipt::text) <= 65536),
+ PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE TABLE im_v2.group_invitation_control_commands (
+ actor_user_id UUID NOT NULL, operation_id UUID NOT NULL,
+ command JSONB NOT NULL CHECK (jsonb_typeof(command) = 'object' AND octet_length(command::text) <= 8192),
+ PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE FUNCTION im_v2.reject_group_invitation_operation_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'immutable invitation operation metadata'; END;
+$$;
+CREATE TRIGGER group_invitation_admission_immutable BEFORE UPDATE OR DELETE ON im_v2.group_invitation_admissions FOR EACH ROW EXECUTE FUNCTION im_v2.reject_group_invitation_operation_mutation();
+CREATE TRIGGER group_invitation_receipt_immutable BEFORE UPDATE OR DELETE ON im_v2.group_invitation_receipts FOR EACH ROW EXECUTE FUNCTION im_v2.reject_group_invitation_operation_mutation();
+CREATE TRIGGER group_invitation_command_immutable BEFORE UPDATE OR DELETE ON im_v2.group_invitation_control_commands FOR EACH ROW EXECUTE FUNCTION im_v2.reject_group_invitation_operation_mutation();
+
+CREATE TABLE im_v2.remote_device_revocation_baselines (
+ baseline_id UUID PRIMARY KEY, actor_user_id UUID NOT NULL, current_device_id UUID NOT NULL,
+ baseline JSONB NOT NULL CHECK (jsonb_typeof(baseline)='object' AND octet_length(baseline::text)<=32768),
+ expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX remote_device_revocation_baseline_expiry_idx ON im_v2.remote_device_revocation_baselines(expires_at);
+CREATE TABLE im_v2.remote_device_revocation_receipts (
+ actor_user_id UUID NOT NULL, operation_id UUID NOT NULL, current_device_id UUID NOT NULL,
+ receipt JSONB NOT NULL CHECK (jsonb_typeof(receipt)='object' AND octet_length(receipt::text)<=65536),
+ PRIMARY KEY(actor_user_id,operation_id)
+);
+CREATE FUNCTION im_v2.guard_remote_device_revocation_metadata() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP='DELETE' AND TG_TABLE_NAME='remote_device_revocation_baselines' THEN RETURN OLD; END IF;
+ RAISE EXCEPTION 'immutable remote device revocation metadata';
+END;
+$$;
+CREATE TRIGGER remote_device_revocation_baseline_immutable BEFORE UPDATE OR DELETE ON im_v2.remote_device_revocation_baselines FOR EACH ROW EXECUTE FUNCTION im_v2.guard_remote_device_revocation_metadata();
+CREATE TRIGGER remote_device_revocation_receipt_immutable BEFORE UPDATE OR DELETE ON im_v2.remote_device_revocation_receipts FOR EACH ROW EXECUTE FUNCTION im_v2.guard_remote_device_revocation_metadata();
+
+COMMIT;

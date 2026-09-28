@@ -83,6 +83,7 @@ public struct V2ResourceTransferPlan: Equatable, Codable, Sendable {
     public let byteRange: V2ResourceByteRange?
     public let partNumber: Int?
     public let checksum: V2ResourceChecksum?
+    public let backgroundAuthorization: V2ResourceBackgroundAuthorization?
 
     public var expiresAt: Date { V2ResourceTime.date(expiresAtUnixMilliseconds) }
     public var httpMethod: String { mode.httpMethod }
@@ -91,16 +92,16 @@ public struct V2ResourceTransferPlan: Equatable, Codable, Sendable {
                 headers: [V2ResourceTransferHeader] = [], formFields: [String: String] = [:],
                 formFileField: String? = nil, expiresAt: Date, expectedByteCount: Int64,
                 byteRange: V2ResourceByteRange? = nil, partNumber: Int? = nil,
-                checksum: V2ResourceChecksum? = nil) throws {
+                checksum: V2ResourceChecksum? = nil, backgroundAuthorization: V2ResourceBackgroundAuthorization? = nil) throws {
         try self.init(version: version, mode: mode, url: url, headers: headers, formFields: formFields,
                       formFileField: formFileField, expiresAtUnixMilliseconds: V2ResourceTime.milliseconds(expiresAt),
-                      expectedByteCount: expectedByteCount, byteRange: byteRange, partNumber: partNumber, checksum: checksum)
+                      expectedByteCount: expectedByteCount, byteRange: byteRange, partNumber: partNumber, checksum: checksum, backgroundAuthorization: backgroundAuthorization)
     }
 
     private init(version: Int, mode: V2ResourceTransferMode, url: URL,
                  headers: [V2ResourceTransferHeader], formFields: [String: String], formFileField: String?,
                  expiresAtUnixMilliseconds: Int64, expectedByteCount: Int64,
-                 byteRange: V2ResourceByteRange?, partNumber: Int?, checksum: V2ResourceChecksum?) throws {
+                 byteRange: V2ResourceByteRange?, partNumber: Int?, checksum: V2ResourceChecksum?, backgroundAuthorization: V2ResourceBackgroundAuthorization?) throws {
         guard version == Self.currentVersion, url.scheme?.lowercased() == "https",
               let host = url.host, !host.isEmpty, url.user == nil, url.password == nil, url.fragment == nil,
               url.absoluteString.utf8.count <= 8_192, expectedByteCount >= 0,
@@ -129,6 +130,14 @@ public struct V2ResourceTransferPlan: Equatable, Codable, Sendable {
                   formFields.isEmpty, formFileField == nil
             else { throw V2ResourceValidationError.invalidTransferPlan }
         }
+        if let backgroundAuthorization {
+            guard mode == .httpPartPut, expectedByteCount>0, expectedByteCount<=8*1_024*1_024,
+                  partNumber == backgroundAuthorization.partNumber,
+                  expiresAtUnixMilliseconds == backgroundAuthorization.expiresAtMilliseconds,
+                  headers.allSatisfy({ $0.kind == .content && $0.name.lowercased() != "authorization" })
+            else { throw V2ResourceValidationError.invalidTransferPlan }
+        }
+        self.backgroundAuthorization = backgroundAuthorization
         self.version = version
         self.mode = mode
         self.url = url
@@ -150,7 +159,7 @@ public struct V2ResourceTransferPlan: Equatable, Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case version, mode, url, headers, formFields, formFileField, expiresAtUnixMilliseconds
-        case expectedByteCount, byteRange, partNumber, checksum
+        case expectedByteCount, byteRange, partNumber, checksum, backgroundAuthorization
     }
 
     public init(from decoder: any Decoder) throws {
@@ -161,6 +170,6 @@ public struct V2ResourceTransferPlan: Equatable, Codable, Sendable {
                       expiresAtUnixMilliseconds: values.decode(Int64.self, forKey: .expiresAtUnixMilliseconds),
                       expectedByteCount: values.decode(Int64.self, forKey: .expectedByteCount),
                       byteRange: values.decodeIfPresent(V2ResourceByteRange.self, forKey: .byteRange),
-                      partNumber: values.decodeIfPresent(Int.self, forKey: .partNumber), checksum: values.decodeIfPresent(V2ResourceChecksum.self, forKey: .checksum))
+                      partNumber: values.decodeIfPresent(Int.self, forKey: .partNumber), checksum: values.decodeIfPresent(V2ResourceChecksum.self, forKey: .checksum), backgroundAuthorization: values.decodeIfPresent(V2ResourceBackgroundAuthorization.self, forKey: .backgroundAuthorization))
     }
 }

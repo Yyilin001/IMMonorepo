@@ -131,8 +131,7 @@ final class IMAppLocalAuthenticationTerminationUITests: XCTestCase {
             XCTFail("The authenticated device inventory must include this installation.")
             return
         }
-        _ = try await post("v2/devices/revoke", body: ["deviceID": currentDevice, "operationID": UUID().uuidString.lowercased()],
-                           access: access, device: otherDevice, expectedStatus: 204)
+        try await revokeObservedDevice(target: DeviceID(currentDevice), access: access, device: otherDevice)
         let refresh = app.buttons["v2.device-sessions.refresh"]
         if !useGateway {
             XCTAssertTrue(refresh.exists)
@@ -178,6 +177,34 @@ final class IMAppLocalAuthenticationTerminationUITests: XCTestCase {
         XCTAssertEqual(activeIDs.count, 2)
         XCTAssertTrue(activeIDs.contains(otherDevice.lowercased()))
         XCTAssertFalse(activeIDs.contains(currentDevice.lowercased()))
+    }
+
+    @MainActor
+    private func revokeObservedDevice(target: DeviceID, access: String, device: String) async throws {
+        func request(_ path: String, body: Data? = nil) async throws -> Data {
+            var request = URLRequest(url: try XCTUnwrap(URL(string: "https://localhost:8443/" + path)), timeoutInterval: 15)
+            request.httpMethod = body == nil ? "GET" : "POST"; request.httpBody = body
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer " + access, forHTTPHeaderField: "Authorization")
+            request.setValue(device, forHTTPHeaderField: "X-IM-Device-ID")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual(try XCTUnwrap(response as? HTTPURLResponse).statusCode, 200)
+            return data
+        }
+        let baseline = try await JSONDecoder().decode(V2RemoteDeviceRevocationBaseline.self,
+            from: request("v2/devices/revocation-baseline"))
+        let command = try V2RemoteDeviceRevocationCommand(operationID: UUID(), baseline: baseline,
+            selection: .device(target), firstSubmissionDeadlineMilliseconds: baseline.expiresAtMilliseconds)
+        let result = try await JSONDecoder().decode(V2RemoteDeviceRevocationResult.self,
+            from: request("v2/devices/remote-revocations/submit", body: JSONEncoder().encode(command)))
+        guard case .receipt(let proof) = result, case .revoked = proof.outcome else {
+            throw V2RemoteDeviceRevocationValidationError.invalidReceipt
+        }
+        XCTAssertTrue(proof.validates(command))
+        let recovered = try await JSONDecoder().decode(V2RemoteDeviceRevocationResult.self,
+            from: request("v2/devices/remote-revocations/operations/recover",
+                body: JSONEncoder().encode(V2RemoteDeviceRevocationRecoveryRequest(command: command, action: .query))))
+        XCTAssertEqual(recovered, result)
     }
 
     @MainActor

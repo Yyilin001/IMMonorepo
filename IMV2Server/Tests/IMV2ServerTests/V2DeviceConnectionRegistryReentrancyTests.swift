@@ -15,7 +15,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
         let stream = try streamFixture()
 
         let registration = Task {
-            try await registry.register(stream, connectionID: connectionID, identity: identity)
+            try await registry.register(stream, connectionID: connectionID, identity: identity, publicationSuppressed: false)
         }
         await leases.waitUntilRefreshStarts()
         await registry.unregister(connectionID: connectionID)
@@ -39,7 +39,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
             try await registry.register(
                 stream,
                 connectionID: connectionID,
-                identity: identity
+                identity: identity, publicationSuppressed: false
             )
         }
         await leases.waitUntilPreferenceLookupStarts()
@@ -61,7 +61,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
         let roomID = try RoomID("00000000-0000-0000-0000-000000000d05")
         let target = try UserID("00000000-0000-0000-0000-000000000d06")
         let stream = try streamFixture()
-        try await registry.register(stream, connectionID: connectionID, identity: identity)
+        try await registry.register(stream, connectionID: connectionID, identity: identity, publicationSuppressed: false)
 
         let subscription = Task {
             await registry.subscribePresence(
@@ -91,7 +91,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
             let connectionID = UUID(
                 uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, UInt8(index / 256), UInt8(index % 256))
             )
-            try await registry.register(stream, connectionID: connectionID, identity: identity)
+            try await registry.register(stream, connectionID: connectionID, identity: identity, publicationSuppressed: false)
             await registry.unregister(connectionID: connectionID)
         }
 
@@ -124,17 +124,22 @@ struct V2DeviceConnectionRegistryReentrancyTests {
 
 private actor SuspendedPresenceLeases: V2LivePresenceLeaseManaging {
     private var active: Set<UUID> = []
+    private var identities: [UUID: V2AuthenticatedConnection] = [:]
+    private var suppressed: [UUID: Bool] = [:]
     private var refreshStarted: CheckedContinuation<Void, Never>?
     private var refreshResume: CheckedContinuation<Void, Never>?
     private var didStartRefresh = false
 
     func admitConnection(
-        identity _: V2AuthenticatedConnection,
+        identity: V2AuthenticatedConnection,
         connectionID: UUID,
+        publicationSuppressed: Bool,
         policy _: V2AuthenticatedConnectionAdmissionPolicy,
         now: Date
     ) async throws -> V2AuthenticatedConnectionLeaseOutcome {
         active.insert(connectionID)
+        identities[connectionID] = identity
+        suppressed[connectionID] = publicationSuppressed
         didStartRefresh = true
         refreshStarted?.resume()
         refreshStarted = nil
@@ -143,21 +148,34 @@ private actor SuspendedPresenceLeases: V2LivePresenceLeaseManaging {
     }
 
     func renewConnection(
-        identity _: V2AuthenticatedConnection,
+        identity: V2AuthenticatedConnection,
         connectionID: UUID,
         now: Date
     ) -> V2AuthenticatedConnectionLeaseOutcome {
-        guard active.contains(connectionID) else { return .rejected }
+        guard active.contains(connectionID), identities[connectionID] == identity else { return .rejected }
         return .accepted(expiresAt: now.addingTimeInterval(30))
     }
 
     func removePresence(
-        identity _: V2AuthenticatedConnection,
+        identity: V2AuthenticatedConnection,
         connectionID: UUID,
         now _: Date
     ) -> Bool {
+        guard identities[connectionID] == identity else { return !active.isEmpty }
         active.remove(connectionID)
+        identities.removeValue(forKey: connectionID)
+        suppressed.removeValue(forKey: connectionID)
         return !active.isEmpty
+    }
+
+    func setPresencePublication(identity: V2AuthenticatedConnection, connectionID: UUID,
+        suppressed value: Bool, now: Date) throws -> V2PresencePublicationLeaseObservation {
+        guard active.contains(connectionID), identities[connectionID] == identity else {
+            throw V2GatewaySessionError.unsupportedCommand
+        }
+        suppressed[connectionID] = value
+        let online = identities.contains { id, stored in stored.userID == identity.userID && suppressed[id] == false }
+        return .init(isOnline: online, expiresAt: now.addingTimeInterval(30))
     }
 
     func allowsOnlinePresence(userID _: UserID) -> Bool { true }
@@ -172,36 +190,54 @@ private actor SuspendedPresenceLeases: V2LivePresenceLeaseManaging {
 
 private actor SuspendedPreferencePresenceLeases: V2LivePresenceLeaseManaging {
     private var active: Set<UUID> = []
+    private var identities: [UUID: V2AuthenticatedConnection] = [:]
+    private var suppressed: [UUID: Bool] = [:]
     private var lookupStarted: CheckedContinuation<Void, Never>?
     private var lookupResume: CheckedContinuation<Void, Never>?
     private var didStartLookup = false
 
     func admitConnection(
-        identity _: V2AuthenticatedConnection,
+        identity: V2AuthenticatedConnection,
         connectionID: UUID,
+        publicationSuppressed: Bool,
         policy _: V2AuthenticatedConnectionAdmissionPolicy,
         now: Date
     ) -> V2AuthenticatedConnectionLeaseOutcome {
         active.insert(connectionID)
+        identities[connectionID] = identity
+        suppressed[connectionID] = publicationSuppressed
         return .accepted(expiresAt: now.addingTimeInterval(30))
     }
 
     func renewConnection(
-        identity _: V2AuthenticatedConnection,
+        identity: V2AuthenticatedConnection,
         connectionID: UUID,
         now: Date
     ) -> V2AuthenticatedConnectionLeaseOutcome {
-        guard active.contains(connectionID) else { return .rejected }
+        guard active.contains(connectionID), identities[connectionID] == identity else { return .rejected }
         return .accepted(expiresAt: now.addingTimeInterval(30))
     }
 
     func removePresence(
-        identity _: V2AuthenticatedConnection,
+        identity: V2AuthenticatedConnection,
         connectionID: UUID,
         now _: Date
     ) -> Bool {
+        guard identities[connectionID] == identity else { return !active.isEmpty }
         active.remove(connectionID)
+        identities.removeValue(forKey: connectionID)
+        suppressed.removeValue(forKey: connectionID)
         return !active.isEmpty
+    }
+
+    func setPresencePublication(identity: V2AuthenticatedConnection, connectionID: UUID,
+        suppressed value: Bool, now: Date) throws -> V2PresencePublicationLeaseObservation {
+        guard active.contains(connectionID), identities[connectionID] == identity else {
+            throw V2GatewaySessionError.unsupportedCommand
+        }
+        suppressed[connectionID] = value
+        let online = identities.contains { id, stored in stored.userID == identity.userID && suppressed[id] == false }
+        return .init(isOnline: online, expiresAt: now.addingTimeInterval(30))
     }
 
     func allowsOnlinePresence(userID _: UserID) async -> Bool {

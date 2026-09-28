@@ -5,51 +5,6 @@ import IMV2Core
 ///
 /// 网关已完成发起者认证。该边界刻意不接受调用方自报的角色或安全服务身份：
 /// 这些信息由权威存储或单独的特权接口推导。
-public struct V2AuthenticatedModeration: Sendable {
-    /// 目标房间。
-    public let roomID: RoomID
-    /// 发起审核的用户。
-    public let actorUserID: UserID
-    /// 本次审核的幂等操作标识。
-    public let operationID: ModerationOperationID
-    /// 审核动作。
-    public let action: V2ModerationAction
-    /// 目标用户；仅部分动作需要。
-    public let targetUserID: UserID?
-    /// 目标消息；仅部分动作需要。
-    public let messageID: MessageID?
-    /// 禁言到期时刻；仅禁言动作需要。
-    public let muteUntil: Date?
-    /// 审核原因码。
-    public let reasonCode: V2ModerationReasonCode
-
-    /// 保存已认证的审核命令。
-    ///
-    /// - Parameters:
-    ///   - roomID: 目标房间。
-    ///   - actorUserID: 发起审核的用户。
-    ///   - operationID: 幂等操作标识。
-    ///   - action: 审核动作。
-    ///   - targetUserID: 目标用户。
-    ///   - messageID: 目标消息。
-    ///   - muteUntil: 禁言到期时刻。
-    ///   - reasonCode: 审核原因码。
-    public init(roomID: RoomID, actorUserID: UserID, operationID: ModerationOperationID, action: V2ModerationAction, targetUserID: UserID? = nil, messageID: MessageID? = nil, muteUntil: Date? = nil, reasonCode: V2ModerationReasonCode) {
-        self.roomID = roomID
-        self.actorUserID = actorUserID
-        self.operationID = operationID
-        self.action = action
-        self.targetUserID = targetUserID
-        self.messageID = messageID
-        self.muteUntil = muteUntil
-        self.reasonCode = reasonCode
-    }
-}
-
-/// 审核结果。
-///
-/// 结果不携带举报文本或消息正文：这些内容保留在权威审计存储中，
-/// 绝不会成为通用的房间同步载荷。
 public struct V2ModerationResult: Equatable, Sendable {
     /// 目标房间。
     public let roomID: RoomID
@@ -138,23 +93,6 @@ public enum V2ModerationOutcome: Equatable, Sendable {
 ///
 /// 单个 PostgreSQL 事务必须完成：推导发起者角色、校验动作合法性、写入权威状态、
 /// 追加房间事件与审计行、写入所需发件箱工作并持久化幂等结果。
-public protocol V2ModerationStore: Sendable {
-    /// 应用一次审核命令。
-    ///
-    /// - Parameters:
-    ///   - command: 审核命令。
-    ///   - capacityProfile: 本次命令使用的容量档位。
-    ///   - eventID: 命令幂等标识。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 审核结果。
-    /// - Throws: 房间或消息不存在、无权限、动作不受支持或持久化失败时抛出。
-    func apply(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome
-}
-
-/// 单独认证的安全服务房间控制命令。
-///
-/// 该命令刻意不接受调用方自报的发起者身份：服务实例使用部署时配置的受信审计主体，
-/// 且无法通过 TCP 网关触达。
 public struct V2TrustedSafetyRoomControl: Sendable {
     /// 目标房间。
     public let roomID: RoomID
@@ -269,51 +207,6 @@ public struct V2ModerationIDFactory: Sendable {
 }
 
 /// 面向普通审核者的审核服务。
-public struct V2ModerationService: Sendable {
-    private let store: any V2ModerationStore
-    private let capacityProfile: V2CapacityProfile
-    private let identifiers: V2ModerationIDFactory
-    private let now: @Sendable () -> Date
-
-    /// 组合审核存储与运行参数。
-    ///
-    /// - Parameters:
-    ///   - store: 执行审核的存储实现。
-    ///   - capacityProfile: 固定的容量档位。
-    ///   - identifiers: 事件标识生成器。
-    ///   - now: 可注入的当前时刻读取函数。
-    public init(store: any V2ModerationStore, capacityProfile: V2CapacityProfile, identifiers: V2ModerationIDFactory = .init(), now: @escaping @Sendable () -> Date = Date.init) {
-        self.store = store
-        self.capacityProfile = capacityProfile
-        self.identifiers = identifiers
-        self.now = now
-    }
-
-    /// 应用一次已认证的审核命令。
-    ///
-    /// - Parameter request: 已认证的审核命令。
-    /// - Returns: 审核结果；标识与授时由本方法补齐。
-    /// - Throws: 命令构造失败、标识生成失败或存储判定失败时抛出。
-    public func apply(_ request: V2AuthenticatedModeration) async throws -> V2ModerationOutcome {
-        let eventID = try identifiers.make()
-        let command = try V2ModerationCommand(
-            roomID: request.roomID,
-            actorUserID: request.actorUserID,
-            operationID: request.operationID,
-            action: request.action,
-            targetUserID: request.targetUserID,
-            messageID: request.messageID,
-            muteUntil: request.muteUntil,
-            reasonCode: request.reasonCode
-        )
-        return try await store.apply(command: command, capacityProfile: capacityProfile, eventID: eventID, now: now())
-    }
-}
-
-/// 与 ``V2ModerationService`` 对应的特权版本。
-///
-/// 能否构造该对象是一个部署期的信任决定：只有已认证的安全服务或管理集成才会获得它
-/// 及其配置的审计主体。
 public struct V2TrustedSafetyModerationService: Sendable {
     private let store: any V2TrustedSafetyModerationStore
     private let safetyActorUserID: UserID

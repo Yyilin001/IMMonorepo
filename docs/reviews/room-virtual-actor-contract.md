@@ -73,7 +73,7 @@ python3 IMV2/scripts/prepare_v2_room_actor_configuration.py \
 
 每个容器只挂载自己的 node 子目录。CA 私钥不挂入服务，已有输出目录不会被覆盖。默认本地启动脚本会创建并保留自己的 Host/caller 身份；此生成器的自签 CA 用于隔离验证，正式部署通过现有 secret provisioning 提供材料。
 
-新库使用 `im-v2-current-53` canonical schema；不提供混合 schema 或历史在线迁移。所有重建和故障脚本只针对显式可丢弃实例。
+新库使用 `im-v2-current-55` canonical schema；不提供混合 schema 或历史在线迁移。所有重建和故障脚本只针对显式可丢弃实例。
 
 ## 观测与验证
 

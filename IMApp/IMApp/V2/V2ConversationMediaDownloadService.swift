@@ -97,8 +97,8 @@ struct V2ConversationMediaCachePolicy: Equatable, Sendable {
 
 /// 把 V2 的设备本地存储策略应用到存放本地同步状态或已下载媒体的目录。
 ///
-/// 应用目前不提供常驻后台媒体传输，
-/// 因此该仅前台使用的媒体缓存采用 `Complete` 保护级别是正确的。
+/// 此目录保存前台下载缓存，采用 `Complete` 保护级别。
+/// 后台上传源文件和完成回调 inbox 由各自的文件所有者管理。
 enum V2DeviceLocalStoragePolicy {
     static func prepareManagedDirectory(
         _ directory: URL,
@@ -241,6 +241,7 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
     private var fileLeases: [UUID: URL] = [:]
     private var pendingDeletion: Set<URL> = []
     private var activeTemporaryFiles: Set<URL> = []
+    private var discardedTemporaryFiles: Set<URL> = []
     private var fileDrainWaiters: [CheckedContinuation<Void, Never>] = []
 
     fileprivate func borrowFile(mediaID: MediaID, fileURL: URL) throws -> V2ConversationMediaFileLease {
@@ -310,32 +311,26 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         let expected = access.plan.expectedByteCount
         guard expected > 0, expected <= 2 * 1_024 * 1_024 else { throw V2ClientMediaTransferError.invalidTarget }
         guard access.plan.expiresAt > now() else { throw V2ClientMediaTransferError.targetExpired }
-        let reservation = try reserve(bytes: expected)
+        let temporary = destination.deletingPathExtension().appendingPathExtension("download")
+        let partial = temporary.appendingPathExtension("range-part")
+        let journal = temporary.appendingPathExtension("range-journal")
+        let existing = (try? fileManager.attributesOfItem(atPath: partial.path)[.size] as? NSNumber)?.int64Value ?? 0
+        let reservation = try reserve(bytes: expected,alreadyStaged: existing)
         defer { reservedBytes -= reservation }
-        let temporary = directory.appendingPathComponent("." + UUID().uuidString + ".partial")
-        activeTemporaryFiles.insert(temporary)
-        defer { activeTemporaryFiles.remove(temporary); try? fileManager.removeItem(at: temporary) }
-        guard fileManager.createFile(atPath: temporary.path, contents: nil) else { throw V2DeviceLocalStorageError.fileSystemFailure }
-        try V2DeviceLocalStoragePolicy.applyToManagedFile(temporary, fileManager: fileManager)
-        let handle = try FileHandle(forWritingTo: temporary)
-        defer { try? handle.close() }
-        var request = URLRequest(url: access.plan.url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 30)
-        request.httpMethod = "GET"
-        for header in access.plan.headers { request.setValue(header.value, forHTTPHeaderField: header.name) }
-        let (stream, response) = try await V2SecureURLSession.mediaProvider.bytes(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw V2ClientMediaTransferError.invalidResponse }
-        var count: Int64 = 0, chunk = Data()
-        for try await byte in stream {
-            try Task.checkCancellation()
-            guard !isClosed, count < expected else { throw V2ClientMediaTransferError.byteCountMismatch }
-            chunk.append(byte); count += 1
-            if chunk.count == 64 * 1_024 { try handle.write(contentsOf: chunk); chunk.removeAll(keepingCapacity: true) }
+        activeTemporaryFiles.formUnion([temporary,partial,journal])
+        defer {
+            activeTemporaryFiles.subtract([temporary,partial,journal])
+            try? fileManager.removeItem(at: temporary)
         }
-        if !chunk.isEmpty { try handle.write(contentsOf: chunk) }
-        try handle.synchronize()
+        let target = try V2ClientMediaTransferTarget(downloadPlan: access.plan)
+        // Use the same bounded byte leaf and account permit as attachments.
+        // The immutable avatar version remains bound to its current lease.
+        try await downloader.download(target: target,to: temporary)
         try Task.checkCancellation()
-        guard !isClosed, count == expected,
-              try V2ResourceFileDigest.sha256(fileURL: temporary, expectedByteCount: expected) == access.checksum.value else { throw V2ClientMediaTransferError.byteCountMismatch }
+        guard !isClosed else { throw CancellationError() }
+        guard (try fileManager.attributesOfItem(atPath: temporary.path)[.size] as? NSNumber)?.int64Value == expected,
+              try V2ResourceFileDigest.sha256(fileURL: temporary,expectedByteCount: expected) == access.checksum.value else { throw V2ClientMediaTransferError.byteCountMismatch }
+        try V2DeviceLocalStoragePolicy.applyToManagedFile(temporary,fileManager: fileManager)
         if fileManager.fileExists(atPath: destination.path) { try fileManager.removeItem(at: destination) }
         try fileManager.moveItem(at: temporary, to: destination)
         verifiedAvatars.insert(destination)
@@ -343,9 +338,9 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
     }
 
     /// Reserve both transfer/temp and final publication peaks before starting I/O.
-    private func reserve(bytes: Int64) throws -> Int64 {
+    private func reserve(bytes: Int64, alreadyStaged: Int64 = 0) throws -> Int64 {
         guard bytes > 0, bytes <= cachePolicy.maximumByteCount / 2 else { throw V2ConversationAttachmentStagingError.stagingQuotaExceeded }
-        let peak = bytes * 2
+        let peak = bytes * 2 - min(max(0,alreadyStaged),bytes)
         guard reservedBytes <= cachePolicy.maximumByteCount - peak else { throw V2ConversationAttachmentStagingError.stagingQuotaExceeded }
         try enforceCachePolicy(excluding: nil, reservedAddition: peak)
         let files = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey])
@@ -366,14 +361,25 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         // Immutable local generations keep an existing player/share and its
         // decoded thumbnail bound to the original bytes during a fresh download.
         let destination = directory.appendingPathComponent(cacheStem(for: media.mediaID) + "." + UUID().uuidString + ".media")
-        let temporary = directory
-            .appendingPathComponent("." + makeUUID().uuidString + ".partial", isDirectory: false)
-        activeTemporaryFiles.insert(temporary)
-        defer { activeTemporaryFiles.remove(temporary); try? fileManager.removeItem(at: temporary) }
-
         let target = try await downloader.authorizedTarget(mediaID: media.mediaID, message: message)
+        // Account directory + media identity + authoritative checksum form the
+        // stable recovery key. Signed targets and headers remain in memory.
+        let temporary = directory.appendingPathComponent("." + cacheStem(for: media.mediaID) + "." + target.checksum.value + ".download")
+        let partial = temporary.appendingPathExtension("range-part")
+        let journal = temporary.appendingPathExtension("range-journal")
+        guard !activeTemporaryFiles.contains(temporary) else { throw V2ClientMediaTransferError.uploadStateConflict }
+        activeTemporaryFiles.formUnion([temporary,partial,journal])
+        defer {
+            activeTemporaryFiles.subtract([temporary,partial,journal])
+            try? fileManager.removeItem(at: temporary)
+            if discardedTemporaryFiles.remove(temporary) != nil {
+                try? fileManager.removeItem(at: partial)
+                try? fileManager.removeItem(at: journal)
+            }
+        }
         let expected = target.expectedByteCount
-        let reservation = try reserve(bytes: expected)
+        let existing = (try? fileManager.attributesOfItem(atPath: partial.path)[.size] as? NSNumber)?.int64Value ?? 0
+        let reservation = try reserve(bytes: expected,alreadyStaged: existing)
         defer { reservedBytes -= reservation }
         try await downloader.download(target: target, to: temporary)
         try Task.checkCancellation()
@@ -401,12 +407,18 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
     }
 
     func discard(_ media: V2MediaReference) async {
-        for (id, target) in transferMedia where target == media.mediaID { transfers[id]?.cancel() }
+        for (id,target) in transferMedia where target == media.mediaID { transfers[id]?.cancel() }
         let stem = cacheStem(for: media.mediaID)
+        for temporary in activeTemporaryFiles where temporary.pathExtension == "download" && temporary.lastPathComponent.hasPrefix("." + stem + ".") {
+            discardedTemporaryFiles.insert(temporary)
+        }
         guard let files = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
-        for file in files where file.pathExtension == "media"
-            && (file.lastPathComponent == stem + ".media" || file.lastPathComponent.hasPrefix(stem + ".")) {
-            retireCachedFile(file.standardizedFileURL)
+        for file in files {
+            if file.pathExtension == "media" && (file.lastPathComponent == stem + ".media" || file.lastPathComponent.hasPrefix(stem + ".")) {
+                retireCachedFile(file.standardizedFileURL)
+            } else if file.lastPathComponent.hasPrefix("." + stem + "."), ["range-part","range-journal","download"].contains(file.pathExtension), !activeTemporaryFiles.contains(file) {
+                try? fileManager.removeItem(at: file)
+            }
         }
     }
 
@@ -436,8 +448,10 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         for entry in entries {
             let candidate = entry.standardizedFileURL
             guard candidate.deletingLastPathComponent() == directory,
-                  candidate.lastPathComponent.hasPrefix("."),
-                  candidate.pathExtension == "partial",
+                  (candidate.lastPathComponent.hasPrefix(".") || ["range-part","range-journal","download"].contains(candidate.pathExtension)),
+                  (candidate.pathExtension == "partial" ||
+                    (["range-part","range-journal","download"].contains(candidate.pathExtension) &&
+                     ((try? candidate.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) < now().addingTimeInterval(-cachePolicy.maximumAge))),
                   !activeTemporaryFiles.contains(candidate),
                   (try? candidate.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
             else { continue }

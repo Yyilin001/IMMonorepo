@@ -104,6 +104,29 @@ struct V2TLSFrameConnectionLifecycleTests {
         await connection.disconnect()
     }
 
+    @Test("synchronization acknowledgement drains through reserved capacity while business admission is occupied")
+    func syncControlUsesReservedCapacity() async throws {
+        let peer = TLSTestPeer()
+        let scheduler = V2AccountWorkScheduler(configuration: .init(ordinaryLimit: 1))
+        let occupied = try await scheduler.acquire(.init(service: "business"))
+        let connection = try makeConnection([peer], scheduler: scheduler)
+        try await authenticate(connection)
+        var envelope = IMV2Envelope()
+        envelope.requestID = 333
+        envelope.protocolVersion = IMV2ProtocolVersion.current
+        envelope.syncAck = .init()
+        let frame = try V2ProtobufFrameCodec.encode(envelope, frameVersion: UInt8(IMV2ProtocolVersion.current))
+        let ack = Task { try await connection.request(frame) }
+        await peer.waitForRequest(333)
+        #expect(await scheduler.snapshot().active == 2)
+        try await peer.reply([333])
+        #expect(try await ack.value.requestID == 333)
+        #expect(await scheduler.snapshot().active == 1)
+        _ = await scheduler.release(occupied)
+        await connection.disconnect()
+        await scheduler.closeAndDrain()
+    }
+
     private func readHint(_ connection: V2TLSFrameConnection, kind: String) async throws {
         switch kind {
         case "sync": #expect(try await connection.nextAvailabilityHint().highWatermark == 7)
@@ -125,6 +148,29 @@ struct V2TLSFrameConnectionLifecycleTests {
         try await peer.reply([10, 11])
         #expect(try await b.value.requestID == 11)
         await connection.disconnect()
+    }
+
+    @Test("scheduled cancellation retains physical permit until the matching reply drains")
+    func scheduledCancellationDoesNotReleaseAdmission() async throws {
+        let peer = TLSTestPeer()
+        let scheduler = V2AccountWorkScheduler(configuration: .init(ordinaryLimit: 1))
+        let connection = try makeConnection([peer], scheduler: scheduler)
+        try await authenticate(connection)
+        let first = Task { try await connection.request(request(25)) }
+        await peer.waitForRequest(25)
+        first.cancel()
+        let second = Task { try await connection.request(request(26)) }
+        for _ in 0..<10000 { if await scheduler.snapshot().waiting == 1 { break }; await Task.yield() }
+        #expect(await scheduler.snapshot().active == 1)
+        #expect(await scheduler.snapshot().waiting == 1)
+        try await peer.reply([25])
+        await #expect(throws: CancellationError.self) { _ = try await first.value }
+        await peer.waitForRequest(26)
+        try await peer.reply([26])
+        #expect(try await second.value.requestID == 26)
+        #expect(await scheduler.snapshot().active == 0)
+        await connection.disconnect()
+        await scheduler.closeAndDrain()
     }
 
     @Test("cancelled entries occupy the bounded capacity until their matching reply")
@@ -281,9 +327,9 @@ struct V2TLSFrameConnectionLifecycleTests {
         await connection.disconnect()
     }
 
-    private func makeConnection(_ peers: [TLSTestPeer], timeout: Duration = .seconds(10), maximumPendingRequests: Int = 8) throws -> V2TLSFrameConnection {
+    private func makeConnection(_ peers: [TLSTestPeer], timeout: Duration = .seconds(10), maximumPendingRequests: Int = 8, scheduler: V2AccountWorkScheduler? = nil) throws -> V2TLSFrameConnection {
         let factory = TLSTestFactory(peers: peers)
-        return V2TLSFrameConnection(connectionFactory: { factory.next() }, frameLimits: try limits(), requestTimeout: timeout, maximumPendingRequests: maximumPendingRequests)
+        return V2TLSFrameConnection(connectionFactory: { factory.next() }, frameLimits: try limits(), requestTimeout: timeout, maximumPendingRequests: maximumPendingRequests, workScheduler: scheduler)
     }
     @discardableResult
     private func authenticate(_ connection: V2TLSFrameConnection) async throws -> V2AuthenticatedClientSession {
@@ -355,6 +401,8 @@ actor TLSTestPeer {
             response.authenticated.userID = "fixture-user"
             response.authenticated.deviceID = auth.deviceID
             response.authenticated.selectedCapabilityProfile = "base"
+        case .presencePublicationControl(let control):
+            response.presencePublicationControlled.mode = control.mode
         default:
             if let commandResponder {
                 response = try await commandResponder(envelope)

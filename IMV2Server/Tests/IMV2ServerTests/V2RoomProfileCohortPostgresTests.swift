@@ -55,6 +55,7 @@ struct V2RoomProfileCohortPostgresTests {
             let owner = try V2RoomServerOwnerResources(database: database, writes: writes, sendBatcher: sendBatcher,
                 membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
+                invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
                 receiptProjectionDelivery: CohortProjectionDelivery(),
                 capacityProfile: .init(id: "standard", limits: .init(maxEligibleMembers: 100,
                     maxCommandsPerWindow: 100, retryAfterSeconds: 3)),

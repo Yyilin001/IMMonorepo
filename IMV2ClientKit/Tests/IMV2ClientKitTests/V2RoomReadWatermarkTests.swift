@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import IMV2Core
 @testable import IMV2ClientKit
 import Testing
@@ -72,17 +73,16 @@ struct V2RoomReadWatermarkTests {
         let room = RoomID(uuid: UUID())
         // 传输永远失败：回执留在待发送状态，但进入房间的本地效果必须立刻生效，
         // 否则离线打开房间后未读会一直挂着，直到下次联网才归零。
-        let outbox = V2ReadReceiptOutboxEngine(store: store, transport: WatermarkFailingReceiptTransport())
-        let pending = try await outbox.enqueueReceipt(roomID: room, readThroughRoomSequence: 9)
-        _ = try await outbox.flushOnce()
-
-        #expect(try await store.pendingReadReceipts().first?.state == .pending)
+        let user = UserID(uuid: UUID())
+        try await store.databasePool.write { try $0.execute(sql:"UPDATE v2_local_installation SET user_id=?",arguments:[user.rawValue]) }
+        _ = try await store.enqueueReadReceiptIntent(accountID:user,roomID:room,readThrough:9)
         #expect(try await store.roomReadWatermark(roomID: room) == 9)
         #expect(try await store.roomReadWatermarks(roomIDs: [room]) == [room: 9])
-
-        // 被拒绝的回执不得计入：一次越界上报不能让未读被永久压低。
-        try await store.rejectReadReceipt(operationID: pending.operationID, code: "INVALID_ARGUMENT")
+        _ = try await store.prepareNextReadReceiptIntent(accountID:user)
+        let pending = try #require(try await store.dueOperationWork(now:.now,kinds:[.readReceipt]).first)
+        try await store.cancelUnsubmittedOperation(id:pending.id,now:.now)
         #expect(try await store.roomReadWatermark(roomID: room) == nil)
+
     }
 }
 
@@ -91,9 +91,7 @@ private struct WatermarkFailingReceiptTransport: V2ClientReadReceiptTransport {
         throw V2RealtimeTransportError.unexpectedResponse
     }
 
-    func setReadReceiptPreferences(operationID _: ReadReceiptPreferenceOperationID, allowsDirectReadReceipts _: Bool, allowsGroupReadReceipts _: Bool) async throws -> V2ReadReceiptPreferences {
-        throw V2RealtimeTransportError.unexpectedResponse
-    }
+
 
     func listReadReceiptReaders(roomID _: RoomID, messageID _: MessageID, cursor _: String?, pageSize _: Int) async throws -> V2ReadReceiptReadersPage {
         throw V2RealtimeTransportError.unexpectedResponse

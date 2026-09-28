@@ -1236,6 +1236,7 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_TLS_CERTIFICATE_CHAIN_PATH": "/run/secrets/tls-chain.pem",
             "IM_V2_TLS_PRIVATE_KEY_PATH": "/run/secrets/tls-key.pem",
             "IM_V2_ACCESS_TOKEN_HMAC_KEY_BASE64": Data(repeating: 3, count: 32).base64EncodedString(),
+            "IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64": Data(repeating: 8, count: 32).base64EncodedString(),
             "IM_V2_CAPABILITY_PROFILE": "base",
             "IM_V2_MAX_MESSAGE_UTF8_BYTES": "4096",
             "IM_V2_MAX_FRAME_BYTES": "65536",

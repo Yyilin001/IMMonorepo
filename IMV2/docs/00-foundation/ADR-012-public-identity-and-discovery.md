@@ -4,6 +4,8 @@
 
 Accepted — 2026-07-25
 
+2026-09-27 更新：本人资料保存采用字段 patch、不可变原操作回执与独立当前快照，支持 query/close；当前 PostgreSQL 为 `im-v2-current-55`。具体 HTTP、指纹、关闭与保留规则由[本人资料当前合同](../../../docs/proposals/resource-system-implementation.md#个人资料更新恢复与头像保留)统一定义，本文不另设协议副本。
+
 2026-09-27 更新：成员目录与资料展示按[资源系统实施记录](../../../docs/proposals/resource-system-implementation.md)分离。本文包含尚未提交的 protocol 32 协调升级行为，不表示旧客户端已兼容。
 
 ## 背景

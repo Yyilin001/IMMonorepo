@@ -113,6 +113,14 @@ public actor V2AccountStorageDirectory {
         return entry
     }
 
+    /// 仅读取既有有效目录；不创建目录、不恢复清理、不改写 manifest。
+    public func existingScopeForLocalRead(accountID: UserID) throws -> V2AccountStorageScope {
+        guard let entry = try active(), entry.accountID == accountID.rawValue else {
+            throw V2OfflineReadBootstrapError.localStoreUnavailable
+        }
+        return try scope(entry)
+    }
+
     /// 恢复启动清理后，复用当前账号的有效目录或创建新实例。
     ///
     /// 首次发放 scope 前会处理退役标记。已有不同账号的有效记录时不会偷偷改绑。

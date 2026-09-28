@@ -22,9 +22,6 @@ struct GatewayCommandAssembly {
         let projection = prepared.projection
         let frontdoor = prepared.frontdoor
         let ownerMaintenance = prepared.ownerMaintenance
-        let socialRelationships = V2SocialRelationshipService(
-            store: PostgresV2SocialRelationshipStore(database: topology.database, projectionDelivery: projection.userShardProjectionDelivery, authorizationCoordinator: prepared.authorization)
-        )
         // 仅配置了审核模式和安全执行身份时才创建各归属库的审核 Worker。
         let contentReviewWorker: V2RoutedContentReviewWorker?
         if configuration.contentReviewMode == .enabled,
@@ -59,23 +56,18 @@ struct GatewayCommandAssembly {
         } else {
             contentReviewWorker = nil
         }
-        let conversationCapabilities = V2ConversationCapabilitiesService(
-            store: PostgresV2ConversationCapabilitiesStore(database: topology.database, projectionDelivery: projection.userShardProjectionDelivery)
-        )
+        let conversationCapabilities = roomServices.roomActorServices.administration
         let liveActivityStore = try PostgresV2LiveActivityStore(database: topology.database)
         let liveActivity = V2LiveActivityService(store: liveActivityStore)
         await frontdoor.connectionRegistry.configureLivePresenceLeases(liveActivityStore)
         await frontdoor.connectionRegistry.configureLiveActivityObservationAuthorizer(liveActivity)
         let handler = V2GatewayDomainCommandHandler(
             roomActors: roomServices.roomActorServices,
-            roomCreation: roomServices.roomCreationServices,
             liveActivity: liveActivity,
             foregroundGroupEventHints: realtime.foregroundGroupEventHints,
             roomRecovery: roomRecovery,
             accountChanges: frontdoor.connectionRegistry,
-            socialRelationships: socialRelationships,
             conversationCapabilities: conversationCapabilities,
-            forwardMessages: roomServices.forwardMessages,
             sync: .init(store: V2RoutedSyncStore(
                 registry: topology.syncUserShardStorage, routeFence: projection.syncUserShardRouter,
                 coLocatedControlBuckets: prepared.coLocatedControlBuckets,

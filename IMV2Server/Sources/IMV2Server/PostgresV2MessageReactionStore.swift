@@ -9,6 +9,8 @@ import SQLKit
 /// 加锁顺序与其他房间变更一致：操作 → 房间 → 消息 → 准入 → 分片。
 public struct PostgresV2MessageReactionStore: V2MessageReactionStore, V2OwnerValidatedMessageReactionStore {
     private let database: any Database
+    private var existingOperationTransaction = false
+    func usingOperationTransaction() -> Self { var copy = self; copy.existingOperationTransaction = true; return copy }
     private var activationScope: V2RoomActivationWriteScope?
 
     public func usingActivationScope(_ scope: V2RoomActivationWriteScope) -> Self {
@@ -66,7 +68,7 @@ public struct PostgresV2MessageReactionStore: V2MessageReactionStore, V2OwnerVal
     ///   房间与分片租约不一致或持久化失败时抛出。
     private func change(command: V2ChangeMessageReactionCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageReactionOutcome {
         return try await v2WithPostgresTransactionRetry(database: database,
-            maximumRetryCount: 0, classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil) { transaction in
+            maximumRetryCount: 0, classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil, existingTransaction: existingOperationTransaction) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2MessageReactionStoreError.corruptPersistenceState }
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             let roomID = try reactionUUID(command.roomID), actorID = try reactionUUID(command.actorUserID)
@@ -75,11 +77,6 @@ public struct PostgresV2MessageReactionStore: V2MessageReactionStore, V2OwnerVal
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             if let ownerRoute { try await v2RequireRoomOwner(roomID: roomID, route: ownerRoute, sql: sql) }
             try await activationScope?.require([roomID], sql: sql)
-            if let prior = try await sql.raw("SELECT room_id, message_id, reaction, action, room_sequence, event_id, created_at FROM im_v2.message_reaction_operations WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)").first(decoding: ReactionOperationRow.self) {
-                guard prior.matches(command, roomID: roomID, messageID: messageID) else { return .idempotencyConflict }
-                guard v2PostgresTimestampCanEncode(prior.createdAt) else { throw V2MessageReactionStoreError.corruptPersistenceState }
-                return .idempotent(try prior.result(actorUserID: command.actorUserID))
-            }
             guard v2PostgresTimestampCanEncode(now) else { throw V2MessageReactionStoreError.corruptPersistenceState }
             guard let room = try await sql.raw("SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReactionRoomRow.self) else { throw V2MessageReactionStoreError.roomNotFound }
             guard room.capacityProfileID == capacityProfile.id else { throw V2MessageReactionStoreError.corruptPersistenceState }
@@ -135,7 +132,6 @@ public struct PostgresV2MessageReactionStore: V2MessageReactionStore, V2OwnerVal
             try await sql.raw("UPDATE im_v2.room_admission SET command_window_used = \(bind: nextRoom.commandWindow.used), shard_lease_id = \(bind: try reactionUUID(lease.id)), shard_lease_generation = \(bind: try reactionSigned(lease.generation)) WHERE room_id = \(bind: roomID)").run()
             try await sql.raw("UPDATE im_v2.shard_admission_pools SET command_window_used = \(bind: lease.commandWindow.used) WHERE room_shard_id = \(bind: room.roomShardID) AND capacity_profile_id = \(bind: room.capacityProfileID) AND lease_id = \(bind: try reactionUUID(lease.id)) AND generation = \(bind: try reactionSigned(lease.generation))").run()
             try await sql.raw("INSERT INTO im_v2.room_events (event_id, room_id, room_sequence, event_type, actor_user_id, payload, committed_membership_revision, created_at) VALUES (\(bind: eventUUID), \(bind: roomID), \(bind: nextSequence), 'message.reaction_changed', \(bind: actorID), jsonb_build_object('event_type', 'message.reaction_changed', 'room_id', \(bind: roomID.uuidString), 'room_sequence', \(bind: nextSequence), 'message_id', \(bind: messageID.uuidString), 'actor_user_id', \(bind: actorID.uuidString), 'reaction', \(bind: command.reaction), 'action', \(bind: command.action.rawValue), 'server_created_at_ms', \(bind: createdAtMilliseconds)), \(bind: room.membershipRevision), \(bind: now))").run()
-            try await sql.raw("INSERT INTO im_v2.message_reaction_operations (actor_user_id, operation_id, room_id, message_id, reaction, action, room_sequence, event_id, created_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), \(bind: messageID), \(bind: command.reaction), \(bind: command.action.rawValue), \(bind: nextSequence), \(bind: eventUUID), \(bind: now))").run()
             return .changed(try .init(roomID: command.roomID, messageID: command.messageID, actorUserID: command.actorUserID, reaction: command.reaction, action: command.action, roomSequence: reactionUnsigned(nextSequence), eventID: eventID, createdAt: timestamp.createdAt))
         }
     }
@@ -156,7 +152,6 @@ private struct ReactionCommittedTimestampRow: Decodable {
     let createdAt: Date
     enum CodingKeys: String, CodingKey { case createdAt = "created_at" }
 }
-private struct ReactionOperationRow: Decodable { let roomID: UUID; let messageID: UUID; let reaction: String; let action: String; let roomSequence: Int64; let eventID: UUID; let createdAt: Date; enum CodingKeys: String, CodingKey { case roomID = "room_id", messageID = "message_id", reaction, action, roomSequence = "room_sequence", eventID = "event_id", createdAt = "created_at" }; func matches(_ command: V2ChangeMessageReactionCommand, roomID: UUID, messageID: UUID) -> Bool { self.roomID == roomID && self.messageID == messageID && reaction == command.reaction && action == command.action.rawValue }; func result(actorUserID: UserID) throws -> V2MessageReactionChange { try .init(roomID: .init(roomID.uuidString), messageID: .init(messageID.uuidString), actorUserID: actorUserID, reaction: reaction, action: try reactionAction(action), roomSequence: reactionUnsigned(roomSequence), eventID: .init(eventID.uuidString), createdAt: createdAt) } }
 private struct ReactionAdmissionRow { let eligibleMemberCount: Int; let commandWindowLimit: Int; let commandWindowUsed: Int; let shardLeaseID: UUID; let shardLeaseGeneration: Int64 }
 extension ReactionAdmissionRow: Decodable { enum CodingKeys: String, CodingKey { case eligibleMemberCount = "eligible_member_count", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", shardLeaseID = "shard_lease_id", shardLeaseGeneration = "shard_lease_generation" }; func state() throws -> RoomAdmissionState { try .init(eligibleMemberCount: eligibleMemberCount, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed)) } }
 private struct ReactionShardRow { let leaseID: UUID; let generation: Int64; let validUntil: Date; let commandWindowLimit: Int; let commandWindowUsed: Int; }

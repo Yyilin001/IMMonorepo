@@ -1,4 +1,5 @@
 import Foundation
+import IMV2ClientKit
 
 /// 投影刷新观察器。
 ///
@@ -9,6 +10,7 @@ import Foundation
 final class V2ProjectionRefreshObserver {
     private let refresh: @MainActor @Sendable () async -> Void
     private var pending = false
+    private var pendingConversationCommit: V2ConversationCommitMeasurement?
     private var active: Task<Void, Never>?
     private var waiter: (id: UUID, continuation: CheckedContinuation<Bool, Never>)?
 
@@ -58,6 +60,7 @@ final class V2ProjectionRefreshObserver {
     func submit(_ request: V2ProjectionChangeNotifier.Request) {
         guard !Task.isCancelled else { return }
         pending = true
+        pendingConversationCommit = V2ConversationCommitMeasurement.earliest(pendingConversationCommit, request.conversationCommit)
         if request.requiresImmediateRefresh { active?.cancel() }
         if let waiter {
             self.waiter = nil
@@ -74,9 +77,11 @@ final class V2ProjectionRefreshObserver {
         while !Task.isCancelled, await takePending() {
             guard !Task.isCancelled else { return }
             let refresh = refresh
+            let conversationCommit = pendingConversationCommit
+            pendingConversationCommit = nil
             let task = Task { @MainActor in
                 guard !Task.isCancelled else { return }
-                await refresh()
+                await V2ProjectionVisibilityScope.$conversationCommit.withValue(conversationCommit) { await refresh() }
             }
             active = task
             await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })

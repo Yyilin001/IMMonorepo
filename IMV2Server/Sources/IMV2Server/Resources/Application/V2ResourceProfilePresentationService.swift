@@ -197,7 +197,7 @@ public struct V2ResourceProfilePresentationService: Sendable {
                 let accessExpiry = min(expiresAt, observedAt.addingTimeInterval(120))
                 avatarRequests[reference.mediaID] = min(avatarRequests[reference.mediaID] ?? accessExpiry, accessExpiry)
             }
-            results.append(.presentation(try .init(view: view, lease: lease, groupMember: groupMember), avatar: nil))
+            results.append(.presentation(try .init(view: view, lease: lease, groupMember: groupMember, contactAlias: after.contactAlias), avatar: nil))
         }
         try await admission.requireOpen()
         do {

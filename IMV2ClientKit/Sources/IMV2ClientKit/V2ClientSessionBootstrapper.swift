@@ -38,6 +38,7 @@ public enum V2ClientSessionBootstrapError: Error, Equatable, Sendable {
     case credentialsUnavailable
     /// 无法确认签发结果已被收养或妥善放弃，需保留恢复责任。
     case credentialIssueRecoveryPending
+    case localStoreCloseFailed
 }
 
 /// 按认证先于存储的顺序协调设备会话与安装绑定数据库。
@@ -46,10 +47,12 @@ public enum V2ClientSessionBootstrapError: Error, Equatable, Sendable {
 /// 认证 epoch 在异步存储操作前后检查，防止旧建立流程把 store 交给新会话。
 /// 普通 close 只关闭对象，不表示注销远端设备或擦除本地数据。
 public actor V2ClientSessionBootstrapper {
+    private let offlineReadOwnerID = UUID()
     private let authSession: V2AuthSession
     private let localStoreBootstrapper: V2LocalStoreBootstrapper
     private let databaseURL: URL
     private let accountStorage: V2AccountLocalStoreOwner?
+    private let beforeClosingLocalStore: @Sendable (GRDBV2LocalSyncStore) async throws -> Void
 
     /// 注入认证、安装绑定和账号目录依赖。
     ///
@@ -60,7 +63,8 @@ public actor V2ClientSessionBootstrapper {
     ///   - accountStorageRoot: 可选账号目录根；提供后启用按账号分开的 store 管理。
     ///
     /// 构造不请求网络或打开数据库，首次实际会话操作时才执行。
-    public init(authSession: V2AuthSession, localStoreBootstrapper: V2LocalStoreBootstrapper, databaseURL: URL, accountStorageRoot: URL? = nil) {
+    public init(authSession: V2AuthSession, localStoreBootstrapper: V2LocalStoreBootstrapper, databaseURL: URL, accountStorageRoot: URL? = nil, beforeClosingLocalStore: @escaping @Sendable (GRDBV2LocalSyncStore) async throws -> Void = { _ in }) {
+        self.beforeClosingLocalStore = beforeClosingLocalStore
         self.authSession = authSession
         self.localStoreBootstrapper = localStoreBootstrapper
         self.databaseURL = databaseURL
@@ -81,14 +85,66 @@ public actor V2ClientSessionBootstrapper {
     /// - Parameter store: 已由 App 停止全部访问任务的原对象。
     /// - Throws: 关闭存储失败。方法不清理凭据、下载缓存或服务端会话。
     public func closeLocalStore(_ store: GRDBV2LocalSyncStore) async throws {
-        if let accountStorage { try await accountStorage.close(store) }
-        else { try await store.close() }
+        do {
+            try await beforeClosingLocalStore(store)
+            if let accountStorage { try await accountStorage.close(store) }
+            else { try await store.close() }
+        } catch { throw V2ClientSessionBootstrapError.localStoreCloseFailed }
     }
 
     /// 按配置选择账号目录所有者或原始数据库入口，始终把已确认的账号身份传给安装绑定打开流程。
     private func openLocalStore(userID: IMV2Core.UserID) async throws -> GRDBV2LocalSyncStore {
         if let accountStorage { return try await accountStorage.open(accountID: userID) }
         return try await localStoreBootstrapper.open(databaseURL: databaseURL, userID: userID)
+    }
+
+    /// 不请求网络，仅验证设备凭据、既有目录及安装绑定。
+    /// 调用方必须提供持久退出标记读取；返回值不打开可写 store 或发放显示授权。
+    public func localReadBootstrap(
+        isLocalExitPending: @Sendable () async throws -> Bool
+    ) async throws -> V2OfflineReadBootstrap {
+        try Task.checkCancellation()
+        guard try await !isLocalExitPending() else { throw V2OfflineReadBootstrapError.localExitPending }
+        let identity = try await authSession.localAccountIdentity()
+        let scope = try await accountStorage?.existingScopeForLocalRead(accountID: identity.userID)
+        let url = scope?.database.primary ?? databaseURL
+        let binding = try await localStoreBootstrapper.existingBindingForLocalRead(databaseURL: url, userID: identity.userID)
+        let current = try await authSession.localAccountIdentity()
+        guard current == identity else { throw V2AuthSessionError.sessionInvalidated }
+        guard try await !isLocalExitPending() else { throw V2OfflineReadBootstrapError.localExitPending }
+        try await authSession.requireLocalIdentityEpoch(identity.epoch)
+        try Task.checkCancellation()
+        return .init(identity: identity, databaseURL: url, storageScope: scope,
+                     installationBinding: binding, ownerID: offlineReadOwnerID)
+    }
+
+    /// Opens an existing SQLite projection read-only after validating the local permit.
+    /// A failed post-open fence closes the captured store before returning.
+    public func openLocalReadSession(_ permit: V2OfflineReadBootstrap,
+        isLocalExitPending: @Sendable () async throws -> Bool) async throws -> GRDBV2LocalSyncStore {
+        try await requireLocalReadBootstrap(permit, isLocalExitPending: isLocalExitPending)
+        let store: GRDBV2LocalSyncStore
+        if let accountStorage { store = try await accountStorage.openLocalReadOnly(permit) }
+        else { store = try GRDBV2LocalSyncStore(localReadOnlyDatabaseURL: permit.databaseURL,
+            installationBinding: permit.installationBinding, userID: permit.identity.userID) }
+        do {
+            try await requireLocalReadBootstrap(permit, isLocalExitPending: isLocalExitPending)
+            return store
+        } catch { try await closeLocalStore(store); throw error }
+    }
+
+    /// 重新验证本地读取上下文；旧 bootstrapper、账号切换或退出均使结果失效。
+    public func requireLocalReadBootstrap(
+        _ permit: V2OfflineReadBootstrap,
+        isLocalExitPending: @Sendable () async throws -> Bool
+    ) async throws {
+        guard permit.ownerID == offlineReadOwnerID else { throw V2AuthSessionError.sessionInvalidated }
+        try await authSession.requireLocalIdentityEpoch(permit.identity.epoch)
+        let current = try await localReadBootstrap(isLocalExitPending: isLocalExitPending)
+        guard current.identity == permit.identity, current.databaseURL == permit.databaseURL,
+              current.storageScope == permit.storageScope, current.installationBinding == permit.installationBinding else {
+            throw V2AuthSessionError.sessionInvalidated
+        }
     }
 
     /// 恢复已有设备会话并打开其账号数据库，不启动新的账号因子流程。
@@ -102,8 +158,11 @@ public actor V2ClientSessionBootstrapper {
             let credentials = try await authSession.realtimeCredentials()
             if let epoch = credentials.sessionEpoch { try await authSession.requireAuthenticatedEpoch(epoch) }
             let store = try await openLocalStore(userID: credentials.userID)
-            if let epoch = credentials.sessionEpoch { try await authSession.requireAuthenticatedEpoch(epoch) }
-            return store
+            do {
+                try Task.checkCancellation()
+                if let epoch = credentials.sessionEpoch { try await authSession.requireAuthenticatedEpoch(epoch) }
+                return store
+            } catch { try await closeLocalStore(store); throw error }
         } catch V2AuthSessionError.unauthenticated {
             throw V2ClientSessionBootstrapError.authenticationRequired
         } catch V2AuthSessionError.credentialsUnavailable {
@@ -157,8 +216,8 @@ public actor V2ClientSessionBootstrapper {
             }
             try await authSession.requireCurrentEpoch(epoch)
             let store = try await openLocalStore(userID: credentials.userID)
-            try await authSession.requireCurrentEpoch(epoch)
-            return store
+            do { try Task.checkCancellation(); try await authSession.requireCurrentEpoch(epoch); return store }
+            catch { try await closeLocalStore(store); throw error }
         } catch {
             await authSession.abandonEstablishment(ifCurrent: epoch)
             throw error

@@ -15,7 +15,10 @@ import VisionKit
 @Observable
 final class V2GroupInvitationStore {
     private let client: any V2ClientGroupInvitationManaging
-    private var operationIDs: [String: UUID] = [:]
+    private let operations:V2InvitationOperationService
+    private(set) var pending:[V2InvitationPending]=[]
+    private var managementBaseline:V2GroupInvitationOperationBaseline?
+    private var baselineDeadline:ContinuousClock.Instant?
     private(set) var links: [V2GroupInviteLink] = []
     private(set) var requests: [V2ClientGroupJoinRequest] = []
     private(set) var nextRequestCursor: String?
@@ -40,16 +43,9 @@ final class V2GroupInvitationStore {
         case completed(PreviewedInvitation, String)
         case failed(String)
     }
-    private struct JoinIntent: Hashable {
-        let secret: String
-        let note: String?
-    }
     private var joinState: JoinState = .idle
     @ObservationIgnored private var joinGeneration = UUID()
     @ObservationIgnored private var previewTask: Task<V2GroupInvitePreview, any Error>?
-    @ObservationIgnored private var cancellationTask: Task<V2ClientGroupJoinRequest, any Error>?
-    @ObservationIgnored private var submissionTask: Task<V2ClientGroupJoinSubmissionOutcome, any Error>?
-    @ObservationIgnored private var joinOperations: [JoinIntent: UUID] = [:]
     @ObservationIgnored private var isInvalidated = false
 
     private var previewedInvitation: PreviewedInvitation? {
@@ -68,7 +64,7 @@ final class V2GroupInvitationStore {
     ///
     /// 仅无申请或已取消的邀请允许提交；已失效、已是成员或正在处理时返回 `false`。
     var canSubmit: Bool {
-        guard !isInvalidated else { return false }
+        guard !isInvalidated, !pending.contains(where: { $0.intent.roomID == previewedInvitation?.preview.roomID && $0.preparationState != .cancelled && $0.work?.scheduling != .finished }) else { return false }
         switch joinState {
         case .ready(let value), .retryable(let value, _):
             return !value.preview.isAlreadyMember && (value.preview.requestState == nil || value.preview.requestState == .cancelled)
@@ -78,7 +74,7 @@ final class V2GroupInvitationStore {
         }
     }
     var canCancelRequest: Bool {
-        !isInvalidated && !isJoining && preview?.requestState == .pending
+        !isInvalidated && !isJoining && preview?.requestState == .pending && !pending.contains(where: {$0.intent.roomID == preview?.roomID && $0.work?.scheduling != .finished})
     }
     /// 面向用户的加入流程反馈文案；无反馈时为 `nil`。
     var joinFeedback: String? {
@@ -92,7 +88,55 @@ final class V2GroupInvitationStore {
     var isPresentingJoin = false
     var isPresentingScanner = false
 
-    init(client: any V2ClientGroupInvitationManaging) { self.client = client }
+    init(client: any V2ClientGroupInvitationManaging,operations:V2InvitationOperationService) { self.client = client;self.operations=operations }
+
+    var canManage:Bool {!isInvalidated && managementRoomID != nil && managementBaseline != nil && (baselineDeadline.map {$0 > .now} ?? false)}
+    func observePending(roomID:String) async {
+        guard let room=try? RoomID(roomID) else {return}
+        do {
+            for try await value in await operations.updates(roomID:room) {
+                try Task.checkCancellation()
+                guard !isInvalidated else {return}
+                let prior=Set(pending.compactMap {$0.work?.scheduling == .finished ? $0.work?.id:nil})
+                let completed=value.contains {$0.work?.scheduling == .finished && !prior.contains($0.work!.id)}
+                pending=value
+                if completed,managementRoomID==room {await loadManagement(roomID:room.rawValue)}
+                if completed,let invitation=previewedInvitation,invitation.preview.roomID==room {
+                    let generation=joinGeneration
+                    do {
+                        let updated=try await client.preview(secret:invitation.secret)
+                        try Task.checkCancellation()
+                        guard generation==joinGeneration,!isInvalidated,updated.inviteID==invitation.preview.inviteID,updated.roomID==room else {continue}
+                        joinState = .completed(.init(secret:invitation.secret,preview:updated),"已收到原操作结果，申请状态已更新。")
+                    } catch is CancellationError {throw CancellationError()}
+                    catch {guard generation==joinGeneration,!isInvalidated else {continue};joinState = .retryable(invitation,"原操作已有结果，当前邀请状态暂无法读取。")}
+                }
+            }
+        }
+        catch is CancellationError {}
+        catch {feedback="本地邀请任务读取暂停。"}
+    }
+    func resume(_ value:V2InvitationPending) async {
+        guard !isInvalidated else {return}
+        do {if value.work != nil {try await operations.resume(id:value.id)} else {try await operations.closeOriginal(id:value.id)}}
+        catch {feedback="原操作核对暂不可用。"}
+    }
+    func discard(_ value:V2InvitationPending) async {guard !isInvalidated else {return};do {try await operations.discard(id:value.id)} catch {feedback="无法移除草稿。"}}
+    func reconfirm(_ value:V2InvitationPending) async {
+        guard !isInvalidated else {return}
+        do {
+            let action:V2GroupInvitationOperationAction
+            switch value.intent.action {
+            case .create(let life,let uses,_):guard canManage,let baseline=managementBaseline else {throw V2InvitationPreparationError.confirmationRequired};action = .create(lifetimeSeconds:life,maximumApprovedUses:uses,expectedMembershipRevision:baseline.membershipRevision)
+            case .revoke(let invite,_):guard canManage,let baseline=managementBaseline else {throw V2InvitationPreparationError.confirmationRequired};action = .revoke(inviteID:invite,expectedMembershipRevision:baseline.membershipRevision)
+            case .decide(let request,let decision,_):guard canManage,let baseline=managementBaseline else {throw V2InvitationPreparationError.confirmationRequired};action = .decide(requestID:request,decision:decision,expectedMembershipRevision:baseline.membershipRevision)
+            default:action=value.intent.action
+            }
+            let confirmation=try await operations.confirmation(roomID:value.intent.roomID,action:action)
+            _ = try await operations.reconfirm(id:value.id,confirmation:confirmation)
+            feedback="已明确重新确认原提案。"
+        } catch {feedback="请刷新管理版本后重新确认。"}
+    }
 
     /// 加载该房间的邀请列表与待处理入群申请。
     ///
@@ -119,6 +163,7 @@ final class V2GroupInvitationStore {
     func endManagement() {
         managementGeneration = UUID()
         managementRoomID = nil
+        managementBaseline=nil;baselineDeadline=nil
         managementTask?.cancel()
         links = []; requests = []; nextRequestCursor = nil; hasEarlierRequests = false; feedback = nil
     }
@@ -132,11 +177,10 @@ final class V2GroupInvitationStore {
     func create(roomID: String, lifetimeSeconds: Int = 7 * 86_400, maximumUses: Int = 100) async {
         guard let room = try? RoomID(roomID) else { feedback = "群聊标识无效。"; return }
         guard managementRoomID == room else { return }
-        let operation = operationID(for: "create:\(roomID)")
+        guard canManage,let baseline=managementBaseline else {feedback="请先刷新管理权限与成员版本。";return}
         await perform { [self] in
-            _ = try await client.create(roomID: room, operationID: .init(uuid: operation), lifetimeSeconds: lifetimeSeconds, maximumApprovedUses: maximumUses)
-            operationIDs["create:\(roomID)"] = nil
-            try await refreshManagement(room: room)
+            let confirmation=try await operations.confirmation(roomID:room,action:.create(lifetimeSeconds:UInt64(lifetimeSeconds),maximumApprovedUses:maximumUses,expectedMembershipRevision:baseline.membershipRevision))
+            _ = try await operations.enqueue(confirmation);feedback="邀请创建意图已保存，等待权威结果。"
         }
     }
 
@@ -145,12 +189,10 @@ final class V2GroupInvitationStore {
     /// - Parameter link: 待撤销的邀请链接。
     func revoke(_ link: V2GroupInviteLink) async {
         guard managementRoomID == link.roomID else { return }
-        let key = "revoke:\(link.inviteID.rawValue)"
-        let operation = operationID(for: key)
+        guard canManage,let baseline=managementBaseline else {feedback="请先刷新管理权限与成员版本。";return}
         await perform { [self] in
-            try await client.revoke(inviteID: link.inviteID, roomID: link.roomID, operationID: .init(uuid: operation))
-            operationIDs[key] = nil
-            try await refreshManagement(room: link.roomID)
+            let confirmation=try await operations.confirmation(roomID:link.roomID,action:.revoke(inviteID:link.inviteID,expectedMembershipRevision:baseline.membershipRevision))
+            _ = try await operations.enqueue(confirmation);feedback="撤销意图已保存，等待权威结果。"
         }
     }
 
@@ -161,12 +203,12 @@ final class V2GroupInvitationStore {
     ///   - decision: 批准或拒绝。
     func decide(_ request: V2ClientGroupJoinRequest, decision: V2GroupJoinDecision) async {
         guard managementRoomID == request.roomID, requests.contains(where: { $0.requestID == request.requestID }) else { return }
-        let key = "decision:\(request.requestID.rawValue):\(decision.rawValue)"
-        let operation = request.resumableDecisionOperationID?.uuidValue ?? operationID(for: key)
+        guard canManage,let baseline=managementBaseline else {feedback="请先刷新管理权限与成员版本。";return}
         await perform { [self] in
-            _ = try await client.decide(roomID: request.roomID, requestID: request.requestID, operationID: .init(uuid: operation), decision: decision)
-            operationIDs[key] = nil
-            try await refreshManagement(room: request.roomID)
+            if let operation=request.resumableDecisionOperationID?.uuidValue,let original=pending.first(where: {$0.intent.identity.operation.rawOperationID==operation.uuidString}) {try await operations.resume(id:original.id);return}
+            guard request.resumableDecisionOperationID == nil else {feedback="缺少原审批意图，请刷新原操作状态；不会另建审批身份。";return}
+            let confirmation=try await operations.confirmation(roomID:request.roomID,action:.decide(requestID:request.requestID,decision:decision,expectedMembershipRevision:baseline.membershipRevision),operationID:UUID())
+            _ = try await operations.enqueue(confirmation);feedback="审批意图已保存，等待权威结果。"
         }
     }
 
@@ -234,78 +276,29 @@ final class V2GroupInvitationStore {
     /// - Parameter note: 可选的申请附言。
     func submit(note: String?) async {
         guard canSubmit, let invitation = previewedInvitation else { return }
-        let generation = joinGeneration
-        let intent = JoinIntent(secret: invitation.secret.rawValue, note: note)
-        let operation = joinOperations[intent] ?? UUID()
-        joinOperations[intent] = operation
+        let generation=joinGeneration
         joinState = .submitting(invitation)
-        let client = client
-        let task = Task {
-            try await client.submit(secret: invitation.secret, operationID: .init(uuid: operation), note: note)
-        }
-        submissionTask = task
         do {
-            let result = try await withTaskCancellationHandler {
-                try await task.value
-            } onCancel: { task.cancel() }
-            try Task.checkCancellation()
-            guard generation == joinGeneration, !isInvalidated else { return }
-            let updated: V2GroupInvitePreview
-            let message: String
-            switch result {
-            case .submitted(let request), .alreadyPending(let request):
-                updated = try Self.updatedPreview(invitation.preview, request: request)
-                message = "入群申请已提交，等待管理员审批。"
-            case .alreadyMember(let value):
-                guard value.inviteID == invitation.preview.inviteID, value.roomID == invitation.preview.roomID else {
-                    throw V2ClientGroupInvitationError.invalidResponse
-                }
-                updated = value
-                message = "你已经是该群成员。"
-            case .cancelled(let request):
-                updated = try Self.updatedPreview(invitation.preview, request: request)
-                message = "该申请已取消，可重新提交。"
-            case .rejected(let request):
-                updated = try Self.updatedPreview(invitation.preview, request: request)
-                message = "该邀请的入群申请已被拒绝。"
-            }
-            submissionTask = nil
-            joinOperations[intent] = nil
-            joinState = .completed(.init(secret: invitation.secret, preview: updated), message)
+            let authorization=V2GroupInvitationSecretAuthorization(secret:invitation.secret)
+            let confirmation=try await operations.confirmation(roomID:invitation.preview.roomID,action:.submit(inviteID:invitation.preview.inviteID,tokenDigest:authorization.tokenDigest,note:note))
+            _ = try await operations.enqueue(confirmation,authorization:authorization)
+            guard generation==joinGeneration,!isInvalidated else {return}
+            joinState = .completed(invitation,"申请意图已安全保存，等待原操作结果。")
         } catch {
-            guard generation == joinGeneration, !isInvalidated else { return }
-            submissionTask = nil
-            // Cancellation cannot undo an already submitted HTTP operation.
-            // Keep its immutable intent/ID for a same-input retry.
-            joinState = .retryable(invitation, error is CancellationError ? "申请尚未确认，可重试查询结果。" : Self.errorMessage(error))
+            guard generation==joinGeneration,!isInvalidated else {return}
+            joinState = .retryable(invitation,Self.errorMessage(error))
         }
     }
 
-    /// 取消当前待审申请；丢失响应后仍使用原申请身份查询终态。
     func cancelRequest() async {
-        guard canCancelRequest, let invitation = previewedInvitation, let requestID = invitation.preview.requestID else { return }
-        let generation = joinGeneration
-        joinState = .cancelling(invitation)
-        let client = client
-        let task = Task { try await client.cancel(roomID: invitation.preview.roomID, requestID: requestID) }
-        cancellationTask = task
+        guard canCancelRequest,let invitation=previewedInvitation,let request=invitation.preview.requestID else {return}
+        let generation=joinGeneration;joinState = .cancelling(invitation)
         do {
-            let request = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-            try Task.checkCancellation()
-            guard generation == joinGeneration, !isInvalidated else { return }
-            guard request.requestID == requestID, [.cancelled, .approved, .rejected].contains(request.state) else {
-                throw V2ClientGroupInvitationError.invalidResponse
-            }
-            let updated = try Self.updatedPreview(invitation.preview, request: request)
-            let message = request.state == .cancelled ? "入群申请已取消。" : "申请已完成审批，无法取消。"
-            cancellationTask = nil
-            joinOperations = joinOperations.filter { $0.key.secret != invitation.secret.rawValue }
-            joinState = .completed(.init(secret: invitation.secret, preview: updated), message)
-        } catch {
-            guard generation == joinGeneration, !isInvalidated else { return }
-            cancellationTask = nil
-            joinState = .retryable(invitation, error is CancellationError ? "取消结果尚未确认，可重试查询。" : Self.errorMessage(error))
-        }
+            let confirmation=try await operations.confirmation(roomID:invitation.preview.roomID,action:.cancel(requestID:request))
+            _ = try await operations.enqueue(confirmation)
+            guard generation==joinGeneration,!isInvalidated else {return}
+            joinState = .completed(invitation,"取消意图已保存，等待权威结果。")
+        } catch {guard generation==joinGeneration,!isInvalidated else {return};joinState = .retryable(invitation,Self.errorMessage(error))}
     }
 
     /// 结束当前加入流程并清空预览状态。
@@ -321,18 +314,12 @@ final class V2GroupInvitationStore {
         isInvalidated = true
         endManagement()
         dismissJoin()
-        joinOperations.removeAll()
-        operationIDs.removeAll()
     }
 
     private func cancelJoinWork() {
         joinGeneration = UUID()
         previewTask?.cancel()
         previewTask = nil
-        cancellationTask?.cancel()
-        cancellationTask = nil
-        submissionTask?.cancel()
-        submissionTask = nil
     }
 
     static func inviteURL(for secret: V2GroupInviteSecret) -> URL {
@@ -349,7 +336,6 @@ final class V2GroupInvitationStore {
         return try? .init(token)
     }
 
-    private func operationID(for key: String) -> UUID { if let value = operationIDs[key] { return value }; let value = UUID(); operationIDs[key] = value; return value }
     private static func updatedPreview(_ current: V2GroupInvitePreview, request: V2ClientGroupJoinRequest) throws -> V2GroupInvitePreview {
         guard request.inviteID == current.inviteID, request.roomID == current.roomID else {
             throw V2ClientGroupInvitationError.invalidResponse
@@ -377,14 +363,17 @@ final class V2GroupInvitationStore {
         try Task.checkCancellation()
         guard managementRoomID == room else { return }
         let generation = managementGeneration
+        managementBaseline=nil;baselineDeadline=nil
+        async let baseline = operations.baseline(roomID:room)
         async let refreshedLinks = client.activeInvites(roomID: room)
         async let refreshedRequests = client.pendingRequests(roomID: room, cursor: nil, pageSize: 100)
-        let (newLinks, requestPage) = try await (refreshedLinks, refreshedRequests)
+        let (newLinks, requestPage, authority) = try await (refreshedLinks, refreshedRequests, baseline)
         try Task.checkCancellation()
         guard generation == managementGeneration, managementRoomID == room, !isInvalidated else { return }
         guard newLinks.count <= 100, newLinks.allSatisfy({ $0.roomID == room }),
               Set(newLinks.map(\.inviteID)).count == newLinks.count else { throw V2ClientGroupInvitationError.invalidResponse }
         try validate(requestPage, room: room, cursor: nil)
+        managementBaseline=authority;baselineDeadline = .now.advanced(by:.seconds(30))
         links = newLinks
         requests = requestPage.requests
         nextRequestCursor = requestPage.nextCursor
@@ -410,10 +399,17 @@ final class V2GroupInvitationStore {
         catch is CancellationError { return }
         catch let error as V2ClientGroupInvitationError {
             guard managementGeneration == generation else { return }
-            if error == .authorizationDenied { links = []; requests = []; nextRequestCursor = nil; hasEarlierRequests = false }
+            if error == .authorizationDenied {
+                managementBaseline = nil; baselineDeadline = nil
+                links = []; requests = []; nextRequestCursor = nil; hasEarlierRequests = false
+            }
             feedback = switch error { case .authorizationDenied: "没有管理该群邀请的权限。"; case .unavailable: "邀请不存在、已撤销、已过期或次数已用完。"; case .memberLimitReached: "群成员已达上限。"; case .rateLimited: "操作过于频繁，请稍后重试。"; case .conflict: "状态已变化，请刷新后重试。"; default: "邀请服务暂不可用，请检查网络后重试。" }
         } catch {
             guard managementGeneration == generation else { return }
+            if (error as? V2AuthSessionError) == .unauthenticated || (error as? V2AuthSessionError) == .sessionInvalidated {
+                managementBaseline = nil; baselineDeadline = nil
+                links = []; requests = []; nextRequestCursor = nil; hasEarlierRequests = false
+            }
             feedback = "邀请服务暂不可用，请检查网络后重试。"
         }
     }
@@ -433,7 +429,7 @@ struct V2GroupInvitationManagementSheet: View {
             List {
                 Section("邀请链接") {
                     Button("创建 7 天邀请链接", systemImage: "link.badge.plus") { Task { await store.create(roomID: roomID) } }
-                        .disabled(store.isWorking)
+                        .disabled(store.isWorking || !store.canManage)
                         .accessibilityIdentifier("v2.group-invite.create")
                     ForEach(store.links) { link in
                         VStack(alignment: .leading, spacing: 10) {
@@ -445,7 +441,7 @@ struct V2GroupInvitationManagementSheet: View {
                                 ShareLink(item: V2GroupInvitationStore.inviteURL(for: link.secret)) { Label("分享", systemImage: "square.and.arrow.up") }
                                     .accessibilityIdentifier("v2.group-invite.share.\(link.inviteID.rawValue)")
                                 Spacer()
-                                Button("撤销", role: .destructive) { Task { await store.revoke(link) } }.disabled(store.isWorking).accessibilityIdentifier("v2.group-invite.revoke.\(link.inviteID.rawValue)")
+                                Button("撤销", role: .destructive) { Task { await store.revoke(link) } }.disabled(store.isWorking || !store.canManage).accessibilityIdentifier("v2.group-invite.revoke.\(link.inviteID.rawValue)")
                             }
                         }
                         .accessibilityIdentifier("v2.group-invite.link.\(link.inviteID.rawValue)")
@@ -461,7 +457,7 @@ struct V2GroupInvitationManagementSheet: View {
                                 Button("拒绝", role: .destructive) { Task { await store.decide(request, decision: .reject) } }.accessibilityIdentifier("v2.group-join-request.reject.\(request.requestID.rawValue)")
                                 Spacer()
                                 Button("批准") { Task { await store.decide(request, decision: .approve) } }.buttonStyle(.borderedProminent).accessibilityIdentifier("v2.group-join-request.approve.\(request.requestID.rawValue)")
-                            }.disabled(store.isWorking)
+                            }.disabled(store.isWorking || !store.canManage)
                         }
                         .accessibilityIdentifier("v2.group-join-request.\(request.requestID.rawValue)")
                     }
@@ -475,12 +471,14 @@ struct V2GroupInvitationManagementSheet: View {
                             .disabled(store.isWorking)
                     }
                 }
+                invitationPendingSection(store:store)
                 if let feedback = store.feedback { Text(feedback).foregroundStyle(.secondary).accessibilityIdentifier("v2.group-invite.feedback") }
             }
             .navigationTitle("群邀请与审批")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("完成") { dismiss() }.accessibilityIdentifier("v2.group-invite.done") } }
             .refreshable { await store.loadManagement(roomID: roomID) }
             .task { await store.loadManagement(roomID: roomID) }
+            .task { await store.observePending(roomID:roomID) }
         }
         .authorPresentationPage(context: .list(profilePageID))
         .onDisappear { store.endManagement() }
@@ -521,9 +519,11 @@ struct V2GroupJoinSheet: View {
                         Button("扫描二维码", systemImage: "qrcode.viewfinder") { store.isPresentingScanner = true }.disabled(!DataScannerViewController.isSupported || !DataScannerViewController.isAvailable).accessibilityIdentifier("v2.group-join.scan")
                     }
                 }
+                invitationPendingSection(store:store)
                 if store.isJoining { ProgressView() }
                 if let feedback = store.joinFeedback { Text(feedback).foregroundStyle(.secondary).accessibilityIdentifier("v2.group-join.feedback") }
             }
+            .task(id:store.preview?.roomID.rawValue) {if let room=store.preview?.roomID.rawValue {await store.observePending(roomID:room)}}
             .navigationTitle("加入群聊")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { store.dismissJoin() }.accessibilityIdentifier("v2.group-join.close") } }
             .sheet(isPresented: $store.isPresentingScanner) { V2GroupInviteScanner { value in store.isPresentingScanner = false; Task { await store.open(value) } } }
@@ -561,5 +561,33 @@ private func groupJoinStatus(_ preview: V2GroupInvitePreview) -> String {
     case .rejected: "入群申请已拒绝。"
     case .cancelled: "入群申请已取消。"
     case nil: "可以提交入群申请。"
+    }
+}
+
+@MainActor
+private func invitationPendingSection(store:V2GroupInvitationStore) -> some View {
+    Section("持久邀请任务") {
+        ForEach(store.pending,id:\.id) { value in
+            VStack(alignment:.leading) {
+                Text(invitationProposalDescription(value.intent.action))
+                Text(value.work.map {$0.scheduling == .finished ? ($0.execution == .committed ? "原操作已有权威结果" : "原操作已关闭或拒绝，未确认新变更") : "原操作结果待确认"} ?? "邀请提案待确认")
+                if let work=value.work,work.scheduling == .needsAttention {Button("继续核对原操作") {Task {await store.resume(value)}}}
+                if value.work==nil,value.confirmationRequired {
+                    Button("明确重新确认提案") {Task {await store.reconfirm(value)}}
+                    Button("仅核对并关闭原操作") {Task {await store.resume(value)}}
+                }
+                if value.work==nil {Button("移除未提交草稿",role:.destructive) {Task {await store.discard(value)}}}
+            }
+        }
+    }
+}
+
+private func invitationProposalDescription(_ action:V2GroupInvitationOperationAction) -> String {
+    switch action {
+    case .create(let seconds,let uses,_):"创建邀请：有效期\(seconds)秒，最多\(uses)次"
+    case .revoke(let invite,_):"撤销邀请 \(invite.rawValue)"
+    case .submit(_,_,let note):"申请加入：\(note ?? "无附言")"
+    case .cancel(let request):"取消申请 \(request.rawValue)"
+    case .decide(let request,let decision,_):"审批申请 \(request.rawValue)：\(decision == .approve ? "批准" : "拒绝")"
     }
 }

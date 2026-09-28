@@ -21,7 +21,7 @@ protocol V2GroupReadReceiptReading: Sendable {
     func readers(roomID: String, messageID: String, cursor: String?) async throws -> V2ReadReceiptReadersPage
 }
 
-enum V2LiveActivityPreferenceUpdateOutcome: Equatable, Sendable { case accepted, rejected(code: String) }
+enum V2LiveActivityPreferenceUpdateOutcome: Equatable, Sendable { case accepted, queuedForRetry, rejected(code: String) }
 protocol V2LiveActivityPreferenceUpdating: Sendable {
     func update(allowsOnlinePresence: Bool, allowsTypingIndicators: Bool) async throws -> V2LiveActivityPreferenceUpdateOutcome
 }
@@ -58,6 +58,10 @@ enum V2MessageReactionOutcome: Equatable, Sendable {
 /// 面向界面的消息表情边界。
 ///
 /// 持久化命令被确认之后，可见表情集合仍以消息投影为权威。
+protocol V2MessageReactionManaging:Sendable {
+    func reactionUpdates(roomID:String) async throws -> AsyncThrowingStream<[V2MessageReactionPending],any Error>
+    func resumeReactionConfirmation(intentID:UUID) async throws
+}
 protocol V2MessageReactionChanging: Sendable {
     func changeReaction(messageID: String, in roomID: String, reaction: String, action: V2MessageReactionAction) async throws -> V2MessageReactionOutcome
 }
@@ -74,6 +78,10 @@ enum V2MessageEditOutcome: Equatable, Sendable {
 protocol V2MessageEditing: Sendable {
     func edit(messageID: String, in roomID: String, expectedMessageRevision: UInt64, text: String) async throws -> V2MessageEditOutcome
 }
+protocol V2MessageMutationManaging: Sendable {
+    func mutationUpdates(roomID:String) async throws -> AsyncThrowingStream<[V2MessageMutationSnapshot],any Error>
+    func resumeMutationConfirmation(workID:UUID) async throws
+}
 
 enum V2ReadReceiptReportOutcome: Equatable, Sendable {
     case recorded
@@ -84,6 +92,13 @@ enum V2ReadReceiptReportOutcome: Equatable, Sendable {
 
 protocol V2ConversationReadReporting: Sendable {
     func recordReadThrough(roomID: String, roomSequence: UInt64) async throws -> V2ReadReceiptReportOutcome
+}
+
+protocol V2ConversationReadSyncManaging: V2ConversationReadReporting {
+    func readSyncUpdates(roomID: String) async throws -> AsyncThrowingStream<V2ReadReceiptTrackingSnapshot, any Error>
+    func resumeReadConfirmation(roomID: String) async throws
+    func archiveUnavailableRead(workID: UUID) async throws
+    func restoreReadArchive(workID: UUID) async throws
 }
 
 enum V2ConversationCapabilityOutcome: Equatable, Sendable { case accepted, queuedForRetry, rejected(code: String) }
@@ -100,7 +115,8 @@ protocol V2MessageFavoriting: Sendable {
 }
 
 protocol V2GroupMessagePinning: Sendable {
-    func setPinned(roomID: String, messageID: String, isPinned: Bool) async throws -> V2ConversationCapabilityOutcome
+    func pinBaseline(roomID:String,messageID:String) async throws -> V2PinnedMessageBaseline
+    func setPinned(roomID: String, messageID: String, isPinned: Bool, expectedRoomSequence:UInt64) async throws -> V2ConversationCapabilityOutcome
 }
 
 enum V2MessageForwardingOutcome: Equatable, Sendable {
@@ -131,7 +147,7 @@ protocol V2GroupRolePolicyChanging: Sendable {
 
 /// 为当前登录用户与目标用户打开确定性私聊房间的边界。
 ///
-/// 开房在服务端是幂等的，因此传输中断后可以安全重试；该边界不涉及任何消息内容。
+/// 请求先持久化；尚未取得原操作的成功回执时返回待处理状态。
 protocol V2DirectConversationOpening: Sendable {
     func openConversation(with publicIdentity: V2PublicIdentity) async throws -> String
 }
@@ -164,6 +180,9 @@ enum V2GroupConversationCancellationOutcome: Equatable, Sendable {
 ///
 /// 它只暴露产品层状态，不暴露传输或数据库细节。
 enum V2RestoredGroupConversationCreationStatus: Equatable, Sendable {
+    case needsConfirmation(operationID:String)
+    case expired
+    case created(roomID:String)
     case queuedForRetry(operationID: String)
     case cancelling(operationID: String)
     case finalizing(operationID: String)
@@ -206,7 +225,8 @@ enum V2GroupMembershipChangeOutcome: Equatable, Sendable {
 }
 
 protocol V2GroupMembershipChanging: Sendable {
-    func changeMembership(roomID: String, targetUserID: String, action: V2RoomMembershipAction, expectedMembershipRevision: UInt64) async throws -> V2GroupMembershipChangeOutcome
+    func membershipConfirmation(roomID:String,action:V2RoomMembershipAction,expectedMembershipRevision:UInt64) throws -> V2MembershipConfirmationWindow
+    func changeMembership(targetUserID:String,confirmation:V2MembershipConfirmationWindow) async throws -> V2GroupMembershipChangeOutcome
 }
 
 enum V2StrangerMessagePreferenceUpdateOutcome: Equatable, Sendable {
@@ -270,116 +290,78 @@ enum V2GroupModerationOutcome: Equatable, Sendable {
 ///
 /// 两类审核动作都有各自独立的持久化操作与审计记录，
 /// 绝不能借用普通成员变更路径来执行。
+protocol V2MemberAdministrationManaging:Sendable {
+    func administrationUpdates(roomID:RoomID) async -> AsyncThrowingStream<[V2MemberAdministrationPending],any Error>
+    func resumeAdministration(id:UUID) async throws
+    func reconfirmAdministration(id:UUID,revision:UInt64) async throws
+    func discardAdministration(id:UUID) async throws
+}
+
 protocol V2GroupMemberMuting: Sendable {
-    func muteMember(roomID: String, targetUserID: String, muteUntil: Date, reasonCode: V2ModerationReasonCode) async throws -> V2GroupModerationOutcome
+    func muteMember(roomID: String, targetUserID: String, muteUntil: Date, reasonCode: V2ModerationReasonCode, expectedMembershipRevision: UInt64) async throws -> V2GroupModerationOutcome
 }
 
 protocol V2ModeratedGroupMemberRemoving: Sendable {
-    func removeMemberByModerator(roomID: String, targetUserID: String, reasonCode: V2ModerationReasonCode) async throws -> V2GroupModerationOutcome
+    func removeMemberByModerator(roomID: String, targetUserID: String, reasonCode: V2ModerationReasonCode, expectedMembershipRevision: UInt64) async throws -> V2GroupModerationOutcome
 }
 
 /// 面向界面的消息发送实现。
 ///
 /// 它在尝试传输之前先持久化命令，因此前台连接失败会转化为持久化重试，
 /// 而不是丢失界面意图。
-actor V2OutboxConversationSender: V2ConversationSending {
-    private let outbox: V2CommandOutboxEngine
-
-    init(outbox: V2CommandOutboxEngine) {
-        self.outbox = outbox
+actor V2OperationConversationSender: V2ConversationSending {
+    private let service: V2MessageSendOperationService
+    init(service:V2MessageSendOperationService) { self.service=service }
+    func send(text:String,media:[V2MediaReference],in roomID:String) async throws -> V2ConversationSendOutcome {
+        try await send(text:text,media:media,mentions:[],entities:[],replyTo:nil,in:roomID)
     }
-
-    func send(text: String, media: [V2MediaReference], in roomID: String) async throws -> V2ConversationSendOutcome {
-        try await send(text: text, media: media, mentions: [], in: roomID)
+    func send(text:String,media:[V2MediaReference],mentions:[V2MentionTarget],in roomID:String) async throws -> V2ConversationSendOutcome {
+        try await send(text:text,media:media,mentions:mentions,entities:[],replyTo:nil,in:roomID)
     }
-
-    func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], in roomID: String) async throws -> V2ConversationSendOutcome {
-        try await send(text: text, media: media, mentions: mentions, entities: [], replyTo: nil, in: roomID)
-    }
-
-    func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?, in roomID: String) async throws -> V2ConversationSendOutcome {
+    func send(text:String,media:[V2MediaReference],mentions:[V2MentionTarget],entities:[V2MessageEntity],replyTo:V2MessageReplyReference?,in roomID:String) async throws -> V2ConversationSendOutcome {
         try Task.checkCancellation()
-        let command = try await outbox.enqueueMessage(roomID: .init(roomID), text: text, media: media, mentions: mentions, entities: entities, replyTo: replyTo)
-        do {
-            switch try await outbox.flushOnce() {
-            case .accepted(let identifier) where identifier == command.clientMessageID:
-                return .accepted
-            case .rejected(let identifier, let code) where identifier == command.clientMessageID:
-                return .rejected(code: code)
-            case .accepted, .rejected, .retryScheduled, .idle:
-                return .queuedForRetry
-            }
-        } catch is CancellationError {
-            // Runtime suspension cancels its flush owner independently from
-            // this caller. The command was durably enqueued above.
-            try Task.checkCancellation()
-            return .queuedForRetry
-        }
+        // Attachment sends enter via durable consumer intents with explicit Ready dependencies.
+        guard media.isEmpty else { throw V2OperationWorkError.dependencyUnavailable }
+        _ = try await service.enqueueMessage(roomID:.init(roomID),text:text,mentions:mentions,entities:entities,replyTo:replyTo)
+        return .queuedForRetry
     }
 }
 
 /// 在首次网络尝试之前持久化撤回。
 ///
 /// 界面最终展示的墓碑状态以已同步的消息投影为权威，而不是以本次确认为准。
-actor V2OutboxMessageWithdrawer: V2MessageWithdrawing {
-    private let outbox: V2MessageWithdrawalOutboxEngine
-
-    init(outbox: V2MessageWithdrawalOutboxEngine) { self.outbox = outbox }
-
-    func withdraw(messageID: String, in roomID: String, expectedMessageRevision: UInt64) async throws -> V2MessageWithdrawalOutcome {
+actor V2OperationMessageWithdrawer: V2MessageWithdrawing {
+    private let service: V2MessageMutationOperationService
+    init(service: V2MessageMutationOperationService) { self.service=service }
+    func withdraw(messageID:String,in roomID:String,expectedMessageRevision:UInt64) async throws -> V2MessageWithdrawalOutcome {
         try Task.checkCancellation()
-        let pending = try await outbox.enqueueWithdrawal(
-            roomID: try .init(roomID),
-            messageID: try .init(messageID),
-            expectedMessageRevision: expectedMessageRevision
-        )
-        switch try await outbox.flushOnce() {
-        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
-        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
-        case .acknowledged, .rejected, .retryScheduled, .idle: return .queuedForRetry
-        }
+        _ = try await service.enqueueWithdrawal(roomID:.init(roomID),messageID:.init(messageID),expectedRevision:expectedMessageRevision)
+        return .queuedForRetry
     }
 }
 
-actor V2OutboxMessageReactionChanger: V2MessageReactionChanging {
-    private let outbox: V2MessageReactionOutboxEngine
-
-    init(outbox: V2MessageReactionOutboxEngine) { self.outbox = outbox }
-
-    func changeReaction(messageID: String, in roomID: String, reaction: String, action: V2MessageReactionAction) async throws -> V2MessageReactionOutcome {
-        try Task.checkCancellation()
-        let pending = try await outbox.enqueueReaction(
-            roomID: try .init(roomID),
-            messageID: try .init(messageID),
-            reaction: reaction,
-            action: action
-        )
-        switch try await outbox.flushOnce() {
-        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
-        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
-        case .acknowledged, .rejected, .retryScheduled, .idle: return .queuedForRetry
-        }
+actor V2OperationMessageReactionChanger: V2MessageReactionChanging,V2MessageReactionManaging {
+    private let service:V2MessageReactionOperationService
+    init(service:V2MessageReactionOperationService) { self.service=service }
+    func reactionUpdates(roomID:String) async throws -> AsyncThrowingStream<[V2MessageReactionPending],any Error> { await service.updates(roomID:try .init(roomID)) }
+    func resumeReactionConfirmation(intentID:UUID) async throws { try await service.resumeConfirmation(intentID:intentID) }
+    func changeReaction(messageID:String,in roomID:String,reaction:String,action:V2MessageReactionAction) async throws -> V2MessageReactionOutcome {
+        _ = try await service.enqueue(roomID:.init(roomID),messageID:.init(messageID),reaction:reaction,targetState:action == .add ? .present : .absent)
+        return .queuedForRetry
     }
 }
 
-actor V2OutboxMessageEditor: V2MessageEditing {
-    private let outbox: V2MessageEditOutboxEngine
-
-    init(outbox: V2MessageEditOutboxEngine) { self.outbox = outbox }
-
-    func edit(messageID: String, in roomID: String, expectedMessageRevision: UInt64, text: String) async throws -> V2MessageEditOutcome {
+actor V2OperationMessageEditor: V2MessageEditing, V2MessageMutationManaging {
+    private let service: V2MessageMutationOperationService
+    init(service: V2MessageMutationOperationService) { self.service=service }
+    func mutationUpdates(roomID:String) async throws -> AsyncThrowingStream<[V2MessageMutationSnapshot],any Error> {
+        await service.updates(roomID:try .init(roomID))
+    }
+    func resumeMutationConfirmation(workID:UUID) async throws { try await service.resumeConfirmation(workID:workID) }
+    func edit(messageID:String,in roomID:String,expectedMessageRevision:UInt64,text:String) async throws -> V2MessageEditOutcome {
         try Task.checkCancellation()
-        let pending = try await outbox.enqueueEdit(
-            roomID: try .init(roomID),
-            messageID: try .init(messageID),
-            expectedMessageRevision: expectedMessageRevision,
-            text: text
-        )
-        switch try await outbox.flushOnce() {
-        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
-        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
-        case .acknowledged, .rejected, .retryScheduled, .idle: return .queuedForRetry
-        }
+        _ = try await service.enqueueEdit(roomID:.init(roomID),messageID:.init(messageID),expectedRevision:expectedMessageRevision,text:text)
+        return .queuedForRetry
     }
 }
 
@@ -387,267 +369,186 @@ actor V2OutboxMessageEditor: V2MessageEditing {
 ///
 /// 底层存储会原子地抑制相等或更旧的水位，因此每当本地会话变为可见时都可以调用该 actor，
 /// 包括离线重启之后，也不会产生重复记录。
-actor V2OutboxConversationReadReporter: V2ConversationReadReporting {
-    private let outbox: V2ReadReceiptOutboxEngine
-
-    init(outbox: V2ReadReceiptOutboxEngine) { self.outbox = outbox }
-
+actor V2OperationConversationReadReporter: V2ConversationReadSyncManaging {
+    private let service: V2ReadReceiptOperationService
+    init(service: V2ReadReceiptOperationService) { self.service = service }
+    func readSyncUpdates(roomID: String) async throws -> AsyncThrowingStream<V2ReadReceiptTrackingSnapshot, any Error> {
+        await service.statusUpdates(roomID:try .init(roomID))
+    }
+    func resumeReadConfirmation(roomID: String) async throws {
+        try await service.resumeConfirmation(roomID:.init(roomID))
+    }
+    func archiveUnavailableRead(workID: UUID) async throws {
+        try await service.archiveUnavailable(workID: workID)
+    }
+    func restoreReadArchive(workID: UUID) async throws {
+        try await service.restoreArchive(workID: workID)
+    }
     func recordReadThrough(roomID: String, roomSequence: UInt64) async throws -> V2ReadReceiptReportOutcome {
         try Task.checkCancellation()
-        guard let pending = try await outbox.enqueueReceiptIfAdvancing(roomID: .init(roomID), readThroughRoomSequence: roomSequence) else {
-            return .alreadyRecorded
-        }
-        switch try await outbox.flushOnce() {
-        case .acknowledged(let operationID) where operationID == pending.operationID: return .recorded
-        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
-        case .acknowledged, .rejected, .retryScheduled, .idle: return .queuedForRetry
-        }
+        return try await service.enqueue(roomID:.init(roomID),readThrough:roomSequence) ? .queuedForRetry : .alreadyRecorded
     }
 }
 
-actor V2OutboxConversationStateChanger: V2ConversationStateChanging {
-    private let outbox: V2ConversationCapabilitiesOutboxEngine
-    init(outbox: V2ConversationCapabilitiesOutboxEngine) { self.outbox = outbox }
+actor V2OutboxConversationStateChanger: V2ConversationStateChanging, V2PersonalPreferenceManaging {
+    private let service: V2PersonalPreferenceService
+    init(service: V2PersonalPreferenceService) { self.service = service }
+    func preferenceUpdates(limit: Int) async -> AsyncThrowingStream<[V2PersonalPreferencePending], any Error> { await service.pendingUpdates(limit: limit) }
+    func desiredPreferenceTarget(_ fallback: V2PersonalPreferenceTarget) async throws -> V2PersonalPreferenceTarget { try await service.desiredTarget(fallback: fallback) }
+    func resumePreference(_ id: UUID) async throws { try await service.resumeConfirmation(intentID: id) }
+    func discardPreference(_ id: UUID) async throws { try await service.discard(intentID: id) }
+
     func setState(roomID: String, isPinned: Bool, isArchived: Bool, muteUntil: Date?) async throws -> V2ConversationCapabilityOutcome {
         try Task.checkCancellation()
-        let pending = try await outbox.enqueueConversationState(roomID: .init(roomID), isPinned: isPinned, isArchived: isArchived, muteUntil: muteUntil)
-        switch try await outbox.flushOnce() {
-        case .conversationStateAcknowledged(let operationID) where operationID == pending.command.operationID: return .accepted
-        case .conversationStateRejected(let operationID, let code) where operationID == pending.command.operationID: return .rejected(code: code)
-        case .conversationStateRetryScheduled, .conversationStateAcknowledged, .conversationStateRejected, .idle: return .queuedForRetry
-        case .messageFavoriteAcknowledged, .messageFavoriteRetryScheduled, .messageFavoriteRejected: return .queuedForRetry
-        }
+        try await service.enqueue(.conversation(roomID: .init(roomID), isPinned: isPinned, isArchived: isArchived, muteUntil: muteUntil))
+        return .queuedForRetry
     }
 }
 
-actor V2OutboxMessageFavoriter: V2MessageFavoriting {
-    private let outbox: V2ConversationCapabilitiesOutboxEngine
-    init(outbox: V2ConversationCapabilitiesOutboxEngine) { self.outbox = outbox }
+actor V2OutboxMessageFavoriter: V2MessageFavoriting, V2PersonalPreferenceManaging {
+    private let service: V2PersonalPreferenceService
+    init(service: V2PersonalPreferenceService) { self.service = service }
+    func preferenceUpdates(limit: Int) async -> AsyncThrowingStream<[V2PersonalPreferencePending], any Error> { await service.pendingUpdates(limit: limit) }
+    func desiredPreferenceTarget(_ fallback: V2PersonalPreferenceTarget) async throws -> V2PersonalPreferenceTarget { try await service.desiredTarget(fallback: fallback) }
+    func resumePreference(_ id: UUID) async throws { try await service.resumeConfirmation(intentID: id) }
+    func discardPreference(_ id: UUID) async throws { try await service.discard(intentID: id) }
+
     func setFavorite(roomID: String, messageID: String, isFavorited: Bool) async throws -> V2ConversationCapabilityOutcome {
         try Task.checkCancellation()
-        let pending = try await outbox.enqueueMessageFavorite(roomID: .init(roomID), messageID: .init(messageID), isFavorited: isFavorited)
-        switch try await outbox.flushOnce() {
-        case .messageFavoriteAcknowledged(let operationID) where operationID == pending.command.operationID: return .accepted
-        case .messageFavoriteRejected(let operationID, let code) where operationID == pending.command.operationID: return .rejected(code: code)
-        case .messageFavoriteRetryScheduled, .messageFavoriteAcknowledged, .messageFavoriteRejected, .idle: return .queuedForRetry
-        case .conversationStateAcknowledged, .conversationStateRetryScheduled, .conversationStateRejected: return .queuedForRetry
-        }
+        try await service.enqueue(.favorite(roomID: .init(roomID), messageID: .init(messageID), isFavorited: isFavorited))
+        return .queuedForRetry
     }
 }
 
-actor V2OutboxGroupMessagePinner: V2GroupMessagePinning {
-    private let outbox: V2GroupCapabilitiesOutboxEngine
-    init(outbox: V2GroupCapabilitiesOutboxEngine) { self.outbox = outbox }
-    func setPinned(roomID: String, messageID: String, isPinned: Bool) async throws -> V2ConversationCapabilityOutcome {
-        try Task.checkCancellation()
-        let pending = try await outbox.enqueuePin(roomID: .init(roomID), messageID: .init(messageID), isPinned: isPinned)
-        switch try await outbox.flushOnce() {
-        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
-        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
-        case .acknowledged, .retryScheduled, .rejected, .idle: return .queuedForRetry
-        }
+protocol V2GroupCapabilityManaging:Sendable {
+    var service:V2GroupCapabilityOperationService { get }
+}
+
+struct V2OperationGroupMessagePinner: V2GroupMessagePinning, V2GroupCapabilityManaging {
+    let service:V2GroupCapabilityOperationService
+    func pinBaseline(roomID:String,messageID:String) async throws -> V2PinnedMessageBaseline {
+        try await service.pinBaseline(roomID:.init(roomID),messageID:.init(messageID))
+    }
+    func setPinned(roomID:String,messageID:String,isPinned:Bool,expectedRoomSequence:UInt64) async throws -> V2ConversationCapabilityOutcome {
+        let confirmation=try service.confirmationWindow(roomID:.init(roomID),action:.pin(messageID:.init(messageID),isPinned:isPinned,expectedRoomSequence:expectedRoomSequence))
+        try await service.enqueue(confirmation:confirmation)
+        return .queuedForRetry
     }
 }
 
-actor V2OutboxMessageForwarder: V2MessageForwarding {
-    private let outbox: V2BulkForwardMessagesOutboxEngine
+protocol V2ForwardPlanManaging: V2MessageForwarding {
+    func updates(sourceRoomID:RoomID) async -> AsyncThrowingStream<[V2ForwardPlanSnapshot],any Error>
+    func resumeConfirmation(workID:UUID) async throws
+    func cancelRemaining(workID:UUID) async throws
+}
+actor V2OperationMessageForwarder: V2ForwardPlanManaging {
+    private let service:V2ForwardPlanOperationService
+    init(service:V2ForwardPlanOperationService) { self.service=service }
+    func forward(sources:[V2ForwardMessageReference],targetRoomIDs:[String]) async throws -> V2MessageForwardingOutcome {
+        _ = try await service.enqueue(sources:sources,targetRoomIDs:targetRoomIDs.map(RoomID.init))
+        return .queued
+    }
+    func updates(sourceRoomID:RoomID) async -> AsyncThrowingStream<[V2ForwardPlanSnapshot],any Error> { await service.updates(sourceRoomID:sourceRoomID) }
+    func resumeConfirmation(workID:UUID) async throws { try await service.resumeConfirmation(workID:workID) }
+    func cancelRemaining(workID:UUID) async throws { try await service.cancelRemaining(workID:workID) }
+}
 
-    init(outbox: V2BulkForwardMessagesOutboxEngine) { self.outbox = outbox }
-
-    func forward(sources: [V2ForwardMessageReference], targetRoomIDs: [String]) async throws -> V2MessageForwardingOutcome {
-        try Task.checkCancellation()
-        let targetIDs = try targetRoomIDs.map(RoomID.init)
-        let plan = try await outbox.enqueue(sources: sources, targetRoomIDs: targetIDs)
-        _ = try await outbox.flushOnce()
-        // A flush completes at most one chunk and may serve an older plan.
-        // Only the durable parent can establish this user's whole outcome.
-        guard let current = try await outbox.plan(operationID: plan.operationID) else {
-            throw V2ClientCommandError.commandConflict
-        }
-        switch current.state {
-        case .completed:
-            return .completed(succeeded: current.succeededCount, failed: current.failedCount)
-        case .active:
-            return .queued
-        case .cancelled:
-            return .rejected(code: current.terminalCode ?? "CANCELLED")
-        }
+struct V2OperationGroupAnnouncementManager: V2GroupAnnouncementManaging {
+    let service:V2GroupCapabilityOperationService
+    func setAnnouncement(roomID:String,body:String,expectedRevision:UInt64) async throws -> V2ConversationCapabilityOutcome {
+        let confirmation=try service.confirmationWindow(roomID:.init(roomID),action:.announcement(body:body,expectedRevision:expectedRevision))
+        try await service.enqueue(confirmation:confirmation)
+        return .queuedForRetry
     }
 }
 
-actor V2OutboxGroupAnnouncementManager: V2GroupAnnouncementManaging {
-    private let outbox: V2GroupCapabilitiesOutboxEngine
-
-    init(outbox: V2GroupCapabilitiesOutboxEngine) { self.outbox = outbox }
-
-    func setAnnouncement(roomID: String, body: String, expectedRevision: UInt64) async throws -> V2ConversationCapabilityOutcome {
-        try Task.checkCancellation()
-        let pending = try await outbox.enqueueAnnouncement(
-            roomID: .init(roomID),
-            body: body,
-            expectedRevision: expectedRevision
-        )
-        switch try await outbox.flushOnce() {
-        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
-        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
-        case .acknowledged, .retryScheduled, .rejected, .idle: return .queuedForRetry
-        }
+struct V2OperationGroupMemberRoleChanger: V2GroupMemberRoleChanging {
+    let service:V2GroupCapabilityOperationService
+    func setRole(roomID:String,userID:String,role:V2RoomMembershipRole,expectedMembershipRevision:UInt64) async throws -> V2ConversationCapabilityOutcome {
+        let confirmation=try service.confirmationWindow(roomID:.init(roomID),action:.memberRole(targetUserID:.init(userID),role:role,expectedMembershipRevision:expectedMembershipRevision))
+        try await service.enqueue(confirmation:confirmation)
+        return .queuedForRetry
     }
 }
 
-actor V2OutboxGroupMemberRoleChanger: V2GroupMemberRoleChanging {
-    private let outbox: V2GroupCapabilitiesOutboxEngine
-
-    init(outbox: V2GroupCapabilitiesOutboxEngine) { self.outbox = outbox }
-
-    func setRole(roomID: String, userID: String, role: V2RoomMembershipRole, expectedMembershipRevision: UInt64) async throws -> V2ConversationCapabilityOutcome {
-        try Task.checkCancellation()
-        let pending = try await outbox.enqueueMemberRole(
-            roomID: .init(roomID),
-            targetUserID: .init(userID),
-            role: role,
-            expectedMembershipRevision: expectedMembershipRevision
-        )
-        switch try await outbox.flushOnce() {
-        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
-        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
-        case .acknowledged, .retryScheduled, .rejected, .idle: return .queuedForRetry
-        }
+struct V2OperationGroupRolePolicyChanger: V2GroupRolePolicyChanging {
+    let service:V2GroupCapabilityOperationService
+    func setPolicy(roomID:String,role:V2RoomMembershipRole,permissions:Set<V2GroupPermission>,expectedRevision:UInt64) async throws -> V2ConversationCapabilityOutcome {
+        let confirmation=try service.confirmationWindow(roomID:.init(roomID),action:.rolePermissions(role:role,permissions:permissions,expectedRevision:expectedRevision))
+        try await service.enqueue(confirmation:confirmation)
+        return .queuedForRetry
     }
 }
 
-actor V2OutboxGroupRolePolicyChanger: V2GroupRolePolicyChanging {
-    private let outbox: V2GroupCapabilitiesOutboxEngine
-
-    init(outbox: V2GroupCapabilitiesOutboxEngine) { self.outbox = outbox }
-
-    func setPolicy(roomID: String, role: V2RoomMembershipRole, permissions: Set<V2GroupPermission>, expectedRevision: UInt64) async throws -> V2ConversationCapabilityOutcome {
-        try Task.checkCancellation()
-        let pending = try await outbox.enqueueRolePermissions(
-            roomID: .init(roomID),
-            role: role,
-            permissions: permissions,
-            expectedRevision: expectedRevision
-        )
-        switch try await outbox.flushOnce() {
-        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
-        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
-        case .acknowledged, .retryScheduled, .rejected, .idle: return .queuedForRetry
-        }
-    }
+enum V2DirectConversationOpeningState:Error {
+    case queued(UUID)
+    case rejected
+    case expired
 }
 
-actor V2RealtimeDirectConversationOpener: V2DirectConversationOpening {
-    private let transport: any V2ClientDirectMessagingTransport
-    private let localStore: GRDBV2LocalSyncStore
-    private let runtime: V2ClientRuntime
-    private let makeUUID: @Sendable () -> UUID
+protocol V2DirectConversationRecovering:V2DirectConversationOpening {
+    var service:V2DirectRoomOperationService { get }
+}
 
-    init(
-        transport: any V2ClientDirectMessagingTransport,
-        localStore: GRDBV2LocalSyncStore,
-        runtime: V2ClientRuntime,
-        makeUUID: @escaping @Sendable () -> UUID = UUID.init
-    ) {
-        self.transport = transport
-        self.localStore = localStore
-        self.runtime = runtime
-        self.makeUUID = makeUUID
-    }
-
-    func openConversation(with publicIdentity: V2PublicIdentity) async throws -> String {
-        // Signing in publishes the local conversation UI before its
-        // foreground-start task is necessarily scheduled. Reuse (or create)
-        // that one runtime attempt before issuing this non-durable request.
-        _ = try await runtime.start()
-        let operationID = try DirectRoomOperationID(makeUUID().uuidString)
-        let opened = try await transport.openDirectRoom(operationID: operationID, targetUserID: publicIdentity.userID)
+struct V2OperationDirectConversationOpener:V2DirectConversationRecovering {
+    let service:V2DirectRoomOperationService
+    func openConversation(with publicIdentity:V2PublicIdentity) async throws -> String {
+        let id=try await service.enqueue(publicIdentity:publicIdentity)
         try Task.checkCancellation()
-        try await localStore.cacheDirectRoomIdentity(roomID: opened.roomID, publicIdentity: publicIdentity, roomCreatedAt: opened.createdAt)
-        return opened.roomID.rawValue
+        if let receipt=try await service.receipt(id:id) {
+            switch receipt.outcome {
+            case .opened(let roomID,_):return roomID.rawValue
+            case .closed,.rejected(.firstSubmissionExpired):throw V2DirectConversationOpeningState.expired
+            case .rejected:throw V2DirectConversationOpeningState.rejected
+            }
+        }
+        try await service.resumeIfNeeded(id:id)
+        throw V2DirectConversationOpeningState.queued(id)
     }
 }
 
 /// 持久化建群的界面边界。
 ///
-/// 它先获取前台实时会话，使创建成功时能立刻返回房间标识；
-/// 若连接无法建立，仍会记录请求并返回常规的持久化重试结果。
-actor V2OutboxGroupConversationCreator: V2GroupConversationCreating {
-    private let outbox: V2GroupRoomCommandOutboxEngine
-    private let runtime: V2ClientRuntime
-
-    init(outbox: V2GroupRoomCommandOutboxEngine, runtime: V2ClientRuntime) {
-        self.outbox = outbox
-        self.runtime = runtime
+/// 请求先写入本地，再由账户执行器推进有界步骤。
+protocol V2GroupCreationRecovering:V2GroupConversationCreating {
+    func creationUpdates() async -> AsyncThrowingStream<Void,any Error>
+    func resumeCreation(operationID:String) async throws
+}
+struct V2OperationGroupConversationCreator:V2GroupCreationRecovering {
+    let service:V2GroupCreationOperationService
+    func creationUpdates() async -> AsyncThrowingStream<Void,any Error> { await service.updates() }
+    func createConversation(title:String,initialMemberUserIDs:[String]) async throws -> V2GroupConversationCreationOutcome {
+        let members=try initialMemberUserIDs.map { try UserID($0.trimmingCharacters(in:.whitespacesAndNewlines)) }
+        let id=try await service.enqueue(title:title,members:members)
+        return .queuedForRetry(operationID:id.uuidString)
     }
-
-    func createConversation(title: String, initialMemberUserIDs: [String]) async throws -> V2GroupConversationCreationOutcome {
-        let members = try initialMemberUserIDs.map { try UserID($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-        do {
-            _ = try await runtime.start()
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch V2RealtimeSessionCoordinatorError.authenticationRequired {
-            throw V2RealtimeSessionCoordinatorError.authenticationRequired
-        } catch {
-            // The command remains safe to retry: enqueue it below before the
-            // first transport attempt rather than rejecting a user action just
-            // because this foreground connection is presently unavailable.
-        }
-        guard let capacityClass = V2GroupCapacityPolicy().capacityClass(forInitialMemberCount: members.count + 1) else {
-            return .rejected(code: "GROUP_MEMBER_LIMIT_REACHED")
-        }
-        let command = try await outbox.enqueueCreation(title: title, capacityClass: capacityClass, initialMemberUserIDs: members)
-        // A staged creation has at least Begin and Finalize, plus one bounded
-        // Append per audience page. Calling the durable engine only once made
-        // a healthy foreground creation look offline after Begin succeeded.
-        // Keep the immediate path finite; a network error still leaves the
-        // same persisted command for the normal reconnect scheduler.
-        let pageCount = (members.count + V2GroupAudienceImportLimits.maximumMembersPerAppend - 1) / V2GroupAudienceImportLimits.maximumMembersPerAppend
-        let maximumForegroundFlushes = pageCount + 2
-        for _ in 0..<maximumForegroundFlushes {
-            switch try await outbox.flushOnce() {
-            case .acknowledged(let operationID, let roomID) where operationID == command.operationID: return .created(roomID: roomID.rawValue)
-            case .rejected(let operationID, let code) where operationID == command.operationID: return .rejected(code: code)
-            case .retryScheduled:
-                continue
-            case .idle, .cancelled, .cancellationRefused, .acknowledged, .rejected:
-                return .queuedForRetry(operationID: command.operationID.rawValue)
+    func cancelConversationCreation(operationID:String) async throws -> V2GroupConversationCancellationOutcome {
+        guard let id=UUID(uuidString:operationID) else { throw V2OperationWorkError.invalidRecord }
+        try await service.requestCancellation(id:id)
+        let pending=try await service.pending(id:id)
+        return pending.progress?.phase == .finalizing ? .finalizationAlreadyStarted:.queuedForRetry
+    }
+    func resumeCreation(operationID:String) async throws {
+        guard let id=UUID(uuidString:operationID) else { throw V2OperationWorkError.invalidRecord }
+        try await service.resume(id:id)
+    }
+    func restoredCreationStatus() async throws -> V2RestoredGroupConversationCreationStatus? {
+        guard let pending=try await service.latest() else { return nil }
+        let id=pending.work.id.uuidString
+        if let receipt=pending.receipt {
+            switch receipt.outcome {
+            case .created(let room,_,_,_): return .created(roomID:room.rawValue)
+            case .closed:return pending.cancellationRequested ? .cancelled:.expired
+            case .rejected(.submissionExpired):return .expired
+            case .rejected(let reason):return .rejected(code:reason.rawValue)
             }
         }
-        return .queuedForRetry(operationID: command.operationID.rawValue)
-    }
-
-    func cancelConversationCreation(operationID: String) async throws -> V2GroupConversationCancellationOutcome {
-        try Task.checkCancellation()
-        let requestedID = try GroupRoomOperationID(operationID)
-        try await outbox.requestCancellation(operationID: requestedID)
-        switch try await outbox.flushOnce() {
-        case .cancelled(let completedID) where completedID == requestedID:
-            return .cancelled
-        case .cancellationRefused(let completedID) where completedID == requestedID:
-            return .finalizationAlreadyStarted
-        case .retryScheduled, .idle, .acknowledged, .rejected, .cancelled, .cancellationRefused:
-            return .queuedForRetry
-        }
-    }
-
-    func restoredCreationStatus() async throws -> V2RestoredGroupConversationCreationStatus? {
-        guard let creation = try await outbox.latestCreation() else { return nil }
-        switch creation.state {
-        case .pending:
-            return .queuedForRetry(operationID: creation.operationID.rawValue)
-        case .cancelling:
-            return .cancelling(operationID: creation.operationID.rawValue)
-        case .finalizing:
-            return .finalizing(operationID: creation.operationID.rawValue)
-        case .cancelled:
-            return .cancelled
-        case .rejected:
-            return .rejected(code: creation.terminalCode ?? "UNKNOWN")
-        case .acknowledged:
-            return nil
-        }
+        if pending.work.execution == .expiredUnsubmitted { return .expired }
+        if pending.work.execution == .cancelledLocally { return .cancelled }
+        if pending.work.scheduling == .needsAttention { return .needsConfirmation(operationID:id) }
+        if pending.progress?.phase == .finalizing { return .finalizing(operationID:id) }
+        if pending.cancellationRequested { return .cancelling(operationID:id) }
+        return .queuedForRetry(operationID:id)
     }
 }
 
@@ -695,31 +596,27 @@ actor V2RealtimeGroupReadReceiptReader: V2GroupReadReceiptReading {
     }
 }
 
-actor V2RealtimeLiveActivityPreferenceUpdater: V2LiveActivityPreferenceUpdating {
-    private let transport: any V2ClientLiveActivityTransport
-    init(transport: any V2ClientLiveActivityTransport) { self.transport = transport }
-
-    func update(allowsOnlinePresence: Bool, allowsTypingIndicators: Bool) async throws -> V2LiveActivityPreferenceUpdateOutcome {
-        do {
-            _ = try await transport.setLiveActivityPreferences(operationID: .init(UUID().uuidString), allowsOnlinePresence: allowsOnlinePresence, allowsTypingIndicators: allowsTypingIndicators)
-            return .accepted
-        } catch let error as V2RealtimeTransportError {
-            if case .server(let code, let retryable, _, _) = error, !retryable { return .rejected(code: code) }
-            throw error
-        }
+actor V2OperationLiveActivityPreferenceUpdater:V2LiveActivityPreferenceUpdating,V2LiveActivityPreferenceReading {
+    let service:V2AccountPreferenceService
+    init(service:V2AccountPreferenceService) { self.service=service }
+    func update(allowsOnlinePresence:Bool,allowsTypingIndicators:Bool) async throws -> V2LiveActivityPreferenceUpdateOutcome {
+        _ = try await service.enqueue(value:.liveActivity(allowsOnlinePresence:allowsOnlinePresence,allowsTypingIndicators:allowsTypingIndicators));return .queuedForRetry
     }
-}
-
-extension V2RealtimeLiveActivityPreferenceUpdater: V2LiveActivityPreferenceReading {
-    func preferences() async throws -> V2LiveActivityPreferences { try await transport.liveActivityPreferences() }
+    func preferences() async throws -> V2LiveActivityPreferences {
+        let snapshot:V2AccountPreferenceSnapshot
+        if let cached=try await service.cachedBaseline(kind:.liveActivityPreference) {snapshot=cached} else {return .init(allowsOnlinePresence:true,allowsTypingIndicators:true,updatedAt:Date())}
+        guard case .liveActivity(let online,let typing)=snapshot.value else { throw V2AccountPreferenceValidationError.invalidSnapshot }
+        return .init(allowsOnlinePresence:online,allowsTypingIndicators:typing,updatedAt:Date())
+    }
 }
 
 actor V2RealtimeConversationLiveActivity: V2ConversationLiveActivityManaging {
     private let transport: any V2ClientLiveActivityTransport
     private let events: any V2LiveActivityEventSource
+    private let localStore:GRDBV2LocalSyncStore
 
-    init(transport: any V2ClientLiveActivityTransport, events: any V2LiveActivityEventSource) {
-        self.transport = transport; self.events = events
+    init(transport: any V2ClientLiveActivityTransport, events: any V2LiveActivityEventSource,localStore:GRDBV2LocalSyncStore) {
+        self.transport = transport; self.events = events;self.localStore=localStore
     }
 
     func activate(roomID: String, includesPresence: Bool) async throws -> V2PresenceState? {
@@ -735,7 +632,11 @@ actor V2RealtimeConversationLiveActivity: V2ConversationLiveActivityManaging {
         if includesPresence { try? await transport.unsubscribePresence(roomID: room) }
     }
 
-    func setTyping(roomID: String, isTyping: Bool) async throws { try await transport.setTyping(roomID: .init(roomID), isTyping: isTyping) }
+    func setTyping(roomID: String, isTyping: Bool) async throws {
+        let permitted:Bool
+        if isTyping { permitted=try await localStore.allowsLocalTypingPublication() } else { permitted=true }
+        try await transport.setTyping(roomID: .init(roomID), isTyping: isTyping && permitted)
+    }
     func nextEvent() async throws -> V2LiveActivityEvent { try await events.nextLiveActivityEvent() }
 }
 
@@ -743,65 +644,43 @@ actor V2RealtimeConversationLiveActivity: V2ConversationLiveActivityManaging {
 ///
 /// 它在尝试实时请求之前记录成员操作；授权权威仍在服务端，
 /// 界面只是不再展示已知对当前成员角色无效的控件。
-actor V2OutboxGroupMembershipChanger: V2GroupMembershipChanging {
-    private let outbox: V2MembershipCommandOutboxEngine
-
-    init(outbox: V2MembershipCommandOutboxEngine) { self.outbox = outbox }
-
-    func changeMembership(roomID: String, targetUserID: String, action: V2RoomMembershipAction, expectedMembershipRevision: UInt64) async throws -> V2GroupMembershipChangeOutcome {
-        try Task.checkCancellation()
-        let pending = try await outbox.enqueueMembershipChange(
-            roomID: .init(roomID),
-            targetUserID: .init(targetUserID.trimmingCharacters(in: .whitespacesAndNewlines)),
-            action: action,
-            expectedMembershipRevision: expectedMembershipRevision
-        )
-        switch try await outbox.flushOnce() {
-        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
-        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
-        case .acknowledged, .rejected, .retryScheduled, .idle: return .queuedForRetry
-        }
+protocol V2MembershipManaging:Sendable {
+    func membershipUpdates(roomID:RoomID) async -> AsyncThrowingStream<[V2MembershipPending],any Error>
+    func resumeMembership(id:UUID) async throws
+    func reconfirmMembership(id:UUID,confirmation:V2MembershipConfirmationWindow) async throws
+    func discardMembership(id:UUID) async throws
+}
+actor V2OperationGroupMembershipChanger:V2GroupMembershipChanging,V2MembershipManaging {
+    let service:V2MembershipOperationService
+    init(service:V2MembershipOperationService) { self.service=service }
+    nonisolated func membershipConfirmation(roomID:String,action:V2RoomMembershipAction,expectedMembershipRevision:UInt64) throws -> V2MembershipConfirmationWindow {
+        try service.confirmationWindow(roomID:.init(roomID),action:action,expectedMembershipRevision:expectedMembershipRevision)
     }
+    func changeMembership(targetUserID:String,confirmation:V2MembershipConfirmationWindow) async throws -> V2GroupMembershipChangeOutcome {
+        _ = try await service.enqueue(targetUserID:.init(targetUserID),confirmation:confirmation)
+        return .queuedForRetry
+    }
+    func membershipUpdates(roomID:RoomID) async -> AsyncThrowingStream<[V2MembershipPending],any Error> { await service.updates(roomID:roomID) }
+    func resumeMembership(id:UUID) async throws { try await service.resumeConfirmation(id:id) }
+    func reconfirmMembership(id:UUID,confirmation:V2MembershipConfirmationWindow) async throws { _ = try await service.reconfirmDraft(id:id,confirmation:confirmation) }
+    func discardMembership(id:UUID) async throws { try await service.discardDraft(id:id) }
 }
 
-actor V2OutboxGroupMemberMuter: V2GroupMemberMuting {
-    private let outbox: V2MemberMuteOutboxEngine
-
-    init(outbox: V2MemberMuteOutboxEngine) { self.outbox = outbox }
-
-    func muteMember(roomID: String, targetUserID: String, muteUntil: Date, reasonCode: V2ModerationReasonCode) async throws -> V2GroupModerationOutcome {
-        try Task.checkCancellation()
-        let pending = try await outbox.enqueueMute(
-            roomID: .init(roomID),
-            targetUserID: .init(targetUserID),
-            muteUntil: muteUntil,
-            reasonCode: reasonCode
-        )
-        switch try await outbox.flushOnce() {
-        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
-        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
-        case .acknowledged, .rejected, .retryScheduled, .idle: return .queuedForRetry
-        }
+actor V2OperationGroupMemberAdministrator: V2GroupMemberMuting, V2ModeratedGroupMemberRemoving, V2MemberAdministrationManaging {
+    let service:V2MemberAdministrationOperationService
+    init(service:V2MemberAdministrationOperationService) { self.service=service }
+    func administrationUpdates(roomID:RoomID) async -> AsyncThrowingStream<[V2MemberAdministrationPending],any Error> { await service.updates(roomID:roomID) }
+    func resumeAdministration(id:UUID) async throws { try await service.resumeConfirmation(id:id) }
+    func reconfirmAdministration(id:UUID,revision:UInt64) async throws { _ = try await service.reconfirmDraft(id:id,expectedMembershipRevision:revision) }
+    func discardAdministration(id:UUID) async throws { try await service.discardDraft(id:id) }
+    func muteMember(roomID:String,targetUserID:String,muteUntil:Date,reasonCode:V2ModerationReasonCode,expectedMembershipRevision:UInt64) async throws -> V2GroupModerationOutcome {
+        guard let until=UInt64(exactly:(muteUntil.timeIntervalSince1970*1_000).rounded(.towardZero)),until>0 else { throw V2MemberAdministrationValidationError.invalidIntent }
+        _ = try await service.enqueue(roomID:.init(roomID),targetUserID:.init(targetUserID),action:.mute(untilMilliseconds:until),reasonCode:reasonCode,expectedMembershipRevision:expectedMembershipRevision)
+        return .queuedForRetry
     }
-}
-
-actor V2OutboxModeratedGroupMemberRemover: V2ModeratedGroupMemberRemoving {
-    private let outbox: V2ModeratedMemberRemovalOutboxEngine
-
-    init(outbox: V2ModeratedMemberRemovalOutboxEngine) { self.outbox = outbox }
-
-    func removeMemberByModerator(roomID: String, targetUserID: String, reasonCode: V2ModerationReasonCode) async throws -> V2GroupModerationOutcome {
-        try Task.checkCancellation()
-        let pending = try await outbox.enqueueRemoval(
-            roomID: .init(roomID),
-            targetUserID: .init(targetUserID),
-            reasonCode: reasonCode
-        )
-        switch try await outbox.flushOnce() {
-        case .acknowledged(let operationID) where operationID == pending.operationID: return .accepted
-        case .rejected(let operationID, let code) where operationID == pending.operationID: return .rejected(code: code)
-        case .acknowledged, .rejected, .retryScheduled, .idle: return .queuedForRetry
-        }
+    func removeMemberByModerator(roomID:String,targetUserID:String,reasonCode:V2ModerationReasonCode,expectedMembershipRevision:UInt64) async throws -> V2GroupModerationOutcome {
+        _ = try await service.enqueue(roomID:.init(roomID),targetUserID:.init(targetUserID),action:.remove,reasonCode:reasonCode,expectedMembershipRevision:expectedMembershipRevision)
+        return .queuedForRetry
     }
 }
 
@@ -809,113 +688,67 @@ actor V2OutboxModeratedGroupMemberRemover: V2ModeratedGroupMemberRemoving {
 ///
 /// 它把用户接收偏好保存在持久化社交命令发件箱中。其他设备修改该设置后，
 /// 远端同步投影仍是权威；该 actor 负责在连接中断时保留本地意图。
-actor V2OutboxStrangerMessagePreferenceUpdater: V2StrangerMessagePreferenceUpdating {
-    private let outbox: V2SocialCommandOutboxEngine
-
-    init(outbox: V2SocialCommandOutboxEngine) {
-        self.outbox = outbox
+actor V2OperationStrangerMessagePreferenceUpdater:V2StrangerMessagePreferenceUpdating {
+    let service:V2AccountPreferenceService
+    init(service:V2AccountPreferenceService) { self.service=service }
+    func update(allowsStrangerMessages:Bool) async throws -> V2StrangerMessagePreferenceUpdateOutcome {
+        _ = try await service.enqueue(value:.strangerMessage(allowsStrangerMessages ? .allow : .deny));return .queuedForRetry
     }
-
-    func update(allowsStrangerMessages: Bool) async throws -> V2StrangerMessagePreferenceUpdateOutcome {
-        try Task.checkCancellation()
-        let command = try await outbox.enqueueStrangerMessagePermission(allowsStrangerMessages ? .allow : .deny)
-        switch try await outbox.flushIfReady(operationID: command.operationID) {
-        case nil:
-            return .queuedForRetry
-        case .acknowledged:
-            return .accepted
-        case .retryScheduled, .idle:
-            return .queuedForRetry
-        case .rejected(_, let code):
-            return .rejected(code: code)
-        }
+}
+actor V2OperationUserAddPreferenceUpdater:V2UserAddPreferenceUpdating {
+    let service:V2AccountPreferenceService
+    init(service:V2AccountPreferenceService) { self.service=service }
+    func update(allowsBeingAdded:Bool) async throws -> V2UserAddPreferenceUpdateOutcome {
+        _ = try await service.enqueue(value:.userAdd(allowsBeingAdded ? .allow : .deny));return .queuedForRetry
+    }
+}
+actor V2OperationReadReceiptPreferenceUpdater:V2ReadReceiptPreferenceUpdating {
+    let service:V2AccountPreferenceService
+    init(service:V2AccountPreferenceService) { self.service=service }
+    func update(allowsDirectReadReceipts:Bool,allowsGroupReadReceipts:Bool) async throws -> V2ReadReceiptPreferenceUpdateOutcome {
+        _ = try await service.enqueue(value:.readReceipt(allowsDirectReadReceipts:allowsDirectReadReceipts,allowsGroupReadReceipts:allowsGroupReadReceipts));return .queuedForRetry
     }
 }
 
-actor V2OutboxUserAddPreferenceUpdater: V2UserAddPreferenceUpdating {
-    private let outbox: V2SocialCommandOutboxEngine
-
-    init(outbox: V2SocialCommandOutboxEngine) { self.outbox = outbox }
-
-    func update(allowsBeingAdded: Bool) async throws -> V2UserAddPreferenceUpdateOutcome {
-        try Task.checkCancellation()
-        let command = try await outbox.enqueueUserAddPermission(allowsBeingAdded ? .allow : .deny)
-        switch try await outbox.flushIfReady(operationID: command.operationID) {
-        case nil: return .queuedForRetry
-        case .acknowledged: return .accepted
-        case .retryScheduled, .idle: return .queuedForRetry
-        case .rejected(_, let code): return .rejected(code: code)
-        }
-    }
+protocol V2SocialOperationManaging:Sendable {
+    func socialProposals() async -> AsyncThrowingStream<[V2SocialOperationProposal],any Error>
+    func saveSocialProposal(action:V2SocialOperationAction,target:UserID) async throws -> UUID
+    func confirmSocialProposal(id:UUID,snapshot:V2SocialOperationSnapshot) async throws
+    func discardSocialProposal(id:UUID) async throws
+    func socialBaseline(target:UserID) async throws -> V2SocialOperationSnapshot
+    func enqueueSocial(action:V2SocialOperationAction,snapshot:V2SocialOperationSnapshot) async throws
+    func socialUpdates() async -> AsyncThrowingStream<[V2SocialOperationPending],any Error>
+    func resumeSocialConfirmation(workID:UUID) async throws
 }
-
-/// 面向界面的已读回执偏好更新实现。
-///
-/// 回执偏好变更是幂等协议命令；服务端仍是权威，并由其同步投影协调其他设备。
-actor V2RealtimeReadReceiptPreferenceUpdater: V2ReadReceiptPreferenceUpdating {
-    private let outbox: V2SocialCommandOutboxEngine
-    init(outbox: V2SocialCommandOutboxEngine) { self.outbox = outbox }
-    func update(allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2ReadReceiptPreferenceUpdateOutcome {
-        try Task.checkCancellation()
-        let command = try await outbox.enqueueReadReceiptPreferences(allowsDirect: allowsDirectReadReceipts, allowsGroup: allowsGroupReadReceipts)
-        switch try await outbox.flushIfReady(operationID: command.operationID) {
-        case .acknowledged: return .accepted
-        case .rejected(_, let code): return .rejected(code: code)
-        case .retryScheduled, .idle, nil: return .queuedForRetry
-        }
+actor V2OperationUserBlockChanger:V2UserBlockChanging,V2SocialOperationManaging {
+    let service:V2SocialOperationService
+    init(service:V2SocialOperationService) { self.service=service }
+    func changeBlock(targetUserID:String,action:V2UserBlockAction) async throws -> V2UserBlockChangeOutcome {
+        _ = try await service.enqueue(action:.userBlock(action),targetUserID:.init(targetUserID));return .queuedForRetry
     }
+    func socialProposals() async -> AsyncThrowingStream<[V2SocialOperationProposal],any Error> { await service.proposalUpdates() }
+    func saveSocialProposal(action:V2SocialOperationAction,target:UserID) async throws -> UUID { try await service.saveProposal(action:action,target:target) }
+    func confirmSocialProposal(id:UUID,snapshot:V2SocialOperationSnapshot) async throws { try await service.confirmProposal(id:id,snapshot:snapshot) }
+    func discardSocialProposal(id:UUID) async throws { try await service.discardProposal(id:id) }
+    func socialBaseline(target:UserID) async throws -> V2SocialOperationSnapshot { try await service.baseline(targetUserID:target) }
+    func enqueueSocial(action:V2SocialOperationAction,snapshot:V2SocialOperationSnapshot) async throws { _ = try await service.enqueue(action:action,snapshot:snapshot) }
+    func socialUpdates() async -> AsyncThrowingStream<[V2SocialOperationPending],any Error> { await service.updates() }
+    func resumeSocialConfirmation(workID:UUID) async throws { try await service.resumeConfirmation(workID:workID) }
 }
-
-actor V2OutboxUserBlockChanger: V2UserBlockChanging {
-    private let outbox: V2SocialCommandOutboxEngine
-
-    init(outbox: V2SocialCommandOutboxEngine) {
-        self.outbox = outbox
+actor V2OperationRelationshipChanger:V2RelationshipChanging,V2SocialOperationManaging {
+    let service:V2SocialOperationService
+    init(service:V2SocialOperationService) { self.service=service }
+    func changeRelationship(targetUserID:String,action:V2RelationshipAction) async throws -> V2RelationshipChangeOutcome {
+        _ = try await service.enqueue(action:.relationship(action),targetUserID:.init(targetUserID));return .queuedForRetry
     }
-
-    func changeBlock(targetUserID: String, action: V2UserBlockAction) async throws -> V2UserBlockChangeOutcome {
-        try Task.checkCancellation()
-        let command = try await outbox.enqueueUserBlock(
-            targetUserID: try .init(targetUserID),
-            action: action
-        )
-        switch try await outbox.flushIfReady(operationID: command.operationID) {
-        case nil:
-            return .queuedForRetry
-        case .acknowledged:
-            return .accepted
-        case .retryScheduled, .idle:
-            return .queuedForRetry
-        case .rejected(_, let code):
-            return .rejected(code: code)
-        }
-    }
-}
-
-actor V2OutboxRelationshipChanger: V2RelationshipChanging {
-    private let outbox: V2SocialCommandOutboxEngine
-
-    init(outbox: V2SocialCommandOutboxEngine) {
-        self.outbox = outbox
-    }
-
-    func changeRelationship(targetUserID: String, action: V2RelationshipAction) async throws -> V2RelationshipChangeOutcome {
-        try Task.checkCancellation()
-        let command = try await outbox.enqueueRelationship(
-            targetUserID: try .init(targetUserID),
-            action: action
-        )
-        switch try await outbox.flushIfReady(operationID: command.operationID) {
-        case nil:
-            return .queuedForRetry
-        case .acknowledged:
-            return .accepted
-        case .retryScheduled, .idle:
-            return .queuedForRetry
-        case .rejected(_, let code):
-            return .rejected(code: code)
-        }
-    }
+    func socialProposals() async -> AsyncThrowingStream<[V2SocialOperationProposal],any Error> { await service.proposalUpdates() }
+    func saveSocialProposal(action:V2SocialOperationAction,target:UserID) async throws -> UUID { try await service.saveProposal(action:action,target:target) }
+    func confirmSocialProposal(id:UUID,snapshot:V2SocialOperationSnapshot) async throws { try await service.confirmProposal(id:id,snapshot:snapshot) }
+    func discardSocialProposal(id:UUID) async throws { try await service.discardProposal(id:id) }
+    func socialBaseline(target:UserID) async throws -> V2SocialOperationSnapshot { try await service.baseline(targetUserID:target) }
+    func enqueueSocial(action:V2SocialOperationAction,snapshot:V2SocialOperationSnapshot) async throws { _ = try await service.enqueue(action:action,snapshot:snapshot) }
+    func socialUpdates() async -> AsyncThrowingStream<[V2SocialOperationPending],any Error> { await service.updates() }
+    func resumeSocialConfirmation(workID:UUID) async throws { try await service.resumeConfirmation(workID:workID) }
 }
 
 /// 把活跃会话界面桥接到可复用房间日志引擎的适配器。
@@ -1023,18 +856,35 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
 }
 
 struct V2AppRealtimeRuntime {
+    let accountRuntime: V2AccountRuntime
+    let personalPreferences: V2PersonalPreferenceService
+    let nameOperations: V2NameOperationService
+    let resourceTransfers: V2ResourceTransferEngine
     let runtime: V2ClientRuntime
     let roomRecovery: V2RoomRecoveryRunner
     let backgroundSync: V2BackgroundSyncRunner
     let projectionChangeNotifier: V2ProjectionChangeNotifier
     let sender: any V2ConversationSending
     let messageWithdrawer: any V2MessageWithdrawing
+    let messageReactionOperations:V2MessageReactionOperationService
     let messageReactionChanger: any V2MessageReactionChanging
+    let messageSendOperations: V2MessageSendOperationService
+    let messageMutationOperations: V2MessageMutationOperationService
     let messageEditor: any V2MessageEditing
+    let readReceiptOperations: V2ReadReceiptOperationService
     let readReceiptReporter: any V2ConversationReadReporting
     let conversationStateChanger: any V2ConversationStateChanging
     let messageFavoriter: any V2MessageFavoriting
     let groupMessagePinner: any V2GroupMessagePinning
+    let messageModerationOperations:V2MessageModerationOperationService
+    let directRoomOperations:V2DirectRoomOperationService
+    let groupCreationOperations:V2GroupCreationOperationService
+    let groupCapabilityOperations:V2GroupCapabilityOperationService
+    let accountPreferences:V2AccountPreferenceService
+    let socialOperations:V2SocialOperationService
+    let membershipOperations:V2MembershipOperationService
+    let memberAdministrationOperations:V2MemberAdministrationOperationService
+    let forwardPlanOperations:V2ForwardPlanOperationService
     let messageForwarder: any V2MessageForwarding
     let groupAnnouncementManager: any V2GroupAnnouncementManaging
     let groupMemberRoleChanger: any V2GroupMemberRoleChanging
@@ -1066,57 +916,84 @@ struct V2AppRealtimeRuntime {
             maximumPayloadBytes: 65_536,
             acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]
         )
+        let accountRuntime = V2AccountRuntime()
+        self.accountRuntime = accountRuntime
         let connection = V2TLSFrameConnection(endpoint: configuration.realtimeEndpoint, frameLimits: frameLimits,
-                                              supportsAuthorPresentationDelta: true)
+                                              supportsAuthorPresentationDelta: true, workScheduler: accountRuntime.scheduler,initialPresenceMode:{
+                                                  try await localStore.localPublicationPolicy().allowsOnlinePresence ? .allowWhenAuthorized:.suppressed
+                                              })
         let transport = V2ProtobufSyncTransport(
             wire: connection,
             protocolVersion: UInt8(IMV2ProtocolVersion.current)
         )
-        let accountHTTP = V2SessionHTTPAuthorization(session: authSession, epoch: authEpoch)
-        let operationRecovery = V2MessageOperationRecoveryController(store: localStore,
-            remote: try V2HTTPMessageOperationRecoveryClient(endpoint: configuration.endpoint("v2/message-operations/recover"),
-                credentials: accountHTTP, transport: accountHTTP), actorUserID: {
-                    let credentials = try await authSession.realtimeCredentials()
-                    try await authSession.requireAuthenticatedEpoch(authEpoch)
-                    return credentials.userID
-                })
-        let outbox = V2CommandOutboxEngine(store: localStore, transport: transport, recovery: operationRecovery)
-        let socialOutbox = V2SocialCommandOutboxEngine(
-            store: localStore,
-            socialTransport: transport,
-            directTransport: transport,
-            readReceiptTransport: transport
-        )
-        let groupOutbox = V2GroupRoomCommandOutboxEngine(store: localStore, transport: transport)
-        let membershipOutbox = V2MembershipCommandOutboxEngine(store: localStore, transport: transport)
-        let memberMuteOutbox = V2MemberMuteOutboxEngine(store: localStore, transport: transport)
-        let moderatedMemberRemovalOutbox = V2ModeratedMemberRemovalOutboxEngine(store: localStore, transport: transport)
-        let withdrawalOutbox = V2MessageWithdrawalOutboxEngine(store: localStore, transport: transport)
-        let reactionOutbox = V2MessageReactionOutboxEngine(store: localStore, transport: transport)
-        let editOutbox = V2MessageEditOutboxEngine(store: localStore, transport: transport)
-        let readReceiptOutbox = V2ReadReceiptOutboxEngine(store: localStore, transport: transport)
-        let conversationCapabilitiesOutbox = V2ConversationCapabilitiesOutboxEngine(store: localStore, transport: transport)
-        let groupCapabilitiesOutbox = V2GroupCapabilitiesOutboxEngine(store: localStore, transport: transport)
-        let forwardMessagesOutbox = V2BulkForwardMessagesOutboxEngine(store: localStore, transport: transport)
+        let accountHTTP = V2SessionHTTPAuthorization(session: authSession, epoch: authEpoch,
+            transport: try V2RegisteredAccountHTTPTransport(executor: accountRuntime.httpExecutor,
+                allowedBases: [configuration.accountBaseURL, configuration.mediaEdgeEndpoint.deletingLastPathComponent().deletingLastPathComponent()],
+                scope: accountRuntime.queryScope(accountID: actorUserID.rawValue, authorizationDomain: "accountHTTP")), scheduler: accountRuntime.scheduler)
+        let messageSendOperations=V2MessageSendOperationService(accountID:actorUserID,store:localStore,
+            client:try V2HTTPMessageSendOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
+        self.messageSendOperations=messageSendOperations
+        let socialOperations=V2SocialOperationService(accountID:actorUserID,store:localStore,
+            client:try V2HTTPSocialOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
+        self.socialOperations=socialOperations
+        let accountPreferences=V2AccountPreferenceService(accountID:actorUserID,activationID:accountRuntime.ownerID,store:localStore,
+            client:try V2HTTPAccountPreferenceOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
+        self.accountPreferences=accountPreferences
+        let groupCreationOperations=V2GroupCreationOperationService(accountID:actorUserID,store:localStore,
+            client:try V2HTTPGroupCreationOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
+        self.groupCreationOperations=groupCreationOperations
+        self.messageModerationOperations=V2MessageModerationOperationService(accountID:actorUserID,activationID:accountRuntime.ownerID,store:localStore,
+            client:try V2HTTPMessageModerationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
+        self.directRoomOperations=V2DirectRoomOperationService(accountID:actorUserID,store:localStore,
+            client:try V2HTTPDirectRoomOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
+        let membershipOperations=V2MembershipOperationService(accountID:actorUserID,activationID:accountRuntime.ownerID,store:localStore,
+            client:try V2HTTPMembershipOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
+        self.membershipOperations=membershipOperations
+        let memberAdministrationOperations=V2MemberAdministrationOperationService(accountID:actorUserID,activationID:accountRuntime.ownerID,store:localStore,
+            client:try V2HTTPMemberAdministrationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
+        self.memberAdministrationOperations=memberAdministrationOperations
+        let messageReactionOperations=V2MessageReactionOperationService(accountID:actorUserID,store:localStore,
+            client:try V2HTTPMessageReactionOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
+        self.messageReactionOperations=messageReactionOperations
+        let messageMutationOperations=V2MessageMutationOperationService(accountID:actorUserID,store:localStore,
+            client:try V2HTTPMessageMutationOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
+        self.messageMutationOperations=messageMutationOperations
+        let readReceiptOperations = V2ReadReceiptOperationService(accountID:actorUserID,store:localStore,
+            client:try V2ReadReceiptOperationAdapter(realtime:transport,baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
+        self.readReceiptOperations = readReceiptOperations
+        let personalPreferences = V2PersonalPreferenceService(accountID: actorUserID, store: localStore, transport: transport,
+            recovery: try V2HTTPPersonalPreferenceRecoveryClient(roomsEndpoint: configuration.endpoint("v2/rooms"), credentials: accountHTTP, transport: accountHTTP))
+        self.personalPreferences = personalPreferences
+        let groupCapabilityOperations=V2GroupCapabilityOperationService(accountID:actorUserID,activationID:accountRuntime.ownerID,store:localStore,
+            client:try V2HTTPGroupCapabilityOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
+        self.groupCapabilityOperations=groupCapabilityOperations
+        let forwardPlanOperations=V2ForwardPlanOperationService(accountID:actorUserID,store:localStore,
+            client:try V2HTTPForwardPlanOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
+        self.forwardPlanOperations=forwardPlanOperations
         let mediaDownloadResolver = try V2HTTPMediaDownloadTargetResolver(
             endpoint: configuration.mediaEdgeEndpoint,
             credentials: accountHTTP, transport: accountHTTP
         )
         let mediaDownloader = V2ClientMediaDownloadService(
             targetResolver: mediaDownloadResolver,
-            byteTransfer: V2URLSessionMediaByteTransfer()
+            byteTransfer: V2URLSessionMediaByteTransfer(scheduler: accountRuntime.scheduler, diagnostics: accountRuntime.networkDiagnostics)
         )
         let profilePresentations = V2ProfilePresentationRepository(actorUserID: actorUserID, deviceID: deviceID,
             reader: try V2HTTPProfilePresentationClient(endpoint: configuration.endpoint("v2/profile-presentations/batch"),
                 credentials: accountHTTP, transport: accountHTTP),
-            nicknameRevisions: { try await localStore.groupNicknameRevisions(keys: $0) })
+            nicknameRevisions: { try await localStore.groupNicknameRevisions(keys: $0) },
+            aliasRevisions: { try await localStore.contactAliasRevisions(keys: $0) })
         self.profilePresentations = profilePresentations
+        self.nameOperations = V2NameOperationService(accountID: actorUserID, store: localStore,
+            client: try V2HTTPNameOperationClient(endpoint: configuration.endpoint("v2/profile-presentations"),
+                credentials: accountHTTP, transport: accountHTTP),
+            didCommit: { await profilePresentations.invalidateEditedName($0) })
         let profileRepository = V2ProfileRepository(store: localStore,
             reader: V2ProfileProjectionReader(presentations: profilePresentations))
         self.profileRepository = profileRepository
         let syncOwnership = V2SyncOperationGate()
         let syncEngine = V2SyncEngine(transport: transport, store: localStore, capabilityProfile: "base", operationGate: syncOwnership)
-        let backgroundConnection = V2TLSFrameConnection(endpoint: configuration.realtimeEndpoint, frameLimits: frameLimits)
+        let backgroundConnection = V2TLSFrameConnection(endpoint: configuration.realtimeEndpoint, frameLimits: frameLimits, workScheduler: accountRuntime.scheduler, workService: "realtime-background",initialPresenceMode:{.suppressed})
         let backgroundTransport = V2ProtobufSyncTransport(wire: backgroundConnection, protocolVersion: UInt8(IMV2ProtocolVersion.current))
         let backgroundPersonalSync = V2SyncEngine(transport: backgroundTransport, store: localStore, capabilityProfile: "base", maxRecords: 100, operationGate: syncOwnership)
         let backgroundRecovery = V2RoomRecoveryRunner(
@@ -1162,26 +1039,8 @@ struct V2AppRealtimeRuntime {
             connection: connection,
             supportedCapabilityProfiles: ["base"]
         )
+        localStore.installNetworkDiagnostics(accountRuntime.networkDiagnostics)
         let projectionChangeNotifier = V2ProjectionChangeNotifier(localStore: localStore)
-        let commandScheduler = V2FairDurableCommandScheduler(lanes: [
-            // Safety and room-authority changes run before normal
-            // sends, but all lanes retain one-quantum fairness.
-            .init { if case .idle = try await withdrawalOutbox.flushOnce() { return false }; return true },
-            .init { if case .idle = try await moderatedMemberRemovalOutbox.flushOnce() { return false }; return true },
-            .init { if case .idle = try await memberMuteOutbox.flushOnce() { return false }; return true },
-            .init { if case .idle = try await membershipOutbox.flushOnce() { return false }; return true },
-            .init { if case .idle = try await groupCapabilitiesOutbox.flushOnce() { return false }; return true },
-            // Interactive sends take precedence over deferred bulk
-            // forwarding. The latter is itself internally chunked.
-            .init { if case .idle = try await outbox.flushOnce() { return false }; return true },
-            .init { if case .idle = try await forwardMessagesOutbox.flushOnce() { return false }; return true },
-            .init { if case .idle = try await groupOutbox.flushOnce() { return false }; return true },
-            .init { if case .idle = try await socialOutbox.flushOnce() { return false }; return true },
-            .init { if case .idle = try await editOutbox.flushOnce() { return false }; return true },
-            .init { if case .idle = try await reactionOutbox.flushOnce() { return false }; return true },
-            .init { if case .idle = try await readReceiptOutbox.flushOnce() { return false }; return true },
-            .init { if case .idle = try await conversationCapabilitiesOutbox.flushOnce() { return false }; return true },
-        ])
         let roomRecoveryEngine = V2RoomRecoveryEngine(transport: transport, latestVisible: transport, store: localStore, groupEvents: groupEventSync)
         let roomCatchUpWorker = V2RoomRecoveryRunner(engine: roomRecoveryEngine, source: connection, personalSync: syncEngine)
         self.roomRecovery = roomCatchUpWorker
@@ -1190,31 +1049,6 @@ struct V2AppRealtimeRuntime {
             availabilitySource: connection,
             heartbeatSender: transport,
             heartbeatInterval: .seconds(30),
-            // Every durable command, including ordinary sends, participates
-            // in the same one-quantum scheduler. A large offline send queue
-            // must not delay withdrawal or room-authority operations by 256
-            // sequential requests.
-            commandOutbox: nil,
-            commandLifecycles: [
-                commandScheduler, outbox, socialOutbox, groupOutbox, membershipOutbox, memberMuteOutbox,
-                moderatedMemberRemovalOutbox, withdrawalOutbox, reactionOutbox,
-                editOutbox, readReceiptOutbox, conversationCapabilitiesOutbox,
-                groupCapabilitiesOutbox, forwardMessagesOutbox
-            ],
-            commandRetrySchedule: localStore.commandRetrySchedule(lanes: [
-                .messages, .withdrawals, .edits, .reactions, .readReceipts, .membership,
-                .memberMutes, .moderatedMemberRemovals, .groupCapabilities,
-                .conversationCapabilities, .social, .groupCreation, .forwardPlans
-            ]),
-            flushAdditionalDurableCommands: {
-                // This must precede lane selection: once the first-party
-                // retry contract expires, no old operation may get one final
-                // network attempt while the server is free to compact it.
-                try await localStore.expireStalePendingCommands(
-                    now: Date()
-                )
-                _ = try await commandScheduler.flush(maximumWorkItems: 256)
-            },
             afterDurableSynchronization: {
                 // Request bounded room work after priority commands; the
                 // runtime-owned worker continues without blocking startup.
@@ -1231,9 +1065,6 @@ struct V2AppRealtimeRuntime {
                 } catch {
                     // Keep the invalidation row for a later authorized retry.
                 }
-                try await localStore.pruneTerminalCommands(
-                    olderThan: Date().addingTimeInterval(-86_400)
-                )
             },
             roomSubscriptionLoop: { connectionID in
                 guard let connectionID else { throw V2TLSFrameConnectionError.notConnected }
@@ -1247,29 +1078,39 @@ struct V2AppRealtimeRuntime {
             policyRecoveryLoop: {
                 // A fresh loop owner per authenticated connection prevents an
                 // old cancelled read from owning the replacement session.
-                try await V2RolePolicyRecoveryRunner(store: localStore, transport: transport).run()
+                try await withThrowingTaskGroup(of:Void.self) {group in
+                    group.addTask {try await V2RolePolicyRecoveryRunner(store:localStore,transport:transport).run()}
+                    group.addTask {
+                        for try await policy in localStore.publicationPolicyUpdates() {
+                            try Task.checkCancellation()
+                            try await transport.setPresencePublicationMode(policy.allowsOnlinePresence ? .allowWhenAuthorized:.suppressed)
+                        }
+                    }
+                    try await group.waitForAll()
+                }
             }
         )
         runtime = .init(connection: coordinator, activity: activity)
         self.projectionChangeNotifier = projectionChangeNotifier
         self.activeHybridGroupSynchronizer = activeHybridGroupSynchronizer
-        sender = V2OutboxConversationSender(outbox: outbox)
-        messageWithdrawer = V2OutboxMessageWithdrawer(outbox: withdrawalOutbox)
-        messageReactionChanger = V2OutboxMessageReactionChanger(outbox: reactionOutbox)
-        messageEditor = V2OutboxMessageEditor(outbox: editOutbox)
-        readReceiptReporter = V2OutboxConversationReadReporter(outbox: readReceiptOutbox)
-        conversationStateChanger = V2OutboxConversationStateChanger(outbox: conversationCapabilitiesOutbox)
-        messageFavoriter = V2OutboxMessageFavoriter(outbox: conversationCapabilitiesOutbox)
-        groupMessagePinner = V2OutboxGroupMessagePinner(outbox: groupCapabilitiesOutbox)
-        messageForwarder = V2OutboxMessageForwarder(outbox: forwardMessagesOutbox)
-        groupAnnouncementManager = V2OutboxGroupAnnouncementManager(outbox: groupCapabilitiesOutbox)
-        groupMemberRoleChanger = V2OutboxGroupMemberRoleChanger(outbox: groupCapabilitiesOutbox)
-        groupRolePolicyChanger = V2OutboxGroupRolePolicyChanger(outbox: groupCapabilitiesOutbox)
+        sender = V2OperationConversationSender(service:messageSendOperations)
+        messageWithdrawer = V2OperationMessageWithdrawer(service:messageMutationOperations)
+        messageReactionChanger = V2OperationMessageReactionChanger(service: messageReactionOperations)
+        messageEditor = V2OperationMessageEditor(service:messageMutationOperations)
+        readReceiptReporter = V2OperationConversationReadReporter(service: readReceiptOperations)
+        conversationStateChanger = V2OutboxConversationStateChanger(service: personalPreferences)
+        messageFavoriter = V2OutboxMessageFavoriter(service: personalPreferences)
+        groupMessagePinner = V2OperationGroupMessagePinner(service:groupCapabilityOperations)
+        messageForwarder = V2OperationMessageForwarder(service:forwardPlanOperations)
+        groupAnnouncementManager = V2OperationGroupAnnouncementManager(service:groupCapabilityOperations)
+        groupMemberRoleChanger = V2OperationGroupMemberRoleChanger(service:groupCapabilityOperations)
+        groupRolePolicyChanger = V2OperationGroupRolePolicyChanger(service:groupCapabilityOperations)
         groupReadReceiptReader = V2RealtimeGroupReadReceiptReader(transport: transport)
-        conversationLiveActivity = V2RealtimeConversationLiveActivity(transport: transport, events: connection)
+        conversationLiveActivity = V2RealtimeConversationLiveActivity(transport: transport, events: connection,localStore:localStore)
         let resourceControl = try V2HTTPResourceUploadClient(endpoint: configuration.endpoint("v2/resource-uploads"), credentials: accountHTTP, transport: accountHTTP)
-        let resourceEngine = V2ResourceTransferEngine(store: localStore, control: resourceControl, executor: V2URLSessionResourcePlanExecutor(), directory: mediaStagingDirectory,
+        let resourceEngine = V2ResourceTransferEngine(store: localStore, control: resourceControl, executor: V2URLSessionResourcePlanExecutor(scheduler: accountRuntime.scheduler, diagnostics: accountRuntime.networkDiagnostics), directory: mediaStagingDirectory,
             capabilities: V2ResourceCapabilitiesCache(reader: resourceControl))
+        self.resourceTransfers = resourceEngine
         let resourceImports = try V2HTTPResourceImportClient(endpoint: configuration.endpoint("v2/resource-imports"), credentials: accountHTTP, transport: accountHTTP)
         let groupAvatarCommands = try V2HTTPGroupAvatarCommandClient(roomsEndpoint: configuration.endpoint("v2/rooms"),
             actorUserID: actorUserID, credentials: accountHTTP, transport: accountHTTP)
@@ -1282,7 +1123,7 @@ struct V2AppRealtimeRuntime {
             store: localStore, intents: groupAvatarIntents, reader: groupReader,
             capabilities: resourceControl, directory: mediaStagingDirectory)
         self.groupAvatarManager = groupAvatarManager
-        let durableSender = V2DurableConversationSendService(store: localStore, engine: resourceEngine, outbox: outbox,
+        let durableSender = V2DurableConversationSendService(store: localStore, engine: resourceEngine, messageOperations:messageSendOperations,
             imports: resourceImports, groupAvatars: groupAvatarIntents, groupAvatarManager: groupAvatarManager)
         attachmentUploader = V2ForegroundConversationAttachmentUploader(durable: durableSender)
         let foregroundMediaDownloader = try V2ForegroundConversationMediaDownloader(
@@ -1291,20 +1132,20 @@ struct V2AppRealtimeRuntime {
         )
         self.mediaDownloader = foregroundMediaDownloader
         self.mediaCacheMaintenance = foregroundMediaDownloader
-        directConversationOpener = V2RealtimeDirectConversationOpener(transport: transport, localStore: localStore, runtime: runtime)
-        groupConversationCreator = V2OutboxGroupConversationCreator(outbox: groupOutbox, runtime: runtime)
+        directConversationOpener = V2OperationDirectConversationOpener(service:directRoomOperations)
+        groupConversationCreator = V2OperationGroupConversationCreator(service:groupCreationOperations)
         groupMemberDirectory = V2RealtimeGroupMemberDirectory(transport: transport)
-        groupMembershipChanger = V2OutboxGroupMembershipChanger(outbox: membershipOutbox)
-        groupMemberMuter = V2OutboxGroupMemberMuter(outbox: memberMuteOutbox)
-        moderatedGroupMemberRemover = V2OutboxModeratedGroupMemberRemover(outbox: moderatedMemberRemovalOutbox)
-        strangerMessagePreferenceUpdater = V2OutboxStrangerMessagePreferenceUpdater(outbox: socialOutbox)
-        userAddPreferenceUpdater = V2OutboxUserAddPreferenceUpdater(outbox: socialOutbox)
-        readReceiptPreferenceUpdater = V2RealtimeReadReceiptPreferenceUpdater(outbox: socialOutbox)
-        let liveActivityPreferenceService = V2RealtimeLiveActivityPreferenceUpdater(transport: transport)
+        groupMembershipChanger = V2OperationGroupMembershipChanger(service:membershipOperations)
+        groupMemberMuter = V2OperationGroupMemberAdministrator(service:memberAdministrationOperations)
+        moderatedGroupMemberRemover = V2OperationGroupMemberAdministrator(service:memberAdministrationOperations)
+        strangerMessagePreferenceUpdater = V2OperationStrangerMessagePreferenceUpdater(service:accountPreferences)
+        userAddPreferenceUpdater = V2OperationUserAddPreferenceUpdater(service:accountPreferences)
+        readReceiptPreferenceUpdater = V2OperationReadReceiptPreferenceUpdater(service:accountPreferences)
+        let liveActivityPreferenceService = V2OperationLiveActivityPreferenceUpdater(service:accountPreferences)
         liveActivityPreferenceUpdater = liveActivityPreferenceService
         liveActivityPreferenceReader = liveActivityPreferenceService
-        userBlockChanger = V2OutboxUserBlockChanger(outbox: socialOutbox)
-        relationshipChanger = V2OutboxRelationshipChanger(outbox: socialOutbox)
+        userBlockChanger = V2OperationUserBlockChanger(service:socialOperations)
+        relationshipChanger = V2OperationRelationshipChanger(service:socialOperations)
     }
 
     let directConversationOpener: any V2DirectConversationOpening
@@ -1321,3 +1162,11 @@ struct V2AppRealtimeRuntime {
     let userBlockChanger: any V2UserBlockChanging
     let relationshipChanger: any V2RelationshipChanging
 }
+
+protocol V2AccountPreferenceManaging:Sendable {
+    var accountPreferenceService:V2AccountPreferenceService { get }
+}
+extension V2OperationStrangerMessagePreferenceUpdater:V2AccountPreferenceManaging { nonisolated var accountPreferenceService:V2AccountPreferenceService { service } }
+extension V2OperationUserAddPreferenceUpdater:V2AccountPreferenceManaging { nonisolated var accountPreferenceService:V2AccountPreferenceService { service } }
+extension V2OperationReadReceiptPreferenceUpdater:V2AccountPreferenceManaging { nonisolated var accountPreferenceService:V2AccountPreferenceService { service } }
+extension V2OperationLiveActivityPreferenceUpdater:V2AccountPreferenceManaging { nonisolated var accountPreferenceService:V2AccountPreferenceService { service } }

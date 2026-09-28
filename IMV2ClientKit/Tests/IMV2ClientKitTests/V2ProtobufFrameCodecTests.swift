@@ -21,7 +21,7 @@ struct V2ProtobufFrameCodecTests {
         envelope.protocolVersion = 1
         envelope.syncPull = .init()
         let frame = try V2ProtobufFrameCodec.encode(envelope, frameVersion: 1)
-        let wrongCommand = V2Frame(version: 1, command: .sendMessage, requestID: 8, payload: frame.payload)
+        let wrongCommand = V2Frame(version: 1, command: .heartbeat, requestID: 8, payload: frame.payload)
         let wrongRequest = V2Frame(version: 1, command: .syncPull, requestID: 9, payload: frame.payload)
         #expect(throws: V2ProtobufFrameCodecError.headerCommandMismatch) { _ = try V2ProtobufFrameCodec.decode(wrongCommand) }
         #expect(throws: V2ProtobufFrameCodecError.requestIDMismatch) { _ = try V2ProtobufFrameCodec.decode(wrongRequest) }
@@ -148,12 +148,10 @@ struct V2ProtobufFrameCodecTests {
         var preference = IMV2Envelope()
         preference.requestID = 17
         preference.protocolVersion = IMV2ProtocolVersion.current
-        preference.setLiveActivityPreferences = .init()
-        preference.setLiveActivityPreferences.operationID = "00000000-0000-0000-0000-000000000017"
-        preference.setLiveActivityPreferences.allowsOnlinePresence = false
-        preference.setLiveActivityPreferences.allowsTypingIndicators = true
+        preference.presencePublicationControl = .init()
+        preference.presencePublicationControl.mode = .suppressed
         let preferenceFrame = try V2ProtobufFrameCodec.encode(preference, frameVersion: UInt8(IMV2ProtocolVersion.current))
-        #expect(preferenceFrame.command == .setLiveActivityPreferences)
+        #expect(preferenceFrame.command == .presencePublicationControl)
         #expect(try V2ProtobufFrameCodec.decode(preferenceFrame) == preference)
 
         var presence = IMV2Envelope()

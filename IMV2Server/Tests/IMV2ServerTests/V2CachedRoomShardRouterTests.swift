@@ -310,7 +310,7 @@ private actor LateCachedRouterSource: V2DirectRoomShardRouting {
         return Dictionary(uniqueKeysWithValues: Set(roomIDs).map { ($0, latest) })
     }
 
-    func withDirectPairRoute<Result: Sendable>(actorUserID: UserID, targetUserID: UserID, proposedShardID: String,
+    func withDirectPairRoute<Result: Sendable>(actorUserID: UserID, targetUserID: UserID, proposedShardID: String, deadline: ContinuousClock.Instant?,
         _ operation: @escaping @Sendable (V2RoomShardRoute) async throws -> (result: Result, roomID: RoomID?)) async throws -> Result {
         let completion = try await operation(old)
         await pauseOldRead()
@@ -356,6 +356,7 @@ private actor CachedRouterSource: V2DirectRoomShardRouting {
         actorUserID _: UserID,
         targetUserID _: UserID,
         proposedShardID _: String,
+        deadline _: ContinuousClock.Instant?,
         _ operation: @escaping @Sendable (V2RoomShardRoute) async throws -> (
             result: Result, roomID: RoomID?
         )

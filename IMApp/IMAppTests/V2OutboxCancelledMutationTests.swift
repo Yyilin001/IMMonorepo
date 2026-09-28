@@ -11,14 +11,17 @@ struct V2OutboxCancelledMutationTests {
         let directory = FileManager.default.temporaryDirectory.appending(path: "im-app-cancelled-mutation-\(UUID())")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
+        let account=UserID(uuid:UUID())
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()),userID:account)
         do {
             let room = RoomID(uuid: UUID())
             let message = MessageID(uuid: UUID())
-            let transport = UnexpectedMutationTransport()
-            let editor = V2OutboxMessageEditor(outbox: .init(store: store, transport: transport))
-            let withdrawer = V2OutboxMessageWithdrawer(outbox: .init(store: store, transport: transport))
-            let reactor = V2OutboxMessageReactionChanger(outbox: .init(store: store, transport: transport))
+            let remote=V2AppMessageWorkClient(rejectOld:false)
+            let service=V2MessageMutationOperationService(accountID:account,store:store,client:remote)
+            let editor=V2OperationMessageEditor(service:service)
+            let withdrawer=V2OperationMessageWithdrawer(service:service)
+            let reactionRemote=V2AppReactionClient(account:account)
+            let reactor=V2OperationMessageReactionChanger(service:.init(accountID:account,store:store,client:reactionRemote))
             let task = Task {
                 withUnsafeCurrentTask { $0?.cancel() }
                 switch kind {
@@ -28,28 +31,14 @@ struct V2OutboxCancelledMutationTests {
                 }
             }
             await #expect(throws: CancellationError.self) { try await task.value }
-            #expect(try await store.pendingMessageEdits().isEmpty)
-            #expect(try await store.pendingMessageWithdrawals().isEmpty)
-            #expect(try await store.pendingMessageReactions().isEmpty)
+            #expect(try await store.dueOperationWork(now:.distantFuture,kinds:[.editMessage,.withdrawMessage]).isEmpty)
+            #expect(await remote.calls==0)
+            #expect(try await store.nextReactionDraft(now:.distantFuture)==nil)
+            #expect(await reactionRemote.calls==0)
             try await store.close()
         } catch {
             try? await store.close()
             throw error
         }
-    }
-}
-
-private struct UnexpectedMutationTransport: V2ClientMessageEditTransport, V2ClientMessageWithdrawalTransport, V2ClientMessageReactionTransport {
-    func editMessage(roomID: RoomID, operationID: MessageEditOperationID, messageID: MessageID, expectedMessageRevision: UInt64, text: String) async throws -> V2ClientMessageEdit {
-        Issue.record("cancelled edit must not reach transport")
-        throw CancellationError()
-    }
-    func withdrawMessage(roomID: RoomID, operationID: MessageWithdrawalOperationID, messageID: MessageID, expectedMessageRevision: UInt64) async throws -> V2ClientMessageWithdrawal {
-        Issue.record("cancelled withdrawal must not reach transport")
-        throw CancellationError()
-    }
-    func changeMessageReaction(roomID: RoomID, operationID: MessageReactionOperationID, messageID: MessageID, reaction: String, action: V2MessageReactionAction) async throws -> V2ClientMessageReactionChange {
-        Issue.record("cancelled reaction must not reach transport")
-        throw CancellationError()
     }
 }

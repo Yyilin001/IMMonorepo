@@ -28,11 +28,11 @@ public struct V2SendIntent: Equatable, Sendable {
 }
 
 public enum V2ResourceJournalError: Error, Equatable, Sendable {
-    case conflict, invalidRecord, dependencyNotReady, bindingExpired, alreadyHandedOff
+    case conflict, invalidRecord, dependencyNotReady, bindingExpired, alreadyHandedOff, capacityExceeded
 }
 
 public struct V2SubmittedSendIntent: Identifiable, Equatable, Sendable {
-    public enum Status: Equatable, Sendable { case pending, confirmingOutcome, closed, rejected }
+    public enum Status: Equatable, Sendable { case pending, acceptedAwaitingProjection, confirmingOutcome, needsAttention, expiredUnsubmitted, closed, rejected }
     public let id: UUID
     public let text: String
     public let status: Status

@@ -94,12 +94,13 @@ struct IMAppLocalAccountIntegrationTests {
             let senderDatabaseURL = databaseDirectory.appendingPathComponent("sender.sqlite")
             let databaseURL = databaseDirectory.appendingPathComponent("receiver.sqlite")
             defer { try? FileManager.default.removeItem(at: databaseDirectory) }
+            let senderBinding = LocalE2EInstallationBindingStore()
             let senderStore = try await V2LocalStoreBootstrapper(
-                bindingStore: LocalE2EInstallationBindingStore()
-            ).open(databaseURL: senderDatabaseURL)
+                bindingStore: senderBinding
+            ).open(databaseURL: senderDatabaseURL, userID: sender.userID)
             let receiverStore = try await V2LocalStoreBootstrapper(
                 bindingStore: LocalE2EInstallationBindingStore()
-            ).open(databaseURL: databaseURL)
+            ).open(databaseURL: databaseURL, userID: receiver.userID)
             let receiverSync = V2SyncEngine(
                 transport: receiverTransport,
                 store: receiverStore,
@@ -108,49 +109,33 @@ struct IMAppLocalAccountIntegrationTests {
             try await synchronizeInitialState(receiverSync)
             await receiverConnection.disconnect()
 
-            let directRoom = try await senderTransport.openDirectRoom(
-                operationID: try DirectRoomOperationID(UUID().uuidString.lowercased()),
-                targetUserID: receiver.userID
-            )
+            let directRoom = try await localOpenDirectRoom(account:sender,target:receiver.userID)
             let expectedText = "dual-client-local-\(UUID().uuidString.lowercased())"
             await senderConnection.disconnect()
-            let offlineSenderOutbox = V2CommandOutboxEngine(store: senderStore, transport: senderTransport)
-            let command = try await offlineSenderOutbox.enqueueMessage(
-                roomID: directRoom.roomID,
-                text: expectedText,
-                media: [],
-                mentions: []
-            )
-            let firstFlush = try await offlineSenderOutbox.flushOnce()
-            #expect((firstFlush) == (.retryScheduled(command.clientMessageID)), "断线时消息必须保存在 sender SQLite outbox 中，而不能丢弃。")
-            let scheduledCommands = try await senderStore.pendingMessageCommands()
-            let scheduledCommand = try #require(scheduledCommands.first(where: { $0.clientMessageID == command.clientMessageID }))
-            #expect((scheduledCommand.state) == (.pending))
-            #expect((scheduledCommand.attemptCount) == (1))
-
-            let reconnectedSenderSession = try await reconnectingSenderConnection.connectAndAuthenticate(
-                accessToken: sender.accessToken,
-                deviceID: sender.deviceID,
-                supportedCapabilityProfiles: ["base"]
-            )
-            #expect((reconnectedSenderSession.userID) == (sender.userID))
-            let reconnectedSenderOutbox = V2CommandOutboxEngine(
-                store: senderStore,
-                transport: V2ProtobufSyncTransport(
-                    wire: reconnectingSenderConnection,
-                    protocolVersion: reconnectedSenderSession.protocolVersion
-                )
-            )
-            let acceptedClientMessageID = try await awaitSenderOutboxReplay(
-                reconnectedSenderOutbox,
-                expectedClientMessageID: command.clientMessageID
-            )
-            #expect((acceptedClientMessageID) == (command.clientMessageID))
-            let acceptedCommands = try await senderStore.pendingMessageCommands()
-            let acceptedCommand = try #require(acceptedCommands.first(where: { $0.clientMessageID == command.clientMessageID }))
-            let acceptedMessageID = try #require(acceptedCommand.acceptedMessageID)
-            #expect((acceptedCommand.state) == (.accepted))
-            #expect(acceptedCommand.acceptedRoomSequence != nil)
+            let client = LocalE2EMessageClient(account: sender, online: false)
+            let service = V2MessageSendOperationService(accountID: sender.userID, store: senderStore, client: client)
+            _ = try await service.enqueueMessage(roomID: directRoom.roomID, text: expectedText)
+            let work = try #require(try await senderStore.dueOperationWork(now: Date(), kinds: [.sendMessage]).first)
+            guard case .sendMessage(let clientMessageID) = work.identity.operation,
+                  case .claimed(let claim) = try await senderStore.claimOperationWork(id: work.id, ownerID: UUID(), action: .submit, now: Date()) else {
+                throw LocalE2EContractError.missingValue
+            }
+            try await service.execute(claim)
+            let scheduled = try #require(try await senderStore.operationWork(id: work.id))
+            #expect(scheduled.execution == .awaitingConfirmation)
+            #expect(scheduled.attemptCount == 1)
+            try await senderStore.close()
+            let restoredSenderStore = try await V2LocalStoreBootstrapper(
+                bindingStore: senderBinding
+            ).open(databaseURL: senderDatabaseURL, userID: sender.userID)
+            await client.setOnline()
+            let receipt = try await awaitSenderReplay(store: restoredSenderStore, account: sender, client: client, workID: work.id)
+            #expect(receipt.identity.operation == .sendMessage(clientMessageID))
+            guard case .accepted(let acceptance) = receipt.outcome else { throw LocalE2EContractError.missingValue }
+            let acceptedMessageID = acceptance.messageID
+            #expect(acceptance.roomSequence > 0)
+            #expect(try await restoredSenderStore.operationWork(id: work.id)?.execution == .committed)
+            try await restoredSenderStore.close()
 
             let reconnectedReceiverSession = try await reconnectingReceiverConnection.connectAndAuthenticate(
                 accessToken: receiver.accessToken,
@@ -223,24 +208,15 @@ struct IMAppLocalAccountIntegrationTests {
                 wire: receiverConnection,
                 protocolVersion: receiverSession.protocolVersion
             )
-            _ = try await receiverTransport.setStrangerMessagePermission(
-                operationID: try StrangerMessagePreferenceOperationID(UUID().uuidString.lowercased()),
-                permission: .deny
-            )
-            let directRoom = try await senderTransport.openDirectRoom(
-                operationID: try DirectRoomOperationID(UUID().uuidString.lowercased()),
-                targetUserID: receiver.userID
-            )
+            try await localSetAccountPreference(account:receiver,value:.strangerMessage(.deny))
+            let directRoom = try await localOpenDirectRoom(account:sender,target:receiver.userID)
             await expectStrangerMessageIsForbidden(
-                senderTransport: senderTransport,
+                senderAccount: sender,
                 roomID: directRoom.roomID
             )
 
-            _ = try await receiverTransport.setStrangerMessagePermission(
-                operationID: try StrangerMessagePreferenceOperationID(UUID().uuidString.lowercased()),
-                permission: .allow
-            )
-            let accepted = try await senderTransport.sendMessage(
+            try await localSetAccountPreference(account:receiver,value:.strangerMessage(.allow))
+            let accepted = try await localAcceptedMessage(account: sender,
                 roomID: directRoom.roomID,
                 clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
                 text: "allowed-after-explicit-restore",
@@ -275,23 +251,12 @@ struct IMAppLocalAccountIntegrationTests {
 
             let requesterTransport = V2ProtobufSyncTransport(wire: requesterConnection, protocolVersion: requesterSession.protocolVersion)
             let recipientTransport = V2ProtobufSyncTransport(wire: recipientConnection, protocolVersion: recipientSession.protocolVersion)
-            let requested = try await requesterTransport.changeRelationship(
-                operationID: try RelationshipOperationID(UUID().uuidString.lowercased()),
-                targetUserID: recipient.userID,
-                action: .request
-            )
-            #expect((requested.resultingState) == (.pending))
-            let accepted = try await recipientTransport.changeRelationship(
-                operationID: try RelationshipOperationID(UUID().uuidString.lowercased()),
-                targetUserID: requester.userID,
-                action: .accept
-            )
-            #expect((accepted.resultingState) == (.accepted))
-            let directRoom = try await requesterTransport.openDirectRoom(
-                operationID: try DirectRoomOperationID(UUID().uuidString.lowercased()),
-                targetUserID: recipient.userID
-            )
-            let message = try await requesterTransport.sendMessage(
+            let requested = try await localChangeRelationship(account:requester,target:recipient.userID,action:.request)
+            #expect((requested) == (.pending))
+            let accepted = try await localChangeRelationship(account:recipient,target:requester.userID,action:.accept)
+            #expect((accepted) == (.accepted))
+            let directRoom = try await localOpenDirectRoom(account:requester,target:recipient.userID)
+            let message = try await localAcceptedMessage(account: requester,
                 roomID: directRoom.roomID,
                 clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
                 text: "accepted-relationship-message",
@@ -339,12 +304,9 @@ struct IMAppLocalAccountIntegrationTests {
                 wire: senderConnection,
                 protocolVersion: senderSession.protocolVersion
             )
-            let directRoom = try await senderTransport.openDirectRoom(
-                operationID: try DirectRoomOperationID(UUID().uuidString.lowercased()),
-                targetUserID: receiver.userID
-            )
+            let directRoom = try await localOpenDirectRoom(account:sender,target:receiver.userID)
             for messageIndex in 1 ... 3 {
-                let accepted = try await senderTransport.sendMessage(
+                let accepted = try await localAcceptedMessage(account: sender,
                     roomID: directRoom.roomID,
                     clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
                     text: "stranger-window-message-\(messageIndex)",
@@ -354,7 +316,7 @@ struct IMAppLocalAccountIntegrationTests {
                 #expect((accepted.roomID) == (directRoom.roomID))
             }
             await expectStrangerMessageIsRateLimited(
-                senderTransport: senderTransport,
+                senderAccount: sender,
                 roomID: directRoom.roomID
             )
         } catch {
@@ -413,16 +375,24 @@ struct IMAppLocalAccountIntegrationTests {
                 wire: addedMemberConnection,
                 protocolVersion: addedMemberSession.protocolVersion
             )
-            let groupOperationID = try GroupRoomOperationID(UUID().uuidString.lowercased())
-            _ = try await ownerTransport.beginGroupRoomCreation(
-                operationID: groupOperationID,
-                title: "  Local gateway group  "
-            )
-            _ = try await ownerTransport.appendGroupRoomCreationMembers(
-                operationID: groupOperationID,
-                memberUserIDs: [initialMember.userID]
-            )
-            let group = try await ownerTransport.finalizeGroupRoomCreation(operationID: groupOperationID)
+            let groupOperationID = GroupRoomOperationID(uuid: UUID())
+            let creation = try V2HTTPGroupCreationOperationClient(baseURL: #require(URL(string: "https://localhost:8443")),
+                credentials: LocalE2EMessageCredentials(account: owner), transport: LocalE2EMessageHTTP())
+            let members = try V2GroupCreationAudience.canonical([initialMember.userID], actorUserID: owner.userID)
+            let creationIntent = try V2GroupCreationIntent(identity: .init(accountID: owner.userID, scope: .account(owner.userID), operation: .groupRoom(groupOperationID)),
+                title: "  Local gateway group  ", capacityClass: .standard, initialMemberCount: members.count,
+                audienceDigest: V2GroupCreationAudience.digest(members), firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1_000) + 600_000)
+            _ = try await creation.begin(creationIntent)
+            _ = try await creation.append(.init(intent: creationIntent, offset: 0, memberUserIDs: members))
+            var creationResult = try await creation.finalize(creationIntent)
+            for _ in 0..<100 {
+                if case .receipt = creationResult { break }
+                try await Task.sleep(for: .milliseconds(100))
+                creationResult = try await creation.recover(creationIntent, action: .query)
+            }
+            guard case .receipt(let creationProof) = creationResult,
+                  creationProof.validates(intent: creationIntent), case .created(let roomID, let title, _, let count) = creationProof.outcome else { Issue.record("Expected original creation proof"); return }
+            let group = (roomID: roomID, title: title, memberCount: count)
             #expect((group.title) == ("Local gateway group"))
             #expect((group.memberCount) == (2))
 
@@ -444,16 +414,12 @@ struct IMAppLocalAccountIntegrationTests {
             #expect((initialMemberPage.membershipRevision) == (ownerPage.membershipRevision))
             #expect((Set(initialMemberPage.members.map(\.userID))) == (Set([owner.userID, initialMember.userID])))
 
-            let added = try await ownerTransport.changeMembership(
-                roomID: group.roomID,
-                operationID: try MembershipOperationID(UUID().uuidString.lowercased()),
-                targetUserID: addedMember.userID,
-                action: .add,
-                expectedMembershipRevision: ownerPage.membershipRevision
-            )
-            #expect((added.action) == (.add))
-            #expect((added.targetUserID) == (addedMember.userID))
-            #expect((added.membershipRevision) > (ownerPage.membershipRevision))
+            let membershipClient=try V2HTTPMembershipOperationClient(baseURL:#require(URL(string:"https://localhost:8443")),credentials:LocalE2EMessageCredentials(account:owner),transport:LocalE2EMessageHTTP())
+            let intent=try V2MembershipIntent(roomID:group.roomID,actorUserID:owner.userID,operationID:.init(uuid:UUID()),targetUserID:addedMember.userID,action:.add,expectedMembershipRevision:ownerPage.membershipRevision,confirmedUntilMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+120_000)
+            guard case .admitted(let admission)=try await membershipClient.admit(intent) else { throw LocalE2EMembershipFailure.noAdmission }
+            let frozen=try V2MembershipOperationCommand(intent:intent,admission:admission)
+            guard case .receipt(let proof)=try await membershipClient.submit(frozen),proof.validates(command:frozen),case .changed(let added)=proof.outcome else { throw LocalE2EMembershipFailure.noReceipt }
+            #expect(added.membershipRevision > ownerPage.membershipRevision)
 
             let addedMemberPage = try await addedMemberTransport.listRoomMembers(
                 roomID: group.roomID,
@@ -463,7 +429,7 @@ struct IMAppLocalAccountIntegrationTests {
             #expect((addedMemberPage.actorRole) == (.member))
             #expect((addedMemberPage.membershipRevision) == (added.membershipRevision))
             #expect((Set(addedMemberPage.members.map(\.userID))) == (Set([owner.userID, initialMember.userID, addedMember.userID])))
-            let acceptance = try await addedMemberTransport.sendMessage(
+            let acceptance = try await localAcceptedMessage(account: addedMember,
                 roomID: group.roomID,
                 clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
                 text: "accepted-after-membership-change",
@@ -586,82 +552,96 @@ private func awaitReceiverProjection(
     throw LocalE2EDeliveryError.receiverProjectionTimedOut(visibleMessageCount: visibleMessages.count)
 }
 
-private func awaitSenderOutboxReplay(
-    _ outbox: V2CommandOutboxEngine,
-    expectedClientMessageID: ClientMessageID
-) async throws -> ClientMessageID {
-    for _ in 0 ..< 50 {
-        switch try await outbox.flushOnce() {
-        case .accepted(let clientMessageID):
-            guard clientMessageID == expectedClientMessageID else {
-                throw LocalE2EDeliveryError.unexpectedOutboxCommand(clientMessageID)
+private struct LocalE2EMessageCredentials: V2ClientMediaEdgeCredentialProvider {
+    let account: LocalE2EAccountCredentials
+    func mediaEdgeCredentials() async throws -> V2ClientMediaEdgeCredentials {
+        .init(accessToken: account.accessToken, deviceID: account.deviceID)
+    }
+}
+private struct LocalE2EMessageHTTP: V2ClientMediaEdgeHTTPTransport {
+    let executor = V2HTTPExecutor()
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        try await executor.execute(request)
+    }
+}
+private actor LocalE2EMessageClient: V2MessageSendOperationClient {
+    let account: LocalE2EAccountCredentials
+    var online: Bool
+    private(set) var receipt: V2MessageSendOperationReceipt?
+    init(account: LocalE2EAccountCredentials, online: Bool = true) { self.account = account; self.online = online }
+    func setOnline() { online = true }
+    private func remote() throws -> V2HTTPMessageSendOperationClient {
+        guard online else { throw URLError(.notConnectedToInternet) }
+        return try .init(baseURL: #require(URL(string: "https://localhost:8443")),
+            credentials: LocalE2EMessageCredentials(account: account), transport: LocalE2EMessageHTTP())
+    }
+    func submit(_ command: V2MessageSendOperationCommand) async throws -> V2MessageSendOperationRecoveryResult {
+        let result = try await remote().submit(command)
+        if case .receipt(let value) = result { receipt = value }
+        return result
+    }
+    func recover(_ request: V2MessageSendOperationRecoveryRequest) async throws -> V2MessageSendOperationRecoveryResult {
+        let result = try await remote().recover(request)
+        if case .receipt(let value) = result { receipt = value }
+        return result
+    }
+}
+
+private func awaitSenderReplay(store: GRDBV2LocalSyncStore, account: LocalE2EAccountCredentials,
+    client: LocalE2EMessageClient, workID: UUID) async throws -> V2MessageSendOperationReceipt {
+    let service = V2MessageSendOperationService(accountID: account.userID, store: store, client: client)
+    let dispatcher = V2OperationWorkDispatcher(store: store, handlers: [.init(kind: .sendMessage) { try await service.execute($0) }])
+    let worker = Task { try await dispatcher.run() }
+    do {
+        for _ in 0..<300 {
+            if try await store.operationWork(id: workID)?.execution == .committed,
+               let receipt = await client.receipt {
+                await dispatcher.stopAndDrain(); worker.cancel(); _ = await worker.result
+                return receipt
             }
-            return clientMessageID
-        case .idle, .retryScheduled:
             try await Task.sleep(for: .milliseconds(100))
-        case .rejected(_, let code):
-            throw LocalE2EDeliveryError.senderOutboxRejected(code)
         }
-    }
-    throw LocalE2EDeliveryError.senderOutboxReplayTimedOut
-}
-
-private func expectStrangerMessageIsForbidden(
-    senderTransport: V2ProtobufSyncTransport,
-    roomID: RoomID
-) async {
-    await expectDirectMessageIsRestricted(senderTransport: senderTransport, roomID: roomID, text: "must-not-deliver")
-}
-
-private func expectDirectMessageIsRestricted(
-    senderTransport: V2ProtobufSyncTransport,
-    roomID: RoomID,
-    text: String
-) async {
-    do {
-        _ = try await senderTransport.sendMessage(
-            roomID: roomID,
-            clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
-            text: text,
-            media: [],
-            mentions: []
-        )
-        Issue.record("接收方拒绝 direct 消息后，发送端不应获得消息接受结果。")
-    } catch let error as V2RealtimeTransportError {
-        guard case .server(let code, let retryable, _, _) = error else {
-            Issue.record("direct 消息拒收必须返回服务端授权结果，实际错误：\(error)。")
-            return
-        }
-        #expect(code == "DIRECT_MESSAGE_RESTRICTED")
-        #expect(!retryable)
+        throw LocalE2EDeliveryError.senderOutboxReplayTimedOut
     } catch {
-        Issue.record("direct 消息拒收应映射为不透明授权错误，实际错误：\(error)。")
+        await dispatcher.stopAndDrain(); worker.cancel(); _ = await worker.result
+        throw error
     }
 }
 
-private func expectStrangerMessageIsRateLimited(
-    senderTransport: V2ProtobufSyncTransport,
-    roomID: RoomID
-) async {
+private func localMessageResult(account: LocalE2EAccountCredentials, roomID: RoomID,
+    clientMessageID: ClientMessageID, text: String, media: [V2MediaReference] = [], mentions: [V2MentionTarget] = []) async throws -> V2MessageSendOperationRecoveryResult {
+    let command = try V2MessageSendOperationCommand(command: .init(roomID: roomID, senderUserID: account.userID,
+        clientMessageID: clientMessageID, text: text, media: media, mentions: mentions, limits: .init(maxUTF8Bytes: 65_536)),
+        firstSubmissionDeadlineMilliseconds: UInt64(Date().addingTimeInterval(86_400).timeIntervalSince1970 * 1_000))
+    return try await LocalE2EMessageClient(account: account).submit(command)
+}
+private struct LocalE2EAcceptedMessage {
+    let roomID: RoomID
+    let messageID: MessageID
+}
+private func localAcceptedMessage(account: LocalE2EAccountCredentials, roomID: RoomID,
+    clientMessageID: ClientMessageID, text: String, media: [V2MediaReference], mentions: [V2MentionTarget]) async throws -> LocalE2EAcceptedMessage {
+    guard case .receipt(let receipt) = try await localMessageResult(account: account, roomID: roomID,
+        clientMessageID: clientMessageID, text: text, media: media, mentions: mentions),
+        case .accepted(let acceptance) = receipt.outcome else { throw LocalE2EContractError.missingValue }
+    return .init(roomID: roomID, messageID: acceptance.messageID)
+}
+private func expectStrangerMessageIsForbidden(senderAccount: LocalE2EAccountCredentials, roomID: RoomID) async {
     do {
-        _ = try await senderTransport.sendMessage(
-            roomID: roomID,
-            clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
-            text: "must-hit-stranger-window-limit",
-            media: [],
-            mentions: []
-        )
-        Issue.record("本机陌生人消息窗口的第 4 条消息不应被接受。")
-    } catch let error as V2RealtimeTransportError {
-        guard case .server(let code, let retryable, _, _) = error else {
-            Issue.record("陌生人限额必须返回服务端限流结果，实际错误：\(error)。")
-            return
-        }
-        #expect(code == "RATE_LIMITED")
-        #expect(retryable)
-    } catch {
-        Issue.record("陌生人限额应映射为服务端限流错误，实际错误：\(error)。")
-    }
+        let result = try await localMessageResult(account: senderAccount, roomID: roomID,
+            clientMessageID: .init(uuid: UUID()), text: "must-not-deliver")
+        guard case .receipt(let receipt) = result else { Issue.record("Expected authoritative policy rejection"); return }
+        #expect(receipt.outcome == .rejected(.directPolicyDenied))
+    } catch { Issue.record("Expected policy receipt, received error: \(error)") }
+}
+private func expectStrangerMessageIsRateLimited(senderAccount: LocalE2EAccountCredentials, roomID: RoomID) async {
+    do {
+        let result = try await localMessageResult(account: senderAccount, roomID: roomID,
+            clientMessageID: .init(uuid: UUID()), text: "must-hit-stranger-window-limit")
+        guard case .deferred(let hint) = result else { Issue.record("Expected authoritative rate limit hint"); return }
+        #expect(hint.reason == .rateLimited)
+        #expect(try #require(hint.retryAfterMilliseconds) > 0)
+    } catch { Issue.record("Expected unresolved retryable operation, received error: \(error)") }
 }
 
 private enum LocalE2EDeliveryError: Error, LocalizedError {
@@ -705,4 +685,29 @@ private func localJSONRequest(endpoint: URL, body: [String: String], cancellatio
         guard decoded == cancellation else { throw LocalE2EContractError.mismatchedCancellation }
     }
     return result
+}
+
+private enum LocalE2EMembershipFailure:Error { case noAdmission,noReceipt }
+
+private func localSetAccountPreference(account:LocalE2EAccountCredentials,value:V2AccountPreferenceValue) async throws {
+    let client=try V2HTTPAccountPreferenceOperationClient(baseURL:#require(URL(string:"https://localhost:8443")),credentials:LocalE2EMessageCredentials(account:account),transport:LocalE2EMessageHTTP())
+    let snapshot=try await client.baseline(kind:value.kind)
+    let reference:V2OperationReference
+    switch value { case .strangerMessage:reference = .strangerMessagePreference(.init(uuid:UUID()));case .userAdd:reference = .userAddPreference(.init(uuid:UUID()));case .readReceipt:reference = .readReceiptPreference(.init(uuid:UUID()));case .liveActivity:reference = .liveActivityPreference(.init(uuid:UUID())) }
+    let command=try V2AccountPreferenceCommand(identity:.init(accountID:account.userID,scope:.account(account.userID),operation:reference),value:value,expectedRevision:snapshot.revision,firstSubmissionDeadlineMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+120000)
+    guard case .receipt(let proof)=try await client.submit(command),proof.validates(command:command),case .applied=proof.outcome else { throw LocalE2EMembershipFailure.noReceipt }
+}
+private func localChangeRelationship(account:LocalE2EAccountCredentials,target:UserID,action:V2RelationshipAction) async throws -> V2RelationshipState {
+    let client=try V2HTTPSocialOperationClient(baseURL:#require(URL(string:"https://localhost:8443")),credentials:LocalE2EMessageCredentials(account:account),transport:LocalE2EMessageHTTP())
+    let snapshot=try await client.baseline(targetUserID:target)
+    let command=try V2SocialOperationCommand(identity:.init(accountID:account.userID,scope:.userPair(account.userID,target),operation:.relationship(.init(uuid:UUID()))),action:.relationship(action),expectedRevision:snapshot.relationshipRevision,firstSubmissionDeadlineMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+600000)
+    guard case .receipt(let proof)=try await client.submit(command),proof.validates(command:command),case .applied(.relationship(let state,_))=proof.outcome else { throw LocalE2EMembershipFailure.noReceipt };return state
+}
+
+private struct LocalE2EOpenedRoom {let roomID:RoomID}
+private func localOpenDirectRoom(account:LocalE2EAccountCredentials,target:UserID) async throws -> LocalE2EOpenedRoom {
+    let client=try V2HTTPDirectRoomOperationClient(baseURL:#require(URL(string:"https://localhost:8443")),credentials:LocalE2EMessageCredentials(account:account),transport:LocalE2EMessageHTTP())
+    let command=try V2DirectRoomOperationCommand(actorUserID:account.userID,operationID:.init(uuid:UUID()),targetUserID:target,firstSubmissionDeadlineMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+600000)
+    guard case .receipt(let receipt)=try await client.submit(command),receipt.validates(command:command),case .opened(let room,_)=receipt.outcome else {throw LocalE2EMembershipFailure.noReceipt}
+    return .init(roomID:room)
 }

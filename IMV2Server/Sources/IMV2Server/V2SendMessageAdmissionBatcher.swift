@@ -10,6 +10,11 @@ import Synchronization
 /// 持久房间日志的可见性与请求成功从不依赖该观察者。
 public protocol V2CommittedMessageBatchObserving: Sendable {
     func observeCommittedMessages(_ outcomes: [V2SendMessageOutcome])
+    func observeCommittedRoomSequence(roomID: RoomID, roomSequence: UInt64)
+}
+
+public extension V2CommittedMessageBatchObserving {
+    func observeCommittedRoomSequence(roomID: RoomID, roomSequence: UInt64) {}
 }
 
 /// 由按房间建键的准入通道共享的单一内存上限。

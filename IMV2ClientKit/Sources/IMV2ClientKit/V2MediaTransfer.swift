@@ -39,10 +39,12 @@ public protocol V2ClientMediaDownloadTargetResolver: Sendable {
 public struct V2ClientMediaEdgeCredentials: Sendable {
     public let accessToken: String
     public let deviceID: DeviceID
+    /// Local monotonic request budget; never encoded or persisted with credentials.
+    public let requestDeadline: ContinuousClock.Instant?
 
-    public init(accessToken: String, deviceID: DeviceID) {
+    public init(accessToken: String, deviceID: DeviceID, requestDeadline: ContinuousClock.Instant? = nil) {
         self.accessToken = accessToken
-        self.deviceID = deviceID
+        self.deviceID = deviceID; self.requestDeadline = requestDeadline
     }
 }
 
@@ -57,18 +59,13 @@ public protocol V2ClientMediaEdgeHTTPTransport: Sendable {
 }
 
 public actor V2URLSessionMediaEdgeHTTPTransport: V2ClientMediaEdgeHTTPTransport {
-    private let session: URLSession
-
-    public init(session: URLSession = V2SecureURLSession.account) {
-        self.session = session
-    }
-
+    private let executor: V2HTTPExecutor
+    public init(session: URLSession = V2SecureURLSession.account) { executor = .init(session: session) }
+    public init(executor: V2HTTPExecutor) { self.executor = executor }
     public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        try Task.checkCancellation()
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw V2ClientMediaTransferError.invalidResponse }
-        return (data, http)
+        try await executor.execute(request, budget: .init(timeout: 15, maximumResponseBytes: 524_288), service: "mediaAuthorization")
     }
+
 }
 
 /// 面向与框架无关的 `GET /v2/media/{mediaID}` 边缘契约的 HTTPS 适配器。
@@ -100,7 +97,7 @@ public struct V2HTTPMediaDownloadTargetResolver: V2ClientMediaDownloadTargetReso
             edgeCredentials = try await credentials.mediaEdgeCredentials()
         } catch is CancellationError {
             throw CancellationError()
-        } catch {
+        } catch let failure as V2HTTPFailure { throw failure } catch let auth as V2AuthSessionError { throw auth } catch {
             throw V2ClientMediaTransferError.authorizationUnavailable
         }
         guard !edgeCredentials.accessToken.isEmpty,
@@ -124,6 +121,7 @@ public struct V2HTTPMediaDownloadTargetResolver: V2ClientMediaDownloadTargetReso
         request.httpMethod = "GET"
         request.setValue("Bearer \(edgeCredentials.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue(edgeCredentials.deviceID.rawValue, forHTTPHeaderField: "X-IM-Device-ID")
+        V2HTTPRequestDeadline.attach(edgeCredentials.requestDeadline, to: &request)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
 
@@ -135,13 +133,17 @@ public struct V2HTTPMediaDownloadTargetResolver: V2ClientMediaDownloadTargetReso
             throw CancellationError()
         } catch let error as V2ClientMediaTransferError {
             throw error
-        } catch {
+        } catch let failure as V2HTTPFailure { throw failure }
+        catch let auth as V2AuthSessionError { throw auth }
+        catch {
             throw V2ClientMediaTransferError.networkFailure
         }
         switch response.statusCode {
         case 200 where V2HTTPContract.isJSON(response): break
         case 200: throw V2ClientMediaTransferError.invalidMediaEdgeResponse
-        case 401, 403: throw V2ClientMediaTransferError.authorizationDenied
+        case 401: throw V2ClientMediaTransferError.authorizationUnavailable
+        case 403: throw V2ClientMediaTransferError.authorizationDenied
+        case 429, 503: throw V2HTTPFailure.status(response, service: "mediaAuthorization")
         default: throw V2ClientMediaTransferError.serverStatus(response.statusCode)
         }
         let envelope: V2MediaDownloadTargetEnvelope
@@ -170,74 +172,80 @@ public protocol V2ClientMediaByteTransfer: Sendable {
 
 /// 基于 URLSession 的前台媒体字节传输实现。
 ///
-/// 目前刻意不选用后台传输：系统管理的签名请求持久化例外、锁屏文件保护与重新启动回调契约尚未开放。
+/// 下载计划只授权前台读取；资源上传的后台授权由独立上传协调器处理。
 /// 该前台适配器通过 URLSession 的异步 API 继承调用方的取消，
 /// 且绝不会把已签名目标写入磁盘。
 public actor V2URLSessionMediaByteTransfer: V2ClientMediaByteTransfer {
-    private let session: URLSession
+    private let transport: any V2RangeDownloadTransport
     private let fileManager: FileManager
-
-    public init(session: URLSession = V2SecureURLSession.mediaProvider, fileManager: FileManager = .default) {
-        self.session = session
-        self.fileManager = fileManager
+    private var active: Set<URL> = []
+    private let chunkBytes: Int64
+    public init(session: URLSession = V2SecureURLSession.mediaProvider, fileManager: FileManager = .default,
+                scheduler: V2AccountWorkScheduler? = nil, diagnostics: V2NetworkDiagnostics? = nil) {
+        transport = V2URLSessionRangeDownloadTransport(session: session,scheduler: scheduler,diagnostics: diagnostics)
+        self.fileManager = fileManager; chunkBytes = 1024 * 1024
     }
-
+    public init(transport: any V2RangeDownloadTransport, chunkBytes: Int64 = 1024 * 1024, fileManager: FileManager = .default) {
+        precondition(chunkBytes > 0 && chunkBytes <= 8 * 1024 * 1024)
+        self.transport = transport; self.chunkBytes = chunkBytes; self.fileManager = fileManager
+    }
     public func download(target: V2ClientMediaTransferTarget, destinationURL: URL) async throws {
         try Task.checkCancellation()
         guard target.expiresAt > Date() else { throw V2ClientMediaTransferError.targetExpired }
-        guard !fileManager.fileExists(atPath: destinationURL.path) else {
-            throw V2ClientMediaTransferError.destinationAlreadyExists
-        }
+        guard target.expectedByteCount >= 0,target.expectedByteCount <= 512 * 1024 * 1024 else { throw V2ClientMediaTransferError.invalidTarget }
+        let destination = destinationURL.standardizedFileURL
+        guard destination.isFileURL,!active.contains(destination) else { throw V2ClientMediaTransferError.uploadStateConflict }
+        guard !fileManager.fileExists(atPath: destination.path) else { throw V2ClientMediaTransferError.destinationAlreadyExists }
+        active.insert(destination); defer { active.remove(destination) }
+        let file = try V2RangeDownloadFile(destination: destination,target: target)
+        var rebuild: (V2RangeDownloadResponse, Int64)?
         do {
-            let (temporaryURL, response) = try await session.download(for: request(for: target, method: "GET"))
-            defer { try? fileManager.removeItem(at: temporaryURL) }
-            try validate(response: response)
-            let byteCount = try fileByteCount(at: temporaryURL)
-            guard byteCount == target.expectedByteCount else { throw V2ClientMediaTransferError.byteCountMismatch }
-            guard try V2ResourceFileDigest.sha256(fileURL: temporaryURL, expectedByteCount: byteCount) == target.checksum.value
-            else { throw V2ClientMediaTransferError.checksumMismatch }
-            try Task.checkCancellation()
-            try fileManager.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            guard !fileManager.fileExists(atPath: destinationURL.path) else {
-                throw V2ClientMediaTransferError.destinationAlreadyExists
+            var verifyCompletedCheckpoint = file.offset == target.expectedByteCount && target.expectedByteCount > 0
+            while file.offset < target.expectedByteCount || verifyCompletedCheckpoint {
+                verifyCompletedCheckpoint = false
+                try Task.checkCancellation()
+                let remainingLease = target.expiresAt.timeIntervalSinceNow
+                guard remainingLease > 0 else { throw V2ClientMediaTransferError.targetExpired }
+                let start = file.offset
+                let priorETag = file.etag
+                let end = start == target.expectedByteCount ? start + chunkBytes - 1 : min(target.expectedByteCount - 1,start + chunkBytes - 1)
+                var request = URLRequest(url: target.url,cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,timeoutInterval: min(60,remainingLease))
+                request.httpMethod = "GET"
+                for (name,value) in target.headers { request.setValue(value,forHTTPHeaderField: name) }
+                request.setValue("bytes=\(start)-\(end)",forHTTPHeaderField:"Range")
+                request.setValue("identity",forHTTPHeaderField:"Accept-Encoding")
+                if let etag = file.etag { request.setValue(etag,forHTTPHeaderField:"If-Range") }
+                let transfer = try await transport.stream(request,maximumBytes: max(64 * 1024,target.expectedByteCount),
+                    receiveResponse: { try file.accept($0,requestedStart: start,requestedEnd: end) },consume: { try file.append($0) })
+                let response = transfer.response
+                // A strong unchanged validator associates this rebuilt full body
+                // with the already hash-verified local prefix. Publish's complete
+                // checksum must still pass before the association becomes evidence.
+                if start > 0, response.statusCode == 200, let priorETag,
+                   response.value(forHTTPHeaderField: "ETag") == priorETag {
+                    rebuild = (transfer, start)
+                } else { transfer.record() }
+                try file.finishResponse()
+                guard file.offset > start || (file.offset == target.expectedByteCount && [200,416].contains(response.statusCode)) else { throw V2RangeDownloadError.invalidRange }
+                // Each Range request drains and releases its byte permit before
+                // another chunk is admitted. 200 providers restart from zero.
             }
-            try fileManager.moveItem(at: temporaryURL, to: destinationURL)
-        } catch let error as V2ClientMediaTransferError {
-            throw error
+            try Task.checkCancellation()
+            try file.publish(to: destination)
+            if let (transfer, prefix) = rebuild {
+                let proven: Int64? = transfer.metric.flatMap { $0.bodyBytesReceived >= prefix ? prefix : nil }
+                transfer.record(verifiedPrefixBytes: proven)
+                rebuild = nil
+            }
         } catch {
-            throw try mapTransport(error)
+            // Failed validation, cancellation and missing task counters stay unknown.
+            rebuild?.0.record()
+
+            try? file.preserveProgress()
+            if (error as? V2RangeDownloadError) == .versionChanged { try? file.discardProgress() }
+            if error is CancellationError || (error as? URLError)?.code == .cancelled { throw CancellationError() }
+            throw error
         }
-    }
-
-    private func request(for target: V2ClientMediaTransferTarget, method: String) -> URLRequest {
-        var request = URLRequest(url: target.url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 60)
-        request.httpMethod = method
-        for (name, value) in target.headers { request.setValue(value, forHTTPHeaderField: name) }
-        return request
-    }
-
-    private func validate(response: URLResponse) throws {
-        guard let http = response as? HTTPURLResponse else { throw V2ClientMediaTransferError.invalidResponse }
-        switch http.statusCode {
-        case 200: return
-        case 401, 403: throw V2ClientMediaTransferError.authorizationDenied
-        default: throw V2ClientMediaTransferError.serverStatus(http.statusCode)
-        }
-    }
-
-    private func fileByteCount(at url: URL) throws -> Int64 {
-        let attributes: [FileAttributeKey: Any]
-        do { attributes = try fileManager.attributesOfItem(atPath: url.path) }
-        catch { throw V2ClientMediaTransferError.fileSystemFailure }
-        guard let value = attributes[.size] as? NSNumber else { throw V2ClientMediaTransferError.fileSystemFailure }
-        return value.int64Value
-    }
-
-    private func mapTransport(_ error: Error) throws -> V2ClientMediaTransferError {
-        if error is CancellationError { throw CancellationError() }
-        if let urlError = error as? URLError, urlError.code == .cancelled { throw CancellationError() }
-        if let transferError = error as? V2ClientMediaTransferError { return transferError }
-        return .networkFailure
     }
 }
 

@@ -1,6 +1,6 @@
 # 资料版本与个人投影整数边界
 
-对应 B01。延续消息/成员命令的数值约束，本批处理资料版本、真实 PostgreSQL 绑定以及个人投影尾序号；不改 protocol 27、PostgreSQL 25 或 SQLite 173/5。
+对应 B01。本文保留资料版本、真实 PostgreSQL 绑定和个人投影尾序号的数值边界及该批专项证据。当前本人资料字段 patch、不可变原回执、query/close 与永久保留采用[本人资料当前合同](../proposals/resource-system-implementation.md#个人资料更新恢复与头像保留)，PostgreSQL 已为 `im-v2-current-55`；下文历史批次证据不作为当前全系统验证。
 
 ## 资料版本与 HTTP 输入
 

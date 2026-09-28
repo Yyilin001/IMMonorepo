@@ -141,21 +141,23 @@ public struct V2ResourceUploadTargetsRequest: Equatable, Codable, Sendable {
     public let locator: V2ResourceUploadLocator
     public let generation: Int64
     public let partNumbers: [Int]
+    public let background: Bool
 
-    public init(locator: V2ResourceUploadLocator, generation: Int64, partNumbers: [Int] = []) throws {
+    public init(locator: V2ResourceUploadLocator, generation: Int64, partNumbers: [Int] = [], background: Bool = false) throws {
         guard generation > 0, partNumbers.count <= 16, Set(partNumbers).count == partNumbers.count,
               partNumbers.allSatisfy({ (1...10_000).contains($0) })
         else { throw V2ResourceValidationError.invalidPart }
+        self.background = background
         self.locator = locator
         self.generation = generation
         self.partNumbers = partNumbers.sorted()
     }
 
-    private enum CodingKeys: String, CodingKey { case locator, generation, partNumbers }
+    private enum CodingKeys: String, CodingKey { case locator, generation, partNumbers, background }
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(locator: values.decode(V2ResourceUploadLocator.self, forKey: .locator), generation: values.decode(Int64.self, forKey: .generation),
-                      partNumbers: values.decode([Int].self, forKey: .partNumbers))
+                      partNumbers: values.decode([Int].self, forKey: .partNumbers), background: values.decode(Bool.self, forKey: .background))
     }
 }
 

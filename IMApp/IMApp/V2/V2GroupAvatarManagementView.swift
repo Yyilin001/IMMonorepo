@@ -76,12 +76,17 @@ struct V2GroupAvatarManagementView: View {
             guard store.authority != nil else { return }
             await pipeline?.groups.invalidate(roomID: store.roomID)
         }
+        .task(id: store.presentationInvalidationGeneration) {
+            guard store.presentationInvalidationGeneration > 0 else { return }
+            await pipeline?.groups.invalidate(roomID: store.roomID)
+        }
         .onDisappear { modal = nil; store.suspend() }
     }
 
     @ViewBuilder private var accessDescription: some View {
-        if let authority = store.authority {
-            if !authority.canManage { Text("只有群主可以更改群头像。") }
+        if let authority = store.displayAuthority {
+            if store.isStale { Text("显示上次读取的状态，请刷新后再管理群头像。") }
+            else if !authority.canManage { Text("只有群主可以更改群头像。") }
             else if let maximum = authority.maximumUploadBytes {
                 Text("JPEG 或 PNG，最大 \(ByteCountFormatter.string(fromByteCount: maximum, countStyle: .file))。关闭页面后，已保存的更改仍会继续处理。")
                     .font(.footnote).foregroundStyle(.secondary)

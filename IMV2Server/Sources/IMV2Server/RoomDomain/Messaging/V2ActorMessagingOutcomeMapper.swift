@@ -27,91 +27,11 @@ public extension V2ActorSendMessageResultWire {
     }
 }
 
-public extension V2ActorMessageEditResultWire {
-    init(_ value: V2MessageEditOutcome) {
-        switch value {
-        case .edited(let edit): self = .edited(.init(edit))
-        case .idempotent(let edit): self = .idempotent(.init(edit))
-        case .idempotencyConflict: self = .idempotencyConflict
-        case .revisionConflict(let current): self = .revisionConflict(current: current)
-        case .alreadyWithdrawn: self = .alreadyWithdrawn
-        case .rateLimited(let delay): self = .rateLimited(retryAfterSeconds: delay)
-        case .unavailable(let reason): self = .unavailable(.init(reason))
-        }
-    }
 
-    func toDomain() throws -> V2MessageEditOutcome {
-        switch self {
-        case .edited(let edit): return .edited(try edit.toDomain())
-        case .idempotent(let edit): return .idempotent(try edit.toDomain())
-        case .idempotencyConflict: return .idempotencyConflict
-        case .revisionConflict(let current):
-            try V2ActorMessagingMapping.validateRevision(current)
-            return .revisionConflict(current: current)
-        case .alreadyWithdrawn: return .alreadyWithdrawn
-        case .rateLimited(let delay):
-            try V2ActorMessagingMapping.validateRetryDelay(delay)
-            return .rateLimited(retryAfterSeconds: delay)
-        case .unavailable(let reason): return .unavailable(reason.toDomain())
-        }
-    }
-}
 
-public extension V2ActorMessageWithdrawalResultWire {
-    init(_ value: V2MessageWithdrawalOutcome) {
-        switch value {
-        case .withdrawn(let withdrawal): self = .withdrawn(.init(withdrawal))
-        case .idempotent(let withdrawal): self = .idempotent(.init(withdrawal))
-        case .idempotencyConflict: self = .idempotencyConflict
-        case .revisionConflict(let current): self = .revisionConflict(current: current)
-        case .alreadyWithdrawn: self = .alreadyWithdrawn
-        case .rateLimited(let delay): self = .rateLimited(retryAfterSeconds: delay)
-        case .unavailable(let reason): self = .unavailable(.init(reason))
-        }
-    }
 
-    func toDomain() throws -> V2MessageWithdrawalOutcome {
-        switch self {
-        case .withdrawn(let withdrawal): return .withdrawn(try withdrawal.toDomain())
-        case .idempotent(let withdrawal): return .idempotent(try withdrawal.toDomain())
-        case .idempotencyConflict: return .idempotencyConflict
-        case .revisionConflict(let current):
-            try V2ActorMessagingMapping.validateRevision(current)
-            return .revisionConflict(current: current)
-        case .alreadyWithdrawn: return .alreadyWithdrawn
-        case .rateLimited(let delay):
-            try V2ActorMessagingMapping.validateRetryDelay(delay)
-            return .rateLimited(retryAfterSeconds: delay)
-        case .unavailable(let reason): return .unavailable(reason.toDomain())
-        }
-    }
-}
 
-public extension V2ActorMessageReactionResultWire {
-    init(_ value: V2MessageReactionOutcome) {
-        switch value {
-        case .changed(let change): self = .changed(.init(change))
-        case .idempotent(let change): self = .idempotent(.init(change))
-        case .idempotencyConflict: self = .idempotencyConflict
-        case .alreadyInDesiredState: self = .alreadyInDesiredState
-        case .rateLimited(let delay): self = .rateLimited(retryAfterSeconds: delay)
-        case .unavailable(let reason): self = .unavailable(.init(reason))
-        }
-    }
 
-    func toDomain() throws -> V2MessageReactionOutcome {
-        switch self {
-        case .changed(let change): return .changed(try change.toDomain())
-        case .idempotent(let change): return .idempotent(try change.toDomain())
-        case .idempotencyConflict: return .idempotencyConflict
-        case .alreadyInDesiredState: return .alreadyInDesiredState
-        case .rateLimited(let delay):
-            try V2ActorMessagingMapping.validateRetryDelay(delay)
-            return .rateLimited(retryAfterSeconds: delay)
-        case .unavailable(let reason): return .unavailable(reason.toDomain())
-        }
-    }
-}
 
 private enum V2ActorMessagingMapping {
     static func validateRetryDelay(_ value: Int) throws {

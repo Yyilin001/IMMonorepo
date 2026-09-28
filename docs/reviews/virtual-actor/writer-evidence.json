@@ -27,21 +27,21 @@
     },
     {
       "id": "W03",
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MessageEditStore.swift",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MessageMutationOperationStore.swift",
       "symbol": "func edit",
-      "table_or_marker": "im_v2.message_edit_operations"
+      "table_or_marker": "im_v2.message_mutation_receipts"
     },
     {
       "id": "W04",
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MessageWithdrawalStore.swift",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MessageMutationOperationStore.swift",
       "symbol": "func withdraw",
-      "table_or_marker": "im_v2.message_withdrawal_operations"
+      "table_or_marker": "im_v2.message_mutation_receipts"
     },
     {
       "id": "W05",
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MessageReactionStore.swift",
+      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MessageReactionOperationStore.swift",
       "symbol": "func change",
-      "table_or_marker": "im_v2.message_reaction_operations"
+      "table_or_marker": "im_v2.message_reaction_receipts"
     },
     {
       "id": "W06",

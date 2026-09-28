@@ -1,5 +1,4 @@
 #if os(macOS)
-import Crypto
 import Darwin
 import Foundation
 import IMV2Core
@@ -89,13 +88,12 @@ struct V2LocalMediaPurgeCrashTests {
         let upload = try await provider.beginUploadedObject(mediaID: id, targetURL: target.url,
             contentType: "text/plain", declaredByteCount: Int64(bytes.count))
         try bytes.write(to: upload.fileURL, options: .withoutOverwriting)
-        let receipt = try V2ForwardMediaCopyReceipt(byteCount: Int64(bytes.count), digest: Data(SHA256.hash(data: bytes)))
         if mode == "recover" && stage == "purged" {
             await #expect(throws: V2LocalFilesystemMediaProviderError.objectUnavailable) {
-                try await provider.commitForwardImportedObject(upload, receipt: receipt)
+                try await provider.commitUploadedObject(upload, actualByteCount: Int64(bytes.count))
             }
         } else if mode == "recover" || stage != "staged" {
-            try await provider.commitForwardImportedObject(upload, receipt: receipt)
+            try await provider.commitUploadedObject(upload, actualByteCount: Int64(bytes.count))
         }
         if mode == "crash" && stage == "purged" { try await provider.purge(mediaID: id) }
         let checkpoint = root.appending(path: mode + ".checkpoint")

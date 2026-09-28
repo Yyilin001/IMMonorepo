@@ -25,14 +25,14 @@ struct V2ResourceProfileBindingPostgresTests {
             }
             let command = try f.command(before: before, avatar: media)
             if scenario == "valid" {
-                guard case .updated(let value) = try await f.store.update(command) else { Issue.record("valid avatar rejected"); return }
+                guard let value = try await f.store.update(command).currentSnapshot else { Issue.record("valid avatar rejected"); return }
                 #expect(value.avatar?.mediaID == media)
-                #expect(try await f.store.update(command) == .idempotent(value))
+                #expect(try await f.store.update(command).currentSnapshot == value)
                 #expect(try await f.count("public_profile_update_operations") == 1)
             } else {
-                await #expect(throws: V2ProfileUpdateError.avatarUnavailable) { _ = try await f.store.update(command) }
+                #expect(try await f.store.update(command).receipt.outcome == .rejected(.avatarUnavailable))
                 #expect(try await f.store.currentProfile(for: f.actor) == before)
-                #expect(try await f.count("public_profile_update_operations") == 0)
+                #expect(try await f.count("public_profile_update_operations") == 1)
                 #expect(try await f.count("public_profile_update_outbox") == 0)
             }
         }
@@ -46,8 +46,8 @@ struct V2ResourceProfileBindingPostgresTests {
             try await f.sql.raw("UPDATE im_v2.media_objects SET expires_at=clock_timestamp()-INTERVAL '1 second' WHERE media_id=\(bind:media.uuidValue!)").run()
             let bound = try await f.store.currentProfile(for: f.actor)
             let rename = try V2ProfileUpdateCommand(actorUserID: f.actor, operationID: .init(uuid: UUID()), expectedRevision: bound.revision,
-                displayName: "Renamed", avatar: .init(mediaID: media))
-            guard case .updated(let renamed) = try await f.store.update(rename) else { Issue.record("retained avatar rejected"); return }
+                patch: .init(displayName: .set("Renamed")), firstSubmissionDeadlineMilliseconds: 4_000_000_000_000)
+            guard let renamed = try await f.store.update(rename).currentSnapshot else { Issue.record("retained avatar rejected"); return }
             #expect(renamed.avatar?.mediaID == media)
             let retention = PostgresV2MediaRetentionStore(database: f.database)
             _ = try await retention.expireEligibleMedia(now: Date(), withdrawnRetention: 60, limit: 100_000)
@@ -57,7 +57,7 @@ struct V2ResourceProfileBindingPostgresTests {
             // A deliberately old injected application clock must not shorten
             // protection relative to the database's actual binding change.
             let oldClock = PostgresV2ProfileUpdateStore(database: f.database, now: { observed.addingTimeInterval(-600) })
-            guard case .updated(let removed) = try await oldClock.update(remove) else { Issue.record("remove rejected"); return }
+            guard let removed = try await oldClock.update(remove).currentSnapshot else { Issue.record("remove rejected"); return }
             #expect(removed.avatar == nil)
             let expiry = try #require(try await f.sql.raw("SELECT expires_at AS value FROM im_v2.media_objects WHERE media_id=\(bind:media.uuidValue!)")
                 .first(decoding: ProfileBindingDate.self)).value
@@ -66,7 +66,7 @@ struct V2ResourceProfileBindingPostgresTests {
             #expect(try await f.state(media) == "available")
             _ = try await retention.expireEligibleMedia(now: expiry.addingTimeInterval(0.01), withdrawnRetention: 60, limit: 100_000)
             #expect(try await f.state(media) == "expired")
-            #expect(try await oldClock.update(remove) == .idempotent(removed))
+            #expect(try await oldClock.update(remove).currentSnapshot == removed)
         }
     }
 
@@ -76,7 +76,7 @@ struct V2ResourceProfileBindingPostgresTests {
             let media = try await f.media(includeCatalog: false), before = try await f.store.currentProfile(for: f.actor)
             try await f.sql.raw("UPDATE im_v2.media_objects SET expires_at=clock_timestamp()-INTERVAL '1 second' WHERE media_id=\(bind:media.uuidValue!)").run()
             let command = try f.command(before: before, avatar: media)
-            await #expect(throws: V2ProfileUpdateError.avatarUnavailable) { _ = try await f.store.update(command) }
+            #expect(try await f.store.update(command).receipt.outcome == .rejected(.avatarUnavailable))
             #expect(try await f.store.currentProfile(for: f.actor) == before)
         }
     }
@@ -109,14 +109,14 @@ struct V2ResourceProfileBindingPostgresTests {
                 await gate.release()
                 if scenario == "rolled-back-gc" {
                     guard case .failure = await holder.result else { Issue.record("GC transaction did not roll back"); _ = await binding.result; return }
-                    guard case .updated(let value) = try await binding.value else { Issue.record("rolled back GC blocked a valid avatar"); return }
+                    guard let value = try await binding.value.currentSnapshot else { Issue.record("rolled back GC blocked a valid avatar"); return }
                     #expect(value.avatar?.mediaID == media)
                     #expect(try await f.count("public_profile_update_operations") == 1)
                 } else {
                     try await holder.value
-                    await #expect(throws: V2ProfileUpdateError.avatarUnavailable) { _ = try await binding.value }
+                    #expect(try await binding.value.receipt.outcome == .rejected(.avatarUnavailable))
                     #expect(try await f.store.currentProfile(for: f.actor) == before)
-                    #expect(try await f.count("public_profile_update_operations") == 0)
+                    #expect(try await f.count("public_profile_update_operations") == 1)
                     #expect(try await f.count("public_profile_update_outbox") == 0)
                 }
                 #expect(try await f.state(media) == (scenario == "committed-gc" ? "expired" : "available"))
@@ -149,7 +149,7 @@ private struct ProfileBindingFixture: Sendable {
     var store: PostgresV2ProfileUpdateStore { .init(database: database) }
     func command(before: V2ProfileView, avatar: MediaID?) throws -> V2ProfileUpdateCommand {
         try .init(actorUserID: actor, operationID: .init(uuid: UUID()), expectedRevision: before.revision,
-            displayName: #require(before.publicIdentity).displayName, avatar: avatar.map { .init(mediaID: $0) })
+            patch: .init(avatar: avatar.map { .set(.init(mediaID:$0)) } ?? .remove), firstSubmissionDeadlineMilliseconds:4_000_000_000_000)
     }
     func media(includeCatalog: Bool = true) async throws -> MediaID {
         let media = MediaID(uuid: UUID())

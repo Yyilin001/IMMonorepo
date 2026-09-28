@@ -391,10 +391,10 @@ struct V2RoomLocalCapabilityIntegrationTests {
             return token
         }
 
-        func send(text: String) -> V2RoomRequest {
-            .messaging(.send(.init(roomID: room, actorUserID: user,
+        func send(text: String) throws -> V2RoomRequest {
+            .messaging(.sendOperation(try .init(command: try .init(roomID: room, senderUserID: user,
                 clientMessageID: .init(uuid: UUID()), text: text, media: [], mentions: [],
-                entities: [], replyTo: nil)))
+                entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 65_536)), firstSubmissionDeadlineMilliseconds: 1_900_000_000_000)))
         }
 
         func removeTemporaryFiles() throws {

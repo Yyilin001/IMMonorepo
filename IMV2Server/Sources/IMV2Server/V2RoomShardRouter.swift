@@ -1,6 +1,7 @@
 import FluentKit
 import Foundation
 import IMV2Core
+import IMV2ActorContracts
 import SQLKit
 
 /// 房间持久化归属的逻辑分片标识及路由代次。
@@ -95,6 +96,7 @@ public protocol V2DirectRoomShardRouting: V2RoomShardRouting {
         actorUserID: UserID,
         targetUserID: UserID,
         proposedShardID: String,
+        deadline: ContinuousClock.Instant?,
         _ operation: @escaping @Sendable (V2RoomShardRoute) async throws -> (result: Result, roomID: RoomID?)
     ) async throws -> Result
 }
@@ -195,6 +197,7 @@ public struct V2PostgresRoomShardRouter: V2DirectRoomShardRouting {
         actorUserID: UserID,
         targetUserID: UserID,
         proposedShardID: String,
+        deadline: ContinuousClock.Instant? = nil,
         _ operation: @escaping @Sendable (V2RoomShardRoute) async throws -> (result: Result, roomID: RoomID?)
     ) async throws -> Result {
         guard let actor = UUID(uuidString: actorUserID.rawValue),
@@ -205,32 +208,42 @@ public struct V2PostgresRoomShardRouter: V2DirectRoomShardRouting {
         // 此控制侧围栏有意只短暂覆盖私聊房间创建。
         // 既有房间的发送使用 `route(for:)`，所有者事务运行时
         // 不会同时持有控制侧事务。
-        return try await database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase else {
-                throw V2RoomShardRouteError.corruptPersistenceState
+        let stop = deadline ?? ContinuousClock.now.advanced(by: .seconds(10))
+        while true {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < stop else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+            let completion: DirectPairTurn<Result>? = try await database.transaction { transaction in
+                guard let sql = transaction as? any SQLDatabase else {
+                    throw V2RoomShardRouteError.corruptPersistenceState
+                }
+                let acquired = try await sql.raw("SELECT pg_try_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0)) AS acquired").first(decoding: DirectPairLockRow.self)
+                guard acquired?.acquired == true else { return nil }
+                try Task.checkCancellation()
+                guard ContinuousClock.now < stop else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+                let route: V2RoomShardRoute
+                if let existing = try await sql.raw("""
+                    SELECT room_shard_id, route_epoch
+                    FROM im_v2.direct_room_owner_routes
+                    WHERE lower_user_id = \(bind: pair.lower)
+                      AND higher_user_id = \(bind: pair.higher)
+                    """).first(decoding: RouteRow.self) {
+                    route = try .init(shardID: existing.roomShardID, epoch: existing.routeEpoch)
+                } else {
+                    route = try .init(shardID: proposedShardID, epoch: 0)
+                }
+                let completion = try await operation(route)
+                guard let roomID = completion.roomID,
+                      let roomUUID = UUID(uuidString: roomID.rawValue)
+                else { return .init(value: completion.result) }
+                try await record(
+                    roomID: roomUUID, pair: pair, route: route, sql: sql, now: now()
+                )
+                return .init(value: completion.result)
             }
-            try await sql.raw(
-                "SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))"
-            ).run()
-            let route: V2RoomShardRoute
-            if let existing = try await sql.raw("""
-                SELECT room_shard_id, route_epoch
-                FROM im_v2.direct_room_owner_routes
-                WHERE lower_user_id = \(bind: pair.lower)
-                  AND higher_user_id = \(bind: pair.higher)
-                """).first(decoding: RouteRow.self) {
-                route = try .init(shardID: existing.roomShardID, epoch: existing.routeEpoch)
-            } else {
-                route = try .init(shardID: proposedShardID, epoch: 0)
-            }
-            let completion = try await operation(route)
-            guard let roomID = completion.roomID,
-                  let roomUUID = UUID(uuidString: roomID.rawValue)
-            else { return completion.result }
-            try await record(
-                roomID: roomUUID, pair: pair, route: route, sql: sql, now: now()
-            )
-            return completion.result
+            if let completion { return completion.value }
+            // Contended turns return their connection before sleeping; a
+            // winner can acquire the control connection needed by its owner.
+            try await Task.sleep(until: min(stop, ContinuousClock.now.advanced(by: .milliseconds(10))), clock: .continuous)
         }
     }
 
@@ -344,3 +357,6 @@ func roomOwnerDirectRouteLockKey(_ pair: CanonicalDirectPair) -> String {
     // 与所有者存储的私聊关系锁区分开。
     "room-route:" + pair.lower.uuidString.lowercased() + ":" + pair.higher.uuidString.lowercased()
 }
+
+private struct DirectPairLockRow: Decodable { let acquired: Bool }
+private struct DirectPairTurn<Value: Sendable>: Sendable { let value: Value }

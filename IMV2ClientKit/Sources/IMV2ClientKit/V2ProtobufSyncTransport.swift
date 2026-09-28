@@ -112,7 +112,6 @@ public protocol V2ClientMessageTransport: Sendable {
     /// - Throws: 服务端拒绝、响应校验或传输错误。
     ///
     /// 调用者负责入队与回执持久化，不应根据返回回执重建消息正文。
-    func sendMessage(roomID: RoomID, clientMessageID: ClientMessageID, text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?) async throws -> V2ClientMessageAcceptance
 }
 
 /// 会话置顶、归档、静音和消息收藏的传输边界；返回服务器结果，本地持久化由调用方负责。
@@ -122,95 +121,13 @@ public protocol V2ClientConversationCapabilitiesTransport: Sendable {
     /// - Parameter command: 已构造的稳定业务命令，重试应保持身份与内容一致。
     /// - Returns: 服务器确认的领域结果。
     /// - Throws: 服务端拒绝、响应校验或传输错误。
-    func setConversationState(command: V2ConversationStateCommand) async throws -> V2ConversationState
+    func setConversationState(command: V2ConversationStateCommand) async throws -> V2PersonalPreferenceReceipt
     /// 提交消息收藏状态。
     ///
     /// - Parameter command: 已构造的稳定业务命令，重试应保持身份与内容一致。
     /// - Returns: 服务器确认的领域结果。
     /// - Throws: 服务端拒绝、响应校验或传输错误。
-    func setMessageFavorite(command: V2MessageFavoriteCommand) async throws -> V2MessageFavorite
-}
-
-/// 群消息置顶、公告及角色策略变更的传输能力，权限判定和并发修订控制由服务端执行。
-public protocol V2ClientGroupCapabilitiesTransport: Sendable {
-    /// 提交群消息置顶或取消置顶。
-    ///
-    /// - Parameter command: 已构造的稳定业务命令，重试应保持身份与内容一致。
-    /// - Returns: 服务器确认的领域结果。
-    /// - Throws: 服务端拒绝、响应校验或传输错误。
-    func setPinnedMessage(command: V2PinnedMessageCommand) async throws -> V2PinnedMessage
-    /// 以预期修订更新群公告。
-    ///
-    /// - Parameter command: 已构造的稳定业务命令，重试应保持身份与内容一致。
-    /// - Returns: 服务器确认的领域结果。
-    /// - Throws: 服务端拒绝、响应校验或传输错误。
-    func setGroupAnnouncement(command: V2GroupAnnouncementCommand) async throws -> V2GroupAnnouncement
-    /// 以预期修订替换指定角色的权限集合。
-    ///
-    /// - Parameter command: 已构造的稳定业务命令，重试应保持身份与内容一致。
-    /// - Returns: 服务器确认的领域结果。
-    /// - Throws: 服务端拒绝、响应校验或传输错误。
-    func setGroupRolePermissions(command: V2GroupRolePermissionsCommand) async throws -> V2GroupRolePermissionsChange
-    /// 以预期成员修订变更成员角色。
-    ///
-    /// - Parameter command: 已构造的稳定业务命令，重试应保持身份与内容一致。
-    /// - Returns: 服务器确认的领域结果。
-    /// - Throws: 服务端拒绝、响应校验或传输错误。
-    func changeGroupMemberRole(command: V2GroupMemberRoleCommand) async throws -> V2GroupMemberRoleChange
-}
-
-/// 转发命令的已认证传输边界，按来源消息与目标房间组合返回独立结果。
-public protocol V2ClientForwardMessagesTransport: Sendable {
-    /// 发送稳定转发命令并返回每个来源与目标组合的结果。
-    ///
-    /// - Parameter command: 重试时保持身份与内容不变的转发意图。
-    /// - Returns: 包含逐项成功或失败的结果数组，调用方应按身份关联而非假定位置对应。
-    /// - Throws: 服务端整体拒绝、响应格式或传输错误。
-    func forwardMessages(command: V2ForwardMessagesCommand) async throws -> [V2ForwardMessageResult]
-}
-
-/// 普通成员增删完成后的动作、成员修订和房间位置回执。
-public struct V2ClientMembershipChange: Equatable, Sendable {
-    /// 操作所属房间。
-    public let roomID: RoomID
-    /// 被添加或移除的成员。
-    public let targetUserID: UserID
-    /// 服务器确认的增删动作。
-    public let action: V2RoomMembershipAction
-    /// 操作后的成员修订。
-    public let membershipRevision: UInt64
-    /// 操作对应的房间位置。
-    public let roomSequence: UInt64
-    /// 服务器操作时间。
-    public let createdAt: Date
-
-    /// 保存成员变更回执并验证修订和房间序列为正且不超过 Int64.max。
-    ///
-    /// - Parameters:
-    ///   - roomID: 所属房间。
-    ///   - targetUserID: 目标成员。
-    ///   - action: 增删动作。
-    ///   - membershipRevision: 新成员修订。
-    ///   - roomSequence: 房间位置。
-    ///   - createdAt: 操作时间，不在此检查有限性或正负。
-    /// - Throws: 修订或序列范围错误。
-    ///
-    /// 与请求身份和旧修订的一致性由传输适配方法验证。
-    public init(roomID: RoomID, targetUserID: UserID, action: V2RoomMembershipAction, membershipRevision: UInt64, roomSequence: UInt64, createdAt: Date) throws {
-        guard membershipRevision > 0 && membershipRevision <= UInt64(Int64.max) && roomSequence > 0 && roomSequence <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
-        self.roomID = roomID
-        self.targetUserID = targetUserID
-        self.action = action
-        self.membershipRevision = membershipRevision
-        self.roomSequence = roomSequence
-        self.createdAt = createdAt
-    }
-}
-
-/// 带预期成员修订的普通成员增删接口，与独立审核移除操作分离。
-public protocol V2ClientMembershipTransport: Sendable {
-    /// 按稳定操作身份和预期成员修订执行普通增删；返回正式回执，领域拒绝或传输失败通过错误报告。
-    func changeMembership(roomID: RoomID, operationID: MembershipOperationID, targetUserID: UserID, action: V2RoomMembershipAction, expectedMembershipRevision: UInt64) async throws -> V2ClientMembershipChange
+    func setMessageFavorite(command: V2MessageFavoriteCommand) async throws -> V2PersonalPreferenceReceipt
 }
 
 /// 按需读取的群成员身份及角色；资料展示须另行取得当前许可。
@@ -278,175 +195,6 @@ public enum V2ClientRoomMembersPageLimits {
     public static let maximumCursorBytes = 512
 }
 
-/// 发起私聊后返回的房间、目标用户和创建时间摘要。
-public struct V2ClientDirectRoom: Equatable, Sendable {
-    /// 正式私聊房间身份。
-    public let roomID: RoomID
-    /// 私聊目标用户。
-    public let targetUserID: UserID
-    /// 服务器房间创建时间。
-    public let createdAt: Date
-
-    /// 保存服务器结果字段，不执行一致性校验或持久化。
-    ///
-    /// - Parameters:
-    ///   - roomID: 正式私聊房间身份。
-    ///   - targetUserID: 私聊目标用户。
-    ///   - createdAt: 服务器房间创建时间。
-    public init(roomID: RoomID, targetUserID: UserID, createdAt: Date) {
-        self.roomID = roomID
-        self.targetUserID = targetUserID
-        self.createdAt = createdAt
-    }
-}
-
-/// 发起私聊及设置账户级陌生消息、用户添加偏好的已认证传输边界。
-public protocol V2ClientDirectMessagingTransport: Sendable {
-    /// 按稳定操作身份发起与目标用户的私聊。
-    ///
-    /// 服务端或传输失败通过抛出错误报告；本地持久化由调用者负责。
-    func openDirectRoom(operationID: DirectRoomOperationID, targetUserID: UserID) async throws -> V2ClientDirectRoom
-    /// 设置账户级陌生人消息权限，返回更新时间。
-    ///
-    /// 服务端或传输失败通过抛出错误报告；本地持久化由调用者负责。
-    func setStrangerMessagePermission(operationID: StrangerMessagePreferenceOperationID, permission: V2StrangerMessagePermission) async throws -> Date
-    /// 设置账户级用户添加权限，返回更新时间。
-    ///
-    /// 服务端或传输失败通过抛出错误报告；本地持久化由调用者负责。
-    func setUserAddPermission(operationID: UserAddPreferenceOperationID, permission: V2UserAddPermission) async throws -> Date
-}
-
-/// 分阶段建群完成后的房间摘要；正式成员数量不要求等于返回的成员身份数组长度。
-public struct V2ClientGroupRoom: Equatable, Sendable {
-    /// 正式群房间身份。
-    public let roomID: RoomID
-    /// 服务端返回的群名称。
-    public let title: String
-    /// 群的消息投递模式。
-    public let capacityClass: V2GroupCapacityClass
-    /// 初始化时排序的成员身份数组；建群传输当前要求为空，完整目录另行分页读取。
-    public let memberUserIDs: [UserID]
-    /// 服务端声明的正式成员总数。
-    public let memberCount: UInt32
-    /// 服务端房间创建时间。
-    public let createdAt: Date
-
-    /// 保存群摘要并按身份排序成员数组，不进行去重或字段一致性验证。
-    ///
-    /// - Parameters:
-    ///   - roomID: 房间身份。
-    ///   - title: 名称。
-    ///   - capacityClass: 投递模式。
-    ///   - memberUserIDs: 可选的成员身份列表。
-    ///   - memberCount: 声明的总成员数，不要求等于数组长度。
-    ///   - createdAt: 创建时间。
-    public init(roomID: RoomID, title: String, capacityClass: V2GroupCapacityClass, memberUserIDs: [UserID], memberCount: UInt32, createdAt: Date) {
-        self.roomID = roomID
-        self.title = title
-        self.capacityClass = capacityClass
-        self.memberUserIDs = memberUserIDs.sorted()
-        self.memberCount = memberCount
-        self.createdAt = createdAt
-    }
-}
-
-/// 服务端建群暂存进度，仅返回操作身份与数量，不返回完整名单；数量供持久化发件箱恢复处理使用。
-public struct V2ClientGroupAudienceDraft: Equatable, Sendable {
-    /// 贯穿建群流程的稳定操作身份。
-    public let operationID: GroupRoomOperationID
-    /// 暂存摘要名称；追加成员响应适配时使用 staged 占位值。
-    public let title: String
-    /// 服务端累计暂存的成员数量。
-    public let stagedMemberCount: Int
-
-    /// 保存建群暂存摘要，检查名称非空及数量非负。
-    ///
-    /// - Parameters:
-    ///   - operationID: 稳定操作身份。
-    ///   - title: 名称，仅用去除首尾空白后的值检查非空，保存原字符串。
-    ///   - stagedMemberCount: 累计暂存人数。
-    /// - Throws: 空名称或负数量时抛出异常响应错误。
-    ///
-    /// 人数上限不在此检查，由传输响应校验负责。
-    public init(operationID: GroupRoomOperationID, title: String, stagedMemberCount: Int) throws {
-        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, stagedMemberCount >= 0 else {
-            throw V2RealtimeTransportError.unexpectedResponse
-        }
-        self.operationID = operationID
-        self.title = title
-        self.stagedMemberCount = stagedMemberCount
-    }
-}
-
-/// 分阶段建群的已认证传输边界。
-///
-/// 调用方持久化操作身份和建群意图，在开始、追加、完成与重试时复用同一身份。
-/// 暂存成功不代表房间已经创建；完成结果才提供正式房间摘要。
-public protocol V2ClientGroupMessagingTransport: Sendable {
-    /// 开始或恢复建群草稿；调用者持久化操作身份，成功只代表暂存状态建立。
-    func beginGroupRoomCreation(operationID: GroupRoomOperationID, title: String) async throws -> V2ClientGroupAudienceDraft
-    /// 向同一操作追加有界成员批次，返回累计暂存数量；重复提交需保持相同意图。
-    func appendGroupRoomCreationMembers(operationID: GroupRoomOperationID, memberUserIDs: [UserID]) async throws -> V2ClientGroupAudienceDraft
-    /// 完成暂存操作并返回正式群摘要，本地终态保存由调用方负责。
-    func finalizeGroupRoomCreation(operationID: GroupRoomOperationID) async throws -> V2ClientGroupRoom
-    /// 取消可变草稿；应在本地取消意图已持久化后调用，不能替代本地队列状态迁移。
-    func cancelGroupRoomCreation(operationID: GroupRoomOperationID) async throws
-}
-
-/// 已认证的关系与屏蔽操作边界。
-///
-/// 返回服务端状态，但多设备界面的持久化收敛仍通过后续同步投影完成。调用方负责稳定操作身份及重试意图。
-public protocol V2ClientSocialRelationshipTransport: Sendable {
-    /// 提交稳定身份的关系变更，返回服务器状态；具体响应匹配校验由适配器实现。
-    ///
-    /// 服务端或传输失败通过抛出错误报告；本地持久化由调用者负责。
-    func changeRelationship(operationID: RelationshipOperationID, targetUserID: UserID, action: V2RelationshipAction) async throws -> V2ClientRelationshipChange
-    /// 提交稳定身份的屏蔽变更，返回服务器结果。
-    ///
-    /// 服务端或传输失败通过抛出错误报告；本地持久化由调用者负责。
-    func changeUserBlock(operationID: UserBlockOperationID, targetUserID: UserID, action: V2UserBlockAction) async throws -> V2ClientUserBlockChange
-}
-
-/// 服务端返回的关系操作及结果状态，构造仅保存字段，不验证操作和结果状态的组合。
-public struct V2ClientRelationshipChange: Equatable, Sendable {
-    /// 服务端返回的关系目标。
-    public let targetUserID: UserID
-    /// 服务器确认的关系动作。
-    public let action: V2RelationshipAction
-    /// 服务器返回的关系状态。
-    public let resultingState: V2RelationshipState
-    /// 服务器更新时间。
-    public let updatedAt: Date
-    /// 保存服务器结果字段，不执行一致性校验或持久化。
-    ///
-    /// - Parameters:
-    ///   - targetUserID: 服务端返回的关系目标。
-    ///   - action: 服务器确认的关系动作。
-    ///   - resultingState: 服务器返回的关系状态。
-    ///   - updatedAt: 服务器更新时间。
-    public init(targetUserID: UserID, action: V2RelationshipAction, resultingState: V2RelationshipState, updatedAt: Date) { self.targetUserID = targetUserID; self.action = action; self.resultingState = resultingState; self.updatedAt = updatedAt }
-}
-
-/// 服务端屏蔽操作结果，构造仅保存字段，不验证动作与屏蔽标志是否一致。
-public struct V2ClientUserBlockChange: Equatable, Sendable {
-    /// 屏蔽目标用户。
-    public let targetUserID: UserID
-    /// 屏蔽或解除动作。
-    public let action: V2UserBlockAction
-    /// 结果是否处于屏蔽状态。
-    public let isBlocked: Bool
-    /// 服务器更新时间。
-    public let updatedAt: Date
-    /// 保存服务器结果字段，不执行一致性校验或持久化。
-    ///
-    /// - Parameters:
-    ///   - targetUserID: 屏蔽目标用户。
-    ///   - action: 屏蔽或解除动作。
-    ///   - isBlocked: 结果是否处于屏蔽状态。
-    ///   - updatedAt: 服务器更新时间。
-    public init(targetUserID: UserID, action: V2UserBlockAction, isBlocked: Bool, updatedAt: Date) { self.targetUserID = targetUserID; self.action = action; self.isBlocked = isBlocked; self.updatedAt = updatedAt }
-}
-
 /// 撤回完成后的消息修订与房间位置回执。
 public struct V2ClientMessageWithdrawal: Equatable, Sendable {
     /// 结果所属房间。
@@ -488,139 +236,6 @@ public protocol V2ClientMessageWithdrawalTransport: Sendable {
     /// 发送带预期修订的撤回命令，返回正式回执。
     ///
     /// 同一意图的重试应复用操作身份与原始参数，不能在重试时悄悄改为新的业务请求。
-    func withdrawMessage(roomID: RoomID, operationID: MessageWithdrawalOperationID, messageID: MessageID, expectedMessageRevision: UInt64) async throws -> V2ClientMessageWithdrawal
-}
-
-/// 审核屏蔽完成后的消息修订与房间位置回执。
-public struct V2ClientMessageRedaction: Equatable, Sendable {
-    /// 结果所属房间。
-    public let roomID: RoomID
-    /// 结果对应消息。
-    public let messageID: MessageID
-    /// 操作后的消息修订。
-    public let messageRevision: UInt64
-    /// 操作对应的房间序列。
-    public let roomSequence: UInt64
-    /// 服务端操作时间。
-    public let createdAt: Date
-
-    /// 保存操作回执，检查房间序列及修订为正且不超过 Int64.max。
-    ///
-    /// - Parameters:
-    ///   - roomID: 结果所属房间。
-    ///   - messageID: 结果对应消息。
-    ///   - messageRevision: 操作后的消息修订。
-    ///   - roomSequence: 操作对应的房间序列。
-    ///   - createdAt: 服务端操作时间。
-    /// - Throws: 整数范围无效时抛出修订范围错误。
-    ///
-    /// 初始化不检查日期有限性或正负，也不读取本地旧状态；请求与响应的一致性由传输方法检查。
-    public init(roomID: RoomID, messageID: MessageID, messageRevision: UInt64, roomSequence: UInt64, createdAt: Date) throws {
-        guard messageRevision > 0 && messageRevision <= UInt64(Int64.max) && roomSequence > 0 && roomSequence <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
-        self.roomID = roomID
-        self.messageID = messageID
-        self.messageRevision = messageRevision
-        self.roomSequence = roomSequence
-        self.createdAt = createdAt
-    }
-}
-
-/// 发送带原因的审核屏蔽命令，权限由服务端判定。
-///
-/// 调用方负责持久化操作身份、重试意图及结果；此接口不直接更新本地同步投影。
-public protocol V2ClientMessageRedactionTransport: Sendable {
-    /// 发送带原因的审核屏蔽命令，权限由服务端判定。
-    ///
-    /// 同一意图的重试应复用操作身份与原始参数，不能在重试时悄悄改为新的业务请求。
-    func redactMessage(roomID: RoomID, operationID: ModerationOperationID, messageID: MessageID, reasonCode: V2ModerationReasonCode) async throws -> V2ClientMessageRedaction
-}
-
-/// 审核禁言回执，保留成员身份、期限与对应房间位置。
-public struct V2ClientMemberMute: Equatable, Sendable {
-    /// 结果所属房间。
-    public let roomID: RoomID
-    /// 审核目标成员。
-    public let targetUserID: UserID
-    /// 服务端返回的禁言期限。
-    public let muteUntil: Date
-    /// 操作对应的房间序列。
-    public let roomSequence: UInt64
-    /// 服务端操作时间。
-    public let createdAt: Date
-
-    /// 保存操作回执，检查房间序列为正且不超过 Int64.max。
-    ///
-    /// - Parameters:
-    ///   - roomID: 结果所属房间。
-    ///   - targetUserID: 审核目标成员。
-    ///   - muteUntil: 服务端返回的禁言期限。
-    ///   - roomSequence: 操作对应的房间序列。
-    ///   - createdAt: 服务端操作时间。
-    /// - Throws: 整数范围无效时抛出修订范围错误。
-    ///
-    /// 初始化不检查日期有限性或正负，也不读取本地旧状态；请求与响应的一致性由传输方法检查。
-    public init(roomID: RoomID, targetUserID: UserID, muteUntil: Date, roomSequence: UInt64, createdAt: Date) throws {
-        guard roomSequence > 0 && roomSequence <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
-        self.roomID = roomID
-        self.targetUserID = targetUserID
-        self.muteUntil = muteUntil
-        self.roomSequence = roomSequence
-        self.createdAt = createdAt
-    }
-}
-
-/// 提交目标成员、禁言期限和审核原因，返回正式回执。
-///
-/// 调用方负责持久化操作身份、重试意图及结果；此接口不直接更新本地同步投影。
-public protocol V2ClientMemberMuteTransport: Sendable {
-    /// 提交目标成员、禁言期限和审核原因，返回正式回执。
-    ///
-    /// 同一意图的重试应复用操作身份与原始参数，不能在重试时悄悄改为新的业务请求。
-    func muteMember(roomID: RoomID, operationID: ModerationOperationID, targetUserID: UserID, muteUntil: Date, reasonCode: V2ModerationReasonCode) async throws -> V2ClientMemberMute
-}
-
-/// 独立审核移除命令的回执；普通成员管理使用不同的操作记录和传输方法。
-public struct V2ClientModeratedMemberRemoval: Equatable, Sendable {
-    /// 结果所属房间。
-    public let roomID: RoomID
-    /// 审核目标成员。
-    public let targetUserID: UserID
-    /// 操作后的成员修订。
-    public let membershipRevision: UInt64
-    /// 操作对应的房间序列。
-    public let roomSequence: UInt64
-    /// 服务端操作时间。
-    public let createdAt: Date
-
-    /// 保存操作回执，检查房间序列及修订为正且不超过 Int64.max。
-    ///
-    /// - Parameters:
-    ///   - roomID: 结果所属房间。
-    ///   - targetUserID: 审核目标成员。
-    ///   - membershipRevision: 操作后的成员修订。
-    ///   - roomSequence: 操作对应的房间序列。
-    ///   - createdAt: 服务端操作时间。
-    /// - Throws: 整数范围无效时抛出修订范围错误。
-    ///
-    /// 初始化不检查日期有限性或正负，也不读取本地旧状态；请求与响应的一致性由传输方法检查。
-    public init(roomID: RoomID, targetUserID: UserID, membershipRevision: UInt64, roomSequence: UInt64, createdAt: Date) throws {
-        guard membershipRevision > 0 && membershipRevision <= UInt64(Int64.max) && roomSequence > 0 && roomSequence <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
-        self.roomID = roomID
-        self.targetUserID = targetUserID
-        self.membershipRevision = membershipRevision
-        self.roomSequence = roomSequence
-        self.createdAt = createdAt
-    }
-}
-
-/// 提交独立审核移除操作，保持其操作身份与普通成员管理分离。
-///
-/// 调用方负责持久化操作身份、重试意图及结果；此接口不直接更新本地同步投影。
-public protocol V2ClientModeratedMemberRemovalTransport: Sendable {
-    /// 提交独立审核移除操作，保持其操作身份与普通成员管理分离。
-    ///
-    /// 同一意图的重试应复用操作身份与原始参数，不能在重试时悄悄改为新的业务请求。
-    func removeMemberByModerator(roomID: RoomID, operationID: ModerationOperationID, targetUserID: UserID, reasonCode: V2ModerationReasonCode) async throws -> V2ClientModeratedMemberRemoval
 }
 
 /// 文本编辑完成后的正文、消息修订与房间位置。
@@ -668,7 +283,6 @@ public protocol V2ClientMessageEditTransport: Sendable {
     /// 发送带预期修订的文本编辑命令，返回服务器确认结果。
     ///
     /// 同一意图的重试应复用操作身份与原始参数，不能在重试时悄悄改为新的业务请求。
-    func editMessage(roomID: RoomID, operationID: MessageEditOperationID, messageID: MessageID, expectedMessageRevision: UInt64, text: String) async throws -> V2ClientMessageEdit
 }
 
 /// 服务端记录的用户房间已读水位；可能高于本次提交值，以保留已读状态的单调推进。
@@ -708,7 +322,6 @@ public protocol V2ClientReadReceiptTransport: Sendable {
     /// 设置账户的私聊和群聊回执偏好，返回服务器状态。
     ///
     /// 传输或服务端拒绝通过抛出错误报告；调用本身不更新本地同步投影。
-    func setReadReceiptPreferences(operationID: ReadReceiptPreferenceOperationID, allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2ReadReceiptPreferences
     /// 按消息与游标读取获授权的已读者目录。
     ///
     /// 传输或服务端拒绝通过抛出错误报告；调用本身不更新本地同步投影。
@@ -731,7 +344,6 @@ public protocol V2ClientLiveActivityTransport: Sendable {
     /// 按稳定操作身份设置在线和输入展示偏好。
     ///
     /// 传输或服务端拒绝通过抛出错误报告；调用本身不更新本地同步投影。
-    func setLiveActivityPreferences(operationID: LiveActivityPreferenceOperationID, allowsOnlinePresence: Bool, allowsTypingIndicators: Bool) async throws -> V2LiveActivityPreferences
     /// 订阅指定房间的在线状态并读取初始快照。
     ///
     /// 传输或服务端拒绝通过抛出错误报告；调用本身不更新本地同步投影。
@@ -799,7 +411,6 @@ public struct V2ClientMessageReactionChange: Equatable, Sendable {
 /// 消息表情添加与移除的已认证传输边界；持久化重试由调用方管理。
 public protocol V2ClientMessageReactionTransport: Sendable {
     /// 使用稳定操作身份提交表情变更并返回服务器结果；请求重试需保持原意图，服务端拒绝或传输失败通过错误报告。
-    func changeMessageReaction(roomID: RoomID, operationID: MessageReactionOperationID, messageID: MessageID, reaction: String, action: V2MessageReactionAction) async throws -> V2ClientMessageReactionChange
 }
 
 /// 运行时发送存活心跳所需的最小接口，不定义定时器或重连策略。
@@ -849,7 +460,7 @@ public struct V2SHA256SnapshotPageDigestVerifier: V2SnapshotPageDigestVerifier {
 ///
 /// 本层校验响应关联、版本和各方法声明的业务字段，不保存同步投影，也不管理持久化命令重试。
 /// 请求号由 actor 在发送前分配；等待期间允许其他请求进入，实际关联与网络生命周期由底层连接负责。
-public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePolicyBaselineTransport, V2ClientMessageTransport, V2ClientConversationCapabilitiesTransport, V2ClientGroupCapabilitiesTransport, V2ClientForwardMessagesTransport, V2ClientMembershipTransport, V2ClientMembershipDirectoryTransport, V2ClientDirectMessagingTransport, V2ClientGroupMessagingTransport, V2ClientGroupEventTransport, V2ClientGroupEventSubscriptionTransport, V2ClientSocialRelationshipTransport, V2ClientMessageWithdrawalTransport, V2ClientMessageRedactionTransport, V2ClientMemberMuteTransport, V2ClientModeratedMemberRemovalTransport, V2ClientMessageEditTransport, V2ClientMessageReactionTransport, V2ClientReadReceiptTransport, V2ClientLiveActivityTransport, V2HeartbeatSender {
+public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePolicyBaselineTransport, V2ClientMessageTransport, V2ClientConversationCapabilitiesTransport, V2ClientMembershipDirectoryTransport, V2ClientGroupEventTransport, V2ClientGroupEventSubscriptionTransport, V2ClientMessageWithdrawalTransport, V2ClientMessageEditTransport, V2ClientMessageReactionTransport, V2ClientReadReceiptTransport, V2ClientLiveActivityTransport, V2HeartbeatSender {
     /// 拥有认证连接与帧请求关联的底层传输。
     private let wire: any V2AuthenticatedFrameTransport
     /// 所有请求使用的已协商非零协议版本。
@@ -1054,61 +665,16 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
         }
     }
 
-    /// 编码新消息或等价重试请求，并校验正式接受回执。
-    ///
-    /// - Parameters:
-    ///   - roomID: 目标房间。
-    ///   - clientMessageID: 跨重试稳定的客户端操作身份。
-    ///   - text: 消息文本。
-    ///   - media: 按顺序编码媒体身份。
-    ///   - mentions: 分别编码用户提及与全体提及。
-    ///   - entities: 使用 UTF-16 范围的富文本实体，调用前需完成内容校验。
-    ///   - replyTo: 可选回复消息身份。
-    /// - Returns: 房间匹配、房间序列可持久化且服务器时间非负的接受回执。
-    /// - Throws: 响应校验、领域值构造、服务端或传输错误。
-    ///
-    /// 不在此生成客户端身份、入队或保存接受终态，持久化重试由发件箱负责。
-    public func sendMessage(roomID: RoomID, clientMessageID: ClientMessageID, text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil) async throws -> V2ClientMessageAcceptance {
-        var request = IMV2Envelope()
-        request.sendMessage = .init()
-        request.sendMessage.roomID = roomID.rawValue
-        request.sendMessage.clientMessageID = clientMessageID.rawValue
-        request.sendMessage.content = .init()
-        request.sendMessage.content.text = text
-        request.sendMessage.content.mediaIds = media.map { $0.mediaID.rawValue }
-        request.sendMessage.content.mentionedUserIds = mentions.compactMap { if case .user(let userID) = $0 { userID.rawValue } else { nil } }
-        request.sendMessage.content.mentionEveryone = mentions.contains(.everyone)
-        request.sendMessage.content.entities = entities.map(v2MessageEntityWire)
-        request.sendMessage.content.replyToMessageID = replyTo?.messageID.rawValue ?? ""
-        let response = try await requestEnvelope(request)
-        guard case .messageAccepted(let accepted)? = response.body else {
-            try throwServerErrorIfPresent(response)
-            throw V2RealtimeTransportError.unexpectedResponse
-        }
-        let acceptedRoomID = try RoomID(accepted.roomID)
-        guard acceptedRoomID == roomID, accepted.roomSequence > 0,
-              Int64(exactly: accepted.roomSequence) != nil,
-              accepted.serverCreatedAtMs >= 0
-        else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(
-            messageID: .init(accepted.messageID), roomID: acceptedRoomID,
-            roomSequence: accepted.roomSequence,
-            createdAt: Date(timeIntervalSince1970: TimeInterval(accepted.serverCreatedAtMs) / 1_000)
-        )
-    }
 
-    /// 提交会话置顶、归档和静音设置，并逐项核对服务器响应。
-    ///
-    /// - Parameter command: 含稳定操作身份、房间和目标设置的命令。
-    /// - Returns: 房间、布尔设置及静音期限与请求一致的会话状态。
-    /// - Throws: 静音日期无法表示为 Int64 毫秒、响应不匹配、领域值构造或传输错误。
-    ///
-    /// 静音日期编码时向零舍入到毫秒，响应的零毫秒解释为 nil；响应日期随后与原始 Date 精确比较。
-    /// 因此调用前的日期精度会影响结果校验。本方法不自动归一化原始日期或持久化本地会话。
-    public func setConversationState(command: V2ConversationStateCommand) async throws -> V2ConversationState {
+
+    /// 提交冻结的会话设置，并验证原操作回执的指纹、目标值及修订。
+    /// 账户绑定由持有本地 intent 的服务再次核对；同步投影不能替代回执。
+    public func setConversationState(command: V2ConversationStateCommand) async throws -> V2PersonalPreferenceReceipt {
         var request = IMV2Envelope(); request.setConversationState = .init()
         request.setConversationState.operationID = command.operationID.rawValue; request.setConversationState.roomID = command.roomID.rawValue
         request.setConversationState.isPinned = command.isPinned; request.setConversationState.isArchived = command.isArchived
+        request.setConversationState.expectedRevision = command.expectedRevision.rawValue
+        request.setConversationState.firstSubmissionDeadlineMs = command.firstSubmissionDeadlineMilliseconds
         if let muteUntil = command.muteUntil {
             guard let milliseconds = Int64(exactly: (muteUntil.timeIntervalSince1970 * 1_000).rounded(.towardZero)) else {
                 throw V2RealtimeTransportError.unexpectedResponse
@@ -1116,170 +682,33 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
             request.setConversationState.muteUntilMs = milliseconds
         }
         let response = try await requestEnvelope(request)
-        guard case .conversationStateSet(let value)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
-        guard value.roomID == command.roomID.rawValue, value.isPinned == command.isPinned, value.isArchived == command.isArchived else { throw V2RealtimeTransportError.unexpectedResponse }
-        let muteUntil = value.muteUntilMs == 0 ? nil : Date(timeIntervalSince1970: TimeInterval(value.muteUntilMs) / 1_000)
-        guard muteUntil == command.muteUntil else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(roomID: .init(value.roomID), isPinned: value.isPinned, isArchived: value.isArchived, muteUntil: muteUntil, updatedAt: Date(timeIntervalSince1970: TimeInterval(value.updatedAtMs) / 1_000))
+        guard case .personalPreferenceReceipt(let value)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
+        let receipt = try V2PersonalPreferenceReceiptCodec.decode(value)
+        guard receipt.identity == (try command.identity(actorUserID: receipt.identity.accountID)),
+              receipt.fingerprint == (try command.fingerprint(actorUserID: receipt.identity.accountID)) else { throw V2RealtimeTransportError.unexpectedResponse }
+        if case .committed(.conversationState(let state)) = receipt.outcome {
+            guard state.isPinned == command.isPinned, state.isArchived == command.isArchived, state.muteUntil == command.muteUntil,
+                  state.revision.rawValue > 0, state.revision.rawValue - 1 == command.expectedRevision.rawValue else { throw V2RealtimeTransportError.unexpectedResponse }
+        }
+        return receipt
     }
 
-    /// 提交消息收藏状态，核对房间、消息和收藏标志。
-    ///
-    /// - Parameter command: 含稳定操作身份的收藏或取消收藏命令。
-    /// - Returns: 对应消息的服务器收藏状态。
-    /// - Throws: 响应身份或标志不匹配、领域值构造、服务端或传输错误。
-    ///
-    /// 更新时间从协议毫秒转换，不在此额外检查非负，也不直接修改本地收藏投影。
-    public func setMessageFavorite(command: V2MessageFavoriteCommand) async throws -> V2MessageFavorite {
+    /// 提交冻结的收藏设置，返回成功、拒绝或关闭的不可变原回执。
+    public func setMessageFavorite(command: V2MessageFavoriteCommand) async throws -> V2PersonalPreferenceReceipt {
         var request = IMV2Envelope(); request.setMessageFavorite = .init()
         request.setMessageFavorite.operationID = command.operationID.rawValue; request.setMessageFavorite.roomID = command.roomID.rawValue; request.setMessageFavorite.messageID = command.messageID.rawValue; request.setMessageFavorite.isFavorited = command.isFavorited
+        request.setMessageFavorite.expectedRevision = command.expectedRevision.rawValue
+        request.setMessageFavorite.firstSubmissionDeadlineMs = command.firstSubmissionDeadlineMilliseconds
         let response = try await requestEnvelope(request)
-        guard case .messageFavoriteChanged(let value)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
-        guard value.roomID == command.roomID.rawValue, value.messageID == command.messageID.rawValue, value.isFavorited == command.isFavorited else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(roomID: .init(value.roomID), messageID: .init(value.messageID), isFavorited: value.isFavorited, updatedAt: Date(timeIntervalSince1970: TimeInterval(value.updatedAtMs) / 1_000))
-    }
-
-    /// 提交群消息置顶状态并校验正式房间位置。
-    ///
-    /// - Parameter command: 指定房间、消息和目标置顶状态的稳定命令。
-    /// - Returns: 身份与状态匹配、房间序列为正且可持久化的置顶结果。
-    /// - Throws: 响应字段、领域值构造、服务端或传输错误。
-    ///
-    /// 此处不预判调用者的群权限，实际授权由服务端处理。
-    public func setPinnedMessage(command: V2PinnedMessageCommand) async throws -> V2PinnedMessage {
-        var request = IMV2Envelope(); request.setPinnedMessage = .init(); request.setPinnedMessage.operationID = command.operationID.rawValue; request.setPinnedMessage.roomID = command.roomID.rawValue; request.setPinnedMessage.messageID = command.messageID.rawValue; request.setPinnedMessage.isPinned = command.isPinned
-        let response = try await requestEnvelope(request)
-        guard case .pinnedMessageChanged(let value)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
-        guard value.roomID == command.roomID.rawValue, value.messageID == command.messageID.rawValue, value.isPinned == command.isPinned else { throw V2RealtimeTransportError.unexpectedResponse }
-        guard value.roomSequence > 0, value.roomSequence <= UInt64(Int64.max) else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(roomID: .init(value.roomID), messageID: .init(value.messageID), isPinned: value.isPinned, roomSequence: value.roomSequence, updatedAt: Date(timeIntervalSince1970: TimeInterval(value.updatedAtMs) / 1_000))
-    }
-
-    /// 按预期修订提交群公告，并要求服务器恰好推进一个修订。
-    ///
-    /// - Parameter command: 含房间、公告正文、稳定操作身份及预期修订的命令。
-    /// - Returns: 房间和正文匹配、修订及房间序列有效的公告结果。
-    /// - Throws: 响应身份、正文、范围或递增关系错误，以及服务端或传输错误。
-    ///
-    /// 校验先检查返回修订为正，再用减一与预期值比较，避免直接增加客户端预期值。
-    public func setGroupAnnouncement(command: V2GroupAnnouncementCommand) async throws -> V2GroupAnnouncement {
-        var request = IMV2Envelope(); request.setGroupAnnouncement = .init(); request.setGroupAnnouncement.operationID = command.operationID.rawValue; request.setGroupAnnouncement.roomID = command.roomID.rawValue; request.setGroupAnnouncement.body = command.body; request.setGroupAnnouncement.expectedRevision = command.expectedRevision
-        let response = try await requestEnvelope(request)
-        guard case .groupAnnouncementChanged(let value)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
-        guard value.roomID == command.roomID.rawValue, value.body == command.body else { throw V2RealtimeTransportError.unexpectedResponse }
-        guard value.revision > 0, value.revision <= UInt64(Int64.max),
-              value.roomSequence > 0, value.roomSequence <= UInt64(Int64.max)
-        else { throw V2RealtimeTransportError.unexpectedResponse }
-        guard value.revision - 1 == command.expectedRevision else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(roomID: .init(value.roomID), body: value.body, revision: value.revision, roomSequence: value.roomSequence, updatedAt: Date(timeIntervalSince1970: TimeInterval(value.updatedAtMs) / 1_000))
-    }
-
-    /// 提交指定群角色的完整权限集合并核对服务器结果。
-    ///
-    /// - Parameter command: 含角色、权限集合及预期策略修订的稳定命令。
-    /// - Returns: 房间与角色匹配、权限集合相同且修订恰好推进一的结果。
-    /// - Throws: 响应中未知或重复权限、字段不匹配、修订错误，以及服务端或传输错误。
-    ///
-    /// 发送前按权限原始值排序，以获得稳定编码顺序。集合大小与响应数组大小比较会拒绝未知或重复权限。
-    public func setGroupRolePermissions(command: V2GroupRolePermissionsCommand) async throws -> V2GroupRolePermissionsChange {
-        var request = IMV2Envelope(); request.setGroupRolePermissions = .init(); request.setGroupRolePermissions.operationID = command.operationID.rawValue; request.setGroupRolePermissions.roomID = command.roomID.rawValue; request.setGroupRolePermissions.role = command.role.rawValue; request.setGroupRolePermissions.expectedRevision = command.expectedRevision; request.setGroupRolePermissions.permissions = command.permissions.sorted { $0.rawValue < $1.rawValue }.map { var item = IMV2GroupRolePermission(); item.permission = $0.rawValue; return item }
-        let response = try await requestEnvelope(request)
-        guard case .groupRolePermissionsChanged(let value)? = response.body, value.roomID == command.roomID.rawValue, value.role == command.role.rawValue else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
-        let permissions = Set(value.permissions.compactMap { V2GroupPermission(rawValue: $0.permission) })
-        guard permissions.count == value.permissions.count, permissions == command.permissions else { throw V2RealtimeTransportError.unexpectedResponse }
-        guard value.revision > 0, value.revision <= UInt64(Int64.max),
-              value.roomSequence > 0, value.roomSequence <= UInt64(Int64.max)
-        else { throw V2RealtimeTransportError.unexpectedResponse }
-        guard value.revision - 1 == command.expectedRevision else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(roomID: .init(value.roomID), role: command.role, permissions: permissions, revision: value.revision, roomSequence: value.roomSequence)
-    }
-
-    /// 按预期成员修订变更指定成员角色，并检查响应完整匹配。
-    ///
-    /// - Parameter command: 含稳定操作身份、目标成员、角色及预期成员修订的命令。
-    /// - Returns: 房间、成员和角色匹配，成员修订恰好推进一且房间序列有效的结果。
-    /// - Throws: 响应字段或修订错误，以及服务端或传输错误。
-    ///
-    /// 本方法不修改本地成员目录，持久化状态通过调用方与同步流程收敛。
-    public func changeGroupMemberRole(command: V2GroupMemberRoleCommand) async throws -> V2GroupMemberRoleChange {
-        var request = IMV2Envelope(); request.changeGroupMemberRole = .init(); request.changeGroupMemberRole.operationID = command.operationID.rawValue; request.changeGroupMemberRole.roomID = command.roomID.rawValue; request.changeGroupMemberRole.userID = command.targetUserID.rawValue; request.changeGroupMemberRole.role = command.role.rawValue; request.changeGroupMemberRole.expectedMembershipRevision = command.expectedMembershipRevision
-        let response = try await requestEnvelope(request)
-        guard case .groupMemberRoleChanged(let value)? = response.body, value.roomID == command.roomID.rawValue, value.userID == command.targetUserID.rawValue, value.role == command.role.rawValue else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
-        guard value.membershipRevision > 0, value.membershipRevision <= UInt64(Int64.max),
-              value.roomSequence > 0, value.roomSequence <= UInt64(Int64.max)
-        else { throw V2RealtimeTransportError.unexpectedResponse }
-        guard value.membershipRevision - 1 == command.expectedMembershipRevision else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(roomID: .init(value.roomID), targetUserID: .init(value.userID), role: command.role, membershipRevision: value.membershipRevision, roomSequence: value.roomSequence)
-    }
-
-    /// 提交带来源修订的转发命令，并校验结果覆盖所有来源与目标组合。
-    ///
-    /// - Parameter command: 稳定操作身份、有序来源引用及目标房间。
-    /// - Returns: 保持服务端返回顺序的逐组合结果；顺序不保证与请求组合顺序一致。
-    /// - Throws: 结果身份集合不匹配、组合遗漏或重复、成功与失败字段不一致，以及服务端或传输错误。
-    ///
-    /// 成功项必须有正式消息身份和正房间序列；失败项必须有错误代码、空消息身份和零序列。
-    /// 逐项失败保留在返回数组中，不自动转换为整个请求失败；本方法不重试或持久化结果。
-    public func forwardMessages(command: V2ForwardMessagesCommand) async throws -> [V2ForwardMessageResult] {
-        var request = IMV2Envelope(); request.forwardMessages = .init(); request.forwardMessages.operationID = command.operationID.rawValue; request.forwardMessages.sources = command.sources.map { source in
-            var wire = IMV2ForwardMessageReference()
-            wire.roomID = source.roomID.rawValue
-            wire.messageID = source.messageID.rawValue
-            wire.revision = source.revision.rawValue
-            return wire
-        }; request.forwardMessages.targetRoomIds = command.targetRoomIDs.map(\.rawValue)
-        let response = try await requestEnvelope(request)
-        guard case .messagesForwarded(let body)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
-        let expected = Set(command.sourceMessageIDs.flatMap { source in command.targetRoomIDs.map { source.rawValue + "|" + $0.rawValue } })
-        let results = try body.results.map { value -> V2ForwardMessageResult in
-            let source = try MessageID(value.sourceMessageID), target = try RoomID(value.targetRoomID)
-            if value.errorCode.isEmpty { guard !value.messageID.isEmpty, value.roomSequence > 0, value.roomSequence <= UInt64(Int64.max) else { throw V2RealtimeTransportError.unexpectedResponse }; return try .init(sourceMessageID: source, targetRoomID: target, messageID: try .init(value.messageID), roomSequence: value.roomSequence, errorCode: nil) }
-            guard value.messageID.isEmpty, value.roomSequence == 0 else { throw V2RealtimeTransportError.unexpectedResponse }
-            return try .init(sourceMessageID: source, targetRoomID: target, messageID: nil, roomSequence: nil, errorCode: value.errorCode)
+        guard case .personalPreferenceReceipt(let value)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
+        let receipt = try V2PersonalPreferenceReceiptCodec.decode(value)
+        guard receipt.identity == (try command.identity(actorUserID: receipt.identity.accountID)),
+              receipt.fingerprint == (try command.fingerprint(actorUserID: receipt.identity.accountID)) else { throw V2RealtimeTransportError.unexpectedResponse }
+        if case .committed(.messageFavorite(let favorite)) = receipt.outcome {
+            guard favorite.isFavorited == command.isFavorited, favorite.revision.rawValue > 0,
+                  favorite.revision.rawValue - 1 == command.expectedRevision.rawValue else { throw V2RealtimeTransportError.unexpectedResponse }
         }
-        guard Set(results.map { $0.sourceMessageID.rawValue + "|" + $0.targetRoomID.rawValue }) == expected, results.count == expected.count else { throw V2RealtimeTransportError.unexpectedResponse }
-        return results
-    }
-
-    /// 提交普通成员增删命令并核对修订恰好增加一。
-    ///
-    /// - Parameters:
-    ///   - roomID: 目标房间。
-    ///   - operationID: 稳定成员操作身份。
-    ///   - targetUserID: 目标成员。
-    ///   - action: 添加或移除。
-    ///   - expectedMembershipRevision: 本次操作依据的成员修订。
-    /// - Returns: 动作、房间和目标匹配，修订与房间序列可持久化的结果。
-    /// - Throws: 响应枚举、身份、修订关系或传输错误。
-    ///
-    /// 服务器创建时间直接从毫秒转换，不在此另行检查非负；本地成员投影由后续流程更新。
-    public func changeMembership(roomID: RoomID, operationID: MembershipOperationID, targetUserID: UserID, action: V2RoomMembershipAction, expectedMembershipRevision: UInt64) async throws -> V2ClientMembershipChange {
-        var request = IMV2Envelope()
-        request.changeRoomMembership = .init()
-        request.changeRoomMembership.roomID = roomID.rawValue
-        request.changeRoomMembership.operationID = operationID.rawValue
-        request.changeRoomMembership.targetUserID = targetUserID.rawValue
-        request.changeRoomMembership.action = action == .add ? .add : .remove
-        request.changeRoomMembership.expectedMembershipRevision = expectedMembershipRevision
-        let response = try await requestEnvelope(request)
-        guard case .membershipChanged(let changed)? = response.body else {
-            try throwServerErrorIfPresent(response)
-            throw V2RealtimeTransportError.unexpectedResponse
-        }
-        let returnedAction: V2RoomMembershipAction
-        switch changed.action {
-        case .add: returnedAction = .add
-        case .remove: returnedAction = .remove
-        case .unspecified, .UNRECOGNIZED: throw V2RealtimeTransportError.unexpectedResponse
-        }
-        guard returnedAction == action,
-              changed.roomID == roomID.rawValue,
-              changed.targetUserID == targetUserID.rawValue,
-              changed.membershipRevision > 0, changed.membershipRevision <= UInt64(Int64.max),
-              changed.roomSequence > 0, changed.roomSequence <= UInt64(Int64.max)
-        else { throw V2RealtimeTransportError.unexpectedResponse }
-        guard changed.membershipRevision - 1 == expectedMembershipRevision else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(roomID: .init(changed.roomID), targetUserID: .init(changed.targetUserID), action: returnedAction, membershipRevision: changed.membershipRevision, roomSequence: changed.roomSequence, createdAt: Date(timeIntervalSince1970: TimeInterval(changed.serverCreatedAtMs) / 1_000))
+        return receipt
     }
 
     public func fetchRolePolicyBaseline(roomID: RoomID) async throws -> V2GroupRolePolicyBaseline {
@@ -1350,121 +779,6 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
         case .admin: return .admin
         case .member: return .member
         case .unspecified, .UNRECOGNIZED: throw V2RealtimeTransportError.unexpectedResponse
-        }
-    }
-
-    /// 提交稳定操作身份以打开或建立私聊房间。
-    ///
-    /// - Parameters:
-    ///   - operationID: 本次私聊意图的稳定身份。
-    ///   - targetUserID: 目标用户。
-    /// - Returns: 目标身份与请求一致的房间摘要。
-    /// - Throws: 响应类型、目标身份、领域身份构造、服务端或传输错误。
-    ///
-    /// 创建时间从协议毫秒转换，不在此额外检查非负；本地会话投影仍由后续持久化流程处理。
-    public func openDirectRoom(operationID: DirectRoomOperationID, targetUserID: UserID) async throws -> V2ClientDirectRoom {
-        var request = IMV2Envelope(); request.openDirectRoom = .init()
-        request.openDirectRoom.operationID = operationID.rawValue
-        request.openDirectRoom.targetUserID = targetUserID.rawValue
-        let response = try await requestEnvelope(request)
-        guard case .directRoomOpened(let opened)? = response.body else {
-            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
-        }
-        guard opened.targetUserID == targetUserID.rawValue else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(roomID: .init(opened.roomID), targetUserID: .init(opened.targetUserID), createdAt: Date(timeIntervalSince1970: TimeInterval(opened.createdAtMs) / 1_000))
-    }
-
-    /// 请求建立或恢复指定操作的建群暂存状态。
-    ///
-    /// - Parameters:
-    ///   - operationID: 跨阶段与重试稳定的操作身份。
-    ///   - title: 提交给服务端的群名称。
-    /// - Returns: 身份匹配、数量未超过上限的暂存摘要，名称采用服务端返回值。
-    /// - Throws: 响应、领域值构造、服务端或传输错误。
-    ///
-    /// 返回名称只检查非空，不在此要求与提交名称完全相等；尚未产生可用房间。
-    public func beginGroupRoomCreation(operationID: GroupRoomOperationID, title: String) async throws -> V2ClientGroupAudienceDraft {
-        var request = IMV2Envelope(); request.beginGroupRoomCreation = .init()
-        request.beginGroupRoomCreation.operationID = operationID.rawValue
-        request.beginGroupRoomCreation.title = title
-        let response = try await requestEnvelope(request)
-        guard case .groupRoomCreationPrepared(let prepared)? = response.body,
-              prepared.operationID == operationID.rawValue,
-              prepared.stagedMemberCount <= UInt32(V2GroupCapacityPolicy.largeMaximumMembers - 1)
-        else {
-            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
-        }
-        return try .init(operationID: .init(prepared.operationID), title: prepared.title, stagedMemberCount: Int(prepared.stagedMemberCount))
-    }
-
-    /// 向建群暂存状态追加一批成员身份。
-    ///
-    /// - Parameters:
-    ///   - operationID: 已持久化的建群操作身份。
-    ///   - memberUserIDs: 非空且不超过单次追加预算的身份数组，按原顺序编码，不在此去重。
-    /// - Returns: 服务端累计暂存数量；返回对象的 title 为占位值 staged，不能用于更新群名称。
-    /// - Throws: 输入数量、响应归属及上限、服务端或传输错误。
-    ///
-    /// 本方法不要求累计数恰好增加输入数量，去重及幂等语义由服务端负责。
-    public func appendGroupRoomCreationMembers(operationID: GroupRoomOperationID, memberUserIDs: [UserID]) async throws -> V2ClientGroupAudienceDraft {
-        guard !memberUserIDs.isEmpty, memberUserIDs.count <= V2GroupAudienceImportLimits.maximumMembersPerAppend else {
-            throw V2RealtimeTransportError.unexpectedResponse
-        }
-        var request = IMV2Envelope(); request.appendGroupRoomCreationMembers = .init()
-        request.appendGroupRoomCreationMembers.operationID = operationID.rawValue
-        request.appendGroupRoomCreationMembers.memberUserIds = memberUserIDs.map(\.rawValue)
-        let response = try await requestEnvelope(request)
-        guard case .groupRoomCreationMembersAppended(let appended)? = response.body,
-              appended.operationID == operationID.rawValue,
-              appended.stagedMemberCount <= UInt32(V2GroupCapacityPolicy.largeMaximumMembers - 1)
-        else {
-            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
-        }
-        return try .init(operationID: operationID, title: "staged", stagedMemberCount: Int(appended.stagedMemberCount))
-    }
-
-    /// 请求完成建群并校验正式房间摘要。
-    ///
-    /// - Parameter operationID: 与暂存阶段相同的稳定操作身份。
-    /// - Returns: 名称非空、投递模式已识别且成员总数为正的房间；当前响应合同要求成员身份数组为空。
-    /// - Throws: 响应字段、身份构造、服务端或传输错误。
-    ///
-    /// 完整名单按需分页读取，不依赖建群确认返回；此方法不负责本地命令终态落盘。
-    public func finalizeGroupRoomCreation(operationID: GroupRoomOperationID) async throws -> V2ClientGroupRoom {
-        var request = IMV2Envelope(); request.finalizeGroupRoomCreation = .init()
-        request.finalizeGroupRoomCreation.operationID = operationID.rawValue
-        let response = try await requestEnvelope(request)
-        guard case .groupRoomCreated(let created)? = response.body else {
-            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
-        }
-        let returnedCapacityClass: V2GroupCapacityClass = switch created.capacityClass {
-        case .standard: .standard
-        case .large: .large
-        case .unspecified, .UNRECOGNIZED: throw V2RealtimeTransportError.unexpectedResponse
-        }
-        let members = try created.memberUserIds.map { try UserID($0) }
-        guard !created.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              members.count == Set(members).count,
-              created.memberCount > 0,
-              members.isEmpty
-        else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(roomID: .init(created.roomID), title: created.title, capacityClass: returnedCapacityClass, memberUserIDs: members, memberCount: created.memberCount, createdAt: Date(timeIntervalSince1970: TimeInterval(created.createdAtMs) / 1_000))
-    }
-
-    /// 取消服务端可变建群草稿，并核对确认中的操作身份。
-    ///
-    /// - Parameter operationID: 要取消的稳定建群操作身份。
-    /// - Throws: 响应身份或类型、服务端或传输错误。
-    ///
-    /// 调用方需先按业务策略持久化本地取消意图，此方法不能替代本地状态迁移。
-    public func cancelGroupRoomCreation(operationID: GroupRoomOperationID) async throws {
-        var request = IMV2Envelope(); request.cancelGroupRoomCreation = .init()
-        request.cancelGroupRoomCreation.operationID = operationID.rawValue
-        let response = try await requestEnvelope(request)
-        guard case .groupRoomCreationCancelled(let cancelled)? = response.body,
-              cancelled.operationID == operationID.rawValue
-        else {
-            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
         }
     }
 
@@ -1591,19 +905,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
     /// - Throws: 未知权限枚举、响应权限与请求不符，以及服务端或传输错误。
     ///
     /// 此方法不持久化本地偏好，调用者应结合服务器结果和同步状态更新界面。
-    public func setStrangerMessagePermission(operationID: StrangerMessagePreferenceOperationID, permission: V2StrangerMessagePermission) async throws -> Date {
-        var request = IMV2Envelope(); request.setStrangerMessagePermission = .init()
-        request.setStrangerMessagePermission.operationID = operationID.rawValue
-        request.setStrangerMessagePermission.permission = permission == .allow ? .allow : .deny
-        let response = try await requestEnvelope(request)
-        guard case .strangerMessagePermissionSet(let result)? = response.body else {
-            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
-        }
-        let returned: V2StrangerMessagePermission
-        switch result.permission { case .allow: returned = .allow; case .deny: returned = .deny; case .unspecified, .UNRECOGNIZED: throw V2RealtimeTransportError.unexpectedResponse }
-        guard returned == permission else { throw V2RealtimeTransportError.unexpectedResponse }
-        return Date(timeIntervalSince1970: TimeInterval(result.updatedAtMs) / 1_000)
-    }
+
 
     /// 设置账户的用户添加权限并要求服务器回显相同设置。
     ///
@@ -1614,19 +916,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
     /// - Throws: 未知权限枚举、响应权限与请求不符，以及服务端或传输错误。
     ///
     /// 此方法不持久化本地偏好，调用者应结合服务器结果和同步状态更新界面。
-    public func setUserAddPermission(operationID: UserAddPreferenceOperationID, permission: V2UserAddPermission) async throws -> Date {
-        var request = IMV2Envelope(); request.setUserAddPermission = .init()
-        request.setUserAddPermission.operationID = operationID.rawValue
-        request.setUserAddPermission.permission = permission == .allow ? .allow : .deny
-        let response = try await requestEnvelope(request)
-        guard case .userAddPermissionSet(let result)? = response.body else {
-            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
-        }
-        let returned: V2UserAddPermission
-        switch result.permission { case .allow: returned = .allow; case .deny: returned = .deny; case .unspecified, .UNRECOGNIZED: throw V2RealtimeTransportError.unexpectedResponse }
-        guard returned == permission else { throw V2RealtimeTransportError.unexpectedResponse }
-        return Date(timeIntervalSince1970: TimeInterval(result.updatedAtMs) / 1_000)
-    }
+
 
     /// 提交关系申请、接受、拒绝或移除操作，并映射服务器结果。
     ///
@@ -1639,20 +929,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
     ///
     /// 当前实现直接采用响应中的目标用户身份，未与请求目标再次比较；也不在此校验动作与结果状态的组合。
     /// 更新时间从毫秒转换，不额外检查非负。
-    public func changeRelationship(operationID: RelationshipOperationID, targetUserID: UserID, action: V2RelationshipAction) async throws -> V2ClientRelationshipChange {
-        var request = IMV2Envelope(); request.changeRelationship = .init()
-        request.changeRelationship.operationID = operationID.rawValue
-        request.changeRelationship.targetUserID = targetUserID.rawValue
-        request.changeRelationship.action = switch action { case .request: .request; case .accept: .accept; case .reject: .reject; case .remove: .remove }
-        let response = try await requestEnvelope(request)
-        guard case .relationshipChanged(let result)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
-        let returnedAction: V2RelationshipAction
-        switch result.action { case .request: returnedAction = .request; case .accept: returnedAction = .accept; case .reject: returnedAction = .reject; case .remove: returnedAction = .remove; case .unspecified, .UNRECOGNIZED: throw V2RealtimeTransportError.unexpectedResponse }
-        let state: V2RelationshipState
-        switch result.resultingState { case .none: state = .none; case .pending: state = .pending; case .accepted: state = .accepted; case .unspecified, .UNRECOGNIZED: throw V2RealtimeTransportError.unexpectedResponse }
-        guard returnedAction == action else { throw V2RealtimeTransportError.unexpectedResponse }
-        return .init(targetUserID: try .init(result.targetUserID), action: returnedAction, resultingState: state, updatedAt: Date(timeIntervalSince1970: TimeInterval(result.updatedAtMs) / 1_000))
-    }
+
 
     /// 提交屏蔽或解除屏蔽，并核对目标、动作与结果标志。
     ///
@@ -1664,79 +941,9 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
     /// - Throws: 响应类型、枚举或字段不匹配，以及服务端或传输错误。
     ///
     /// 不自动修改本地关系图；更新时间转换后不额外检查非负。
-    public func changeUserBlock(operationID: UserBlockOperationID, targetUserID: UserID, action: V2UserBlockAction) async throws -> V2ClientUserBlockChange {
-        var request = IMV2Envelope(); request.changeUserBlock = .init()
-        request.changeUserBlock.operationID = operationID.rawValue
-        request.changeUserBlock.targetUserID = targetUserID.rawValue
-        request.changeUserBlock.action = action == .block ? .block : .unblock
-        let response = try await requestEnvelope(request)
-        guard case .userBlockChanged(let result)? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
-        let returnedAction: V2UserBlockAction
-        switch result.action { case .block: returnedAction = .block; case .unblock: returnedAction = .unblock; case .unspecified, .UNRECOGNIZED: throw V2RealtimeTransportError.unexpectedResponse }
-        guard returnedAction == action, result.targetUserID == targetUserID.rawValue, result.isBlocked == (action == .block) else { throw V2RealtimeTransportError.unexpectedResponse }
-        return .init(targetUserID: targetUserID, action: returnedAction, isBlocked: result.isBlocked, updatedAt: Date(timeIntervalSince1970: TimeInterval(result.updatedAtMs) / 1_000))
-    }
 
-    /// 请求撤回消息并验证响应修订恰好比预期修订增加一。
-    ///
-    /// - Parameters:
-    ///   - roomID: 消息所属房间。
-    ///   - operationID: 跨重试稳定的撤回操作身份。
-    ///   - messageID: 要撤回的消息。
-    ///   - expectedMessageRevision: 客户端当前预期修订。
-    /// - Returns: 房间和消息身份匹配、修订与房间位置可持久化的撤回回执。
-    /// - Throws: 响应身份、修订、房间序列错误，或服务端与传输错误。
-    ///
-    /// 成功响应不自动修改本地投影。本层转换服务器时间，但不额外检查该时间非负。
-    public func withdrawMessage(roomID: RoomID, operationID: MessageWithdrawalOperationID, messageID: MessageID, expectedMessageRevision: UInt64) async throws -> V2ClientMessageWithdrawal {
-        var request = IMV2Envelope()
-        request.withdrawMessage = .init()
-        request.withdrawMessage.roomID = roomID.rawValue
-        request.withdrawMessage.operationID = operationID.rawValue
-        request.withdrawMessage.messageID = messageID.rawValue
-        request.withdrawMessage.expectedMessageRevision = expectedMessageRevision
-        let response = try await requestEnvelope(request)
-        guard case .messageWithdrawn(let withdrawn)? = response.body else {
-            try throwServerErrorIfPresent(response)
-            throw V2RealtimeTransportError.unexpectedResponse
-        }
-        guard withdrawn.roomID == roomID.rawValue, withdrawn.messageID == messageID.rawValue,
-              withdrawn.messageRevision > expectedMessageRevision, withdrawn.messageRevision <= UInt64(Int64.max),
-              withdrawn.roomSequence > 0, withdrawn.roomSequence <= UInt64(Int64.max)
-        else { throw V2RealtimeTransportError.unexpectedResponse }
-        guard withdrawn.messageRevision - 1 == expectedMessageRevision else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(roomID: .init(withdrawn.roomID), messageID: .init(withdrawn.messageID), messageRevision: withdrawn.messageRevision, roomSequence: withdrawn.roomSequence, createdAt: Date(timeIntervalSince1970: TimeInterval(withdrawn.serverCreatedAtMs) / 1_000))
-    }
 
-    /// 提交带审核原因的消息屏蔽操作并验证回执。
-    ///
-    /// - Parameters:
-    ///   - roomID: 目标房间。
-    ///   - operationID: 稳定审核操作身份。
-    ///   - messageID: 被屏蔽消息。
-    ///   - reasonCode: 审核原因代码。
-    /// - Returns: 身份匹配、消息修订大于一且房间序列有效的回执。
-    /// - Throws: 响应字段、服务端或传输错误。
-    ///
-    /// 此操作没有客户端预期修订参数，不执行恰好增加一的比较。权限与审核记录由服务端负责。
-    public func redactMessage(roomID: RoomID, operationID: ModerationOperationID, messageID: MessageID, reasonCode: V2ModerationReasonCode) async throws -> V2ClientMessageRedaction {
-        var request = IMV2Envelope()
-        request.moderateMessage = .init()
-        request.moderateMessage.roomID = roomID.rawValue
-        request.moderateMessage.operationID = operationID.rawValue
-        request.moderateMessage.messageID = messageID.rawValue
-        request.moderateMessage.reasonCode = reasonCode.rawValue
-        let response = try await requestEnvelope(request)
-        guard case .messageRedacted(let redacted)? = response.body else {
-            try throwServerErrorIfPresent(response)
-            throw V2RealtimeTransportError.unexpectedResponse
-        }
-        guard redacted.roomID == roomID.rawValue, redacted.messageID == messageID.rawValue,
-              redacted.messageRevision > 1, redacted.messageRevision <= UInt64(Int64.max),
-              redacted.roomSequence > 0, redacted.roomSequence <= UInt64(Int64.max)
-        else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(roomID: .init(redacted.roomID), messageID: .init(redacted.messageID), messageRevision: redacted.messageRevision, roomSequence: redacted.roomSequence, createdAt: Date(timeIntervalSince1970: TimeInterval(redacted.serverCreatedAtMs) / 1_000))
-    }
+
 
     /// 把禁言期限安全转换为毫秒后提交，并核对服务端回显。
     ///
@@ -1750,28 +957,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
     /// - Throws: 时间不可表示、响应不匹配、服务端或传输错误。
     ///
     /// 此处不读取当前时间，禁言期限是否晚于现在由服务端决定。
-    public func muteMember(roomID: RoomID, operationID: ModerationOperationID, targetUserID: UserID, muteUntil: Date, reasonCode: V2ModerationReasonCode) async throws -> V2ClientMemberMute {
-        guard let muteUntilMilliseconds = Int64(exactly: (muteUntil.timeIntervalSince1970 * 1_000).rounded(.towardZero)),
-              muteUntilMilliseconds > 0
-        else { throw V2RealtimeTransportError.unexpectedResponse }
-        var request = IMV2Envelope(); request.muteMember = .init()
-        request.muteMember.roomID = roomID.rawValue
-        request.muteMember.operationID = operationID.rawValue
-        request.muteMember.targetUserID = targetUserID.rawValue
-        request.muteMember.muteUntilMs = muteUntilMilliseconds
-        request.muteMember.reasonCode = reasonCode.rawValue
-        let response = try await requestEnvelope(request)
-        guard case .memberMuted(let muted)? = response.body else {
-            try throwServerErrorIfPresent(response)
-            throw V2RealtimeTransportError.unexpectedResponse
-        }
-        guard muted.roomID == roomID.rawValue, muted.targetUserID == targetUserID.rawValue,
-              muted.muteUntilMs == muteUntilMilliseconds, muted.roomSequence > 0,
-              muted.roomSequence <= UInt64(Int64.max),
-              muted.serverCreatedAtMs >= 0
-        else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(roomID: .init(muted.roomID), targetUserID: .init(muted.targetUserID), muteUntil: Date(timeIntervalSince1970: TimeInterval(muted.muteUntilMs) / 1_000), roomSequence: muted.roomSequence, createdAt: Date(timeIntervalSince1970: TimeInterval(muted.serverCreatedAtMs) / 1_000))
-    }
+
 
     /// 提交独立审核移除命令并校验结果。
     ///
@@ -1784,59 +970,9 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
     /// - Throws: 响应校验、服务端或传输错误。
     ///
     /// 本方法不携带预期成员修订，因此不执行与客户端旧修订的递增关系检查。
-    public func removeMemberByModerator(roomID: RoomID, operationID: ModerationOperationID, targetUserID: UserID, reasonCode: V2ModerationReasonCode) async throws -> V2ClientModeratedMemberRemoval {
-        var request = IMV2Envelope(); request.moderateMemberRemoval = .init()
-        request.moderateMemberRemoval.roomID = roomID.rawValue
-        request.moderateMemberRemoval.operationID = operationID.rawValue
-        request.moderateMemberRemoval.targetUserID = targetUserID.rawValue
-        request.moderateMemberRemoval.reasonCode = reasonCode.rawValue
-        let response = try await requestEnvelope(request)
-        guard case .memberRemovedByModerator(let removed)? = response.body else {
-            try throwServerErrorIfPresent(response)
-            throw V2RealtimeTransportError.unexpectedResponse
-        }
-        guard removed.roomID == roomID.rawValue, removed.targetUserID == targetUserID.rawValue,
-              removed.membershipRevision > 0, removed.roomSequence > 0,
-              removed.membershipRevision <= UInt64(Int64.max), removed.roomSequence <= UInt64(Int64.max),
-              removed.serverCreatedAtMs >= 0
-        else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(roomID: .init(removed.roomID), targetUserID: .init(removed.targetUserID), membershipRevision: removed.membershipRevision, roomSequence: removed.roomSequence, createdAt: Date(timeIntervalSince1970: TimeInterval(removed.serverCreatedAtMs) / 1_000))
-    }
 
-    /// 提交文本编辑，并验证回执保留请求文本且修订恰好推进一。
-    ///
-    /// - Parameters:
-    ///   - roomID: 消息房间。
-    ///   - operationID: 稳定编辑操作身份。
-    ///   - messageID: 被编辑消息。
-    ///   - expectedMessageRevision: 编辑所依据的修订。
-    ///   - text: 新文本，按原样发送。
-    /// - Returns: 身份和文本匹配、修订与房间位置有效的编辑结果。
-    /// - Throws: 响应不一致、服务端或传输错误。
-    ///
-    /// 此适配方法只设置文本字段，不进行本地正文校验或投影持久化；服务器时间转换后不额外检查正负。
-    public func editMessage(roomID: RoomID, operationID: MessageEditOperationID, messageID: MessageID, expectedMessageRevision: UInt64, text: String) async throws -> V2ClientMessageEdit {
-        var request = IMV2Envelope()
-        request.editMessage = .init()
-        request.editMessage.roomID = roomID.rawValue
-        request.editMessage.operationID = operationID.rawValue
-        request.editMessage.messageID = messageID.rawValue
-        request.editMessage.expectedMessageRevision = expectedMessageRevision
-        request.editMessage.content = .init()
-        request.editMessage.content.text = text
-        let response = try await requestEnvelope(request)
-        guard case .messageEdited(let edited)? = response.body else {
-            try throwServerErrorIfPresent(response)
-            throw V2RealtimeTransportError.unexpectedResponse
-        }
-        guard edited.roomID == roomID.rawValue, edited.messageID == messageID.rawValue,
-              edited.text == text, edited.messageRevision > expectedMessageRevision,
-              edited.messageRevision <= UInt64(Int64.max),
-              edited.roomSequence > 0, edited.roomSequence <= UInt64(Int64.max)
-        else { throw V2RealtimeTransportError.unexpectedResponse }
-        guard edited.messageRevision - 1 == expectedMessageRevision else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(roomID: .init(edited.roomID), messageID: .init(edited.messageID), text: edited.text, messageRevision: edited.messageRevision, roomSequence: edited.roomSequence, createdAt: Date(timeIntervalSince1970: TimeInterval(edited.serverCreatedAtMs) / 1_000))
-    }
+
+
 
     /// 提交已读水位并接受服务器保留的更高水位。
     ///
@@ -1873,17 +1009,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
     /// - Throws: 响应类型或时间错误，以及服务端或传输错误。
     ///
     /// 本层不要求返回的两个布尔值与请求完全相等，也不自动保存本地设置。
-    public func setReadReceiptPreferences(operationID: ReadReceiptPreferenceOperationID, allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2ReadReceiptPreferences {
-        var request = IMV2Envelope(); request.setReadReceiptPreferences = .init()
-        request.setReadReceiptPreferences.operationID = operationID.rawValue
-        request.setReadReceiptPreferences.allowsDirectReadReceipts = allowsDirectReadReceipts
-        request.setReadReceiptPreferences.allowsGroupReadReceipts = allowsGroupReadReceipts
-        let response = try await requestEnvelope(request)
-        guard case .readReceiptPreferencesSet(let result)? = response.body, result.updatedAtMs >= 0 else {
-            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
-        }
-        return .init(allowsDirectReadReceipts: result.allowsDirectReadReceipts, allowsGroupReadReceipts: result.allowsGroupReadReceipts, updatedAt: Date(timeIntervalSince1970: TimeInterval(result.updatedAtMs) / 1_000))
-    }
+
 
     /// 分页读取有权查看的消息已读者及公开资料。
     ///
@@ -1928,19 +1054,18 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
     ///   - allowsTypingIndicators: 是否允许输入指示。
     /// - Returns: 服务端偏好及非负更新时间，不在此要求返回值与请求逐项相等。
     /// - Throws: 响应类型、时间、服务端或传输错误。
-    public func setLiveActivityPreferences(operationID: LiveActivityPreferenceOperationID, allowsOnlinePresence: Bool, allowsTypingIndicators: Bool) async throws -> V2LiveActivityPreferences {
-        var request = IMV2Envelope(); request.setLiveActivityPreferences = .init()
-        request.setLiveActivityPreferences.operationID = operationID.rawValue
-        request.setLiveActivityPreferences.allowsOnlinePresence = allowsOnlinePresence
-        request.setLiveActivityPreferences.allowsTypingIndicators = allowsTypingIndicators
-        let response = try await requestEnvelope(request)
-        guard case .liveActivityPreferencesSet(let result)? = response.body, result.updatedAtMs >= 0 else {
-            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
-        }
-        return .init(allowsOnlinePresence: result.allowsOnlinePresence, allowsTypingIndicators: result.allowsTypingIndicators, updatedAt: Date(timeIntervalSince1970: TimeInterval(result.updatedAtMs) / 1_000))
-    }
+
 
     /// 读取服务器当前在线及输入指示偏好，要求响应类型匹配且更新时间非负；不在此持久化缓存。
+    public func setPresencePublicationMode(_ mode:V2PresencePublicationMode) async throws {
+        var request=IMV2Envelope();request.presencePublicationControl = .init()
+        request.presencePublicationControl.mode = mode == .suppressed ? .suppressed:.allowWhenAuthorized
+        let response=try await requestEnvelope(request)
+        guard case .presencePublicationControlled(let echo)?=response.body,echo.mode==request.presencePublicationControl.mode else {
+            try throwServerErrorIfPresent(response);throw V2RealtimeTransportError.unexpectedResponse
+        }
+    }
+
     public func liveActivityPreferences() async throws -> V2LiveActivityPreferences {
         var request = IMV2Envelope(); request.getLiveActivityPreferences = .init()
         let response = try await requestEnvelope(request)
@@ -2001,38 +1126,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
         guard case .acknowledged? = response.body else { try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse }
     }
 
-    /// 提交表情变更并核对房间、消息、表情内容与动作。
-    ///
-    /// - Parameters:
-    ///   - roomID: 消息所属房间。
-    ///   - operationID: 重试间保持稳定的表情操作身份。
-    ///   - messageID: 目标消息。
-    ///   - reaction: 按原样发送的表情内容。
-    ///   - action: 添加或移除。
-    /// - Returns: 字段匹配且房间序列为正、可持久化的表情回执。
-    /// - Throws: 未知动作、响应不匹配、身份构造、服务端或传输错误。
-    ///
-    /// 执行用户取自响应并构造领域身份，不在此与本地账户再次比较。创建时间从毫秒转换，不额外检查非负。
-    /// 此方法不更新本地表情投影，也不自动重试。
-    public func changeMessageReaction(roomID: RoomID, operationID: MessageReactionOperationID, messageID: MessageID, reaction: String, action: V2MessageReactionAction) async throws -> V2ClientMessageReactionChange {
-        var request = IMV2Envelope(); request.changeMessageReaction = .init()
-        request.changeMessageReaction.roomID = roomID.rawValue
-        request.changeMessageReaction.operationID = operationID.rawValue
-        request.changeMessageReaction.messageID = messageID.rawValue
-        request.changeMessageReaction.reaction = reaction
-        request.changeMessageReaction.action = action == .add ? .add : .remove
-        let response = try await requestEnvelope(request)
-        guard case .messageReactionChanged(let changed)? = response.body else {
-            try throwServerErrorIfPresent(response); throw V2RealtimeTransportError.unexpectedResponse
-        }
-        let returnedAction: V2MessageReactionAction
-        switch changed.action { case .add: returnedAction = .add; case .remove: returnedAction = .remove; case .unspecified, .UNRECOGNIZED: throw V2RealtimeTransportError.unexpectedResponse }
-        guard changed.roomID == roomID.rawValue, changed.messageID == messageID.rawValue,
-              changed.reaction == reaction, returnedAction == action,
-              changed.roomSequence > 0, changed.roomSequence <= UInt64(Int64.max)
-        else { throw V2RealtimeTransportError.unexpectedResponse }
-        return try .init(roomID: .init(changed.roomID), messageID: .init(changed.messageID), actorUserID: .init(changed.actorUserID), reaction: changed.reaction, action: returnedAction, roomSequence: changed.roomSequence, createdAt: Date(timeIntervalSince1970: TimeInterval(changed.serverCreatedAtMs) / 1_000))
-    }
+
 
     /// 分配非零请求号、写入协商版本并执行一轮帧请求。
     ///

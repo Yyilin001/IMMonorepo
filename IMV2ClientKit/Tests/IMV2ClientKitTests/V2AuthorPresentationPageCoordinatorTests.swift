@@ -383,8 +383,7 @@ private actor PageWire: V2AuthorPresentationSource, V2ClientAuthorPresentationSu
     func subscribePresence(roomID: RoomID) throws -> V2PresenceState { throw CancellationError() }
     func unsubscribePresence(roomID: RoomID) {}
     func liveActivityPreferences() throws -> V2LiveActivityPreferences { throw CancellationError() }
-    func setLiveActivityPreferences(operationID: LiveActivityPreferenceOperationID, allowsOnlinePresence: Bool,
-                                   allowsTypingIndicators: Bool) throws -> V2LiveActivityPreferences { throw CancellationError() }
+
     func nextGroupEventAvailabilityHint() async throws -> V2GroupEventAvailabilityHint {
         try await Task.sleep(for: .seconds(60)); throw CancellationError()
     }

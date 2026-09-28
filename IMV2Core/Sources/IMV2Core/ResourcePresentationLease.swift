@@ -62,9 +62,11 @@ public struct V2AuthorizedProfilePresentation: Equatable, Codable, Sendable {
     /// Room-local content under this same recipient/context lease. Nil means
     /// no nickname row; a cleared nickname retains its nonzero row revision.
     public let groupMember: V2GroupMemberPresentation?
+    /// Private owner field bound to this recipient and target. A cleared row retains its revision.
+    public let contactAlias: V2ContactAlias?
 
     public init(view: V2ProfileView, lease: V2PresentationAccessLease,
-                groupMember: V2GroupMemberPresentation? = nil) throws {
+                groupMember: V2GroupMemberPresentation? = nil, contactAlias: V2ContactAlias? = nil) throws {
         guard view.userID == lease.key.userID, view.revision == lease.profileRevision,
               view.visibilityRevision == lease.visibilityRevision
         else { throw V2ResourceValidationError.invalidPresentationLease }
@@ -78,14 +80,23 @@ public struct V2AuthorizedProfilePresentation: Equatable, Codable, Sendable {
                     groupNickname: groupMember.groupNickname, revision: groupMember.revision) == groupMember
             else { throw V2ResourceValidationError.invalidPresentationLease }
         }
+        if let contactAlias {
+            guard view.state == .active, contactAlias.ownerUserID == lease.actorUserID,
+                  contactAlias.targetUserID == view.userID, contactAlias.ownerUserID != contactAlias.targetUserID,
+                  try V2ContactAlias(ownerUserID: contactAlias.ownerUserID, targetUserID: view.userID,
+                    remarkName: contactAlias.remarkName, revision: contactAlias.revision) == contactAlias
+            else { throw V2ResourceValidationError.invalidPresentationLease }
+        }
         self.lease = lease
         self.groupMember = groupMember
+        self.contactAlias = contactAlias
     }
 
-    private enum CodingKeys: String, CodingKey { case view, lease, groupMember }
+    private enum CodingKeys: String, CodingKey { case view, lease, groupMember, contactAlias }
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(view: values.decode(V2ProfileView.self, forKey: .view), lease: values.decode(V2PresentationAccessLease.self, forKey: .lease),
-                      groupMember: values.decodeIfPresent(V2GroupMemberPresentation.self, forKey: .groupMember))
+                      groupMember: values.decodeIfPresent(V2GroupMemberPresentation.self, forKey: .groupMember),
+                      contactAlias: values.decodeIfPresent(V2ContactAlias.self, forKey: .contactAlias))
     }
 }

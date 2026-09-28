@@ -16,6 +16,7 @@ public protocol V2GroupAvatarOperationRecovering: Sendable {
 
 public enum V2GroupAvatarSubmissionError: Error, Equatable, Sendable {
     case authorizationUnavailable
+    case authorizationDenied
     case outcomeUnknown
     case invalidResponse
     /// A status hint, not a closure proof. Resolve through the recovery endpoint.
@@ -55,7 +56,7 @@ public struct V2HTTPGroupAvatarCommandClient: V2GroupAvatarCommandSubmitting, V2
         do { value = try JSONDecoder().decode(V2GroupAvatarCommandResponse.self, from: data) }
         catch {
             // A control-domain denial is deliberately not a room receipt.
-            if response.statusCode == 403 { throw V2GroupAvatarSubmissionError.authorizationUnavailable }
+            if response.statusCode == 403 { throw V2GroupAvatarSubmissionError.authorizationDenied }
             throw V2GroupAvatarSubmissionError.invalidResponse
         }
         guard value.actorUserID == actorUserID, value.deviceID == deviceID, value.command == command else {
@@ -76,7 +77,7 @@ public struct V2HTTPGroupAvatarCommandClient: V2GroupAvatarCommandSubmitting, V2
         let endpoint = roomsEndpoint.appendingPathComponent(request.command.roomID.rawValue)
             .appendingPathComponent("avatar").appendingPathComponent("recovery")
         let (data, response, deviceID) = try await send(body: request, endpoint: endpoint)
-        if response.statusCode == 403 { throw V2GroupAvatarSubmissionError.authorizationUnavailable }
+        if response.statusCode == 403 { throw V2GroupAvatarSubmissionError.authorizationDenied }
         guard response.statusCode == 200 else { throw V2GroupAvatarSubmissionError.outcomeUnknown }
         guard data.count <= 16 * 1_024, V2HTTPContract.isJSON(response) else { throw V2GroupAvatarSubmissionError.invalidResponse }
         let value: V2GroupAvatarRecoveryResponse
@@ -97,9 +98,12 @@ public struct V2HTTPGroupAvatarCommandClient: V2GroupAvatarCommandSubmitting, V2
         }
         var request = URLRequest(url: endpoint, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 15)
         request.httpMethod = "POST"
-        request.httpBody = try JSONEncoder().encode(body)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        request.httpBody = try encoder.encode(body)
         request.setValue("Bearer \(identity.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue(identity.deviceID.rawValue, forHTTPHeaderField: "X-IM-Device-ID")
+        V2HTTPRequestDeadline.attach(identity.requestDeadline, to: &request)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
@@ -107,14 +111,17 @@ public struct V2HTTPGroupAvatarCommandClient: V2GroupAvatarCommandSubmitting, V2
         let response: HTTPURLResponse
         do { (data, response) = try await transport.data(for: request) }
         catch is CancellationError { throw CancellationError() }
+        catch let failure as V2HTTPFailure { throw failure }
+        catch let error as V2AuthSessionError { throw error }
         catch { throw V2GroupAvatarSubmissionError.outcomeUnknown }
         // Even cancellation after send does not prove that the room did not commit.
         try Task.checkCancellation()
         switch response.statusCode {
         case 401: throw V2GroupAvatarSubmissionError.authorizationUnavailable
         case 429:
-            let raw = response.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init) ?? 1
-            throw V2GroupAvatarSubmissionError.throttled(retryAfter: raw.isFinite ? min(60, max(1, raw)) : 1)
+            let now = Date()
+            let retry = V2RetryAfter.date(from: response.value(forHTTPHeaderField: "Retry-After"), now: now)
+            throw V2GroupAvatarSubmissionError.throttled(retryAfter: retry.map { max(0,$0.timeIntervalSince(now)) } ?? 1)
         default: break
         }
         return (data, response, identity.deviceID)

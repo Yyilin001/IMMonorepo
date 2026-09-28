@@ -8,6 +8,36 @@ import Testing
 
 @MainActor
 struct V2ContactsStoreTests {
+    @Test(arguments: [false, true])
+    func refreshFailureRetainsTransientContentButRevokesDeniedContent(denied: Bool) async throws {
+        let account = try UserID("00000000-0000-0000-0000-000000000801")
+        let friend = try makeIdentity(userID: "00000000-0000-0000-0000-000000000802", handle: "alice", displayName: "Alice")
+        let source = ContactsDataSourceFake(projections: [.init(userID: friend.userID, state: .accepted,
+            requestedByUserID: account, updatedAt: .now, publicIdentity: friend)], hydratedProfiles: [:])
+        let changer = RelationshipChangerFake(outcome: .accepted)
+        let store = makeStore(dataSource: source, currentUserID: account, relationshipChanger: changer)
+        await store.refresh()
+        let item = try #require(store.friends.first)
+        await source.setReadFailure(.init(kind: denied ? .httpStatus : .transport, service: "contacts", statusCode: denied ? 403 : nil))
+        await store.refresh()
+        #expect(store.state == (denied ? .failed : .loaded))
+        #expect(store.friends.count == (denied ? 0 : 1))
+        #expect(store.isStale == !denied)
+        #expect(store.readFeedback != nil)
+        #expect(!store.canUseContactActions)
+        await store.remove(item)
+        #expect(await changer.actions().isEmpty)
+        #expect(await store.openConversation(with: item) == nil)
+        await source.setReadFailure(nil)
+        await store.refresh()
+        #expect(store.state == .loaded)
+        #expect(!store.isStale)
+        #expect(store.readFeedback == nil)
+        #expect(store.canUseContactActions)
+        await store.remove(item)
+        #expect(await changer.actions() == [.remove])
+    }
+
     @Test func refreshGroupsRelationshipProjectionsAndHydratesMissingContactCards() async throws {
         let currentUserID = try UserID("00000000-0000-0000-0000-000000000801")
         let friend = try makeIdentity(userID: "00000000-0000-0000-0000-000000000802", handle: "alice", displayName: "Alice")
@@ -613,6 +643,8 @@ private actor ContactsDataSourceFake: V2ContactsReading {
     private var projections: [V2ContactProjection]
     private let hydratedProfiles: [UserID: V2PublicIdentity]
     private var requests: [[UserID]] = []
+    private var readFailure: V2HTTPFailure?
+    func setReadFailure(_ failure: V2HTTPFailure?) { readFailure = failure }
 
     func remove(userID: UserID) { projections.removeAll { $0.userID == userID } }
 
@@ -628,6 +660,7 @@ private actor ContactsDataSourceFake: V2ContactsReading {
         limit: Int,
         includeTotalCount: Bool
     ) async throws -> V2ContactProjectionPage {
+        if let readFailure { throw readFailure }
         let normalizedQuery = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let candidates = projections
             .filter { projection in

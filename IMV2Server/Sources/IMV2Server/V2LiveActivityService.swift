@@ -40,7 +40,6 @@ public protocol V2LiveActivityStore: Sendable {
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 变更结果。
     /// - Throws: 持久化失败时抛出。
-    func setPreferences(command: V2SetLiveActivityPreferencesCommand, now: Date) async throws -> V2SetLiveActivityPreferencesOutcome
 
     /// 读取当前用户的实时状态偏好。
     ///
@@ -95,6 +94,9 @@ public protocol V2LiveActivityStore: Sendable {
 /// 连接生命周期负责租约，请求处理层负责房间授权；两个协议分开声明可以避免
 /// 一个套接字因此获得数据库授权能力。
 public protocol V2LivePresenceLeaseManaging: Sendable {
+    func setPresencePublication(identity: V2AuthenticatedConnection, connectionID: UUID,
+        suppressed: Bool, now: Date) async throws -> V2PresencePublicationLeaseObservation
+
     /// 以跨副本的设备与用户预算准入一条新的已认证连接。
     ///
     /// 该步骤与续租刻意分开，使常规心跳不会重复执行只有连接建立时才需要的加锁与聚合统计。
@@ -109,6 +111,7 @@ public protocol V2LivePresenceLeaseManaging: Sendable {
     func admitConnection(
         identity: V2AuthenticatedConnection,
         connectionID: UUID,
+        publicationSuppressed: Bool,
         policy: V2AuthenticatedConnectionAdmissionPolicy,
         now: Date
     ) async throws -> V2AuthenticatedConnectionLeaseOutcome
@@ -261,9 +264,7 @@ public struct V2LiveActivityService: Sendable, V2LiveActivityObservationAuthoriz
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 变更结果。
     /// - Throws: 存储实现抛出的错误。
-    public func setPreferences(_ command: V2SetLiveActivityPreferencesCommand, now: Date) async throws -> V2SetLiveActivityPreferencesOutcome {
-        try await store.setPreferences(command: command, now: now)
-    }
+
 
     /// 读取实时状态偏好。
     ///
@@ -327,3 +328,9 @@ public struct V2LiveActivityService: Sendable, V2LiveActivityObservationAuthoriz
 }
 
 extension PostgresV2LiveActivityStore: V2LivePresenceLeaseManaging {}
+
+public struct V2PresencePublicationLeaseObservation: Sendable {
+    public let isOnline: Bool
+    public let expiresAt: Date
+    public init(isOnline: Bool, expiresAt: Date) { self.isOnline=isOnline;self.expiresAt=expiresAt }
+}

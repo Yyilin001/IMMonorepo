@@ -9,6 +9,7 @@ public struct V2ActorSpecialAccountMessageWire: Codable, Equatable, Sendable {
     public let operatorID: String?
     public let operationID: ClientMessageID
     public let requestFingerprint: String
+    public let firstSubmissionDeadlineMilliseconds: UInt64
     public let customerUserID: UserID
     public let text: String
     public let media: [V2MediaReference]
@@ -17,7 +18,7 @@ public struct V2ActorSpecialAccountMessageWire: Codable, Equatable, Sendable {
     public let replyTo: V2MessageReplyReference?
 
     public init(stableAccountKey: String, servicePrincipal: String, operatorID: String?,
-                operationID: ClientMessageID, requestFingerprint: String, customerUserID: UserID,
+                operationID: ClientMessageID, requestFingerprint: String, firstSubmissionDeadlineMilliseconds: UInt64, customerUserID: UserID,
                 text: String, media: [V2MediaReference], mentions: [V2ActorMentionTargetWire],
                 entities: [V2MessageEntity], replyTo: V2MessageReplyReference?) {
         self.stableAccountKey = stableAccountKey
@@ -25,6 +26,7 @@ public struct V2ActorSpecialAccountMessageWire: Codable, Equatable, Sendable {
         self.operatorID = operatorID
         self.operationID = operationID
         self.requestFingerprint = requestFingerprint
+        self.firstSubmissionDeadlineMilliseconds = firstSubmissionDeadlineMilliseconds
         self.customerUserID = customerUserID
         self.text = text
         self.media = media

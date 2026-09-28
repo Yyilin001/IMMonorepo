@@ -9,6 +9,7 @@ import Glibc
 #endif
 import IMV2Core
 import IMV2ActorApplication
+import IMV2ActorContracts
 import IMV2Server
 import IMV2ServerHTTP
 import NIOPosix
@@ -144,7 +145,7 @@ enum IMV2AccountServerApp {
             // 每个物理归属方保留一个连接池，用于租约解析和限定范围的媒体授权；
             // 房间命令始终通过 RoomRef 执行。
             var accountStorageDatabases: [String: any Database] = [configuration.databaseURL: database]
-            for url in Set(configuration.roomShardStorage.map(\.databaseURL)) where accountStorageDatabases[url] == nil {
+            for url in Set(configuration.roomShardStorage.map(\.databaseURL) + configuration.userShardStorage.map(\.databaseURL)) where accountStorageDatabases[url] == nil {
                 let identifier = DatabaseID(string: "account-owner-\(accountStorageDatabases.count)")
                 resources.databases.use(try postgresDatabaseConfiguration(url: url, policy: configuration.databasePolicy), as: identifier)
                 let pool = try V2EventLoopDatabasePool(databases: resources.databases, logger: logger, identifier: identifier, eventLoops: databaseEventLoops)
@@ -160,6 +161,64 @@ enum IMV2AccountServerApp {
                 guard let owner = accountStorageDatabases[storage.databaseURL] else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 roomDatabases[storage.shardID] = owner
             }
+            var socialUserLocations:[V2UserShardStorageLocation]=[]
+            for storage in configuration.userShardStorage {
+                guard let owner=accountStorageDatabases[storage.databaseURL] else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                socialUserLocations.append(try .init(bucket:storage.bucket,database:owner,schema:storage.schema))
+            }
+            let socialUserRegistry=try V2StaticUserShardStorageRegistry(locations:socialUserLocations)
+            // Partition the existing coordination budget N: the outer direct
+            // pair-route transaction gets 1; all nested work retains N-1.
+            // Route waiters cannot consume identity/authorization/projection capacity.
+            let socialCoordinationID=DatabaseID(string:"account-social-coordination")
+            resources.databases.use(try postgresDatabaseConfiguration(url:configuration.databaseURL,policy:configuration.databasePolicy,
+                connectionsPerEventLoop:configuration.databasePolicy.maximumConnectionsPerEventLoop-1),as:socialCoordinationID)
+            let socialCoordinationPool=try V2EventLoopDatabasePool(databases:resources.databases,logger:logger,identifier:socialCoordinationID,eventLoops:databaseEventLoops)
+            let directPairRouteID=DatabaseID(string:"account-direct-pair-route")
+            resources.databases.use(try postgresDatabaseConfiguration(url:configuration.databaseURL,policy:configuration.databasePolicy,
+                connectionsPerEventLoop:1),as:directPairRouteID)
+            let directPairRoutePool=try V2EventLoopDatabasePool(databases:resources.databases,logger:logger,identifier:directPairRouteID,eventLoops:databaseEventLoops)
+            for member in socialCoordinationPool.eventLoopDatabases + directPairRoutePool.eventLoopDatabases {
+                try await V2PostgresSessionReadiness.verify(database:member,policy:configuration.databasePolicy)
+            }
+            let socialRouteFence=V2PostgresUserShardRouter(database:socialCoordinationPool.database)
+            let socialProjectionDelivery=V2PostgresUserShardProjectionDelivery(registry:socialUserRegistry,routeFence:socialRouteFence,batchRouteFence:socialRouteFence,
+                coLocatedControlBuckets:Set(configuration.userShardStorage.filter{$0.databaseURL==configuration.databaseURL && $0.schema=="im_v2"}.map(\.bucket)))
+            let socialAuthorization=V2DirectAuthorizationCoordinator(controlDatabase:socialCoordinationPool.database,ownerDatabases:roomDatabases)
+            await runtimeTasks.start {
+                while !Task.isCancelled {
+                    do { _ = try await socialAuthorization.recover(limit:100,now:Date()) }
+                    catch is CancellationError { break }
+                    catch { V2ServiceLogging.logWorkerFailure(logger,worker:"social_direct_authorization_recovery",error:error) }
+                    do { try await v2Sleep(for:.seconds(1)) } catch { break }
+                }
+            }
+            let socialOperations=PostgresV2SocialRelationshipStore(database:database,projectionDelivery:socialProjectionDelivery,authorizationCoordinator:socialAuthorization)
+            V2VaporSocialOperationRoutes(authenticator:authenticator,store:socialOperations).register(on:authenticatedAccountRoutes)
+            let accountPreferenceOperations=PostgresV2AccountPreferenceOperationStore(database:database,projectionDelivery:socialProjectionDelivery,authorizationCoordinator:socialAuthorization)
+            V2VaporAccountPreferenceOperationRoutes(authenticator:authenticator,store:accountPreferenceOperations).register(on:authenticatedAccountRoutes)
+            var fixedGroupBootstraps:[String:V2RoomBootstrapDomainExecutor]=[:]
+            for storage in configuration.roomShardStorage {
+                guard let owner=roomDatabases[storage.shardID] else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                fixedGroupBootstraps[storage.shardID]=try .init(shardID:storage.shardID,
+                    direct:PostgresV2DirectMessagingStore(database:owner,identityReader:PostgresV2DirectRoomIdentityReader(database:socialCoordinationPool.database),projectionDelivery:socialProjectionDelivery,authorizationCoordinator:socialAuthorization),
+                    group:PostgresV2GroupMessagingStore(database:owner),capacityProfile:configuration.capacityProfile)
+            }
+            let groupBootstrapOwners=fixedGroupBootstraps
+            let groupCreationBootstrap=V2ActorCreationBootstrapPort(execute:{ request,deadline in
+                guard ContinuousClock.now<deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+                let shard:String=switch request { case .provenDirect(let value):value.roomShardID;case .provenDirectRecovery(let value):value.roomShardID;case .provenGroup(let value):value.placement.roomShardID }
+                guard let owner=groupBootstrapOwners[shard] else { throw V2RoomCallFailure.notAccepted(.unavailable) }
+                return try await owner.execute(request)
+            },stage:{ placement,page,deadline in
+                guard ContinuousClock.now<deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+                guard let owner=groupBootstrapOwners[placement.roomShardID] else { throw V2RoomCallFailure.notAccepted(.unavailable) }
+                try await owner.stage(intent:placement,page:page)
+            })
+            let groupCreationOperations=PostgresV2GroupCreationOperationStore(database:database,selector:try .init(rawValue:configuration.groupRoomShardIDs.joined(separator:",")),bootstrap:groupCreationBootstrap,capacityProfile:configuration.capacityProfile)
+            V2VaporGroupCreationOperationRoutes(authenticator:authenticator,store:groupCreationOperations).register(on:authenticatedAccountRoutes)
+            let directRoomOperations=PostgresV2DirectRoomOperationStore(database:database,routes:V2PostgresRoomShardRouter(database:directPairRoutePool.database),selector:try .init(shardIDs:configuration.directRoomShardIDs),bootstrap:groupCreationBootstrap)
+            V2VaporDirectRoomOperationRoutes(authenticator:authenticator,store:directRoomOperations).register(on:authenticatedAccountRoutes)
             let roomRouter = V2PostgresRoomShardRouter(database: database)
             let actorConfiguration = try V2RoomActorApplicationConfiguration(
                 environment: ProcessRuntimeEnvironment(), hostsRooms: false,
@@ -168,8 +227,17 @@ enum IMV2AccountServerApp {
                 configuration: actorConfiguration, ownerRouter: roomRouter,
                 roomDatabases: roomDatabases)
             roomActor = actor
-            V2VaporMessageOperationRecoveryRoutes(authenticator: authenticator,
-                messages: .init(directory: actor.directory, callTimeout: try .init(10000))).register(on: authenticatedAccountRoutes)
+            let forwardPlans=V2ForwardPlanService(store:.init(database:database),
+                port:.init(router:roomRouter,rooms:.init(directory:actor.directory)))
+            V2VaporForwardPlanRoutes(authenticator:authenticator,service:forwardPlans).register(on:authenticatedAccountRoutes)
+            await runtimeTasks.start {
+                while !Task.isCancelled {
+                    do { try await forwardPlans.runOnce(limit:16) }
+                    catch is CancellationError { break }
+                    catch { V2ServiceLogging.logWorkerFailure(logger,worker:"forward_plan_recovery",error:error) }
+                    do { try await v2Sleep(for:.milliseconds(200)) } catch { break }
+                }
+            }
             if let localMediaConfiguration {
                 let provider = try V2LocalFilesystemMediaProvider(
                     rootDirectory: localMediaConfiguration.rootDirectory,
@@ -347,8 +415,16 @@ enum IMV2AccountServerApp {
                     policy: configuration.publicIdentityLookupRateLimit
                 )
             ).register(on: authenticatedAccountRoutes)
-            V2VaporProfileViewRoutes(authenticator: authenticator).register(on: authenticatedAccountRoutes)
             let profileUpdateStore = PostgresV2ProfileUpdateStore(database: database)
+            V2VaporPersonalPreferenceRecoveryRoutes(authenticator:authenticator,administration:.init(directory:actor.directory)).register(on:authenticatedAccountRoutes)
+            V2VaporMessageSendOperationRoutes(authenticator:authenticator,messages:.init(directory:actor.directory,callTimeout:try .init(10_000))).register(on:authenticatedAccountRoutes)
+            V2VaporMessageMutationOperationRoutes(authenticator:authenticator,messages:.init(directory:actor.directory,callTimeout:try .init(10_000))).register(on:authenticatedAccountRoutes)
+            V2VaporGroupCapabilityRoutes(authenticator:authenticator,rooms:.init(directory:actor.directory)).register(on:authenticatedAccountRoutes)
+            V2VaporMembershipOperationRoutes(authenticator:authenticator,rooms:.init(directory:actor.directory)).register(on:authenticatedAccountRoutes)
+            V2VaporMemberAdministrationRoutes(authenticator:authenticator,rooms:.init(directory:actor.directory)).register(on:authenticatedAccountRoutes)
+            V2VaporMessageModerationRoutes(authenticator:authenticator,rooms:.init(directory:actor.directory)).register(on:authenticatedAccountRoutes)
+            V2VaporMessageReactionOperationRoutes(authenticator:authenticator,messages:.init(directory:actor.directory,callTimeout:try .init(10_000))).register(on:authenticatedAccountRoutes)
+            V2VaporReadReceiptRecoveryRoutes(authenticator:authenticator,queries:.init(directory:actor.directory)).register(on:authenticatedAccountRoutes)
             V2VaporProfileUpdateRoutes(
                 authenticator: authenticator,
                 profiles: .init(store: profileUpdateStore, reader: profileUpdateStore)
@@ -360,9 +436,14 @@ enum IMV2AccountServerApp {
                     directory: actor.directory
                 ), authorizedProfiles: resourceProfileRuntime
             ).register(on: authenticatedAccountRoutes)
+            let invitationOperations=V2RoomRefAdministrationClient(directory:actor.directory)
             let invitationCoordinator = V2ActorInvitationCoordinator(
                 controlDatabase: database,
                 room: .init(directory: actor.directory),
+                operations:.init(baseline:{ input,deadline in try await invitationOperations.groupInvitationBaseline(input,deadline:deadline) },
+                    admit:{ input,deadline in try await invitationOperations.admitGroupInvitation(input,deadline:deadline) },
+                    submit:{ input,deadline in try await invitationOperations.submitGroupInvitation(input,deadline:deadline) },
+                    recover:{ input,deadline in try await invitationOperations.recoverGroupInvitation(input,deadline:deadline) }),
                 secretIssuer: try .init(rawKey: configuration.groupInviteTokenHMACKey))
             let inviteRecovery = V2GroupInviteCreationRecoveryWorker(
                 jobs: PostgresV2GroupInviteDirectory(database: database),
@@ -397,6 +478,7 @@ enum IMV2AccountServerApp {
                     do { try await v2Sleep(for: .seconds(5)) } catch { break }
                 }
             }
+            V2VaporGroupInvitationOperationRoutes(authenticator:authenticator,coordinator:invitationCoordinator).register(on:authenticatedAccountRoutes)
             let groupInvitations = V2ActorGroupInvitationClient(coordinator: invitationCoordinator)
             V2VaporGroupInvitationRoutes(
                 authenticator: authenticator,
@@ -462,8 +544,13 @@ enum IMV2AccountServerApp {
 
 private func postgresDatabaseConfiguration(
     url: String,
-    policy: V2PostgresRuntimePolicy
+    policy: V2PostgresRuntimePolicy,
+    connectionsPerEventLoop: Int? = nil
 ) throws -> DatabaseConfigurationFactory {
+    let connections = connectionsPerEventLoop ?? policy.maximumConnectionsPerEventLoop
+    guard (1...policy.maximumConnectionsPerEventLoop).contains(connections) else {
+        throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP")
+    }
     var configuration = try SQLPostgresConfiguration(url: url)
     configuration.coreConfiguration.options.connectTimeout = .milliseconds(
         Int64(policy.connectTimeoutMilliseconds)
@@ -473,7 +560,7 @@ private func postgresDatabaseConfiguration(
     )
     return .postgres(
         configuration: configuration,
-        maxConnectionsPerEventLoop: policy.maximumConnectionsPerEventLoop,
+        maxConnectionsPerEventLoop: connections,
         connectionPoolTimeout: .milliseconds(Int64(policy.poolTimeoutMilliseconds))
     )
 }

@@ -3,215 +3,85 @@ import Foundation
 import IMV2Core
 import Testing
 
-@Suite("V2 social command outbox")
-struct V2SocialCommandOutboxTests {
-    @Test("relationship block and preference intents survive restart and dispatch once")
+@Suite("V2 social and account preference operation persistence")
+struct V2SocialOperationPersistenceTests {
+    @Test("relationship block and account preferences survive restart with original frozen identities")
     func persistsAndDispatchesAllSocialCommandKinds() async throws {
-        let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-social-outbox-\(UUID().uuidString).sqlite")
-        defer { try? FileManager.default.removeItem(at: url); try? FileManager.default.removeItem(atPath: url.path + "-wal"); try? FileManager.default.removeItem(atPath: url.path + "-shm") }
-        let binding = V2LocalInstallationBinding(value: UUID(uuidString: "00000000-0000-0000-0000-000000000361")!)
-        let firstStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        let transport = SocialOutboxTransport()
-        let target = try UserID("00000000-0000-0000-0000-000000000362")
-        let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let engine = V2SocialCommandOutboxEngine(store: firstStore, socialTransport: transport, directTransport: transport, now: { now })
-        let relationship = try await engine.enqueueRelationship(targetUserID: target, action: V2RelationshipAction.request)
-        #expect(relationship.kind == .relationship)
-        let block = try await engine.enqueueUserBlock(targetUserID: target, action: V2UserBlockAction.block)
-        #expect(block.kind == .userBlock)
-        let preference = try await engine.enqueueStrangerMessagePermission(V2StrangerMessagePermission.deny)
-        #expect(preference.kind == .strangerMessagePreference)
-        let addPreference = try await engine.enqueueUserAddPermission(V2UserAddPermission.deny)
-        #expect(addPreference.kind == .userAddPreference)
-        #expect(try await firstStore.pendingSocialCommands().count == 4)
-
-        let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        let restartedEngine = V2SocialCommandOutboxEngine(store: restartedStore, socialTransport: transport, directTransport: transport, now: { now })
-        for _ in 0..<4 {
-            guard case .acknowledged = try await restartedEngine.flushOnce() else { Issue.record("expected acknowledgement"); return }
+        let account=UserID(uuid:UUID()),target=UserID(uuid:UUID()),binding=V2LocalInstallationBinding(value:UUID())
+        let url=FileManager.default.temporaryDirectory.appending(path:"social-work-"+UUID().uuidString).appending(path:"state.sqlite")
+        defer { try? FileManager.default.removeItem(at:url.deletingLastPathComponent()) }
+        var store=try GRDBV2LocalSyncStore(databaseURL:url,installationBinding:binding,userID:account)
+        let remote=SocialOperationFixtureRemote(account:account)
+        let social=V2SocialOperationService(accountID:account,store:store,client:remote)
+        let preferences=V2AccountPreferenceService(accountID:account,store:store,client:remote)
+        let relationship=try await social.enqueue(action:.relationship(.request),targetUserID:target)
+        let stranger=try await preferences.enqueue(value:.strangerMessage(.deny),snapshot:remote.baseline(kind:.strangerMessagePreference))
+        let add=try await preferences.enqueue(value:.userAdd(.deny),snapshot:remote.baseline(kind:.userAddPreference))
+        let frozen=try #require(try await store.operationWork(id:relationship))
+        try await store.close()
+        store=try .init(databaseURL:url,installationBinding:binding,userID:account)
+        let restarted=V2SocialOperationService(accountID:account,store:store,client:remote)
+        let restartedPreferences=V2AccountPreferenceService(accountID:account,store:store,client:remote)
+        for id in [relationship,stranger,add] {
+            guard case .claimed(let claim)=try await store.claimOperationWork(id:id,ownerID:UUID(),action:.submit,now:Date()) else { Issue.record("expected persistent claim");return }
+            if id==relationship { try await restarted.execute(claim) } else { try await restartedPreferences.execute(claim) }
+            #expect(try await store.operationWork(id:id)?.execution == .committed)
         }
-        #expect(try await restartedStore.pendingSocialCommands().allSatisfy { $0.state == V2PendingSocialCommand.State.acknowledged })
-        #expect((await transport.dispatchedKinds()).map(\.rawValue).sorted() == ["relationship", "strangerMessagePreference", "userAddPreference", "userBlock"])
+        #expect(await remote.identities.contains(frozen.identity))
+        let block=try await restarted.enqueue(action:.userBlock(.block),targetUserID:target)
+        guard case .claimed(let claim)=try await store.claimOperationWork(id:block,ownerID:UUID(),action:.submit,now:Date()) else { Issue.record("expected block claim");return }
+        try await restarted.execute(claim)
+        #expect(try await store.operationWork(id:block)?.execution == .committed)
+        try await store.close()
     }
-
-    @Test("重启后相同待隐私意图复用原操作而新目标状态保留顺序")
+    @Test("exact frozen privacy retry reuses identity while a new target cannot replace unknown work")
     func duplicatePendingPrivacyIntentReusesOnlyTheEquivalentOperation() async throws {
-        let url = FileManager.default.temporaryDirectory
-            .appending(path: "im-v2-social-reuse-\(UUID().uuidString).sqlite")
-        let binding = V2LocalInstallationBinding(value: UUID())
-        let firstStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        let firstOperation = UUID(uuidString: "00000000-0000-0000-0000-000000000363")!
-        let transport = SocialOutboxTransport()
-        let firstEngine = V2SocialCommandOutboxEngine(
-            store: firstStore,
-            socialTransport: transport,
-            directTransport: transport,
-            makeUUID: { firstOperation }
-        )
-
-        let original = try await firstEngine.enqueueStrangerMessagePermission(.deny)
-        let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        let restartedEngine = V2SocialCommandOutboxEngine(
-            store: restartedStore,
-            socialTransport: transport,
-            directTransport: transport
-        )
-        let reused = try await restartedEngine.enqueueStrangerMessagePermission(.deny)
-        let changed = try await restartedEngine.enqueueStrangerMessagePermission(.allow)
-
-        #expect(reused.operationID == original.operationID)
-        #expect(changed.operationID != original.operationID)
-        let pending = try await restartedStore.pendingSocialCommands()
-        #expect(pending.count == 2)
-        #expect(pending.map(\.strangerPermission) == [.deny, .allow])
+        let account=UserID(uuid:UUID()),url=FileManager.default.temporaryDirectory.appending(path:"social-reuse-"+UUID().uuidString).appending(path:"state.sqlite")
+        defer { try? FileManager.default.removeItem(at:url.deletingLastPathComponent()) }
+        let store=try GRDBV2LocalSyncStore(databaseURL:url,installationBinding:.init(value:UUID()),userID:account)
+        let identity=try V2OperationIdentity(accountID:account,scope:.account(account),operation:.strangerMessagePreference(.init(uuid:UUID())))
+        let command=try V2AccountPreferenceCommand(identity:identity,value:.strangerMessage(.deny),expectedRevision:0,firstSubmissionDeadlineMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+120000)
+        let original=try await store.enqueueAccountPreference(command)
+        #expect(try await store.enqueueAccountPreference(command)==original)
+        let changed=try V2AccountPreferenceCommand(identity:.init(accountID:account,scope:.account(account),operation:.strangerMessagePreference(.init(uuid:UUID()))),value:.strangerMessage(.allow),expectedRevision:0,firstSubmissionDeadlineMilliseconds:command.firstSubmissionDeadlineMilliseconds)
+        await #expect(throws:V2OperationWorkError.invalidTransition) { try await store.enqueueAccountPreference(changed) }
+        #expect(try await store.accountPreferenceCommand(workID:original)==command)
+        try await store.close()
     }
-
-    @Test("explicit flush never reports an older queued command as the current action")
+    @Test("a later social click cannot flush or replace an earlier unknown identity")
     func flushIfReadyLeavesAnEarlierCommandUntouched() async throws {
-        let target = try UserID("00000000-0000-0000-0000-000000000372")
-        let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let earlierID = "00000000-0000-0000-0000-000000000370"
-        let requestedID = UUID(uuidString: "00000000-0000-0000-0000-000000000371")!
-        let earlier = try V2PendingSocialCommand(
-            operationID: earlierID,
-            kind: .strangerMessagePreference,
-            targetUserID: nil,
-            relationshipAction: nil,
-            blockAction: nil,
-            strangerPermission: .deny,
-            state: .pending,
-            attemptCount: 0,
-            nextAttemptAt: now,
-            terminalCode: nil
-        )
-        let store = SocialOutboxStoreSpy(commands: [earlier])
-        let transport = SocialOutboxTransport()
-        let engine = V2SocialCommandOutboxEngine(
-            store: store,
-            socialTransport: transport,
-            directTransport: transport,
-            makeUUID: { requestedID },
-            now: { now }
-        )
-
-        let requested = try await engine.enqueueRelationship(targetUserID: target, action: .request)
-        let result = try await engine.flushIfReady(operationID: requested.operationID)
-
-        #expect(result == nil)
-        #expect(await transport.dispatchedKinds().isEmpty)
-        #expect(await store.command(operationID: earlierID)?.state == .pending)
-        #expect(await store.command(operationID: requested.operationID)?.state == .pending)
+        let account=UserID(uuid:UUID()),target=UserID(uuid:UUID()),url=FileManager.default.temporaryDirectory.appending(path:"social-head-"+UUID().uuidString).appending(path:"state.sqlite")
+        defer { try? FileManager.default.removeItem(at:url.deletingLastPathComponent()) }
+        let store=try GRDBV2LocalSyncStore(databaseURL:url,installationBinding:.init(value:UUID()),userID:account)
+        let remote=SocialOperationFixtureRemote(account:account)
+        let service=V2SocialOperationService(accountID:account,store:store,client:remote)
+        let id=try await service.enqueue(action:.relationship(.request),targetUserID:target)
+        await #expect(throws:V2OperationWorkError.invalidTransition) { try await service.enqueue(action:.userBlock(.block),targetUserID:target) }
+        #expect(try await store.operationWork(id:id)?.execution == .prepared)
+        #expect(await remote.identities.isEmpty)
+        try await store.close()
     }
 }
-
-private actor SocialOutboxStoreSpy: V2LocalSocialCommandStore {
-    private var commands: [V2PendingSocialCommand]
-
-    init(commands: [V2PendingSocialCommand]) {
-        self.commands = commands
+private actor SocialOperationFixtureRemote:V2SocialOperationClient,V2AccountPreferenceClient {
+    let account:UserID
+    var identities:[V2OperationIdentity]=[]
+    init(account:UserID) { self.account=account }
+    func baseline(targetUserID:UserID) async throws -> V2SocialOperationSnapshot { try .init(actorUserID:account,targetUserID:targetUserID,relationshipState:.none,requestedByUserID:nil,relationshipRevision:0,isBlocked:false,blockRevision:0) }
+    func baseline(kind:V2OperationKind) async throws -> V2AccountPreferenceSnapshot {
+        let value:V2AccountPreferenceValue
+        switch kind { case .strangerMessagePreference:value = .strangerMessage(.allow);case .userAddPreference:value = .userAdd(.allow);case .readReceiptPreference:value = .readReceipt(allowsDirectReadReceipts:true,allowsGroupReadReceipts:true);default:value = .liveActivity(allowsOnlinePresence:true,allowsTypingIndicators:true) }
+        return try .init(ownerUserID:account,value:value,revision:0)
     }
-
-    func enqueue(_ command: V2PendingSocialCommand) async throws {
-        commands.append(command)
+    func submit(_ command:V2SocialOperationCommand) async throws -> V2SocialOperationRecoveryResult {
+        identities.append(command.identity)
+        let applied:V2SocialOperationApplied
+        switch command.action { case .relationship:applied = .relationship(state:.pending,revision:command.expectedRevision+1);case .userBlock(let action):applied = .userBlock(isBlocked:action == .block,revision:command.expectedRevision+1) }
+        return .receipt(try .init(identity:command.identity,fingerprint:command.fingerprint,outcome:.applied(applied),resolvedAtMilliseconds:UInt64(Date().timeIntervalSince1970*1000)))
     }
-
-    func enqueueOrReusePendingSocialCommand(_ command: V2PendingSocialCommand) async throws -> V2PendingSocialCommand {
-        if let existing = commands.first(where: {
-            $0.kind == command.kind
-                && $0.targetUserID == command.targetUserID
-                && $0.relationshipAction == command.relationshipAction
-                && $0.blockAction == command.blockAction
-                && $0.strangerPermission == command.strangerPermission
-                && $0.state == .pending
-        }) {
-            return existing
-        }
-        commands.append(command)
-        return command
+    func recover(_ command:V2SocialOperationCommand,action:V2OperationRecoveryRequest.Action) async throws -> V2SocialOperationRecoveryResult { try await submit(command) }
+    func submit(_ command:V2AccountPreferenceCommand) async throws -> V2AccountPreferenceRecoveryResult {
+        identities.append(command.identity)
+        return .receipt(try .init(identity:command.identity,fingerprint:command.fingerprint,outcome:.applied(value:command.value,revision:command.expectedRevision+1),resolvedAtMilliseconds:UInt64(Date().timeIntervalSince1970*1000)))
     }
-
-    func nextReadySocialCommand(now: Date) async throws -> V2PendingSocialCommand? {
-        commands.first { $0.state == .pending && $0.nextAttemptAt <= now }
-    }
-
-    func markSocialCommandAcknowledged(operationID: String) async throws {
-        try replace(operationID: operationID) { command in
-            try V2PendingSocialCommand(
-                operationID: command.operationID,
-                kind: command.kind,
-                targetUserID: command.targetUserID,
-                relationshipAction: command.relationshipAction,
-                blockAction: command.blockAction,
-                strangerPermission: command.strangerPermission,
-                state: .acknowledged,
-                attemptCount: command.attemptCount,
-                nextAttemptAt: command.nextAttemptAt,
-                terminalCode: nil
-            )
-        }
-    }
-
-    func scheduleSocialCommandRetry(operationID: String, nextAttemptAt: Date) async throws {
-        try replace(operationID: operationID) { command in
-            try V2PendingSocialCommand(
-                operationID: command.operationID,
-                kind: command.kind,
-                targetUserID: command.targetUserID,
-                relationshipAction: command.relationshipAction,
-                blockAction: command.blockAction,
-                strangerPermission: command.strangerPermission,
-                state: .pending,
-                attemptCount: command.attemptCount + 1,
-                nextAttemptAt: nextAttemptAt,
-                terminalCode: nil
-            )
-        }
-    }
-
-    func rejectSocialCommand(operationID: String, code: String) async throws {
-        try replace(operationID: operationID) { command in
-            try V2PendingSocialCommand(
-                operationID: command.operationID,
-                kind: command.kind,
-                targetUserID: command.targetUserID,
-                relationshipAction: command.relationshipAction,
-                blockAction: command.blockAction,
-                strangerPermission: command.strangerPermission,
-                state: .rejected,
-                attemptCount: command.attemptCount,
-                nextAttemptAt: command.nextAttemptAt,
-                terminalCode: code
-            )
-        }
-    }
-
-    func command(operationID: String) -> V2PendingSocialCommand? {
-        commands.first { $0.operationID == operationID }
-    }
-
-    private func replace(
-        operationID: String,
-        transform: (V2PendingSocialCommand) throws -> V2PendingSocialCommand
-    ) throws {
-        guard let index = commands.firstIndex(where: { $0.operationID == operationID }) else {
-            throw V2ClientCommandError.commandNotPending
-        }
-        commands[index] = try transform(commands[index])
-    }
-}
-
-private actor SocialOutboxTransport: V2ClientSocialRelationshipTransport, V2ClientDirectMessagingTransport {
-    private var kinds: [V2PendingSocialCommandKind] = []
-    func changeRelationship(operationID _: RelationshipOperationID, targetUserID: UserID, action: V2RelationshipAction) -> V2ClientRelationshipChange {
-        kinds.append(.relationship)
-        return .init(targetUserID: targetUserID, action: action, resultingState: .pending, updatedAt: .distantFuture)
-    }
-    func changeUserBlock(operationID _: UserBlockOperationID, targetUserID: UserID, action: V2UserBlockAction) -> V2ClientUserBlockChange {
-        kinds.append(.userBlock)
-        return .init(targetUserID: targetUserID, action: action, isBlocked: action == .block, updatedAt: .distantFuture)
-    }
-    func openDirectRoom(operationID _: DirectRoomOperationID, targetUserID _: UserID) throws -> V2ClientDirectRoom { throw V2RealtimeTransportError.unexpectedResponse }
-    func setStrangerMessagePermission(operationID _: StrangerMessagePreferenceOperationID, permission _: V2StrangerMessagePermission) -> Date { kinds.append(.strangerMessagePreference); return .distantFuture }
-    func setUserAddPermission(operationID _: UserAddPreferenceOperationID, permission _: V2UserAddPermission) -> Date { kinds.append(.userAddPreference); return .distantFuture }
-    func dispatchedKinds() -> [V2PendingSocialCommandKind] { kinds }
+    func recover(_ command:V2AccountPreferenceCommand,action:V2OperationRecoveryRequest.Action) async throws -> V2AccountPreferenceRecoveryResult { try await submit(command) }
 }

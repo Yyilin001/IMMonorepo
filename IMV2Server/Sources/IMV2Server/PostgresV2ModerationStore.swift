@@ -8,9 +8,11 @@ import SQLKit
 ///
 /// 它使用独立的幂等与审计记录，但写入与撤回相同的可见墓碑投影形态，
 /// 因此较旧的本地时间线不会把未知的审核事件当成一次有效的消息接受。
-public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModerationStore, V2OwnerValidatedModerationStore {
+public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore, V2OwnerValidatedModerationStore {
     private let database: any Database
     private let activationScope: V2RoomActivationWriteScope?
+    private var existingMemberAdministrationTransaction=false
+    private var existingMessageModerationTransaction=false
     public init(database: any Database) {
         self.database = database
         activationScope = nil
@@ -20,21 +22,28 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
         self.activationScope = activationScope
     }
 
-    public func apply(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
-        try await apply(command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, now: now)
+    func usingMemberAdministrationTransaction() -> Self {
+        var value=self;value.existingMemberAdministrationTransaction=true;return value
     }
 
-    public func applyOwnerValidated(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
-        try await apply(command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, now: now)
+    func usingMessageModerationTransaction() -> Self {
+        var value=self;value.existingMessageModerationTransaction=true;return value
+    }
+
+    func apply(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
+        try await apply(command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, now: now)
     }
 
     private func apply(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
         switch command.action {
         case .redactMessage:
+            guard existingMessageModerationTransaction else { throw V2ModerationStoreError.unsupportedAction }
             return try await redact(command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, now: now)
         case .muteMember:
+            guard existingMemberAdministrationTransaction else { throw V2ModerationStoreError.unsupportedAction }
             return try await mute(command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, now: now)
         case .removeMember:
+            guard existingMemberAdministrationTransaction else { throw V2ModerationStoreError.unsupportedAction }
             return try await removeMember(command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, now: now)
         case .freezeRoom, .unfreezeRoom:
             throw V2ModerationStoreError.unsupportedAction
@@ -163,7 +172,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
     private func redact(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date, isTrustedSafety: Bool = false) async throws -> V2ModerationOutcome {
         return try await v2WithPostgresTransactionRetry(
             database: database, maximumRetryCount: 0,
-            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil
+            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil, existingTransaction: existingMessageModerationTransaction
         ) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ModerationStoreError.corruptPersistenceState }
             let roomID = try moderationUUID(command.roomID)
@@ -176,7 +185,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             if let activationScope { try await activationScope.require([roomID], sql: sql) }
             if activationScope == nil, let ownerRoute { try await v2RequireRoomOwner(roomID: roomID, route: ownerRoute, sql: sql) }
-            if let prior = try await sql.raw("""
+            if !existingMessageModerationTransaction, let prior = try await sql.raw("""
                 SELECT room_id, action, target_user_id, message_id, resulting_message_revision, mute_until, reason_code,
                        room_sequence, event_id, created_at
                 FROM im_v2.moderation_operations
@@ -191,7 +200,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR NO KEY UPDATE
                 """).first(decoding: ModerationRoomRow.self) else { throw V2ModerationStoreError.roomNotFound }
             guard room.capacityProfileID == capacityProfile.id else { throw V2ModerationStoreError.corruptPersistenceState }
-            if !isTrustedSafety {
+            if !isTrustedSafety && !existingMessageModerationTransaction {
                 guard let role = try await sql.raw("""
                     SELECT role FROM im_v2.room_memberships
                     WHERE room_id = \(bind: roomID) AND user_id = \(bind: actorID)
@@ -280,9 +289,10 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 ),
                 sql: sql
             )
-            try await sql.raw("""
+            if !existingMessageModerationTransaction { try await sql.raw("""
                 INSERT INTO im_v2.moderation_operations (actor_user_id, operation_id, room_id, action, target_user_id, message_id, resulting_message_revision, mute_until, reason_code, room_sequence, event_id, created_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), 'redact_message', NULL, \(bind: messageID), \(bind: messageRevision), NULL, \(bind: command.reasonCode.rawValue), \(bind: roomSequence), \(bind: eventUUID), \(bind: now))
                 """).run()
+            }
             try await sql.raw("""
                 INSERT INTO im_v2.moderation_audit_entries (actor_user_id, operation_id, room_id, action, target_user_id, message_id, reason_code, occurred_at, retain_until) VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), 'redact_message', NULL, \(bind: messageID), \(bind: command.reasonCode.rawValue), \(bind: now), \(bind: retainUntil))
                 """).run()
@@ -293,7 +303,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
     private func removeMember(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
         return try await v2WithPostgresTransactionRetry(
             database: database, maximumRetryCount: 0,
-            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil
+            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil, existingTransaction: existingMemberAdministrationTransaction
         ) { transaction in
             guard let sql = transaction as? any SQLDatabase,
                   let commandTargetID = command.targetUserID
@@ -307,16 +317,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             if let activationScope { try await activationScope.require([roomID], sql: sql) }
             if activationScope == nil, let ownerRoute { try await v2RequireRoomOwner(roomID: roomID, route: ownerRoute, sql: sql) }
-            if let prior = try await sql.raw("""
-                SELECT room_id, action, target_user_id, message_id, resulting_message_revision,
-                       resulting_membership_revision, mute_until, reason_code,
-                       room_sequence, event_id, created_at
-                FROM im_v2.moderation_operations
-                WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)
-                """).first(decoding: ModerationOperationRow.self) {
-                guard prior.matchesRemoval(command, roomID: roomID, targetID: targetID) else { return .idempotencyConflict }
-                return .idempotent(try prior.result(operationID: command.operationID))
-            }
+
             let retainUntil = try validatedAuditRetention(now: now)
             guard let room = try await sql.raw("""
                 SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class
@@ -332,7 +333,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 """).first(decoding: ModerationRoleRow.self),
                 let actorRole = V2RoomMembershipRole(rawValue: actor.role)
             else { throw V2ModerationStoreError.actorNotAuthorized }
-            try V2ModerationAuthorization.authorize(actorRole: actorRole, action: .removeMember, now: now, command: command)
+            try V2ModerationAuthorization.authorize(actorRole: actorRole, configuredPermissions: try await v2ResolvedGroupPermissions(roomID:roomID,role:actorRole,sql:sql), action: .removeMember, now: now, command: command)
             let target = try await sql.raw("""
                 SELECT user_id, role FROM im_v2.room_memberships
                 WHERE room_id = \(bind: roomID) AND user_id = \(bind: targetID)
@@ -404,9 +405,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 SELECT event_id, \(bind: targetID), 'membership', payload, created_at, created_at, room_id
                 FROM im_v2.room_events WHERE event_id = \(bind: eventUUID)
                 """).run()
-            try await sql.raw("""
-                INSERT INTO im_v2.moderation_operations (actor_user_id, operation_id, room_id, action, target_user_id, message_id, resulting_message_revision, resulting_membership_revision, mute_until, reason_code, room_sequence, event_id, created_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), 'remove_member', \(bind: targetID), NULL, NULL, \(bind: membershipRevision), NULL, \(bind: command.reasonCode.rawValue), \(bind: roomSequence), \(bind: eventUUID), \(bind: now))
-                """).run()
+
             try await sql.raw("INSERT INTO im_v2.moderation_audit_entries (actor_user_id, operation_id, room_id, action, target_user_id, message_id, reason_code, occurred_at, retain_until) VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), 'remove_member', \(bind: targetID), NULL, \(bind: command.reasonCode.rawValue), \(bind: now), \(bind: retainUntil))").run()
             return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: .removeMember, targetUserID: commandTargetID, messageID: nil, membershipRevision: moderationUnsigned(membershipRevision), muteUntil: nil, roomSequence: moderationUnsigned(roomSequence), eventID: eventID, createdAt: timestamp.createdAt))
         }
@@ -418,7 +417,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
         }
         return try await v2WithPostgresTransactionRetry(
             database: database, maximumRetryCount: 0,
-            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil
+            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil, existingTransaction: existingMemberAdministrationTransaction
         ) { transaction in
             guard let sql = transaction as? any SQLDatabase,
                   let commandTargetID = command.targetUserID,
@@ -433,19 +432,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             if let activationScope { try await activationScope.require([roomID], sql: sql) }
             if activationScope == nil, let ownerRoute { try await v2RequireRoomOwner(roomID: roomID, route: ownerRoute, sql: sql) }
-            if let prior = try await sql.raw("""
-                SELECT room_id, action, target_user_id, message_id, resulting_message_revision, mute_until, reason_code,
-                       room_sequence, event_id, created_at,
-                       mute_until IS NOT DISTINCT FROM \(bind: commandMuteUntil) AS mute_matches
-                FROM im_v2.moderation_operations
-                WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)
-                """).first(decoding: ModerationOperationRow.self) {
-                guard prior.matchesMute(command, roomID: roomID, targetID: targetID) else { return .idempotencyConflict }
-                guard prior.muteUntil.map(v2PostgresTimestampCanEncode) == true else { throw V2ModerationStoreError.corruptPersistenceState }
-                // 使用与写入相同的 PostgreSQL 微秒精度。
-                guard prior.muteMatches == true else { return .idempotencyConflict }
-                return .idempotent(try prior.result(operationID: command.operationID))
-            }
+
             let retainUntil = try validatedAuditRetention(now: now)
             guard v2PostgresTimestampPrecedes(now, commandMuteUntil) else { throw V2ModerationValidationError.invalidMuteExpiry }
             guard let room = try await sql.raw("""
@@ -462,7 +449,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 """).first(decoding: ModerationRoleRow.self),
                 let roleValue = V2RoomMembershipRole(rawValue: role.role)
             else { throw V2ModerationStoreError.actorNotAuthorized }
-            try V2ModerationAuthorization.authorize(actorRole: roleValue, action: command.action, now: now, command: command)
+            try V2ModerationAuthorization.authorize(actorRole: roleValue, configuredPermissions: try await v2ResolvedGroupPermissions(roomID:roomID,role:roleValue,sql:sql), action: command.action, now: now, command: command)
             let targetIsMember = try await sql.raw("""
                 SELECT EXISTS (
                     SELECT 1 FROM im_v2.room_memberships
@@ -523,9 +510,7 @@ public struct PostgresV2ModerationStore: V2ModerationStore, V2TrustedSafetyModer
                 VALUES (\(bind: eventUUID), \(bind: roomID), \(bind: roomSequence), 'member.muted', \(bind: actorID),
                         jsonb_build_object('event_type', 'member.muted', 'room_id', \(bind: roomID.uuidString), 'room_sequence', \(bind: roomSequence), 'actor_user_id', \(bind: actorID.uuidString), 'target_user_id', \(bind: targetID.uuidString), 'mute_until_ms', \(bind: muteUntilMilliseconds), 'server_created_at_ms', \(bind: createdAtMilliseconds)), \(bind: room.membershipRevision), \(bind: now))
                 """).run()
-            try await sql.raw("""
-                INSERT INTO im_v2.moderation_operations (actor_user_id, operation_id, room_id, action, target_user_id, message_id, resulting_message_revision, mute_until, reason_code, room_sequence, event_id, created_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), 'mute_member', \(bind: targetID), NULL, NULL, \(bind: commandMuteUntil), \(bind: command.reasonCode.rawValue), \(bind: roomSequence), \(bind: eventUUID), \(bind: now))
-                """).run()
+
             try await sql.raw("""
                 INSERT INTO im_v2.moderation_audit_entries (actor_user_id, operation_id, room_id, action, target_user_id, message_id, reason_code, occurred_at, retain_until) VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), 'mute_member', \(bind: targetID), NULL, \(bind: command.reasonCode.rawValue), \(bind: now), \(bind: retainUntil))
                 """).run()
@@ -559,13 +544,9 @@ private struct ModerationOperationRow: Decodable {
     let roomID: UUID; let action: String; let targetUserID: UUID?; let messageID: UUID?; let resultingMessageRevision: Int64?; let resultingMembershipRevision: Int64?; let muteUntil: Date?; let reasonCode: String; let roomSequence: Int64; let eventID: UUID; let createdAt: Date
     enum CodingKeys: String, CodingKey { case muteMatches = "mute_matches", roomID = "room_id", action, targetUserID = "target_user_id", messageID = "message_id", resultingMessageRevision = "resulting_message_revision", resultingMembershipRevision = "resulting_membership_revision", muteUntil = "mute_until", reasonCode = "reason_code", roomSequence = "room_sequence", eventID = "event_id", createdAt = "created_at" }
     func matchesRedaction(_ command: V2ModerationCommand, roomID: UUID, messageID: UUID) -> Bool { self.roomID == roomID && action == "redact_message" && command.action == .redactMessage && targetUserID == nil && self.messageID == messageID && muteUntil == nil && reasonCode == command.reasonCode.rawValue }
-    func matchesMute(_ command: V2ModerationCommand, roomID: UUID, targetID: UUID) -> Bool { self.roomID == roomID && action == "mute_member" && command.action == .muteMember && targetUserID == targetID && messageID == nil && reasonCode == command.reasonCode.rawValue }
     func matchesRoomControl(_ command: V2ModerationCommand, roomID: UUID) -> Bool {
         let expectedAction = command.action == .freezeRoom ? "freeze_room" : "unfreeze_room"
         return self.roomID == roomID && action == expectedAction && targetUserID == nil && messageID == nil && resultingMessageRevision == nil && muteUntil == nil && reasonCode == command.reasonCode.rawValue
-    }
-    func matchesRemoval(_ command: V2ModerationCommand, roomID: UUID, targetID: UUID) -> Bool {
-        self.roomID == roomID && action == "remove_member" && command.action == .removeMember && targetUserID == targetID && messageID == nil && resultingMessageRevision == nil && muteUntil == nil && reasonCode == command.reasonCode.rawValue
     }
     func result(operationID: ModerationOperationID) throws -> V2ModerationResult {
         guard v2PostgresTimestampCanEncode(createdAt), muteUntil.map(v2PostgresTimestampCanEncode) ?? true else { throw V2ModerationStoreError.corruptPersistenceState }
@@ -573,12 +554,6 @@ private struct ModerationOperationRow: Decodable {
         case "redact_message":
             guard targetUserID == nil, let messageID, let resultingMessageRevision, muteUntil == nil else { throw V2ModerationStoreError.corruptPersistenceState }
             return try .init(roomID: .init(roomID.uuidString), operationID: operationID, action: .redactMessage, targetUserID: nil, messageID: .init(messageID.uuidString), messageRevision: moderationUnsigned(resultingMessageRevision), muteUntil: nil, roomSequence: moderationUnsigned(roomSequence), eventID: .init(eventID.uuidString), createdAt: createdAt)
-        case "mute_member":
-            guard let targetUserID, messageID == nil, resultingMessageRevision == nil, let muteUntil else { throw V2ModerationStoreError.corruptPersistenceState }
-            return try .init(roomID: .init(roomID.uuidString), operationID: operationID, action: .muteMember, targetUserID: .init(targetUserID.uuidString), messageID: nil, muteUntil: muteUntil, roomSequence: moderationUnsigned(roomSequence), eventID: .init(eventID.uuidString), createdAt: createdAt)
-        case "remove_member":
-            guard let targetUserID, messageID == nil, resultingMessageRevision == nil, let resultingMembershipRevision, muteUntil == nil else { throw V2ModerationStoreError.corruptPersistenceState }
-            return try .init(roomID: .init(roomID.uuidString), operationID: operationID, action: .removeMember, targetUserID: .init(targetUserID.uuidString), messageID: nil, membershipRevision: moderationUnsigned(resultingMembershipRevision), muteUntil: nil, roomSequence: moderationUnsigned(roomSequence), eventID: .init(eventID.uuidString), createdAt: createdAt)
         case "freeze_room", "unfreeze_room":
             guard targetUserID == nil, messageID == nil, resultingMessageRevision == nil, muteUntil == nil else { throw V2ModerationStoreError.corruptPersistenceState }
             return try .init(roomID: .init(roomID.uuidString), operationID: operationID, action: action == "freeze_room" ? .freezeRoom : .unfreezeRoom, targetUserID: nil, messageID: nil, muteUntil: nil, roomSequence: moderationUnsigned(roomSequence), eventID: .init(eventID.uuidString), createdAt: createdAt)

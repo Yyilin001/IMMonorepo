@@ -134,7 +134,8 @@ extension GRDBV2LocalSyncStore {
             is_pinned INTEGER NOT NULL CHECK (is_pinned IN (0, 1)),
             is_archived INTEGER NOT NULL CHECK (is_archived IN (0, 1)),
             mute_until REAL NOT NULL CHECK (mute_until >= 0),
-            updated_at REAL NOT NULL
+            updated_at REAL NOT NULL,
+            revision INTEGER NOT NULL CHECK(revision>0)
         );
 
         CREATE TABLE v2_conversation_summaries (
@@ -183,33 +184,7 @@ extension GRDBV2LocalSyncStore {
 
         CREATE TABLE v2_direct_sending_capabilities (room_id TEXT PRIMARY KEY, can_send INTEGER NOT NULL CHECK (can_send IN (0, 1)), state_version INTEGER NOT NULL CHECK (state_version > 0), updated_at REAL NOT NULL);
 
-        CREATE TABLE v2_forward_message_chunks (
-                operation_id TEXT PRIMARY KEY,
-                plan_id TEXT NOT NULL REFERENCES v2_forward_message_plans(plan_id),
-                chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
-                source_message_ids TEXT NOT NULL, source_references TEXT,
-                target_room_id TEXT NOT NULL,
-                state TEXT NOT NULL CHECK (state IN ('pending','acknowledged','rejected','cancelled')),
-                completion_digest TEXT,
-                attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
-                next_attempt_at REAL NOT NULL,
-                terminal_code TEXT,
-                created_at REAL NOT NULL,
-                UNIQUE (plan_id, chunk_index)
-            );
 
-        CREATE TABLE v2_forward_message_plans (
-                plan_id TEXT PRIMARY KEY,
-                source_message_ids TEXT NOT NULL, source_references TEXT,
-                target_room_ids TEXT NOT NULL,
-                next_chunk_index INTEGER NOT NULL CHECK (next_chunk_index >= 0),
-                total_chunk_count INTEGER NOT NULL CHECK (total_chunk_count > 0),
-                succeeded_count INTEGER NOT NULL DEFAULT 0 CHECK (succeeded_count >= 0),
-                failed_count INTEGER NOT NULL DEFAULT 0 CHECK (failed_count >= 0),
-                state TEXT NOT NULL CHECK (state IN ('active','completed','cancelled')), terminal_code TEXT,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
 
         \(announcementProjectionSchemaSQL);
 
@@ -291,7 +266,8 @@ extension GRDBV2LocalSyncStore {
             message_id TEXT PRIMARY KEY,
             room_id TEXT NOT NULL,
             is_favorited INTEGER NOT NULL CHECK (is_favorited IN (0, 1)),
-            updated_at REAL NOT NULL
+            updated_at REAL NOT NULL,
+            revision INTEGER NOT NULL CHECK(revision>0)
         );
 
         CREATE TABLE v2_message_projections (
@@ -377,232 +353,13 @@ extension GRDBV2LocalSyncStore {
             CHECK (mute_until > server_created_at)
         );
 
-        CREATE TABLE v2_pending_conversation_states (
-                operation_id TEXT PRIMARY KEY,
-                room_id TEXT NOT NULL,
-                is_pinned INTEGER NOT NULL CHECK (is_pinned IN (0, 1)),
-                is_archived INTEGER NOT NULL CHECK (is_archived IN (0, 1)),
-                mute_until REAL NOT NULL CHECK (mute_until >= 0),
-                state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
-                attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
-                next_attempt_at REAL NOT NULL,
-                created_at REAL NOT NULL,
-                terminal_code TEXT, terminal_at REAL NULL,
-                CHECK ((state = 'pending' AND terminal_code IS NULL) OR (state = 'acknowledged' AND terminal_code IS NULL) OR (state = 'rejected' AND terminal_code IS NOT NULL))
-            );
 
-        CREATE TABLE v2_pending_group_capabilities (
-                operation_id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('pin', 'announcement', 'rolePermissions', 'memberRole')),
-                room_id TEXT NOT NULL, message_id TEXT, is_pinned INTEGER CHECK (is_pinned IN (0, 1)), body TEXT,
-                role TEXT CHECK (role IN ('owner', 'admin', 'member')), permissions TEXT NOT NULL,
-                target_user_id TEXT, expected_revision INTEGER NOT NULL CHECK (expected_revision >= 0),
-                state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
-                attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0), next_attempt_at REAL NOT NULL, created_at REAL NOT NULL,
-                terminal_code TEXT, terminal_at REAL NULL,
-                CHECK ((state = 'pending' AND terminal_code IS NULL) OR (state = 'acknowledged' AND terminal_code IS NULL) OR (state = 'rejected' AND terminal_code IS NOT NULL))
-            );
 
-        CREATE TABLE v2_pending_group_room_creations (
-                operation_id TEXT PRIMARY KEY, title TEXT NOT NULL,
-                initial_member_user_ids TEXT NOT NULL,
-                capacity_class TEXT NOT NULL CHECK (capacity_class IN ('standard', 'large')),
-                uploaded_member_count INTEGER NOT NULL DEFAULT 0 CHECK (uploaded_member_count >= 0),
-                state TEXT NOT NULL CHECK (state IN ('pending', 'cancelling', 'finalizing', 'cancelled', 'acknowledged', 'rejected')),
-                attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0), next_attempt_at REAL NOT NULL, created_at REAL NOT NULL,
-                created_room_id TEXT,
-                terminal_code TEXT, terminal_at REAL NULL,
-                CHECK ((state IN ('pending', 'cancelling', 'finalizing', 'cancelled') AND created_room_id IS NULL AND terminal_code IS NULL)
-                    OR (state = 'acknowledged' AND created_room_id IS NOT NULL AND terminal_code IS NULL)
-                    OR (state = 'rejected' AND created_room_id IS NULL AND terminal_code IS NOT NULL))
-            );
 
-        CREATE TABLE v2_pending_member_mutes (
-            operation_id TEXT PRIMARY KEY, room_id TEXT NOT NULL, target_user_id TEXT NOT NULL,
-            mute_until REAL NOT NULL, reason_code TEXT NOT NULL CHECK (length(reason_code) BETWEEN 1 AND 64),
-            state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
-            attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0), next_attempt_at REAL NOT NULL, created_at REAL NOT NULL,
-            resulting_room_sequence INTEGER, terminal_code TEXT, terminal_at REAL NULL,
-            CHECK ((state = 'pending' AND resulting_room_sequence IS NULL AND terminal_code IS NULL) OR (state = 'acknowledged' AND resulting_room_sequence IS NOT NULL AND resulting_room_sequence > 0 AND terminal_code IS NULL) OR (state = 'rejected' AND resulting_room_sequence IS NULL AND terminal_code IS NOT NULL))
-        );
 
-        CREATE TABLE v2_pending_membership_commands (
-                operation_id TEXT PRIMARY KEY,
-                room_id TEXT NOT NULL,
-                target_user_id TEXT NOT NULL,
-                action TEXT NOT NULL CHECK (action IN ('add', 'remove')),
-                expected_membership_revision INTEGER NOT NULL CHECK (expected_membership_revision >= 0),
-                state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
-                attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
-                next_attempt_at REAL NOT NULL,
-                created_at REAL NOT NULL,
-                resulting_membership_revision INTEGER,
-                resulting_room_sequence INTEGER,
-                terminal_code TEXT,
-                terminal_current_revision INTEGER CHECK (terminal_current_revision IS NULL OR terminal_current_revision >= 0), terminal_at REAL NULL,
-                CHECK (
-                    (state = 'pending' AND resulting_membership_revision IS NULL AND resulting_room_sequence IS NULL AND terminal_code IS NULL AND terminal_current_revision IS NULL)
-                    OR (state = 'acknowledged' AND resulting_membership_revision IS NOT NULL AND resulting_room_sequence IS NOT NULL AND terminal_code IS NULL AND terminal_current_revision IS NULL)
-                    OR (state = 'rejected' AND resulting_membership_revision IS NULL AND resulting_room_sequence IS NULL AND terminal_code IS NOT NULL)
-                )
-            );
 
-        CREATE TABLE v2_pending_message_commands (
-            client_message_id TEXT PRIMARY KEY,
-            room_id TEXT NOT NULL,
-            text TEXT NOT NULL,
-            media_ids TEXT NOT NULL DEFAULT '[]',
-            state TEXT NOT NULL CHECK (state IN ('pending', 'accepted', 'rejected')),
-            attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
-            next_attempt_at REAL NOT NULL,
-            created_at REAL NOT NULL,
-            accepted_message_id TEXT,
-            accepted_room_sequence INTEGER,
-            terminal_code TEXT, mention_targets TEXT NOT NULL DEFAULT '[]', entities TEXT NOT NULL DEFAULT '[]', reply_to_message_id TEXT, terminal_at REAL NULL,
-            CHECK (
-                (state = 'pending' AND accepted_message_id IS NULL AND accepted_room_sequence IS NULL AND terminal_code IS NULL)
-                OR (state = 'accepted' AND accepted_message_id IS NOT NULL AND accepted_room_sequence IS NOT NULL AND accepted_room_sequence > 0 AND terminal_code IS NULL)
-                OR (state = 'rejected' AND accepted_message_id IS NULL AND accepted_room_sequence IS NULL AND terminal_code IS NOT NULL)
-            )
-        );
 
-        CREATE TABLE v2_pending_message_edits (
-                operation_id TEXT PRIMARY KEY,
-                room_id TEXT NOT NULL,
-                message_id TEXT NOT NULL,
-                expected_message_revision INTEGER NOT NULL CHECK (expected_message_revision > 0),
-                text_body TEXT NOT NULL CHECK (length(text_body) > 0),
-                state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
-                attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
-                next_attempt_at REAL NOT NULL,
-                created_at REAL NOT NULL,
-                resulting_message_revision INTEGER,
-                resulting_room_sequence INTEGER,
-                terminal_code TEXT,
-                terminal_current_revision INTEGER, terminal_at REAL NULL,
-                CHECK (
-                    (state = 'pending' AND resulting_message_revision IS NULL AND resulting_room_sequence IS NULL AND terminal_code IS NULL AND terminal_current_revision IS NULL)
-                    OR (state = 'acknowledged' AND resulting_message_revision IS NOT NULL AND resulting_room_sequence IS NOT NULL AND terminal_code IS NULL AND terminal_current_revision IS NULL)
-                    OR (state = 'rejected' AND resulting_message_revision IS NULL AND resulting_room_sequence IS NULL AND terminal_code IS NOT NULL)
-                )
-            );
 
-        CREATE TABLE v2_pending_message_favorites (
-                operation_id TEXT PRIMARY KEY,
-                room_id TEXT NOT NULL,
-                message_id TEXT NOT NULL,
-                is_favorited INTEGER NOT NULL CHECK (is_favorited IN (0, 1)),
-                state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
-                attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
-                next_attempt_at REAL NOT NULL,
-                created_at REAL NOT NULL,
-                terminal_code TEXT, terminal_at REAL NULL,
-                CHECK ((state = 'pending' AND terminal_code IS NULL) OR (state = 'acknowledged' AND terminal_code IS NULL) OR (state = 'rejected' AND terminal_code IS NOT NULL))
-            );
-
-        CREATE TABLE v2_pending_message_reactions (
-                operation_id TEXT PRIMARY KEY,
-                room_id TEXT NOT NULL,
-                message_id TEXT NOT NULL,
-                reaction TEXT NOT NULL CHECK (
-                    length(CAST(reaction AS BLOB)) BETWEEN 1 AND 16
-                ),
-                action TEXT NOT NULL CHECK (action IN ('add', 'remove')),
-                state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
-                attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
-                next_attempt_at REAL NOT NULL,
-                created_at REAL NOT NULL,
-                resulting_room_sequence INTEGER,
-                terminal_code TEXT, terminal_at REAL NULL,
-                CHECK (
-                    (state = 'pending' AND resulting_room_sequence IS NULL AND terminal_code IS NULL)
-                    OR (state = 'acknowledged' AND resulting_room_sequence IS NOT NULL AND resulting_room_sequence > 0 AND terminal_code IS NULL)
-                    OR (state = 'rejected' AND resulting_room_sequence IS NULL AND terminal_code IS NOT NULL)
-                )
-            );
-
-        CREATE TABLE v2_pending_message_redactions (
-            operation_id TEXT PRIMARY KEY,
-            room_id TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            reason_code TEXT NOT NULL CHECK (length(reason_code) > 0 AND length(reason_code) <= 64),
-            state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
-            attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
-            next_attempt_at REAL NOT NULL,
-            created_at REAL NOT NULL,
-            resulting_message_revision INTEGER,
-            resulting_room_sequence INTEGER,
-            terminal_code TEXT, terminal_at REAL NULL,
-            CHECK (
-                (state = 'pending' AND resulting_message_revision IS NULL AND resulting_room_sequence IS NULL AND terminal_code IS NULL)
-                OR (state = 'acknowledged' AND resulting_message_revision IS NOT NULL AND resulting_message_revision > 1 AND resulting_room_sequence IS NOT NULL AND resulting_room_sequence > 0 AND terminal_code IS NULL)
-                OR (state = 'rejected' AND resulting_message_revision IS NULL AND resulting_room_sequence IS NULL AND terminal_code IS NOT NULL)
-            )
-        );
-
-        CREATE TABLE v2_pending_message_withdrawals (
-                operation_id TEXT PRIMARY KEY,
-                room_id TEXT NOT NULL,
-                message_id TEXT NOT NULL,
-                expected_message_revision INTEGER NOT NULL CHECK (expected_message_revision > 0),
-                state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
-                attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
-                next_attempt_at REAL NOT NULL,
-                created_at REAL NOT NULL,
-                resulting_message_revision INTEGER,
-                resulting_room_sequence INTEGER,
-                terminal_code TEXT,
-                terminal_current_revision INTEGER, terminal_at REAL NULL,
-                CHECK (
-                    (state = 'pending' AND resulting_message_revision IS NULL AND resulting_room_sequence IS NULL AND terminal_code IS NULL AND terminal_current_revision IS NULL)
-                    OR (state = 'acknowledged' AND resulting_message_revision IS NOT NULL AND resulting_room_sequence IS NOT NULL AND terminal_code IS NULL AND terminal_current_revision IS NULL)
-                    OR (state = 'rejected' AND resulting_message_revision IS NULL AND resulting_room_sequence IS NULL AND terminal_code IS NOT NULL)
-                )
-            );
-
-        CREATE TABLE v2_pending_moderated_member_removals (
-            operation_id TEXT PRIMARY KEY, room_id TEXT NOT NULL, target_user_id TEXT NOT NULL,
-            reason_code TEXT NOT NULL CHECK (length(reason_code) BETWEEN 1 AND 64),
-            state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
-            attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0), next_attempt_at REAL NOT NULL, created_at REAL NOT NULL,
-            resulting_membership_revision INTEGER, resulting_room_sequence INTEGER, terminal_code TEXT, terminal_at REAL NULL,
-            CHECK ((state = 'pending' AND resulting_membership_revision IS NULL AND resulting_room_sequence IS NULL AND terminal_code IS NULL) OR (state = 'acknowledged' AND resulting_membership_revision IS NOT NULL AND resulting_membership_revision > 0 AND resulting_room_sequence IS NOT NULL AND resulting_room_sequence > 0 AND terminal_code IS NULL) OR (state = 'rejected' AND resulting_membership_revision IS NULL AND resulting_room_sequence IS NULL AND terminal_code IS NOT NULL))
-        );
-
-        CREATE TABLE v2_pending_read_receipts (
-                operation_id TEXT PRIMARY KEY,
-                room_id TEXT NOT NULL,
-                read_through_room_sequence INTEGER NOT NULL CHECK (read_through_room_sequence > 0),
-                state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
-                attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
-                next_attempt_at REAL NOT NULL,
-                created_at REAL NOT NULL,
-                resulting_room_sequence INTEGER,
-                terminal_code TEXT, terminal_at REAL NULL,
-                CHECK (
-                    (state = 'pending' AND resulting_room_sequence IS NULL AND terminal_code IS NULL)
-                    OR (state = 'acknowledged' AND resulting_room_sequence IS NOT NULL AND resulting_room_sequence > 0 AND terminal_code IS NULL)
-                    OR (state = 'rejected' AND resulting_room_sequence IS NULL AND terminal_code IS NOT NULL)
-                )
-            );
-
-        CREATE TABLE v2_pending_social_commands (
-                operation_id TEXT PRIMARY KEY,
-                command_kind TEXT NOT NULL CHECK (command_kind IN ('relationship', 'userBlock', 'strangerMessagePreference', 'userAddPreference', 'readReceiptPreference')),
-                target_user_id TEXT, relationship_action TEXT, block_action TEXT,
-                stranger_permission TEXT, user_add_permission TEXT,
-                allows_direct_read_receipts INTEGER CHECK (allows_direct_read_receipts IN (0, 1)),
-                allows_group_read_receipts INTEGER CHECK (allows_group_read_receipts IN (0, 1)),
-                state TEXT NOT NULL CHECK (state IN ('pending', 'acknowledged', 'rejected')),
-                attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0), next_attempt_at REAL NOT NULL, created_at REAL NOT NULL, terminal_code TEXT, terminal_at REAL NULL,
-                CHECK (
-                    (command_kind = 'relationship' AND target_user_id IS NOT NULL AND relationship_action IN ('request', 'accept', 'reject', 'remove') AND block_action IS NULL AND stranger_permission IS NULL AND user_add_permission IS NULL AND allows_direct_read_receipts IS NULL AND allows_group_read_receipts IS NULL)
-                    OR (command_kind = 'userBlock' AND target_user_id IS NOT NULL AND relationship_action IS NULL AND block_action IN ('block', 'unblock') AND stranger_permission IS NULL AND user_add_permission IS NULL AND allows_direct_read_receipts IS NULL AND allows_group_read_receipts IS NULL)
-                    OR (command_kind = 'strangerMessagePreference' AND target_user_id IS NULL AND relationship_action IS NULL AND block_action IS NULL AND stranger_permission IN ('allow', 'deny') AND user_add_permission IS NULL AND allows_direct_read_receipts IS NULL AND allows_group_read_receipts IS NULL)
-                    OR (command_kind = 'userAddPreference' AND target_user_id IS NULL AND relationship_action IS NULL AND block_action IS NULL AND stranger_permission IS NULL AND user_add_permission IN ('allow', 'deny') AND allows_direct_read_receipts IS NULL AND allows_group_read_receipts IS NULL)
-                    OR (command_kind = 'readReceiptPreference' AND target_user_id IS NULL AND relationship_action IS NULL AND block_action IS NULL AND stranger_permission IS NULL AND user_add_permission IS NULL AND allows_direct_read_receipts IS NOT NULL AND allows_group_read_receipts IS NOT NULL)
-                ),
-                CHECK ((state IN ('pending', 'acknowledged') AND terminal_code IS NULL) OR (state = 'rejected' AND terminal_code IS NOT NULL))
-            );
 
         CREATE TABLE v2_profile_invalidations (
             user_id TEXT PRIMARY KEY,
@@ -706,6 +463,7 @@ extension GRDBV2LocalSyncStore {
         CREATE TABLE v2_stranger_message_preference (
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                 allows_stranger_messages INTEGER NOT NULL CHECK (allows_stranger_messages IN (0, 1)),
+                revision INTEGER NOT NULL CHECK(revision>0),
                 updated_at REAL NOT NULL
             );
 
@@ -737,7 +495,15 @@ extension GRDBV2LocalSyncStore {
         CREATE TABLE v2_user_add_preference (
             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
             allows_being_added INTEGER NOT NULL CHECK (allows_being_added IN (0, 1)),
+            revision INTEGER NOT NULL CHECK(revision>0),
             updated_at REAL NOT NULL
+        );
+
+        CREATE TABLE v2_live_activity_preference (
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            allows_online_presence INTEGER NOT NULL CHECK(allows_online_presence IN (0,1)),
+            allows_typing_indicators INTEGER NOT NULL CHECK(allows_typing_indicators IN (0,1)),
+            revision INTEGER NOT NULL CHECK(revision>0),updated_at REAL NOT NULL
         );
 
         CREATE TABLE v2_user_block_projections (
@@ -755,15 +521,9 @@ extension GRDBV2LocalSyncStore {
         CREATE UNIQUE INDEX v2_direct_room_identities_target_idx
             ON v2_direct_room_identities (target_user_id);
 
-        CREATE INDEX v2_forward_message_chunks_ready_idx
-                ON v2_forward_message_chunks (state, next_attempt_at, created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_forward_message_plans_active_expiry_idx ON v2_forward_message_plans (created_at) WHERE state = 'active';
 
-        CREATE INDEX v2_forward_message_plans_active_idx
-                ON v2_forward_message_plans (created_at, plan_id) WHERE state = 'active';
 
-        CREATE INDEX v2_forward_message_plans_terminal_cleanup_idx ON v2_forward_message_plans (updated_at) WHERE state IN ('completed', 'cancelled');
 
         -- Sparse indexes retain only invalid stored sequences; empty for valid data.
         CREATE INDEX v2_group_event_cursors_invalid_sequence_idx ON v2_group_event_cursors (room_id) WHERE (typeof(applied_room_sequence) <> 'integer' OR applied_room_sequence < 0);
@@ -796,152 +556,53 @@ extension GRDBV2LocalSyncStore {
         CREATE INDEX v2_moderation_projections_room_idx
             ON v2_moderation_projections (room_id, server_created_at, source_event_id);
 
-        CREATE INDEX v2_pending_conversation_states_idempotency_expiry_idx ON v2_pending_conversation_states (created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_conversation_states_ready_idx ON v2_pending_conversation_states (state, next_attempt_at, created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_conversation_states_terminal_cleanup_idx ON v2_pending_conversation_states (terminal_at) WHERE state <> 'pending';
 
-        CREATE INDEX v2_pending_group_capabilities_idempotency_expiry_idx ON v2_pending_group_capabilities (created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_group_capabilities_ready_idx ON v2_pending_group_capabilities (state, next_attempt_at, created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_group_capabilities_terminal_cleanup_idx ON v2_pending_group_capabilities (terminal_at) WHERE state <> 'pending';
 
-        CREATE INDEX v2_pending_group_room_creations_active_expiry_idx ON v2_pending_group_room_creations (created_at) WHERE state IN ('finalizing', 'cancelling');
 
-        CREATE INDEX v2_pending_group_room_creations_idempotency_expiry_idx ON v2_pending_group_room_creations (created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_group_room_creations_intent_with_capacity_class_idx
-                ON v2_pending_group_room_creations
-                (title, capacity_class, initial_member_user_ids, created_at, operation_id)
-                WHERE state IN ('pending', 'finalizing');
 
-        CREATE INDEX v2_pending_group_room_creations_ready_idx
-                ON v2_pending_group_room_creations (state, next_attempt_at, created_at)
-                WHERE state IN ('pending', 'finalizing', 'cancelling');
 
-        CREATE INDEX v2_pending_group_room_creations_terminal_cleanup_idx ON v2_pending_group_room_creations (terminal_at) WHERE state IN ('cancelled', 'acknowledged', 'rejected');
 
-        CREATE INDEX v2_pending_member_mutes_idempotency_expiry_idx ON v2_pending_member_mutes (created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_member_mutes_intent_idx
-                ON v2_pending_member_mutes
-                (room_id, target_user_id, mute_until, reason_code, created_at, operation_id)
-                WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_member_mutes_ready_idx ON v2_pending_member_mutes (state, next_attempt_at, created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_member_mutes_terminal_cleanup_idx ON v2_pending_member_mutes (terminal_at) WHERE state <> 'pending';
 
-        CREATE INDEX v2_pending_membership_commands_idempotency_expiry_idx ON v2_pending_membership_commands (created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_membership_commands_terminal_cleanup_idx ON v2_pending_membership_commands (terminal_at) WHERE state <> 'pending';
 
-        CREATE INDEX v2_pending_membership_intent_idx
-                ON v2_pending_membership_commands
-                (room_id, target_user_id, action, expected_membership_revision, created_at, operation_id)
-                WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_membership_ready_idx
-                ON v2_pending_membership_commands (state, next_attempt_at, created_at)
-                WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_message_commands_idempotency_expiry_idx ON v2_pending_message_commands (created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_message_commands_terminal_cleanup_idx ON v2_pending_message_commands (terminal_at) WHERE state <> 'pending';
 
-        CREATE INDEX v2_pending_message_edits_idempotency_expiry_idx ON v2_pending_message_edits (created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_message_edits_intent_idx
-                ON v2_pending_message_edits
-                (room_id, message_id, expected_message_revision, text_body, created_at, operation_id)
-                WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_message_edits_ready_idx
-                ON v2_pending_message_edits (state, next_attempt_at, created_at)
-                WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_message_edits_terminal_cleanup_idx ON v2_pending_message_edits (terminal_at) WHERE state <> 'pending';
 
-        CREATE INDEX v2_pending_message_favorites_idempotency_expiry_idx ON v2_pending_message_favorites (created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_message_favorites_ready_idx ON v2_pending_message_favorites (state, next_attempt_at, created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_message_favorites_terminal_cleanup_idx ON v2_pending_message_favorites (terminal_at) WHERE state <> 'pending';
 
-        CREATE INDEX v2_pending_message_reactions_idempotency_expiry_idx ON v2_pending_message_reactions (created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_message_reactions_intent_idx
-                ON v2_pending_message_reactions
-                (room_id, message_id, reaction, action, created_at, operation_id)
-                WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_message_reactions_ready_idx
-                ON v2_pending_message_reactions (state, next_attempt_at, created_at)
-                WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_message_reactions_terminal_cleanup_idx ON v2_pending_message_reactions (terminal_at) WHERE state <> 'pending';
 
-        CREATE INDEX v2_pending_message_ready_idx
-            ON v2_pending_message_commands (state, next_attempt_at, created_at)
-            WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_message_redactions_idempotency_expiry_idx ON v2_pending_message_redactions (created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_message_redactions_intent_idx
-                ON v2_pending_message_redactions
-                (room_id, message_id, reason_code, created_at, operation_id)
-                WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_message_redactions_ready_idx
-            ON v2_pending_message_redactions (state, next_attempt_at, created_at)
-            WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_message_redactions_terminal_cleanup_idx ON v2_pending_message_redactions (terminal_at) WHERE state <> 'pending';
 
-        CREATE INDEX v2_pending_message_withdrawals_idempotency_expiry_idx ON v2_pending_message_withdrawals (created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_message_withdrawals_intent_idx
-                ON v2_pending_message_withdrawals
-                (room_id, message_id, expected_message_revision, created_at, operation_id)
-                WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_message_withdrawals_ready_idx
-                ON v2_pending_message_withdrawals (state, next_attempt_at, created_at)
-                WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_message_withdrawals_terminal_cleanup_idx ON v2_pending_message_withdrawals (terminal_at) WHERE state <> 'pending';
 
-        CREATE INDEX v2_pending_moderated_member_removals_idempotency_expiry_idx ON v2_pending_moderated_member_removals (created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_moderated_member_removals_intent_idx
-                ON v2_pending_moderated_member_removals
-                (room_id, target_user_id, reason_code, created_at, operation_id)
-                WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_moderated_member_removals_ready_idx ON v2_pending_moderated_member_removals (state, next_attempt_at, created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_moderated_member_removals_terminal_cleanup_idx ON v2_pending_moderated_member_removals (terminal_at) WHERE state <> 'pending';
 
-        CREATE INDEX v2_pending_read_receipts_idempotency_expiry_idx ON v2_pending_read_receipts (created_at) WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_read_receipts_ready_idx
-                ON v2_pending_read_receipts (state, next_attempt_at, created_at)
-                WHERE state = 'pending';
 
-        CREATE INDEX v2_pending_read_receipts_terminal_cleanup_idx ON v2_pending_read_receipts (terminal_at) WHERE state <> 'pending';
-
-        CREATE INDEX v2_pending_social_commands_idempotency_expiry_idx ON v2_pending_social_commands (created_at) WHERE state = 'pending';
-
-        CREATE INDEX v2_pending_social_commands_intent_idx
-                ON v2_pending_social_commands
-                (command_kind, target_user_id, relationship_action, block_action, stranger_permission, created_at, operation_id)
-                WHERE state = 'pending';
-
-        CREATE INDEX v2_pending_social_commands_terminal_cleanup_idx ON v2_pending_social_commands (terminal_at) WHERE state <> 'pending';
-
-        CREATE INDEX v2_pending_social_ready_idx ON v2_pending_social_commands (state, next_attempt_at, created_at) WHERE state = 'pending';
 
         CREATE INDEX v2_relationship_list_requester_page_idx
                 ON v2_relationship_projections
@@ -1183,131 +844,19 @@ extension GRDBV2LocalSyncStore {
                 WHERE room_id = NEW.room_id;
             END;
 
-        CREATE TRIGGER v2_pending_conversation_states_set_terminal_at
-        AFTER UPDATE OF state ON v2_pending_conversation_states
-        WHEN NEW.terminal_at IS NULL AND NEW.state <> 'pending'
-        BEGIN
-            UPDATE v2_pending_conversation_states
-            SET terminal_at = (julianday('now') - 2440587.5) * 86400.0
-            WHERE rowid = NEW.rowid;
-        END;
 
-        CREATE TRIGGER v2_pending_group_capabilities_set_terminal_at
-        AFTER UPDATE OF state ON v2_pending_group_capabilities
-        WHEN NEW.terminal_at IS NULL AND NEW.state <> 'pending'
-        BEGIN
-            UPDATE v2_pending_group_capabilities
-            SET terminal_at = (julianday('now') - 2440587.5) * 86400.0
-            WHERE rowid = NEW.rowid;
-        END;
 
-        CREATE TRIGGER v2_pending_group_room_creations_set_terminal_at
-        AFTER UPDATE OF state ON v2_pending_group_room_creations
-        WHEN NEW.terminal_at IS NULL AND NEW.state IN ('cancelled', 'acknowledged', 'rejected')
-        BEGIN
-            UPDATE v2_pending_group_room_creations
-            SET terminal_at = (julianday('now') - 2440587.5) * 86400.0
-            WHERE rowid = NEW.rowid;
-        END;
 
-        CREATE TRIGGER v2_pending_member_mutes_set_terminal_at
-        AFTER UPDATE OF state ON v2_pending_member_mutes
-        WHEN NEW.terminal_at IS NULL AND NEW.state <> 'pending'
-        BEGIN
-            UPDATE v2_pending_member_mutes
-            SET terminal_at = (julianday('now') - 2440587.5) * 86400.0
-            WHERE rowid = NEW.rowid;
-        END;
 
-        CREATE TRIGGER v2_pending_membership_commands_set_terminal_at
-        AFTER UPDATE OF state ON v2_pending_membership_commands
-        WHEN NEW.terminal_at IS NULL AND NEW.state <> 'pending'
-        BEGIN
-            UPDATE v2_pending_membership_commands
-            SET terminal_at = (julianday('now') - 2440587.5) * 86400.0
-            WHERE rowid = NEW.rowid;
-        END;
 
-        CREATE TRIGGER v2_pending_message_commands_set_terminal_at
-        AFTER UPDATE OF state ON v2_pending_message_commands
-        WHEN NEW.terminal_at IS NULL AND NEW.state <> 'pending'
-        BEGIN
-            UPDATE v2_pending_message_commands
-            SET terminal_at = (julianday('now') - 2440587.5) * 86400.0
-            WHERE rowid = NEW.rowid;
-        END;
 
-        CREATE TRIGGER v2_pending_message_edits_set_terminal_at
-        AFTER UPDATE OF state ON v2_pending_message_edits
-        WHEN NEW.terminal_at IS NULL AND NEW.state <> 'pending'
-        BEGIN
-            UPDATE v2_pending_message_edits
-            SET terminal_at = (julianday('now') - 2440587.5) * 86400.0
-            WHERE rowid = NEW.rowid;
-        END;
 
-        CREATE TRIGGER v2_pending_message_favorites_set_terminal_at
-        AFTER UPDATE OF state ON v2_pending_message_favorites
-        WHEN NEW.terminal_at IS NULL AND NEW.state <> 'pending'
-        BEGIN
-            UPDATE v2_pending_message_favorites
-            SET terminal_at = (julianday('now') - 2440587.5) * 86400.0
-            WHERE rowid = NEW.rowid;
-        END;
 
-        CREATE TRIGGER v2_pending_message_reactions_set_terminal_at
-        AFTER UPDATE OF state ON v2_pending_message_reactions
-        WHEN NEW.terminal_at IS NULL AND NEW.state <> 'pending'
-        BEGIN
-            UPDATE v2_pending_message_reactions
-            SET terminal_at = (julianday('now') - 2440587.5) * 86400.0
-            WHERE rowid = NEW.rowid;
-        END;
 
-        CREATE TRIGGER v2_pending_message_redactions_set_terminal_at
-        AFTER UPDATE OF state ON v2_pending_message_redactions
-        WHEN NEW.terminal_at IS NULL AND NEW.state <> 'pending'
-        BEGIN
-            UPDATE v2_pending_message_redactions
-            SET terminal_at = (julianday('now') - 2440587.5) * 86400.0
-            WHERE rowid = NEW.rowid;
-        END;
 
-        CREATE TRIGGER v2_pending_message_withdrawals_set_terminal_at
-        AFTER UPDATE OF state ON v2_pending_message_withdrawals
-        WHEN NEW.terminal_at IS NULL AND NEW.state <> 'pending'
-        BEGIN
-            UPDATE v2_pending_message_withdrawals
-            SET terminal_at = (julianday('now') - 2440587.5) * 86400.0
-            WHERE rowid = NEW.rowid;
-        END;
 
-        CREATE TRIGGER v2_pending_moderated_member_removals_set_terminal_at
-        AFTER UPDATE OF state ON v2_pending_moderated_member_removals
-        WHEN NEW.terminal_at IS NULL AND NEW.state <> 'pending'
-        BEGIN
-            UPDATE v2_pending_moderated_member_removals
-            SET terminal_at = (julianday('now') - 2440587.5) * 86400.0
-            WHERE rowid = NEW.rowid;
-        END;
 
-        CREATE TRIGGER v2_pending_read_receipts_set_terminal_at
-        AFTER UPDATE OF state ON v2_pending_read_receipts
-        WHEN NEW.terminal_at IS NULL AND NEW.state <> 'pending'
-        BEGIN
-            UPDATE v2_pending_read_receipts
-            SET terminal_at = (julianday('now') - 2440587.5) * 86400.0
-            WHERE rowid = NEW.rowid;
-        END;
 
-        CREATE TRIGGER v2_pending_social_commands_set_terminal_at
-        AFTER UPDATE OF state ON v2_pending_social_commands
-        WHEN NEW.terminal_at IS NULL AND NEW.state <> 'pending'
-        BEGIN
-            UPDATE v2_pending_social_commands
-            SET terminal_at = (julianday('now') - 2440587.5) * 86400.0
-            WHERE rowid = NEW.rowid;
-        END;
 
         INSERT INTO v2_message_search_state
             (singleton, index_version, state, generation)

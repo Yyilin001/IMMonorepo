@@ -78,7 +78,7 @@ public struct V2ClientRoomProfileProjection: Equatable, Sendable {
         guard (record.projectionKind == "room" && payload.eventType == "room.created")
                 || (record.projectionKind == "membership" && payload.eventType == "membership_changed"),
               !normalizedTitle.isEmpty,
-              normalizedTitle.utf8.count <= V2CreateGroupRoomCommand.maximumTitleUTF8Bytes,
+              normalizedTitle.utf8.count <= V2GroupCreationIntent.maximumTitleUTF8Bytes,
               !normalizedTitle.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
               payload.membershipRevision > 0,
               payload.createdAtMilliseconds >= 0

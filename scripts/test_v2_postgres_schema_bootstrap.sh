@@ -90,22 +90,17 @@ assert_scalar() {
   fi
 }
 
-# Current schema adds quota intents, operation aliases, and owner receipts.
-# Their seven indexes plus cancellation history add eight to the prior baseline.
-# Terminal forward inbox/export compaction adds two bounded-scan indexes.
-# Durable housekeeping adds a singleton cursor and its primary-key index.
-# Actor activation adds one durable owner-store table and its primary key.
-# Resource lifecycle and permanent message closure add six tables, fourteen
-# indexes, two triggers and two functions.
-# Retired upload operations/grants remove two tables and five indexes.
+# Fresh current63 canonical schema, including permanent typed receipts and
+# remote-device security metadata. Counts include views and application-only
+# triggers; retired ledgers must remain absent rather than be recreated.
 assert_scalar 'im_v2 relation count' \
-  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '157'
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '168'
 assert_scalar 'im_v2 index count' \
-  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '369'
+  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '358'
 assert_scalar 'im_v2 application trigger count' \
-  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '31'
+  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '60'
 assert_scalar 'im_v2 function count' \
-  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '28'
+  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '36'
 
 # A same-named trigger function is not enough: replacing its body must fail
 # readiness, as must a nullable ready-variant constraint or a weakened replay key.
@@ -170,10 +165,21 @@ psql -c 'ALTER TABLE im_v2.control_housekeeping_cursor ADD CONSTRAINT control_ho
 test "$(current_schema_contract)" = 't'
 
 
-psql -c 'ALTER TABLE im_v2.group_room_creation_drafts ADD CONSTRAINT group_room_creation_drafts_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id)' >/dev/null
-test "$(current_schema_contract)" = 'f'
-psql -c 'ALTER TABLE im_v2.group_room_creation_drafts DROP CONSTRAINT group_room_creation_drafts_room_id_fkey' >/dev/null
-test "$(current_schema_contract)" = 't'
+# Retired operation/draft tables are forbidden even if an old deployment
+# recreates them with plausible keys. Check each independently, then restore
+# the clean schema before testing the next drift.
+for retired_table in \
+  group_room_operations group_room_creation_drafts group_room_creation_draft_members \
+  direct_room_operations user_relationship_operations user_block_operations \
+  room_pinned_message_operations group_announcement_operations \
+  group_permission_operations group_role_operations \
+  message_edit_operations message_withdrawal_operations message_reaction_operations
+do
+  psql -c "CREATE TABLE im_v2.${retired_table} (operation_id UUID PRIMARY KEY)" >/dev/null
+  test "$(current_schema_contract)" = 'f'
+  psql -c "DROP TABLE im_v2.${retired_table}" >/dev/null
+  test "$(current_schema_contract)" = 't'
+done
 
 psql -c 'ALTER TABLE im_v2.room_activation_leases DROP CONSTRAINT room_activation_leases_holder_check' >/dev/null
 test "$(current_schema_contract)" = 'f'

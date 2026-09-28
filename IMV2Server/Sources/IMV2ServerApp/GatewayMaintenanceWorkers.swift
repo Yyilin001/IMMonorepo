@@ -18,9 +18,6 @@ extension GatewayBackgroundWorkers {
         let readReceiptPreferencePropagationWorker = maintenance.readReceiptPreferencePropagationWorker
         let deviceRevocationWorker = maintenance.deviceRevocationWorker
         let moderationAuditRetentionWorker = maintenance.moderationAuditRetentionWorker
-        let maintenanceGroupAudienceStore = maintenance.maintenanceGroupAudienceStore
-        let roomCreation = maintenance.roomCreation
-        let callTimeout = maintenance.callTimeout
         let mediaRetentionWorker = maintenance.mediaRetentionWorker
 
         // 投影清理可能跨越远端分片边界，因此使用独立的重试节奏，
@@ -182,30 +179,6 @@ extension GatewayBackgroundWorkers {
                         break
                     } catch {
                         V2ServiceLogging.logWorkerFailure(logger, worker: "moderation_audit_retention_worker", error: error)
-                    }
-                    do {
-                        // 分阶段创建草稿可能持有较大的临时受众集合。
-                        // 与其他保留期工作使用相同的有界维护节奏回收；
-                        // 取消和 Actor 本地准入也会立即执行定向清理。
-                        _ = try await maintenanceGroupAudienceStore.purgeExpired(
-                            now: Date(), limit: configuration.workerBatchSize
-                        )
-                    } catch is CancellationError {
-                        return
-                    } catch {
-                        V2ServiceLogging.logWorkerFailure(logger, worker: "group_creation_draft_cleanup", error: error)
-                    }
-                    do {
-                        let report = try await roomCreation.recoverFinalizing(
-                            limit: configuration.workerBatchSize, deadline: .now + callTimeout.duration
-                        )
-                        if report.failedCount > 0 {
-                            logger.warning("IM V2 group creation finalization recovery left retryable drafts")
-                        }
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        V2ServiceLogging.logWorkerFailure(logger, worker: "group_creation_finalization_recovery", error: error)
                     }
                     do {
                         _ = try await mediaRetentionWorker.runOnce(limit: configuration.workerBatchSize)

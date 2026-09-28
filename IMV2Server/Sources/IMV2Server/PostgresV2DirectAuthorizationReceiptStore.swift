@@ -95,7 +95,18 @@ struct PostgresV2DirectAuthorizationReceiptStore: Sendable {
             SELECT * FROM \(unsafeRaw: schema).direct_authorization_receipts
             WHERE room_id = \(bind: attempt.roomID) AND sender_user_id = \(bind: attempt.senderID)
               AND client_message_id = \(bind: attempt.clientMessageID) AND generation = \(bind: attempt.generation)
-            """).first(decoding: ReceiptRow.self) else { return nil }
+            """).first(decoding: ReceiptRow.self) else {
+            // A permanent operation close also settles an already reserved control obligation.
+            // It prohibits all late generations; absence alone remains unresolved.
+            guard let closed=try await sql.raw("""
+                SELECT fingerprint_version,request_fingerprint
+                FROM \(unsafeRaw:schema).message_operation_closures
+                WHERE room_id=\(bind:attempt.roomID) AND sender_user_id=\(bind:attempt.senderID)
+                  AND client_message_id=\(bind:attempt.clientMessageID)
+                """).first(decoding:ClosedAuthorizationFingerprint.self) else { return nil }
+            guard closed.version==3,closed.fingerprint==attempt.fingerprint else { throw V2DirectAuthorizationReceiptError.identityConflict }
+            return .init(disposition:.aborted,eventID:nil)
+        }
         guard row.matches(attempt) else { throw V2DirectAuthorizationReceiptError.identityConflict }
         return row.receipt
     }
@@ -232,4 +243,9 @@ private struct ReceiptRow: Decodable {
             && ownerEpoch == attempt.ownerEpoch && requestFingerprint == attempt.fingerprint
     }
     var receipt: V2DirectAuthorizationReceipt { .init(disposition: disposition, eventID: eventID) }
+}
+
+private struct ClosedAuthorizationFingerprint:Decodable {
+    let version:Int16;let fingerprint:Data
+    enum CodingKeys:String,CodingKey { case version="fingerprint_version",fingerprint="request_fingerprint" }
 }

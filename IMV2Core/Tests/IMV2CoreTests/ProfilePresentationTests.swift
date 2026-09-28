@@ -8,8 +8,8 @@ struct ProfilePresentationTests {
     func updateCommandNormalizesName(input: String) throws {
         let command = try V2ProfileUpdateCommand(actorUserID: Fixture().owner,
             operationID: .init(uuid: UUID()), expectedRevision: Fixture().profileRevision,
-            displayName: input, avatar: nil)
-        #expect(Array(command.displayName.utf8) == Array("Café".utf8))
+            patch: .init(displayName: .set(input)), firstSubmissionDeadlineMilliseconds: 4_000_000_000_000)
+        #expect(command.patch.displayName == .set("Café"))
     }
 
     @Test("profile name normalization preserves validation",
@@ -18,7 +18,7 @@ struct ProfilePresentationTests {
         #expect(throws: V2PublicIdentityValidationError.invalidDisplayName) {
             try V2ProfileUpdateCommand(actorUserID: Fixture().owner,
                 operationID: .init(uuid: UUID()), expectedRevision: Fixture().profileRevision,
-                displayName: input, avatar: nil)
+                patch: .init(displayName: .set(input)), firstSubmissionDeadlineMilliseconds: 4_000_000_000_000)
         }
     }
 

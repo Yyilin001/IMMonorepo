@@ -19,6 +19,12 @@ python3 IMV2/scripts/prepare_v2_room_actor_configuration.py \
 
 当前 DistributedCluster 的 TLS 路径将地址作为 SNI；NIOSSL 拒绝 IP 字面量，因此配置要求 DNS 名。证书 SAN 必须匹配该名称，TLS 固定为 1.3、完整证书校验和双向认证。Cluster 内部端口无须发布到宿主机或公网。
 
+## 邀请令牌密钥
+
+Account 与所有承载房间的 Gateway 必须从部署 secret 配置读取相同的 `IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64`，Base64 解码后至少 32 字节；缺失或无效会阻止启动。它与 Actor TLS、签名密钥及 access-token 密钥分开管理，普通重启不得重新生成。正式工具 `VirtualActorBusinessProbe` 也要求此环境变量。
+
+本地 Account/Gateway Compose 均读取同一个 `.env.local`；其示例与本地配置检查已包含该字段。部署模板位于 `IMV2Server/.env.example`，占位值须由部署 secret 注入替换，不能直接用于启动。
+
 ## 拓扑与关闭
 
 生成器默认每个 host 可访问全部传入 shard；实际多数据库部署应按需求缩小每个 peer 与 service 的 shard 集合。数据库访问能力来自 App 已有的配置，不从网络发现结果添加数据库连接。生成器给 Gateway 用户调用、协调、维护及可信审核权限，Account 只给用户调用与协调权限；部署时按实际职责裁剪。

@@ -48,6 +48,7 @@ public actor V2DeviceConnectionRegistry {
     private var livePresenceRenewals: V2LivePresenceRenewalBatcher?
     private var liveActivityObservationAuthorizer: (any V2LiveActivityObservationAuthorizing)?
     private var liveActivityBroker: (any V2LiveActivityInterestManaging & V2LiveActivityPublishing)?
+    private var publicationSuppressedByConnection:[UUID:Bool]=[:]
     private var presenceByConnection: [UUID: (roomID: RoomID, targetUserID: UserID)] = [:]
     private var presenceMutationByConnection: [UUID: Generation] = [:]
     private var presenceWatchersByTarget: [UserID: [UUID: V2GatewayByteStream]] = [:]
@@ -104,7 +105,7 @@ public actor V2DeviceConnectionRegistry {
     }
 
     @discardableResult
-    public func register(_ stream: V2GatewayByteStream, connectionID: UUID, identity: V2AuthenticatedConnection) async throws -> Bool {
+    public func register(_ stream: V2GatewayByteStream, connectionID: UUID, identity: V2AuthenticatedConnection, publicationSuppressed:Bool) async throws -> Bool {
         hasStartedRegistrations = true
         // 连接 ID 是单次生命周期的令牌，不是幂等键。
         // 首次注册挂起期间若接受重复 ID，另一条流就可能继承其身份和租约。
@@ -115,6 +116,7 @@ public actor V2DeviceConnectionRegistry {
         let lifecycle = makeGeneration()
         lifecycleByConnection[connectionID] = lifecycle
         identityByConnection[connectionID] = identity
+        publicationSuppressedByConnection[connectionID] = publicationSuppressed
         streamsByDevice[identity.deviceID, default: [:]][connectionID] = stream
         streamsByUser[identity.userID, default: [:]][connectionID] = stream
         guard let livePresenceLeases else { return true }
@@ -123,6 +125,7 @@ public actor V2DeviceConnectionRegistry {
             lease = try await livePresenceLeases.admitConnection(
                 identity: identity,
                 connectionID: connectionID,
+                publicationSuppressed:publicationSuppressed,
                 policy: connectionAdmissionPolicy,
                 now: Date()
             )
@@ -148,7 +151,7 @@ public actor V2DeviceConnectionRegistry {
             await compensateStalePresence(connectionID: connectionID, identity: identity)
             return false
         }
-        guard allowsOnlinePresence else {
+        guard allowsOnlinePresence && !publicationSuppressed else {
             // 持久化记录也是跨副本的已认证连接准入租约。
             // 在线状态隐私只控制该租约是否可见，不控制它是否存在。
             // 若在此删除租约，隐藏在线状态的用户就能绕过全局的
@@ -163,8 +166,21 @@ public actor V2DeviceConnectionRegistry {
         return true
     }
 
+    public func setPresencePublication(connectionID:UUID,identity:V2AuthenticatedConnection,
+        mode:V2PresencePublicationMode) async throws {
+        guard identityByConnection[connectionID]==identity,let lifecycle=lifecycleByConnection[connectionID],let leases=livePresenceLeases else {throw V2GatewaySessionError.unsupportedCommand}
+        let suppressed=mode == .suppressed
+        // The durable lease flag precedes the acknowledgement. All account,
+        // device and connection fields are matched in the persistence boundary.
+        let observation=try await leases.setPresencePublication(identity:identity,connectionID:connectionID,suppressed:suppressed,now:Date())
+        guard lifecycleByConnection[connectionID]==lifecycle,identityByConnection[connectionID]==identity else {throw V2GatewaySessionError.unsupportedCommand}
+        publicationSuppressedByConnection[connectionID]=suppressed
+        await routePresence(targetUserID:identity.userID,isOnline:observation.isOnline,expiresAt:observation.expiresAt)
+    }
+
     public func unregister(connectionID: UUID) async {
         guard let identity = identityByConnection.removeValue(forKey: connectionID) else { return }
+        publicationSuppressedByConnection.removeValue(forKey:connectionID)
         lifecycleByConnection.removeValue(forKey: connectionID)
         streamsByDevice[identity.deviceID]?.removeValue(forKey: connectionID)
         if streamsByDevice[identity.deviceID]?.isEmpty == true { streamsByDevice.removeValue(forKey: identity.deviceID) }
@@ -617,7 +633,7 @@ public actor V2DeviceConnectionRegistry {
             await unregister(connectionID: connectionID)
             return false
         }
-        if refresh.allowsOnlinePresence,
+        if refresh.allowsOnlinePresence, publicationSuppressedByConnection[connectionID] == false,
            lifecycleByConnection[connectionID] == lifecycle {
             await routePresence(targetUserID: identity.userID, isOnline: true, expiresAt: expiresAt)
         }
@@ -968,6 +984,7 @@ public actor V2DeviceConnectionRegistry {
         guard lifecycleByConnection[connectionID] == lifecycle,
               identityByConnection[connectionID] == identity
         else { return }
+        publicationSuppressedByConnection.removeValue(forKey:connectionID)
         lifecycleByConnection.removeValue(forKey: connectionID)
         identityByConnection.removeValue(forKey: connectionID)
         streamsByDevice[identity.deviceID]?.removeValue(forKey: connectionID)

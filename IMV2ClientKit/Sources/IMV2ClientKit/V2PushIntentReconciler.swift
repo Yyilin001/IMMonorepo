@@ -261,7 +261,13 @@ public actor V2PushIntentReconciler {
                 return saved ? .paused : .superseded
             }
             var delay = min(60, pow(2, Double(min(current.attemptCount, 6))))
-            if case V2ClientPushEndpointError.rateLimited(let minimum) = error, minimum.isFinite, minimum > 0 { delay = max(delay, minimum) }
+            var serviceMinimum: TimeInterval?
+            if case V2ClientPushEndpointError.rateLimited(let minimum) = error, minimum.isFinite, minimum > 0 { serviceMinimum = minimum }
+            if let minimum = (error as? V2HTTPFailure)?.retryAfter?.timeIntervalSince(now()), minimum.isFinite, minimum > 0 { serviceMinimum = minimum }
+            if let serviceMinimum {
+                delay = max(delay, serviceMinimum)
+                try await store.preserveSupersededPushServiceCooldown(until: now().addingTimeInterval(serviceMinimum), expected: current)
+            }
             return try await store.retryPushIntent(at: now().addingTimeInterval(delay), expected: current) ? .retryScheduled : .superseded
         }
     }

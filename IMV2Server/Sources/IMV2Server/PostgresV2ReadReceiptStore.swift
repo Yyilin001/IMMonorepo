@@ -16,7 +16,7 @@ public struct PostgresV2ReadReceiptStore:
     V2ReadReceiptControlStore,
     V2ReadReceiptBatchStore
 {
-    private let database: any Database
+    let database: any Database
     private let projectionDelivery: any V2UserShardProjectionDelivering
 
     public init(database: any Database, projectionDelivery: any V2UserShardProjectionDelivering) {
@@ -93,6 +93,11 @@ public struct PostgresV2ReadReceiptStore:
                     }
                     try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "v2-read-receipt-operation:" + userID.uuidString.lowercased() + ":" + operationID.uuidString.lowercased()), 0))").run()
                     let requested = try receiptSigned(command.readThroughRoomSequence)
+                    // 即使已读游标未推进，也要匹配操作写入的时间戳精度。
+                    guard let room = try await sql.raw("SELECT room_sequence, membership_revision, \(bind: now)::timestamptz AS recorded_at FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReceiptRoomRow.self) else { throw V2ReadReceiptStoreError.roomNotFound }
+                    guard room.roomSequence >= 0, Int64(command.readThroughRoomSequence) <= room.roomSequence else { throw V2ReadReceiptStoreError.roomSequenceNotFound }
+                    let member = try await sql.raw("SELECT 1 AS exists FROM im_v2.room_memberships WHERE room_id = \(bind: roomID) AND user_id = \(bind: userID) AND joined_revision <= \(bind: room.membershipRevision) AND (left_revision IS NULL OR left_revision > \(bind: room.membershipRevision))").first(decoding: ReceiptExistsRow.self)
+                    guard member != nil else { throw V2ReadReceiptStoreError.actorNotMember }
                     if let prior = try await sql.raw("""
                         SELECT room_id, requested_room_sequence, resulting_room_sequence, recorded_at
                         FROM im_v2.read_receipt_operations
@@ -108,11 +113,6 @@ public struct PostgresV2ReadReceiptStore:
                             readThroughRoomSequence: receiptUnsigned(prior.resultingSequence),
                             recordedAt: prior.recordedAt)), nil, nil)
                     }
-                    // 即使已读游标未推进，也要匹配操作写入的时间戳精度。
-                    guard let room = try await sql.raw("SELECT room_sequence, membership_revision, \(bind: now)::timestamptz AS recorded_at FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReceiptRoomRow.self) else { throw V2ReadReceiptStoreError.roomNotFound }
-                    guard room.roomSequence >= 0, Int64(command.readThroughRoomSequence) <= room.roomSequence else { throw V2ReadReceiptStoreError.roomSequenceNotFound }
-                    let member = try await sql.raw("SELECT 1 AS exists FROM im_v2.room_memberships WHERE room_id = \(bind: roomID) AND user_id = \(bind: userID) AND joined_revision <= \(bind: room.membershipRevision) AND (left_revision IS NULL OR left_revision > \(bind: room.membershipRevision))").first(decoding: ReceiptExistsRow.self)
-                    guard member != nil else { throw V2ReadReceiptStoreError.actorNotMember }
                     let current = try await sql.raw("SELECT read_through_room_sequence FROM im_v2.room_read_receipts WHERE room_id = \(bind: roomID) AND user_id = \(bind: userID) FOR UPDATE").first(decoding: ReceiptStateRow.self)?.sequence ?? 0
                     let resulting = max(current, requested)
                     if current == 0 {
@@ -397,23 +397,12 @@ public struct PostgresV2ReadReceiptStore:
         }
     }
 
-    public func setPreferences(command: V2SetReadReceiptPreferencesCommand, now: Date) async throws -> V2SetReadReceiptPreferencesOutcome {
-        let result: (outcome: V2SetReadReceiptPreferencesOutcome, deliveryRequests: [ReceiptProjectionDeliveryRequest]) = try await database.transaction { transaction in
+    func applyAccountReadReceiptPreferences(command:V2SetReadReceiptPreferencesCommand,transaction:any Database,now:Date) async throws -> V2ReadReceiptPreferences {
             guard let sql = transaction as? any SQLDatabase else { throw V2ReadReceiptStoreError.corruptPersistenceState }
             let actorID = try receiptUUID(command.actorUserID)
             let operationID = try receiptUUID(command.operationID)
             let lockKey = "v2-read-receipt-preference:" + actorID.uuidString
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
-            if let prior = try await sql.raw("SELECT allows_direct_read_receipts, allows_group_read_receipts, preference_revision, updated_at FROM im_v2.read_receipt_preference_operations WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)").first(decoding: ReceiptPreferenceOperationRow.self) {
-                guard prior.allowsDirect == command.allowsDirectReadReceipts, prior.allowsGroup == command.allowsGroupReadReceipts else { return (.idempotencyConflict, []) }
-                guard v2PostgresTimestampCanEncode(prior.updatedAt) else { throw V2ReadReceiptStoreError.corruptPersistenceState }
-                let requests = [try ReceiptProjectionDeliveryRequest(
-                    userID: command.actorUserID,
-                    sourceEventID: operationID,
-                    projectionKinds: ["read_receipt_preferences"]
-                )]
-                return (.idempotent(try prior.preferences()), requests)
-            }
             guard v2PostgresTimestampCanEncode(now) else { throw V2ReadReceiptStoreError.corruptPersistenceState }
             let priorDirect = try await sql.raw("SELECT allows_direct_read_receipts FROM im_v2.user_read_receipt_preferences WHERE user_id = \(bind: actorID) FOR UPDATE").first(decoding: ReceiptPreferenceStateRow.self)?.allowsDirect ?? true
             guard let version = try await sql.raw("""
@@ -431,29 +420,14 @@ public struct PostgresV2ReadReceiptStore:
                 """).first(decoding: ReceiptPreferenceRevisionRow.self) else {
                 throw V2ReadReceiptStoreError.corruptPersistenceState
             }
-            guard let persisted = try await sql.raw("INSERT INTO im_v2.read_receipt_preference_operations (actor_user_id, operation_id, allows_direct_read_receipts, allows_group_read_receipts, preference_revision, updated_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: command.allowsDirectReadReceipts), \(bind: command.allowsGroupReadReceipts), \(bind: version.revision), \(bind: now)) RETURNING allows_direct_read_receipts, allows_group_read_receipts, preference_revision, updated_at").first(decoding: ReceiptPreferenceOperationRow.self) else { throw V2ReadReceiptStoreError.corruptPersistenceState }
-            let preferences = try persisted.preferences()
+            let preferences=V2ReadReceiptPreferences(allowsDirectReadReceipts:command.allowsDirectReadReceipts,allowsGroupReadReceipts:command.allowsGroupReadReceipts,updatedAt:now)
             try await appendPreferenceProjection(recipientID: actorID, sourceEventID: operationID, preferences: preferences, revision: version.revision, now: now, sql: sql)
-            let deliveryRequests = [try ReceiptProjectionDeliveryRequest(
-                userID: command.actorUserID,
-                sourceEventID: operationID,
-                projectionKinds: ["read_receipt_preferences"]
-            )]
             if priorDirect && !command.allowsDirectReadReceipts {
                 // 私聊房间关系图无界。这里只提交持久化传播意图；
                 // 由游标有界的工作器在请求路径之外生成并镜像双方墓碑。
                 try await sql.raw("INSERT INTO im_v2.read_receipt_preference_propagation_outbox (actor_user_id, operation_id, recorded_at, created_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: now), \(bind: now))").run()
             }
-            return (.updated(preferences), deliveryRequests)
-        }
-        for request in result.deliveryRequests {
-            _ = try await projectionDelivery.deliverToCurrentShard(
-                userID: request.userID,
-                sourceEventID: request.sourceEventID,
-                projectionKinds: request.projectionKinds
-            )
-        }
-        return result.outcome
+            return preferences
     }
 
     public func readerCandidates(
@@ -1147,7 +1121,7 @@ private struct GroupReceiptBatchRoomLockStatement: PostgresPreparedStatement {
 }
 
 private struct GroupReceiptBatchStatement: PostgresPreparedStatement {
-    static let name = "im_v2_group_read_receipt_batch_record_v6"
+    static let name = "im_v2_group_read_receipt_batch_record_v7"
     static let sql = """
         WITH input AS MATERIALIZED (
             SELECT source.ordinal, source.room_id, source.user_id,
@@ -1274,6 +1248,10 @@ private struct GroupReceiptBatchStatement: PostgresPreparedStatement {
                    WHEN NOT input.owner_is_valid THEN 'owner_changed'
                    WHEN prior.prior_room_kind = 'direct' AND prior.room_id = input.room_id
                    THEN 'not_group'
+                   WHEN context.room_kind='group' AND context.room_sequence < input.requested_sequence
+                   THEN 'room_sequence_not_found'
+                   WHEN context.room_kind='group' AND NOT context.actor_is_member
+                   THEN 'actor_not_member'
                    WHEN prior.ordinal IS NOT NULL
                         AND prior.room_id = input.room_id
                         AND prior.requested_room_sequence

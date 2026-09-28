@@ -50,6 +50,8 @@ public struct V2PasswordLifecycleClient: Sendable {
         do { (data, response) = try await transport.data(for: request) }
         catch is CancellationError { throw CancellationError() }
         catch let error as URLError where error.code == .cancelled { throw CancellationError() }
+        catch let failure as V2HTTPFailure { throw failure }
+        catch let error as V2AuthSessionError { throw error }
         catch { throw V2AccountAuthenticationError.networkFailure }
         switch response.statusCode {
         case 204 where data.isEmpty: return

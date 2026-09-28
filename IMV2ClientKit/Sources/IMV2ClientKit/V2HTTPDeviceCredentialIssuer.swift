@@ -221,7 +221,9 @@ public actor V2HTTPAccountAssertionDeviceCredentialProvider: V2AccountDeviceCred
             throw CancellationError()
         } catch let error as V2HTTPAuthTransportError {
             throw error
-        } catch {
+        } catch let failure as V2HTTPFailure { throw failure }
+        catch let error as V2AuthSessionError { throw error }
+        catch {
             throw V2HTTPAuthTransportError.networkFailure
         }
         switch response.statusCode {

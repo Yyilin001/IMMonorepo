@@ -31,11 +31,11 @@ struct V2GatewayByteStreamTests {
         }
         #expect(ready)
         var hello = IMV2Envelope(); hello.requestID = 1
-        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await stream.receive(encoded(hello, version: 0))
         var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(protocolVersion)
-        auth.authenticate.accessToken = "opaque"; auth.authenticate.deviceID = "device-a"
+        auth.authenticate.accessToken = "opaque"; auth.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await stream.receive(encoded(auth, version: protocolVersion))
         if mode == 1 { channel.isWritable = false }
         if mode == 2 {
@@ -96,11 +96,11 @@ struct V2GatewayByteStreamTests {
         #expect(!(await stream.sendAccountRoomNotification(notification)))
         #expect(await recorder.all().isEmpty)
         var hello = IMV2Envelope(); hello.requestID = 1
-        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await stream.receive(encoded(hello, version: 0))
         var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(protocolVersion)
-        auth.authenticate.accessToken = "opaque"; auth.authenticate.deviceID = "device-a"
+        auth.authenticate.accessToken = "opaque"; auth.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await stream.receive(encoded(auth, version: protocolVersion))
         #expect(await stream.sendAccountRoomNotification(notification) == written)
         let frames = await recorder.all()
@@ -129,11 +129,11 @@ struct V2GatewayByteStreamTests {
             let recorder = OutboundFrameRecorder()
             await stream.setOutboundWriter { await recorder.append($0) }
             var hello = IMV2Envelope(); hello.requestID = 1
-            hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+            hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
             hello.clientHello.supportedCapabilityProfiles = ["base"]
             _ = try await stream.receive(encoded(hello, version: 0))
             var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(protocolVersion)
-            auth.authenticate.accessToken = "opaque"; auth.authenticate.deviceID = "device-a"
+            auth.authenticate.accessToken = "opaque"; auth.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
             _ = try await stream.receive(encoded(auth, version: protocolVersion))
             var request = IMV2Envelope(); request.requestID = 3; request.protocolVersion = UInt32(protocolVersion)
             if kind == "group" { request.groupEventSubscribe.roomID = spelling }
@@ -170,11 +170,11 @@ struct V2GatewayByteStreamTests {
             let recorder = OutboundFrameRecorder()
             await stream.setOutboundWriter { await recorder.append($0) }
             var hello = IMV2Envelope(); hello.requestID = 1
-            hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+            hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
             hello.clientHello.supportedCapabilityProfiles = ["base"]
             _ = try await stream.receive(encoded(hello, version: 0))
             var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(protocolVersion)
-            auth.authenticate.accessToken = "opaque"; auth.authenticate.deviceID = "device-a"
+            auth.authenticate.accessToken = "opaque"; auth.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
             _ = try await stream.receive(encoded(auth, version: protocolVersion))
             let oldRoom = RoomID(uuid: UUID()), newRoom = RoomID(uuid: UUID()), subject = UserID(uuid: UUID())
             if hasPriorSubscription {
@@ -250,11 +250,11 @@ struct V2GatewayByteStreamTests {
         let recorder = OutboundFrameRecorder()
         await stream.setOutboundWriter { await recorder.append($0) }
         var hello = IMV2Envelope(); hello.requestID = 1
-        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await stream.receive(encoded(hello, version: 0))
         var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(protocolVersion)
-        auth.authenticate.accessToken = "opaque"; auth.authenticate.deviceID = "device-a"
+        auth.authenticate.accessToken = "opaque"; auth.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await stream.receive(encoded(auth, version: protocolVersion))
         let room = RoomID(uuid: UUID()), user = UserID(uuid: UUID())
         for seconds in [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, Double(Int64.max) / 1_000] {
@@ -295,7 +295,7 @@ struct V2GatewayByteStreamTests {
         var hello = IMV2Envelope()
         hello.requestID = 1
         hello.clientHello = .init()
-        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await stream.receive(encoded(hello, version: 0))
         var authenticate = IMV2Envelope()
@@ -303,7 +303,7 @@ struct V2GatewayByteStreamTests {
         authenticate.protocolVersion = UInt32(protocolVersion)
         authenticate.authenticate = .init()
         authenticate.authenticate.accessToken = "rejected-opaque-token"
-        authenticate.authenticate.deviceID = "device-a"
+        authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         let bytes = try encoded(authenticate, version: protocolVersion)
         var responses: [Data] = []
         do {
@@ -416,7 +416,7 @@ struct V2GatewayByteStreamTests {
         var hello = IMV2Envelope()
         hello.requestID = 1
         hello.clientHello = .init()
-        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await stream.receive(encoded(hello, version: 0))
         var authenticate = IMV2Envelope()
@@ -424,7 +424,7 @@ struct V2GatewayByteStreamTests {
         authenticate.protocolVersion = UInt32(protocolVersion)
         authenticate.authenticate = .init()
         authenticate.authenticate.accessToken = "opaque"
-        authenticate.authenticate.deviceID = "device-a"
+        authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
         await registry.subscribeForegroundGroup(
             stream,
@@ -502,7 +502,7 @@ struct V2GatewayByteStreamTests {
         var hello = IMV2Envelope()
         hello.requestID = 1
         hello.clientHello = .init()
-        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await stream.receive(encoded(hello, version: 0))
         var authenticate = IMV2Envelope()
@@ -510,7 +510,7 @@ struct V2GatewayByteStreamTests {
         authenticate.protocolVersion = UInt32(protocolVersion)
         authenticate.authenticate = .init()
         authenticate.authenticate.accessToken = "opaque"
-        authenticate.authenticate.deviceID = "device-a"
+        authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
         await registry.subscribeForegroundGroup(
             stream,
@@ -557,7 +557,7 @@ struct V2GatewayByteStreamTests {
         var hello = IMV2Envelope()
         hello.requestID = 1
         hello.clientHello = .init()
-        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
         let helloBytes = try V2FrameCodec.encode(try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0), limits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]))
         #expect(try await stream.receive(Data(helloBytes.prefix(5))).isEmpty)
@@ -570,7 +570,7 @@ struct V2GatewayByteStreamTests {
         authenticate.protocolVersion = UInt32(protocolVersion)
         authenticate.authenticate = .init()
         authenticate.authenticate.accessToken = "opaque"
-        authenticate.authenticate.deviceID = "device-a"
+        authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         let authResponses = try await stream.receive(encoded(authenticate, version: protocolVersion))
         #expect(try decode(authResponses[0]).authenticated.selectedCapabilityProfile == "base")
 
@@ -616,7 +616,7 @@ struct V2GatewayByteStreamTests {
         var hello = IMV2Envelope()
         hello.requestID = 1
         hello.clientHello = .init()
-        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await stream.receive(encoded(hello, version: 0))
 
@@ -625,7 +625,7 @@ struct V2GatewayByteStreamTests {
         authenticate.protocolVersion = UInt32(protocolVersion)
         authenticate.authenticate = .init()
         authenticate.authenticate.accessToken = "opaque"
-        authenticate.authenticate.deviceID = "device-a"
+        authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
 
         var command = IMV2Envelope()
@@ -649,7 +649,7 @@ struct V2GatewayByteStreamTests {
         await #expect(throws: V2FrameCodecError.invalidMagic) {
             try await stream.receive(Data([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
         }
-        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
+        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
         await #expect(throws: V2ConnectionStateError.unexpectedCommand) {
             try await stream.receive(encoded(hello, version: 0))
         }
@@ -684,7 +684,7 @@ struct V2GatewayByteStreamTests {
         var hello = IMV2Envelope()
         hello.requestID = 1
         hello.clientHello = .init()
-        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await stream.receive(encoded(hello, version: 0))
         var authenticate = IMV2Envelope()
@@ -692,7 +692,7 @@ struct V2GatewayByteStreamTests {
         authenticate.protocolVersion = UInt32(protocolVersion)
         authenticate.authenticate = .init()
         authenticate.authenticate.accessToken = "opaque"
-        authenticate.authenticate.deviceID = "device-a"
+        authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
 
         var denseWire = Data()
@@ -729,9 +729,9 @@ struct V2GatewayByteStreamTests {
         await stream.setOutboundWriter { bytes in
             await recorder.append(bytes)
         }
-        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
+        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await stream.receive(encoded(hello, version: 0))
-        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
+        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
         #expect(await registry.connectionMetricsSnapshot() == .init(activeDevices: 1, activeConnections: 1))
 
@@ -768,7 +768,7 @@ struct V2GatewayByteStreamTests {
         var hello = IMV2Envelope()
         hello.requestID = 1
         hello.clientHello = .init()
-        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await stream.receive(encoded(hello, version: 0))
         var authenticate = IMV2Envelope()
@@ -776,7 +776,7 @@ struct V2GatewayByteStreamTests {
         authenticate.protocolVersion = UInt32(protocolVersion)
         authenticate.authenticate = .init()
         authenticate.authenticate.accessToken = "opaque"
-        authenticate.authenticate.deviceID = "device-a"
+        authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
         #expect(await registry.connectionMetricsSnapshot().activeConnections == 1)
 
@@ -805,9 +805,9 @@ struct V2GatewayByteStreamTests {
         )
         let recorder = OutboundFrameRecorder()
         await stream.setOutboundWriter { bytes in await recorder.append(bytes) }
-        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
+        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await stream.receive(encoded(hello, version: 0))
-        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
+        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
 
         let roomID = try RoomID("00000000-0000-0000-0000-000000000c01")
@@ -838,9 +838,9 @@ struct V2GatewayByteStreamTests {
         )
         let recorder = OutboundFrameRecorder()
         await stream.setOutboundWriter { bytes in await recorder.append(bytes) }
-        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
+        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await stream.receive(encoded(hello, version: 0))
-        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
+        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
 
         let roomID = try RoomID("00000000-0000-0000-0000-000000000c02")
@@ -902,9 +902,9 @@ struct V2GatewayByteStreamTests {
             )
             let recorder = recorders[index]
             await stream.setOutboundWriter { bytes in await recorder.append(bytes) }
-            var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
+            var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
             _ = try await stream.receive(encoded(hello, version: 0))
-            var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
+            var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
             _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
             await registry.subscribeForegroundGroup(
                 stream,
@@ -1001,7 +1001,7 @@ struct V2GatewayByteStreamTests {
             var hello = IMV2Envelope()
             hello.requestID = 1
             hello.clientHello = .init()
-            hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+            hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
             hello.clientHello.supportedCapabilityProfiles = ["base"]
             if index == 0 { hello.clientHello.supportedFrameCompressions = [.zlib] }
             _ = try await stream.receive(encoded(hello, version: 0))
@@ -1010,7 +1010,7 @@ struct V2GatewayByteStreamTests {
             authenticate.protocolVersion = UInt32(protocolVersion)
             authenticate.authenticate = .init()
             authenticate.authenticate.accessToken = "opaque"
-            authenticate.authenticate.deviceID = "device-a"
+            authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
             _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
             await registry.subscribeForegroundGroup(
                 stream,
@@ -1073,9 +1073,9 @@ struct V2GatewayByteStreamTests {
                 registry: registry
             )
             await stream.setOutboundWriter { bytes in await recorder.append(bytes) }
-            var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
+            var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
             _ = try await stream.receive(encoded(hello, version: 0))
-            var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
+            var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
             _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
             await registry.subscribeForegroundGroup(stream, connectionID: connectionID, roomID: roomID)
         }
@@ -1132,7 +1132,7 @@ struct V2GatewayByteStreamTests {
             var hello = IMV2Envelope()
             hello.requestID = 1
             hello.clientHello = .init()
-            hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+            hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
             hello.clientHello.supportedCapabilityProfiles = ["base"]
             _ = try await stream.receive(encoded(hello, version: 0))
             var authenticate = IMV2Envelope()
@@ -1140,7 +1140,7 @@ struct V2GatewayByteStreamTests {
             authenticate.protocolVersion = UInt32(protocolVersion)
             authenticate.authenticate = .init()
             authenticate.authenticate.accessToken = "opaque"
-            authenticate.authenticate.deviceID = "device-a"
+            authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
             _ = try await stream.receive(encoded(authenticate, version: protocolVersion))
             await registry.subscribeForegroundGroup(
                 stream,
@@ -1238,9 +1238,16 @@ private final class SynchronousFrameRecorder: Sendable {
 private actor RejectingByteStreamRenewalLeases: V2LivePresenceLeaseManaging {
     private var active: Set<UUID> = []
 
+    func setPresencePublication(identity: V2AuthenticatedConnection, connectionID: UUID,
+        suppressed: Bool, now: Date) throws -> V2PresencePublicationLeaseObservation {
+        Issue.record("The rejected-renewal fixture must not publish presence")
+        throw V2LiveActivityStoreError.corruptPersistenceState
+    }
+
     func admitConnection(
         identity _: V2AuthenticatedConnection,
         connectionID: UUID,
+        publicationSuppressed _: Bool,
         policy _: V2AuthenticatedConnectionAdmissionPolicy,
         now: Date
     ) -> V2AuthenticatedConnectionLeaseOutcome {

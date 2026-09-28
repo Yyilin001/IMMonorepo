@@ -99,6 +99,7 @@ public struct PostgresV2ForwardReceiptStore: Sendable {
               let sourceID = source.messageID.uuidValue, let sourceRoom = source.roomID.uuidValue,
               let targetID = target.uuidValue else { throw V2ForwardExportError.invalidRequest }
         guard let sql = database as? any SQLDatabase else { throw V2ForwardExportError.corruptPersistenceState }
+        if let rejection = try await forwardPreparationRejection(actor: actorID, operation: operationID, source: source, target: target, sql: sql) { return .rejected(code: rejection) }
         guard let row = try await sql.raw("""
             SELECT export.source_room_id, export.source_content_revision,
                    export.payload_digest AS export_digest,
@@ -200,4 +201,17 @@ private struct TerminalPairRow: Decodable {
         exportDigest = try values.decode(Data.self, forKey: .exportDigest)
         receipt = try V2ForwardReceiptRow(from: decoder)
     }
+}
+
+/// A source rejection is created under the exact export lock before any export/handoff exists.
+func forwardPreparationRejection(actor: UUID, operation: UUID, source: V2ForwardMessageReference, target: RoomID, sql: any SQLDatabase) async throws -> String? {
+    guard let row = try await sql.raw("""
+        SELECT source_room_id,source_content_revision,error_code FROM im_v2.forward_preparation_rejections
+        WHERE actor_user_id=\(bind:actor) AND operation_id=\(bind:operation) AND source_message_id=\(bind:source.messageID.uuidValue!) AND target_room_id=\(bind:target.uuidValue!)
+        """).first(decoding: ForwardPreparationRejectionRow.self) else { return nil }
+    guard row.source_room_id == source.roomID.uuidValue, row.source_content_revision == source.revision.signedValue else { throw V2ForwardExportError.idempotencyConflict }
+    return row.error_code
+}
+private struct ForwardPreparationRejectionRow: Decodable {
+    let source_room_id: UUID; let source_content_revision: Int64; let error_code: String
 }

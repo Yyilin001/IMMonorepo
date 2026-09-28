@@ -401,6 +401,8 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         let deadline: Task<Void, Never>
         /// 底层发送任务，由响应清理或连接关闭结束其所有权。
         let sendTask: Task<Void, Never>
+        let holdsAdmission: Bool
+        var callerCancelled = false
     }
     /// 带内部身份的单次提示等待句柄，供取消回调核对并避免误取消后来的等待。
     private struct Waiter<Value: Sendable> {
@@ -417,6 +419,9 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     // slot remain owned by this connection until the reply or generation close.
     /// 按协议请求号保存关联记录，包括 continuation 已清空的取消请求；这些记录仍占用容量。
     private var responseWaiters: [UInt64: PendingResponse] = [:]
+    private let workScheduler: V2AccountWorkScheduler?
+    private let workService: String
+    private let initialPresenceMode:@Sendable () async throws -> V2PresencePublicationMode
     private var accountRoomInbox = V2AccountRoomChangeInbox()
     private var accountRoomWaiter: Waiter<V2AccountRoomChange>?
     /// 唯一用户同步提示等待者。
@@ -451,13 +456,19 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         maximumProtobufMessageDepth: Int = V2ProtobufFrameCodec.defaultMaximumMessageDepth,
         requestTimeout: Duration = .seconds(20),
         maximumPendingRequests: Int = 256,
-        supportsAuthorPresentationDelta: Bool = false
+        supportsAuthorPresentationDelta: Bool = false,
+        workScheduler: V2AccountWorkScheduler? = nil,
+        workService: String = "realtime",
+        initialPresenceMode:@escaping @Sendable () async throws -> V2PresencePublicationMode = {.allowWhenAuthorized}
     ) {
         precondition(maximumProtobufMessageDepth > 0)
         self.connectionFactory = { V2NetworkTLSByteConnection(endpoint: endpoint) }
         precondition(maximumPendingRequests > 0 && requestTimeout > .zero)
         self.maximumPendingRequests = maximumPendingRequests
         self.supportsAuthorPresentationDelta = supportsAuthorPresentationDelta
+        self.workScheduler = workScheduler
+        self.workService = workService
+        self.initialPresenceMode=initialPresenceMode
         self.limits = frameLimits
         self.maximumProtobufMessageDepth = maximumProtobufMessageDepth
         self.requestTimeout = requestTimeout
@@ -469,12 +480,18 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         frameLimits: V2FrameLimits,
         requestTimeout: Duration = .seconds(20),
         maximumPendingRequests: Int = 256,
-        supportsAuthorPresentationDelta: Bool = false
+        supportsAuthorPresentationDelta: Bool = false,
+        workScheduler: V2AccountWorkScheduler? = nil,
+        workService: String = "realtime",
+        initialPresenceMode:@escaping @Sendable () async throws -> V2PresencePublicationMode = {.allowWhenAuthorized}
     ) {
         precondition(maximumPendingRequests > 0 && requestTimeout > .zero)
         self.connectionFactory = connectionFactory
         self.maximumPendingRequests = maximumPendingRequests
         self.supportsAuthorPresentationDelta = supportsAuthorPresentationDelta
+        self.workScheduler = workScheduler
+        self.workService = workService
+        self.initialPresenceMode=initialPresenceMode
         limits = frameLimits
         maximumProtobufMessageDepth = V2ProtobufFrameCodec.defaultMaximumMessageDepth
         self.requestTimeout = requestTimeout
@@ -539,6 +556,8 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
             authenticate.authenticate = .init()
             authenticate.authenticate.accessToken = accessToken
             authenticate.authenticate.deviceID = deviceID.rawValue
+            // Registration cannot publish before this connection's local ceiling is read.
+            authenticate.authenticate.presencePublicationSuppressed = true
             let authenticated = try await sendBootstrap(authenticate, version: version, generation: generation)
             guard case .authenticated(let response)? = authenticated.body,
                   response.deviceID == deviceID.rawValue,
@@ -547,6 +566,14 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
                   response.authorPresentationStreamID == serverHello.authorPresentationStreamID,
                   let userID = try? UserID(response.userID)
             else { throw V2TLSFrameConnectionError.authenticationFailed }
+            try requireGeneration(generation)
+            let presenceMode=try await initialPresenceMode()
+            try requireGeneration(generation)
+            var publication=IMV2Envelope();publication.requestID=3;publication.protocolVersion=UInt32(version)
+            publication.presencePublicationControl = .init()
+            publication.presencePublicationControl.mode = presenceMode == .suppressed ? .suppressed:.allowWhenAuthorized
+            let publicationReply=try await sendBootstrap(publication,version:version,generation:generation)
+            guard case .presencePublicationControlled(let echo)?=publicationReply.body,echo.mode==publication.presencePublicationControl.mode else {throw V2TLSFrameConnectionError.authenticationFailed}
             try requireGeneration(generation)
             authenticatedVersion = version
             if let authorStreamID {
@@ -573,7 +600,24 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     /// 要求已认证且帧版本匹配后发送关联请求；请求预算、取消及超时由内部关联流程处理，失败通过错误报告。
     public func request(_ frame: V2Frame) async throws -> V2Frame {
         guard let version = authenticatedVersion, frame.version == version else { throw V2TLSFrameConnectionError.notConnected }
-        return try await sendAndAwaitResponse(frame)
+        let envelope = try V2ProtobufFrameCodec.decode(frame, maximumMessageDepth: maximumProtobufMessageDepth,
+            compression: negotiatedFrameCompression)
+        guard let body = envelope.body else { throw V2TLSFrameConnectionError.unexpectedResponse }
+        let context = try V2TCPFramePolicy.policy(for: body).context(service: workService, scoped: V2NetworkWorkScope.context)
+        guard let workScheduler else { return try await sendAndAwaitResponse(frame) }
+        let generation = connectionID
+        let permit = try await workScheduler.acquire(context, deadline: .now.advanced(by: requestTimeout))
+        do {
+            guard connectionID == generation else { throw V2TLSFrameConnectionError.connectionClosed }
+            let response = try await sendAndAwaitResponse(frame, holdsAdmission: true)
+            _ = await workScheduler.release(permit)
+            try Task.checkCancellation()
+            return response
+        } catch {
+            _ = await workScheduler.release(permit)
+            if Task.isCancelled { throw CancellationError() }
+            throw error
+        }
     }
 
     public func beginAuthorPresentationView(roomID: RoomID) throws -> V2AuthorPresentationView {
@@ -850,7 +894,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     /// 检查任务绑定的连接代际、非零且未占用请求号及容量预算，登记后等待响应。
     /// 调用者取消只结束其等待，发送任务、请求号与容量仍保留到响应返回或连接关闭，避免晚到响应误配新请求。
     /// 请求发送失败或超时会关闭整条同代连接，而不是只回收单个请求号。
-    private func sendAndAwaitResponse(_ frame: V2Frame) async throws -> V2Frame {
+    private func sendAndAwaitResponse(_ frame: V2Frame, holdsAdmission: Bool = false) async throws -> V2Frame {
         guard let connection, let generation = connectionID else { throw V2TLSFrameConnectionError.notConnected }
         if let expected = V2ConnectionRequestScope.connectionID, expected != generation {
             throw V2TLSFrameConnectionError.connectionClosed
@@ -893,7 +937,10 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
             if (try? RoomID(envelope.groupEventUnsubscribe.roomID)) == current.roomID { endAuthorPresentationView(current) }
         }
         let id = UUID()
-        return try await withTaskCancellationHandler(operation: {
+        var ownedSend: Task<Void, Never>?
+        let result: Result<V2Frame, any Error>
+        do {
+        result = .success(try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
                 guard !Task.isCancelled else { continuation.resume(throwing: CancellationError()); return }
                 guard responseWaiters[frame.requestID] == nil, frame.requestID != 0 else {
@@ -912,11 +959,15 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
                     do { try await connection.send(bytes) }
                     catch { await self?.failRequest(frame.requestID, id: id, generation: generation) }
                 }
-                responseWaiters[frame.requestID] = .init(id: id, command: frame.command, authorView: authorView, continuation: continuation, deadline: deadline, sendTask: sendTask)
+                ownedSend = sendTask
+                responseWaiters[frame.requestID] = .init(id: id, command: frame.command, authorView: authorView, continuation: continuation, deadline: deadline, sendTask: sendTask, holdsAdmission: holdsAdmission)
             }
         }, onCancel: {
             Task { await self.cancelRequest(frame.requestID, id: id, generation: generation) }
-        })
+        }))
+        } catch { result = .failure(error) }
+        if holdsAdmission { await ownedSend?.value }
+        return try result.get()
     }
 
     /// 编码并发送握手帧；调用取消时取消底层连接，以结束网络回调等待。此路径不创建已认证请求关联槽位。
@@ -1031,7 +1082,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
             case .groupEventSubscribed(let response):
                 if let view = waiter.authorView {
                     // Install before a delta coalesced in this same socket read.
-                    if waiter.continuation != nil { try authorPresentationInbox?.confirm(view, response: response) }
+                    if waiter.continuation != nil && !waiter.callerCancelled { try authorPresentationInbox?.confirm(view, response: response) }
                 } else if !response.authorPresentationViewID.isEmpty {
                     throw V2TLSFrameConnectionError.unexpectedResponse
                 }
@@ -1046,7 +1097,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
             case .accountRoomChangesReady(let ready):
                 // Install before resuming the caller: the next frame may already
                 // be buffered in this same read, ahead of its consumer task.
-                guard waiter.continuation != nil else { throw V2TLSFrameConnectionError.connectionClosed }
+                guard waiter.continuation != nil && !waiter.callerCancelled else { throw V2TLSFrameConnectionError.connectionClosed }
                 try accountRoomInbox.begin(epoch: ready.connectionEpoch)
             case .error: break
             default: throw V2TLSFrameConnectionError.unexpectedResponse
@@ -1137,6 +1188,14 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     /// 不删除关联项、不取消发送任务或期限，不立即释放在途容量；晚到响应或连接关闭负责最终清理。
     private func cancelRequest(_ requestID: UInt64, id: UUID, generation: UUID) {
         guard connectionID == generation, responseWaiters[requestID]?.id == id else { return }
+        // Scheduled physical work retains its continuation until response/timeout/close.
+        // The caller is cancelled, but releasing admission before the on-wire attempt drains
+        // would allow another attempt to exceed the physical concurrency budget.
+        if responseWaiters[requestID]?.holdsAdmission == true {
+            responseWaiters[requestID]?.callerCancelled = true
+            if let view = responseWaiters[requestID]?.authorView { endAuthorPresentationView(view) }
+            return
+        }
         let continuation = responseWaiters[requestID]?.continuation
         responseWaiters[requestID]?.continuation = nil
         if let view = responseWaiters[requestID]?.authorView { endAuthorPresentationView(view) }

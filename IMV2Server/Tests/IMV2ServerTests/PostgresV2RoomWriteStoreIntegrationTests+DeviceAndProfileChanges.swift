@@ -378,20 +378,24 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 10,    retryAfterSeconds: 3))
             let send = V2SendMessageService(store: PostgresV2RoomWriteStore(database: resources.database(.psql)), capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), now: { now })
             guard case .accepted(let message) = try await send.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: clientMessageID, text: "original")) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            let edit = V2MessageEditService(store: PostgresV2MessageEditStore(database: resources.database(.psql)), capacityProfile: profile, maximumTextUTF8Bytes: 64, now: { now.addingTimeInterval(1) })
             let request = V2AuthenticatedMessageEdit(roomID: roomID, actorUserID: senderID, operationID: .init(uuid: UUID()), messageID: message.messageID, expectedMessageRevision: 1, text: "committed edit")
             let owner = UserID(uuid: memberTwoUUID)
             let mutation = UUID()
-            let expectedError: V2RoomWriteStoreError = restriction == "freeze" ? .roomFrozen : restriction == "mute" ? .actorMuted : .actorNotEligible
+            @Sendable func boundEdit(_ input:V2AuthenticatedMessageEdit) async throws -> V2MessageMutationRecoveryResult {
+                let frozen=try V2MessageEditOperationCommand(command:.init(roomID:input.roomID,actorUserID:input.actorUserID,operationID:input.operationID,messageID:input.messageID,expectedMessageRevision:input.expectedMessageRevision,text:input.text,maximumUTF8Bytes:64),firstSubmissionDeadlineMilliseconds:UInt64(now.timeIntervalSince1970*1000)+60_000)
+                return try await withRoomActivation(database:resources.database(.psql),roomID:roomID) { token in
+                    try await PostgresV2MessageMutationOperationStore(database:resources.database(.psql),contentReviewMode:.disabled,clock:{now.addingTimeInterval(1)}).edit(frozen,token:token,capacityProfile:profile,eventID:.init(uuid:UUID()),now:now.addingTimeInterval(1),maximumUTF8Bytes:64)
+                }
+            }
             @Sendable func run(_ editing: Bool) async throws -> String {
                 if editing {
-                    do {
-                        guard case .edited(let value) = try await edit.edit(request) else { throw V2MessageEditStoreError.corruptPersistenceState }
+                    guard case .receipt(let receipt)=try await boundEdit(request) else { throw V2MessageEditStoreError.corruptPersistenceState }
+                    switch receipt.outcome {
+                    case .committed(let value):
                         #expect(value.messageRevision == 2 && value.roomSequence == 2)
                         return "edited"
-                    } catch let error as V2RoomWriteStoreError {
-                        #expect(error == expectedError)
-                        return "denied"
+                    case .rejected(.permissionDenied):return "denied"
+                    default:throw V2MessageEditStoreError.corruptPersistenceState
                     }
                 }
                 if restriction == "permission" || restriction == "demote" {
@@ -402,8 +406,19 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         guard case .applied = try await controls.changeMemberRole(actorUserID: owner, command: .init(operationID: .init(uuid: mutation), roomID: roomID, targetUserID: senderID, role: .member, expectedMembershipRevision: 1)) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
                     }
                 } else if restriction == "membership-remove" {
-                    let memberships = V2RoomMembershipService(store: PostgresV2RoomMembershipStore(database: resources.database(.psql)), capacityProfile: profile, now: { now.addingTimeInterval(1) })
-                    guard case .changed = try await memberships.change(.init(roomID: roomID, actorUserID: owner, operationID: .init(uuid: mutation), targetUserID: senderID, action: .remove, expectedMembershipRevision: 0)) else { throw V2RoomMembershipStoreError.corruptPersistenceState }
+                    let database = resources.database(.psql)
+                    let memberships = PostgresV2MembershipOperationStore(database: database, clock: { now.addingTimeInterval(1) })
+                    let snapshot = try await V2PostgresMembershipIdentitySnapshotValidator(database: database).snapshot(actorUserID: owner, targetUserID: senderID)
+                    try await withRoomActivation(database: database, roomID: roomID) { token in
+                        let intent = try V2MembershipIntent(roomID: roomID, actorUserID: owner, operationID: .init(uuid: mutation),
+                            targetUserID: senderID, action: .remove, expectedMembershipRevision: 0,
+                            confirmedUntilMilliseconds: UInt64(now.timeIntervalSince1970 * 1000) + 120_000)
+                        guard case .admitted(let admission) = try await memberships.admit(intent, identitySnapshot: snapshot, token: token) else { throw V2MembershipOperationValidationError.invalidAdmission }
+                        let command = try V2MembershipOperationCommand(intent: intent, admission: admission)
+                        guard case .receipt(let receipt) = try await memberships.submit(command, token: token,
+                            capacityProfile: profile, eventID: .init(uuid: UUID()), identitySnapshot: snapshot),
+                            case .changed = receipt.outcome else { throw V2MembershipOperationValidationError.invalidReceipt }
+                    }
                 } else {
                     let store = PostgresV2ModerationStore(database: resources.database(.psql))
                     let result: V2ModerationOutcome
@@ -411,8 +426,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         let safety = V2TrustedSafetyModerationService(store: store, safetyActorUserID: owner, capacityProfile: profile, now: { now.addingTimeInterval(1) })
                         result = try await safety.apply(V2TrustedSafetyRoomControl(roomID: roomID, operationID: .init(uuid: mutation), action: .freezeRoom, reasonCode: .init("abuse_spam")))
                     } else {
-                        let moderation = V2ModerationService(store: store, capacityProfile: profile, now: { now.addingTimeInterval(1) })
-                        result = try await moderation.apply(.init(roomID: roomID, actorUserID: owner, operationID: .init(uuid: mutation), action: restriction == "mute" ? .muteMember : .removeMember, targetUserID: senderID, muteUntil: restriction == "mute" ? now.addingTimeInterval(300) : nil, reasonCode: .init("abuse_spam")))
+                        result = try await applyAdmittedMemberFixture(database:resources.database(.psql),command:.init(roomID: roomID, actorUserID: owner, operationID: .init(uuid: mutation), action: restriction == "mute" ? .muteMember : .removeMember, targetUserID: senderID, muteUntil: restriction == "mute" ? now.addingTimeInterval(300) : nil, reasonCode: .init("abuse_spam")),profile:profile,eventID:.init(uuid:UUID()),now:now.addingTimeInterval(1))
                     }
                     guard case .applied = result else { throw V2ModerationStoreError.corruptPersistenceState }
                 }
@@ -467,21 +481,18 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 throw error
             }
             let before = try await directWriteArtifactCounts(sql: sql)
+            guard case .receipt(let replay)=try await boundEdit(request) else { throw V2MessageEditStoreError.corruptPersistenceState }
             if editFirst {
-                guard case .idempotent(let replay) = try await edit.edit(request) else { throw V2MessageEditStoreError.corruptPersistenceState }
-                #expect(replay.messageRevision == 2 && replay.roomSequence == 2)
-                #expect(replay.createdAt == now.addingTimeInterval(1))
-            } else {
-                await #expect(throws: expectedError) { try await edit.edit(request) }
-            }
-            await #expect(throws: expectedError) {
-                try await edit.edit(.init(roomID: roomID, actorUserID: senderID, operationID: .init(uuid: UUID()), messageID: message.messageID, expectedMessageRevision: editFirst ? 2 : 1, text: "denied after policy"))
-            }
+                guard case .committed(let applied)=replay.outcome else { throw V2MessageEditStoreError.corruptPersistenceState }
+                #expect(applied.messageRevision == 2 && applied.roomSequence == 2)
+            } else { #expect(replay.outcome == .rejected(.permissionDenied)) }
+            guard case .receipt(let denied)=try await boundEdit(.init(roomID:roomID,actorUserID:senderID,operationID:.init(uuid:UUID()),messageID:message.messageID,expectedMessageRevision:editFirst ? 2:1,text:"denied after policy")) else { throw V2MessageEditStoreError.corruptPersistenceState }
+            #expect(denied.outcome == .rejected(.permissionDenied))
             #expect(try await directWriteArtifactCounts(sql: sql) == before)
             let persisted = try #require(try await sql.raw("SELECT text_body, content_revision FROM im_v2.messages WHERE message_id=\(bind: message.messageID.uuidValue!)").first(decoding: EditMessageStateRow.self))
             #expect(persisted.text == (editFirst ? "committed edit" : "original"))
             #expect(persisted.revision == (editFirst ? 2 : 1))
-            #expect(try await count("im_v2.message_edit_operations", on: sql) == (editFirst ? 1 : 0))
+            #expect(try await count("im_v2.message_mutation_receipts", on: sql) == 2)
             #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.room_events WHERE event_type='message.edited'").first(decoding: CountRow.self)?.value == (editFirst ? 1 : 0))
             #expect(try await sql.raw("SELECT room_sequence AS value FROM im_v2.rooms WHERE room_id=\(bind: roomUUID)").first(decoding: CountRow.self)?.value == (editFirst ? 3 : 2))
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
@@ -496,31 +507,68 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         operation: String, operationID: UUID, replay: Bool = false, expectedRevision: UInt64 = 1, text: String = "updated authority") async throws -> EventID {
         let now = Date(timeIntervalSince1970: 1_750_000_000)
         let profile = try forwardImportTestProfile()
-        switch operation {
-        case "edit":
-            let service = V2MessageEditService(store: PostgresV2MessageEditStore(database: database, contentReviewMode: .disabled), capacityProfile: profile, maximumTextUTF8Bytes: 64, now: { now })
-            let result = try await service.edit(.init(roomID: room, actorUserID: senderID, operationID: .init(uuid: operationID), messageID: message, expectedMessageRevision: expectedRevision, text: text))
-            switch result {
-            case .edited(let value): #expect(!replay); return value.eventID
-            case .idempotent(let value): #expect(replay); return value.eventID
-            default: throw V2MessageEditStoreError.corruptPersistenceState
+        return try await withRoomActivation(database: database, roomID: room) { token in
+            if operation == "reaction" {
+                let command = try V2MessageReactionOperationCommand(command: .init(roomID: room, actorUserID: senderID,
+                    operationID: .init(uuid: operationID), messageID: message, reaction: "👍", action: .add),
+                    expectedReactionRevision: 0, firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
+                let result = try await PostgresV2MessageReactionOperationStore(database: database, clock: { now })
+                    .change(command, token: token, capacityProfile: profile, eventID: .init(uuid: UUID()), now: now)
+                guard case .receipt(let proof) = result, proof.validates(identity: try command.identity, fingerprint: try command.fingerprint),
+                      case .committed(let value) = proof.outcome, let event = value.event else {
+                    throw V2MessageReactionStoreError.corruptPersistenceState
+                }
+                return event.eventID
             }
-        case "withdraw":
-            let service = V2MessageWithdrawalService(store: PostgresV2MessageWithdrawalStore(database: database), capacityProfile: profile, now: { now })
-            let result = try await service.withdraw(.init(roomID: room, actorUserID: senderID, operationID: .init(uuid: operationID), messageID: message, expectedMessageRevision: expectedRevision))
-            switch result {
-            case .withdrawn(let value): #expect(!replay); return value.eventID
-            case .idempotent(let value): #expect(replay); return value.eventID
-            default: throw V2MessageWithdrawalStoreError.corruptPersistenceState
+            let store = PostgresV2MessageMutationOperationStore(database: database, contentReviewMode: .disabled, clock: { now })
+            let result: V2MessageMutationRecoveryResult
+            if operation == "edit" {
+                let command = try V2MessageEditOperationCommand(command: .init(roomID: room, actorUserID: senderID,
+                    operationID: .init(uuid: operationID), messageID: message, expectedMessageRevision: expectedRevision,
+                    text: text, maximumUTF8Bytes: 64), firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
+                result = try await store.edit(command, token: token, capacityProfile: profile, eventID: .init(uuid: UUID()), now: now, maximumUTF8Bytes: 64)
+            } else {
+                let command = try V2MessageWithdrawalOperationCommand(command: .init(roomID: room, actorUserID: senderID,
+                    operationID: .init(uuid: operationID), messageID: message, expectedMessageRevision: expectedRevision),
+                    firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
+                result = try await store.withdraw(command, token: token, capacityProfile: profile, eventID: .init(uuid: UUID()), now: now)
             }
-        default:
-            let service = V2MessageReactionService(store: PostgresV2MessageReactionStore(database: database), capacityProfile: profile, now: { now })
-            let result = try await service.change(.init(roomID: room, actorUserID: senderID, operationID: .init(uuid: operationID), messageID: message, reaction: "👍", action: .add))
-            switch result {
-            case .changed(let value): #expect(!replay); return value.eventID
-            case .idempotent(let value): #expect(replay); return value.eventID
-            default: throw V2MessageReactionStoreError.corruptPersistenceState
+            guard case .receipt(let proof) = result, case .committed(let value) = proof.outcome else {
+                throw V2MessageEditStoreError.corruptPersistenceState
             }
+            return value.eventID
+        }
+    }
+
+    private func pinReferenceForTest(database: any Database, actor: UserID, command: V2PinnedMessageCommand,
+        expectedRoomSequence: UInt64) async throws -> V2GroupCapabilityRecoveryResult {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let intent = try V2GroupCapabilityIntent(identity: .init(accountID: actor,
+            scope: .message(command.roomID, command.messageID), operation: .pinnedMessage(command.operationID)),
+            action: .pin(messageID: command.messageID, isPinned: command.isPinned, expectedRoomSequence: expectedRoomSequence),
+            confirmedUntilMilliseconds: 1_750_000_120_000)
+        return try await withRoomActivation(database: database, roomID: command.roomID) { token in
+            let store = PostgresV2GroupCapabilityOperationStore(database: database, clock: { now })
+            switch try await store.admit(intent, token: token) {
+            case .admitted(let admission):
+                return try await store.submit(.init(intent: intent, admission: admission), token: token,
+                    capacityProfile: forwardImportTestProfile(), eventID: .init(uuid: UUID()))
+            case .currentUnavailable(.current(.messageNotFound)): throw V2GroupCapabilitiesStoreError.messageNotFound
+            case .currentUnavailable(.current(.messageWithdrawn)): throw V2GroupCapabilitiesStoreError.messageWithdrawn
+            default: throw V2GroupCapabilitiesStoreError.corruptPersistenceState
+            }
+        }
+    }
+
+    /// Deliberate lost-proof injection in a disposable test schema only. Restore
+    /// the protection before committing; production never mutates this ledger.
+    private func removeAcceptanceForCorruptionTest(database: any Database, message: UUID) async throws {
+        guard Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { throw CancellationError() }
+        try await database.transaction { tx in
+            let sql = try #require(tx as? any SQLDatabase)
+            try await sql.raw("ALTER TABLE im_v2.message_send_completions DISABLE TRIGGER USER").run()
+            try await sql.raw("DELETE FROM im_v2.message_send_completions WHERE message_id=\(bind: message)").run()
+            try await sql.raw("ALTER TABLE im_v2.message_send_completions ENABLE TRIGGER USER").run()
         }
     }
 
@@ -531,7 +579,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let change = scenario.hasPrefix("change")
             let starting: Int64 = scenario.hasSuffix("one") ? 1 : (scenario.hasSuffix("before-max") ? Int64.max-1 : Int64.max)
             let maximum = try #require(V2ProfileRevision(rawValue: UInt64(starting)))
-            let exhausted = change && starting == Int64.max
+            let exhausted = starting == Int64.max
             let target = UserID(uuid: memberTwoUUID), operation = UUID()
             if kind == "alias" {
                 try await sql.raw("INSERT INTO im_v2.user_relationships(lower_user_id,higher_user_id,state,requested_by_user_id,updated_at) VALUES (\(bind: senderUUID),\(bind: memberTwoUUID),'accepted',\(bind: senderUUID),\(bind: now))").run()
@@ -542,14 +590,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let store = PostgresV2ProfilePresentationStore(database: database, nicknameCapacityProfile: try forwardImportTestProfile(), now: { now })
             func update(_ name: String, operationID: UUID) async throws -> V2ProfileRevision {
                 if kind == "alias" {
-                    return try await store.updateContactAlias(ownerUserID: senderID, targetUserID: target, operationID: .init(uuid: operationID), expectedRevision: maximum, remarkName: name).revision
+                    return try await store.updateContactAlias(.init(ownerUserID: senderID, targetUserID: target, operationID: .init(uuid: operationID), expectedRevision: maximum, remarkName: name,firstSubmissionDeadlineMilliseconds:UInt64(Int64.max))).committedValue.revision
                 }
-                return try await store.updateOwnGroupNickname(actorUserID: senderID, roomID: roomID, operationID: .init(uuid: operationID), expectedRevision: maximum, nickname: name).revision
+                return try await store.updateOwnGroupNickname(.init(actorUserID: senderID, roomID: roomID, operationID: .init(uuid: operationID), expectedRevision: maximum, nickname: name,firstSubmissionDeadlineMilliseconds:UInt64(Int64.max))).committedValue.revision
             }
             let name = change ? "changed" : "original"
-            let resultRevision = try #require(V2ProfileRevision(rawValue: UInt64(exhausted || !change ? starting : starting+1)))
+            let resultRevision = try #require(V2ProfileRevision(rawValue: UInt64(exhausted ? starting : starting+1)))
             if exhausted {
-                await #expect(throws: V2ProfilePresentationError.corruptPersistenceState) { _ = try await update("changed", operationID: operation) }
+                await #expect(throws: V2ProfilePresentationError.revisionConflict(maximum)) { _ = try await update(name, operationID: operation) }
             } else {
                 #expect(try await update(name, operationID: operation) == resultRevision)
                 // A completed no-op still has a valid immutable replay result.
@@ -559,8 +607,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let column = kind == "alias" ? "remark_name" : "nickname"
             #expect(try await sql.raw("SELECT \(unsafeRaw: column) AS value FROM im_v2.\(unsafeRaw: table)").first(decoding: StringValueRow.self)?.value == (exhausted ? "original" : name))
             #expect(try await sql.raw("SELECT revision AS value FROM im_v2.\(unsafeRaw: table)").first(decoding: CountRow.self)?.value == resultRevision.signedValue)
-            let operations = kind == "alias" ? "user_contact_alias_operations" : "room_member_nickname_operations"
-            #expect(try await count("im_v2." + operations, on: sql) == (exhausted ? 0 : 1))
+            let operations = kind == "alias" ? "contact_alias_operation_receipts" : "group_nickname_operation_receipts"
+            #expect(try await count("im_v2." + operations, on: sql) == 1)
         }
     }
 
@@ -665,232 +713,106 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Concurrent profile retries serialize ledger reads and preserve payload and revision conflicts",
-          arguments: ["changed", "no-op", "changed-invalid-clock", "no-op-invalid-clock", "name-mismatch", "avatar-mismatch", "different-operation"])
-    func ownProfileConcurrentReplay(scenario: String) async throws {
+    @Test("Profile patches retain unrelated fields and replay the original receipt after later commits")
+    func ownProfileImmutableReceipts() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let now = Date(timeIntervalSince1970: 946_684_800 + 0.00000125)
-            let clockReads = Mutex(0)
-            let store = PostgresV2ProfileUpdateStore(database: database, now: {
-                let index = clockReads.withLock { count in defer { count += 1 }; return count }
-                return index > 0 && scenario.hasSuffix("invalid-clock") ? Date(timeIntervalSince1970: .nan) : now
-            })
+            let store = PostgresV2ProfileUpdateStore(database: database)
             let before = try await store.currentProfile(for: senderID)
-            let noOp = scenario.hasPrefix("no-op")
-            let name = noOp ? try #require(before.publicIdentity).displayName : "Concurrent profile"
-            let operation = ProfileUpdateOperationID(uuid: UUID())
-            let command = try V2ProfileUpdateCommand(actorUserID: senderID, operationID: operation,
-                expectedRevision: before.revision, displayName: name, avatar: nil)
-            let retry = try V2ProfileUpdateCommand(actorUserID: senderID,
-                operationID: scenario == "different-operation" ? .init(uuid: UUID()) : operation,
-                expectedRevision: before.revision,
-                displayName: scenario == "name-mismatch" ? "Another name" : "  " + name + "  ",
-                avatar: scenario == "avatar-mismatch" ? .init(mediaID: .init(uuid: UUID())) : nil)
-            let gate = PostgreSQLTransactionGate()
-            let holder = Task {
-                try await database.transaction { transaction in
-                    let held = try #require(transaction as? any SQLDatabase)
-                    try await held.raw("SELECT user_id FROM im_v2.public_user_profiles WHERE user_id = \(bind: senderUUID) FOR UPDATE").run()
-                    await gate.holdTransaction()
-                }
-            }
-            await gate.waitUntilHeld()
-            func waitForWriters(_ expected: Int64) async throws {
-                for _ in 0..<500 {
-                    let waiting = try await sql.raw("SELECT COUNT(*) AS value FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%public_user_profiles%'").first(decoding: CountRow.self)?.value ?? 0
-                    if waiting == expected { return }
-                    try await Task.sleep(for: .milliseconds(10))
-                }
-                Issue.record("Expected real profile writers to wait on the held row")
-                throw CancellationError()
-            }
-            let first = Task { try await store.update(command) }
-            var second: Task<V2ProfileUpdateOutcome, Error>?
-            do {
-                // Establish the first writer's row-lock position before
-                // allowing its concurrent retry to read an empty ledger.
-                try await waitForWriters(1)
-                second = Task { try await store.update(retry) }
-                try await waitForWriters(2)
-                await gate.releaseTransaction()
-                try await holder.value
-                guard case .updated(let updated) = try await first.value else {
-                    throw V2ProfileUpdateError.corruptPersistenceState
-                }
-                let second = try #require(second)
-                if scenario.hasSuffix("mismatch") {
-                    await #expect(throws: V2ProfileUpdateError.operationPayloadMismatch) { try await second.value }
-                } else if scenario == "different-operation" {
-                    await #expect(throws: V2ProfileUpdateError.revisionConflict(current: updated.revision)) { try await second.value }
-                } else {
-                    #expect(try await second.value == .idempotent(updated))
-                }
-                #expect(clockReads.withLock { $0 } == 1)
-                #expect(updated.revision.signedValue == before.revision.signedValue + (noOp ? 0 : 1))
-                #expect(updated.visibilityRevision.signedValue == before.visibilityRevision.signedValue + (noOp ? 0 : 1))
-                #expect(try await store.currentProfile(for: senderID) == updated)
-                #expect(try await store.update(command) == .idempotent(updated))
-                #expect(clockReads.withLock { $0 } == 1)
-                #expect(try await count("im_v2.public_profile_update_operations", on: sql) == 1)
-                #expect(try await count("im_v2.public_profile_update_outbox", on: sql) == (noOp ? 0 : 1))
-                #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.public_profile_update_operations WHERE actor_user_id = \(bind: senderUUID) AND created_at = \(bind: now)").first(decoding: CountRow.self)?.value == 1)
-            } catch {
-                first.cancel()
-                second?.cancel()
-                await gate.releaseTransaction()
-                _ = await holder.result
-                _ = await first.result
-                if let second { _ = await second.result }
-                throw error
+            let first = try V2ProfileUpdateCommand(actorUserID: senderID, operationID: .init(uuid: UUID()), expectedRevision: before.revision,
+                patch: .init(displayName: .set("\nCafe\u{301}\t")), firstSubmissionDeadlineMilliseconds: 4_000_000_000_000)
+            let a = try await store.update(first)
+            let snapshotA = try #require(a.currentSnapshot)
+            #expect(snapshotA.publicIdentity?.displayName == "Café")
+            let second = try V2ProfileUpdateCommand(actorUserID: senderID, operationID: .init(uuid: UUID()), expectedRevision: snapshotA.revision,
+                patch: .init(displayName: .set("Later")), firstSubmissionDeadlineMilliseconds: 4_000_000_000_000)
+            let b = try await store.update(second)
+            let replay = try await store.update(first)
+            #expect(replay.receipt == a.receipt)
+            #expect(replay.currentSnapshot == b.currentSnapshot)
+            #expect(replay.currentSnapshot?.revision != snapshotA.revision)
+            #expect(try await count("im_v2.public_profile_update_operations", on: sql) == 2)
+            #expect(try await count("im_v2.public_profile_update_outbox", on: sql) == 2)
+            let recover = V2ProfileOperationRecoveryRequest(actorUserID: senderID, operationID: first.operationID, fingerprint: first.fingerprint, action: .closeIfAbsent)
+            #expect(try await store.recover(recover) == .receipt(a.receipt, currentSnapshot: b.currentSnapshot))
+            await #expect(throws: (any Error).self) {
+                try await sql.raw("UPDATE im_v2.public_profile_update_operations SET outcome_kind='closed',result_revision=NULL WHERE actor_user_id=\(bind:senderUUID)").run()
             }
         }
     }
 
-    @Test("Profile names persist canonically with exact event times and replay across clock boundaries",
-          arguments: [0, 1, 2], [false, true])
-    func ownProfileCanonicalNameTimestamp(clockIndex: Int, hasAvatar: Bool) async throws {
-        let dates: [Double] = [946_684_800 + 0.00000125, -210_866_803_200, 9_224_318_015_990]
-        let now = Date(timeIntervalSince1970: dates[clockIndex])
+    @Test("Profile close and submit serialize, unresolved is not closure", arguments: [false, true])
+    func ownProfileCloseAndSubmit(closeFirst: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let clock = TestSequenceClock([now])
-            let store = PostgresV2ProfileUpdateStore(database: database, now: { clock.now() })
-            let media = UUID()
-            if hasAvatar {
-                try await sql.raw("INSERT INTO im_v2.media_objects(media_id,owner_user_id,content_type,byte_count,state,upload_session_id,expires_at,state_updated_at,created_at) VALUES (\(bind: media),\(bind: senderUUID),'image/png',1,'available',\(bind: UUID()),\(bind: now),\(bind: now),\(bind: now))").run()
-            }
-            let avatar: V2AvatarReference? = hasAvatar ? .init(mediaID: .init(uuid: media)) : nil
-            let operation = ProfileUpdateOperationID(uuid: UUID())
+            let store = PostgresV2ProfileUpdateStore(database: database)
             let before = try await store.currentProfile(for: senderID)
-            func command(_ name: String) throws -> V2ProfileUpdateCommand {
-                try .init(actorUserID: senderID, operationID: operation,
-                    expectedRevision: before.revision, displayName: name, avatar: avatar)
-            }
-            guard case .updated(let updated) = try await store.update(command("\nCafe\u{301}\t")) else {
-                throw V2ProfileUpdateError.corruptPersistenceState
-            }
-            #expect(updated.publicIdentity?.displayName == "Café")
-            #expect(updated.avatar == avatar)
-            #expect(updated.revision.signedValue == 2)
-            #expect(try await sql.raw("""
-                SELECT COUNT(*) AS value FROM im_v2.public_user_profiles p
-                JOIN im_v2.public_profile_update_operations op ON op.actor_user_id = p.user_id
-                JOIN im_v2.public_profile_update_outbox o ON o.source_user_id = p.user_id
-                WHERE p.user_id = \(bind: senderUUID)
-                  AND convert_to(p.display_name, 'UTF8') = convert_to(\(bind: "Café")::text, 'UTF8')
-                  AND op.requested_display_name = p.display_name AND o.display_name = p.display_name
-                  AND p.updated_at = \(bind: now) AND o.profile_updated_at = p.updated_at
-                  AND o.created_at = p.updated_at AND op.created_at = p.updated_at
-                """).first(decoding: CountRow.self)?.value == 1)
-            for date in [Date(timeIntervalSince1970: .nan), Date(timeIntervalSince1970: .infinity), now] {
-                clock.set([date])
-                for name in ["Café", "\nCafe\u{301}\t", "  Café  "] {
-                    guard case .idempotent(let replay) = try await store.update(command(name)) else {
-                        throw V2ProfileUpdateError.corruptPersistenceState
-                    }
-                    #expect(replay == updated)
-                }
-            }
-            #expect(try await store.currentProfile(for: senderID) == updated)
-            #expect(try await count("im_v2.public_profile_update_operations", on: sql) == 1)
-            #expect(try await count("im_v2.public_profile_update_outbox", on: sql) == 1)
+            let command = try V2ProfileUpdateCommand(actorUserID: senderID, operationID: .init(uuid:UUID()), expectedRevision: before.revision,
+                patch: .init(displayName:.set("New")), firstSubmissionDeadlineMilliseconds:4_000_000_000_000)
+            let query = V2ProfileOperationRecoveryRequest(actorUserID: senderID, operationID: command.operationID, fingerprint: command.fingerprint, action:.query)
+            let close = V2ProfileOperationRecoveryRequest(actorUserID: senderID, operationID: command.operationID, fingerprint: command.fingerprint, action:.closeIfAbsent)
+            #expect(try await store.recover(query) == .unresolved)
+            if closeFirst { _ = try await store.recover(close) }
+            let result = try await store.update(command)
+            #expect(result.receipt.outcome == (closeFirst ? .closed : .committed(revision: try #require(V2ProfileRevision(rawValue:2)), visibilityRevision:try #require(V2ProfileRevision(rawValue:2)))))
+            #expect(try await store.recover(close) == .receipt(result.receipt,currentSnapshot:result.currentSnapshot))
+            #expect(try await count("im_v2.public_profile_update_outbox", on:sql) == (closeFirst ? 0 : 1))
+            let changed = try V2ProfileUpdateCommand(actorUserID:senderID,operationID:command.operationID,expectedRevision:before.revision,
+                patch:.init(displayName:.set("Other")),firstSubmissionDeadlineMilliseconds:4_000_000_000_000)
+            await #expect(throws:V2ProfileUpdateError.operationPayloadMismatch) { try await store.update(changed) }
+            #expect(try await store.recover(.init(actorUserID:senderID,operationID:command.operationID,fingerprint:changed.fingerprint,action:.query)) == .fingerprintConflict)
         }
     }
 
-    @Test("Equivalent profile names remain no-ops at exhausted revision boundaries",
-          arguments: ["revision", "visibility_revision"])
-    func ownProfileCanonicalNameNoOp(column: String) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let store = PostgresV2ProfileUpdateStore(database: database, now: { now })
-            try await sql.raw("UPDATE im_v2.public_user_profiles SET \(unsafeRaw: column) = \(bind: Int64.max) WHERE user_id = \(bind: senderUUID)").run()
-            let before = try await store.currentProfile(for: senderID)
-            let name = try #require(before.publicIdentity).displayName
-            let persistedBefore = try await sql.raw("SELECT to_jsonb(p)::text AS value FROM im_v2.public_user_profiles p WHERE user_id = \(bind: senderUUID)").first(decoding: StringValueRow.self)?.value
-            // Padding can exceed the database's raw-name length limit; only
-            // the already validated canonical name belongs in persistence.
-            let command = try V2ProfileUpdateCommand(actorUserID: senderID, operationID: .init(uuid: UUID()),
-                expectedRevision: before.revision, displayName: String(repeating: " ", count: 300) + name + "\n", avatar: nil)
-            #expect(try await store.update(command) == .updated(before))
-            #expect(try await store.update(command) == .idempotent(before))
-            #expect(try await sql.raw("SELECT to_jsonb(p)::text AS value FROM im_v2.public_user_profiles p WHERE user_id = \(bind: senderUUID)").first(decoding: StringValueRow.self)?.value == persistedBefore)
-            #expect(try await sql.raw("SELECT requested_display_name AS value FROM im_v2.public_profile_update_operations WHERE actor_user_id = \(bind: senderUUID)").first(decoding: StringValueRow.self)?.value == name)
-            #expect(try await count("im_v2.public_profile_update_operations", on: sql) == 1)
-            #expect(try await count("im_v2.public_profile_update_outbox", on: sql) == 0)
-        }
-    }
-
-    @Test("Historical padded profile operation names replay without weakening payload matching", arguments: [false, true])
-    func ownProfileLegacyCanonicalNameReplay(hasAvatar: Bool) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let operation = ProfileUpdateOperationID(uuid: UUID())
-            let media = UUID()
-            if hasAvatar {
-                try await sql.raw("INSERT INTO im_v2.media_objects(media_id,owner_user_id,content_type,byte_count,state,upload_session_id,expires_at,state_updated_at,created_at) VALUES (\(bind: media),\(bind: senderUUID),'image/png',1,'available',\(bind: UUID()),\(bind: now),\(bind: now),\(bind: now))").run()
-            }
-            let avatar: V2AvatarReference? = hasAvatar ? .init(mediaID: .init(uuid: media)) : nil
-            let revision = try #require(V2ProfileRevision(rawValue: 1))
-            let command = try V2ProfileUpdateCommand(actorUserID: senderID, operationID: operation,
-                expectedRevision: revision, displayName: "Café", avatar: avatar)
-            let initial = PostgresV2ProfileUpdateStore(database: database, now: { now })
-            _ = try await initial.update(command)
-            // Reproduce rows written by the old implementation, which kept
-            // raw input in the profile and ledger but normalized the outbox.
-            try await sql.raw("UPDATE im_v2.public_user_profiles SET display_name = \(bind: "\nCafe\u{301}\t") WHERE user_id = \(bind: senderUUID)").run()
-            try await sql.raw("UPDATE im_v2.public_profile_update_operations SET requested_display_name = \(bind: "\nCafe\u{301}\t") WHERE actor_user_id = \(bind: senderUUID)").run()
-            func snapshot() async throws -> [String] {
-                var values: [String] = []
-                for table in ["public_user_profiles", "public_profile_update_operations", "public_profile_update_outbox"] {
-                    guard let row = try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: table) r").first(decoding: StringValueRow.self) else { throw CancellationError() }
-                    values.append(row.value)
-                }
-                return values
-            }
-            let before = try await snapshot()
-            let current = try await initial.currentProfile(for: senderID)
-            let replayStore = PostgresV2ProfileUpdateStore(database: database, now: { Date(timeIntervalSince1970: .nan) })
-            for name in ["Café", "\nCafe\u{301}\t", "  Café  "] {
-                let retry = try V2ProfileUpdateCommand(actorUserID: senderID, operationID: operation,
-                    expectedRevision: revision, displayName: name, avatar: avatar)
-                #expect(try await replayStore.update(retry) == .idempotent(current))
-                #expect(try await snapshot() == before)
-            }
-            let differentAvatar: V2AvatarReference? = hasAvatar ? nil : .init(mediaID: .init(uuid: UUID()))
-            for changed in [
-                try V2ProfileUpdateCommand(actorUserID: senderID, operationID: operation, expectedRevision: revision, displayName: "Different", avatar: avatar),
-                try V2ProfileUpdateCommand(actorUserID: senderID, operationID: operation, expectedRevision: current.revision, displayName: "Café", avatar: avatar),
-                try V2ProfileUpdateCommand(actorUserID: senderID, operationID: operation, expectedRevision: revision, displayName: "Café", avatar: differentAvatar)
-            ] {
-                await #expect(throws: V2ProfileUpdateError.operationPayloadMismatch) { try await replayStore.update(changed) }
-                #expect(try await snapshot() == before)
+    @Test("Concurrent profile close and submission have one immutable fact", arguments: 0..<8)
+    func ownProfileCloseSubmissionRace(seed:Int) async throws {
+        try await withForwardOwnerDatabases(mode:.standard) { database,_,sql,_,_ in
+            let store = PostgresV2ProfileUpdateStore(database:database)
+            let before = try await store.currentProfile(for:senderID)
+            let command = try V2ProfileUpdateCommand(actorUserID:senderID,operationID:.init(uuid:UUID()),expectedRevision:before.revision,
+                patch:.init(displayName:.set("Race \(seed)")),firstSubmissionDeadlineMilliseconds:4_000_000_000_000)
+            let request = V2ProfileOperationRecoveryRequest(actorUserID:senderID,operationID:command.operationID,fingerprint:command.fingerprint,action:.closeIfAbsent)
+            async let update = store.update(command)
+            async let close = store.recover(request)
+            let result = try await update, recovery = try await close
+            #expect(recovery == .receipt(result.receipt,currentSnapshot:result.currentSnapshot))
+            #expect(try await count("im_v2.public_profile_update_operations",on:sql) == 1)
+            switch result.receipt.outcome {
+            case .closed: #expect(try await store.currentProfile(for:senderID) == before)
+            case .committed: #expect(try await count("im_v2.public_profile_update_outbox",on:sql) == 1)
+            case .rejected: Issue.record("Unexpected rejection in seed \(seed)")
             }
         }
     }
 
-    @Test("own profile writes use signed revisions and reject exhausted counters", arguments: ["normal", "before-max", "revision-max", "visibility-max"], [false, true])
-    func ownProfileRevisionBounds(_ scenario: String, change: Bool) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let revision: Int64 = scenario == "revision-max" ? Int64.max : (scenario == "before-max" ? Int64.max-1 : 1)
-            let visibility: Int64 = scenario == "visibility-max" ? Int64.max : revision
-            try await sql.raw("UPDATE im_v2.public_user_profiles SET revision=\(bind: revision),visibility_revision=\(bind: visibility) WHERE user_id=\(bind: senderUUID)").run()
-            let store = PostgresV2ProfileUpdateStore(database: database, now: { now })
-            let before = try await store.currentProfile(for: senderID)
-            let name = change ? "changed name" : try #require(before.publicIdentity).displayName
-            let command = try V2ProfileUpdateCommand(actorUserID: senderID, operationID: .init(uuid: UUID()), expectedRevision: before.revision, displayName: name, avatar: nil)
-            let exhausted = change && (revision == Int64.max || visibility == Int64.max)
-            if exhausted {
-                await #expect(throws: V2ProfileUpdateError.corruptPersistenceState) { _ = try await store.update(command) }
-                #expect(try await store.currentProfile(for: senderID) == before)
-            } else {
-                guard case .updated(let updated) = try await store.update(command) else { throw V2ProfileUpdateError.corruptPersistenceState }
-                #expect(updated.revision.signedValue == revision + (change ? 1 : 0))
-                #expect(updated.visibilityRevision.signedValue == visibility + (change ? 1 : 0))
-                guard case .idempotent(let replay) = try await store.update(command) else { throw V2ProfileUpdateError.corruptPersistenceState }
-                #expect(replay == updated)
+    @Test("Profile rejection is durable and does not become a late mutation", arguments:["revision", "deadline"])
+    func ownProfileDurableRejection(reason:String) async throws {
+        try await withForwardOwnerDatabases(mode:.standard) { database,_,sql,_,_ in
+            let store = PostgresV2ProfileUpdateStore(database:database)
+            let before = try await store.currentProfile(for:senderID)
+            let command = try V2ProfileUpdateCommand(actorUserID:senderID,operationID:.init(uuid:UUID()),
+                expectedRevision:reason == "revision" ? try #require(V2ProfileRevision(rawValue:99)) : before.revision,
+                patch:.init(displayName:.set("Rejected")),firstSubmissionDeadlineMilliseconds:reason == "deadline" ? 1 : 4_000_000_000_000)
+            let result = try await store.update(command)
+            #expect(result.receipt.outcome == .rejected(reason == "deadline" ? .expiredUnsubmitted : .revisionConflict(current:before.revision)))
+            #expect(try await store.update(command).receipt == result.receipt)
+            #expect(try await store.currentProfile(for:senderID) == before)
+            #expect(try await count("im_v2.public_profile_update_outbox",on:sql) == 0)
+        }
+    }
+
+    @Test("Profile patches handle no-op and exhausted revision counters", arguments:[false,true])
+    func ownProfileRevisionBounds(change:Bool) async throws {
+        try await withForwardOwnerDatabases(mode:.standard) { database,_,sql,_,_ in
+            try await sql.raw("UPDATE im_v2.public_user_profiles SET revision=\(bind:Int64.max),visibility_revision=\(bind:Int64.max) WHERE user_id=\(bind:senderUUID)").run()
+            let store = PostgresV2ProfileUpdateStore(database:database)
+            let before = try await store.currentProfile(for:senderID)
+            let command = try V2ProfileUpdateCommand(actorUserID:senderID,operationID:.init(uuid:UUID()),expectedRevision:before.revision,
+                patch:.init(displayName:.set(change ? "Changed" : try #require(before.publicIdentity).displayName)),firstSubmissionDeadlineMilliseconds:4_000_000_000_000)
+            if change { await #expect(throws:V2ProfileUpdateError.corruptPersistenceState) { try await store.update(command) } }
+            else {
+                let result = try await store.update(command)
+                #expect(result.currentSnapshot == before)
+                #expect(try await store.update(command).receipt == result.receipt)
             }
-            #expect(try await count("im_v2.public_profile_update_operations", on: sql) == (exhausted ? 0 : 1))
-            #expect(try await count("im_v2.public_profile_update_outbox", on: sql) == (!exhausted && change ? 1 : 0))
         }
     }
 
@@ -901,7 +823,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let clock = LegacyMediaTestClock(now)
             let media = MediaID(uuid: UUID()), device = DeviceID(uuid: UUID()), actor = UserID(uuid: memberTwoUUID)
             let mediaUUID = try #require(media.uuidValue), deviceUUID = try #require(device.uuidValue)
+            // Accepted attachments require a verified immutable placement even when
+            // this scenario replaces only the signing boundary with a transition fake.
+            let root = FileManager.default.temporaryDirectory.appending(path: "room-log-media-\(UUID())", directoryHint: .isDirectory)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let resourceFixture = try ConcurrentMediaResourceFixture(root: root, now: { now })
             try await sql.raw("INSERT INTO im_v2.media_objects(media_id,owner_user_id,content_type,byte_count,state,upload_session_id,expires_at,state_updated_at,created_at) VALUES (\(bind: mediaUUID),\(bind: senderUUID),'text/plain',1,'available',\(bind: UUID()),\(bind: now.addingTimeInterval(600)),\(bind: now),\(bind: now))").run()
+            try await resourceFixture.seedPlacement(mediaID: mediaUUID, roomID: roomID,
+                bytes: Data([0x61]), sql: sql, now: now)
             try await sql.raw("INSERT INTO im_v2.auth_devices(user_id,device_id,created_at,last_active_at) VALUES (\(bind: memberTwoUUID),\(bind: deviceUUID),\(bind: now),\(bind: now))").run()
             let sender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { now })
             guard case .accepted(let message) = try await sender.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "media baseline", media: [.init(mediaID: media)])) else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -917,7 +846,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     try await sql.raw("UPDATE im_v2.rooms SET membership_revision=2").run()
                     if scenario == "avatar-gap" { try await sql.raw("UPDATE im_v2.public_user_profiles SET avatar_media_id=\(bind: mediaUUID) WHERE user_id=\(bind: senderUUID)").run() }
                 } else if scenario.hasSuffix("missing") {
-                    try await sql.raw("DELETE FROM im_v2.message_send_completions WHERE message_id=\(bind: message.messageID.uuidValue!)").run()
+                    try await removeAcceptanceForCorruptionTest(database: database, message: try #require(message.messageID.uuidValue))
                 } else if scenario == "provider-device-expiry" {
                     try await sql.raw("UPDATE im_v2.auth_devices SET session_expires_at=clock_timestamp()-interval '1 second' WHERE device_id=\(bind: deviceUUID)").run()
                 } else if scenario == "provider-device" {
@@ -933,7 +862,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 } else if scenario == "provider-expiry" { clock.advance(by: 61) }
             }
             if scenario.hasPrefix("issue") || scenario == "avatar-gap" { try await change() }
-            if scenario.hasPrefix("issue") {
+            if scenario.hasPrefix("issue") || scenario == "avatar-gap" {
+                // Avatar presentation has its own lease. A profile reference
+                // cannot bypass the attachment's current content audience.
                 await #expect(throws: V2MediaStoreError.downloadNotAuthorized) {
                     _ = try await store.requestDownload(requesterUserID: actor, deviceID: device, mediaID: media, expiresAt: now.addingTimeInterval(60), now: now)
                 }
@@ -956,7 +887,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
             }
             let service = try V2MediaProviderSessionService(store: sessions, provider: provider, now: { clock.now() })
-            if scenario == "healthy" || scenario == "avatar-gap" {
+            if scenario == "healthy" {
                 let result = try await service.exchangeDownload(actorUserID: actor, deviceID: device, downloadSessionID: grant.downloadSessionID)
                 #expect(result.expiresAt == grant.expiresAt)
             } else if scenario == "provider-expiry" {
@@ -968,7 +899,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     _ = try await service.exchangeDownload(actorUserID: actor, deviceID: device, downloadSessionID: grant.downloadSessionID)
                 }
             }
-            let expected = scenario == "provider-takeover" ? "claimed" : (scenario == "healthy" || scenario == "avatar-gap" ? "consumed" : "pending")
+            let expected = scenario == "provider-takeover" ? "claimed" : (scenario == "healthy" ? "consumed" : "pending")
             #expect(try await sql.raw("SELECT state AS value FROM im_v2.media_download_grants").first(decoding: StringValueRow.self)?.value == expected)
             #expect(await provider.calls == 1)
         }
@@ -987,8 +918,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let target = try #require(source.messageID.uuidValue)
             if scenario == "hidden-existing-pin" {
                 try await sql.raw("UPDATE im_v2.room_memberships SET role='owner' WHERE user_id=\(bind: senderUUID)").run()
-                let result = try await PostgresV2GroupCapabilitiesStore(database: database).setPinnedMessage(actorUserID: senderID, command: .init(operationID: .init(uuid: UUID()), roomID: roomID, messageID: source.messageID, isPinned: true), capacityProfile: profile, eventID: .init(uuid: UUID()), now: now)
-                guard case .applied = result else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
+                let result = try await pinReferenceForTest(database: database, actor: senderID,
+                    command: .init(operationID: .init(uuid: UUID()), roomID: roomID, messageID: source.messageID, isPinned: true),
+                    expectedRoomSequence: source.roomSequence)
+                guard case .receipt(let proof) = result, case .applied = proof.outcome else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             }
             if ["gap-edit", "rejoined"].contains(scenario) {
                 try await sql.raw("UPDATE im_v2.room_memberships SET left_revision=1 WHERE user_id=\(bind: memberTwoUUID)").run()
@@ -1000,7 +933,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await sql.raw("UPDATE im_v2.room_memberships SET joined_revision=1 WHERE user_id=\(bind: memberTwoUUID)").run()
                 try await sql.raw("UPDATE im_v2.rooms SET membership_revision=1").run()
             } else if scenario == "missing-acceptance" {
-                try await sql.raw("DELETE FROM im_v2.message_send_completions WHERE message_id=\(bind: target)").run()
+                try await removeAcceptanceForCorruptionTest(database: database, message: target)
             } else if scenario == "accepted-storage-drift" {
                 // The physical compatibility copy is not accepted authority.
                 try await sql.raw("UPDATE im_v2.messages SET accepted_event_storage='message_row', accepted_membership_revision=99, accepted_event_id=\(bind: UUID()) WHERE message_id=\(bind: target)").run()
@@ -1009,33 +942,44 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             } else if scenario == "wrong-completion" {
                 // Import-like malformed evidence: preserve its lookup key but
                 // bind the immutable result to a different message identity.
-                try await sql.raw("""
+                guard Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { throw CancellationError() }
+                try await database.transaction { tx in
+                    let faultSQL = try #require(tx as? any SQLDatabase)
+                    try await faultSQL.raw("ALTER TABLE im_v2.message_send_completions DISABLE TRIGGER USER").run()
+                    try await faultSQL.raw("""
                     WITH old AS (DELETE FROM im_v2.message_send_completions WHERE message_id=\(bind: target) RETURNING *)
                     INSERT INTO im_v2.message_send_completions
                     SELECT changed.* FROM old CROSS JOIN LATERAL jsonb_populate_record(NULL::im_v2.message_send_completions, to_jsonb(old)||jsonb_build_object('message_id',\(bind: UUID()))) changed
                     """).run()
+                    try await faultSQL.raw("ALTER TABLE im_v2.message_send_completions ENABLE TRIGGER USER").run()
+                }
             } else if scenario == "withdrawn" {
                 _ = try await mutateAcceptedMessage(database: database, room: roomID, message: source.messageID, operation: "withdraw", operationID: UUID())
             }
             let actor = UserID(uuid: memberTwoUUID), operation = UUID()
             let reply = try V2SendMessageCommand(roomID: roomID, senderUserID: actor, clientMessageID: .init(uuid: operation), text: "reply", replyTo: .init(messageID: source.messageID), limits: limits)
             let pin = V2PinnedMessageCommand(operationID: .init(uuid: operation), roomID: roomID, messageID: source.messageID, isPinned: true)
+            let pinSequence = UInt64(try #require(try await sql.raw("SELECT room_sequence AS value FROM im_v2.rooms WHERE room_id=\(bind: roomUUID)").first(decoding: CountRow.self)).value)
+            var firstPinResult: V2GroupCapabilityRecoveryResult?
             func run() async throws -> String {
                 if path.hasPrefix("reply") {
                     let result = try await store.accept(command: reply, capacityProfile: profile, identifiers: try V2AcceptanceIDFactory().make(at: now), now: now)
                     switch result { case .accepted: return "changed"; case .idempotent: return "replay"; default: return "other" }
                 }
-                let result = try await PostgresV2GroupCapabilitiesStore(database: database).setPinnedMessage(actorUserID: actor, command: pin, capacityProfile: profile, eventID: .init(uuid: UUID()), now: now)
-                switch result { case .applied: return "changed"; case .idempotent: return "replay"; default: return "other" }
+                let result = try await pinReferenceForTest(database: database, actor: actor, command: pin, expectedRoomSequence: pinSequence)
+                if let original = firstPinResult { #expect(result == original); return "replay" }
+                firstPinResult = result
+                guard case .receipt(let proof) = result, case .applied = proof.outcome else { return "other" }
+                return "changed"
             }
             let allowed = ["member", "rejoined", "accepted-storage-drift", "replay-after-leave", "visible-edit"].contains(scenario)
-            let before = try await sql.raw("SELECT jsonb_build_array((SELECT count(*) FROM im_v2.messages),(SELECT count(*) FROM im_v2.room_events),(SELECT count(*) FROM im_v2.room_pinned_message_operations),(SELECT jsonb_agg(to_jsonb(r)) FROM im_v2.rooms r),(SELECT jsonb_agg(to_jsonb(a)) FROM im_v2.room_admission a))::text AS value").first(decoding: StringValueRow.self)?.value
+            let before = try await sql.raw("SELECT jsonb_build_array((SELECT count(*) FROM im_v2.messages),(SELECT count(*) FROM im_v2.room_events),(SELECT count(*) FROM im_v2.group_capability_receipts),(SELECT jsonb_agg(to_jsonb(r)) FROM im_v2.rooms r),(SELECT jsonb_agg(to_jsonb(a)) FROM im_v2.room_admission a))::text AS value").first(decoding: StringValueRow.self)?.value
             do { #expect(try await run() == "changed"); #expect(allowed) }
             catch V2RoomWriteStoreError.replyTargetNotFound { #expect(!allowed && path.hasPrefix("reply")) }
             catch V2GroupCapabilitiesStoreError.messageNotFound { #expect(!allowed && path.hasPrefix("pin")) }
             catch V2GroupCapabilitiesStoreError.messageWithdrawn { #expect(scenario == "withdrawn" && path.hasPrefix("pin")) }
             if !allowed {
-                let after = try await sql.raw("SELECT jsonb_build_array((SELECT count(*) FROM im_v2.messages),(SELECT count(*) FROM im_v2.room_events),(SELECT count(*) FROM im_v2.room_pinned_message_operations),(SELECT jsonb_agg(to_jsonb(r)) FROM im_v2.rooms r),(SELECT jsonb_agg(to_jsonb(a)) FROM im_v2.room_admission a))::text AS value").first(decoding: StringValueRow.self)?.value
+                let after = try await sql.raw("SELECT jsonb_build_array((SELECT count(*) FROM im_v2.messages),(SELECT count(*) FROM im_v2.room_events),(SELECT count(*) FROM im_v2.group_capability_receipts),(SELECT jsonb_agg(to_jsonb(r)) FROM im_v2.rooms r),(SELECT jsonb_agg(to_jsonb(a)) FROM im_v2.room_admission a))::text AS value").first(decoding: StringValueRow.self)?.value
                 #expect(after == before)
             }
             // This predicate also serves forward export/final acceptance and
@@ -1147,7 +1091,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(third.events.map(\.sourceEventID) == [event])
             #expect(third.nextRoomSequence == message.roomSequence + 2 && !third.hasMore)
             // Missing authority cannot turn into silent cursor advancement.
-            try await sql.raw("DELETE FROM im_v2.message_send_completions WHERE message_id=\(bind: message.messageID.uuidValue!)").run()
+            try await removeAcceptanceForCorruptionTest(database: database, message: try #require(message.messageID.uuidValue))
             await #expect(throws: V2GroupEventLogError.corruptPersistenceState) {
                 try await reader.pull(roomID: roomID, actorUserID: oldMember, afterRoomSequence: message.roomSequence + 1, pageSize: 1)
             }
@@ -1167,20 +1111,33 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw("UPDATE im_v2.rooms SET membership_revision=2").run()
             try await sql.raw("UPDATE im_v2.room_admission SET eligible_member_count=3").run()
             let actor = UserID(uuid: scenario == "rejoined" ? memberTwoUUID : memberThreeUUID)
-            let service = try V2MessageReactionService(store: PostgresV2MessageReactionStore(database: database), capacityProfile: forwardImportTestProfile(), now: { now })
             let command = V2AuthenticatedMessageReaction(roomID: roomID, actorUserID: actor, operationID: .init(uuid: UUID()), messageID: message.messageID, reaction: "👍", action: scenario == "newRemove" ? .remove : .add)
+            let frozen = try V2MessageReactionOperationCommand(command: .init(roomID: command.roomID, actorUserID: command.actorUserID,
+                operationID: command.operationID, messageID: command.messageID, reaction: command.reaction, action: command.action),
+                expectedReactionRevision: 0, firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
+            func change() async throws -> V2MessageReactionRecoveryResult {
+                try await withRoomActivation(database: database, roomID: roomID) { token in
+                    try await PostgresV2MessageReactionOperationStore(database: database, clock: { now })
+                        .change(frozen, token: token, capacityProfile: forwardImportTestProfile(), eventID: .init(uuid: UUID()), now: now)
+                }
+            }
             if scenario == "rejoined" {
-                guard case .changed(let result) = try await service.change(command) else { throw V2MessageReactionStoreError.corruptPersistenceState }
+                let original = try await change()
+                guard case .receipt(let proof) = original, case .committed = proof.outcome else { throw V2MessageReactionStoreError.corruptPersistenceState }
                 try await sql.raw("UPDATE im_v2.room_memberships SET left_revision=3 WHERE user_id=\(bind: memberTwoUUID) AND left_revision IS NULL").run()
                 try await sql.raw("UPDATE im_v2.rooms SET membership_revision=3").run()
-                #expect(try await service.change(command) == .idempotent(result))
+                #expect(try await change() == original)
             } else {
-                let tables = ["rooms", "room_events", "message_reactions", "message_reaction_operations", "room_admission", "shard_admission_pools"]
+                let tables = ["rooms", "room_events", "message_reactions", "room_admission", "shard_admission_pools"]
                 var before: [String] = []
                 for table in tables {
                     before.append(try #require(try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]'::jsonb)::text AS value FROM im_v2.\(ident: table) t").first(decoding: StringValueRow.self)).value)
                 }
-                await #expect(throws: V2MessageReactionStoreError.actorNotMember) { try await service.change(command) }
+                guard case .receipt(let rejection) = try await change(), case .rejected(.permissionDenied) = rejection.outcome else {
+                    throw V2MessageReactionStoreError.corruptPersistenceState
+                }
+                #expect(rejection.validates(identity: try frozen.identity, fingerprint: try frozen.fingerprint))
+                #expect(try await count("im_v2.message_reaction_receipts", on: sql) == 1)
                 for (index, table) in tables.enumerated() {
                     let after = try #require(try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]'::jsonb)::text AS value FROM im_v2.\(ident: table) t").first(decoding: StringValueRow.self)).value
                     #expect(after == before[index], "Unexpected change to \(table)")
@@ -1249,10 +1206,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try forwardImportTestProfile()
             let destination: RoomID
             if kind.hasPrefix("direct") {
-                let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: database),
+                let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: database, identityReader: PostgresV2DirectRoomIdentityReader(database: database), projectionDelivery: SuccessfulProjectionDelivery()),
                     capacityProfile: profile, roomShardID: "room-a", now: { now })
-                guard case .opened(let room) = try await direct.open(actorUserID: senderID,
-                    operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID)) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                let room = try await direct.openedIdentity(actorUserID: senderID,
+                    operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID), firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
                 destination = room.roomID
                 // A preceding message must not supply this message’s acceptance identity.
                 let precedingStore = PostgresV2RoomWriteStore(database: database,
@@ -1292,7 +1249,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(!page.hasMore)
             // Completed-operation replay remains available without the send receipt.
             // No production cleanup deletes receipts; deletion here injects loss.
-            try await sql.raw("DELETE FROM im_v2.message_send_completions WHERE message_id=\(bind: message.messageID.uuidValue!)").run()
+            try await removeAcceptanceForCorruptionTest(database: database, message: try #require(message.messageID.uuidValue))
             let eventsBeforeReplay = try await count("im_v2.room_events", on: sql)
             #expect(try await mutateAcceptedMessage(database: database, room: destination, message: message.messageID,
                 operation: operation, operationID: operationID, replay: true) == event)
@@ -1308,9 +1265,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { now })
             guard case .accepted(let message) = try await sender.send(.init(roomID: roomID, actorUserID: senderID,
                 clientMessageID: .init(uuid: UUID()), text: "accepted authority")) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            try await sql.raw("DELETE FROM im_v2.message_send_completions WHERE message_id=\(bind: message.messageID.uuidValue!)").run()
+            try await removeAcceptanceForCorruptionTest(database: database, message: try #require(message.messageID.uuidValue))
             let tables = ["rooms", "messages", "room_events", "room_admission", "shard_admission_pools",
-                "message_edit_operations", "message_withdrawal_operations", "message_reaction_operations", "message_reactions", "message_projection_state_values"]
+                "message_mutation_receipts", "message_reaction_receipts", "message_reactions", "message_projection_state_values"]
             var before: [String] = []
             for table in tables {
                 before.append(try #require(try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]'::jsonb)::text AS value FROM im_v2.\(ident: table) t").first(decoding: StringValueRow.self)).value)
@@ -1409,15 +1366,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("foreground forwarding rechecks both owners at acceptance and result publication", arguments: ["source", "target"], [false, true])
     func foregroundForwardOwnerStageChange(_ changed: String, afterAcceptance: Bool) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { _, owner, _, sql, sourceRoom in
+        try await withForwardOwnerDatabases(mode: .standard) { control, owner, _, sql, sourceRoom in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile(), limits = try V2MessageCommandLimits(maxUTF8Bytes: 64)
             let write = PostgresV2RoomWriteStore(database: owner)
             let sender = V2SendMessageService(store: write, capacityProfile: profile, limits: limits, now: { now })
             guard case .accepted(let source) = try await sender.send(.init(roomID: sourceRoom, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "stage change")) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: owner), capacityProfile: profile, roomShardID: "room-b", now: { now })
+            let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery()), capacityProfile: profile, roomShardID: "room-b", now: { now })
             let actor = UserID(uuid: memberTwoUUID)
-            guard case .opened(let target) = try await direct.open(actorUserID: actor, operationID: .init(uuid: UUID()), targetUserID: senderID) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            let target = try await direct.openedIdentity(actorUserID: actor, operationID: .init(uuid: UUID()), targetUserID: senderID, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
             let changing = changed == "source" ? sourceRoom : target.roomID
             let adapter = ForegroundOwnerTransitionStore(store: write, afterAcceptance: afterAcceptance) {
                 try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: changing.uuidValue!)").run()
@@ -1467,8 +1424,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let write = PostgresV2RoomWriteStore(database: owner)
             let send = V2SendMessageService(store: write, capacityProfile: profile, limits: limits, now: { now })
             guard case .accepted(let source) = try await send.send(.init(roomID: sourceRoom, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "foreground owner")) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: owner), capacityProfile: profile, roomShardID: "room-b", now: { now })
-            guard case .opened(let target) = try await direct.open(actorUserID: .init(uuid: memberTwoUUID), operationID: .init(uuid: UUID()), targetUserID: senderID) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery()), capacityProfile: profile, roomShardID: "room-b", now: { now })
+            let target = try await direct.openedIdentity(actorUserID: .init(uuid: memberTwoUUID), operationID: .init(uuid: UUID()), targetUserID: senderID, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
             let changingRoom = changed == "source" ? sourceRoom : target.roomID
             try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: sourceRoom.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)), (\(bind: target.roomID.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch=1 WHERE room_id=\(bind: changingRoom.uuidValue!)").run()
@@ -1671,31 +1628,56 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let operation = UUID()
             let safetyActor = UserID(uuid: UUID())
             if kind == "unfreeze" { try await ownerSQL.raw("UPDATE im_v2.rooms SET frozen_at=\(bind: now), frozen_by_user_id=\(bind: safetyActor.uuidValue!) WHERE room_id=\(bind: room.uuidValue!)").run() }
+            let frozenMessageCommand: V2MessageModerationCommand?
+            if kind == "redact" {
+                frozenMessageCommand = try await freezeMessageModerationFixture(database: owner, roomID: room,
+                    actorUserID: senderID, operationID: .init(uuid: operation), messageID: message.messageID,
+                    reasonCode: .init("abuse_spam"), now: now, ownerRoute: .init(shardID: "room-b", epoch: 0))
+            } else { frozenMessageCommand = nil }
             @Sendable func run(_ route: any V2RoomShardRouting, on database: any Database, operationID: UUID, colocated: Bool = false, local: Bool = false) async throws -> String {
                 let ownerStore = PostgresV2ModerationStore(database: database)
-                let stores = colocated ? ["room-b": ownerStore, "colocated": ownerStore] : ["room-b": ownerStore]
-                let routed = try V2RoutedModerationStore(router: route, stores: stores,
-                    physicalStoreKeyByShard: colocated ? ["room-b": "physical-owner", "colocated": "physical-owner"] : nil)
                 let action: V2ModerationAction = switch kind {
                 case "mute": .muteMember; case "remove": .removeMember; case "freeze": .freezeRoom; case "unfreeze": .unfreezeRoom; default: .redactMessage
                 }
                 let result: V2ModerationOutcome
                 if kind == "safety_redact" || kind == "freeze" || kind == "unfreeze" {
-                    let selected: any V2TrustedSafetyModerationStore = local ? ownerStore : routed
-                    let service = V2TrustedSafetyModerationService(store: selected, safetyActorUserID: safetyActor, capacityProfile: profile, now: { now })
-                    result = try await service.apply(V2TrustedSafetyModeration(roomID: room, operationID: .init(uuid: operationID), action: action,
-                        messageID: action == .redactMessage ? message.messageID : nil, expectedMessageRevision: action == .redactMessage ? 1 : nil,
-                        reasonCode: .init("abuse_spam")))
+                    if local {
+                        let service = V2TrustedSafetyModerationService(store: ownerStore, safetyActorUserID: safetyActor, capacityProfile: profile, now: { now })
+                        result = try await service.apply(V2TrustedSafetyModeration(roomID: room, operationID: .init(uuid: operationID), action: action,
+                            messageID: action == .redactMessage ? message.messageID : nil, expectedMessageRevision: action == .redactMessage ? 1 : nil,
+                            reasonCode: .init("abuse_spam")))
+                    } else {
+                        let selected = try await route.route(for: room)
+                        guard selected.shardID == "room-b" || (colocated && selected.shardID == "colocated") else { throw V2RoomShardStorageRegistryError.unknownShardID }
+                        let command = try V2ModerationCommand(roomID: room, actorUserID: safetyActor, operationID: .init(uuid: operationID), action: action,
+                            messageID: action == .redactMessage ? message.messageID : nil, expectedMessageRevision: action == .redactMessage ? 1 : nil,
+                            reasonCode: .init("abuse_spam"))
+                        result = try await ownerStore.applyTrustedSafetyOwnerValidated(command: command, ownerRoute: selected,
+                            capacityProfile: profile, eventID: .init(uuid: UUID()), now: now)
+                    }
+                } else if kind == "mute" || kind == "remove" {
+                    let resolved=try await route.route(for:room)
+                    guard resolved.shardID == "room-b" || (colocated && resolved.shardID == "colocated") else { throw V2RoomShardStorageRegistryError.unknownShardID }
+                    result=try await applyAdmittedMemberFixture(database:database,command:.init(roomID:room,actorUserID:senderID,operationID:.init(uuid:operationID),action:action,targetUserID:.init(uuid:memberTwoUUID),muteUntil:kind == "mute" ? now.addingTimeInterval(300):nil,reasonCode:.init("abuse_spam")),profile:profile,eventID:.init(uuid:UUID()),now:now,ownerRoute:resolved)
                 } else {
-                    let selected: any V2ModerationStore = local ? ownerStore : routed
-                    let service = V2ModerationService(store: selected, capacityProfile: profile, now: { now })
-                    result = try await service.apply(.init(roomID: room, actorUserID: senderID, operationID: .init(uuid: operationID), action: action,
-                        targetUserID: action == .redactMessage ? nil : .init(uuid: memberTwoUUID), messageID: action == .redactMessage ? message.messageID : nil,
-                        muteUntil: action == .muteMember ? now.addingTimeInterval(300) : nil, reasonCode: .init("abuse_spam")))
+                    let resolved = try await route.route(for: room)
+                    guard resolved.shardID == "room-b" || (colocated && resolved.shardID == "colocated") else { throw V2RoomShardStorageRegistryError.unknownShardID }
+                    let original = try #require(frozenMessageCommand)
+                    let frozen: V2MessageModerationCommand
+                    if operationID == operation { frozen = original }
+                    else {
+                        frozen = try await freezeMessageModerationFixture(database: database, roomID: room,
+                            actorUserID: senderID, operationID: .init(uuid: operationID), messageID: message.messageID,
+                            reasonCode: .init("abuse_spam"), now: now, ownerRoute: resolved)
+                    }
+                    let response = try await submitMessageModerationFixture(database: database, command: frozen,
+                        profile: profile, eventID: .init(uuid: UUID()), now: now, ownerRoute: resolved)
+                    guard case .receipt(let proof) = response, proof.validates(intent: frozen.intent), case .redacted = proof.outcome else { throw CancellationError() }
+                    return "receipt"
                 }
                 switch result { case .applied: return "changed"; case .idempotent: return "replay"; default: return "other" }
             }
-            let table = "moderation_operations"
+            let table = kind == "redact" ? "message_moderation_receipts" : kind == "mute" || kind == "remove" ? "member_administration_receipts":"moderation_operations"
             let before = try await ownerSQL.raw("SELECT to_jsonb(x)::text AS value FROM im_v2.rooms x WHERE room_id=\(bind: room.uuidValue!)").first(decoding: StringValueRow.self)?.value
             let sequenceBefore = try await ownerSQL.raw("SELECT room_sequence AS value FROM im_v2.rooms WHERE room_id=\(bind: room.uuidValue!)").first(decoding: CountRow.self)?.value
             await #expect(throws: V2RoomOwnerFenceError.ownerChanged) { _ = try await run(router, on: owner, operationID: operation) }
@@ -1712,13 +1694,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 for try await value in tasks { values.append(value) }
                 return values
             }
-            #expect(outcomes.filter { $0 == "changed" }.count == 1 && outcomes.filter { $0 == "replay" }.count == 9)
+            #expect(kind == "redact" ? outcomes.allSatisfy { $0 == "receipt" } : outcomes.filter { $0 == "changed" }.count == 1 && outcomes.filter { $0 == "replay" }.count == 9)
+            #expect(try await count("im_v2." + table, on: ownerSQL) == 1)
             try await ownerSQL.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: room.uuidValue!)").run()
             try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch=1 WHERE room_id=\(bind: room.uuidValue!)").run()
             for op in [operation, UUID()] {
                 await #expect(throws: V2RoomOwnerFenceError.ownerChanged) { _ = try await run(cached, on: owner, operationID: op, colocated: true) }
             }
-            #expect(try await run(router, on: owner, operationID: operation) == "replay")
+            #expect(try await run(router, on: owner, operationID: operation) == (kind == "redact" ? "receipt" : "replay"))
             try await ownerSQL.raw("UPDATE im_v2.rooms SET room_shard_id='retired-room-b' WHERE room_id=\(bind: room.uuidValue!)").run()
             await #expect(throws: V2RoomOwnerFenceError.ownerChanged) { _ = try await run(router, on: owner, operationID: operation) }
             try await ownerSQL.raw("UPDATE im_v2.rooms SET room_shard_id='room-b' WHERE room_id=\(bind: room.uuidValue!)").run()
@@ -1755,7 +1738,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 await barrier.release(); _ = try? await holder.value; _ = try? await replay.value
                 throw error
             }
-            #expect(try await run(router, on: owner, operationID: operation) == "replay")
+            #expect(try await run(router, on: owner, operationID: operation) == (kind == "redact" ? "receipt" : "replay"))
             #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table)").first(decoding: CountRow.self)?.value == 1)
             #expect(try await ownerSQL.raw("SELECT room_sequence AS value FROM im_v2.rooms WHERE room_id=\(bind: room.uuidValue!)").first(decoding: CountRow.self)?.value == sequenceBefore.map { $0 + 1 })
             #expect(try await ownerSQL.raw("SELECT COUNT(*) AS value FROM im_v2.public_user_profiles").first(decoding: CountRow.self)?.value == 0)

@@ -1,5 +1,14 @@
 # 消息发送 owner 事务栅栏
 
+## 当前普通发送执行合同（current57，protocol35）
+
+[MessageSendOperation](../../IMV2Core/Sources/IMV2Core/MessageSendOperation.swift) 保留消息正文 domain fingerprint v3，用公共 v1 明确编码原身份、v3 digest 和冻结首次截止。clientMessageID 在提交前稳定；首次接受选定 messageID，永久 completion 和执行 receipt 固定原映射。accepted 仅表示服务端接受，不表示审核通过、送达或已读。
+
+POST `/v2/rooms/:room/message-operations/send` 接受 typed envelope（1 MiB）；`/recover` 接受 typed query/close 请求（4 KiB）。[执行器](../../IMV2Server/Sources/IMV2Server/PostgresV2MessageSendOperationStore.swift) 在原 domain operation lock 与 RoomRef activation fence 内先重放永久回执，再验证最多二十四小时的新操作受理窗口。领域 acceptance/completion 与最小 v1 execution receipt 同事务；永久 negative 结果同时写原 v3 closure fence，关闭与提交竞争只产生一个权威结果。原正文生命周期独立，receipt 不授予正文显示权限。
+
+`message_send_operation_receipts` 与 `message_send_completions` 均防 UPDATE/DELETE，无 housekeeping 清理。恢复返回原 bound receipt/unresolved/fingerprintConflict；临时 admission 不生成永久 rejected。HTTP no-store 与独立持久 cost 3 预算覆盖查询、提交和随机 ID close。旧无冻结截止的普通 TLS send 批处理入口已拒绝执行，旧无绑定 HTTP recovery 未注册；以下批量路径描述属于原领域写原语与迁移前背景。
+
+
 范围：B27 房间 owner 迁移前置条件中的普通 SendMessage。涵盖普通群/大群单条、普通私聊、私聊冷批量/暖缓存快速追加，以及大群集合批量。完整迁移执行器和后台跨 owner 转发导入仍未闭环。
 
 ## 路由与能力边界
@@ -33,3 +42,5 @@ Gateway 单库和多 owner 入口已使用上述能力。最终组装也修正�
 迁移必须先 fence 旧 owner，再切 control route。仅更新控制路由无法阻止仍与旧本地 epoch 匹配的缓存请求。完整历史复制、核验、切换、故障恢复、生产 TLS/App 与性能验收仍开放。PostgreSQL 25、protocol 25、SQLite 173/5 和 47 项问题状态统计均不变。
 
 后续补充：后台转发目标新接收、accepted 重试与最终 completed 发布现已补 owner 校验，见[导入 owner 合同](forward-import-owner-fence-contract.md)。已完成不可变回执仍可跨后续 epoch 变化重读；活跃工作及 post-commit 投影的完整迁移交接仍开放。
+
+限流与临时准入不足返回绑定原 identity/fingerprint 的 deferred 调度提示（rateLimited 或 admissionUnavailable）。HTTP 分别使用 429/503，存在 retryAfterMilliseconds 时附 Retry-After；陌生人窗口额度耗尽同样保留原操作为未决，不永久拒绝。领域写及永久回执共用外层事务；提交前不更新进程缓存或确认跨 owner control intent。关闭回执可由既有 owner proof worker 核对原 v3 fingerprint 后终结尚未确认的 control grant。

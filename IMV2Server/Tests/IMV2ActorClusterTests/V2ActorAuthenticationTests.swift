@@ -137,38 +137,47 @@ struct V2ActorAuthenticationTests {
         #expect(try fixture.trust.verifySessionGrant(signedGrant, for: hello, maximumBytes: 10_000) == session)
     }
 
-    @Test("invitation control grants require the coordinator service permission")
+    @Test("invitation metadata requires coordinator authority while frozen operations bind the user")
     func invitationCoordinatorPermission() async throws {
         let fixture = try Fixture(workerPermissions: [.roomCoordination])
         let userGrant = try await fixture.open()
         let workerGrant = try await fixture.auth.openSession(fixture.worker.sign(
             fixture.hello(serviceID: fixture.worker.serviceID), maximumBytes: 10_000))
-        let createdAt = Date()
+        let createdAt = Date(), milliseconds = UInt64(Date().timeIntervalSince1970 * 1_000)
+        let operation = GroupInviteOperationID(uuid: UUID())
+        let intent = try V2GroupInvitationOperationIntent(identity: .init(accountID: fixture.user,
+            scope: .room(fixture.token.roomID), operation: .groupInvite(operation)),
+            action: .create(lifetimeSeconds: 300, maximumApprovedUses: 10, expectedMembershipRevision: 0),
+            confirmedUntilMilliseconds: milliseconds + 120_000)
+        let admission = try V2GroupInvitationAdmission(id: .init(uuid: UUID()), identity: intent.identity,
+            intentFingerprint: intent.fingerprint, membershipRevision: 0,
+            issuedAtMilliseconds: milliseconds, expiresAtMilliseconds: milliseconds + 120_000)
+        let command = try V2GroupInvitationOperationCommand(intent: intent, admission: admission)
+        let requests: [V2RoomRequest] = [.administration(.groupInvitationAdmit(intent)),
+            .administration(.groupInvitationSubmit(.init(command: command))),
+            .administration(.groupInvitationRecover(.init(intent: intent, action: .query)))]
+        for (index, request) in requests.enumerated() {
+            _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: userGrant,
+                sequence: UInt64(index + 1), principal: .user(fixture.user), request: request), maximumBytes: 10_000))
+            await failure(.forbidden) {
+                _ = try await fixture.auth.accept(fixture.worker.sign(fixture.call(grant: workerGrant,
+                    sequence: UInt64(index + 1), principal: .service, request: request), maximumBytes: 10_000))
+            }
+        }
         let creation = V2ActorInviteCreatePersistenceWire(inviteID: .init(uuid: UUID()),
-            roomID: fixture.token.roomID, actorUserID: fixture.user, operationID: .init(uuid: UUID()),
+            roomID: fixture.token.roomID, actorUserID: fixture.user, operationID: operation,
             tokenDigest: .init(bytes: Data(repeating: 1, count: 32)), requestedLifetimeSeconds: 300,
             expiresAt: createdAt.addingTimeInterval(300), maximumApprovedUses: 10,
             maximumActiveInvitesPerRoom: 10, createdAt: createdAt, evaluatedAt: createdAt)
-        let requests: [V2RoomRequest] = [.invitation(.commitCreation(creation)),
-                                        .invitationQuery(.preflightCreation(creation))]
-        for (index, request) in requests.enumerated() {
-            for principal in [V2ActorCallPrincipal.user(fixture.user), .service] {
-                let rejected = try fixture.call(grant: userGrant,
-                    sequence: UInt64(index + 1), principal: principal, request: request)
-                await failure(.forbidden) {
-                    _ = try await fixture.auth.accept(fixture.client.sign(rejected, maximumBytes: 10_000))
-                }
+        let metadata = V2RoomRequest.invitationQuery(.preflightCreation(creation))
+        for principal in [V2ActorCallPrincipal.user(fixture.user), .service] {
+            await failure(.forbidden) {
+                _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: userGrant,
+                    sequence: 4, principal: principal, request: metadata), maximumBytes: 10_000))
             }
-            let accepted = try fixture.call(grant: workerGrant, sequence: UInt64(index + 1),
-                principal: .service, request: request)
-            _ = try await fixture.auth.accept(fixture.worker.sign(accepted, maximumBytes: 10_000))
         }
-        let directCreate = V2RoomRequest.invitation(.create(.init(roomID: fixture.token.roomID,
-            actorUserID: fixture.user, operationID: .init(uuid: UUID()), lifetime: 300, maximumApprovedUses: 10)))
-        await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.worker.sign(fixture.call(grant: workerGrant,
-                sequence: 3, principal: .service, request: directCreate), maximumBytes: 10_000))
-        }
+        _ = try await fixture.auth.accept(fixture.worker.sign(fixture.call(grant: workerGrant,
+            sequence: 4, principal: .service, request: metadata), maximumBytes: 10_000))
     }
 
     @Test("forward workflow commands require service authority and pairs require reservations")
@@ -290,10 +299,10 @@ struct V2ActorAuthenticationTests {
         let (grant, capability) = try await fixture.auth.openLocalSession(
             fixture.client.sign(hello, maximumBytes: limits.maximumRequestBytes),
             generation: generation)
-        let large = V2RoomRequest.messaging(.send(.init(
-            roomID: fixture.token.roomID, actorUserID: fixture.user,
+        let large = try V2RoomRequest.messaging(.sendOperation(try .init(command: try .init(
+            roomID: fixture.token.roomID, senderUserID: fixture.user,
             clientMessageID: .init(uuid: UUID()), text: String(repeating: "x", count: 4_096),
-            media: [], mentions: [], entities: [], replyTo: nil)))
+            media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 65_536)), firstSubmissionDeadlineMilliseconds: 1_900_000_000_000)))
         await failure(.oversized) {
             _ = try await fixture.auth.acceptLocal(V2ActorLocalPayload(try fixture.call(
                 grant: grant, request: large)),
@@ -366,10 +375,9 @@ struct V2ActorAuthenticationTests {
             .init(serviceID: grant.serviceID, callerIncarnation: grant.callerIncarnation, recipient: token.host,
                   sessionID: grant.sessionID, sequence: sequence, attemptID: attempt, traceID: UUID(),
                   remainingBudget: try .init(5_000), principal: principal ?? .user(user),
-                  request: .invoke(token: token, request: request ?? .messaging(.send(.init(
-                    roomID: token.roomID, actorUserID: user, clientMessageID: ClientMessageID(uuid: UUID()),
-                    text: "signed", media: [], mentions: [], entities: [], replyTo: nil
-                  )))))
+                  request: .invoke(token: token, request: try request ?? .messaging(.sendOperation(try .init(command: try .init(
+                    roomID: token.roomID, senderUserID: user, clientMessageID: ClientMessageID(uuid: UUID()),
+                    text: "signed", media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 65_536)), firstSubmissionDeadlineMilliseconds: 1_900_000_000_000)))))
         }
     }
 

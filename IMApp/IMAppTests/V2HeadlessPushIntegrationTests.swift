@@ -68,14 +68,31 @@ struct V2HeadlessPushIntegrationTests {
             let revoker = try await revokerIssuer.issueDeviceCredentials()
             try await V2KeychainCredentialStore(service: service + ".revoker").save(.init(credentials: revoker))
             try await revokerIssuer.finalizeIssuedDeviceCredentials(revoker)
-            var request = URLRequest(url: config.endpoint("v2/devices/revoke"))
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.setValue("Bearer " + revoker.accessToken, forHTTPHeaderField: "Authorization")
-            request.setValue(revoker.deviceID.rawValue, forHTTPHeaderField: "X-IM-Device-ID")
-            request.httpBody = try JSONEncoder().encode(["deviceID": scope.deviceID.rawValue, "operationID": UUID().uuidString])
-            let (_, response) = try await URLSession.shared.data(for: request)
-            try #require((response as? HTTPURLResponse)?.statusCode == 204)
+            func remoteRequest(_ path: String, body: Data? = nil) async throws -> Data {
+                var request = URLRequest(url: config.endpoint(path), timeoutInterval: 15)
+                request.httpMethod = body == nil ? "GET" : "POST"
+                request.httpBody = body
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.setValue("Bearer " + revoker.accessToken, forHTTPHeaderField: "Authorization")
+                request.setValue(revoker.deviceID.rawValue, forHTTPHeaderField: "X-IM-Device-ID")
+                let (data, response) = try await URLSession.shared.data(for: request)
+                try #require((response as? HTTPURLResponse)?.statusCode == 200)
+                return data
+            }
+            let baseline = try await JSONDecoder().decode(V2RemoteDeviceRevocationBaseline.self,
+                from: remoteRequest("v2/devices/revocation-baseline"))
+            let command = try V2RemoteDeviceRevocationCommand(operationID: UUID(), baseline: baseline,
+                selection: .device(scope.deviceID), firstSubmissionDeadlineMilliseconds: baseline.expiresAtMilliseconds)
+            let revocationResult = try await JSONDecoder().decode(V2RemoteDeviceRevocationResult.self,
+                from: remoteRequest("v2/devices/remote-revocations/submit", body: JSONEncoder().encode(command)))
+            guard case .receipt(let proof) = revocationResult, case .revoked = proof.outcome else {
+                throw V2RemoteDeviceRevocationValidationError.invalidReceipt
+            }
+            #expect(proof.validates(command))
+            let recovered = try await JSONDecoder().decode(V2RemoteDeviceRevocationResult.self,
+                from: remoteRequest("v2/devices/remote-revocations/operations/recover",
+                    body: JSONEncoder().encode(V2RemoteDeviceRevocationRecoveryRequest(command: command, action: .query))))
+            #expect(recovered == revocationResult)
             #expect(await deliverPush(delegate) == .failed)
             let deadline = ContinuousClock.now.advanced(by: .seconds(5))
             while delegate.store.route != .signedOut {

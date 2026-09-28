@@ -91,7 +91,7 @@ public struct V2ClientConversationListPage: Equatable, Sendable {
 /// 本地同步存储。
 ///
 /// 本地数据库是权威的设备端投影，它在单个 SQLite 事务内增量应用同步记录。
-public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2LocalMembershipCommandStore, V2LocalMessageWithdrawalStore, V2LocalMessageRedactionStore, V2LocalMemberMuteStore, V2LocalModeratedMemberRemovalStore, V2LocalMessageReactionStore, V2LocalMessageEditStore, V2LocalReadReceiptStore, V2LocalConversationCapabilitiesStore, V2LocalGroupCapabilitiesStore, V2BulkForwardMessagesStore, V2LocalSocialCommandStore, V2LocalGroupRoomCommandStore, V2LocalGroupEventStore, V2ClientProfileProjectionStore {
+public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2ClientProfileProjectionStore {
     /// 全部本地命令仓储共用的 actor 级连接池。
     ///
     /// 扩展方法保持 actor 边界，同时让各个持久化队列各自位于独立源文件中。
@@ -143,6 +143,31 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             try databasePool.close()
             throw error
         }
+    }
+
+    /// Opens only an existing, previously bound database. No migration, repair,
+    /// search indexing, directory creation, binding write or presentation lease restoration.
+    init(localReadOnlyDatabaseURL databaseURL: URL, installationBinding: V2LocalInstallationBinding, userID: UserID) throws {
+        self.databaseURL = databaseURL
+        messageSearchDatabaseURL = V2LocalDatabaseArtifacts(primary: databaseURL).search
+        var configuration = Configuration()
+        configuration.readonly = true
+        let primary = try DatabasePool(path: databaseURL.path, configuration: configuration)
+        do {
+            try primary.read { db in
+                guard let row = try Row.fetchOne(db, sql: "SELECT binding, user_id FROM v2_local_installation WHERE singleton = 1"),
+                      (row["binding"] as String) == installationBinding.value.uuidString,
+                      (row["user_id"] as String?) == userID.rawValue else {
+                    throw V2OfflineReadBootstrapError.installationBindingMismatch
+                }
+            }
+            // The required stored property remains read-only too. If no derived search
+            // file exists, it points at the primary file; offline UI does not run search.
+            let searchURL = FileManager.default.fileExists(atPath: messageSearchDatabaseURL.path)
+                ? messageSearchDatabaseURL : databaseURL
+            messageSearchDatabasePool = try DatabasePool(path: searchURL.path, configuration: configuration)
+            databasePool = primary
+        } catch { try? primary.close(); throw error }
     }
 
     /// 析构时结束变更订阅。
@@ -197,6 +222,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     public func boundAccountID() throws -> UserID? {
         try databasePool.read { db in
             try String.fetchOne(db, sql: "SELECT user_id FROM v2_local_installation WHERE singleton = 1").map(UserID.init)
+        }
+    }
+
+    public func boundInstallationBinding() throws -> V2LocalInstallationBinding {
+        try databasePool.read { db in
+            guard let value = try String.fetchOne(db, sql: "SELECT binding FROM v2_local_installation WHERE singleton=1"), let id = UUID(uuidString:value) else {throw V2ClientLocalStorageError.installationBindingMismatch}
+            return .init(value:id)
         }
     }
 
@@ -319,6 +351,17 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 arguments: [roomID?.rawValue, roomID?.rawValue, limit]
             )
             return try rawRoomIDs.map(RoomID.init)
+        }
+    }
+
+    /// Local presentation needs positive retained room authority and no explicit
+    /// membership/room denial. Cached titles, messages or identities alone do not override a denial.
+    public func roomAllowsLocalRead(roomID: RoomID) throws -> Bool {
+        try databasePool.read { db in
+            if try Bool.fetchOne(db, sql: "SELECT is_member = 0 FROM v2_room_membership_states WHERE room_id = ?", arguments: [roomID.rawValue]) == true { return false }
+            if try Bool.fetchOne(db, sql: "SELECT is_authorized = 0 FROM v2_room_event_authorizations WHERE room_id = ?", arguments: [roomID.rawValue]) == true { return false }
+            if let authorized = try Bool.fetchOne(db, sql: "SELECT is_group_event_authorized FROM v2_room_profile_projections WHERE room_id = ?", arguments: [roomID.rawValue]) { return authorized }
+            return try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM v2_direct_room_identities WHERE room_id = ? UNION ALL SELECT 1 FROM v2_direct_room_profile_projections WHERE room_id = ?)", arguments: [roomID.rawValue, roomID.rawValue]) == true
         }
     }
 
@@ -590,6 +633,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     try Self.applyStrangerMessagePermission(record, db: db)
                 } else if record.projectionKind == "user_add_permission" {
                     try Self.applyUserAddPermission(record, db: db)
+                } else if record.projectionKind == "live_activity_preferences" {
+                    try Self.applyLiveActivityPreference(record,db:db)
                 } else if record.projectionKind == "direct_read_receipt" {
                     try Self.applyDirectReadReceipt(record, db: db)
                 } else if record.projectionKind == "own_read_watermark" {
@@ -600,6 +645,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                     try Self.persist(V2ClientConversationState(record: record), db: db)
                 } else if record.projectionKind == "message_favorite" {
                     try Self.persist(V2ClientMessageFavorite(record: record), db: db)
+                } else if record.projectionKind == "contact_alias" {
+                    try Self.applyContactAliasInvalidation(record, db: db)
                 } else if record.projectionKind == "group_capability" {
                     try Self.applyGroupCapability(record, db: db)
                 } else if record.projectionKind == "room" || record.projectionKind == "membership" {
@@ -993,6 +1040,11 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 sql: "ALTER TABLE \(Self.snapshotShadowTable(for: "v2_contact_profile_search")) RENAME TO v2_contact_profile_search"
             )
             try Self.restoreApplicationTriggers(triggers, db: db)
+            // Evidence was computed against verified shadows before ACK.
+            // Only the indexed, quota-bounded send metadata changes here; no
+            // projection scan is added to the fixed bank activation.
+            try db.execute(sql: "UPDATE v2_message_send_operations SET accepted_projection_observed=1,projection_observed_snapshot_id=NULL WHERE projection_observed_snapshot_id=?",
+                arguments: [manifest.reset.snapshotID.rawValue])
 
             try db.execute(
                 sql: """
@@ -1057,6 +1109,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             if state["activation_prepared"] as Bool { return }
 
             try Self.validateSnapshotMembershipFences(table: Self.snapshotShadowTable(for: "v2_room_membership_states"), db: db)
+            try Self.persistAccountPreferenceFloors(db:db)
             try Self.prepareDeviceOwnedIdentityShadow(db: db)
             // Direct-room eligibility is represented by the device identity
             // shadow, so it must be prepared (and invalidations applied)
@@ -1084,6 +1137,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             try Self.prepareContactSearchShadow(db: db)
             try Self.prepareMessageSearchControlShadow(db: db)
             try Self.createSnapshotShadowIndexes(db: db)
+            try Self.prepareAcceptedSendSnapshotEvidence(snapshotID: manifest.reset.snapshotID.rawValue, db: db)
             try db.execute(
                 sql: "UPDATE v2_snapshot_import SET activation_prepared = 1 WHERE snapshot_id = ?",
                 arguments: [manifest.reset.snapshotID.rawValue]
@@ -1116,10 +1170,12 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         "v2_read_receipt_preference",
         "v2_profile_views",
         "v2_profile_invalidations",
+        "v2_contact_alias_invalidations",
         "v2_relationship_projections",
         "v2_user_block_projections",
         "v2_stranger_message_preference",
         "v2_user_add_preference",
+        "v2_live_activity_preference",
         "v2_conversation_states",
         "v2_message_favorites",
         "v2_timeline_activity_projections",
@@ -1267,6 +1323,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try copyRoomRows(table: "v2_group_announcements", shadow: shadowAnnouncements)
         try preserveGroupAvatarInvalidations(authorizedRoomsSQL: authorizedRoomsSQL, db: db)
         try preserveGroupNicknameInvalidations(authorizedRoomsSQL: authorizedRoomsSQL, db: db)
+        try preserveContactAliasInvalidations(db: db)
         if try Bool.fetchOne(db, sql: """
             SELECT EXISTS (
                 SELECT 1 FROM (
@@ -1740,11 +1797,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         case "user_block": try applyUserBlock(record, target: .snapshotShadow, db: db)
         case "stranger_message_permission": try applyStrangerMessagePermission(record, target: .snapshotShadow, db: db)
         case "user_add_permission": try applyUserAddPermission(record, target: .snapshotShadow, db: db)
+        case "live_activity_preferences": try applyLiveActivityPreference(record,target:.snapshotShadow,db:db)
         case "direct_read_receipt": try applyDirectReadReceipt(record, target: .snapshotShadow, db: db)
         case "own_read_watermark": try applyOwnReadWatermark(record, target: .snapshotShadow, db: db)
         case "read_receipt_preferences": try applyReadReceiptPreference(record, target: .snapshotShadow, db: db)
         case "conversation_state": try persist(V2ClientConversationState(record: record), target: .snapshotShadow, db: db)
         case "message_favorite": try persist(V2ClientMessageFavorite(record: record), target: .snapshotShadow, db: db)
+        case "contact_alias": try applyContactAliasInvalidation(record, target: .snapshotShadow, db: db)
         case "group_capability": try applyGroupCapability(record, target: .snapshotShadow, db: db)
         case "room": try applyMembershipAwareRoomProjection(record, target: .snapshotShadow, db: db)
         case "direct_room_profile": try persist(V2ClientDirectRoomProfileProjection(record: record), target: .snapshotShadow, db: db)
@@ -1872,8 +1931,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             return eventType == "room.frozen" || eventType == "room.unfrozen"
                 ? room
                 : room + ":" + (try string("target_user_id"))
-        case "relationship", "user_block": return try string("target_user_id")
-        case "stranger_message_permission", "user_add_permission", "read_receipt_preferences": return "singleton"
+        case "relationship", "user_block", "contact_alias": return try string("target_user_id")
+        case "stranger_message_permission", "user_add_permission", "read_receipt_preferences", "live_activity_preferences": return "singleton"
         case "direct_room_profile", "direct_read_receipt", "conversation_state", "direct_sending_capability":
             return try string("room_id")
         case "message_favorite": return try string("message_id")
@@ -2129,7 +2188,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
 
     public func conversationState(roomID: RoomID) throws -> V2ClientConversationState? {
         try databasePool.read { db in
-            guard let row = try Row.fetchOne(db, sql: "SELECT room_id, is_pinned, is_archived, mute_until, updated_at FROM v2_conversation_states WHERE room_id = ?", arguments: [roomID.rawValue]) else { return nil }
+            guard let row = try Row.fetchOne(db, sql: "SELECT room_id, is_pinned, is_archived, mute_until, updated_at, revision FROM v2_conversation_states WHERE room_id = ?", arguments: [roomID.rawValue]) else { return nil }
             return try Self.decodeConversationState(row)
         }
     }
@@ -2144,7 +2203,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try databasePool.read { db in
             let states = try Row.fetchAll(
                 db,
-                sql: "SELECT room_id, is_pinned, is_archived, mute_until, updated_at FROM v2_conversation_states"
+                sql: "SELECT room_id, is_pinned, is_archived, mute_until, updated_at, revision FROM v2_conversation_states"
             ).map(Self.decodeConversationState)
             return Dictionary(uniqueKeysWithValues: states.map { ($0.roomID, $0) })
         }
@@ -2876,7 +2935,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     /// 批量读取若干房间的有效已读水位。
     ///
     /// 一次会话列表刷新只查一次：投影表按主键点查，本设备待发送与已确认的回执按房间取
-    /// 较大值。被拒绝的回执不计入，否则一次越界的上报就会永久压低未读。
+    /// 较大值。归档只停止服务器核对，仍保留本设备阅读位置；不作为服务器已读证明。
+    /// 被拒绝的回执不计入，否则一次越界的上报就会永久压低未读。
     ///
     /// - Parameter roomIDs: 目标房间，调用方需传入有界集合。
     /// - Returns: 有水位记录的房间到水位的映射；没有记录的房间不出现。
@@ -2895,17 +2955,17 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                         FROM v2_room_read_watermarks
                         WHERE room_id IN (\(placeholders))
                         UNION ALL
-                        SELECT room_id,
-                               CASE WHEN state = 'acknowledged'
-                                    THEN resulting_room_sequence
-                                    ELSE read_through_room_sequence
-                               END AS value
-                        FROM v2_pending_read_receipts
-                        WHERE room_id IN (\(placeholders)) AND state IN ('pending', 'acknowledged')
+                        SELECT room_id,desired_sequence AS value FROM v2_read_receipt_intents WHERE room_id IN (\(placeholders))
+                        UNION ALL
+                        SELECT room_id,requested_sequence AS value FROM v2_read_receipt_archives WHERE room_id IN (\(placeholders))
+                        UNION ALL
+                        SELECT r.room_id,r.requested_sequence AS value FROM v2_read_receipt_operations r
+                        JOIN v2_operation_work w ON w.work_id=r.work_id
+                        WHERE r.room_id IN (\(placeholders)) AND w.execution_state NOT IN ('rejected','closed','cancelledLocally','expiredUnsubmitted')
                     )
                     GROUP BY room_id
                     """,
-                arguments: StatementArguments(identifiers + identifiers)
+                arguments: StatementArguments(identifiers + identifiers + identifiers + identifiers)
             )
             var watermarks: [RoomID: UInt64] = [:]
             for row in rows {
@@ -2919,8 +2979,9 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
 
     /// 缓存当前用户打开私聊前显式解析出的身份。
     ///
-    /// 它刻意在同步重置后仍然保留：服务端尚未把该缓存变成同步投影，
-    /// 而删除它会让一个已授权且仍然有效的私聊房间在恢复后退化成 UUID 标题。
+    /// 它在同步重置后保留原房间与目标身份的关联；读取时权威
+    /// direct_room_profile 投影优先。缓存和永久创建回执均不授予当前
+    /// 房间访问权限，也不能替代资料展示所需的当前授权。
     ///
     /// - Parameters:
     ///   - roomID: 目标房间。
@@ -2931,40 +2992,42 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         guard roomCreatedAt.timeIntervalSince1970.isFinite, roomCreatedAt.timeIntervalSince1970 >= 0,
               updatedAt.timeIntervalSince1970.isFinite else { throw V2ClientProjectionError.invalidMessagePayload }
         try databasePool.write { db in
-            try Self.requireProjectionWritesUnfenced(db: db)
-            if let existing = try Row.fetchOne(db, sql: "SELECT target_user_id, room_created_at FROM v2_direct_room_identities WHERE room_id = ?", arguments: [roomID.rawValue]) {
-                let targetUserID: String = existing["target_user_id"]
-                guard targetUserID == publicIdentity.userID.rawValue,
-                      (existing["room_created_at"] as Double) == roomCreatedAt.timeIntervalSince1970 else { throw V2ClientProjectionError.invalidMessagePayload }
-            }
-            if let created = try Double.fetchOne(db, sql: "SELECT room_created_at FROM v2_direct_room_profile_projections WHERE room_id = ?", arguments: [roomID.rawValue]),
-               created != roomCreatedAt.timeIntervalSince1970 { throw V2ClientProjectionError.invalidMessagePayload }
-            try db.execute(
-                sql: """
-                INSERT INTO v2_direct_room_identities
-                    (room_id, target_user_id, public_handle, display_name, account_kind, updated_at, room_created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(room_id) DO UPDATE SET
-                    public_handle = excluded.public_handle,
-                    display_name = excluded.display_name,
-                    account_kind = excluded.account_kind,
-                    updated_at = excluded.updated_at
-                """,
-                arguments: [
-                    roomID.rawValue,
-                    publicIdentity.userID.rawValue,
-                    publicIdentity.handle.rawValue,
-                    publicIdentity.displayName,
-                    publicIdentity.accountKind.rawValue,
-                    updatedAt.timeIntervalSince1970,
-                    roomCreatedAt.timeIntervalSince1970
-                ]
-            )
-            try db.execute(
-                sql: "INSERT INTO v2_room_event_authorizations (room_id, is_authorized) VALUES (?, 1) ON CONFLICT(room_id) DO UPDATE SET is_authorized = excluded.is_authorized",
-                arguments: [roomID.rawValue]
-            )
+            try Self.cacheDirectRoomIdentity(roomID:roomID,publicIdentity:publicIdentity,roomCreatedAt:roomCreatedAt,updatedAt:updatedAt,db:db)
         }
+    }
+
+    static func cacheDirectRoomIdentity(roomID:RoomID,publicIdentity:V2PublicIdentity,roomCreatedAt:Date,updatedAt:Date,db:Database) throws {
+        try Self.requireProjectionWritesUnfenced(db: db)
+        if let existing = try Row.fetchOne(db, sql: "SELECT target_user_id, room_created_at FROM v2_direct_room_identities WHERE room_id = ?", arguments: [roomID.rawValue]) {
+            let targetUserID: String = existing["target_user_id"]
+            guard targetUserID == publicIdentity.userID.rawValue,
+                  (existing["room_created_at"] as Double) == roomCreatedAt.timeIntervalSince1970 else { throw V2ClientProjectionError.invalidMessagePayload }
+        }
+        if let created = try Double.fetchOne(db, sql: "SELECT room_created_at FROM v2_direct_room_profile_projections WHERE room_id = ?", arguments: [roomID.rawValue]),
+           created != roomCreatedAt.timeIntervalSince1970 { throw V2ClientProjectionError.invalidMessagePayload }
+        try db.execute(
+            sql: """
+            INSERT INTO v2_direct_room_identities
+                (room_id, target_user_id, public_handle, display_name, account_kind, updated_at, room_created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(room_id) DO UPDATE SET
+                public_handle = excluded.public_handle,
+                display_name = excluded.display_name,
+                account_kind = excluded.account_kind,
+                updated_at = excluded.updated_at
+            """,
+            arguments: [
+                roomID.rawValue,
+                publicIdentity.userID.rawValue,
+                publicIdentity.handle.rawValue,
+                publicIdentity.displayName,
+                publicIdentity.accountKind.rawValue,
+                updatedAt.timeIntervalSince1970,
+                roomCreatedAt.timeIntervalSince1970
+            ]
+        )
+        // This records the original creation result only. Room event authorization
+        // is owned by current sync/query projections, never by a permanent receipt.
     }
 
     func directRoomIdentities() throws -> [V2ClientDirectRoomIdentity] {
@@ -3311,7 +3374,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
             isPinned: row["is_pinned"],
             isArchived: row["is_archived"],
             muteUntil: muteUntil == 0 ? nil : Date(timeIntervalSince1970: muteUntil),
-            updatedAt: Date(timeIntervalSince1970: row["updated_at"] as Double)
+            updatedAt: Date(timeIntervalSince1970: row["updated_at"] as Double),
+            revision: V2PersonalPreferenceRevision(rawValue: UInt64(row["revision"] as Int64))!
         )
     }
 
@@ -3929,20 +3993,40 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         try db.execute(sql: "INSERT INTO \(table) (target_user_id, is_blocked, updated_at) VALUES (?, ?, ?) ON CONFLICT(target_user_id) DO UPDATE SET is_blocked = excluded.is_blocked, updated_at = excluded.updated_at", arguments: [target.rawValue, payload.isBlocked, Double(payload.updatedAtMilliseconds) / 1_000])
     }
 
-    private static func applyStrangerMessagePermission(_ record: V2ClientSyncRecord, target: ProjectionTableTarget = .live, db: Database) throws {
-        struct Payload: Decodable { let allowsStrangerMessages: Bool; let updatedAtMilliseconds: Int64; enum CodingKeys: String, CodingKey { case allowsStrangerMessages = "allows_stranger_messages"; case updatedAtMilliseconds = "updated_at_ms" } }
-        let payload: Payload
-        do { payload = try JSONDecoder().decode(Payload.self, from: record.payload) } catch { throw V2ClientSocialProjectionError.invalidPayload }
-        let table = target.table("v2_stranger_message_preference")
-        try db.execute(sql: "INSERT INTO \(table) (singleton, allows_stranger_messages, updated_at) VALUES (1, ?, ?) ON CONFLICT(singleton) DO UPDATE SET allows_stranger_messages = excluded.allows_stranger_messages, updated_at = excluded.updated_at", arguments: [payload.allowsStrangerMessages, Double(payload.updatedAtMilliseconds) / 1_000])
+    private static func applyStrangerMessagePermission(_ record:V2ClientSyncRecord,target:ProjectionTableTarget = .live,db:Database) throws {
+        struct Payload:Decodable {let allowsStrangerMessages:Bool;let revision:UInt64;let updatedAtMilliseconds:Int64;enum CodingKeys:String,CodingKey {case allowsStrangerMessages="allows_stranger_messages",revision,updatedAtMilliseconds="updated_at_ms"}}
+        let value:Payload
+        do {value=try JSONDecoder().decode(Payload.self,from:record.payload)} catch {throw V2ClientSocialProjectionError.invalidPayload}
+        try applyVersionedPreference(table:target.table("v2_stranger_message_preference"),values:["allows_stranger_messages":value.allowsStrangerMessages],revision:value.revision,updatedAt:value.updatedAtMilliseconds,db:db)
     }
-
-    private static func applyUserAddPermission(_ record: V2ClientSyncRecord, target: ProjectionTableTarget = .live, db: Database) throws {
-        struct Payload: Decodable { let allowsBeingAdded: Bool; let updatedAtMilliseconds: Int64; enum CodingKeys: String, CodingKey { case allowsBeingAdded = "allows_being_added"; case updatedAtMilliseconds = "updated_at_ms" } }
-        let payload: Payload
-        do { payload = try JSONDecoder().decode(Payload.self, from: record.payload) } catch { throw V2ClientSocialProjectionError.invalidPayload }
-        let table = target.table("v2_user_add_preference")
-        try db.execute(sql: "INSERT INTO \(table) (singleton, allows_being_added, updated_at) VALUES (1, ?, ?) ON CONFLICT(singleton) DO UPDATE SET allows_being_added = excluded.allows_being_added, updated_at = excluded.updated_at", arguments: [payload.allowsBeingAdded, Double(payload.updatedAtMilliseconds) / 1_000])
+    private static func applyUserAddPermission(_ record:V2ClientSyncRecord,target:ProjectionTableTarget = .live,db:Database) throws {
+        struct Payload:Decodable {let allowsBeingAdded:Bool;let revision:UInt64;let updatedAtMilliseconds:Int64;enum CodingKeys:String,CodingKey {case allowsBeingAdded="allows_being_added",revision,updatedAtMilliseconds="updated_at_ms"}}
+        let value:Payload
+        do {value=try JSONDecoder().decode(Payload.self,from:record.payload)} catch {throw V2ClientSocialProjectionError.invalidPayload}
+        try applyVersionedPreference(table:target.table("v2_user_add_preference"),values:["allows_being_added":value.allowsBeingAdded],revision:value.revision,updatedAt:value.updatedAtMilliseconds,db:db)
+    }
+    private static func applyLiveActivityPreference(_ record:V2ClientSyncRecord,target:ProjectionTableTarget = .live,db:Database) throws {
+        struct Payload:Decodable {let online:Bool;let typing:Bool;let revision:UInt64;let updatedAtMilliseconds:Int64;enum CodingKeys:String,CodingKey {case online="allows_online_presence",typing="allows_typing_indicators",revision,updatedAtMilliseconds="updated_at_ms"}}
+        let value:Payload
+        do {value=try JSONDecoder().decode(Payload.self,from:record.payload)} catch {throw V2ClientSocialProjectionError.invalidPayload}
+        try applyVersionedPreference(table:target.table("v2_live_activity_preference"),values:["allows_online_presence":value.online,"allows_typing_indicators":value.typing],revision:value.revision,updatedAt:value.updatedAtMilliseconds,db:db)
+    }
+    // Only schema-owned table/column names reach this helper; payloads carry values.
+    private static func applyVersionedPreference(table:String,values:[String:Bool],revision:UInt64,updatedAt:Int64,db:Database) throws {
+        guard revision>0,revision<=UInt64(Int64.max),updatedAt>=0 else {throw V2ClientSocialProjectionError.invalidPayload}
+        let columns=values.keys.sorted(),time=Double(updatedAt)/1000
+        if let prior=try Row.fetchOne(db,sql:"SELECT * FROM \(table) WHERE singleton=1") {
+            let old=try storageUnsigned(prior,column:"revision")
+            guard old>0 else {throw V2ClientSyncError.storageRangeExceeded}
+            if revision<old {return}
+            if revision==old {
+                guard columns.allSatisfy({(prior[$0] as Bool)==values[$0]}),(prior["updated_at"] as Double)==time else {throw V2ClientSocialProjectionError.invalidPayload};return
+            }
+        }
+        let names=columns.joined(separator:","),marks=columns.map {_ in "?"}.joined(separator:","),updates=columns.map {"\($0)=excluded.\($0)"}.joined(separator:",")
+        var arguments=StatementArguments(columns.map {values[$0]!});arguments += [Int64(revision),time]
+        try db.execute(sql:"INSERT INTO \(table)(singleton,\(names),revision,updated_at) VALUES(1,\(marks),?,?) ON CONFLICT(singleton) DO UPDATE SET \(updates),revision=excluded.revision,updated_at=excluded.updated_at",arguments:arguments)
+        if ["v2_stranger_message_preference","v2_user_add_preference","v2_live_activity_preference"].contains(table) {try persistAccountPreferenceFloors(db:db)}
     }
 
     private static func applyDirectReadReceipt(_ record: V2ClientSyncRecord, target: ProjectionTableTarget = .live, db: Database) throws {
@@ -4092,14 +4176,31 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
                 allows_group_read_receipts = excluded.allows_group_read_receipts,
                 updated_at = excluded.updated_at, preference_revision = excluded.preference_revision
             """, arguments: [payload.allowsDirect, payload.allowsGroup, Double(payload.updatedAt) / 1_000, Int64(payload.revision)])
+        if case .live = target {try persistAccountPreferenceFloors(db:db)}
     }
     private static func persist(_ projection: V2ClientConversationState, target: ProjectionTableTarget = .live, db: Database) throws {
         let table = target.table("v2_conversation_states")
-        try db.execute(sql: "INSERT INTO \(table) (room_id, is_pinned, is_archived, mute_until, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(room_id) DO UPDATE SET is_pinned = excluded.is_pinned, is_archived = excluded.is_archived, mute_until = excluded.mute_until, updated_at = excluded.updated_at", arguments: [projection.roomID.rawValue, projection.isPinned, projection.isArchived, projection.muteUntil?.timeIntervalSince1970 ?? 0, projection.updatedAt.timeIntervalSince1970])
+        if let prior = try Row.fetchOne(db, sql: "SELECT * FROM \(table) WHERE room_id=?", arguments: [projection.roomID.rawValue]) {
+            let previous: Int64 = prior["revision"]
+            if previous > projection.revision.signedValue { return }
+            if previous == projection.revision.signedValue {
+                guard (prior["is_pinned"] as Bool) == projection.isPinned, (prior["is_archived"] as Bool) == projection.isArchived, (prior["mute_until"] as Double) == (projection.muteUntil?.timeIntervalSince1970 ?? 0), (prior["updated_at"] as Double) == projection.updatedAt.timeIntervalSince1970 else { throw V2ClientProjectionError.invalidMessagePayload }
+                return
+            }
+        }
+        try db.execute(sql: "INSERT INTO \(table) (room_id, is_pinned, is_archived, mute_until, updated_at, revision) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(room_id) DO UPDATE SET is_pinned = excluded.is_pinned, is_archived = excluded.is_archived, mute_until = excluded.mute_until, updated_at = excluded.updated_at, revision=excluded.revision", arguments: [projection.roomID.rawValue, projection.isPinned, projection.isArchived, projection.muteUntil?.timeIntervalSince1970 ?? 0, projection.updatedAt.timeIntervalSince1970, projection.revision.signedValue])
     }
     private static func persist(_ projection: V2ClientMessageFavorite, target: ProjectionTableTarget = .live, db: Database) throws {
         let table = target.table("v2_message_favorites")
-        try db.execute(sql: "INSERT INTO \(table) (message_id, room_id, is_favorited, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET room_id = excluded.room_id, is_favorited = excluded.is_favorited, updated_at = excluded.updated_at", arguments: [projection.messageID.rawValue, projection.roomID.rawValue, projection.isFavorited, projection.updatedAt.timeIntervalSince1970])
+        if let prior = try Row.fetchOne(db, sql: "SELECT * FROM \(table) WHERE message_id=?", arguments: [projection.messageID.rawValue]) {
+            let previous: Int64 = prior["revision"]
+            if previous > projection.revision.signedValue { return }
+            if previous == projection.revision.signedValue {
+                guard (prior["room_id"] as String) == projection.roomID.rawValue, (prior["is_favorited"] as Bool) == projection.isFavorited, (prior["updated_at"] as Double) == projection.updatedAt.timeIntervalSince1970 else { throw V2ClientProjectionError.invalidMessagePayload }
+                return
+            }
+        }
+        try db.execute(sql: "INSERT INTO \(table) (message_id, room_id, is_favorited, updated_at, revision) VALUES (?, ?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET room_id = excluded.room_id, is_favorited = excluded.is_favorited, updated_at = excluded.updated_at, revision=excluded.revision", arguments: [projection.messageID.rawValue, projection.roomID.rawValue, projection.isFavorited, projection.updatedAt.timeIntervalSince1970, projection.revision.signedValue])
     }
 
     private static func applyModeration(_ record: V2ClientSyncRecord, target: ProjectionTableTarget = .live, db: Database) throws {
@@ -4121,6 +4222,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         target: ProjectionTableTarget = .live,
         db: Database
     ) throws {
+        if case .live = target {
+            // Validation below shares this transaction: invalid projections roll
+            // back the marker as well as the projection. Cache trimming later
+            // cannot resurrect a previously materialized local send row.
+            try db.execute(sql: "UPDATE v2_message_send_operations SET accepted_projection_observed=1,projection_observed_snapshot_id=NULL WHERE accepted_message_id=? AND room_id=? AND accepted_room_sequence=? AND accepted_projection_observed=0",
+                arguments: [projection.messageID.rawValue,projection.roomID.rawValue,try storageInteger(projection.roomSequence)])
+        }
         let messages = target.table("v2_message_projections")
         let tombstones = target.table("v2_message_tombstones")
         if let existing = try Row.fetchOne(db, sql: "SELECT * FROM \(messages) WHERE message_id = ?", arguments: [projection.messageID.rawValue]) {
@@ -4474,6 +4582,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
     }
 
     private static func persist(_ tombstone: V2ClientMessageTombstone, db: Database) throws {
+        try db.execute(sql: "UPDATE v2_message_send_operations SET accepted_projection_observed=1,projection_observed_snapshot_id=NULL WHERE accepted_message_id=? AND room_id=? AND accepted_projection_observed=0",
+            arguments: [tombstone.messageID.rawValue,tombstone.roomID.rawValue])
         let tombstoneRevision = try storageInteger(tombstone.messageRevision)
         if let existing = try Row.fetchOne(db, sql: "SELECT room_id, message_revision FROM v2_message_tombstones WHERE message_id = ?", arguments: [tombstone.messageID.rawValue]) {
             let roomID: String = existing["room_id"]
@@ -4782,63 +4892,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         )
     }
 
-    static func requirePendingCommand(_ clientMessageID: ClientMessageID, db: Database) throws {
-        guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_message_commands WHERE client_message_id = ?", arguments: [clientMessageID.rawValue])?["state"], state == V2PendingMessageCommand.State.pending.rawValue else {
-            throw V2ClientCommandError.commandNotPending
-        }
-    }
 
-    static func requirePendingMembershipCommand(_ operationID: MembershipOperationID, db: Database) throws {
-        guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_membership_commands WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingMembershipCommand.State.pending.rawValue else {
-            throw V2ClientCommandError.commandNotPending
-        }
-    }
-
-    static func requirePendingMessageWithdrawal(_ operationID: MessageWithdrawalOperationID, db: Database) throws {
-        guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_message_withdrawals WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingMessageWithdrawal.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending }
-    }
-    static func requirePendingMessageRedaction(_ operationID: ModerationOperationID, db: Database) throws {
-        guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_message_redactions WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingMessageRedaction.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending }
-    }
-    static func requirePendingMemberMute(_ operationID: ModerationOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_member_mutes WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingMemberMute.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
-    static func requirePendingModeratedMemberRemoval(_ operationID: ModerationOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_moderated_member_removals WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingModeratedMemberRemoval.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
-    static func requirePendingMessageReaction(_ operationID: MessageReactionOperationID, db: Database) throws {
-        guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_message_reactions WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingMessageReaction.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending }
-    }
-    static func requirePendingConversationState(_ operationID: ConversationPreferenceOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_conversation_states WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingConversationStateCommand.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
-    static func requirePendingMessageFavorite(_ operationID: MessageFavoriteOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_message_favorites WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingMessageFavoriteCommand.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
-    static func requirePendingMessageEdit(_ operationID: MessageEditOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_message_edits WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingMessageEdit.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
-    static func requirePendingReadReceipt(_ operationID: ReadReceiptOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_read_receipts WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingReadReceipt.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
-    static func requirePendingSocialCommand(_ operationID: String, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_social_commands WHERE operation_id = ?", arguments: [operationID])?["state"], state == V2PendingSocialCommand.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
-    static func requirePendingGroupRoomCreation(_ operationID: GroupRoomOperationID, db: Database) throws { guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_group_room_creations WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingGroupRoomCreation.State.pending.rawValue else { throw V2ClientCommandError.commandNotPending } }
-    static func requireActiveGroupRoomCreation(_ operationID: GroupRoomOperationID, db: Database) throws {
-        guard let state: String = try Row.fetchOne(db, sql: "SELECT state FROM v2_pending_group_room_creations WHERE operation_id = ?", arguments: [operationID.rawValue])?["state"], state == V2PendingGroupRoomCreation.State.pending.rawValue || state == V2PendingGroupRoomCreation.State.finalizing.rawValue else {
-            throw V2ClientCommandError.commandNotPending
-        }
-    }
-
-    static func decodePendingCommand(_ row: Row) throws -> V2PendingMessageCommand {
-        guard let state = V2PendingMessageCommand.State(rawValue: row["state"] as String) else {
-            throw V2ClientCommandError.commandConflict
-        }
-        let acceptedRaw: String? = row["accepted_message_id"]
-        let acceptedRoomSequence = try optionalCommandStorageUnsigned(row, column: "accepted_room_sequence")
-        return try .init(
-            roomID: .init(row["room_id"] as String),
-            clientMessageID: .init(row["client_message_id"] as String),
-            text: row["text"],
-            media: try decodeMedia(row["media_ids"]),
-            mentions: try decodeMentions(row["mention_targets"]),
-            entities: try decodeEntities(row["entities"], text: row["text"]),
-            replyTo: try (row["reply_to_message_id"] as String?).map { try V2MessageReplyReference(messageID: .init($0)) },
-            state: state,
-            attemptCount: try commandAttemptCount(row),
-            nextAttemptAt: try commandRetryDate(row),
-            acceptedMessageID: try acceptedRaw.map(MessageID.init),
-            acceptedRoomSequence: acceptedRoomSequence,
-            terminalCode: row["terminal_code"]
-        )
-    }
 
     static func encodeMedia(_ media: [V2MediaReference]) throws -> String {
         guard media.count <= V2MessageCommandLimits.maxMediaAttachments,
@@ -4934,58 +4988,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         return entities
     }
 
-    static func decodePendingMembershipCommand(_ row: Row) throws -> V2PendingMembershipCommand {
-        guard let state = V2PendingMembershipCommand.State(rawValue: row["state"] as String),
-              let action = V2RoomMembershipAction(rawValue: row["action"] as String)
-        else { throw V2ClientCommandError.commandConflict }
-        let revision = try optionalCommandStorageUnsigned(row, column: "resulting_membership_revision")
-        let roomSequence = try optionalCommandStorageUnsigned(row, column: "resulting_room_sequence")
-        let terminalCurrentRevision = try optionalCommandStorageUnsigned(row, column: "terminal_current_revision")
-        return try .init(
-            roomID: .init(row["room_id"] as String),
-            operationID: .init(row["operation_id"] as String),
-            targetUserID: .init(row["target_user_id"] as String),
-            action: action,
-            expectedMembershipRevision: try commandStorageUnsigned(row, column: "expected_membership_revision"),
-            state: state,
-            attemptCount: try commandAttemptCount(row),
-            nextAttemptAt: try commandRetryDate(row),
-            resultingMembershipRevision: revision,
-            resultingRoomSequence: roomSequence,
-            terminalCode: row["terminal_code"],
-            terminalCurrentRevision: terminalCurrentRevision
-        )
-    }
 
-    static func decodePendingMessageWithdrawal(_ row: Row) throws -> V2PendingMessageWithdrawal {
-        guard let state = V2PendingMessageWithdrawal.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
-        return try .init(
-            roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), messageID: .init(row["message_id"] as String),
-            expectedMessageRevision: try commandStorageUnsigned(row, column: "expected_message_revision"), state: state,
-            attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row),
-            resultingMessageRevision: optionalCommandStorageUnsigned(row, column: "resulting_message_revision"),
-            resultingRoomSequence: optionalCommandStorageUnsigned(row, column: "resulting_room_sequence"),
-            terminalCode: row["terminal_code"], terminalCurrentRevision: optionalCommandStorageUnsigned(row, column: "terminal_current_revision")
-        )
-    }
-
-    static func decodePendingMessageRedaction(_ row: Row) throws -> V2PendingMessageRedaction {
-        guard let state = V2PendingMessageRedaction.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
-        return try .init(
-            roomID: .init(row["room_id"] as String),
-            operationID: .init(row["operation_id"] as String),
-            messageID: .init(row["message_id"] as String),
-            reasonCode: .init(row["reason_code"] as String),
-            state: state,
-            attemptCount: try commandAttemptCount(row),
-            nextAttemptAt: try commandRetryDate(row),
-            resultingMessageRevision: optionalCommandStorageUnsigned(row, column: "resulting_message_revision"),
-            resultingRoomSequence: optionalCommandStorageUnsigned(row, column: "resulting_room_sequence"),
-            terminalCode: row["terminal_code"]
-        )
-    }
-    static func decodePendingMemberMute(_ row: Row) throws -> V2PendingMemberMute { guard let state = V2PendingMemberMute.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }; return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), targetUserID: .init(row["target_user_id"] as String), muteUntil: Date(timeIntervalSince1970: row["mute_until"] as Double), reasonCode: .init(row["reason_code"] as String), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), resultingRoomSequence: optionalCommandStorageUnsigned(row, column: "resulting_room_sequence"), terminalCode: row["terminal_code"]) }
-    static func decodePendingModeratedMemberRemoval(_ row: Row) throws -> V2PendingModeratedMemberRemoval { guard let state = V2PendingModeratedMemberRemoval.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }; return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), targetUserID: .init(row["target_user_id"] as String), reasonCode: .init(row["reason_code"] as String), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), resultingMembershipRevision: optionalCommandStorageUnsigned(row, column: "resulting_membership_revision"), resultingRoomSequence: optionalCommandStorageUnsigned(row, column: "resulting_room_sequence"), terminalCode: row["terminal_code"]) }
 
     static func decodeRoomControlProjection(_ row: Row) throws -> V2ClientRoomControlProjection {
         let sourceEventID: EventID = try .init(row["source_event_id"] as String)
@@ -5030,126 +5033,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         )
     }
 
-    static func decodePendingMessageReaction(_ row: Row) throws -> V2PendingMessageReaction {
-        guard let state = V2PendingMessageReaction.State(rawValue: row["state"] as String), let action = V2MessageReactionAction(rawValue: row["action"] as String) else { throw V2ClientCommandError.commandConflict }
-        return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), messageID: .init(row["message_id"] as String), reaction: row["reaction"], action: action, state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), resultingRoomSequence: optionalCommandStorageUnsigned(row, column: "resulting_room_sequence"), terminalCode: row["terminal_code"])
-    }
-    static func decodePendingConversationState(_ row: Row) throws -> V2PendingConversationStateCommand {
-        guard let state = V2PendingConversationStateCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
-        let muteUntil = (row["mute_until"] as Double) == 0 ? nil : Date(timeIntervalSince1970: row["mute_until"] as Double)
-        return try .init(command: .init(operationID: .init(row["operation_id"] as String), roomID: .init(row["room_id"] as String), isPinned: row["is_pinned"], isArchived: row["is_archived"], muteUntil: muteUntil), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), terminalCode: row["terminal_code"])
-    }
-    static func decodePendingMessageFavorite(_ row: Row) throws -> V2PendingMessageFavoriteCommand {
-        guard let state = V2PendingMessageFavoriteCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
-        return try .init(command: .init(operationID: .init(row["operation_id"] as String), roomID: .init(row["room_id"] as String), messageID: .init(row["message_id"] as String), isFavorited: row["is_favorited"]), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), terminalCode: row["terminal_code"])
-    }
-    static func decodePendingGroupCapability(_ row: Row) throws -> V2PendingGroupCapabilityCommand {
-        guard let kind = V2PendingGroupCapabilityCommand.Kind(rawValue: row["kind"] as String), let state = V2PendingGroupCapabilityCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
-        let role = (row["role"] as String?).flatMap(V2RoomMembershipRole.init(rawValue:))
-        let rawPermissions = try JSONDecoder().decode([String].self, from: Data((row["permissions"] as String).utf8))
-        let permissions = Set(rawPermissions.compactMap(V2GroupPermission.init(rawValue:)))
-        guard permissions.count == rawPermissions.count else { throw V2ClientCommandError.commandConflict }
-        return try .init(kind: kind, operationID: row["operation_id"], roomID: .init(row["room_id"] as String), messageID: try (row["message_id"] as String?).map(MessageID.init), isPinned: row["is_pinned"], body: row["body"], role: role, permissions: permissions, targetUserID: try (row["target_user_id"] as String?).map(UserID.init), expectedRevision: try storageUnsigned(row, column: "expected_revision"), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), terminalCode: row["terminal_code"])
-    }
-    static func decodeForwardSourceReferences(_ row: Row) throws -> [V2ForwardMessageReference] {
-        guard let json: String = row["source_references"] else { throw V2ClientCommandError.commandConflict }
-        let sources = try JSONDecoder().decode([V2ForwardMessageReference].self, from: Data(json.utf8))
-        let ids = try JSONDecoder().decode([String].self, from: Data((row["source_message_ids"] as String).utf8))
-        guard !sources.isEmpty, sources.map({ $0.messageID.rawValue }) == ids,
-              Set(sources.map(\.messageID)).count == sources.count
-        else { throw V2ClientCommandError.commandConflict }
-        return sources
-    }
-    static func decodeForwardMessagesPlan(_ row: Row) throws -> V2ForwardMessagesPlan {
-        guard let state = V2ForwardMessagesPlan.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
-        let sources = try JSONDecoder().decode([String].self, from: Data((row["source_message_ids"] as String).utf8))
-        let targets = try JSONDecoder().decode([String].self, from: Data((row["target_room_ids"] as String).utf8))
-        let progress = try validatedForwardChunkProgress(row, sourceCount: sources.count, targetCount: targets.count)
-        guard !targets.isEmpty, sources.count <= Int.max / targets.count else { throw V2ClientCommandError.commandConflict }
-        let total = sources.count * targets.count
-        let succeededValue: DatabaseValue = row["succeeded_count"]
-        let failedValue: DatabaseValue = row["failed_count"]
-        guard case .int64(let storedSucceeded) = succeededValue.storage,
-              case .int64(let storedFailed) = failedValue.storage,
-              let succeeded = Int(exactly: storedSucceeded), let failed = Int(exactly: storedFailed),
-              succeeded >= 0, failed >= 0, succeeded <= total, failed <= total - succeeded
-        else { throw V2ClientCommandError.commandConflict }
-        let completedResults: Int
-        if progress.index == progress.total {
-            completedResults = total
-        } else {
-            let index = Int(progress.index)
-            let pageSize = V2BulkForwardMessagesOutboxEngine.sourceMessagesPerChunk
-            let sourceStart = (index / targets.count) * pageSize
-            let chunkSize = min(pageSize, sources.count - sourceStart)
-            completedResults = sourceStart * targets.count + (index % targets.count) * chunkSize
-        }
-        guard succeeded + failed == completedResults else { throw V2ClientCommandError.commandConflict }
-        return .init(operationID: try .init(row["plan_id"] as String), sourceMessageCount: sources.count, targetRoomCount: targets.count, totalForwardCount: total, succeededCount: succeeded, failedCount: failed, state: state, terminalCode: row["terminal_code"])
-    }
-    static func validatedForwardChunkProgress(_ row: Row, sourceCount: Int, targetCount: Int) throws -> (index: Int64, total: Int64) {
-        guard sourceCount > 0, targetCount > 0 else { throw V2ClientCommandError.commandConflict }
-        let pageSize = V2BulkForwardMessagesOutboxEngine.sourceMessagesPerChunk
-        let pages = sourceCount / pageSize + (sourceCount % pageSize == 0 ? 0 : 1)
-        let (expected, overflow) = pages.multipliedReportingOverflow(by: targetCount)
-        let indexValue: DatabaseValue = row["next_chunk_index"]
-        let totalValue: DatabaseValue = row["total_chunk_count"]
-        guard !overflow, let expectedCount = Int64(exactly: expected),
-              case .int64(let index) = indexValue.storage,
-              case .int64(let total) = totalValue.storage,
-              total == expectedCount, index >= 0, index <= total
-        else { throw V2ClientCommandError.commandConflict }
-        return (index, total)
-    }
-    static func decodeForwardPlanChunk(_ row: Row) throws -> V2PendingForwardMessagesCommand {
-        guard let state = V2PendingForwardMessagesCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
-        let sources = try decodeForwardSourceReferences(row)
-        let target = try RoomID(row["target_room_id"] as String)
-        return try .init(command: .init(operationID: try .init(row["operation_id"] as String), sources: sources, targetRoomIDs: [target]), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), terminalCode: row["terminal_code"])
-    }
 
-    static func advanceForwardPlan(planID: String, completedChunkIndex: Int64, succeeded: Int, failed: Int, now: Date, db: Database) throws {
-        guard succeeded >= 0, failed >= 0,
-              let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_forward_message_plans WHERE plan_id = ?", arguments: [planID]),
-              let state = V2ForwardMessagesPlan.State(rawValue: row["state"] as String), state == .active
-        else { throw V2ClientCommandError.commandConflict }
-        let plan = try decodeForwardMessagesPlan(row)
-        let remaining = plan.totalForwardCount - plan.succeededCount - plan.failedCount
-        guard succeeded <= remaining, failed <= remaining - succeeded else { throw V2ClientCommandError.commandConflict }
-        let nextChunkIndex: Int64 = row["next_chunk_index"]
-        let totalChunkCount: Int64 = row["total_chunk_count"]
-        guard nextChunkIndex == completedChunkIndex, completedChunkIndex >= 0,
-              completedChunkIndex < totalChunkCount else { throw V2ClientCommandError.commandConflict }
-        let next = completedChunkIndex + 1
-        try db.execute(
-            sql: "UPDATE v2_forward_message_plans SET next_chunk_index = ?, succeeded_count = ?, failed_count = ?, state = ?, updated_at = ? WHERE plan_id = ?",
-            arguments: [next, plan.succeededCount + succeeded, plan.failedCount + failed, next == totalChunkCount ? V2ForwardMessagesPlan.State.completed.rawValue : V2ForwardMessagesPlan.State.active.rawValue, try Self.commandRetryTimestamp(now), planID]
-        )
-    }
-    static func decodePendingMessageEdit(_ row: Row) throws -> V2PendingMessageEdit {
-        guard let state = V2PendingMessageEdit.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
-        return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), messageID: .init(row["message_id"] as String), expectedMessageRevision: try commandStorageUnsigned(row, column: "expected_message_revision"), text: row["text_body"], state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), resultingMessageRevision: optionalCommandStorageUnsigned(row, column: "resulting_message_revision"), resultingRoomSequence: optionalCommandStorageUnsigned(row, column: "resulting_room_sequence"), terminalCode: row["terminal_code"], terminalCurrentRevision: optionalCommandStorageUnsigned(row, column: "terminal_current_revision"))
-    }
-    static func decodePendingReadReceipt(_ row: Row) throws -> V2PendingReadReceipt { guard let state = V2PendingReadReceipt.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }; return try .init(roomID: .init(row["room_id"] as String), operationID: .init(row["operation_id"] as String), readThroughRoomSequence: try commandStorageUnsigned(row, column: "read_through_room_sequence"), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), resultingRoomSequence: optionalCommandStorageUnsigned(row, column: "resulting_room_sequence"), terminalCode: row["terminal_code"]) }
-    static func decodePendingSocialCommand(_ row: Row) throws -> V2PendingSocialCommand {
-        guard let kind = V2PendingSocialCommandKind(rawValue: row["command_kind"] as String), let state = V2PendingSocialCommand.State(rawValue: row["state"] as String) else { throw V2ClientCommandError.commandConflict }
-        return try .init(operationID: row["operation_id"], kind: kind, targetUserID: try (row["target_user_id"] as String?).map(UserID.init), relationshipAction: (row["relationship_action"] as String?).flatMap(V2RelationshipAction.init), blockAction: (row["block_action"] as String?).flatMap(V2UserBlockAction.init), strangerPermission: (row["stranger_permission"] as String?).flatMap(V2StrangerMessagePermission.init), userAddPermission: (row["user_add_permission"] as String?).flatMap(V2UserAddPermission.init), allowsDirectReadReceipts: row["allows_direct_read_receipts"], allowsGroupReadReceipts: row["allows_group_read_receipts"], state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), terminalCode: row["terminal_code"])
-    }
-    static func encodeGroupMemberUserIDs(_ members: [UserID]) throws -> String {
-        guard let encoded = String(data: try JSONEncoder().encode(members.map(\.rawValue)), encoding: .utf8) else { throw V2ClientCommandError.commandConflict }
-        return encoded
-    }
-    static func decodeGroupMemberUserIDs(_ encoded: String) throws -> [UserID] {
-        try JSONDecoder().decode([String].self, from: Data(encoded.utf8)).map(UserID.init)
-    }
-    static func decodePendingGroupRoomCreation(_ row: Row) throws -> V2PendingGroupRoomCreation {
-        let membersData = Data((row["initial_member_user_ids"] as String).utf8)
-        let members = try JSONDecoder().decode([String].self, from: membersData).map(UserID.init)
-        guard let state = V2PendingGroupRoomCreation.State(rawValue: row["state"] as String),
-              let capacityClass = V2GroupCapacityClass(rawValue: row["capacity_class"] as String)
-        else { throw V2ClientCommandError.commandConflict }
-        return try .init(operationID: .init(row["operation_id"] as String), title: row["title"], capacityClass: capacityClass, initialMemberUserIDs: members, uploadedMemberCount: commandNonnegativeInteger(row["uploaded_member_count"]), state: state, attemptCount: try commandAttemptCount(row), nextAttemptAt: try commandRetryDate(row), createdRoomID: try (row["created_room_id"] as String?).map(RoomID.init), terminalCode: row["terminal_code"])
-    }
 
     enum V2MessageSearchRebuildOutcome {
         case advanced(Int64)
@@ -5162,9 +5046,29 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         var migrator = DatabaseMigrator()
         migrator.registerMigration("createCurrentV2Schema") { db in
             try db.execute(sql: currentSchemaSQL)
+            try db.execute(sql: operationWorkSchemaSQL)
+            try db.execute(sql: profileIntentSchemaSQL)
+            try db.execute(sql: personalPreferenceIntentSchemaSQL)
+            try db.execute(sql: nameOperationSchemaSQL)
+            try db.execute(sql: readReceiptWorkSchemaSQL)
+            try db.execute(sql: messageMutationWorkSchemaSQL)
+            try db.execute(sql: socialOperationWorkSchemaSQL)
+            try db.execute(sql: socialProposalSchemaSQL)
+            try db.execute(sql: accountPreferenceWorkSchemaSQL)
+            try db.execute(sql: accountPreferenceDraftSchemaSQL)
+            try db.execute(sql: accountPreferenceAuthorityCacheSchemaSQL)
+            try db.execute(sql: messageReactionWorkSchemaSQL)
+            try db.execute(sql: messageSendWorkSchemaSQL)
+            try db.execute(sql: forwardPlanWorkSchemaSQL)
+            try db.execute(sql: memberAdministrationWorkSchemaSQL)
+            try db.execute(sql: membershipWorkSchemaSQL)
+            try db.execute(sql: invitationWorkSchemaSQL)
+            try db.execute(sql: groupCapabilityWorkSchemaSQL)
+            try db.execute(sql: groupCreationWorkSchemaSQL)
+            try db.execute(sql: directRoomWorkSchemaSQL)
+            try db.execute(sql: messageModerationWorkSchemaSQL)
             try db.execute(sql: resourceJournalSchemaSQL)
             try db.execute(sql: resourceImportSchemaSQL)
-            try db.execute(sql: messageOperationRecoverySchemaSQL)
             try db.execute(sql: groupAvatarInvalidationSchemaSQL)
             try db.execute(sql: groupAvatarIntentsSchemaSQL)
             try db.execute(sql: groupNicknameInvalidationSchemaSQL)
@@ -5207,22 +5111,6 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalCommandStore, V2Loca
         return migrator
     }()
 
-    static let terminalCommandTables = [
-        "v2_pending_message_commands",
-        "v2_pending_membership_commands",
-        "v2_pending_message_withdrawals",
-        "v2_pending_message_redactions",
-        "v2_pending_member_mutes",
-        "v2_pending_moderated_member_removals",
-        "v2_pending_message_edits",
-        "v2_pending_read_receipts",
-        "v2_pending_message_reactions",
-        "v2_pending_conversation_states",
-        "v2_pending_message_favorites",
-        "v2_pending_group_capabilities",
-        "v2_pending_social_commands",
-        "v2_pending_group_room_creations"
-    ]
 }
 
 private enum TimelinePageCandidate {

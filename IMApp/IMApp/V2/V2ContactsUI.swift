@@ -162,6 +162,9 @@ final class V2ContactsStore {
     private let dataSource: any V2ContactsReading
     private let windowReader: (any V2ContactsWindowReading)?
     private let identityResolver: any V2PublicIdentityPresentationResolving
+    private(set) var socialPending:[V2SocialOperationPending]=[]
+    private(set) var socialProposals:[V2SocialOperationProposal]=[]
+    var socialConfirmation:V2SocialConfirmationProposal?
     private let relationshipChanger: any V2RelationshipChanging
     private let userBlockChanger: any V2UserBlockChanging
     private let directConversationOpener: any V2DirectConversationOpening
@@ -185,6 +188,9 @@ final class V2ContactsStore {
     var hasEarlierOutgoingRequests: Bool { earlierLanes.contains(.outgoing) }
 
     private(set) var state: State = .loading
+    private(set) var isStale = false
+    private(set) var readFeedback: String?
+    var canUseContactActions: Bool { state == .loaded && !isStale }
     private(set) var friends: [V2ContactListItem] = []
     private(set) var incomingRequests: [V2ContactListItem] = []
     private(set) var outgoingRequests: [V2ContactListItem] = []
@@ -219,7 +225,8 @@ final class V2ContactsStore {
         userBlockChanger: any V2UserBlockChanging,
         directConversationOpener: any V2DirectConversationOpening,
         currentUserID: UserID,
-        projectionChangeNotifier: V2ProjectionChangeNotifier? = nil
+        projectionChangeNotifier: V2ProjectionChangeNotifier? = nil,
+        nameOperations: V2NameOperationService? = nil
     ) {
         self.dataSource = dataSource
         windowReader = dataSource as? any V2ContactsWindowReading
@@ -229,6 +236,13 @@ final class V2ContactsStore {
         self.directConversationOpener = directConversationOpener
         self.currentUserID = currentUserID
         self.projectionChangeNotifier = projectionChangeNotifier
+        self.nameOperations = nameOperations
+    }
+
+    private let nameOperations: V2NameOperationService?
+    func nameEditor(for item: V2ContactListItem) -> V2NameEditorStore? {
+        guard canUseContactActions, item.relationship == .friend, let nameOperations else { return nil }
+        return .init(target: .contact(item.userID), service: nameOperations)
     }
 
     var filteredFriends: [V2ContactListItem] {
@@ -298,6 +312,8 @@ final class V2ContactsStore {
                 reconcileViewports()
                 if searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { friendsViewport.restore(to: friendRestoration) }
                 requestsViewport.restore(to: requestRestoration)
+                isStale = false
+                readFeedback = nil
                 state = .loaded
                 if !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     await refreshFriendSearch()
@@ -308,11 +324,40 @@ final class V2ContactsStore {
             return
         } catch {
             guard !Task.isCancelled, generation == refreshingGeneration else { return }
+            handleReadFailure(error)
+        }
+    }
+
+    private func isAuthoritativeReadDenial(_ error: Error) -> Bool {
+        (error as? V2HTTPFailure)?.statusCode == 403
+            || (error as? V2AuthSessionError) == .unauthenticated
+            || (error as? V2AuthSessionError) == .sessionInvalidated
+    }
+
+    private func handleReadFailure(_ error: Error) {
+        // Withdraw the observed confirmation, retaining its durable proposal.
+        // A stale directory must not leave a new sensitive command enabled.
+        socialConfirmation = nil
+        let denied = isAuthoritativeReadDenial(error)
+        if denied {
+            allItems = []; friends = []; incomingRequests = []; outgoingRequests = []; friendSearchResults = []
+            incomingRequestCount = 0
+            friendsNextCursor = nil; incomingRequestsNextCursor = nil; outgoingRequestsNextCursor = nil; friendSearchNextCursor = nil
+            refreshingGeneration &+= 1
+            searchGeneration &+= 1
+            pageOperations.removeAll(); earlierLanes.removeAll()
+            isStale = false
+            readFeedback = "联系人访问权限已失效，请重新登录或刷新。"
             state = .failed
+        } else {
+            isStale = true
+            readFeedback = "刷新失败，显示上次联系人内容；刷新成功后可继续操作。"
+            state = allItems.isEmpty ? .failed : .loaded
         }
     }
 
     func refreshFriendSearch() async {
+        guard state == .loaded else { return }
         searchGeneration &+= 1
         let generation = searchGeneration
         let operation = UUID()
@@ -360,6 +405,7 @@ final class V2ContactsStore {
             return
         } catch {
             guard !Task.isCancelled, generation == searchGeneration else { return }
+            handleReadFailure(error)
             feedback = "无法搜索联系人。"
         }
     }
@@ -482,11 +528,24 @@ final class V2ContactsStore {
     }
 
     func block(_ item: V2ContactListItem) async {
+        guard canUseContactActions else {
+            feedback = "请刷新联系人后再操作。"
+            return
+        }
         guard !updatingUserIDs.contains(item.userID) else { return }
         updatingUserIDs.insert(item.userID)
         defer { updatingUserIDs.remove(item.userID) }
         feedback = nil
         do {
+            if let manager=userBlockChanger as? any V2SocialOperationManaging {
+                let confirmationGeneration = refreshingGeneration
+                let id=try await manager.saveSocialProposal(action:.userBlock(.block),target:item.userID)
+                let baseline=try await manager.socialBaseline(target:item.userID)
+                try Task.checkCancellation()
+                guard confirmationGeneration == refreshingGeneration, canUseContactActions else { return }
+                socialConfirmation = .init(snapshot:baseline,action:.userBlock(.block),proposalID:id)
+                return
+            }
             switch try await userBlockChanger.changeBlock(targetUserID: item.userID.rawValue, action: .block) {
             case .accepted:
                 feedback = "屏蔽请求已提交，正在同步。"
@@ -503,6 +562,10 @@ final class V2ContactsStore {
     }
 
     func openConversation(with item: V2ContactListItem) async -> String? {
+        guard canUseContactActions else {
+            feedback = "请刷新联系人后再打开会话。"
+            return nil
+        }
         guard let identity = item.publicIdentity else {
             feedback = "联系人资料暂不可用，请刷新后重试。"
             return nil
@@ -511,6 +574,15 @@ final class V2ContactsStore {
             let roomID = try await directConversationOpener.openConversation(with: identity)
             try Task.checkCancellation()
             return roomID
+        } catch V2DirectConversationOpeningState.queued {
+            feedback = "已保存私聊请求，完成后会显示在会话列表中。再次点击可继续核对原请求。"
+            return nil
+        } catch V2DirectConversationOpeningState.expired {
+            feedback = "私聊请求已过期，可重新发起。"
+            return nil
+        } catch V2DirectConversationOpeningState.rejected {
+            feedback = "当前无法与对方创建私聊。"
+            return nil
         } catch is CancellationError {
             return nil
         } catch {
@@ -537,12 +609,67 @@ final class V2ContactsStore {
         feedback = "查找结果已过期，请重新查找。"
     }
 
+    func observeSocialProposals() async {
+        guard let manager=relationshipChanger as? any V2SocialOperationManaging else { return }
+        do { for try await values in await manager.socialProposals() { guard !Task.isCancelled else {return};socialProposals=values } } catch is CancellationError {} catch {feedback="保存的联系人提案暂不可读。"}
+    }
+    private func canConfirmSocialAction(_ action: V2SocialOperationAction) -> Bool {
+        if case .relationship(.request) = action { return !isStale && state != .failed }
+        return canUseContactActions
+    }
+    func prepareSocialProposal(_ proposal:V2SocialOperationProposal) async {
+        guard canConfirmSocialAction(proposal.action), let manager=relationshipChanger as? any V2SocialOperationManaging else {
+            feedback="请刷新联系人后再确认，提案已保留。"; return
+        }
+        let confirmationGeneration = refreshingGeneration
+        do {
+            let baseline=try await manager.socialBaseline(target:proposal.targetUserID)
+            try Task.checkCancellation()
+            guard confirmationGeneration == refreshingGeneration, canConfirmSocialAction(proposal.action) else { return }
+            socialConfirmation = .init(snapshot:baseline,action:proposal.action,proposalID:proposal.id)
+        } catch is CancellationError { }
+        catch {feedback="提案已保留，读取权威基线后才能确认。"}
+    }
+    func discardSocialProposal(_ id:UUID) async {
+        guard let manager=relationshipChanger as? any V2SocialOperationManaging else {return}
+        do {try await manager.discardSocialProposal(id:id)} catch {feedback="无法取消提案。"}
+    }
+    func observeSocialOperations() async {
+        guard let manager=relationshipChanger as? any V2SocialOperationManaging else { return }
+        do { for try await values in await manager.socialUpdates() { guard !Task.isCancelled else { return };socialPending=values } }
+        catch is CancellationError {} catch { feedback="联系人操作状态暂时无法读取。" }
+    }
+    func confirmSocialOperation() async {
+        guard let proposal=socialConfirmation,let manager=relationshipChanger as? any V2SocialOperationManaging else { return }
+        socialConfirmation=nil
+        guard canConfirmSocialAction(proposal.action) else { feedback="请刷新联系人后再确认，提案已保留。"; return }
+        guard proposal.expiresAt > .now else { feedback="确认基线已过期，请重新读取后确认。";return }
+        do { if let id=proposal.proposalID {try await manager.confirmSocialProposal(id:id,snapshot:proposal.snapshot)} else {try await manager.enqueueSocial(action:proposal.action,snapshot:proposal.snapshot)};feedback="原联系人操作已保存，正在核对。" }
+        catch { feedback="无法保存联系人操作，请重新读取后确认。" }
+    }
+    func resumeSocialOperation(_ id:UUID) async {
+        guard let manager=relationshipChanger as? any V2SocialOperationManaging else { return }
+        do { try await manager.resumeSocialConfirmation(workID:id) } catch { feedback="无法继续核对原联系人操作。" }
+    }
     private func changeRelationship(target: UserID, action: V2RelationshipAction) async {
+        guard action == .request || canUseContactActions else {
+            feedback = "请刷新联系人后再操作。"
+            return
+        }
         guard !updatingUserIDs.contains(target) else { return }
         updatingUserIDs.insert(target)
         defer { updatingUserIDs.remove(target) }
         feedback = nil
         do {
+            if let manager=relationshipChanger as? any V2SocialOperationManaging {
+                let confirmationGeneration = refreshingGeneration
+                let id=try await manager.saveSocialProposal(action:.relationship(action),target:target)
+                let baseline=try await manager.socialBaseline(target:target)
+                try Task.checkCancellation()
+                guard confirmationGeneration == refreshingGeneration, canConfirmSocialAction(.relationship(action)) else { return }
+                socialConfirmation = .init(snapshot:baseline,action:.relationship(action),proposalID:id)
+                return
+            }
             switch try await relationshipChanger.changeRelationship(targetUserID: target.rawValue, action: action) {
             case .accepted:
                 feedback = "请求已提交，正在同步。"
@@ -622,6 +749,7 @@ final class V2ContactsStore {
                 guard generation == refreshingGeneration,
                       lane != .search || (queryGeneration == searchGeneration && query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines))
                 else { throw CancellationError() }
+                if isAuthoritativeReadDenial(error) { throw error }
                 feedback = "部分联系人资料暂不可更新。"
             }
         }
@@ -696,6 +824,7 @@ final class V2ContactsStore {
             throw CancellationError()
         } catch {
             try Task.checkCancellation()
+            if isAuthoritativeReadDenial(error) { throw error }
             // A cached page remains useful offline. Missing profiles are
             // explicit and hydration work never expands beyond this page.
             feedback = "部分联系人资料暂不可更新。"
@@ -762,6 +891,7 @@ final class V2ContactsStore {
             guard refreshGeneration == refreshingGeneration,
                   query == nil || (currentSearchGeneration == searchGeneration && query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines))
             else { return }
+            handleReadFailure(error)
             feedback = "无法加载更多联系人。"
         }
     }
@@ -817,6 +947,7 @@ final class V2ContactsStore {
         catch {
             guard generation == refreshingGeneration,
                   lane != .search || (queryGeneration == searchGeneration && query == searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
+            handleReadFailure(error)
             feedback = "无法加载前面的联系人。"
         }
     }
@@ -918,7 +1049,7 @@ struct V2ContactsRootView: View {
                 case .loading:
                     ProgressView("正在加载联系人…")
                 case .failed:
-                    ContentUnavailableView("无法读取联系人", systemImage: "person.crop.circle.badge.exclamationmark", description: Text("请检查网络或本地数据后重试。"))
+                    ContentUnavailableView("无法读取联系人", systemImage: "person.crop.circle.badge.exclamationmark", description: Text(store.readFeedback ?? "请检查网络或本地数据后重试。"))
                 case .loaded:
                     contactList
                 }
@@ -948,6 +1079,11 @@ struct V2ContactsRootView: View {
                     V2ContactDetailView(store: store, userID: userID, rootNavigation: rootNavigation)
                 }
             }
+            .safeAreaInset(edge:.bottom) { VStack { V2SocialProposalList(proposals:store.socialProposals,prepare:{await store.prepareSocialProposal($0)},discard:{await store.discardSocialProposal($0)})
+                V2SocialPendingStatusView(pending:store.socialPending) { id in await store.resumeSocialOperation(id) } } }
+            .confirmationDialog("确认联系人操作",isPresented:Binding(get:{store.socialConfirmation != nil},set:{if !$0 {store.socialConfirmation=nil}})) { Button("确认保存原操作") { Task {await store.confirmSocialOperation()} } } message: { Text(store.socialConfirmation?.description ?? "") }
+            .task { await store.observeSocialProposals() }
+            .task { await store.observeSocialOperations() }
             .task { await store.observeProjectionChanges() }
             .refreshable { await store.refresh(revalidateProfiles: true) }
         }
@@ -956,6 +1092,9 @@ struct V2ContactsRootView: View {
     @ViewBuilder
     private var contactList: some View {
         List {
+            if let message = store.readFeedback {
+                Text(message).foregroundStyle(.secondary).accessibilityIdentifier("v2.contacts.readFeedback")
+            }
             NavigationLink(value: V2ContactsRoute.requests) {
                 Label("新的朋友", systemImage: "person.crop.circle.badge.plus")
             }
@@ -1188,6 +1327,8 @@ private struct V2ContactDetailView: View {
     let rootNavigation: V2RootNavigationStore
     @State private var actionTask: Task<Void, Never>?
     @State private var pendingAction: PendingAction?
+    @State private var nameEditor: V2NameEditorStore?
+    @State private var showsNameEditor = false
 
     var body: some View {
         Group {
@@ -1228,6 +1369,9 @@ private struct V2ContactDetailView: View {
             }
         }
         .onDisappear { actionTask?.cancel() }
+        .sheet(isPresented: $showsNameEditor) {
+            if let nameEditor { V2NameEditorView(store: nameEditor) }
+        }
     }
 
     @ViewBuilder
@@ -1245,6 +1389,11 @@ private struct V2ContactDetailView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(store.isUpdating(item) || item.publicIdentity == nil)
                 .accessibilityIdentifier("v2.contacts.detail.message.\(item.id)")
+                Button("编辑备注") {
+                    nameEditor = store.nameEditor(for: item)
+                    showsNameEditor = nameEditor != nil
+                }
+                .accessibilityIdentifier("v2.contacts.detail.remark.\(item.id)")
                 Button("删除好友", role: .destructive) { pendingAction = .remove(item) }
                     .disabled(store.isUpdating(item))
                     .accessibilityIdentifier("v2.contacts.detail.remove.\(item.id)")

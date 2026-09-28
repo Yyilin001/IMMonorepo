@@ -1,7 +1,7 @@
 import Foundation
 
 /// 消息意图中不可变的提及目标，不包含显示名、文本偏移或客户端声称的成员权限。
-public enum V2MentionTarget: Hashable, Sendable {
+public enum V2MentionTarget: Hashable, Codable, Sendable {
     /// 提及一个明确用户。
     case user(UserID)
     /// 广播提及，由发送者角色决定是否允许。

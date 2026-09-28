@@ -21,6 +21,7 @@ let package = Package(
         .executable(name: "VirtualActorBusinessProbe", targets: ["VirtualActorBusinessProbe"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.35.0"),
         .package(url: "https://github.com/vapor/routing-kit.git", from: "5.0.0-beta"),
         .package(url: "https://github.com/apple/swift-http-types.git", from: "1.7.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.14.0"),
@@ -167,6 +168,7 @@ let package = Package(
             name: "IMV2AccountServerApp",
             dependencies: [
                 "IMV2ActorApplication",
+                "IMV2ActorContracts",
                 "IMV2Server",
                 "IMV2ServerHTTP",
                 .product(name: "Vapor", package: "vapor"),
@@ -200,9 +202,15 @@ let package = Package(
         // This executable belongs only to the local Compose verification
         // image. It gives the shell smoke test a real TLS/protobuf client
         // without adding a debug route or weakening the gateway itself.
+        .target(name: "IMV2ToolHTTP", dependencies: [
+            "IMV2Core",
+            .product(name: "AsyncHTTPClient", package: "async-http-client"),
+            .product(name: "NIOSSL", package: "swift-nio-ssl"),
+        ]),
         .executableTarget(
             name: "IMV2LocalGatewayProbe",
             dependencies: [
+                "IMV2ToolHTTP",
                 "IMV2Core",
                 "IMV2Server",
                 .product(name: "NIOCore", package: "swift-nio"),
@@ -216,6 +224,7 @@ let package = Package(
         .executableTarget(
             name: "IMV2GatewayLoadGenerator",
             dependencies: [
+                "IMV2ToolHTTP",
                 "IMV2Core",
                 "IMV2Compression",
                 "IMV2Server",

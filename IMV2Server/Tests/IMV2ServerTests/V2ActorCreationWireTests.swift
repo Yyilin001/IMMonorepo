@@ -17,28 +17,6 @@ struct V2ActorCreationWireTests {
         try JSONDecoder().decode(T.self, from: JSONEncoder().encode(value))
     }
 
-    @Test func fullRoomOutcomesAndCoordinatorCommands() throws {
-        let direct = V2ActorOpenDirectRoomWire(actorUserID: actor, operationID: try DirectRoomOperationID("direct-op"), targetUserID: member)
-        #expect(try roundTrip(V2ActorRoomCreationCommand.openDirect(direct)).stableOperationIdentity == .direct(direct.operationID))
-        #expect(try direct.toDomain().targetUserID == member)
-        let directRoom = V2DirectRoom(roomID: roomID, actorUserID: actor, targetUserID: member, createdAt: now)
-        #expect(try roundTrip(V2ActorOpenDirectRoomOutcomeWire(domain: .idempotent(directRoom))).toDomain() == .idempotent(directRoom))
-        let group = V2ActorCreateGroupRoomWire(actorUserID: actor, operationID: operationID, title: "Team", initialMemberUserIDs: [member])
-        let domain = try group.toDomain(capacityClass: .standard)
-        #expect(try roundTrip(group).toDomain(capacityClass: .standard) == domain)
-        let groupRoom = try V2GroupRoom(roomID: roomID, ownerUserID: actor, title: "Team", capacityClass: .standard,
-                                        memberUserIDs: [actor, member], memberCount: 7, createdAt: now)
-        #expect(try roundTrip(V2ActorCreateGroupRoomOutcomeWire(domain: .created(groupRoom))).toDomain() == .created(groupRoom))
-        let audience = try V2GroupAudienceImport(actorUserID: actor, operationID: operationID,
-                                                   title: "Team", memberUserIDs: [member])
-        #expect(try roundTrip(V2ActorGroupAudienceImportWire(domain: audience)).toDomain() == audience)
-        let append = V2ActorStagedGroupAppendWire(actorUserID: actor, operationID: operationID, memberUserIDs: [member])
-        #expect(try roundTrip(append).validatedMemberUserIDs() == [member])
-        #expect(throws: V2GroupAudienceImportError.invalidInput) {
-            try V2ActorStagedGroupAppendWire(actorUserID: actor, operationID: operationID, memberUserIDs: []).validatedMemberUserIDs()
-        }
-    }
-
     @Test func frozenIntentAndManifestVerifyDigest() throws {
         let intent = try V2GroupRoomCreationIntent(actorUserID: actor, operationID: operationID, roomID: roomID,
                                                     eventID: eventID, roomShardID: "shard-a", routeEpoch: 0,

@@ -12,15 +12,7 @@ public enum V2ActorMessagingOperationID: Codable, Equatable, Sendable {
     case edit(MessageEditOperationID)
     case withdraw(MessageWithdrawalOperationID)
     case reaction(MessageReactionOperationID)
-    case recover(ClientMessageID)
-}
-
-public struct V2ActorMessageRecoveryWire: Codable, Equatable, Sendable {
-    public let actorUserID: UserID
-    public let request: V2MessageOperationRecoveryRequest
-    public init(actorUserID: UserID, request: V2MessageOperationRecoveryRequest) {
-        self.actorUserID = actorUserID; self.request = request
-    }
+    case mutation(V2OperationReference)
 }
 
 public struct V2ActorSendMessageWire: Codable, Equatable, Sendable {
@@ -45,91 +37,68 @@ public struct V2ActorSendMessageWire: Codable, Equatable, Sendable {
     }
 }
 
-public struct V2ActorEditMessageWire: Codable, Equatable, Sendable {
+
+
+
+
+
+
+public struct V2ActorMessageReactionSnapshotWire: Codable, Equatable, Sendable {
     public let roomID: RoomID
     public let actorUserID: UserID
-    public let operationID: MessageEditOperationID
-    public let messageID: MessageID
-    public let expectedMessageRevision: UInt64
-    public let text: String
-
-    public init(roomID: RoomID, actorUserID: UserID, operationID: MessageEditOperationID, messageID: MessageID, expectedMessageRevision: UInt64, text: String) {
-        self.roomID = roomID
-        self.actorUserID = actorUserID
-        self.operationID = operationID
-        self.messageID = messageID
-        self.expectedMessageRevision = expectedMessageRevision
-        self.text = text
-    }
-}
-
-public struct V2ActorWithdrawMessageWire: Codable, Equatable, Sendable {
-    public let roomID: RoomID
-    public let actorUserID: UserID
-    public let operationID: MessageWithdrawalOperationID
-    public let messageID: MessageID
-    public let expectedMessageRevision: UInt64
-
-    public init(roomID: RoomID, actorUserID: UserID, operationID: MessageWithdrawalOperationID, messageID: MessageID, expectedMessageRevision: UInt64) {
-        self.roomID = roomID
-        self.actorUserID = actorUserID
-        self.operationID = operationID
-        self.messageID = messageID
-        self.expectedMessageRevision = expectedMessageRevision
-    }
-}
-
-public struct V2ActorReactionMessageWire: Codable, Equatable, Sendable {
-    public let roomID: RoomID
-    public let actorUserID: UserID
-    public let operationID: MessageReactionOperationID
     public let messageID: MessageID
     public let reaction: String
-    public let action: V2MessageReactionAction
-
-    public init(roomID: RoomID, actorUserID: UserID, operationID: MessageReactionOperationID, messageID: MessageID, reaction: String, action: V2MessageReactionAction) {
-        self.roomID = roomID
-        self.actorUserID = actorUserID
-        self.operationID = operationID
-        self.messageID = messageID
-        self.reaction = reaction
-        self.action = action
+    public let requestID: UUID
+    public init(roomID: RoomID, actorUserID: UserID, messageID: MessageID, reaction: String, requestID: UUID = UUID()) {
+        self.roomID=roomID; self.actorUserID=actorUserID; self.messageID=messageID; self.reaction=reaction; self.requestID=requestID
     }
 }
 
 /// D1 房间范围命令族的判别字段。
 public enum V2RoomMessagingCommand: Codable, Equatable, Sendable {
-    case send(V2ActorSendMessageWire)
-    case edit(V2ActorEditMessageWire)
-    case withdraw(V2ActorWithdrawMessageWire)
-    case reaction(V2ActorReactionMessageWire)
-    case recover(V2ActorMessageRecoveryWire)
+    case sendOperation(V2MessageSendOperationCommand)
+    case recoverSendOperation(V2MessageSendOperationRecoveryRequest)
+    case editOperation(V2MessageEditOperationCommand)
+    case withdrawOperation(V2MessageWithdrawalOperationCommand)
+    case recoverMutation(V2MessageMutationRecoveryRequest)
+    case reactionOperation(V2MessageReactionOperationCommand)
+    case recoverReaction(V2MessageReactionRecoveryRequest)
+    case reactionSnapshot(V2ActorMessageReactionSnapshotWire)
 
     public var roomID: RoomID {
         switch self {
-        case .send(let value): value.roomID
-        case .edit(let value): value.roomID
-        case .withdraw(let value): value.roomID
-        case .reaction(let value): value.roomID
-        case .recover(let value): value.request.roomID
+        case .reactionOperation(let value): value.roomID
+        case .reactionSnapshot(let value): value.roomID
+        case .recoverReaction(let value): if case .message(let room,_) = value.identity.scope { room } else { preconditionFailure("validated reaction scope") }
+        case .sendOperation(let value): value.command.roomID
+        case .recoverSendOperation(let value): if case .room(let room)=value.identity.scope { room } else { preconditionFailure("validated send scope") }
+        case .editOperation(let value): value.roomID
+        case .withdrawOperation(let value): value.roomID
+        case .recoverMutation(let value): if case .message(let room,_) = value.identity.scope { room } else { preconditionFailure("validated mutation scope") }
         }
     }
     public var actorUserID: UserID {
         switch self {
-        case .send(let value): value.actorUserID
-        case .edit(let value): value.actorUserID
-        case .withdraw(let value): value.actorUserID
-        case .reaction(let value): value.actorUserID
-        case .recover(let value): value.actorUserID
+        case .reactionOperation(let value): value.actorUserID
+        case .reactionSnapshot(let value): value.actorUserID
+        case .recoverReaction(let value): value.identity.accountID
+        case .sendOperation(let value): value.command.senderUserID
+        case .recoverSendOperation(let value): value.identity.accountID
+        case .editOperation(let value): value.actorUserID
+        case .withdrawOperation(let value): value.actorUserID
+        case .recoverMutation(let value): value.identity.accountID
         }
     }
     public var operationID: V2ActorMessagingOperationID {
         switch self {
-        case .send(let value): .send(value.clientMessageID)
-        case .edit(let value): .edit(value.operationID)
-        case .withdraw(let value): .withdraw(value.operationID)
-        case .reaction(let value): .reaction(value.operationID)
-        case .recover(let value): .recover(value.request.clientMessageID)
+        case .reactionOperation(let value): .reaction(value.operationID)
+        case .reactionSnapshot(let value): .reaction(.init(uuid:value.requestID))
+        case .recoverReaction(let value): .mutation(value.identity.operation)
+        case .sendOperation(let value): .send(value.command.clientMessageID)
+        case .recoverSendOperation(let value): .mutation(value.identity.operation)
+        case .editOperation(let value): .edit(value.operationID)
+        case .withdrawOperation(let value): .withdraw(value.operationID)
+        case .recoverMutation(let value): .mutation(value.identity.operation)
         }
     }
     /// 四种操作都具有持久化、限定范围的幂等身份。

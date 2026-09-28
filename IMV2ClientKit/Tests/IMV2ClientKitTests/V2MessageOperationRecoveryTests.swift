@@ -3,89 +3,59 @@ import IMV2Core
 @testable import IMV2ClientKit
 import Testing
 
-@Suite("Message outcome recovery without replacing the original intent")
+@Suite("Message outcome recovery without replacing the original intent", .serialized)
 struct V2MessageOperationRecoveryTests {
-    @Test("expired sends survive terminal pruning and recover accepted with the original fingerprint")
-    func expiredAcceptance() async throws {
-        let store = try makeStore(), actor = UserID(uuid: UUID()), room = RoomID(uuid: UUID())
-        let transport = RecoveryOnlyMessageTransport()
-        let started = Date(timeIntervalSince1970: 1_000), now = started.addingTimeInterval(V2IdempotencyPolicy.maximumClientRetryAge + 1)
-        let initial = V2CommandOutboxEngine(store: store, transport: transport, now: { started })
-        let command = try await initial.enqueueMessage(roomID: room, text: "An immutable send", media: [.init(mediaID: .init(uuid: UUID()))])
-        let accepted = try V2MessageOperationAcceptance(messageID: .init(uuid: UUID()), roomSequence: 6)
-        let remote = ScriptedRecoveryClient([.accepted(accepted)])
-        try await store.expireStalePendingCommands(now: now)
-        try await store.pruneTerminalCommands(olderThan: now.addingTimeInterval(86_400))
-        let recovery = V2MessageOperationRecoveryController(store: store, remote: remote, actorUserID: { actor })
-        let engine = V2CommandOutboxEngine(store: store, transport: transport, now: { now }, recovery: recovery)
-        #expect(try await engine.flushOnce() == .accepted(command.clientMessageID))
-        let requests = await remote.requests
-        #expect(requests.count == 1)
-        let expected = try V2SendMessageCommand(roomID: room, senderUserID: actor, clientMessageID: command.clientMessageID,
-            text: command.text, media: command.media, limits: .init(maxUTF8Bytes: 1_024))
-        #expect(requests.first?.fingerprint == expected.fingerprint)
-        #expect(requests.first?.clientMessageID == command.clientMessageID)
-        #expect(requests.first?.action == .closeIfAbsent)
-        #expect(try await store.pendingMessageCommands().first?.acceptedMessageID == accepted.messageID)
-        #expect(await transport.calls == 0)
-        try await store.close()
-    }
-
-    @Test("unresolved recovery keeps the original operation, then records a permanent closure")
+    @Test("only a bound permanent closure permits an explicitly new send")
     func unresolvedThenClosed() async throws {
-        let store = try makeStore(), actor = UserID(uuid: UUID()), transport = RecoveryOnlyMessageTransport()
-        let now = Date(timeIntervalSince1970: 1_000)
-        let enqueue = V2CommandOutboxEngine(store: store, transport: transport, now: { now })
-        let command = try await enqueue.enqueueMessage(roomID: .init(uuid: UUID()), text: "Never duplicate")
-        try await store.requireMessageOperationRecovery(command.clientMessageID, now: now)
-        let remote = ScriptedRecoveryClient([.unresolved, .closed])
-        let controller = V2MessageOperationRecoveryController(store: store, remote: remote, actorUserID: { actor })
-        #expect(try await controller.flushOnce(now: now) == .retryScheduled(command.clientMessageID))
-        #expect(try await store.nextReadyMessage(now: now.addingTimeInterval(1_000)) == nil)
-        #expect(try await controller.flushOnce(now: now.addingTimeInterval(301)) == .rejected(command.clientMessageID, code: "MESSAGE_OPERATION_CLOSED"))
-        let requests = await remote.requests
-        #expect(requests.count == 2 && requests[0] == requests[1])
-        #expect(try await store.pendingMessageCommands().count == 1)
-        #expect(try await store.pendingMessageCommands().first?.terminalCode == "MESSAGE_OPERATION_CLOSED")
-        try await store.close()
+        let f=try SendWorkFixture();defer { f.remove() }
+        let intent=try f.intent("never duplicate"),created=Date().addingTimeInterval(-90_000)
+        try await f.store.freezeSendIntent(intent,now:created)
+        try await f.store.handOffSendIntent(intent.id,now:created)
+        let remote=ClosureMessageClient(),service=V2MessageSendOperationService(accountID:f.account,store:f.store,client:remote)
+        let work=try await f.head()
+        guard case .claimed(let submitted)=try await f.store.claimOperationWork(id:work.id,ownerID:UUID(),action:.submit,now:created.addingTimeInterval(1)) else { throw V2OperationWorkError.invalidTransition }
+        try await service.execute(submitted)
+        await #expect(throws:V2ResourceJournalError.conflict) { try await f.store.replaceProvenUnsentSendIntent(intent.id) }
+        try await service.resumeConfirmation(intentID:intent.id)
+        let original=try await f.store.messageSendCommand(workID:work.id)
+        try await service.execute(f.claim(try #require(await f.store.operationWork(id:work.id))))
+        #expect(try await f.store.operationWork(id:work.id)?.execution == .awaitingConfirmation)
+        try await service.execute(f.claim(try #require(await f.store.operationWork(id:work.id))))
+        #expect(try await f.store.operationWork(id:work.id)?.execution == .closed)
+        #expect(await remote.actions == [.closeIfAbsent,.closeIfAbsent])
+        let replacement=try await f.store.replaceProvenUnsentSendIntent(intent.id)
+        #expect(try await f.store.replaceProvenUnsentSendIntent(intent.id)==replacement)
+        let draft=try #require(try await f.store.preparingSendIntents().first)
+        #expect(draft.id==replacement && draft.clientMessageID != original.command.clientMessageID)
+        #expect(draft.text==original.command.text)
+        try await f.store.close()
     }
-
-    @Test("MEDIA_UNAVAILABLE enters durable recovery before any replacement can be sent")
-    func unavailableMediaUsesRecoveryLane() async throws {
-        let store = try makeStore(), actor = UserID(uuid: UUID()), transport = RecoveryOnlyMessageTransport()
-        let now = Date(timeIntervalSince1970: 2_000)
-        let remote = ScriptedRecoveryClient([.closed])
-        let engine = V2CommandOutboxEngine(store: store, transport: transport, now: { now },
-            recovery: .init(store: store, remote: remote, actorUserID: { actor }))
-        let command = try await engine.enqueueMessage(roomID: .init(uuid: UUID()), text: "Attachment",
-            media: [.init(mediaID: .init(uuid: UUID()))])
-        #expect(try await engine.flushOnce() == .retryScheduled(command.clientMessageID))
-        #expect(try await engine.flushOnce() == .rejected(command.clientMessageID, code: "MESSAGE_OPERATION_CLOSED"))
-        #expect(await transport.calls == 1)
-        #expect(try await engine.flushOnce() == .idle)
-        try await store.close()
-    }
-
-    private func makeStore() throws -> GRDBV2LocalSyncStore {
-        try .init(databaseURL: FileManager.default.temporaryDirectory.appendingPathComponent("message-operation-recovery-\(UUID()).sqlite"),
-                  installationBinding: .init(value: UUID()))
-    }
-}
-
-private actor ScriptedRecoveryClient: V2MessageOperationRecovering {
-    private var results: [V2MessageOperationRecoveryResult]
-    private(set) var requests: [V2MessageOperationRecoveryRequest] = []
-    init(_ results: [V2MessageOperationRecoveryResult]) { self.results = results }
-    func recover(_ request: V2MessageOperationRecoveryRequest) async throws -> V2MessageOperationRecoveryResult {
-        requests.append(request)
-        return results.isEmpty ? .unresolved : results.removeFirst()
+    @Test("unknown send blocks its room key without blocking a different room")
+    func unknownRoomHead() async throws {
+        let f=try SendWorkFixture();defer { f.remove() }
+        let first=try f.intent("unknown"),second=try f.intent("successor")
+        for intent in [first,second] { try await f.store.freezeSendIntent(intent);try await f.store.handOffSendIntent(intent.id) }
+        let work=try await f.head()
+        try await V2MessageSendOperationService(accountID:f.account,store:f.store,client:f.remote).execute(f.claim(work))
+        let independent=try V2SendIntent(id:UUID(),roomID:.init(uuid:UUID()),clientMessageID:.init(uuid:UUID()),text:"other room",attachmentJobIDs:[])
+        try await f.store.freezeSendIntent(independent);try await f.store.handOffSendIntent(independent.id)
+        let due=try await f.store.dueOperationWork(now:.distantFuture,kinds:[.sendMessage])
+        #expect(due.contains { $0.intentID==first.id })
+        #expect(!due.contains { $0.intentID==second.id })
+        #expect(due.contains { $0.intentID==independent.id })
+        try await f.store.close()
     }
 }
-private actor RecoveryOnlyMessageTransport: V2ClientMessageTransport {
-    private(set) var calls = 0
-    func sendMessage(roomID: RoomID, clientMessageID: ClientMessageID, text: String, media: [V2MediaReference],
-                     mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?) async throws -> V2ClientMessageAcceptance {
-        calls += 1
-        throw V2RealtimeTransportError.server(code: "MEDIA_UNAVAILABLE", retryable: false, retryAfterSeconds: 0, currentRevision: nil)
+private actor ClosureMessageClient:V2MessageSendOperationClient {
+    var command:V2MessageSendOperationCommand?
+    var actions:[V2OperationRecoveryRequest.Action]=[]
+    func submit(_ command:V2MessageSendOperationCommand) async throws -> V2MessageSendOperationRecoveryResult {
+        self.command=command;throw URLError(.networkConnectionLost)
+    }
+    func recover(_ request:V2MessageSendOperationRecoveryRequest) async throws -> V2MessageSendOperationRecoveryResult {
+        actions.append(request.action)
+        if actions.count==1 { return .unresolved }
+        guard let command else { return .unresolved }
+        return .receipt(try .init(identity:command.identity,fingerprint:command.fingerprint,outcome:.closed,resolvedAtMilliseconds:UInt64(Date().timeIntervalSince1970*1_000)))
     }
 }

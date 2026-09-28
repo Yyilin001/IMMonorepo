@@ -12,7 +12,7 @@ extension IMAppRoomRecoveryScaleTests {
         let personal = V2SyncEngine(transport: transport, store: store, capabilityProfile: session.capabilityProfile)
         try await synchronizeInitialState(personal)
         let race = RecoveryScanRaceTransport(transport: transport, roomID: roomID, boundary: boundary) {
-            try await sendRecoveryOnlineMessage(transport: transport, auth: auth, roomID: roomID,
+            try await sendRecoveryOnlineMessage(transport: transport, auth: auth, account: account, roomID: roomID,
                 deadline: ContinuousClock.now.advanced(by: .seconds(30)))
         }
         let engine = V2RoomRecoveryEngine(transport: race, latestVisible: transport, store: store,

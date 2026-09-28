@@ -4,6 +4,12 @@
 No existing database, .env, Keychain trust, container or listening service is
 modified. Private keys and bytes live in a temporary directory. Output contains
 only process/test logs and aggregate evidence; never credentials or signed URLs.
+
+--slow-resource selects only the dedicated slow upload scenario. The HTTPS
+fixture arm/state/release endpoints require X-Resource-Fixture and gate one PUT
+body after its first 16KiB for at most 45s; account control and Gateway TLS remain
+unpaused. Successful evidence requires real control/cursor assertions in that
+scenario, followed by a completed upload and drained gate.
 """
 import argparse
 import base64
@@ -48,14 +54,37 @@ def wait_listener(process, port):
 
 
 def stop(process):
-    if process.poll() is None:
-        os.killpg(process.pid, signal.SIGTERM)
+    # All callers below mark their start_new_session children at launch. Never
+    # derive a group from an inherited/shared child or from the current process.
+    group = getattr(process, '_owned_process_group', None)
+    if group != process.pid or group == os.getpgrp():
+        raise RuntimeError('refusing cleanup of an unowned process group')
+
+    def group_exists():
+        process.poll()  # Reap the leader even when only descendants remain.
         try:
-            process.wait(timeout=90)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=10)
-            raise RuntimeError('owned process failed to drain')
+            os.killpg(group, 0)
+            return True
+        except ProcessLookupError:
+            return False
+
+    def drain(seconds):
+        deadline = time.monotonic() + seconds
+        while group_exists():
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(.05)
+        return True
+
+    if group_exists():
+        try: os.killpg(group, signal.SIGTERM)
+        except ProcessLookupError: pass
+        if not drain(90):
+            try: os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError: pass
+            if not drain(10):
+                raise RuntimeError('owned process group failed to drain')
+    process.wait(timeout=10)
 
 
 def compose_defaults(name):
@@ -66,9 +95,103 @@ def compose_defaults(name):
             if '${' not in value}
 
 
+class SlowUploadGate:
+    """One owned upstream body gate; no capability, URL or body is retained."""
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.release_event = threading.Event()
+        self.armed = False
+        self.closed = False
+        self.connection = None
+        self.hits = self.body_bytes = self.active = self.completed = self.expired = 0
+        self.waiting = self.released = False
+
+    def snapshot(self):
+        with self.condition:
+            return dict(hits=self.hits, bodyBytesRead=self.body_bytes, waiting=self.waiting,
+                        active=self.active, completed=self.completed, expired=self.expired, released=self.released)
+
+    def arm(self):
+        with self.condition:
+            if self.closed or self.armed or self.hits:
+                return False
+            self.armed = True
+            return True
+
+    def claim(self, connection):
+        with self.condition:
+            if self.closed or not self.armed:
+                return False
+            self.armed = False
+            self.hits += 1
+            self.active += 1
+            self.connection = connection
+            return True
+
+    def read(self, handler, length):
+        # A remaining body is essential: a completed upload followed by a delayed
+        # response is not evidence of slow up-stream bytes.
+        if length <= 16384:
+            raise ValueError('slow upload requires a body larger than 16KiB')
+        handler.connection.settimeout(5)
+        prefix = handler.rfile.read(16384)
+        if len(prefix) != 16384:
+            raise ValueError('short upload body')
+        with self.condition:
+            self.body_bytes += len(prefix)
+            self.waiting = True
+        if not self.release_event.wait(timeout=45):
+            with self.condition:
+                self.expired += 1
+            raise TimeoutError('owned upload gate deadline exceeded')
+        with self.condition:
+            self.waiting = False
+            if self.closed:
+                raise ConnectionError('owned upload gate is closing')
+        handler.connection.settimeout(20)
+        remainder = handler.rfile.read(length - len(prefix))
+        with self.condition:
+            self.body_bytes += len(remainder)
+        if len(remainder) != length - len(prefix):
+            raise ValueError('short upload body')
+        return prefix + remainder
+
+    def release(self):
+        with self.condition:
+            self.released = True
+        self.release_event.set()
+
+    def finish(self, success):
+        with self.condition:
+            self.completed += int(success)
+            self.active -= 1
+            self.waiting = False
+            self.connection = None
+            self.condition.notify_all()
+
+    def close_and_drain(self):
+        with self.condition:
+            self.closed = True
+            connection = self.connection
+        self.release()
+        if connection is not None:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        deadline = time.monotonic() + 10
+        with self.condition:
+            while self.active:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError('owned slow upload handler did not drain')
+                self.condition.wait(timeout=remaining)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True, help='new evidence directory')
+    parser.add_argument('--slow-resource', action='store_true', help='one opt-in slow signed-byte upload with concurrent typed control and TLS cursor progress')
     args = parser.parse_args()
     if sys.platform != 'darwin':
         raise RuntimeError('this native ClientKit acceptance requires macOS')
@@ -97,6 +220,7 @@ def main():
         database_port, account_port, gateway_port, metrics_port = [free_port() for _ in range(4)]
         database_args = ['-h', '127.0.0.1', '-p', str(database_port), '-U', 'postgres']
         started_postgres, proxy, proxy_thread = False, None, None
+        slow_gate = SlowUploadGate() if args.slow_resource else None
         with (output / 'setup.log').open('w') as setup:
             def run(command):
                 subprocess.run(command, env=environment, stdout=setup, stderr=subprocess.STDOUT, check=True)
@@ -109,6 +233,7 @@ def main():
                 log = (output / (name + '.log')).open('w'); logs.append(log)
                 process = subprocess.Popen([str(binary / name)], env=dict(environment, **config),
                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                process._owned_process_group = process.pid
                 processes.append(process)
                 return process
 
@@ -141,10 +266,46 @@ def main():
                         pass  # Signed object capabilities must not enter access logs.
 
                     def dispatch(self):
+                        self._slow_claimed = False
+                        self._slow_success = False
+                        try:
+                            self.dispatch_request()
+                        except (TimeoutError, ValueError, OSError):
+                            if not self._slow_claimed:
+                                raise
+                            self.close_connection = True
+                            try: self.send_error(408)
+                            except OSError: pass
+                        finally:
+                            if self._slow_claimed:
+                                slow_gate.finish(self._slow_success)
+
+                    def dispatch_request(self):
+                        path = self.path.split('?', 1)[0]
+                        if path.startswith('/__fixture__/slow-upload/'):
+                            if slow_gate is None or self.headers.get('X-Resource-Fixture') != fixture_token:
+                                self.send_error(403); return
+                            if self.headers.get('Transfer-Encoding') or self.headers.get('Content-Length', '0') != '0':
+                                self.send_error(400); self.close_connection = True; return
+                            if path == '/__fixture__/slow-upload/state' and self.command == 'GET':
+                                value = slow_gate.snapshot()
+                            elif path == '/__fixture__/slow-upload/arm' and self.command == 'POST':
+                                if not slow_gate.arm(): self.send_error(409); return
+                                value = slow_gate.snapshot()
+                            elif path == '/__fixture__/slow-upload/release' and self.command == 'POST':
+                                slow_gate.release(); value = slow_gate.snapshot()
+                            else:
+                                self.send_error(404); return
+                            payload = json.dumps(value).encode()
+                            self.send_response(200); self.send_header('Content-Type', 'application/json')
+                            self.send_header('Content-Length', str(len(payload))); self.end_headers()
+                            self.wfile.write(payload); return
                         length = int(self.headers.get('Content-Length', '0'))
                         if not 0 <= length <= 2 * 1024 * 1024 or self.headers.get('Transfer-Encoding'):
                             self.send_error(413); return
-                        body = self.rfile.read(length)
+                        if slow_gate is not None and self.command == 'PUT' and re.fullmatch(r'/v2/local-media/upload/[0-9a-fA-F-]{36}', path):
+                            self._slow_claimed = slow_gate.claim(self.connection)
+                        body = slow_gate.read(self, length) if self._slow_claimed else self.rfile.read(length)
                         if self.path == '/__fixture__/room' and self.command == 'POST':
                             if self.headers.get('X-Resource-Fixture') != fixture_token:
                                 self.send_error(403); return
@@ -178,7 +339,7 @@ def main():
                         headers = {key: value for key, value in self.headers.items() if key.lower() not in excluded}
                         headers['X-IM-V2-Account-Edge-Authorization'] = secrets['IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64']
                         headers['X-IM-V2-Account-Client-Address'] = '127.0.0.1'
-                        upstream = http.client.HTTPConnection('127.0.0.1', account_port, timeout=20)
+                        upstream = http.client.HTTPConnection('127.0.0.1', account_port, timeout=5 if self._slow_claimed else 20)
                         try:
                             upstream.request(self.command, self.path, body, headers)
                             response = upstream.getresponse(); payload = response.read()
@@ -194,6 +355,7 @@ def main():
                                     self.send_header(key, value)
                             self.send_header('Content-Length', str(len(payload))); self.end_headers()
                             self.wfile.write(payload)
+                            self._slow_success = 200 <= response.status < 300
                         finally:
                             upstream.close()
 
@@ -209,6 +371,7 @@ def main():
                 base_url = f'https://localhost:{proxy.server_port}'
                 db_url = f'postgres://postgres@127.0.0.1:{database_port}/im_live_resources'
                 shared = dict(secrets, IM_V2_DATABASE_URL=db_url,
+                    IM_V2_DIRECT_ROOM_SHARD_ID='rooms-primary', IM_V2_GROUP_ROOM_SHARD_ID='rooms-primary',
                     IM_V2_ROOM_SHARD_STORES_JSON=json.dumps([{'shard_id': 'rooms-primary', 'database_url': db_url, 'schema': 'im_v2'}]),
                     IM_V2_USER_SHARD_STORES_JSON=json.dumps([{'bucket': 'users-primary', 'database_url': db_url, 'schema': 'im_v2'}]),
                     IM_V2_LOCAL_MEDIA_MODE='filesystem', IM_V2_LOCAL_MEDIA_UNSAFE_TEST_ONLY='1',
@@ -229,18 +392,28 @@ def main():
                 test_env = dict(environment, IMV2_LIVE_RESOURCE_GATEWAY_PORT=str(gateway_port),
                     IMV2_LIVE_RESOURCE_FIXTURE_TOKEN=fixture_token, IMV2_LIVE_ACCOUNT_HTTPS_URL=base_url,
                     IMV2_LIVE_ACCOUNT_CA_DER=str(private / 'ca.der'))
+                if args.slow_resource:
+                    test_env['IMV2_LIVE_RESOURCE_SLOW_UPLOAD'] = '1'
+                test_filter = 'V2LiveResourceAuthorTests/slowResourceUploadKeepsControlAndCursorProgress' if args.slow_resource else 'V2LiveResourceAuthorTests'
                 with (output / 'client.log').open('w') as log:
                     test = subprocess.Popen(['swift', 'test', '--disable-automatic-resolution', '--no-parallel',
-                        '--jobs', '4', '--filter', 'V2LiveResourceAuthorTests'], cwd=ROOT / 'IMV2ClientKit', env=test_env,
+                        '--jobs', '4', '--filter', test_filter], cwd=ROOT / 'IMV2ClientKit', env=test_env,
                         stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                    test._owned_process_group = test.pid
                     try:
                         result = test.wait(timeout=240)
                     finally:
                         stop(test)
                 text = (output / 'client.log').read_text()
-                passed = len(re.findall(r'Test "real resource upload, author delivery, byte access and block revocation" passed', text)) == 1
+                if args.slow_resource:
+                    passed = 'slowResourceUploadKeepsControlAndCursorProgress' in text and bool(re.search(r'Test .*slowResourceUploadKeepsControlAndCursorProgress.* passed', text))
+                    state = slow_gate.snapshot()
+                    passed = passed and state['hits'] == state['completed'] == 1 and state['expired'] == state['active'] == 0 and state['released'] and state['bodyBytesRead'] > 16384
+                else:
+                    passed = len(re.findall(r'Test "real resource upload, author delivery, byte access and block revocation" passed', text)) == 1
                 summary = {'clientExitCode': result, 'requiredTestPassed': passed,
                     'httpResponses': [{'method': m, 'path': p, 'status': s, 'count': n} for (m, p, s), n in sorted(counts.items())],
+                    'slowResourceGate': slow_gate.snapshot() if slow_gate else None,
                     'resourceFacts': json.loads(sql("""SELECT json_build_object(
                         'readyAvatars',(SELECT count(*) FROM im_v2.resource_catalog r JOIN im_v2.media_objects m USING(media_id) WHERE r.usage_kind='user_avatar' AND m.state='available'),
                         'variants',(SELECT count(*) FROM im_v2.resource_variants),
@@ -250,6 +423,10 @@ def main():
                     raise RuntimeError('required live resource test failed; inspect client.log')
             finally:
                 failures = []
+                if slow_gate is not None:
+                    try: slow_gate.close_and_drain()
+                    except Exception as error: failures.append(str(error))
+                    (output / 'slow-resource-gate.json').write_text(json.dumps(slow_gate.snapshot(), indent=2) + '\n')
                 for process in reversed(processes):
                     try: stop(process)
                     except Exception as error: failures.append(str(error))

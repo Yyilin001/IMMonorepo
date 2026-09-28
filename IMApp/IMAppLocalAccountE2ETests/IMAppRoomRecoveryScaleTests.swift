@@ -193,7 +193,7 @@ final class IMAppRoomRecoveryScaleTests: XCTestCase {
                 }
                 let deadline = ContinuousClock.now.advanced(by: .seconds(30))
                 if dropTail { await loss.arm() }
-                try await sendRecoveryOnlineMessage(transport: transport, auth: auth, roomID: roomID, deadline: deadline)
+                try await sendRecoveryOnlineMessage(transport: transport, auth: auth, account: account, roomID: roomID, deadline: deadline)
                 // No detailed room subscription or manual recovery request. The
                 // account notification must wake the still-running recovery driver.
                 while true {
@@ -300,35 +300,13 @@ private func controlRecoveryBroker(action: String) async throws {
 }
 
 func sendRecoveryOnlineMessage(transport: V2ProtobufSyncTransport, auth: V2AuthSession,
-                                       roomID: RoomID, deadline: ContinuousClock.Instant) async throws {
-    let secondaryPort = ProcessInfo.processInfo.environment["IMV2_ROOM_RECOVERY_SECONDARY_PORT"].flatMap(UInt16.init)
-    let secondary = try secondaryPort.map { port in
-        V2TLSFrameConnection(endpoint: try .init(host: "localhost", port: port),
-            frameLimits: try .init(maximumPayloadBytes: 65536, acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]))
-    }
-    do {
-        var sender = transport
-        if let secondary {
-            let coordinator = V2RealtimeSessionCoordinator(authSession: auth, connection: secondary,
-                supportedCapabilityProfiles: ["base"])
-            let session = try await coordinator.connect()
-            sender = V2ProtobufSyncTransport(wire: secondary, protocolVersion: session.protocolVersion)
-        }
-        let clientID = try ClientMessageID(UUID().uuidString.lowercased())
-        while true {
-            do {
-                _ = try await sender.sendMessage(roomID: roomID, clientMessageID: clientID,
-                    text: "tls-scale-online", media: [], mentions: [])
-                break
-            } catch V2RealtimeTransportError.server(code: _, retryable: true, retryAfterSeconds: let seconds, currentRevision: _) {
-                guard ContinuousClock.now < deadline else { throw V2RealtimeTransportError.unexpectedResponse }
-                try await Task.sleep(for: .seconds(max(1, seconds)))
-            }
-        }
-        await secondary?.disconnect()
-    } catch {
-        await secondary?.disconnect()
-        throw error
+                               account: LocalE2EAccountCredentials,
+                               roomID: RoomID, deadline: ContinuousClock.Instant) async throws {
+    // The receiver remains on TLS; the mutation uses its persisted HTTP operation.
+    let clientID = try ClientMessageID(UUID().uuidString.lowercased())
+    guard ContinuousClock.now < deadline else { throw V2RealtimeTransportError.unexpectedResponse }
+    _ = try await V2HTTPRequestDeadline.run(until: deadline, service: "accountAPI") {
+        try await account.sendMessage(roomID: roomID, clientMessageID: clientID, text: "tls-scale-online", auth: auth)
     }
 }
 

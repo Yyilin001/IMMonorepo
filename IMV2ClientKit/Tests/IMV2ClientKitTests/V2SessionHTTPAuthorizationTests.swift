@@ -157,6 +157,111 @@ struct V2SessionHTTPAuthorizationTests {
         #expect(await session.currentState() != .unauthenticated)
     }
 
+    @Test("real builder carries local deadline through request copies without wire headers")
+    func builderDeadlineMetadata() async throws {
+        let old = try makeCredentials()
+        let session = V2AuthSession(credentialStore: HTTPAuthorizationCredentialStore(old), transport: try refreshTransport(HTTPAuthorizationTransport(status: 401)))
+        _ = try await session.restoreState()
+        let edge = HTTPAuthorizationTransport(status: 200)
+        let authorization = V2SessionHTTPAuthorization(session: session, epoch: await session.currentEpoch(), transport: edge)
+        let client = try V2HTTPDeviceSessionClient(endpoint: URL(string: "https://account.example.test/v2/devices")!, credentials: authorization, transport: authorization)
+        _ = try? await client.list(cursor: nil, pageSize: 10)
+        let observed = await edge.deadlineObservation()
+        #expect(observed.0 != nil)
+        #expect(observed.0 == observed.1)
+        #expect(observed.2.keys.allSatisfy { !$0.lowercased().contains("deadline") })
+        var copy = try request(old)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        V2HTTPRequestDeadline.attach(deadline, to: &copy)
+        copy = (copy as NSURLRequest).copy() as! URLRequest
+        copy.httpBody = Data("changed body".utf8)
+        copy.setValue("value", forHTTPHeaderField: "X-Copy-Test")
+        #expect(V2HTTPRequestDeadline.deadline(for: copy) == deadline)
+    }
+
+    @Test("short HTTP deadline drains real shared refresh without shortening another subscriber")
+    func physicalRefreshUsesIndependentBudget() async throws {
+        let old = try makeCredentials()
+        let successor = try makeCredentials(token: "successor")
+        HTTPDeadlineProtocol.state.reset(body: try refreshBody(successor))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [HTTPDeadlineProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+        let scheduler = V2AccountWorkScheduler(configuration: .init(ordinaryLimit: 1))
+        let executor = V2HTTPExecutor(session: urlSession, scheduler: scheduler)
+        let refresh = try V2HTTPDeviceCredentialAuthTransport(refreshEndpoint: URL(string: "https://account.example.test/refresh")!,
+            transport: V2URLSessionAuthHTTPTransport(executor: executor, workContext: .init(service: "authentication", kind: .authentication)))
+        let session = V2AuthSession(credentialStore: HTTPAuthorizationCredentialStore(old), transport: refresh)
+        _ = try await session.restoreState()
+        let authorization = V2SessionHTTPAuthorization(session: session, epoch: await session.currentEpoch(),
+            transport: V2URLSessionAuthHTTPTransport(executor: executor), scheduler: scheduler)
+        var original = try request(old)
+        V2HTTPRequestDeadline.attach(.now.advanced(by: .milliseconds(500)), to: &original)
+        let boundRequest = original
+        let returned = HTTPDeadlineReturnFlag()
+        let short = Task {
+            defer { Task { await returned.finish() } }
+            return try await authorization.data(for: boundRequest)
+        }
+        let startLimit = ContinuousClock.now.advanced(by: .seconds(2))
+        while !HTTPDeadlineProtocol.state.started {
+            try #require(ContinuousClock.now < startLimit)
+            await Task.yield()
+        }
+        let independent = Task { try await session.refresh() }
+        try await Task.sleep(for: .milliseconds(600))
+        #expect(await scheduler.snapshot().active == 1)
+        #expect(await !returned.finished)
+        #expect(HTTPDeadlineProtocol.state.stops == 0)
+        HTTPDeadlineProtocol.state.release()
+        await #expect(throws: V2HTTPFailure(kind: .deadlineExceeded, service: "account", certainty: .outcomeUnknown)) { try await short.value }
+        #expect(try await independent.value == successor)
+        #expect(await scheduler.snapshot().active == 0)
+        #expect(HTTPDeadlineProtocol.state.refreshes == 1)
+        #expect(HTTPDeadlineProtocol.state.businessRequests == 1)
+    }
+
+    @Test("initial expired credential timeout retains auth slot until real rotation drains")
+    func initialCredentialsIncludeDeadline() async throws {
+        let old = try V2AuthCredentials(userID: .init("test-user"), deviceID: .init("test-device"),
+            accessToken: "expired", accessTokenExpiresAt: .distantPast, refreshCredential: "test-refresh")
+        let successor = try makeCredentials(token: "successor")
+        HTTPDeadlineProtocol.state.reset(body: try refreshBody(successor))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [HTTPDeadlineProtocol.self]
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+        let scheduler = V2AccountWorkScheduler(configuration: .init(ordinaryLimit: 1))
+        let executor = V2HTTPExecutor(session: urlSession, scheduler: scheduler)
+        let refresh = try V2HTTPDeviceCredentialAuthTransport(refreshEndpoint: URL(string: "https://account.example.test/refresh")!,
+            transport: V2URLSessionAuthHTTPTransport(executor: executor, workContext: .init(service: "authentication", kind: .authentication)))
+        let session = V2AuthSession(credentialStore: HTTPAuthorizationCredentialStore(old), transport: refresh)
+        _ = try await session.restoreState()
+        let authorization = V2SessionHTTPAuthorization(session: session, epoch: await session.currentEpoch(), scheduler: scheduler, requestTimeout: 0.5)
+        let returned = HTTPDeadlineReturnFlag()
+        let short = Task {
+            defer { Task { await returned.finish() } }
+            return try await authorization.deviceSessionCredentials()
+        }
+        let startLimit = ContinuousClock.now.advanced(by: .seconds(2))
+        while !HTTPDeadlineProtocol.state.started {
+            try #require(ContinuousClock.now < startLimit)
+            await Task.yield()
+        }
+        let independent = Task { try await session.refresh() }
+        try await Task.sleep(for: .milliseconds(600))
+        #expect(await scheduler.snapshot().active == 1)
+        #expect(await !returned.finished)
+        #expect(HTTPDeadlineProtocol.state.stops == 0)
+        HTTPDeadlineProtocol.state.release()
+        await #expect(throws: V2HTTPFailure(kind: .deadlineExceeded, service: "authentication", certainty: .notStarted)) { try await short.value }
+        #expect(try await independent.value == successor)
+        #expect(await scheduler.snapshot().active == 0)
+        #expect(HTTPDeadlineProtocol.state.refreshes == 1)
+        #expect(HTTPDeadlineProtocol.state.businessRequests == 0)
+    }
+
     private func refreshTransport(_ transport: HTTPAuthorizationTransport) throws -> V2HTTPDeviceCredentialAuthTransport {
         try .init(refreshEndpoint: URL(string: "https://account.example.test/v2/device-credentials/refresh")!, transport: transport)
     }
@@ -242,6 +347,9 @@ private actor HTTPAuthorizationTransport: V2AuthHTTPTransport, V2ClientDeviceSes
     private let body: Data
     private let failure: Failure?
     private var blocked: Bool
+    private var observedDeadline: ContinuousClock.Instant?
+    private var observedScope: ContinuousClock.Instant?
+    private var observedHeaders: [String: String] = [:]
     private var requests = 0
     private var waiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
@@ -249,6 +357,9 @@ private actor HTTPAuthorizationTransport: V2AuthHTTPTransport, V2ClientDeviceSes
         self.status = status; self.body = body; self.blocked = blocked; self.failure = failure
     }
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        observedDeadline = V2HTTPRequestDeadline.deadline(for: request)
+        observedScope = V2HTTPRequestDeadline.current
+        observedHeaders = request.allHTTPHeaderFields ?? [:]
         requests += 1
         let ready = waiters.filter { requests >= $0.0 }
         waiters.removeAll { requests >= $0.0 }
@@ -260,6 +371,7 @@ private actor HTTPAuthorizationTransport: V2AuthHTTPTransport, V2ClientDeviceSes
         let url = try #require(request.url)
         return (body, try #require(HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])))
     }
+    func deadlineObservation() -> (ContinuousClock.Instant?, ContinuousClock.Instant?, [String: String]) { (observedDeadline, observedScope, observedHeaders) }
     func count() -> Int { requests }
     func waitForRequest(count: Int = 1) async {
         if requests >= count { return }
@@ -269,5 +381,45 @@ private actor HTTPAuthorizationTransport: V2AuthHTTPTransport, V2ClientDeviceSes
         blocked = false
         let pending = releaseWaiters; releaseWaiters.removeAll()
         for waiter in pending { waiter.resume() }
+    }
+}
+
+private actor HTTPDeadlineReturnFlag {
+    var finished = false
+    func finish() { finished = true }
+}
+private final class HTTPDeadlineProtocol: URLProtocol, @unchecked Sendable {
+    static let state = State()
+    final class State: @unchecked Sendable {
+        private let lock = NSLock()
+        private var pending: [HTTPDeadlineProtocol] = []
+        private var body = Data()
+        private var refreshCount = 0
+        private var businessCount = 0
+        private var stopCount = 0
+        var started: Bool { lock.withLock { !pending.isEmpty } }
+        var stops: Int { lock.withLock { stopCount } }
+        var refreshes: Int { lock.withLock { refreshCount } }
+        var businessRequests: Int { lock.withLock { businessCount } }
+        func reset(body: Data) { lock.withLock { self.body = body; pending = []; refreshCount = 0; businessCount = 0; stopCount = 0 } }
+        func receive(_ request: HTTPDeadlineProtocol) {
+            if request.request.url?.path == "/refresh" { lock.withLock { pending.append(request); refreshCount += 1 } }
+            else { lock.withLock { businessCount += 1 }; request.deliver(status: 401, body: Data()) }
+        }
+        func stop() { lock.withLock { stopCount += 1 } }
+        func release() {
+            let delivery = lock.withLock { let value = (pending, body); pending = []; return value }
+            for request in delivery.0 { request.deliver(status: 200, body: delivery.1) }
+        }
+    }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() { Self.state.receive(self) }
+    override func stopLoading() { if request.url?.path == "/refresh" { Self.state.stop() } }
+    func deliver(status: Int, body: Data) {
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
     }
 }

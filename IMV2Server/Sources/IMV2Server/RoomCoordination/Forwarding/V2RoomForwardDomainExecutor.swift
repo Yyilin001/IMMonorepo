@@ -41,6 +41,9 @@ public struct V2RoomForwardDomainExecutor: Sendable {
         switch command {
         case .sameOwnerPair:
             throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        case .recoverExport(let pair,let action):
+            if let outcome=try await exports.recover(pair,action:action) { return .terminalExport(.init(domain:outcome)) }
+            return .unresolvedExport
         case .prepareExport(let request):
             let sourceRoute = try V2RoomShardRoute(shardID: token.owner.shardID,
                                                    epoch: token.owner.epoch)

@@ -26,44 +26,65 @@ public struct V2RoomRefMessagingClient: Sendable {
     // 持久化发件箱仍是权威依据。
     public var publishesCommittedGroupEvents: Bool { false }
 
-    public func send(_ request: V2AuthenticatedSendMessage) async throws -> V2SendMessageOutcome {
-        let response = try await call(.send(.init(request)), actor: request.actorUserID)
-        guard case .send(let value) = response else { throw V2RoomCallFailure.outcomeUnknown }
-        return try value.toDomain()
+
+
+    public func reactionOperation(_ command:V2MessageReactionOperationCommand) async throws -> V2MessageReactionRecoveryResult {
+        try await reactionOperationCall(.reactionOperation(command),identity:command.identity,fingerprint:command.fingerprint)
+    }
+    public func recoverReaction(_ request:V2MessageReactionRecoveryRequest) async throws -> V2MessageReactionRecoveryResult {
+        try await reactionOperationCall(.recoverReaction(request),identity:request.identity,fingerprint:request.fingerprint)
+    }
+    public func reactionSnapshot(roomID:RoomID,actorUserID:UserID,messageID:MessageID,reaction:String) async throws -> V2MessageReactionSnapshot {
+        guard case .reactionSnapshot(let result)=try await call(.reactionSnapshot(.init(roomID:roomID,actorUserID:actorUserID,messageID:messageID,reaction:reaction)),actor:actorUserID),
+              result.roomID==roomID,result.actorUserID==actorUserID,result.messageID==messageID else { throw V2RoomCallFailure.outcomeUnknown }
+        return result
+    }
+    private func reactionOperationCall(_ command:V2RoomMessagingCommand,identity:V2OperationIdentity,fingerprint:V2OperationFingerprint) async throws -> V2MessageReactionRecoveryResult {
+        guard case .reactionOperation(let result)=try await call(command,actor:identity.accountID) else { throw V2RoomCallFailure.outcomeUnknown }
+        if case .receipt(let receipt)=result, !receipt.validates(identity:identity,fingerprint:fingerprint) { throw V2RoomCallFailure.outcomeUnknown }
+        if case .deferred(let hint)=result, !hint.validates(identity:identity,fingerprint:fingerprint) { throw V2RoomCallFailure.outcomeUnknown }
+        return result
+    }
+    public func sendOperation(_ command:V2MessageSendOperationCommand) async throws -> V2MessageSendOperationRecoveryResult {
+        try await sendOperationCall(.sendOperation(command),identity:command.identity,fingerprint:command.fingerprint)
+    }
+    public func recoverSendOperation(_ request:V2MessageSendOperationRecoveryRequest) async throws -> V2MessageSendOperationRecoveryResult {
+        try await sendOperationCall(.recoverSendOperation(request),identity:request.identity,fingerprint:request.fingerprint)
+    }
+    private func sendOperationCall(_ command:V2RoomMessagingCommand,identity:V2OperationIdentity,fingerprint:V2OperationFingerprint) async throws -> V2MessageSendOperationRecoveryResult {
+        guard case .sendOperation(let result)=try await call(command,actor:identity.accountID) else { throw V2RoomCallFailure.outcomeUnknown }
+        if case .receipt(let receipt)=result,!receipt.validates(identity:identity,fingerprint:fingerprint) { throw V2RoomCallFailure.outcomeUnknown }
+        if case .deferred(let hint)=result,!hint.validates(identity:identity,fingerprint:fingerprint) { throw V2RoomCallFailure.outcomeUnknown }
+        return result
     }
 
-    public func recover(_ request: V2MessageOperationRecoveryRequest, actorUserID: UserID) async throws -> V2MessageOperationRecoveryResult {
-        let response = try await call(.recover(.init(actorUserID: actorUserID, request: request)), actor: actorUserID)
-        guard case .recovery(let value) = response else { throw V2RoomCallFailure.outcomeUnknown }
-        return value
+    public func editOperation(_ command:V2MessageEditOperationCommand) async throws -> V2MessageMutationRecoveryResult {
+        try await mutationCall(.editOperation(command),identity:command.identity,fingerprint:command.fingerprint)
     }
-
-    public func edit(_ request: V2AuthenticatedMessageEdit) async throws -> V2MessageEditOutcome {
-        let response = try await call(.edit(.init(request)), actor: request.actorUserID)
-        guard case .edit(let value) = response else { throw V2RoomCallFailure.outcomeUnknown }
-        return try value.toDomain()
+    public func withdrawOperation(_ command:V2MessageWithdrawalOperationCommand) async throws -> V2MessageMutationRecoveryResult {
+        try await mutationCall(.withdrawOperation(command),identity:command.identity,fingerprint:command.fingerprint)
     }
-
-    public func withdraw(_ request: V2AuthenticatedMessageWithdrawal) async throws -> V2MessageWithdrawalOutcome {
-        let response = try await call(.withdraw(.init(request)), actor: request.actorUserID)
-        guard case .withdraw(let value) = response else { throw V2RoomCallFailure.outcomeUnknown }
-        return try value.toDomain()
+    public func recoverMutation(_ request:V2MessageMutationRecoveryRequest) async throws -> V2MessageMutationRecoveryResult {
+        try await mutationCall(.recoverMutation(request),identity:request.identity,fingerprint:request.fingerprint)
     }
-
-    public func change(_ request: V2AuthenticatedMessageReaction) async throws -> V2MessageReactionOutcome {
-        let response = try await call(.reaction(.init(request)), actor: request.actorUserID)
-        guard case .reaction(let value) = response else { throw V2RoomCallFailure.outcomeUnknown }
-        return try value.toDomain()
+    private func mutationCall(_ command:V2RoomMessagingCommand,identity:V2OperationIdentity,fingerprint:V2OperationFingerprint) async throws -> V2MessageMutationRecoveryResult {
+        guard case .mutation(let result)=try await call(command,actor:identity.accountID) else { throw V2RoomCallFailure.outcomeUnknown }
+        if case .receipt(let receipt)=result, !receipt.validates(identity:identity,fingerprint:fingerprint) { throw V2RoomCallFailure.outcomeUnknown }
+        if case .deferred(let hint)=result,!hint.validates(identity:identity,fingerprint:fingerprint) { throw V2RoomCallFailure.outcomeUnknown }
+        return result
     }
 
     private func call(_ command: V2RoomMessagingCommand, actor: UserID) async throws -> V2RoomMessagingResult {
-        guard !Task.isCancelled else { throw V2RoomCallFailure.notAccepted(.cancelled) }
-        let response = try await invoke(.messaging(command), actor, .now + callTimeout.duration)
+        try Task.checkCancellation()
+        let response: V2RoomResponse
+        do {
+            response = try await invoke(.messaging(command), actor, .now + callTimeout.duration)
+        } catch let failure as V2RoomCallFailure {
+            if case .notAccepted(.cancelled) = failure { throw CancellationError() }
+            throw failure
+        }
         guard case .messaging(let result) = response else { throw V2RoomCallFailure.outcomeUnknown }
         if case .failure(let failure) = result { throw failure.domainError() }
         return result
     }
 }
-
-extension V2RoomRefMessagingClient: V2GatewaySendMessageHandling,
-    V2GatewayMessageEditHandling, V2GatewayMessageWithdrawalHandling, V2GatewayMessageReactionHandling {}

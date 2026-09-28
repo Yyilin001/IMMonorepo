@@ -133,6 +133,7 @@ public final class V2CachedRoomShardRouter: V2DirectRoomShardRouting, Sendable {
         actorUserID: UserID,
         targetUserID: UserID,
         proposedShardID: String,
+        deadline: ContinuousClock.Instant? = nil,
         _ operation: @escaping @Sendable (V2RoomShardRoute) async throws -> (
             result: Result, roomID: RoomID?
         )
@@ -140,7 +141,8 @@ public final class V2CachedRoomShardRouter: V2DirectRoomShardRouting, Sendable {
         let committed = try await source.withDirectPairRoute(
             actorUserID: actorUserID,
             targetUserID: targetUserID,
-            proposedShardID: proposedShardID
+            proposedShardID: proposedShardID,
+            deadline: deadline
         ) { route in
             let completion = try await operation(route)
             return (result: (value: completion.result, roomID: completion.roomID, route: route), roomID: completion.roomID)

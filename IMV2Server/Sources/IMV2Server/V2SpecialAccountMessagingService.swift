@@ -17,6 +17,7 @@ public struct V2TrustedSpecialAccountMessage: Sendable {
     /// 本次发送的幂等操作标识。
     public let operationID: ClientMessageID
     /// 请求指纹，用于区分同标识下的不同载荷。
+    public let firstSubmissionDeadlineMilliseconds: UInt64
     public let requestFingerprint: String
     /// 接收消息的客户用户。
     public let customerUserID: UserID
@@ -56,6 +57,7 @@ public struct V2TrustedSpecialAccountMessage: Sendable {
         operatorID: String? = nil,
         operationID: ClientMessageID,
         requestFingerprint: String,
+        firstSubmissionDeadlineMilliseconds: UInt64,
         customerUserID: UserID,
         text: String,
         media: [V2MediaReference] = [],
@@ -63,6 +65,8 @@ public struct V2TrustedSpecialAccountMessage: Sendable {
         entities: [V2MessageEntity] = [],
         replyTo: V2MessageReplyReference? = nil
     ) throws {
+        guard firstSubmissionDeadlineMilliseconds > 0, firstSubmissionDeadlineMilliseconds <= UInt64(Int64.max) else { throw V2SpecialAccountMessagingError.invalidRequest }
+        self.firstSubmissionDeadlineMilliseconds = firstSubmissionDeadlineMilliseconds
         let key = stableAccountKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let principal = servicePrincipal.trimmingCharacters(in: .whitespacesAndNewlines)
         let fingerprint = requestFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -149,7 +153,7 @@ public protocol V2SpecialAccountMessagingStore: Sendable {
 /// 两条底层操作使用同一个由调用方提供的操作标识。
 public struct V2TrustedSpecialAccountMessagingService: Sendable {
     private let store: any V2SpecialAccountMessagingStore
-    private let directMessaging: V2DirectMessagingService
+    private let directMessaging: PostgresV2DirectRoomOperationStore
     private let messages: V2SendMessageService
     private let now: @Sendable () -> Date
 
@@ -162,7 +166,7 @@ public struct V2TrustedSpecialAccountMessagingService: Sendable {
     ///   - now: 可注入的当前时刻读取函数。
     public init(
         store: any V2SpecialAccountMessagingStore,
-        directMessaging: V2DirectMessagingService,
+        directMessaging: PostgresV2DirectRoomOperationStore,
         messages: V2SendMessageService,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
@@ -188,16 +192,18 @@ public struct V2TrustedSpecialAccountMessagingService: Sendable {
         guard let account = try await store.resolveActiveAccount(stableKey: request.stableAccountKey) else {
             throw V2SpecialAccountMessagingError.accountUnavailable
         }
-        let opened = try await directMessaging.open(
-            actorUserID: account.userID,
-            operationID: try .init(request.operationID.rawValue),
-            targetUserID: request.customerUserID
-        )
-        let roomID: RoomID
+        let command = try V2DirectRoomOperationCommand(actorUserID:account.userID,
+            operationID:.init(request.operationID.rawValue),targetUserID:request.customerUserID,
+            firstSubmissionDeadlineMilliseconds:request.firstSubmissionDeadlineMilliseconds)
+        let opened = try await directMessaging.submit(command,now:now(),deadline:ContinuousClock.now.advanced(by:.seconds(10)))
+        let roomID:RoomID
         switch opened {
-        case .opened(let room), .idempotent(let room): roomID = room.roomID
-        case .idempotencyConflict: throw V2SpecialAccountMessagingError.idempotencyConflict
-        case .unavailable: throw V2SpecialAccountMessagingError.unavailable
+        case .receipt(let receipt):
+            guard receipt.validates(command:command) else { throw V2SpecialAccountMessagingError.unavailable }
+            guard case .opened(let room,_) = receipt.outcome else { throw V2SpecialAccountMessagingError.deliveryDenied }
+            roomID=room
+        case .fingerprintConflict: throw V2SpecialAccountMessagingError.idempotencyConflict
+        case .processing,.unresolved,.deferred: throw V2SpecialAccountMessagingError.unavailable
         }
         try await store.authorizeOutbound(account: account, roomID: roomID, customerUserID: request.customerUserID)
         let outcome = try await messages.send(.init(

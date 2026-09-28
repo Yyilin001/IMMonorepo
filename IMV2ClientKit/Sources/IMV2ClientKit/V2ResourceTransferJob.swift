@@ -3,6 +3,7 @@ import IMV2Core
 
 /// Durable metadata only. Neither this value nor its SQLite row contains a signed plan.
 public struct V2ResourceTransferJob: Equatable, Sendable {
+    public enum Action: String, Sendable { case create, status, upload, finalize, cancel, awaitingBackground }
     public enum Stage: String, Sendable { case prepared, transferring, processing, ready, paused, cancelled, rejected, expired }
     public let id: UUID
     public let request: V2ResourceUploadRequest
@@ -13,6 +14,23 @@ public struct V2ResourceTransferJob: Equatable, Sendable {
     public let attempts: Int
     public let retryAt: Date
     public let lastError: String?
+    public let nextAction: Action
+    public let actionAttempts: Int
+    public let totalAttempts: Int
+    public let roundDeadline: Date?
+    public let pollAttempts: Int
+    public let needsAttention: Bool
+}
+
+/// Immutable source metadata inserted atomically with its consuming send intent.
+public struct V2ResourcePreparedUpload: Sendable {
+    public let id: UUID
+    public let request: V2ResourceUploadRequest
+    public let localFileToken: String
+    public init(id: UUID, request: V2ResourceUploadRequest, localFileToken: String) throws {
+        guard UUID(uuidString: localFileToken) != nil else { throw V2ResourceJournalError.invalidRecord }
+        self.id = id; self.request = request; self.localFileToken = localFileToken
+    }
 }
 
 extension GRDBV2LocalSyncStore {
@@ -31,6 +49,7 @@ extension GRDBV2LocalSyncStore {
         }
         guard try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM v2_resource_transfer_jobs WHERE local_file_token=? AND (staging_release_started=1 OR staging_released=1))",
             arguments: [localFileToken]) != true else { throw V2ResourceJournalError.conflict }
+        try Self.requireResourceJobCapacity(db: db)
         try db.execute(sql: """
             INSERT INTO v2_resource_transfer_jobs(job_id,operation_id,media_id,request,local_file_token,stage,created_at)
             VALUES(?,?,?,?,?,'prepared',?)
@@ -82,14 +101,15 @@ extension GRDBV2LocalSyncStore {
     private static let resourceStagingReleasePredicate = """
         j.stage IN ('ready','cancelled','rejected','expired') AND j.staging_released=0
         AND (EXISTS(SELECT 1 FROM v2_send_intent_dependencies d WHERE d.job_id=j.job_id)
-          OR EXISTS(SELECT 1 FROM v2_group_avatar_intents i WHERE i.upload_job_id=j.job_id))
+          OR EXISTS(SELECT 1 FROM v2_group_avatar_intents i WHERE i.upload_job_id=j.job_id)
+          OR EXISTS(SELECT 1 FROM v2_profile_intents i WHERE i.local_file_token=j.local_file_token))
         AND NOT EXISTS(
             SELECT 1 FROM v2_resource_transfer_jobs shared
             JOIN v2_send_intent_dependencies d ON d.job_id=shared.job_id
             JOIN v2_send_intents i USING(intent_id)
-            LEFT JOIN v2_pending_message_commands c ON c.client_message_id=i.client_message_id
+            LEFT JOIN v2_operation_work c ON c.work_id=i.work_id
             WHERE shared.local_file_token=j.local_file_token AND i.stage<>'cancelled'
-              AND (i.stage<>'handedOff' OR c.state IS NULL OR c.state<>'accepted')
+              AND (i.stage<>'handedOff' OR c.execution_state IS NULL OR c.execution_state<>'committed')
         )
         AND NOT EXISTS(
             SELECT 1 FROM v2_resource_transfer_jobs shared JOIN v2_group_avatar_intents i ON i.upload_job_id=shared.job_id
@@ -97,10 +117,15 @@ extension GRDBV2LocalSyncStore {
               AND (i.stage NOT IN ('committed','cancelled','closed') OR (i.stage='closed' AND i.closed_disposition='awaitingDecision'))
         )
         AND NOT EXISTS(
+            SELECT 1 FROM v2_profile_intents i
+            WHERE i.local_file_token=j.local_file_token AND i.source_released=0
+        )
+        AND NOT EXISTS(
             SELECT 1 FROM v2_resource_transfer_jobs shared WHERE shared.local_file_token=j.local_file_token
               AND shared.staging_released=0 AND shared.stage NOT IN ('cancelled','rejected','expired')
               AND NOT EXISTS(SELECT 1 FROM v2_send_intent_dependencies d WHERE d.job_id=shared.job_id)
               AND NOT EXISTS(SELECT 1 FROM v2_group_avatar_intents i WHERE i.upload_job_id=shared.job_id)
+              AND NOT EXISTS(SELECT 1 FROM v2_profile_intents i WHERE i.upload_job_id=shared.job_id)
         )
         """
 
@@ -111,6 +136,7 @@ extension GRDBV2LocalSyncStore {
                 AND (stage NOT IN ('cancelled','rejected','expired')
                     OR EXISTS(SELECT 1 FROM v2_group_avatar_intents i WHERE i.upload_job_id=j.job_id
                         AND (i.stage NOT IN ('committed','cancelled','closed') OR (i.stage='closed' AND i.closed_disposition='awaitingDecision'))))
+                UNION SELECT local_file_token FROM v2_profile_intents WHERE source_released=0 AND local_file_token IS NOT NULL
                 """))
         }
     }
@@ -132,13 +158,15 @@ extension GRDBV2LocalSyncStore {
                 else if session.state == .finalizing || session.state == .completed { stage = .processing }
                 else { stage = .transferring }
             }
-            try db.execute(sql: "UPDATE v2_resource_transfer_jobs SET session=?,stage=?,bindable_until=?,retry_at=?,last_error=NULL WHERE job_id=?", arguments: [try JSONEncoder().encode(session), stage.rawValue, session.bindableUntil?.timeIntervalSince1970, session.retryNotBefore?.timeIntervalSince1970 ?? 0, id.uuidString])
+            guard job.stage != .ready || [.ready, .cancelled, .rejected, .expired].contains(stage) else { throw V2ResourceJournalError.conflict }
+            let next: V2ResourceTransferJob.Action = (stage == .transferring) ? .upload : .status
+            try db.execute(sql: "UPDATE v2_resource_transfer_jobs SET session=?,stage=?,bindable_until=?,retry_at=MAX(server_retry_not_before,?),server_retry_not_before=MAX(server_retry_not_before,?),next_action=? WHERE job_id=?", arguments: [try JSONEncoder().encode(session), stage.rawValue, session.bindableUntil?.timeIntervalSince1970, session.retryNotBefore?.timeIntervalSince1970 ?? 0, session.retryNotBefore?.timeIntervalSince1970 ?? 0, next.rawValue, id.uuidString])
         }
     }
 
     public func retryResourceTransfer(id: UUID) throws {
         try databasePool.write { db in
-            try db.execute(sql: "UPDATE v2_resource_transfer_jobs SET attempts=0,retry_at=0,last_error=NULL WHERE job_id=? AND stage='paused' AND cancellation_requested=0", arguments: [id.uuidString])
+            try db.execute(sql: "UPDATE v2_resource_transfer_jobs SET attempts=0,action_attempts=0,poll_attempts=0,background_attempts=0,round_deadline=NULL,needs_attention=0,retry_at=server_retry_not_before,last_error=NULL,next_action=CASE WHEN session IS NULL THEN 'create' ELSE 'status' END WHERE job_id=? AND stage='paused' AND cancellation_requested=0", arguments: [id.uuidString])
         }
     }
 
@@ -147,7 +175,7 @@ extension GRDBV2LocalSyncStore {
             let stillUsed = try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM v2_send_intent_dependencies d JOIN v2_send_intents i ON i.intent_id=d.intent_id WHERE d.job_id=? AND i.stage IN ('preparing','handedOff'))", arguments: [id.uuidString]) ?? false
             let avatarUsed = try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM v2_group_avatar_intents WHERE upload_job_id=? AND stage NOT IN ('cancelled','closed'))", arguments: [id.uuidString]) ?? false
             guard !stillUsed, !avatarUsed else { return nil }
-            try db.execute(sql: "UPDATE v2_resource_transfer_jobs SET cancellation_requested=1 WHERE job_id=?", arguments: [id.uuidString])
+            try db.execute(sql: "UPDATE v2_resource_transfer_jobs SET cancellation_requested=1,next_action=CASE WHEN EXISTS(SELECT 1 FROM v2_background_transfer_tasks b WHERE b.job_id=v2_resource_transfer_jobs.job_id AND b.state='active') THEN 'awaitingBackground' ELSE 'cancel' END,retry_at=server_retry_not_before,needs_attention=0,action_attempts=0,round_deadline=NULL WHERE job_id=?", arguments: [id.uuidString])
             return try Self.readResourceTransfer(id, db: db)
         }
     }
@@ -177,7 +205,26 @@ extension GRDBV2LocalSyncStore {
         guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_resource_transfer_jobs WHERE job_id=?", arguments: [id.uuidString]),
               let stage = V2ResourceTransferJob.Stage(rawValue: row["stage"]) else { return nil }
         let bytes: Data? = row["session"]
-        return try .init(id: id, request: JSONDecoder().decode(V2ResourceUploadRequest.self, from: row["request"]), localFileToken: row["local_file_token"], session: bytes.map { try JSONDecoder().decode(V2ResourceUploadSession.self, from: $0) }, stage: stage, cancellationRequested: row["cancellation_requested"], attempts: row["attempts"], retryAt: Date(timeIntervalSince1970: row["retry_at"]), lastError: row["last_error"])
+        let requestBytes: Data = row["request"]
+        let request = try JSONDecoder().decode(V2ResourceUploadRequest.self, from: requestBytes)
+        let session = try bytes.map { try JSONDecoder().decode(V2ResourceUploadSession.self, from: $0) }
+        let deadline: Double? = row["round_deadline"]
+        let nextAction = V2ResourceTransferJob.Action(rawValue: row["next_action"]) ?? .status
+        let token: String = row["local_file_token"]
+        let cancellation: Bool = row["cancellation_requested"]
+        let attempts: Int = row["attempts"]
+        let retryTimestamp: Double = row["retry_at"]
+        let lastError: String? = row["last_error"]
+        let actionAttempts: Int = row["action_attempts"]
+        let totalAttempts: Int = row["total_attempts"]
+        let pollAttempts: Int = row["poll_attempts"]
+        let needsAttention: Bool = row["needs_attention"]
+        let roundDeadline = deadline.map { Date(timeIntervalSince1970: $0) }
+        return V2ResourceTransferJob(id: id, request: request, localFileToken: token, session: session,
+            stage: stage, cancellationRequested: cancellation, attempts: attempts,
+            retryAt: Date(timeIntervalSince1970: retryTimestamp), lastError: lastError,
+            nextAction: nextAction, actionAttempts: actionAttempts, totalAttempts: totalAttempts,
+            roundDeadline: roundDeadline, pollAttempts: pollAttempts, needsAttention: needsAttention)
     }
 }
 

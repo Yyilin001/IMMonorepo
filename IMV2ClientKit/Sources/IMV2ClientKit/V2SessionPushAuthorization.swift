@@ -15,9 +15,10 @@ extension V2HTTPPushEndpointClient {
     ///
     /// 退出清理应使用其清理代际创建独立客户端，不能继续复用已失效的前台所有者。
     public init(endpoint: URL, session: V2AuthSession, epoch: V2AuthSessionEpoch,
-                transport: any V2ClientPushEndpointHTTPTransport = V2URLSessionPushEndpointHTTPTransport()) throws {
+                transport: any V2ClientPushEndpointHTTPTransport = V2URLSessionPushEndpointHTTPTransport(),
+                scheduler: V2AccountWorkScheduler? = nil) throws {
         let authorization = V2SessionHTTPAuthorization(
-            session: session, epoch: epoch, transport: V2PushAuthorizationTransport(base: transport)
+            session: session, epoch: epoch, transport: V2PushAuthorizationTransport(base: transport), scheduler: scheduler
         )
         try self.init(endpoint: endpoint, credentials: authorization, transport: authorization)
     }

@@ -116,13 +116,30 @@ public struct V2AuthenticatedAccountRateLimitMiddleware: Middleware, Sendable {
     /// 按路径和方法返回速率预算（scope 与 cost）。
     private static func budget(for request: Request) -> (scope: String, cost: Int)? {
         let path = request.url.path
-        if path == "/v2/profile-views/batch" { return ("profile-views", 5) }
         if path.hasPrefix("/v2/media/") || path == "/v2/media/uploads" { return ("media", 5) }
         if path.hasPrefix("/v2/profile-presentations/") {
             guard request.method == .get else { return ("profile-presentations", 4) }
             let limit = min(500, max(1, request.query[Int.self, at: "limit"] ?? 200))
             return ("profile-presentations", 1 + ((limit + 99) / 100))
         }
+        // Recovery has its own persistent budget; random-ID close cannot evade mutation admission.
+        if path.hasPrefix("/v2/profile-presentations/contact-aliases/"),path.hasSuffix("/operations/recover") { return ("contact-alias-recovery",3) }
+        if path.hasPrefix("/v2/profile-presentations/groups/"),path.hasSuffix("/nickname/operations/recover") { return ("group-nickname-recovery",3) }
+        if path.hasPrefix("/v2/rooms/"),path.contains("/message-operations/") { return ("message-operations",3) }
+        if path.hasPrefix("/v2/rooms/"),path.contains("/message-mutations/") { return ("message-mutations",3) }
+        if path.hasPrefix("/v2/rooms/"),path.contains("/message-reactions/") { return ("message-reactions",3) }
+        if path.hasPrefix("/v2/account-preferences/") { return ("account-preference-operations",3) }
+        if path.hasPrefix("/v2/direct-room-operations/") { return ("direct-room-operations",3) }
+        if path.hasPrefix("/v2/social/") { return ("social-operations",3) }
+        if path.hasPrefix("/v2/rooms/"),path.contains("/group-capability-operations/") { return ("group-capabilities",3) }
+        if path.hasPrefix("/v2/rooms/"),path.contains("/membership/") { return ("membership",3) }
+        if path.hasPrefix("/v2/rooms/"),path.contains("/invitation-operations/") { return ("group-invitation-operations",3) }
+        if path.hasPrefix("/v2/rooms/"),path.contains("/message-moderation-operations/") { return ("message-moderation-operations",3) }
+        if path.hasPrefix("/v2/rooms/"),path.contains("/member-administration/") { return ("member-administration",3) }
+        if path.hasPrefix("/v2/forward-plans/") { return ("forward-plans",3) }
+        if path.hasPrefix("/v2/rooms/"),path.hasSuffix("/read-receipts/operations/recover") { return ("read-receipt-recovery",1) }
+        if path.hasPrefix("/v2/rooms/"),path.hasSuffix("/personal-preferences/operations/recover") { return ("personal-preference-recovery",3) }
+        if path == "/v2/profile/me/operations/recover" { return ("profile-recovery", 3) }
         if path == "/v2/profile/me" { return ("profile", request.method == .get ? 1 : 3) }
         if path.hasPrefix("/v2/devices") {
             guard request.method == .get else { return ("devices", 3) }

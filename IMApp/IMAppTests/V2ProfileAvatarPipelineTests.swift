@@ -9,6 +9,39 @@ import UIKit
 @MainActor
 @Suite("Profile avatar pixels and display authority", .timeLimit(.minutes(1)))
 struct V2ProfileAvatarPipelineTests {
+    @Test("recipient authorized alias takes precedence over nickname and clears to nickname")
+    func aliasDisplay() async throws {
+        let f = try ProfilePipelineFixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let thumbnails = V2LocalMediaThumbnailCache(directory: f.root), pipeline = f.pipeline(thumbnails)
+        try await f.reader.replaceNickname("Room name")
+        try await f.reader.replaceAlias("My private name")
+        let first = await pipeline.profiles.activate()
+        #expect(try await pipeline.snapshot(key: f.key, activation: first, pixels: nil)?.name == "My private name")
+        await pipeline.profiles.deactivate(first)
+        try await f.reader.replaceAlias(nil)
+        let second = await pipeline.profiles.activate()
+        #expect(try await pipeline.snapshot(key: f.key, activation: second, pixels: nil)?.name == "Room name")
+        await pipeline.close(); await thumbnails.close(); try await f.files.close()
+    }
+
+    @Test("an alias replacement during image decode withdraws the old combined result")
+    func aliasReplacementDuringDecode() async throws {
+        let f = try ProfilePipelineFixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let starts = AsyncStream<Void>.makeStream(), gate = ProfileDecodeGate()
+        let thumbnails = V2LocalMediaThumbnailCache(directory: f.root) { _, _ in await gate.wait(starts.continuation); return V2SendableImage(image: UIImage()) }
+        let pipeline = f.pipeline(thumbnails), first = await pipeline.profiles.activate()
+        let decode = Task { try await pipeline.snapshot(key: f.key, activation: first, pixels: 16) }
+        var entered = starts.stream.makeAsyncIterator(); _ = await entered.next()
+        try await f.reader.replaceAlias("New alias")
+        let second = await pipeline.profiles.activate()
+        _ = try await pipeline.profiles.presentation(for: f.key, activation: second)
+        await gate.release()
+        #expect(try await decode.value == nil)
+        await pipeline.close(); await thumbnails.close(); try await f.files.close(); starts.continuation.finish()
+    }
+
     @Test("name-only selector rows share authorization, skip byte work and reauthorize after reentry")
     func nameOnlySelector() async throws {
         let f = try ProfilePipelineFixture(direct: true)
@@ -281,11 +314,16 @@ private actor ProfilePipelineReader: V2ProfilePresentationReading {
     var calls = 0
     init(value: V2AuthorizedProfilePresentation, avatar: V2ResourceAvatarAccess) { self.value = value; self.avatar = avatar }
     func deny() { denied = true }
+    func replaceAlias(_ name: String?) throws {
+        let alias = try V2ContactAlias(ownerUserID: value.lease.actorUserID, targetUserID: value.view.userID,
+            remarkName: name, revision: #require(.init(rawValue: (value.contactAlias?.revision.rawValue ?? 0) + 1)))
+        value = try .init(view: value.view, lease: value.lease, groupMember: value.groupMember, contactAlias: alias)
+    }
     func replaceNickname(_ name: String?) throws {
         guard case .room(let room) = value.lease.key.context else { throw CancellationError() }
         let member = try V2GroupMemberPresentation(roomID: room, userID: value.view.userID,
             groupNickname: name, revision: #require(.init(rawValue: (value.groupMember?.revision.rawValue ?? 0) + 1)))
-        value = try .init(view: value.view, lease: value.lease, groupMember: member)
+        value = try .init(view: value.view, lease: value.lease, groupMember: member, contactAlias: value.contactAlias)
     }
     func replaceName() throws {
         let rev = try #require(V2ProfileRevision(rawValue: 2)), previous = value
@@ -295,7 +333,7 @@ private actor ProfilePipelineReader: V2ProfilePresentationReading {
         let lease = try V2PresentationAccessLease(actorUserID: previous.lease.actorUserID, deviceID: previous.lease.deviceID,
             key: previous.lease.key, profileRevision: rev, visibilityRevision: rev, contextRevision: 2,
             observedAt: Date(), validUntil: Date().addingTimeInterval(299))
-        value = try .init(view: view, lease: lease)
+        value = try .init(view: view, lease: lease, groupMember: previous.groupMember, contactAlias: previous.contactAlias)
     }
     func readPresentations(_ keys: [V2ProfileViewLookupKey]) throws -> V2ProfilePresentationBatch {
         calls += 1

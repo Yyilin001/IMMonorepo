@@ -11,58 +11,46 @@ struct V2OutboxMutationCorrelationTests {
         let directory = FileManager.default.temporaryDirectory.appending(path: "im-app-mutation-correlation-\(UUID())")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
+        let account=UserID(uuid:UUID())
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()),userID:account)
         do {
             let room = RoomID(uuid: UUID())
             let oldMessage = MessageID(uuid: UUID())
             let newMessage = MessageID(uuid: UUID())
-            let transport = MutationTransport(rejectedMessage: rejectOld ? oldMessage : nil)
             if kind == "withdrawal" {
-                let olderOutbox = V2MessageWithdrawalOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: 999) })
-                let older = try await olderOutbox.enqueueWithdrawal(roomID: room, messageID: oldMessage, expectedMessageRevision: 1)
-                let outbox = V2MessageWithdrawalOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: 1_000) })
-                let adapter = V2OutboxMessageWithdrawer(outbox: outbox)
-                #expect(try await adapter.withdraw(messageID: newMessage.rawValue, in: room.rawValue, expectedMessageRevision: 1) == .queuedForRetry)
-                let commands = try await store.pendingMessageWithdrawals()
-                let current = try #require(commands.first { $0.messageID == newMessage })
-                #expect(current.state == .pending)
-                #expect(commands.first { $0.operationID == older.operationID }?.state == (rejectOld ? .rejected : .acknowledged))
-                #expect(try await outbox.flushOnce() == .acknowledged(current.operationID))
-                #expect(try await store.pendingMessageWithdrawals().first { $0.operationID == current.operationID }?.state == .acknowledged)
+                let remote=V2AppMessageWorkClient(rejectOld:rejectOld)
+                let service=V2MessageMutationOperationService(accountID:account,store:store,client:remote)
+                let olderID=try await service.enqueueWithdrawal(roomID:room,messageID:oldMessage,expectedRevision:1)
+                let older=try #require(try await store.operationWork(id:olderID))
+                guard case .claimed(let claim)=try await store.claimOperationWork(id:olderID,ownerID:UUID(),action:.submit,now:older.nextActionAt) else { throw V2OperationWorkError.invalidTransition }
+                try await service.execute(claim)
+                let adapter=V2OperationMessageWithdrawer(service:service)
+                #expect(try await adapter.withdraw(messageID:newMessage.rawValue,in:room.rawValue,expectedMessageRevision:1) == .queuedForRetry)
+                let current=try #require(try await store.dueOperationWork(now:.now,kinds:[.withdrawMessage]).first)
+                #expect(current.id != olderID && current.execution == .prepared)
+                #expect(try await store.operationWork(id:olderID)?.execution == (rejectOld ? .rejected : .committed))
+                #expect(await remote.calls==1)
             } else {
-                let olderOutbox = V2MessageReactionOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: 999) })
-                let older = try await olderOutbox.enqueueReaction(roomID: room, messageID: oldMessage, reaction: "👍", action: .add)
-                let outbox = V2MessageReactionOutboxEngine(store: store, transport: transport, now: { Date(timeIntervalSince1970: 1_000) })
-                let adapter = V2OutboxMessageReactionChanger(outbox: outbox)
-                #expect(try await adapter.changeReaction(messageID: newMessage.rawValue, in: room.rawValue, reaction: "👍", action: .add) == .queuedForRetry)
-                let commands = try await store.pendingMessageReactions()
-                let current = try #require(commands.first { $0.messageID == newMessage })
-                #expect(current.state == .pending)
-                #expect(commands.first { $0.operationID == older.operationID }?.state == (rejectOld ? .rejected : .acknowledged))
-                #expect(try await outbox.flushOnce() == .acknowledged(current.operationID))
-                #expect(try await store.pendingMessageReactions().first { $0.operationID == current.operationID }?.state == .acknowledged)
+                let remote=V2AppReactionClient(account:account,rejectOld:rejectOld)
+                let service=V2MessageReactionOperationService(accountID:account,store:store,client:remote)
+                let olderID=try await service.enqueue(roomID:room,messageID:oldMessage,reaction:"👍",targetState:.present)
+                #expect(try await service.prepareNextIntent())
+                let older=try #require(try await store.operationWork(id:olderID))
+                guard case .claimed(let claim)=try await store.claimOperationWork(id:olderID,ownerID:UUID(),action:.submit,now:older.nextActionAt) else { throw V2OperationWorkError.invalidTransition }
+                try await service.execute(claim)
+                let adapter=V2OperationMessageReactionChanger(service:service)
+                #expect(try await adapter.changeReaction(messageID:newMessage.rawValue,in:room.rawValue,reaction:"👍",action:.add) == .queuedForRetry)
+                #expect(try await service.prepareNextIntent())
+                let current=try #require(try await store.dueOperationWork(now:.now,kinds:[.reaction]).first)
+                #expect(current.id != olderID && current.execution == .prepared)
+                #expect(try await store.operationWork(id:olderID)?.execution == (rejectOld ? .rejected : .committed))
+                #expect(await remote.submissions==1)
+
             }
             try await store.close()
         } catch {
             try? await store.close()
             throw error
         }
-    }
-}
-
-private struct MutationTransport: V2ClientMessageWithdrawalTransport, V2ClientMessageReactionTransport {
-    let rejectedMessage: MessageID?
-    private func check(_ message: MessageID) throws {
-        if message == rejectedMessage {
-            throw V2RealtimeTransportError.server(code: "FORBIDDEN", retryable: false, retryAfterSeconds: 0, currentRevision: nil)
-        }
-    }
-    func withdrawMessage(roomID: RoomID, operationID: MessageWithdrawalOperationID, messageID: MessageID, expectedMessageRevision: UInt64) async throws -> V2ClientMessageWithdrawal {
-        try check(messageID)
-        return try .init(roomID: roomID, messageID: messageID, messageRevision: 2, roomSequence: 1, createdAt: Date(timeIntervalSince1970: 1_000))
-    }
-    func changeMessageReaction(roomID: RoomID, operationID: MessageReactionOperationID, messageID: MessageID, reaction: String, action: V2MessageReactionAction) async throws -> V2ClientMessageReactionChange {
-        try check(messageID)
-        return try .init(roomID: roomID, messageID: messageID, actorUserID: .init(uuid: UUID()), reaction: reaction, action: action, roomSequence: 1, createdAt: Date(timeIntervalSince1970: 1_000))
     }
 }

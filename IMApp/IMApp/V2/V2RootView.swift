@@ -77,6 +77,11 @@ struct V2RootView: View {
                     signedOutContent
                 case .authenticating:
                     ProgressView("正在验证身份…")
+                case .localReadOnly:
+                    if let presentation = store.offlinePresentation {
+                        V2OfflineRootView(presentation: presentation,
+                            retryOnline: { await store.retryOnlineFromLocalReadOnly() }, signOut: { await store.signOut() })
+                    } else { ProgressView("正在打开本地内容…") }
                 case .signedIn:
                     if let conversationStore = store.conversationStore,
                        let contactsStore = store.contactsStore,
@@ -97,6 +102,17 @@ struct V2RootView: View {
                         )
                         .environment(\.v2MediaThumbnailCache, store.mediaThumbnailCache)
                         .environment(\.v2AvatarPipeline, store.avatarPipeline)
+                        .safeAreaInset(edge:.top) {
+                            if store.accountWorkPaused {
+                                HStack {
+                                    Text("账户后台同步已暂停，已保存的操作会保留。")
+                                    Button("重新连接") { Task { await store.resumeAccountWork() } }
+                                        .disabled(store.isResumingAccountWork)
+                                        .accessibilityIdentifier("v2.account-work.resume")
+                                }
+                                .padding().background(.regularMaterial)
+                            }
+                        }
                     } else {
                         ProgressView("正在打开本地会话…")
                     }

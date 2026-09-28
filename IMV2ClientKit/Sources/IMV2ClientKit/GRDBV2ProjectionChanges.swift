@@ -1,3 +1,4 @@
+import Foundation
 import GRDB
 
 extension GRDBV2LocalSyncStore {
@@ -6,6 +7,8 @@ extension GRDBV2LocalSyncStore {
     /// 订阅会立即给出一次全量失效，因此打开页面时不需要依赖观察到订阅之前已经提交的事务。
     ///
     /// - Returns: 变更订阅句柄。
+    public nonisolated func installNetworkDiagnostics(_ diagnostics: V2NetworkDiagnostics) { projectionChangeHub.installDiagnostics(diagnostics) }
+
     public func projectionChanges() -> V2ProjectionChangeSubscription { projectionChangeHub.subscribe() }
 }
 
@@ -17,6 +20,7 @@ extension GRDBV2LocalSyncStore {
 final class V2ProjectionTransactionObserver: TransactionObserver {
     private let hub: V2ProjectionChangeHub
     private var pending = V2ProjectionChange.none
+    private var willCommit: ContinuousClock.Instant?
     /// 以变更中枢构造观察者。
     ///
     /// - Parameter hub: 接收已提交变更的中枢。
@@ -35,18 +39,33 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
     func databaseDidChange(with event: DatabaseEvent) {
         pending = pending.merging(Self.change(table: event.tableName, kind: event.kind))
     }
+    func databaseWillCommit() throws {
+        willCommit = .now
+    }
     /// 事务提交后发布累积的变更。
     ///
     /// - Parameter db: 已提交的数据库。
     func databaseDidCommit(_ db: Database) {
+        let didCommit = ContinuousClock.now
         let committed = pending
         pending = .none
-        hub.publish(committed)
+        let sink = hub.diagnosticSink()
+        if !committed.scopes.isEmpty, let willCommit, let sink {
+            let duration = willCommit.duration(to: didCommit).components
+            sink.record(.init(phase: .willCommitToDidCommit,
+                elapsed: Double(duration.seconds) + Double(duration.attoseconds) / 1e18, scopes: committed.scopes))
+        }
+        willCommit = nil
+        let stamp: V2ConversationCommitMeasurement?
+        if committed.scopes.contains(.conversations), let sink {
+            stamp = .init(committedAt: didCommit, diagnostics: sink)
+        } else { stamp = nil }
+        hub.publish(.init(scopes: committed.scopes, requiresImmediateRefresh: committed.requiresImmediateRefresh, conversationCommit: stamp))
     }
     /// 事务回滚后丢弃累积的变更。
     ///
     /// - Parameter db: 已回滚的数据库。
-    func databaseDidRollback(_ db: Database) { pending = .none }
+    func databaseDidRollback(_ db: Database) { pending = .none; willCommit = nil }
 
     /// 把单张表的变更映射到可见作用域。
     ///
@@ -65,6 +84,11 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
             table.hasPrefix("v2_contact_profile_search") || table.hasPrefix("sqlite_") { return .none }
         let conversation: V2ProjectionScopes = [.conversations, .conversationDetails]
         switch table {
+        case "v2_operation_work", "v2_operation_dependencies", "v2_profile_intents", "v2_own_profile_snapshot",
+             "v2_personal_preference_intents", "v2_personal_preference_confirmed", "v2_name_operations", "v2_name_confirmed":
+            // These are observed by their owning intent/editor streams. Retry
+            // metadata cannot revoke every visible profile's authorization.
+            return .none
         case "v2_room_recovery_work", "v2_room_recovery_scan", "v2_resource_transfer_jobs", "v2_send_intent_dependencies", "v2_resource_import_jobs", "v2_send_intent_import_dependencies":
             return .none
         case "v2_room_sync_states", "v2_room_latest_visible":
@@ -83,30 +107,34 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
             return .init(scopes: [.contacts, .conversations, .conversationDetails, .presentations], requiresImmediateRefresh: kind != .insert)
         case "v2_role_policy_recovery_requests":
             return .init(scopes: .conversationDetails, requiresImmediateRefresh: false)
-        case "v2_message_reactions", "v2_direct_read_receipt_projections", "v2_room_read_watermarks", "v2_pending_message_reactions", "v2_pending_read_receipts":
+        case "v2_message_reactions", "v2_direct_read_receipt_projections", "v2_room_read_watermarks", "v2_message_reaction_intents", "v2_read_receipt_intents", "v2_read_receipt_operations":
             return .init(scopes: .conversationDetails, requiresImmediateRefresh: false)
-        case "v2_send_intents", "v2_pending_message_commands", "v2_forward_message_plans", "v2_forward_message_chunks", "v2_pending_group_room_creations":
+        case "v2_read_receipt_archives":
+            return .init(scopes: conversation, requiresImmediateRefresh: false)
+        case "v2_send_intents", "v2_message_send_operations", "v2_forward_plan_operations":
             return .init(scopes: conversation, requiresImmediateRefresh: false)
         case "v2_group_avatar_effects", "v2_group_nickname_effects": return .none
         case "v2_group_nickname_invalidations":
             return .init(scopes: .groupNicknames, requiresImmediateRefresh: true)
+        case "v2_contact_alias_invalidations":
+            return .init(scopes: .contactAliases, requiresImmediateRefresh: true)
         case "v2_group_avatar_intents":
             // Local retries/claims only change management status. They cannot
             // invalidate every visible avatar's authorization and cause refetches.
             return .init(scopes: .conversationDetails, requiresImmediateRefresh: true)
         case "v2_room_event_authorizations", "v2_group_member_roles", "v2_room_control_projections", "v2_group_avatar_invalidations":
             return .init(scopes: [.conversations, .conversationDetails, .presentations], requiresImmediateRefresh: true)
-        case "v2_conversation_states", "v2_pending_conversation_states", "v2_message_favorites", "v2_pending_message_favorites",
-             "v2_group_announcements", "v2_group_pinned_messages", "v2_pending_group_capabilities",
+        case "v2_conversation_states", "v2_message_favorites",
+             "v2_group_announcements", "v2_group_pinned_messages",
              "v2_message_tombstones", "v2_moderation_projections",
              "v2_group_permission_revisions", "v2_group_role_policies", "v2_group_role_policy_baselines",
-             "v2_direct_sending_capabilities", "v2_timeline_activity_projections", "v2_pending_message_edits",
-             "v2_pending_message_redactions", "v2_pending_message_withdrawals", "v2_pending_member_mutes",
-             "v2_pending_membership_commands", "v2_pending_moderated_member_removals":
+             "v2_direct_sending_capabilities", "v2_timeline_activity_projections", "v2_message_mutation_operations",
+             "v2_message_moderation_operations", "v2_member_administration_intents",
+             "v2_membership_intents", "v2_group_capability_intents":
             return .init(scopes: conversation, requiresImmediateRefresh: true)
-        case "v2_relationship_projections", "v2_pending_social_commands", "v2_profile_invalidations":
+        case "v2_relationship_projections", "v2_social_operations", "v2_profile_invalidations":
             return .init(scopes: [.contacts, .conversations, .conversationDetails, .presentations], requiresImmediateRefresh: true)
-        case "v2_read_receipt_preference", "v2_stranger_message_preference", "v2_user_add_preference":
+        case "v2_account_preference_operations", "v2_read_receipt_preference", "v2_stranger_message_preference", "v2_user_add_preference":
             return .init(scopes: [.privacy, .conversationDetails], requiresImmediateRefresh: true)
         case "v2_user_block_projections", "v2_snapshots":
             return .all

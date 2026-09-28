@@ -5,8 +5,8 @@ import IMV2Core
 /// Its immutable no-overwrite object is a stable source for retrying a finalize copy.
 public struct V2LocalResourceUploadTransport: V2UploadTransport {
     public let binding: V2StorageBinding
-    public let capabilities = V2ResourceTransportCapabilities(modes: [.httpPut], maximumBytes: 256 * 1_024 * 1_024)
-    private let provider: V2LocalFilesystemMediaProvider
+    public let capabilities = V2ResourceTransportCapabilities(modes: [.httpPartPut, .httpPut], maximumBytes: 256 * 1_024 * 1_024)
+    let provider: V2LocalFilesystemMediaProvider
     public init(binding: V2StorageBinding, provider: V2LocalFilesystemMediaProvider) {
         self.binding = binding; self.provider = provider
     }

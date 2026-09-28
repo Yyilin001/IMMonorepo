@@ -31,6 +31,8 @@
 
 持久授权确认/中止另用 `direct_authorization_resolution` 专用池：按控制库与所有 room owner 的不同 URL 去重，每个 URL、每个 event loop 配 1 条连接；仅用户分片数据库不增加这个池。Gateway 与 Operator 均计入进程总预算。它不借用前台权限写者或授权预留池，避免预留等待权限锁、权限写者又等待确认连接形成环。同一物理 URL 的 owner 中止和控制确认可共用这个专用池，因为两笔事务顺序执行，不嵌套持有连接。此组装已写入运行入口；预算边界和同库/双库下占满单连接业务池后的协调器专项已通过，见[验证记录](../../../docs/reviews/verification-records.md#20260920-direct-authorization-runtime-pools)。正式发送、批量和转发已接自动持久授权；完整进程故障与迁移验收仍待完成，不能视为 D07 已关闭。
 
+Account 的原操作私聊建房另外区分最外层 pair-route 围栏与内部协调工作。原 `account-social-coordination` 每 EventLoop 的 N 条预算拆为 `account-direct-pair-route` 1 条和 `account-social-coordination` N−1 条，总连接预算不增加；Account 要求 `IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP >= 2`，不足时启动配置校验失败。`.psql` 仍负责 handoff；owner 回调的身份读取、授权协调和用户投影路由继续使用内部协调池。pair-route 事务可以跨 owner 调用持锁，但排队的 route 请求不能耗尽回调所需连接。两池都验证 session 策略并随统一 resources 排空关闭。这是本轮源码修复，尚未执行构建或并发回归。
+
 同库 Delivery 必须继续通过 Delivery control store 在一笔事务中提交 Inbox、sequence、Sync Log 和 completion 状态；不能为了“拆池”破坏原子性。Sync 使用 Sync control router 获取相同 advisory route fence，Maintenance/Projection 使用各自的数据库句柄。
 
 ### 2. 前台写入、交互读取和 Sync 使用独立过载准入

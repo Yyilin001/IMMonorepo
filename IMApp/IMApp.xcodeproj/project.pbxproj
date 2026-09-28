@@ -13,6 +13,7 @@
 		1BADBC462F73859E00E89B24 /* IMV2Core in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC492F73859E00E89B24 /* IMV2Core */; };
 		A1E2E3E4F567891011121321 /* IMV2ClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = A1E2E3E4F567891011121323 /* IMV2ClientKit */; };
 		A1E2E3E4F567891011121322 /* IMV2Core in Frameworks */ = {isa = PBXBuildFile; productRef = A1E2E3E4F567891011121324 /* IMV2Core */; };
+		A1E2E3E4F567891011121325 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A1E2E3E4F567891011121326 /* GRDB */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -114,6 +115,7 @@
 			files = (
 				A1E2E3E4F567891011121321 /* IMV2ClientKit in Frameworks */,
 				A1E2E3E4F567891011121322 /* IMV2Core in Frameworks */,
+				A1E2E3E4F567891011121325 /* GRDB in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -247,6 +249,7 @@
 			packageProductDependencies = (
 				A1E2E3E4F567891011121323 /* IMV2ClientKit */,
 				A1E2E3E4F567891011121324 /* IMV2Core */,
+				A1E2E3E4F567891011121326 /* GRDB */,
 			);
 			productName = IMAppLocalAccountE2ETests;
 			productReference = A1E2E3E4F567891011121301 /* IMAppLocalAccountE2ETests.xctest */;
@@ -317,6 +320,7 @@
 			mainGroup = 1BADBC052F73859D00E89B24;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				A1E2E3E4F567891011121327 /* XCRemoteSwiftPackageReference "GRDB.swift" */,
 				1BADBC412F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2ClientKit" */,
 				1BADBC472F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2Core" */,
 			);
@@ -892,6 +896,17 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		A1E2E3E4F567891011121327 /* XCRemoteSwiftPackageReference "GRDB.swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/groue/GRDB.swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 7.10.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		1BADBC422F73859E00E89B24 /* IMV2ClientKit */ = {
 			isa = XCSwiftPackageProductDependency;
@@ -922,6 +937,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 1BADBC472F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2Core" */;
 			productName = IMV2Core;
+		};
+		A1E2E3E4F567891011121326 /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1E2E3E4F567891011121327 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
+			productName = GRDB;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

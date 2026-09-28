@@ -10,10 +10,12 @@ import SQLKit
 public struct V2RoomServerOwnerResources: Sendable {
     let database: any Database
     let writes: PostgresV2RoomWriteStore
+    let mutations: PostgresV2MessageMutationOperationStore
     let edits: PostgresV2MessageEditStore
     let withdrawals: PostgresV2MessageWithdrawalStore
     let reactions: PostgresV2MessageReactionStore
     let identities: any V2MembershipIdentitySnapshotValidating
+    let invitationSecretIssuer: V2GroupInviteSecretIssuer
     let invitationIdentities: any V2GroupInvitationIdentityReading
     let receipts: V2ActorRoomReceiptExecutor
     let receiptBatcher: V2HostRoomReceiptBatcher
@@ -24,11 +26,13 @@ public struct V2RoomServerOwnerResources: Sendable {
     let messageLimits: V2MessageCommandLimits
     let maximumEditBytes: Int
     let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
+    let committedMessageObserver: (any V2CommittedMessageBatchObserving)?
 
     public init(database: any Database, writes: PostgresV2RoomWriteStore,
                 sendBatcher: any V2ActorGrantedSendBatching,
                 membershipIdentities: any V2MembershipIdentitySnapshotValidating,
                 invitationIdentities: any V2GroupInvitationIdentityReading,
+                invitationSecretIssuer: V2GroupInviteSecretIssuer,
                 receiptProjectionDelivery: any V2UserShardProjectionDelivering,
                 capacityProfile: V2CapacityProfile, messageLimits: V2MessageCommandLimits,
                 maximumEditBytes: Int, contentReviewMode: V2ContentReviewMode,
@@ -36,17 +40,20 @@ public struct V2RoomServerOwnerResources: Sendable {
                 receiptBatchConfiguration: V2ReadReceiptBatcher.Configuration = .init(
                     maximumBatchSize: 64, maximumDelay: .milliseconds(2),
                     maximumInFlightBatches: 4, maximumPendingRequests: 256),
-                databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil) throws {
+                databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
+                committedMessageObserver: (any V2CommittedMessageBatchObserving)? = nil) throws {
         guard maximumEditBytes > 0 else {
             throw V2ActorContractError.invalidConfiguration("room edit bytes")
         }
         self.database = database
+        self.mutations = .init(database:database,contentReviewMode:contentReviewMode,identities:membershipIdentities,committedMessageObserver:committedMessageObserver)
         self.writes = writes
         self.edits = .init(database: database, contentReviewMode: contentReviewMode,
                            identities: membershipIdentities)
         self.withdrawals = .init(database: database)
         self.reactions = .init(database: database)
         self.identities = membershipIdentities
+        self.invitationSecretIssuer = invitationSecretIssuer
         self.invitationIdentities = invitationIdentities
         let receipts = V2ActorRoomReceiptExecutor(database: database, projectionDelivery: receiptProjectionDelivery)
         self.receipts = receipts
@@ -62,6 +69,7 @@ public struct V2RoomServerOwnerResources: Sendable {
         self.messageLimits = messageLimits
         self.maximumEditBytes = maximumEditBytes
         self.databaseWorkAdmission = databaseWorkAdmission
+        self.committedMessageObserver = committedMessageObserver
     }
 }
 
@@ -153,17 +161,6 @@ private actor V2RoomServerActivation {
         let callDeadline = turn.items.map(\.deadline).min()!
         do {
             return try await V2RoomSQLDeadline.withDeadline(callDeadline) {
-                if turn.items.allSatisfy({ $0.request.canShareSendTurn }) {
-                    let sends = turn.items.compactMap { item -> V2ActorSendMessageWire? in
-                        if case .messaging(.send(let send)) = item.request { return send }
-                        return nil
-                    }
-                    let results = try await handlers.messages.executeGrantedSendTurn(sends,
-                        batchDeadline: turn.context.batchDeadline,
-                        callDeadline: callDeadline, using: resources.sends)
-                    guard results.count == turn.items.count else { return .outcomeUnknown }
-                    return .committed(results.map(V2RoomResponse.messaging))
-                }
                 if isProfileTurn {
                     let requests = turn.items.compactMap { item -> V2ActorProfileVisibilityBatchWire? in
                         if case .mediaAuthorization(.profileVisibilityBatch(let request)) = item.request { return request }
@@ -185,8 +182,8 @@ private actor V2RoomServerActivation {
                             batchDeadline: turn.context.batchDeadline, callDeadline: item.deadline)
                     }
                 } else {
-                    // 发送、回执和恢复操作各自针对实际 SQL 批次获取一次许可；
-                    // 多个获准房间轮次可能共享同一批次。
+                    // 回执和恢复操作在其执行叶子针对实际 SQL 获取许可；
+                    // typed scalar 发送在上方取得一次前台写许可。
                     response = try await dispatch(item.request, handlers: handlers, resources: resources,
                         batchDeadline: turn.context.batchDeadline, callDeadline: item.deadline)
                 }
@@ -258,10 +255,6 @@ private actor V2RoomServerActivation {
             }
         case .specialAccountAudit(let command):
             return .specialAccountAudit(try await handlers.audit.execute(command))
-        case .invitation(let command):
-            do { return .invitation(try await handlers.invitations.execute(command)) }
-            catch let failure as V2GroupInvitationServiceError { return .invitation(.failure(.init(domain: failure))) }
-            catch let failure as V2GroupInvitationValidationError { return .invitation(.failure(.init(validationError: failure))) }
         case .invitationQuery(let query):
             do { return .invitation(try await handlers.invitations.execute(query)) }
             catch let failure as V2GroupInvitationServiceError { return .invitation(.failure(.init(domain: failure))) }
@@ -301,8 +294,8 @@ private actor V2RoomServerActivation {
                 withdrawals: resources.withdrawals, reactions: resources.reactions,
                 capacityProfile: resources.capacity, limits: resources.messageLimits,
                 maximumEditBytes: resources.maximumEditBytes, now: now,
-                recovery: .init(database: resources.database))
-            administration = try .init(database: resources.database, token: token,
+                mutations:resources.mutations,sendOperations:.init(database:resources.database,writes:resources.writes,clock:now,committedMessageObserver:resources.committedMessageObserver),reactionOperations:.init(database:resources.database,clock:now,committedMessageObserver:resources.committedMessageObserver))
+            administration = try .init(database: resources.database, invitationSecretIssuer: resources.invitationSecretIssuer, invitationIdentities: resources.invitationIdentities, token: token,
                 capacityProfile: resources.capacity, membershipIdentities: resources.identities, now: now)
             audit = try .init(token: token, store: .init(database: resources.database), now: now)
             invitations = try .init(database: resources.database, token: token,
@@ -314,11 +307,11 @@ private actor V2RoomServerActivation {
 private extension V2RoomRequest {
     var hostDatabaseWorkClass: V2DatabaseWorkClass? {
         switch self {
-        case .messaging(.send), .receipt, .recovery: return nil
+        case .receipt, .recovery: return nil
         case .administrationQuery, .receiptQuery, .roomLog, .directory,
              .invitationQuery, .mediaAuthorization: return .interactiveRead
         case .forward, .maintenance, .messaging, .administration,
-             .specialAccountAudit, .invitation: return .foregroundWrite
+             .specialAccountAudit: return .foregroundWrite
         }
     }
 }

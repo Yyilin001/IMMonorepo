@@ -49,7 +49,7 @@ def run_private(command: list[str], *, environment: dict[str, str] | None = None
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("account-url", "ca", "compose-file", "env-file", "project",
-                   "context", "recovery-directory", "gateway-probe-path"):
+                   "context", "recovery-directory", "gateway-probe-path", "gateway-account-url"):
         parser.add_argument("--" + option, required=True)
     args = parser.parse_args()
     phase = "preflight"
@@ -67,6 +67,11 @@ def main() -> int:
         base = urllib.parse.urlsplit(args.account_url)
         checked(base.scheme == "https" and base.hostname is not None and base.port is not None)
         checked(not base.path.rstrip("/") and not base.query and not base.fragment)
+        gateway_account_url = urllib.parse.urlsplit(args.gateway_account_url)
+        checked(gateway_account_url.scheme == "https" and gateway_account_url.hostname == "account"
+                and gateway_account_url.port == 8443 and not gateway_account_url.username
+                and not gateway_account_url.password and not gateway_account_url.query
+                and not gateway_account_url.fragment and gateway_account_url.path in ("", "/"))
         context = ssl.create_default_context(cafile=str(ca))
         compose = ["docker", "--context", args.context, "compose", "--project-name", args.project,
                    "--env-file", str(env_file), "--file", str(compose_file)]
@@ -238,18 +243,24 @@ COMMIT;
         phase = "authenticated gateway media send"
         client_message_id = str(uuid.uuid4())
         probe_env = os.environ.copy()
+
         probe_env.update({
+            "IM_V2_GATEWAY_PROBE_ACCOUNT_BASE_URL": args.gateway_account_url,
+            "IM_V2_GATEWAY_PROBE_CA_PATH": "/caddy/caddy/pki/authorities/local/root.crt",
             "IM_V2_GATEWAY_PROBE_MODE": "sendRoomMediaMessage",
             "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN": owner[0],
             "IM_V2_GATEWAY_PROBE_DEVICE_ID": owner[1],
             "IM_V2_GATEWAY_PROBE_EXPECTED_ROOM_ID": room_id,
             "IM_V2_GATEWAY_PROBE_MEDIA_ID": media_id,
             "IM_V2_GATEWAY_PROBE_CLIENT_MESSAGE_ID": client_message_id,
+            "IM_V2_GATEWAY_PROBE_SEND_DEADLINE_MS": str(int(time.time() * 1000) + 86_400_000),
         })
         probe_keys = (
+            "IM_V2_GATEWAY_PROBE_ACCOUNT_BASE_URL", "IM_V2_GATEWAY_PROBE_CA_PATH",
             "IM_V2_GATEWAY_PROBE_MODE", "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN",
             "IM_V2_GATEWAY_PROBE_DEVICE_ID", "IM_V2_GATEWAY_PROBE_EXPECTED_ROOM_ID",
             "IM_V2_GATEWAY_PROBE_MEDIA_ID", "IM_V2_GATEWAY_PROBE_CLIENT_MESSAGE_ID",
+            "IM_V2_GATEWAY_PROBE_SEND_DEADLINE_MS",
         )
         sent = run_private(
             compose + ["exec", "-T"] + [part for key in probe_keys for part in ("--env", key)]

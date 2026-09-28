@@ -6,6 +6,7 @@ public extension V2ActorSpecialAccountMessageWire {
         self.init(stableAccountKey: value.stableAccountKey,
                   servicePrincipal: value.servicePrincipal, operatorID: value.operatorID,
                   operationID: value.operationID, requestFingerprint: value.requestFingerprint,
+                  firstSubmissionDeadlineMilliseconds: value.firstSubmissionDeadlineMilliseconds,
                   customerUserID: value.customerUserID, text: value.text, media: value.media,
                   mentions: value.mentions.map(V2ActorMentionTargetWire.init),
                   entities: value.entities, replyTo: value.replyTo)
@@ -15,7 +16,7 @@ public extension V2ActorSpecialAccountMessageWire {
         let value = try V2TrustedSpecialAccountMessage(
             stableAccountKey: stableAccountKey, servicePrincipal: servicePrincipal,
             operatorID: operatorID, operationID: operationID,
-            requestFingerprint: requestFingerprint, customerUserID: customerUserID,
+            requestFingerprint: requestFingerprint, firstSubmissionDeadlineMilliseconds: firstSubmissionDeadlineMilliseconds, customerUserID: customerUserID,
             text: text, media: media, mentions: mentions.map { $0.toDomain() },
             entities: entities, replyTo: replyTo)
         guard value.stableAccountKey == stableAccountKey,

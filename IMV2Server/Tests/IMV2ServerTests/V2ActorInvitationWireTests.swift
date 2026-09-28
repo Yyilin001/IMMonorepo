@@ -43,14 +43,6 @@ struct V2ActorInvitationWireTests {
     }
 
     @Test func confidentialInputsAndReplay() throws {
-        let operationID = try GroupInviteOperationID("invite-op")
-        let create = V2ActorCreateGroupInviteWire(roomID: roomID, actorUserID: actor, operationID: operationID,
-                                                   lifetime: 3600, maximumApprovedUses: 4)
-        #expect(try roundTrip(create).toDomain().maximumApprovedUses == 4)
-        let cancel = V2RoomInvitationCommand.cancel(.init(roomID: roomID, requestID: requestID, applicantUserID: actor))
-        #expect(cancel.retryPolicy == .noAutomaticRetry)
-        #expect(cancel.stableOperationIdentity == nil)
-        #expect(V2RoomInvitationCommand.create(create).retryPolicy == .durableIdempotent)
         let secretWire = V2ActorInviteSecretWire(domain: secret)
         #expect(secretWire.description == "<redacted-group-invite-secret>")
         #expect(try roundTrip(secretWire).toDomain() == secret)
@@ -96,7 +88,7 @@ struct V2ActorInvitationWireTests {
             leaseToken: UUID(), leaseUntil: now.addingTimeInterval(30), attemptCount: 1)
         let wire = V2ActorGroupJoinQuotaIntentWire(domain: intent)
         #expect(try roundTrip(wire).toDomain() == intent)
-        #expect(V2RoomInvitationCommand.submitReserved(wire).retryPolicy == .durableIdempotent)
+        #expect(V2RoomInvitationQuery.reservedObservation(wire).retryPolicy == .readOnly)
         let bad = V2ActorGroupJoinQuotaIntentWire(
             applicantUserID: wire.applicantUserID, operationID: wire.operationID, requestID: wire.requestID,
             roomID: wire.roomID, inviteID: wire.inviteID, tokenDigest: .init(bytes: Data()), note: wire.note,

@@ -11,26 +11,27 @@ struct V2OutboxCancelledGroupCapabilityTests {
         let directory = FileManager.default.temporaryDirectory.appending(path: "im-app-cancelled-group-setting-\(UUID())")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
+        let account=UserID(uuid:UUID())
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()),userID:account)
         do {
             let now = Date(timeIntervalSince1970: 1_000)
-            let outbox = V2GroupCapabilitiesOutboxEngine(store: store, transport: UnexpectedGroupSettingTransport(), now: { now })
-            let pinner = V2OutboxGroupMessagePinner(outbox: outbox)
-            let announcement = V2OutboxGroupAnnouncementManager(outbox: outbox)
-            let role = V2OutboxGroupMemberRoleChanger(outbox: outbox)
-            let policy = V2OutboxGroupRolePolicyChanger(outbox: outbox)
+            let service=V2GroupCapabilityOperationService(accountID:account,activationID:UUID(),store:store,client:UnexpectedGroupSettingTransport())
+            let pinner = V2OperationGroupMessagePinner(service: service)
+            let announcement = V2OperationGroupAnnouncementManager(service: service)
+            let role = V2OperationGroupMemberRoleChanger(service: service)
+            let policy = V2OperationGroupRolePolicyChanger(service: service)
             let room = RoomID(uuid: UUID())
             let task = Task {
                 withUnsafeCurrentTask { $0?.cancel() }
                 switch kind {
-                case "pin": return try await pinner.setPinned(roomID: room.rawValue, messageID: MessageID(uuid: UUID()).rawValue, isPinned: true)
+                case "pin": return try await pinner.setPinned(roomID: room.rawValue, messageID: MessageID(uuid: UUID()).rawValue, isPinned: true, expectedRoomSequence: 1)
                 case "announcement": return try await announcement.setAnnouncement(roomID: room.rawValue, body: "new announcement", expectedRevision: 1)
                 case "role": return try await role.setRole(roomID: room.rawValue, userID: UserID(uuid: UUID()).rawValue, role: .admin, expectedMembershipRevision: 1)
                 default: return try await policy.setPolicy(roomID: room.rawValue, role: .member, permissions: [.sendMessages], expectedRevision: 1)
                 }
             }
             await #expect(throws: CancellationError.self) { try await task.value }
-            #expect(try await store.nextReadyGroupCapability(now: now) == nil)
+            #expect(try await store.beginGroupCapabilityPreparation(now: now) == nil)
             try await store.close()
         } catch {
             try? await store.close()
@@ -39,21 +40,9 @@ struct V2OutboxCancelledGroupCapabilityTests {
     }
 }
 
-private struct UnexpectedGroupSettingTransport: V2ClientGroupCapabilitiesTransport {
-    func setPinnedMessage(command: V2PinnedMessageCommand) async throws -> V2PinnedMessage {
-        Issue.record("cancelled pin must not reach transport")
-        throw CancellationError()
-    }
-    func setGroupAnnouncement(command: V2GroupAnnouncementCommand) async throws -> V2GroupAnnouncement {
-        Issue.record("cancelled announcement must not reach transport")
-        throw CancellationError()
-    }
-    func setGroupRolePermissions(command: V2GroupRolePermissionsCommand) async throws -> V2GroupRolePermissionsChange {
-        Issue.record("cancelled policy must not reach transport")
-        throw CancellationError()
-    }
-    func changeGroupMemberRole(command: V2GroupMemberRoleCommand) async throws -> V2GroupMemberRoleChange {
-        Issue.record("cancelled role change must not reach transport")
-        throw CancellationError()
-    }
+private struct UnexpectedGroupSettingTransport:V2GroupCapabilityOperationClient {
+    func pinBaseline(roomID:RoomID,messageID:MessageID) async throws -> V2PinnedMessageBaseline { throw CancellationError() }
+    func admit(_ intent:V2GroupCapabilityIntent) async throws -> V2GroupCapabilityAdmissionResult { Issue.record("cancelled action reached admission");throw CancellationError() }
+    func submit(_ command:V2GroupCapabilityCommand) async throws -> V2GroupCapabilityRecoveryResult { Issue.record("cancelled action reached submit");throw CancellationError() }
+    func recover(_ command:V2GroupCapabilityCommand,action:V2OperationRecoveryRequest.Action) async throws -> V2GroupCapabilityRecoveryResult { throw CancellationError() }
 }

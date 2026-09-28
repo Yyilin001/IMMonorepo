@@ -36,9 +36,7 @@ struct GroupCapabilityRevisionBoundsTests {
             try V2GroupRolePermissionsCommand(operationID: .init("permissions"), roomID: .init("room"),
                 role: .member, permissions: [], expectedRevision: 0)
         }
-        #expect(throws: V2CoreError.invalidPositiveValue) {
-            try V2GroupMemberRoleCommand(operationID: .init("role"), roomID: .init("room"),
-                targetUserID: .init("member"), role: .admin, expectedMembershipRevision: 0)
-        }
+        #expect(try V2GroupMemberRoleCommand(operationID: .init("role"), roomID: .init("room"),
+            targetUserID: .init("member"), role: .admin, expectedMembershipRevision: 0).expectedMembershipRevision == 0)
     }
 }

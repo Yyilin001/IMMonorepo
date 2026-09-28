@@ -9,6 +9,32 @@ import Testing
 
 @Suite(.serialized)
 struct V2ResourceProfilePresentationTests {
+    @Test("HTTP/author common authorization reads only the current recipient's private alias",
+          .enabled(if:ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil))
+    func recipientAliases() async throws {
+        let resources = makeV2DatabaseTestResources()
+        var service:V2ResourceProfilePresentationService?
+        do {
+            resources.databases.use(try .postgres(url:#require(ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"])),as:.psql,isDefault:true)
+            let database = resources.database(.psql),sql = try #require(database as? any SQLDatabase)
+            let target = UserID(uuid:UUID()),owners = [UserID(uuid:UUID()),UserID(uuid:UUID())]
+            for user in owners + [target] { try await seedProfile(user,sql:sql) }
+            let reader = V2ResourceProfilePresentationService(controlDatabase:database,authorization:.init(query:{ _,_ in throw V2MediaStoreError.downloadNotAuthorized }),avatars:.init(delivery:NoProfileAvatarDelivery()))
+            service = reader
+            for (index,owner) in owners.enumerated() {
+                let device = DeviceID(uuid:UUID())
+                try await sql.raw("INSERT INTO im_v2.auth_devices(user_id,device_id,created_at,last_active_at) VALUES(\(bind:owner.uuidValue!),\(bind:device.uuidValue!),clock_timestamp(),clock_timestamp())").run()
+                try await sql.raw("INSERT INTO im_v2.user_relationships(lower_user_id,higher_user_id,state,requested_by_user_id,updated_at) VALUES(LEAST(\(bind:owner.uuidValue!),\(bind:target.uuidValue!)),GREATEST(\(bind:owner.uuidValue!),\(bind:target.uuidValue!)),'accepted',\(bind:owner.uuidValue!),clock_timestamp())").run()
+                let name = "Private owner " + String(index)
+                try await sql.raw("INSERT INTO im_v2.user_contact_aliases(owner_user_id,target_user_id,remark_name,revision,updated_at) VALUES(\(bind:owner.uuidValue!),\(bind:target.uuidValue!),\(bind:name),7,clock_timestamp())").run()
+                let response = try await reader.read(.init(keys:[.init(userID:target,context:.relationship)]),actorUserID:owner,deviceID:device)
+                guard case .presentation(let value,_) = response.results[0] else { throw V2MediaStoreError.downloadNotAuthorized }
+                #expect(value.contactAlias?.ownerUserID == owner && value.contactAlias?.remarkName == name && value.contactAlias?.revision.rawValue == 7)
+            }
+            await reader.close();try await resources.shutdown()
+        } catch { await service?.close();try? await resources.shutdown();throw error }
+    }
+
     @Test("join-review visibility follows invitation permissions and pending requests without granting member access",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil),
           arguments: ["owner", "admin-default", "member-default", "admin-empty", "admin-unrelated", "member-grant", "admin-grant"])

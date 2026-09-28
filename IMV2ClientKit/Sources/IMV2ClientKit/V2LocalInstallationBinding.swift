@@ -165,6 +165,8 @@ public actor V2LocalStoreBootstrapper {
         self.makeBinding = makeBinding
     }
 
+    func bindingStoreForLocalRead() async throws -> V2LocalInstallationBinding? { try await bindingStore.load() }
+
     /// 取得安装绑定并打开账户本地数据库，缺失或不匹配时按约定重建。
     ///
     /// - Parameters:

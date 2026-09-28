@@ -138,6 +138,23 @@ struct V2GroupAvatarClosureTests {
         let f = try IntentFixture(), job = try await f.upload(), command = try f.command(media: job.request.mediaID)
         _ = try await f.store.freezeGroupAvatarIntent(actorUserID: f.actor, command: command, uploadJobID: job.id)
         let proof = try await close(f, command)
+        var fillers: [(UUID, V2ResourceImportRequest)] = []
+        for _ in 0..<32 {
+            let id = UUID(), request = try V2ResourceImportRequest(operationID: .init(uuid: UUID()),
+                source: .message(location: .init(roomID: f.room, messageID: .init(uuid: UUID())),
+                    mediaID: .init(uuid: UUID()), variantID: nil),
+                targetUsage: .messageAttachment(f.room), targetMediaID: .init(uuid: UUID()))
+            try await f.store.prepareResourceImport(id: id, request: request)
+            fillers.append((id, request))
+        }
+        await #expect(throws: V2ResourceJournalError.capacityExceeded) {
+            _ = try await f.store.replaceClosedGroupAvatarIntent(command.operationID, expectedRevision: 7)
+        }
+        #expect(try await f.store.groupAvatarIntent(command.operationID)?.closedDisposition == .awaitingDecision)
+        #expect(try await f.store.pendingGroupAvatarIntents(in: f.room).count == 1)
+        let freed = fillers[0]
+        try await f.store.saveResourceImport(.init(locator: .init(home: .room(f.room), operationID: freed.1.operationID),
+            mediaID: freed.1.targetMediaID, state: .cancelled, bindableUntil: nil), id: freed.0)
         let id = try await f.store.replaceClosedGroupAvatarIntent(command.operationID, expectedRevision: 7)
         #expect(try await f.store.replaceClosedGroupAvatarIntent(command.operationID, expectedRevision: 99) == id)
         let next = try #require(try await f.store.groupAvatarIntent(id))

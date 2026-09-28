@@ -68,6 +68,7 @@ public enum V2DeviceSessionMutationOutcome: Equatable, Sendable {
 
 /// 设备会话服务错误。
 public enum V2DeviceSessionServiceError: Error, Equatable, Sendable {
+    case authorizationDenied
     /// 请求参数不满足约束。
     case invalidRequest
     /// 持久化记录缺失或字段无法解码。
@@ -114,7 +115,7 @@ struct V2IssuedDeviceRevocationCapability: Sendable {
 ///
 /// 变更会持有与凭据签发/刷新相同的账号咨询锁，在单个事务内吊销该设备的全部凭据，
 /// 并为每个网关追加一条持久化吊销事件。
-public protocol V2DeviceSessionManaging: Sendable {
+public protocol V2DeviceSessionManaging: V2RemoteDeviceRevocationManaging {
     /// 分页读取账号的活跃会话。
     ///
     /// - Parameters:
@@ -125,21 +126,6 @@ public protocol V2DeviceSessionManaging: Sendable {
     /// - Throws: 无权限或持久化失败时抛出。
     func sessions(for userID: UserID, cursor: String?, pageSize: Int) async throws -> V2DeviceSessionPage
 
-    /// 吊销指定设备。
-    ///
-    /// - Parameters:
-    ///   - actorUserID: 发起操作的用户。
-    ///   - currentDeviceID: 发起操作的当前设备。
-    ///   - targetDeviceID: 待吊销设备。
-    ///   - operationID: 幂等操作标识。
-    /// - Returns: 变更结果。
-    /// - Throws: 目标不可用或持久化失败时抛出。
-    func revokeDevice(
-        actorUserID: UserID,
-        currentDeviceID: DeviceID,
-        targetDeviceID: DeviceID,
-        operationID: UUID
-    ) async throws -> V2DeviceSessionMutationOutcome
     /// 吊销当前设备。
     ///
     /// - Parameters:
@@ -150,19 +136,7 @@ public protocol V2DeviceSessionManaging: Sendable {
     /// - Throws: 持久化失败时抛出。
     func revokeCurrentDevice(actorUserID: UserID, currentDeviceID: DeviceID, operationID: UUID) async throws -> V2DeviceSessionMutationOutcome
 
-    /// 吊销除当前设备外的全部设备。
-    ///
-    /// - Parameters:
-    ///   - actorUserID: 发起操作的用户。
-    ///   - currentDeviceID: 保留的当前设备。
-    ///   - operationID: 幂等操作标识。
-    /// - Returns: 变更结果。
-    /// - Throws: 持久化失败时抛出。
-    func revokeOtherDevices(
-        actorUserID: UserID,
-        currentDeviceID: DeviceID,
-        operationID: UUID
-    ) async throws -> V2DeviceSessionMutationOutcome
+
 }
 
 /// 基于 PostgreSQL 的账号会话服务。
@@ -353,21 +327,7 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
     ///   - operationID: 幂等操作标识。
     /// - Returns: 变更结果。
     /// - Throws: 目标不可用或持久化失败时抛出。
-    public func revokeDevice(
-        actorUserID: UserID,
-        currentDeviceID: DeviceID,
-        targetDeviceID: DeviceID,
-        operationID: UUID
-    ) async throws -> V2DeviceSessionMutationOutcome {
-        guard targetDeviceID != currentDeviceID else { return .targetUnavailable }
-        return try await mutate(
-            actorUserID: actorUserID,
-            currentDeviceID: currentDeviceID,
-            targetDeviceID: targetDeviceID,
-            operationID: operationID,
-            kind: .revokeDevice
-        )
-    }
+
 
     /// 吊销当前设备。
     ///
@@ -411,55 +371,9 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
     ///   - operationID: 幂等操作标识。
     /// - Returns: 变更结果。
     /// - Throws: 持久化失败时抛出。
-    public func revokeOtherDevices(
-        actorUserID: UserID,
-        currentDeviceID: DeviceID,
-        operationID: UUID
-    ) async throws -> V2DeviceSessionMutationOutcome {
-        try await database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase else { throw V2DeviceSessionServiceError.unavailable }
-            let userUUID = try deviceSessionUUID(actorUserID)
-            let currentUUID = try deviceSessionUUID(currentDeviceID)
-            try await Self.lockAccountState(sql, userID: userUUID)
-            guard try await isCurrentDeviceActive(sql, userID: userUUID, deviceID: currentUUID) else { return .targetUnavailable }
-            if let existing = try await operation(sql, actorUserID: userUUID, operationID: operationID) {
-                guard existing.kind == SessionOperationKind.revokeOtherDevices.rawValue, existing.targetDeviceID == nil else {
-                    return .targetUnavailable
-                }
-                return .idempotent
-            }
-            let occurredAt = now()
-            try await revokeOtherDevices(sql, userID: userUUID, currentDeviceID: currentUUID, at: occurredAt)
-            try await insertOperation(sql, actorUserID: userUUID, operationID: operationID, kind: .revokeOtherDevices, targetDeviceID: nil, at: occurredAt)
-            return .applied
-        }
-    }
 
-    private func mutate(
-        actorUserID: UserID,
-        currentDeviceID: DeviceID,
-        targetDeviceID: DeviceID,
-        operationID: UUID,
-        kind: SessionOperationKind
-    ) async throws -> V2DeviceSessionMutationOutcome {
-        try await database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase else { throw V2DeviceSessionServiceError.unavailable }
-            let userUUID = try deviceSessionUUID(actorUserID)
-            let currentUUID = try deviceSessionUUID(currentDeviceID)
-            let targetUUID = try deviceSessionUUID(targetDeviceID)
-            try await Self.lockAccountState(sql, userID: userUUID)
-            guard try await isCurrentDeviceActive(sql, userID: userUUID, deviceID: currentUUID) else { return .targetUnavailable }
-            if let existing = try await operation(sql, actorUserID: userUUID, operationID: operationID) {
-                guard existing.kind == kind.rawValue, existing.targetDeviceID == targetUUID else { return .targetUnavailable }
-                return .idempotent
-            }
-            guard try await isTargetActive(sql, userID: userUUID, deviceID: targetUUID) else { return .targetUnavailable }
-            let occurredAt = now()
-            try await Self.revokeSession(sql, userID: userUUID, deviceID: targetUUID, at: occurredAt)
-            try await insertOperation(sql, actorUserID: userUUID, operationID: operationID, kind: kind, targetDeviceID: targetUUID, at: occurredAt)
-            return .applied
-        }
-    }
+
+
 
     private func isCurrentDeviceActive(_ sql: any SQLDatabase, userID: UUID, deviceID: UUID) async throws -> Bool {
         try await isTargetActive(sql, userID: userID, deviceID: deviceID)
@@ -532,52 +446,7 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
             """).run()
     }
 
-    private func revokeOtherDevices(_ sql: any SQLDatabase, userID: UUID, currentDeviceID: UUID, at: Date) async throws {
-        guard v2PostgresTimestampCanEncode(at) else { throw V2DeviceSessionServiceError.unavailable }
-        // 每个修改数据的 CTE 都消费认证设备更新返回的同一有界集合。
-        // 这样无须在应用层物化设备 ID，并将 N×5 次串行数据库往返合并为一次。
-        try await sql.raw("""
-        WITH revoked_devices AS MATERIALIZED (
-            UPDATE im_v2.auth_devices
-            SET revoked_at = \(bind: at)
-            WHERE user_id = \(bind: userID)
-              AND device_id <> \(bind: currentDeviceID)
-              AND revoked_at IS NULL
-            RETURNING device_id
-        ), revoked_refresh_sessions AS (
-            UPDATE im_v2.device_refresh_sessions AS session
-            SET revoked_at = COALESCE(session.revoked_at, \(bind: at))
-            FROM revoked_devices
-            WHERE session.device_id = revoked_devices.device_id
-            RETURNING session.device_id
-        ), revoked_access_tokens AS (
-            UPDATE im_v2.device_access_tokens AS token
-            SET revoked_at = COALESCE(token.revoked_at, \(bind: at))
-            FROM revoked_devices
-            WHERE token.user_id = \(bind: userID)
-              AND token.device_id = revoked_devices.device_id
-            RETURNING token.device_id
-        ), disabled_push_endpoints AS (
-            UPDATE im_v2.push_device_endpoints AS endpoint
-            SET disabled_at = COALESCE(endpoint.disabled_at, \(bind: at))
-            FROM revoked_devices
-            WHERE endpoint.device_id = revoked_devices.device_id
-            RETURNING endpoint.device_id
-        ), appended_revocations AS (
-            INSERT INTO im_v2.device_revocation_events (user_id, device_id, created_at)
-            SELECT \(bind: userID), device_id, \(bind: at)
-            FROM revoked_devices
-            ON CONFLICT (device_id) DO NOTHING
-            RETURNING device_id
-        )
-        SELECT
-            (SELECT COUNT(*) FROM revoked_devices) AS revoked_device_count,
-            (SELECT COUNT(*) FROM revoked_refresh_sessions) AS revoked_refresh_count,
-            (SELECT COUNT(*) FROM revoked_access_tokens) AS revoked_access_count,
-            (SELECT COUNT(*) FROM disabled_push_endpoints) AS disabled_push_count,
-            (SELECT COUNT(*) FROM appended_revocations) AS appended_revocation_count
-        """).run()
-    }
+
 
     /// 取得账号级咨询锁。
     ///
@@ -591,7 +460,7 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
     }
 }
 
-private enum SessionOperationKind: String { case revokeDevice = "revoke_device"; case revokeOtherDevices = "revoke_other_devices" }
+private enum SessionOperationKind: String { case revokeDevice = "revoke_device" }
 private struct DeviceSessionRow: Decodable { let deviceID: UUID; let displayName: String; let platform: String; let createdAt: Date; let lastActiveAt: Date; let cursorTimestamp: DeviceSessionCursorTimestamp; enum CodingKeys: String, CodingKey { case deviceID = "device_id"; case displayName = "display_name"; case platform; case createdAt = "created_at"; case lastActiveAt = "last_active_at"; case cursorTimestamp = "cursor_timestamp" } }
 private struct DeviceSessionOperationRow: Decodable { let kind: String; let targetDeviceID: UUID?; enum CodingKeys: String, CodingKey { case kind = "operation_kind"; case targetDeviceID = "target_device_id" } }
 private struct CapabilitySessionRow: Decodable {
@@ -652,3 +521,77 @@ private func deviceSessionUUID<Tag>(_ identifier: V2Identifier<Tag>) throws -> U
     guard let value = UUID(uuidString: identifier.rawValue) else { throw V2DeviceSessionServiceError.malformedPersistence }
     return value
 }
+
+/// Online remote device safety is separate from the self-revocation capability journal.
+public protocol V2RemoteDeviceRevocationManaging: Sendable {
+    func remoteRevocationBaseline(actorUserID:UserID,currentDeviceID:DeviceID) async throws -> V2RemoteDeviceRevocationBaseline
+    func submitRemoteRevocation(_ command:V2RemoteDeviceRevocationCommand) async throws -> V2RemoteDeviceRevocationResult
+    func recoverRemoteRevocation(_ request:V2RemoteDeviceRevocationRecoveryRequest) async throws -> V2RemoteDeviceRevocationResult
+}
+
+extension V2PostgresDeviceSessionService: V2RemoteDeviceRevocationManaging {
+    public func remoteRevocationBaseline(actorUserID:UserID,currentDeviceID:DeviceID) async throws -> V2RemoteDeviceRevocationBaseline {
+        try await database.transaction { tx in
+            guard let sql=tx as? any SQLDatabase else {throw V2DeviceSessionServiceError.unavailable}
+            let actor=try deviceSessionUUID(actorUserID),current=try deviceSessionUUID(currentDeviceID)
+            try await Self.lockAccountState(sql,userID:actor)
+            guard try await isCurrentDeviceActive(sql,userID:actor,deviceID:current) else {throw V2DeviceSessionServiceError.authorizationDenied}
+            let issued=now()
+            guard v2PostgresTimestampCanEncode(issued), try v2GatewayMilliseconds(issued) > 0,
+                  v2PostgresTimestampCanEncode(issued.addingTimeInterval(120)) else { throw V2DeviceSessionServiceError.unavailable }
+            // Admission owns bounded eager cleanup; the control-plane GC also
+            // removes expired baselines. Permanent receipts are never included.
+            try await sql.raw("DELETE FROM im_v2.remote_device_revocation_baselines WHERE baseline_id IN (SELECT baseline_id FROM im_v2.remote_device_revocation_baselines WHERE actor_user_id = \(bind:actor) AND expires_at <= \(bind:issued) ORDER BY expires_at LIMIT 256)").run()
+            let activeBaselines=try await sql.raw("SELECT baseline::text AS value FROM im_v2.remote_device_revocation_baselines WHERE actor_user_id = \(bind:actor) AND expires_at > \(bind:issued) LIMIT 32").all(decoding:RemoteDeviceJSONRow.self)
+            guard activeBaselines.count < 32 else {throw V2DeviceSessionServiceError.unavailable}
+            let rows=try await sql.raw("SELECT device_id FROM im_v2.auth_devices WHERE user_id = \(bind:actor) AND device_id <> \(bind:current) AND revoked_at IS NULL AND session_expires_at > \(bind:issued) ORDER BY device_id LIMIT 257").all(decoding:RemoteDeviceTargetRow.self)
+            guard rows.count<=V2RemoteDeviceRevocationBaseline.maximumTargets else {throw V2DeviceSessionServiceError.invalidRequest}
+            guard let milliseconds=UInt64(exactly:try v2GatewayMilliseconds(issued)),
+                  milliseconds<=UInt64(Int64.max)-120_000 else {throw V2DeviceSessionServiceError.invalidRequest}
+            let value=try V2RemoteDeviceRevocationBaseline(id:UUID(),actorUserID:actorUserID,currentDeviceID:currentDeviceID,
+                targetDeviceIDs:rows.map {DeviceID(uuid:$0.deviceID)}.sorted {$0.rawValue<$1.rawValue},issuedAtMilliseconds:milliseconds,expiresAtMilliseconds:milliseconds+120_000)
+            let text=String(decoding:try JSONEncoder().encode(value),as:UTF8.self)
+            try await sql.raw("INSERT INTO im_v2.remote_device_revocation_baselines(baseline_id,actor_user_id,current_device_id,baseline,expires_at) VALUES (\(bind:value.id),\(bind:actor),\(bind:current),\(bind:text)::jsonb,\(bind:issued.addingTimeInterval(120)))").run()
+            return value
+        }
+    }
+    public func submitRemoteRevocation(_ command:V2RemoteDeviceRevocationCommand) async throws -> V2RemoteDeviceRevocationResult {
+        try await remoteRevocationTransaction(command) {sql,issued in
+            let milliseconds=try v2GatewayMilliseconds(issued)
+            guard milliseconds<command.firstSubmissionDeadlineMilliseconds else {return try await saveRemoteProof(command,outcome:.rejected(.deadlineExpired),now:issued,sql:sql)}
+            guard let row=try await sql.raw("SELECT baseline::text AS value FROM im_v2.remote_device_revocation_baselines WHERE baseline_id = \(bind:command.baseline.id) AND actor_user_id = \(bind:command.baseline.actorUserID.uuidValue!) AND current_device_id = \(bind:command.baseline.currentDeviceID.uuidValue!) AND expires_at > \(bind:issued)").first(decoding:RemoteDeviceJSONRow.self),
+                  try JSONDecoder().decode(V2RemoteDeviceRevocationBaseline.self,from:Data(row.value.utf8))==command.baseline else {return try await saveRemoteProof(command,outcome:.rejected(.baselineUnavailable),now:issued,sql:sql)}
+            guard try await isCurrentDeviceActive(sql,userID:command.baseline.actorUserID.uuidValue!,deviceID:command.baseline.currentDeviceID.uuidValue!) else {return try await saveRemoteProof(command,outcome:.rejected(.authorizationDenied),now:issued,sql:sql)}
+            // Immutable device IDs are never revived. Do not select a fresh 'others' set here.
+            for target in command.targetDeviceIDs {try await Self.revokeSession(sql,userID:command.baseline.actorUserID.uuidValue!,deviceID:target.uuidValue!,at:issued)}
+            return try await saveRemoteProof(command,outcome:.revoked,now:issued,sql:sql)
+        }
+    }
+    public func recoverRemoteRevocation(_ request:V2RemoteDeviceRevocationRecoveryRequest) async throws -> V2RemoteDeviceRevocationResult {
+        try await remoteRevocationTransaction(request.command) {sql,issued in
+            request.action == .query ? .unresolved : try await saveRemoteProof(request.command,outcome:.closed,now:issued,sql:sql)
+        }
+    }
+    private func remoteRevocationTransaction(_ command:V2RemoteDeviceRevocationCommand,operation:@escaping @Sendable(any SQLDatabase,Date) async throws -> V2RemoteDeviceRevocationResult) async throws -> V2RemoteDeviceRevocationResult {
+        try await database.transaction {tx in
+            guard let sql=tx as? any SQLDatabase else {throw V2DeviceSessionServiceError.unavailable}
+            try await Self.lockAccountState(sql,userID:command.baseline.actorUserID.uuidValue!)
+            if let row=try await sql.raw("SELECT receipt::text AS value FROM im_v2.remote_device_revocation_receipts WHERE actor_user_id = \(bind:command.baseline.actorUserID.uuidValue!) AND operation_id = \(bind:command.operationID)").first(decoding:RemoteDeviceJSONRow.self) {
+                let receipt=try JSONDecoder().decode(V2RemoteDeviceRevocationReceipt.self,from:Data(row.value.utf8))
+                return receipt.validates(command) ? .receipt(receipt):.fingerprintConflict
+            }
+            let issued = now()
+            guard v2PostgresTimestampCanEncode(issued), try v2GatewayMilliseconds(issued) > 0 else { throw V2DeviceSessionServiceError.unavailable }
+            return try await operation(sql,issued)
+        }
+    }
+    private func saveRemoteProof(_ command:V2RemoteDeviceRevocationCommand,outcome:V2RemoteDeviceRevocationReceipt.Outcome,now:Date,sql:any SQLDatabase) async throws -> V2RemoteDeviceRevocationResult {
+        guard let milliseconds=UInt64(exactly:try v2GatewayMilliseconds(now)) else {throw V2DeviceSessionServiceError.invalidRequest}
+        let receipt=try V2RemoteDeviceRevocationReceipt(command:command,outcome:outcome,resolvedAtMilliseconds:milliseconds)
+        let text=String(decoding:try JSONEncoder().encode(receipt),as:UTF8.self)
+        try await sql.raw("INSERT INTO im_v2.remote_device_revocation_receipts(actor_user_id,operation_id,current_device_id,receipt) VALUES (\(bind:command.baseline.actorUserID.uuidValue!),\(bind:command.operationID),\(bind:command.baseline.currentDeviceID.uuidValue!),\(bind:text)::jsonb)").run()
+        return .receipt(receipt)
+    }
+}
+private struct RemoteDeviceTargetRow:Decodable {let deviceID:UUID;enum CodingKeys:String,CodingKey {case deviceID="device_id"}}
+private struct RemoteDeviceJSONRow:Decodable {let value:String}

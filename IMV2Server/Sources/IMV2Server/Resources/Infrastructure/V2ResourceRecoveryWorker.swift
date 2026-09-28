@@ -38,7 +38,10 @@ public struct V2ResourceRecoveryWorker: Sendable {
             let actor = UserID(uuid: row.actorUserID)
             let locator = V2ResourceUploadLocator(home: request.usage.home(actorUserID: actor), sessionID: .init(uuid: row.sessionID))
             // Transient/authorization failures stay durable; expiry seals abandoned operations.
-            _ = try? await service.finalize(.init(locator: locator,generation: row.generation), actor: actor, device: .init(uuid: row.deviceID))
+            do {
+                let current = try await service.status(locator, actor: actor, device: .init(uuid: row.deviceID))
+                _ = try await service.finalize(.init(locator: locator,generation: row.generation,parts:current.confirmedParts), actor: actor, device: .init(uuid: row.deviceID))
+            } catch { /* Durable expiry/recovery owns the next bounded pass. */ }
         }
     }
 }

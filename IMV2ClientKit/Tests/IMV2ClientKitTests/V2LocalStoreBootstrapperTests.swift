@@ -14,9 +14,9 @@ struct V2LocalStoreBootstrapperTests {
         let replacement = V2LocalInstallationBinding(value: UUID(uuidString: "00000000-0000-0000-0000-000000000602")!)
         let bootstrapper = V2LocalStoreBootstrapper(bindingStore: bindingStore, makeBinding: { replacement })
 
-        let store = try await bootstrapper.open(databaseURL: url)
+        let store = try await bootstrapper.open(databaseURL: url, userID: .init("binding-user"))
 
-        #expect(try await store.pendingMessageCommands().isEmpty)
+        #expect(try await savedDurableMessages(in: store).isEmpty)
         #expect(try await store.messageSearchDatabasePool.read { db in try !db.tableExists("imported_search_probe") })
         #expect(try await bindingStore.load() == replacement)
     }
@@ -29,9 +29,9 @@ struct V2LocalStoreBootstrapperTests {
         let bindingStore = InMemoryInstallationBindingStore(binding: trusted)
         let bootstrapper = V2LocalStoreBootstrapper(bindingStore: bindingStore)
 
-        let store = try await bootstrapper.open(databaseURL: url)
+        let store = try await bootstrapper.open(databaseURL: url, userID: .init("binding-user"))
 
-        #expect(try await store.pendingMessageCommands().isEmpty)
+        #expect(try await savedDurableMessages(in: store).isEmpty)
         #expect(try await store.messageSearchDatabasePool.read { db in try !db.tableExists("imported_search_probe") })
         #expect(try await bindingStore.load() == trusted)
     }
@@ -42,23 +42,14 @@ struct V2LocalStoreBootstrapperTests {
         let binding = V2LocalInstallationBinding(value: UUID(uuidString: "00000000-0000-0000-0000-000000000605")!)
         let bindingStore = InMemoryInstallationBindingStore()
         let bootstrapper = V2LocalStoreBootstrapper(bindingStore: bindingStore, makeBinding: { binding })
-        let first = try await bootstrapper.open(databaseURL: url)
-        let command = try V2PendingMessageCommand(
+        let first = try await bootstrapper.open(databaseURL: url, userID: .init("binding-user"))
+        let command = try await persistDurableMessage(in: first,
             roomID: .init("00000000-0000-0000-0000-000000000606"),
-            clientMessageID: .init("00000000-0000-0000-0000-000000000607"),
-            text: "device-local",
-            state: .pending,
-            attemptCount: 0,
-            nextAttemptAt: .distantPast,
-            acceptedMessageID: nil,
-            acceptedRoomSequence: nil,
-            terminalCode: nil
-        )
-        try await first.enqueue(command)
+            clientMessageID: .init("00000000-0000-0000-0000-000000000607"), text: "device-local")
 
-        let reopened = try await bootstrapper.open(databaseURL: url)
+        let reopened = try await bootstrapper.open(databaseURL: url, userID: .init("binding-user"))
 
-        #expect(try await reopened.pendingMessageCommands() == [command])
+        #expect(try await savedDurableMessages(in: reopened) == [command])
     }
 
     @Test("temporary Keychain unavailability leaves the database untouched")
@@ -69,25 +60,17 @@ struct V2LocalStoreBootstrapperTests {
         let bootstrapper = V2LocalStoreBootstrapper(bindingStore: bindingStore)
 
         await #expect(throws: V2LocalStoreBootstrapError.installationBindingUnavailable) {
-            _ = try await bootstrapper.open(databaseURL: url)
+            _ = try await bootstrapper.open(databaseURL: url, userID: .init("binding-user"))
         }
         #expect(FileManager.default.fileExists(atPath: url.path))
         #expect(FileManager.default.fileExists(atPath: V2LocalDatabaseArtifacts(primary: url).search.path))
     }
 
     private func persistPendingCommand(in url: URL, binding: V2LocalInstallationBinding) async throws {
-        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        try await store.enqueue(try .init(
+        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding, userID: .init("binding-user"))
+        try await persistDurableMessage(in: store,
             roomID: .init("00000000-0000-0000-0000-000000000609"),
-            clientMessageID: .init("00000000-0000-0000-0000-000000000610"),
-            text: "untrusted",
-            state: .pending,
-            attemptCount: 0,
-            nextAttemptAt: .distantPast,
-            acceptedMessageID: nil,
-            acceptedRoomSequence: nil,
-            terminalCode: nil
-        ))
+            clientMessageID: .init("00000000-0000-0000-0000-000000000610"), text: "untrusted")
         try await store.messageSearchDatabasePool.write { db in
             try db.execute(sql: "CREATE TABLE imported_search_probe (body TEXT)")
             try db.execute(sql: "INSERT INTO imported_search_probe VALUES ('untrusted search body')")

@@ -103,6 +103,25 @@ struct V2VaporLocalFilesystemMediaRoutesTests {
                 #expect(partial.status == .partialContent)
                 #expect(partial.headers[.contentRange] == "bytes 100-199/131071")
                 #expect(try await partial.body.data() == payload.subdata(in: 100..<200))
+                let eTag = try #require(downloaded.headers[.eTag])
+                #expect(eTag.hasPrefix("\"") && eTag.hasSuffix("\""))
+                #expect(!eTag.hasPrefix("W/"))
+                let matched = try await client.get(
+                    URI(string: requestPath(for: download.url)),
+                    headers: [.range: "bytes=100-199", .ifRange: eTag]
+                )
+                #expect(matched.status == .partialContent)
+                #expect(matched.headers[.eTag] == eTag)
+                #expect(matched.headers[.contentRange] == "bytes 100-199/131071")
+                #expect(try await matched.body.data() == payload.subdata(in: 100..<200))
+                let stale = try await client.get(
+                    URI(string: requestPath(for: download.url)),
+                    headers: [.range: "bytes=200000-200099", .ifRange: "\"stale-object-version\""]
+                )
+                #expect(stale.status == .ok)
+                #expect(stale.headers[.eTag] == eTag)
+                #expect(stale.headers[.contentRange] == nil)
+                #expect(try await stale.body.data() == payload)
             }
             let staging = root.appendingPathComponent(".upload-staging", isDirectory: true)
             #expect(try FileManager.default.contentsOfDirectory(atPath: staging.path).isEmpty)

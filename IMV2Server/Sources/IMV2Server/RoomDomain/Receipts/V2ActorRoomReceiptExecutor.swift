@@ -58,9 +58,13 @@ public struct V2ActorRoomReceiptExecutor: Sendable {
     }
 
     public func query(_ query: V2RoomReceiptQuery, token: V2RoomActivationToken) async throws -> V2RoomReceiptResult {
+        if case .recover(let request) = query {
+            return .recovery(try await store(database).recoverActivationValidated(request,token:token,timeouts:timeouts))
+        }
         let reader = V2ActorRoomQueryExecutor(database: database, timeouts: timeouts)
         return try await reader.withFencedRead(roomIDs: [query.roomID], tokens: [token]) { transaction in
             switch query {
+            case .recover: throw V2ActorRoomReceiptWireError.invalidRequest
             case .readerCandidates(let wire):
                 do {
                     let page = try await store(transaction).readerCandidates(roomID: wire.roomID,

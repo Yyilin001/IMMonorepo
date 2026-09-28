@@ -44,8 +44,10 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                 try await gate.waitUntilHeld()
                 let token = try await cancelMaintenanceActivate(host: host)
                 let firstID = UUID(), queuedID = UUID()
+                let firstRequest = try cancelMaintenanceSendBytes(operation: firstID, text: "first")
+                let queuedRequest = try cancelMaintenanceSendBytes(operation: queuedID, text: "queued")
                 let first = Task { try await host.invoke(token: token,
-                    encodedRequest: try cancelMaintenanceSendBytes(operation: firstID, text: "first"),
+                    encodedRequest: firstRequest,
                     deadline: .now + .seconds(15)) }
                 try await cancelMaintenanceWaitUntil {
                     let waiting = try await cancelMaintenanceAdvisoryWait(sql: sql)
@@ -53,7 +55,7 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                     return waiting && snapshot.foregroundWrite.inFlight == 1
                 }
                 let queued = Task { try await host.invoke(token: token,
-                    encodedRequest: try cancelMaintenanceSendBytes(operation: queuedID, text: "queued"),
+                    encodedRequest: queuedRequest,
                     deadline: .now + .seconds(15)) }
                 try await cancelMaintenanceWaitUntil { await hosted.budget.snapshot().commandCount == 2 }
                 queued.cancel()
@@ -92,9 +94,10 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                 let fresh = try await cancelMaintenanceActivate(host: successor.host)
                 #expect(fresh.activationEpoch.rawValue == token.activationEpoch.rawValue + 1)
                 let replay = try await successor.host.invoke(token: fresh,
-                    encodedRequest: cancelMaintenanceSendBytes(operation: firstID, text: "first"),
+                    encodedRequest: firstRequest,
                     deadline: .now + .seconds(5))
-                guard case .messaging(.send(.idempotent(let accepted))) = replay else {
+                guard case .messaging(.sendOperation(.receipt(let proof))) = replay,
+                      case .accepted(let accepted) = proof.outcome else {
                     throw CancelMaintenanceFailure.unexpectedResult
                 }
                 #expect(accepted.messageID.uuidValue == original)
@@ -521,6 +524,7 @@ private func cancelMaintenanceHost(database: any Database,
         sendBatcher: batcher,
         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
+        invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
         receiptProjectionDelivery: CancelMaintenanceProjectionDelivery(),
         capacityProfile: fixture.forwardImportTestProfile(),
         messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
@@ -552,9 +556,9 @@ private func cancelMaintenanceActivate(
 }
 
 private func cancelMaintenanceSendBytes(operation: UUID, text: String) throws -> Data {
-    try JSONEncoder().encode(V2RoomRequest.messaging(.send(.init(roomID: roomID,
-        actorUserID: senderID, clientMessageID: .init(uuid: operation), text: text,
-        media: [], mentions: [], entities: [], replyTo: nil))))
+    try JSONEncoder().encode(V2RoomRequest.messaging(.sendOperation(.init(command: .init(roomID: roomID,
+        senderUserID: senderID, clientMessageID: .init(uuid: operation), text: text,
+        media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 600_000))))
 }
 
 private func cancelMaintenanceExpectFailure<T: Sendable>(_ expected: V2RoomCallFailure,
@@ -686,9 +690,9 @@ private func cancelMaintenanceRoomLockWait(sql: any SQLDatabase) async throws ->
 
 private func cancelMaintenanceOperationCount(sql: any SQLDatabase, operation: UUID) async throws -> Int64 {
     try #require(try await sql.raw("""
-        SELECT COUNT(*)::bigint AS value FROM im_v2.message_send_completions
-        WHERE room_id = \(bind: roomUUID) AND sender_user_id = \(bind: senderUUID)
-          AND client_message_id = \(bind: operation)
+        SELECT COUNT(*)::bigint AS value FROM im_v2.message_send_operation_receipts
+        WHERE room_id = \(bind: roomUUID) AND actor_user_id = \(bind: senderUUID)
+          AND operation_id = \(bind: operation)
         """).first(decoding: CancelMaintenanceCountRow.self)).value
 }
 

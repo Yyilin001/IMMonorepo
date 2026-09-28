@@ -118,6 +118,7 @@ public struct V2ActorForwardExportIntentWire: Codable, Equatable, Sendable {
 public enum V2RoomForwardCommand: Codable, Equatable, Sendable {
     case sameOwnerPair(V2ActorForwardPairWire)
     case prepareExport(V2ActorPrepareForwardExportWire)
+    case recoverExport(V2ActorForwardPairWire, action: V2OperationRecoveryRequest.Action)
     case recordReceipt(V2ActorRecordForwardReceiptWire)
     case importExport(V2ActorForwardExportWire)
 
@@ -125,6 +126,7 @@ public enum V2RoomForwardCommand: Codable, Equatable, Sendable {
         switch self {
         case .sameOwnerPair(let value): value.targetRoomID
         case .prepareExport(let value): value.source.roomID
+        case .recoverExport(let value, _): value.source.roomID
         case .recordReceipt(let value): value.sourceRoomID
         case .importExport(let value): RoomID(uuid: value.intent.targetRoomID)
         }
@@ -134,6 +136,7 @@ public enum V2RoomForwardCommand: Codable, Equatable, Sendable {
         switch self {
         case .sameOwnerPair(let value): value.actorUserID
         case .prepareExport(let value): value.actorUserID
+        case .recoverExport(let value, _): value.actorUserID
         case .recordReceipt(let value): value.actorUserID
         case .importExport(let value): UserID(uuid: value.intent.actorUserID)
         }
@@ -175,6 +178,7 @@ public enum V2RoomForwardResult: Codable, Equatable, Sendable {
     case pair(V2ActorForwardMessageResultWire)
     case preparedExport(V2ActorForwardExportWire)
     case terminalExport(V2ActorForwardImportOutcomeWire)
+    case unresolvedExport
     case receiptRecorded
     case imported(V2ActorForwardImportOutcomeWire)
 }

@@ -21,7 +21,9 @@ public struct V2RoomMessagingExecutor: Sendable {
     private let limits: V2MessageCommandLimits
     private let identifiers: V2AcceptanceIDFactory
     private let maximumEditBytes: Int
-    private let recovery: PostgresV2MessageOperationRecoveryStore?
+    private let sendOperations:PostgresV2MessageSendOperationStore?
+    private let mutations: PostgresV2MessageMutationOperationStore?
+    private let reactionOperations: PostgresV2MessageReactionOperationStore?
     private let now: @Sendable () -> Date
 
     public init(
@@ -38,7 +40,9 @@ public struct V2RoomMessagingExecutor: Sendable {
         withdrawalIdentifiers: V2MessageWithdrawalIDFactory = .init(),
         reactionIdentifiers: V2MessageReactionIDFactory = .init(),
         now: @escaping @Sendable () -> Date = Date.init,
-        recovery: PostgresV2MessageOperationRecoveryStore? = nil
+        mutations: PostgresV2MessageMutationOperationStore? = nil,
+        sendOperations:PostgresV2MessageSendOperationStore? = nil,
+        reactionOperations:PostgresV2MessageReactionOperationStore? = nil
     ) throws {
         guard maximumEditBytes > 0 else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
         let scope = try V2RoomActivationWriteScope(tokens: [token])
@@ -55,7 +59,9 @@ public struct V2RoomMessagingExecutor: Sendable {
         self.identifiers = identifiers
         self.maximumEditBytes = maximumEditBytes
         self.now = now
-        self.recovery = recovery
+        self.mutations = mutations
+        self.sendOperations = sendOperations
+        self.reactionOperations = reactionOperations
     }
 
     public func prepareSend(_ value: V2ActorSendMessageWire) throws -> V2PreparedActorSend {
@@ -74,17 +80,30 @@ public struct V2RoomMessagingExecutor: Sendable {
         guard command.roomID == token.roomID else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
         do {
             switch command {
-            case .recover(let value):
-                guard let recovery else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
-                return .recovery(try await recovery.recover(value.request, actorUserID: value.actorUserID, token: token))
-            case .send(let value):
-                return try await executePreparedSend(prepareSend(value))
-            case .edit(let value):
-                return .edit(.init(try await edits.edit(value.toAuthenticated(maximumTextUTF8Bytes: maximumEditBytes))))
-            case .withdraw(let value):
-                return .withdraw(.init(try await withdrawals.withdraw(value.toAuthenticated())))
-            case .reaction(let value):
-                return .reaction(.init(try await reactions.change(value.toAuthenticated())))
+            case .reactionOperation(let value):
+                guard let reactionOperations else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+                return .reactionOperation(try await reactionOperations.change(value,token:token,capacityProfile:capacityProfile,eventID:.init(uuid:UUID()),now:now()))
+            case .recoverReaction(let value):
+                guard let reactionOperations else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+                return .reactionOperation(try await reactionOperations.recover(value,token:token,now:now()))
+            case .reactionSnapshot(let value):
+                guard let reactionOperations else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+                return .reactionSnapshot(try await reactionOperations.snapshot(roomID:value.roomID,actorUserID:value.actorUserID,messageID:value.messageID,reaction:value.reaction,token:token))
+            case .sendOperation(let value):
+                guard let sendOperations,value.command.text.utf8.count<=limits.maxUTF8Bytes else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+                return .sendOperation(try await sendOperations.send(value,token:token,capacityProfile:capacityProfile,identifiers:identifiers.make(at:now())))
+            case .recoverSendOperation(let value):
+                guard let sendOperations else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+                return .sendOperation(try await sendOperations.recover(value,token:token))
+            case .editOperation(let value):
+                guard let mutations else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+                return .mutation(try await mutations.edit(value,token:token,capacityProfile:capacityProfile,eventID:.init(uuid:UUID()),now:now(),maximumUTF8Bytes:maximumEditBytes))
+            case .withdrawOperation(let value):
+                guard let mutations else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+                return .mutation(try await mutations.withdraw(value,token:token,capacityProfile:capacityProfile,eventID:.init(uuid:UUID()),now:now()))
+            case .recoverMutation(let value):
+                guard let mutations else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+                return .mutation(try await mutations.recover(value,token:token,now:now()))
             }
         } catch {
             if let failure = V2ActorMessagingErrorWire(domainError: error) { return .failure(failure) }

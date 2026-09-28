@@ -209,6 +209,7 @@ private func g2Host(database: any Database, fixture: PostgresV2RoomWriteStoreInt
         sendBatcher: batcher,
         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
+        invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
         receiptProjectionDelivery: G2ProjectionDelivery(),
         capacityProfile: fixture.forwardImportTestProfile(),
         messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,

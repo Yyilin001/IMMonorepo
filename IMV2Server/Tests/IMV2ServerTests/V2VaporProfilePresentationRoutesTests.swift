@@ -69,8 +69,8 @@ struct V2VaporProfilePresentationRoutesTests {
     func groupNicknameUsesAuthenticatedActor() async throws {
         let app = try await Application(.testing)
         defer { Task { try? await app.shutdown() } }
-        let actor = try UserID("actor")
-        let room = try RoomID("room")
+        let actor = UserID(uuid: UUID())
+        let room = RoomID(uuid: UUID())
         let nickname = try V2GroupMemberPresentation(
             roomID: room,
             userID: actor,
@@ -84,8 +84,8 @@ struct V2VaporProfilePresentationRoutesTests {
         ).register(on: app)
 
         try await app.testing { client in
-            let response = try await client.send(.put, headers: authenticatedHeaders(), to: "v2/profile-presentations/groups/room/nickname", beforeSend: { request in
-            try request.content.encode(NicknameMutationRequest(operationID: "operation", expectedRevision: 1, nickname: "值班"))
+            let response = try await client.send(.put, headers: authenticatedHeaders(), to: URI(string: "v2/profile-presentations/groups/\(room.rawValue)/nickname"), beforeSend: { request in
+            request.body = .init(data: try JSONEncoder().encode(V2GroupNicknameUpdateCommand(actorUserID: actor, roomID: room, operationID: GroupNicknameOperationID(uuid: UUID()), expectedRevision: .init(rawValue: 1), nickname: "值班", firstSubmissionDeadlineMilliseconds: 1000)))
         })
             #expect(response.status == .ok)
             #expect(response.headers[.cacheControl] == "no-store")
@@ -97,23 +97,34 @@ struct V2VaporProfilePresentationRoutesTests {
         #expect(request.nickname == "值班")
     }
 
-    @Test("overflowing profile revisions are rejected before the presentation store", arguments: [UInt64(0), UInt64(Int64.max)+1, UInt64.max], ["alias", "nickname"])
-    func rejectsUnrepresentableRevision(_ revision: UInt64, route: String) async throws {
+    @Test("single-target edit baselines and recovery use typed scoped contracts")
+    func typedBaselinesAndRecovery() async throws {
+        let actor = UserID(uuid: UUID()), target = UserID(uuid: UUID()), room = RoomID(uuid: UUID())
         let app = try await Application(.testing)
         do {
-            let actor = try UserID("actor")
-            let manager = PresentationRouteManager()
-            V2VaporProfilePresentationRoutes(authenticator: PresentationRouteAuthenticator(userID: actor), presentations: manager).register(on: app)
-            let path = route == "alias" ? "v2/profile-presentations/contact-aliases/target" : "v2/profile-presentations/groups/room/nickname"
+            V2VaporProfilePresentationRoutes(authenticator: PresentationRouteAuthenticator(userID: actor),
+                presentations: PresentationRouteManager()).register(on: app)
             try await app.testing { client in
-                let response = try await client.send(.put, headers: authenticatedHeaders(), to: URI(string: path), beforeSend: { request in
-                if route == "alias" { try request.content.encode(AliasMutationRequest(operationID: "operation", expectedRevision: revision, remarkName: "name")) }
-                else { try request.content.encode(NicknameMutationRequest(operationID: "operation", expectedRevision: revision, nickname: "name")) }
-            })
- #expect(response.status == .badRequest)
+                for path in ["v2/profile-presentations/contact-aliases/\(target.rawValue)",
+                    "v2/profile-presentations/groups/\(room.rawValue)/nickname"] {
+                    let response = try await client.send(.get, headers: authenticatedHeaders(), to: URI(string:path))
+                    #expect(response.status == .ok && response.headers[.cacheControl] == "no-store")
+                }
+                let c = try V2ContactAliasUpdateCommand(ownerUserID: actor, targetUserID: target,
+                    operationID: .init(uuid: UUID()), expectedRevision: nil, remarkName: nil,
+                    firstSubmissionDeadlineMilliseconds: 1000)
+                let request = try V2ContactAliasRecoveryRequest(identity:c.identity, fingerprint:c.fingerprint, action:.query)
+                let response = try await client.send(.post, headers: authenticatedHeaders(),
+                    to: URI(string:"v2/profile-presentations/contact-aliases/\(target.rawValue)/operations/recover"), beforeSend: { wire in
+                        wire.body = .init(data:try JSONEncoder().encode(request))
+                    })
+                #expect(response.status == .ok && response.headers[.cacheControl] == "no-store")
+                let mismatched = try await client.send(.post, headers:authenticatedHeaders(),
+                    to:URI(string:"v2/profile-presentations/contact-aliases/\(actor.rawValue)/operations/recover"), beforeSend:{ wire in
+                        wire.body = .init(data:try JSONEncoder().encode(request))
+                    })
+                #expect(mismatched.status == .forbidden)
             }
-            #expect(await manager.nicknameUpdateRequest() == nil)
-            #expect(await manager.aliasUpdateCount() == 0)
             try await app.shutdown()
         } catch { try? await app.shutdown(); throw error }
     }
@@ -173,21 +184,25 @@ private actor PresentationRouteManager: V2ProfilePresentationManaging {
         aliasList = .init(owner: ownerUserID, cursor: afterTargetUserID, limit: limit)
         return .init(values: alias.map { [$0] } ?? [], nextCursor: afterTargetUserID)
     }
-    func updateContactAlias(ownerUserID _: UserID, targetUserID _: UserID, operationID _: ContactAliasOperationID, expectedRevision _: V2ProfileRevision?, remarkName _: String?) throws -> V2ContactAlias {
+    func updateContactAlias(_ command: V2ContactAliasUpdateCommand) throws -> V2ContactAliasUpdateReceipt {
         aliasUpdates += 1
         if let error { throw error }
-        return try #require(alias)
+        return try .init(identity: command.identity, fingerprint: command.fingerprint, outcome: .committed(#require(alias)), resolvedAtMilliseconds: 1)
     }
+    func contactAliasSnapshot(ownerUserID: UserID, targetUserID: UserID) throws -> V2ContactAliasSnapshot { if let error { throw error }; return try .init(ownerUserID: ownerUserID, targetUserID: targetUserID, value: alias) }
+    func recoverContactAlias(_ request: V2ContactAliasRecoveryRequest) -> V2ContactAliasRecoveryResult { .unresolved }
     func groupNicknames(actorUserID _: UserID, roomID _: RoomID, afterUserID _: UserID?, limit _: Int) throws -> V2GroupNicknamePage {
         nicknameReads += 1
         if let error { throw error }
         return .init(values: nickname.map { [$0] } ?? [], nextCursor: nil)
     }
-    func updateOwnGroupNickname(actorUserID: UserID, roomID: RoomID, operationID _: GroupNicknameOperationID, expectedRevision: V2ProfileRevision?, nickname: String?) throws -> V2GroupMemberPresentation {
+    func updateOwnGroupNickname(_ command: V2GroupNicknameUpdateCommand) throws -> V2GroupNicknameUpdateReceipt {
         if let error { throw error }
-        nicknameUpdate = .init(actor: actorUserID, room: roomID, expectedRevision: expectedRevision, nickname: nickname)
-        return try #require(self.nickname)
+        nicknameUpdate = .init(actor: command.actorUserID, room: command.roomID, expectedRevision: command.expectedRevision, nickname: command.nickname)
+        return try .init(identity: command.identity, fingerprint: command.fingerprint, outcome: .committed(#require(self.nickname)), resolvedAtMilliseconds: 1)
     }
+    func ownGroupNicknameSnapshot(actorUserID: UserID, roomID: RoomID) throws -> V2GroupNicknameSnapshot { if let error { throw error }; return try .init(actorUserID: actorUserID, roomID: roomID, value: nickname) }
+    func recoverGroupNickname(_ request: V2GroupNicknameRecoveryRequest) -> V2GroupNicknameRecoveryResult { .unresolved }
     func aliasListRequest() -> AliasListRequest? { aliasList }
     func nicknameUpdateRequest() -> NicknameUpdateRequest? { nicknameUpdate }
 }

@@ -75,6 +75,16 @@ struct ResourceGroupNicknameTests {
         #expect(throws: (any Error).self) { _ = try JSONDecoder().decode(V2AuthorizedProfilePresentation.self, from: encoded) }
     }
 
+    @Test("private contact aliases bind to recipient and target and retain clearing revisions")
+    func privateAliasBinding() throws {
+        let (view,lease,_) = try fixture()
+        let alias = try V2ContactAlias(ownerUserID:lease.actorUserID,targetUserID:view.userID,remarkName:nil,revision:#require(.init(rawValue:7)))
+        let value = try V2AuthorizedProfilePresentation(view:view,lease:lease,contactAlias:alias)
+        #expect(try JSONDecoder().decode(V2AuthorizedProfilePresentation.self,from:JSONEncoder().encode(value)) == value)
+        let wrongOwner = try V2ContactAlias(ownerUserID:.init(uuid:UUID()),targetUserID:view.userID,remarkName:"Private",revision:#require(.init(rawValue:7)))
+        #expect(throws:V2ResourceValidationError.invalidPresentationLease) { try V2AuthorizedProfilePresentation(view:view,lease:lease,contactAlias:wrongOwner) }
+    }
+
     private func fixture() throws -> (V2ProfileView, V2PresentationAccessLease, RoomID) {
         let room = RoomID(uuid: UUID()), user = UserID(uuid: UUID()), now = Date()
         let revision = try #require(V2ProfileRevision(rawValue: 1))

@@ -36,6 +36,10 @@ public struct V2ResourceForwardMediaCopier: V2ForwardMediaObjectCopying {
             }
         }
         let source = try await sourceFacts(lease)
+        // Placement bytes must match the frozen message attachment, before
+        // preparing an output. A known short source is a terminal integrity
+        // failure, not a transient destination precondition to retry.
+        guard source.byteCount == lease.source.byteCount else { throw V2ForwardMediaCopyError.byteCountMismatch }
         let output = try await target.prepareResourceCopy(lease, source: source, allocate: {
             let reference = try allocate(registry.defaultBinding)
             guard reference.binding == registry.defaultBinding else { throw V2ResourceProviderError.configurationInvalid }
@@ -74,7 +78,6 @@ public struct V2ResourceForwardMediaCopier: V2ForwardMediaObjectCopying {
               AND c.home_id=\(bind:lease.export.intent.sourceRoomID) AND c.usage_kind='message_attachment'
               AND p.state='active' AND m.state='available' AND m.upload_session_id=\(bind:lease.source.uploadSessionID)
               AND m.content_type=\(bind:lease.source.contentType) AND m.byte_count=\(bind:lease.source.byteCount)
-              AND p.byte_count=m.byte_count
             """).first(decoding:ForwardSourcePlacement.self) else { throw V2ForwardMediaCopyError.sourceUnavailable }
         return try .init(reference:JSONDecoder().decode(V2StoredObjectReference.self,from:Data(row.reference.utf8)),byteCount:row.byteCount,sha256:row.sha256)
     }

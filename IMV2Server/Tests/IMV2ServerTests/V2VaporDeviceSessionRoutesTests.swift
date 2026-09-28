@@ -9,7 +9,7 @@ import VaporTesting
 
 @Suite("V2 Vapor device-session routes")
 struct V2VaporDeviceSessionRoutesTests {
-    @Test("session mutation clock failures return a no-store unavailable response", arguments: ["revoke", "revoke-current", "revoke-others"])
+    @Test("session mutation clock failures return a no-store unavailable response", arguments: ["remote-revocations/submit", "revoke-current", "remote-revocations/operations/recover"])
     func mutationClockFailureResponse(path: String) async throws {
         let app = try await Application(.testing)
         do {
@@ -21,7 +21,12 @@ struct V2VaporDeviceSessionRoutesTests {
                 let response = try await client.send(.post, to: URI(string: "v2/devices/\(path)"), beforeSend: { request in
                 request.headers.bearerAuthorization = .init(token: "opaque-token")
                 request.headers[HTTPField.Name("X-IM-Device-ID")!] = device.rawValue
-                try request.content.encode(V2DeviceSessionMutationHTTPRequest(deviceID: path == "revoke" ? target.rawValue : nil, operationID: UUID()))
+                if path == "revoke-current" { try request.content.encode(V2DeviceSessionMutationHTTPRequest(operationID: UUID())) }
+                else {
+                    let command = try deviceRouteCommand(user: user, current: device, target: target)
+                    if path.hasSuffix("recover") { try request.content.encode(V2RemoteDeviceRevocationRecoveryRequest(command: command, action: .query), as: .json) }
+                    else { try request.content.encode(command, as: .json) }
+                }
             })
                 #expect(response.status == .serviceUnavailable)
                 #expect(response.headers[.cacheControl] == "no-store")
@@ -191,12 +196,12 @@ struct V2VaporDeviceSessionRoutesTests {
         let operationID = UUID(uuidString: "00000000-0000-0000-0000-000000000814")!
 
         try await app.testing { client in
-            let response = try await client.send(.post, to: "v2/devices/revoke", beforeSend: { request in
+            let response = try await client.send(.post, to: "v2/devices/remote-revocations/submit", beforeSend: { request in
             request.headers.bearerAuthorization = .init(token: "opaque-token")
             request.headers[HTTPField.Name("X-IM-Device-ID")!] = currentID.rawValue
-            try request.content.encode(V2DeviceSessionMutationHTTPRequest(deviceID: otherID.rawValue, operationID: operationID))
+            try request.content.encode(deviceRouteCommand(user: userID, current: currentID, target: otherID, operation: operationID), as: .json)
         })
-            #expect(response.status == .noContent)
+            #expect(response.status == .ok)
             #expect(response.headers[.cacheControl] == "no-store")
         }
         let request = try #require(await store.revokeRequest())
@@ -226,19 +231,31 @@ private actor DeviceSessionRouteStore: V2DeviceSessionManaging {
         if let failure { throw failure }
         return .init(sessions: values, nextCursor: nil)
     }
-    func revokeDevice(actorUserID: UserID, currentDeviceID: DeviceID, targetDeviceID: DeviceID, operationID: UUID) throws -> V2DeviceSessionMutationOutcome {
+    func remoteRevocationBaseline(actorUserID: UserID, currentDeviceID: DeviceID) throws -> V2RemoteDeviceRevocationBaseline {
         if let failure { throw failure }
-        recorded = .init(actor: actorUserID, current: currentDeviceID, target: targetDeviceID, operationID: operationID)
-        return .applied
+        return try .init(id: UUID(), actorUserID: actorUserID, currentDeviceID: currentDeviceID,
+            targetDeviceIDs: values.map(\.deviceID).filter { $0 != currentDeviceID }.sorted { $0.rawValue < $1.rawValue },
+            issuedAtMilliseconds: 1_750_000_000_000, expiresAtMilliseconds: 1_750_000_120_000)
+    }
+    func submitRemoteRevocation(_ command: V2RemoteDeviceRevocationCommand) throws -> V2RemoteDeviceRevocationResult {
+        if let failure { throw failure }
+        if let target = command.targetDeviceIDs.first { recorded = .init(actor: command.baseline.actorUserID, current: command.baseline.currentDeviceID, target: target, operationID: command.operationID) }
+        return .receipt(try .init(command: command, outcome: .revoked, resolvedAtMilliseconds: 1_750_000_000_001))
+    }
+    func recoverRemoteRevocation(_ request: V2RemoteDeviceRevocationRecoveryRequest) throws -> V2RemoteDeviceRevocationResult {
+        if let failure { throw failure }
+        return .unresolved
     }
     func revokeCurrentDevice(actorUserID: UserID, currentDeviceID: DeviceID, operationID: UUID) throws -> V2DeviceSessionMutationOutcome {
         if let failure { throw failure }
         recorded = .init(actor: actorUserID, current: currentDeviceID, target: currentDeviceID, operationID: operationID)
         return .applied
     }
-    func revokeOtherDevices(actorUserID _: UserID, currentDeviceID _: DeviceID, operationID _: UUID) throws -> V2DeviceSessionMutationOutcome {
-        if let failure { throw failure }
-        return .applied
-    }
     func revokeRequest() -> Request? { recorded }
+}
+
+private func deviceRouteCommand(user: UserID, current: DeviceID, target: DeviceID, operation: UUID = UUID()) throws -> V2RemoteDeviceRevocationCommand {
+    let baseline = try V2RemoteDeviceRevocationBaseline(id: UUID(), actorUserID: user, currentDeviceID: current,
+        targetDeviceIDs: [target], issuedAtMilliseconds: 1_750_000_000_000, expiresAtMilliseconds: 1_750_000_120_000)
+    return try .init(operationID: operation, baseline: baseline, selection: .device(target), firstSubmissionDeadlineMilliseconds: baseline.expiresAtMilliseconds)
 }

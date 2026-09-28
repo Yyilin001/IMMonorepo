@@ -996,6 +996,7 @@ struct V2SyncEngineTests {
                 sourceEventID: .init("00000000-0000-0000-0000-00000000019\(index + 1)"),
                 projectionKind: "message_favorite",
                 payload: JSONSerialization.data(withJSONObject: [
+                    "revision": 1,
                     "room_id": roomID,
                     "message_id": messageID,
                     "is_favorited": true,
@@ -1033,6 +1034,7 @@ struct V2SyncEngineTests {
                 sourceEventID: .init("00000000-0000-0000-0000-000000000205"),
                 projectionKind: "conversation_state",
                 payload: JSONSerialization.data(withJSONObject: [
+                    "revision": 1,
                     "room_id": firstRoomID.rawValue,
                     "is_pinned": true,
                     "is_archived": false,
@@ -1045,6 +1047,7 @@ struct V2SyncEngineTests {
                 sourceEventID: .init("00000000-0000-0000-0000-000000000206"),
                 projectionKind: "conversation_state",
                 payload: JSONSerialization.data(withJSONObject: [
+                    "revision": 1,
                     "room_id": secondRoomID.rawValue,
                     "is_pinned": false,
                     "is_archived": true,
@@ -1057,6 +1060,7 @@ struct V2SyncEngineTests {
                 sourceEventID: .init("00000000-0000-0000-0000-000000000207"),
                 projectionKind: "message_favorite",
                 payload: JSONSerialization.data(withJSONObject: [
+                    "revision": 1,
                     "room_id": firstRoomID.rawValue,
                     "message_id": firstMessageID.rawValue,
                     "is_favorited": true,
@@ -1068,6 +1072,7 @@ struct V2SyncEngineTests {
                 sourceEventID: .init("00000000-0000-0000-0000-000000000208"),
                 projectionKind: "message_favorite",
                 payload: JSONSerialization.data(withJSONObject: [
+                    "revision": 1,
                     "room_id": secondRoomID.rawValue,
                     "message_id": secondMessageID.rawValue,
                     "is_favorited": true,
@@ -1933,10 +1938,12 @@ struct V2SyncEngineTests {
                 ])
             ),
             V2ClientSyncRecord(sequence: 6, sourceEventID: .init("00000000-0000-0000-0000-000000000416"), projectionKind: "conversation_state", payload: JSONSerialization.data(withJSONObject: [
+                    "revision": 1,
                 "room_id": pinned, "is_pinned": true, "is_archived": false,
                 "mute_until_ms": 0, "updated_at_ms": 1_750_000_004_000,
             ])),
             V2ClientSyncRecord(sequence: 7, sourceEventID: .init("00000000-0000-0000-0000-000000000417"), projectionKind: "conversation_state", payload: JSONSerialization.data(withJSONObject: [
+                    "revision": 1,
                 "room_id": archived, "is_pinned": false, "is_archived": true,
                 "mute_until_ms": 0, "updated_at_ms": 1_750_000_004_001,
             ])),
@@ -1956,6 +1963,7 @@ struct V2SyncEngineTests {
         #expect(archivedPage.entries.map(\.roomID.rawValue) == [archived])
 
         let archiveTie = try V2ClientSyncRecord(sequence: 8, sourceEventID: .init("00000000-0000-0000-0000-000000000418"), projectionKind: "conversation_state", payload: JSONSerialization.data(withJSONObject: [
+                    "revision": 1,
             "room_id": tiedFirst, "is_pinned": false, "is_archived": true,
             "mute_until_ms": 0, "updated_at_ms": 1_750_000_004_002,
         ]))
@@ -1969,7 +1977,7 @@ struct V2SyncEngineTests {
         let target = "00000000-0000-0000-0000-000000000290"
         let relationship = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init("00000000-0000-0000-0000-000000000291"), projectionKind: "relationship", payload: socialPayload(["target_user_id": target, "state": "pending", "requested_by_user_id": target, "updated_at_ms": 1_750_000_000_000]))
         let block = try V2ClientSyncRecord(sequence: 2, sourceEventID: .init("00000000-0000-0000-0000-000000000292"), projectionKind: "user_block", payload: socialPayload(["target_user_id": target, "is_blocked": true, "updated_at_ms": 1_750_000_001_000]))
-        let preference = try V2ClientSyncRecord(sequence: 3, sourceEventID: .init("00000000-0000-0000-0000-000000000293"), projectionKind: "stranger_message_permission", payload: socialPayload(["allows_stranger_messages": false, "updated_at_ms": 1_750_000_002_000]))
+        let preference = try V2ClientSyncRecord(sequence: 3, sourceEventID: .init("00000000-0000-0000-0000-000000000293"), projectionKind: "stranger_message_permission", payload: socialPayload(["allows_stranger_messages": false, "revision": 1, "updated_at_ms": 1_750_000_002_000]))
         _ = try await store.apply(.init(generation: 1, records: [relationship, block, preference], nextSyncToken: .init("social-token"), receipt: .init("social-receipt"), hasMore: false, capabilityProfile: "base"))
 
         let storedRelationship = try #require(await store.relationships().first)
@@ -2396,43 +2404,42 @@ struct V2SyncEngineTests {
     @Test("explicit personal rebuild survives restart and response loss without deleting the outbox")
     func durablePersonalSnapshotRebuild() async throws {
         let url = temporaryDatabaseURL()
-        var store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
+        var store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding, userID: .init("sync-owner"))
         let record = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init("00000000-0000-0000-0000-000000009001"), projectionKind: "message", payload: messagePayload(text: "old local baseline"))
         let batch = try V2ClientSyncBatch(generation: 1, records: [record], nextSyncToken: .init("old-token"), receipt: .init("old-receipt"), hasMore: false, capabilityProfile: "base")
         _ = try await store.apply(batch)
-        let pending = V2PendingMessageCommand(roomID: try .init("00000000-0000-0000-0000-000000009002"), clientMessageID: try .init("00000000-0000-0000-0000-000000009003"), text: "keep this outbox", state: .pending, attemptCount: 0, nextAttemptAt: .distantPast, acceptedMessageID: nil, acceptedRoomSequence: nil, terminalCode: nil)
-        try await store.enqueue(pending)
+        let pending = try await persistDurableMessage(in: store, roomID: try .init("00000000-0000-0000-0000-000000009002"), clientMessageID: try .init("00000000-0000-0000-0000-000000009003"), text: "keep this outbox")
         try await store.close()
-        store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
+        store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding, userID: .init("sync-owner"))
         #expect(try await !store.requiresSnapshotRebuild())
         #expect(try await store.cursor()?.appliedSequence == 1)
-        #expect(try await store.pendingMessageCommands() == [pending])
+        #expect(try await savedDurableMessages(in: store) == [pending])
         try await store.requestSnapshotRebuild()
         try await store.requestSnapshotRebuild()
         #expect(try await store.requiresSnapshotRebuild())
         await #expect(throws: V2ClientSyncError.snapshotRebuildRequired) { try await store.apply(batch) }
         try await store.close()
-        store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
+        store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding, userID: .init("sync-owner"))
         let reset = try V2ClientResetRequired(snapshotID: .init("00000000-0000-0000-0000-000000009004"), generation: 4, baseSequence: 10, expiresAt: .distantFuture)
         let transport = try RebuildSnapshotTransport(reset: reset)
         var engine = V2SyncEngine(transport: transport, store: store, capabilityProfile: "base")
         await #expect(throws: RebuildSnapshotTransport.ResponseLost.self) { try await engine.synchronizeOnce() }
         #expect(try await store.requiresSnapshotRebuild())
         #expect(try await store.cursor()?.appliedSequence == 1)
-        #expect(try await store.pendingMessageCommands() == [pending])
+        #expect(try await savedDurableMessages(in: store) == [pending])
         #expect(try await engine.synchronizeOnce() == .resetPending(reset))
         #expect(try await store.requiresSnapshotRebuild())
         // A pending reset resumes its saved generation without issuing another
         // forced request, including after the process restarts.
         try await store.close()
-        store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding)
+        store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding, userID: .init("sync-owner"))
         engine = V2SyncEngine(transport: transport, store: store, capabilityProfile: "base")
         #expect(try await engine.synchronizeOnce() == .resetPending(reset))
         try await engine.completePendingReset()
         #expect(try await !store.requiresSnapshotRebuild())
         #expect(try await store.cursor()?.generation == 4)
         #expect(try await store.cursor()?.appliedSequence == 10)
-        #expect(try await store.pendingMessageCommands() == [pending])
+        #expect(try await savedDurableMessages(in: store) == [pending])
         #expect(await transport.rebuildFlags() == [true, true])
         #expect(await transport.tokensWereAbsent())
     }
@@ -4245,8 +4252,7 @@ extension V2SyncEngineTests {
         #expect(try await store.enqueueMissingRolePolicyBaselines(limit: 1) == 0)
         let request = try #require(try await store.pendingRolePolicyBaselineRequests().first)
         #expect(try await store.requestRolePolicyBaseline(roomID: announcementRoom) == request)
-        let pending = V2PendingMessageCommand(roomID: announcementRoom, clientMessageID: try .init("00000000-0000-0000-0000-00000000AAAA"), text: "recover without dropping outbox", state: .pending, attemptCount: 0, nextAttemptAt: .distantPast, acceptedMessageID: nil, acceptedRoomSequence: nil, terminalCode: nil)
-        try await store.enqueue(pending)
+        let pending = try await persistDurableMessage(in: store, roomID: announcementRoom, clientMessageID: try .init("00000000-0000-0000-0000-00000000AAAA"), text: "recover without dropping outbox")
         try await store.close()
         store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: testInstallationBinding, userID: policyRecoveryUser)
         #expect(try await store.pendingRolePolicyBaselineRequests() == [request])
@@ -4277,7 +4283,7 @@ extension V2SyncEngineTests {
         #expect(try await db.read { try Int.fetchOne($0, sql: "SELECT permission_revision FROM v2_group_role_policy_baselines") } == 8)
         #expect(try await db.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM v2_role_policy_effects") } == 3)
         try db.close()
-        #expect(try await store.pendingMessageCommands() == [pending])
+        #expect(try await savedDurableMessages(in: store) == [pending])
         await #expect(throws: V2RolePolicyRecoveryError.invalidBaseline) {
             try await store.completeRolePolicyBaseline(policyRecoveryBaseline(revision: 9), for: refresh)
         }

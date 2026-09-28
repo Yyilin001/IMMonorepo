@@ -316,11 +316,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     func directAuthorizationProcessCrash(kind: String, checkpoint: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { control, owner, sql, ownerSQL, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000), profile = try forwardImportTestProfile()
-            let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: owner), capacityProfile: profile, roomShardID: "room-b", now: { now })
+            let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery()), capacityProfile: profile, roomShardID: "room-b", now: { now })
             var rooms: [UUID] = [], operations: [UUID] = []
             for recipient in [memberTwoUUID] {
-                guard case .opened(let room) = try await direct.open(actorUserID: senderID,
-                    operationID: .init(uuid: UUID()), targetUserID: .init(uuid: recipient)) else { throw CancellationError() }
+                let room = try await direct.openedIdentity(actorUserID: senderID,
+                    operationID: .init(uuid: UUID()), targetUserID: .init(uuid: recipient), firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
                 rooms.append(room.roomID.uuidValue!); operations.append(UUID())
             }
             var forward: V2ForwardExport?
@@ -573,10 +573,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     ) async throws {
             let now = Date(timeIntervalSince1970: 1_750_000_000), profile = try forwardImportTestProfile()
             let recipient = UserID(uuid: memberTwoUUID)
-            let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: owner),
+            let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery()),
                 capacityProfile: profile, roomShardID: "room-b", now: { now })
-            guard case .opened(let room) = try await direct.open(actorUserID: senderID,
-                operationID: .init(uuid: UUID()), targetUserID: recipient) else { throw CancellationError() }
+            let room = try await direct.openedIdentity(actorUserID: senderID,
+                operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
             let writer = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
                 contentReviewMode: .disabled,
@@ -651,8 +651,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let revocation = Task {
                     _ = try await PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(),
                         authorizationCoordinator: .init(controlDatabase: control, ownerDatabases: ["room-b": owner]))
-                        .changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                            targetUserID: senderID, action: .block), now: now)
+                        .executeSocialFixture(actorUserID: recipient, targetUserID: senderID, operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now:  now)
                     return try await ownerSQL.raw("SELECT count(*) AS value FROM im_v2.messages WHERE client_message_id = \(bind: operation.uuidValue!)")
                         .first(decoding: CountRow.self)?.value ?? -1
                 }
@@ -721,12 +720,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let sql = try #require(control as? any SQLDatabase)
                 let now = Date(timeIntervalSince1970: 1_750_000_000), profile = try forwardImportTestProfile()
                 let recipient = UserID(uuid: memberTwoUUID)
-                let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: owner),
+                let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery()),
                     capacityProfile: profile, roomShardID: "room-b", now: { now })
-                guard case .opened(let room) = try await direct.open(actorUserID: senderID,
-                    operationID: .init(uuid: UUID()), targetUserID: recipient) else {
-                    throw V2RoomWriteStoreError.corruptPersistenceState
-                }
+                let room = try await direct.openedIdentity(actorUserID: senderID,
+                    operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
                 for id in [room.roomID, groupRoom] {
                     try await sql.raw("""
                         INSERT INTO im_v2.room_owner_routes(room_id, room_shard_id, route_epoch, created_at, updated_at)
@@ -749,8 +746,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let results = try await [first, second]
                 #expect(results.allSatisfy { if case .accepted = $0 { true } else { false } })
                 _ = try await PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery())
-                    .changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                        targetUserID: senderID, action: .block), now: now)
+                    .executeSocialFixture(actorUserID: recipient, targetUserID: senderID, operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now:  now)
                 guard case .denied = try await service.send(.init(roomID: room.roomID, actorUserID: senderID,
                     clientMessageID: .init(uuid: UUID()), text: "blocked")) else {
                     throw V2RoomWriteStoreError.corruptPersistenceState
@@ -775,12 +771,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 clientMessageID: .init(uuid: UUID()), text: "forward control")) else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
-            let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: owner),
+            let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery()),
                 capacityProfile: profile, roomShardID: "room-b", now: { now })
-            guard case .opened(let room) = try await direct.open(actorUserID: actor,
-                operationID: .init(uuid: UUID()), targetUserID: recipient) else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
+            let room = try await direct.openedIdentity(actorUserID: actor,
+                operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
             let exports = PostgresV2ForwardExportStore(database: control)
             @Sendable func prepare() async throws -> V2ForwardExport {
                 try await exports.prepare(actorUserID: actor, operationID: .init(uuid: UUID()),
@@ -796,15 +790,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let original = try await prepare(), accepted = try await receive(original)
             guard case .accepted = accepted else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery())
-            _ = try await social.changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                targetUserID: actor, action: .block), now: now)
+            _ = try await social.executeSocialFixture(actorUserID: recipient, targetUserID: actor, operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now:  now)
             #expect(try await receive(original) == accepted)
             let blocked = try await prepare(), denied = try await receive(blocked)
             guard case .rejected = denied else { throw V2RoomWriteStoreError.corruptPersistenceState }
             #expect(try await count("im_v2.messages", on: ownerSQL) == 1)
             #expect(try await count("im_v2.user_blocks", on: ownerSQL) == 0)
-            _ = try await social.changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                targetUserID: actor, action: .unblock), now: now)
+            _ = try await social.executeSocialFixture(actorUserID: recipient, targetUserID: actor, operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.unblock), now:  now)
             #expect(try await receive(blocked) == denied)
             guard case .accepted = try await receive(prepare()) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             #expect(try await count("im_v2.messages", on: ownerSQL) == 2)
@@ -819,11 +811,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let recipient = UserID(uuid: memberTwoUUID)
             for database in [control, owner] {
                 let social = PostgresV2SocialRelationshipStore(database: database, projectionDelivery: SuccessfulProjectionDelivery())
-                _ = try await social.changeRelationship(.init(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: recipient, action: .request), now: now)
-                _ = try await social.changeRelationship(.init(actorUserID: recipient, operationID: .init(uuid: UUID()), targetUserID: senderID, action: .accept), now: now)
+                _ = try await social.executeSocialFixture(actorUserID: senderID, targetUserID: recipient, operation: .relationship(.init(uuid: UUID())), action: .relationship(.request), now:  now)
+                _ = try await social.executeSocialFixture(actorUserID: recipient, targetUserID: senderID, operation: .relationship(.init(uuid: UUID())), action: .relationship(.accept), now:  now)
             }
-            let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: owner), capacityProfile: profile, roomShardID: "room-b", now: { now })
-            guard case .opened(let room) = try await direct.open(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: recipient) else { throw CancellationError() }
+            let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery()), capacityProfile: profile, roomShardID: "room-b", now: { now })
+            let room = try await direct.openedIdentity(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
             let command = try V2SendMessageCommand(roomID: room.roomID, senderUserID: senderID,
                 clientMessageID: .init(uuid: UUID()), text: "before revocation", limits: .init(maxUTF8Bytes: 64))
             let grant = try await directAuthorizationGrant(command, recipient: recipient, control: control, now: now)
@@ -832,17 +824,31 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let coordinator = V2DirectAuthorizationCoordinator(controlDatabase: control, ownerDatabases: ["room-b": owner])
             let unavailable = V2DirectAuthorizationCoordinator(controlDatabase: control, ownerDatabases: [:])
             let operationID = UUID()
+            let originalSocial: V2SocialOperationCommand?
+            if kind == "block" || kind == "relationship" {
+                originalSocial = try await PostgresV2SocialRelationshipStore(database: control,
+                    projectionDelivery: SuccessfulProjectionDelivery()).freezeSocialFixture(
+                        actorUserID: recipient, targetUserID: senderID,
+                        operation: kind == "block" ? .userBlock(.init(uuid: operationID)) : .relationship(.init(uuid: operationID)),
+                        action: kind == "block" ? .userBlock(.block) : .relationship(.remove), now: now)
+            } else { originalSocial = nil }
+            let originalPreference: V2AccountPreferenceCommand?
+            if kind == "preference" {
+                originalPreference = try await PostgresV2AccountPreferenceOperationStore(database: control,
+                    projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: coordinator)
+                    .freezePreferenceFixture(owner: recipient, operation: .strangerMessagePreference(.init(uuid: operationID)),
+                        value: .strangerMessage(.deny), now: now)
+            } else { originalPreference = nil }
             @Sendable func revoke(_ handler: V2DirectAuthorizationCoordinator?) async throws {
                 switch kind {
-                case "block":
-                    _ = try await PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: handler)
-                        .changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: operationID), targetUserID: senderID, action: .block), now: now)
-                case "relationship":
-                    _ = try await PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: handler)
-                        .changeRelationship(.init(actorUserID: recipient, operationID: .init(uuid: operationID), targetUserID: senderID, action: .remove), now: now)
+                case "block", "relationship":
+                    _ = try await PostgresV2SocialRelationshipStore(database: control,
+                        projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: handler)
+                        .submitSocialOperation(try #require(originalSocial), now: now)
                 case "preference":
-                    _ = try await PostgresV2DirectMessagingStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: handler)
-                        .setStrangerMessagePermission(command: .init(actorUserID: recipient, operationID: .init(uuid: operationID), permission: .deny), now: now)
+                    _ = try await PostgresV2AccountPreferenceOperationStore(database: control,
+                        projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: handler ?? unavailable)
+                        .submit(try #require(originalPreference), now: now)
                 default:
                     _ = try await V2PostgresAccountDisableService(database: control, operatorPrincipal: "authorization-test", authorizationCoordinator: handler, now: { now })
                         .disable(.init(userID: recipient, operationID: operationID, reason: .userRequested))
@@ -902,10 +908,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: .standard) { control, owner, sql, ownerSQL, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000), profile = try forwardImportTestProfile()
             let recipient = UserID(uuid: memberTwoUUID)
-            let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: owner),
+            let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery()),
                 capacityProfile: profile, roomShardID: "room-b", now: { now })
-            guard case .opened(let room) = try await direct.open(actorUserID: senderID,
-                operationID: .init(uuid: UUID()), targetUserID: recipient) else { throw CancellationError() }
+            let room = try await direct.openedIdentity(actorUserID: senderID,
+                operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
             let credits = V2ShardAdmissionCommandCreditPool(database: owner, batchSize: 2)
             let cache = V2DirectRoomLogFastAppendCache()
             let writer = PostgresV2RoomWriteStore(database: owner,
@@ -955,10 +961,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: .standard) { control, owner, _, ownerSQL, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000), profile = try forwardImportTestProfile()
             let recipient = UserID(uuid: memberTwoUUID)
-            let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: owner),
+            let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery()),
                 capacityProfile: profile, roomShardID: "room-b", now: { now })
-            guard case .opened(let room) = try await direct.open(actorUserID: senderID,
-                operationID: .init(uuid: UUID()), targetUserID: recipient) else { throw CancellationError() }
+            let room = try await direct.openedIdentity(actorUserID: senderID,
+                operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
             let cache = V2DirectRoomLogFastAppendCache()
             let base = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
@@ -978,8 +984,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             if kind == "denied" {
                 _ = try await PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery())
-                    .changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                        targetUserID: senderID, action: .block), now: now)
+                    .executeSocialFixture(actorUserID: recipient, targetUserID: senderID, operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now:  now)
             }
             let input = try command()
             let grant = try await directAuthorizationGrant(input, recipient: recipient, control: control, now: now)
@@ -1037,7 +1042,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 100, retryAfterSeconds: 3))
             try await ownerSQL.raw("UPDATE im_v2.shard_admission_pools SET command_window_limit = 100").run()
             let recipients = [UserID(uuid: memberTwoUUID), UserID(uuid: memberThreeUUID)]
-            let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: owner), capacityProfile: profile, roomShardID: "room-b", now: { now })
+            let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery()), capacityProfile: profile, roomShardID: "room-b", now: { now })
             let cache = V2DirectRoomLogFastAppendCache()
             let base = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 20, window: 86_400), contentReviewMode: .disabled,
@@ -1045,7 +1050,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 shardAdmissionCommandCreditPool: .init(database: owner, batchSize: 2)).usingControlDatabase(control)
             var requests: [V2RoomWriteRequest] = [], grants: [V2DirectAuthorizationGrant] = []
             for recipient in recipients {
-                guard case .opened(let room) = try await direct.open(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: recipient) else { throw CancellationError() }
+                let room = try await direct.openedIdentity(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
                 let warmCommand = try V2SendMessageCommand(roomID: room.roomID, senderUserID: senderID,
                     clientMessageID: .init(uuid: UUID()), text: "warm", limits: .init(maxUTF8Bytes: 64))
                 guard case .accepted = try await base.accept(command: warmCommand, capacityProfile: profile,
@@ -1084,34 +1089,43 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let actor = UserID(uuid: memberTwoUUID), recipient = UserID(uuid: memberThreeUUID)
             let root = FileManager.default.temporaryDirectory.appending(path: "forward-auth-" + UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: root) }
-            let sourceFiles = try V2LocalFilesystemMediaProvider(rootDirectory: root.appending(path: "source"),
-                targetBaseURL: URL(string: "https://source.invalid")!, signingKey: Data(repeating: 1, count: 32), now: { now })
-            let targetFiles = try V2LocalFilesystemMediaProvider(rootDirectory: root.appending(path: "target"),
-                targetBaseURL: URL(string: "https://target.invalid")!, signingKey: Data(repeating: 2, count: 32), now: { now })
+            let transferClock = TestSequenceClock([now])
+            let binding = try V2StorageBinding(id: "forward-authorization", configurationRevision: 1)
+            let storage = try V2LocalResourceStorage(root: root.appending(path: "objects"), binding: binding)
+            let registry = try V2ResourceStorageRegistry(storages: [storage], defaultBinding: binding)
             var media: [V2MediaReference] = []
             if useMedia {
-                try await sourceFiles.prepare(); try await targetFiles.prepare()
                 let id = MediaID(uuid: UUID()), bytes = Data("authorization media".utf8)
-                let upload = try await sourceFiles.issueUploadTarget(mediaID: id, contentType: "application/octet-stream", byteCount: Int64(bytes.count), expiresAt: now.addingTimeInterval(600))
-                try await sourceFiles.storeUploadedObject(mediaID: id, targetURL: upload.url, contentType: "application/octet-stream", bytes: bytes)
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                let input = root.appending(path: "source-input")
+                try bytes.write(to: input)
+                let facts = try await storage.write(storage.allocate(), byteCount: Int64(bytes.count),
+                    sha256: Data(SHA256.hash(data: bytes)), bytes: V2LocalResourceStorage.stream(file: input))
+                try FileManager.default.removeItem(at: input)
                 try await sql.raw("""
                     INSERT INTO im_v2.media_objects (media_id, owner_user_id, content_type, byte_count, state, upload_session_id, expires_at, state_updated_at, created_at)
                     VALUES (\(bind: id.uuidValue!), \(bind: senderUUID), 'application/octet-stream', \(bind: Int64(bytes.count)), 'available', \(bind: UUID()), \(bind: now.addingTimeInterval(600)), \(bind: now), \(bind: now))
+                    """).run()
+                try await sql.raw("INSERT INTO im_v2.resource_catalog(media_id,home_kind,home_id,usage_kind,created_at) VALUES(\(bind:id.uuidValue!),'room',\(bind:roomID.uuidValue!),'message_attachment',\(bind:now))").run()
+                let referenceJSON = String(decoding: try JSONEncoder().encode(facts.reference), as: UTF8.self)
+                try await sql.raw("""
+                    INSERT INTO im_v2.resource_blob_placements(placement_id,media_id,generation,reference_json,byte_count,sha256,state,verified_at)
+                    VALUES(\(bind:facts.reference.placementID),\(bind:id.uuidValue!),1,\(bind:referenceJSON)::jsonb,\(bind:facts.byteCount),\(bind:facts.sha256),'active',\(bind:now))
                     """).run()
                 media = [.init(mediaID: id)]
             }
             let source = V2SendMessageService(store: PostgresV2RoomWriteStore(database: control), capacityProfile: profile, limits: limits, now: { now })
             guard case .accepted(let original) = try await source.send(.init(roomID: roomID, actorUserID: senderID,
                 clientMessageID: .init(uuid: UUID()), text: "durable forward", media: media)) else { throw CancellationError() }
-            let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: owner), capacityProfile: profile, roomShardID: "room-b", now: { now })
-            guard case .opened(let room) = try await direct.open(actorUserID: actor, operationID: .init(uuid: UUID()), targetUserID: recipient) else { throw CancellationError() }
+            let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery()), capacityProfile: profile, roomShardID: "room-b", now: { now })
+            let room = try await direct.openedIdentity(actorUserID: actor, operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
             let export = try await PostgresV2ForwardExportStore(database: control).prepare(actorUserID: actor, operationID: .init(uuid: UUID()),
                 source: .init(roomID: roomID, messageID: original.messageID, revision: .init(1)), sourceRoute: .init(shardID: "room-a", epoch: 0),
                 targetRoomID: room.roomID, targetRoute: .init(shardID: "room-b", epoch: 0), now: now)
             let writer = PostgresV2RoomWriteStore(database: owner).usingControlDatabase(control, authorizationResolutionDatabase: control).usingWorkloadDatabase(owner)
             @Sendable func deliver(_ maxBytes: Int = 64) async throws -> V2ForwardImportOutcome {
                 try await writer.importForwardExport(export, capacityProfile: profile, limits: .init(maxUTF8Bytes: maxBytes),
-                    identifiers: V2AcceptanceIDFactory().make(at: now), now: now)
+                    identifiers: V2AcceptanceIDFactory().make(at: transferClock.now()), now: transferClock.now())
             }
             if useMedia {
                 #expect(try await deliver() == .pending(.media))
@@ -1122,12 +1136,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             if denied && scenario != "revoked" {
                 _ = try await PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(),
                     authorizationCoordinator: .init(controlDatabase: control, ownerDatabases: ["room-b": owner]))
-                    .changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()), targetUserID: actor, action: .block), now: now)
+                    .executeSocialFixture(actorUserID: recipient, targetUserID: actor, operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now:  now)
             }
             if useMedia {
-                let copier = try V2LocalFilesystemForwardMediaCopier(sources: ["room-a": sourceFiles], target: targetFiles, maximumBytes: 1024, now: { now })
-                let worker = try V2ForwardMediaImportWorker(store: .init(database: owner), copier: copier,
-                    scanner: V2LocalEICARMediaScanner(provider: targetFiles), now: { now })
+                let importer = try PostgresV2ForwardMediaImportStore(database: owner)
+                let copier = try V2ResourceForwardMediaCopier(sources: ["room-a": control], target: importer,
+                    registry: registry, maximumBytes: 1024, allocate: { _ in try storage.allocate() }, now: { transferClock.now() })
+                let worker = try V2ForwardMediaImportWorker(store: importer, copier: copier,
+                    scanner: V2PlacementMediaScanner(database: owner, registry: registry, scanner: V2LocalResourceScanner()), now: { transferClock.now() })
                 #expect(try await worker.runOnce(exportID: export.intent.exportID) == .ready)
                 #expect(try await count("im_v2.direct_authorization_intents", on: sql) == 0)
             }
@@ -1186,14 +1202,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         .existing(roomID: room.roomID.uuidValue!, senderID: actor.uuidValue!, clientMessageID: export.intent.targetClientMessageID))
                     _ = try await PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(),
                         authorizationCoordinator: .init(controlDatabase: control, ownerDatabases: ["room-b": owner]))
-                        .changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()), targetUserID: actor, action: .block), now: now)
+                        .executeSocialFixture(actorUserID: recipient, targetUserID: actor, operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now:  now)
                     try #require(try await sql.raw("SELECT disposition AS value FROM im_v2.direct_authorization_intents").first(decoding: StringValueRow.self)?.value == "aborted")
                     try #require(try await count("im_v2.user_blocks", on: sql) == 1)
+                    // The block drain records its post-lock clock; a subsequent user retry must not go backwards.
+                    transferClock.set([now.addingTimeInterval(1)])
                     try await ownerSQL.raw("UPDATE im_v2.room_admission SET command_window_used = 0 WHERE room_id = \(bind: room.roomID.uuidValue!)").run()
-                    let stale = try writer.usingAuthorizationGrants([grant], now: now)
+                    let stale = try writer.usingAuthorizationGrants([grant], now: transferClock.now())
                     await #expect(throws: V2DirectAuthorizationReceiptError.attemptAborted) {
                         try await stale.importForwardExport(export, capacityProfile: profile, limits: limits,
-                            identifiers: V2AcceptanceIDFactory().make(at: now), now: now)
+                            identifiers: V2AcceptanceIDFactory().make(at: transferClock.now()), now: transferClock.now())
                     }
                     #expect(try await count("im_v2.messages", on: ownerSQL) == 0)
                     #expect(try await count("im_v2.message_media_references", on: ownerSQL) == 0)
@@ -1249,8 +1267,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let source = V2SendMessageService(store: PostgresV2RoomWriteStore(database: control), capacityProfile: profile, limits: limits, now: { now })
             guard case .accepted(let message) = try await source.send(.init(roomID: roomID, actorUserID: senderID,
                 clientMessageID: .init(uuid: UUID()), text: "durable forward")) else { throw CancellationError() }
-            let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: owner), capacityProfile: profile, roomShardID: "room-b", now: { now })
-            guard case .opened(let room) = try await direct.open(actorUserID: actor, operationID: .init(uuid: UUID()), targetUserID: recipient) else { throw CancellationError() }
+            let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery()), capacityProfile: profile, roomShardID: "room-b", now: { now })
+            let room = try await direct.openedIdentity(actorUserID: actor, operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
             let export = try await PostgresV2ForwardExportStore(database: control).prepare(actorUserID: actor, operationID: .init(uuid: UUID()),
                 source: .init(roomID: roomID, messageID: message.messageID, revision: .init(1)), sourceRoute: .init(shardID: "room-a", epoch: 0),
                 targetRoomID: room.roomID, targetRoute: .init(shardID: "room-b", epoch: 0), now: now)
@@ -1292,15 +1310,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try V2CapacityProfile(id: "standard", limits: .init(
                 maxEligibleMembers: 10, maxCommandsPerWindow: 100, retryAfterSeconds: 3))
             try await ownerSQL.raw("UPDATE im_v2.shard_admission_pools SET command_window_limit = 100").run()
+            let batchClock = TestSequenceClock([now])
             let recipients = [UserID(uuid: memberTwoUUID), UserID(uuid: memberThreeUUID)]
-            let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: owner),
+            let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery()),
                 capacityProfile: profile, roomShardID: "room-b", now: { now })
             var rooms: [RoomID] = []
             for recipient in recipients {
-                guard case .opened(let room) = try await direct.open(actorUserID: senderID,
-                    operationID: .init(uuid: UUID()), targetUserID: recipient) else {
-                    Issue.record("expected direct room"); return
-                }
+                let room = try await direct.openedIdentity(actorUserID: senderID,
+                    operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
                 rooms.append(room.roomID)
             }
             let cache = V2DirectRoomLogFastAppendCache()
@@ -1316,7 +1333,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     .init(request: .init(command: try .init(roomID: room, senderUserID: senderID,
                         clientMessageID: .init(uuid: UUID()), text: "batch control",
                         limits: .init(maxUTF8Bytes: 64)), capacityProfile: profile,
-                        identifiers: try V2AcceptanceIDFactory().make(at: now), now: now),
+                        identifiers: try V2AcceptanceIDFactory().make(at: batchClock.now()), now: batchClock.now()),
                         ownerRoute: try .init(shardID: "room-b", epoch: 0))
                 }
             }
@@ -1340,8 +1357,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let before = try await count("im_v2.messages", on: ownerSQL)
             let blocked = recipients[blockedFirst ? 0 : 1]
             let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: .init(controlDatabase: control, ownerDatabases: ["room-b": owner]))
-            _ = try await social.changeUserBlock(.init(actorUserID: blocked, operationID: .init(uuid: UUID()),
-                targetUserID: senderID, action: .block), now: now)
+            _ = try await social.executeSocialFixture(actorUserID: blocked, targetUserID: senderID, operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now:  now)
+            // Each later action follows the previous authority drain, retaining the original command IDs.
+            batchClock.set([now.addingTimeInterval(1)])
             #expect(try await count("im_v2.user_blocks", on: ownerSQL) == 0)
             let rejected = try requests()
             await #expect(throws: V2AtomicRoomWriteBatchError.self) {
@@ -1352,9 +1370,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(try await ownerSQL.raw("SELECT count(*) AS value FROM im_v2.messages WHERE client_message_id = \(bind: item.request.command.clientMessageID.uuidValue!)")
                     .first(decoding: CountRow.self)?.value == 0)
             }
-            _ = try await social.changeUserBlock(.init(actorUserID: blocked, operationID: .init(uuid: UUID()),
-                targetUserID: senderID, action: .unblock), now: now)
-            let restored = try await writer.acceptAtomicallyOwnerValidated(requests: rejected)
+            _ = try await social.executeSocialFixture(actorUserID: blocked, targetUserID: senderID, operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.unblock), now: now.addingTimeInterval(2))
+            batchClock.set([now.addingTimeInterval(3)])
+            let resumed = try rejected.map { item in
+                V2OwnerValidatedRoomWriteRequest(request: .init(command: item.request.command,
+                    capacityProfile: profile, identifiers: try V2AcceptanceIDFactory().make(at: batchClock.now()),
+                    now: batchClock.now()), ownerRoute: item.ownerRoute)
+            }
+            let restored = try await writer.acceptAtomicallyOwnerValidated(requests: resumed)
             #expect(restored.allSatisfy { if case .accepted = $0 { true } else { false } })
             #expect(try await count("im_v2.messages", on: ownerSQL) == before + 2)
             let fence = V2DirectSendControlPolicyFence(database: control)
@@ -1377,24 +1400,19 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let recipient = UserID(uuid: memberTwoUUID), profile = try forwardImportTestProfile()
             let coordinator = V2DirectAuthorizationCoordinator(controlDatabase: control, ownerDatabases: ["room-b": owner])
             let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: coordinator)
-            let directControl = PostgresV2DirectMessagingStore(database: control, projectionDelivery: SuccessfulProjectionDelivery())
+            let directControl = PostgresV2DirectMessagingStore(database: control, identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery())
             if kind == "relationship" {
                 for database in [control, owner] {
                     let store = PostgresV2SocialRelationshipStore(database: database, projectionDelivery: SuccessfulProjectionDelivery())
-                    _ = try await store.changeRelationship(.init(actorUserID: senderID, operationID: .init(uuid: UUID()),
-                        targetUserID: recipient, action: .request), now: now)
-                    _ = try await store.changeRelationship(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                        targetUserID: senderID, action: .accept), now: now)
+                    _ = try await store.executeSocialFixture(actorUserID: senderID, targetUserID: recipient, operation: .relationship(.init(uuid: UUID())), action: .relationship(.request), now:  now)
+                    _ = try await store.executeSocialFixture(actorUserID: recipient, targetUserID: senderID, operation: .relationship(.init(uuid: UUID())), action: .relationship(.accept), now:  now)
                 }
-                _ = try await directControl.setStrangerMessagePermission(command: .init(actorUserID: recipient,
-                    operationID: .init(uuid: UUID()), permission: .deny), now: now)
+                _ = try await PostgresV2AccountPreferenceOperationStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: .init(controlDatabase: control, ownerDatabases: [:])).executePreferenceFixture(owner: recipient, operation: .strangerMessagePreference(.init(uuid: UUID())), value: .strangerMessage(.deny), now: now)
             }
-            let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: owner),
+            let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery()),
                 capacityProfile: profile, roomShardID: "room-b", now: { now })
-            guard case .opened(let room) = try await direct.open(actorUserID: senderID,
-                operationID: .init(uuid: UUID()), targetUserID: recipient) else {
-                Issue.record("expected direct room"); return
-            }
+            let room = try await direct.openedIdentity(actorUserID: senderID,
+                operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
             let cache = V2DirectRoomLogFastAppendCache()
             let writer = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
@@ -1449,8 +1467,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 do {
                     #expect(try await waitForLock(ownerSQL, query: "%SELECT room_id, room_shard_id, owner_epoch%"))
                     let revocation = Task {
-                        try await social.changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                            targetUserID: senderID, action: .block), now: now)
+                        try await social.executeSocialFixture(actorUserID: recipient, targetUserID: senderID, operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now:  now)
                     }
                     do {
                         #expect(try await waitForLock(ownerSQL, query: "%pg_advisory_xact_lock(%"))
@@ -1477,14 +1494,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             switch kind {
             case "concurrent-block": break
             case "block":
-                _ = try await social.changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                    targetUserID: senderID, action: .block), now: now)
+                _ = try await social.executeSocialFixture(actorUserID: recipient, targetUserID: senderID, operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now:  now)
             case "relationship":
-                _ = try await social.changeRelationship(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                    targetUserID: senderID, action: .remove), now: now)
+                _ = try await social.executeSocialFixture(actorUserID: recipient, targetUserID: senderID, operation: .relationship(.init(uuid: UUID())), action: .relationship(.remove), now:  now)
             case "preference":
-                _ = try await directControl.setStrangerMessagePermission(command: .init(actorUserID: recipient,
-                    operationID: .init(uuid: UUID()), permission: .deny), now: now)
+                _ = try await PostgresV2AccountPreferenceOperationStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: .init(controlDatabase: control, ownerDatabases: [:])).executePreferenceFixture(owner: recipient, operation: .strangerMessagePreference(.init(uuid: UUID())), value: .strangerMessage(.deny), now: now)
             default:
                 _ = try await V2PostgresAccountDisableService(database: control, operatorPrincipal: "send-policy-test", now: { now })
                     .disable(.init(userID: kind == "disable-sender" ? senderID : recipient,
@@ -1508,11 +1522,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             #expect(try await count("im_v2.messages", on: ownerSQL) == before)
             if kind == "block" || kind == "concurrent-block" {
-                _ = try await social.changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                    targetUserID: senderID, action: .unblock), now: now)
+                _ = try await social.executeSocialFixture(actorUserID: recipient, targetUserID: senderID, operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.unblock), now:  now)
             } else if kind == "relationship" || kind == "preference" {
-                _ = try await directControl.setStrangerMessagePermission(command: .init(actorUserID: recipient,
-                    operationID: .init(uuid: UUID()), permission: .allow), now: now)
+                _ = try await PostgresV2AccountPreferenceOperationStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: .init(controlDatabase: control, ownerDatabases: [:])).executePreferenceFixture(owner: recipient, operation: .strangerMessagePreference(.init(uuid: UUID())), value: .strangerMessage(.allow), now: now)
             } else { return }
             guard case .accepted = try await send(request()) else { Issue.record("control permission restoration ignored"); return }
             #expect(try await count("im_v2.messages", on: ownerSQL) == before + 1)
@@ -1527,12 +1539,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let recipient = UserID(uuid: memberTwoUUID)
             let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery())
-            let direct = PostgresV2DirectMessagingStore(database: control, projectionDelivery: SuccessfulProjectionDelivery())
+            let direct = PostgresV2DirectMessagingStore(database: control, identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery())
             if kind == "relationship" {
-                _ = try await social.changeRelationship(.init(actorUserID: senderID, operationID: .init(uuid: UUID()),
-                    targetUserID: recipient, action: .request), now: now)
-                _ = try await social.changeRelationship(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                    targetUserID: senderID, action: .accept), now: now)
+                _ = try await social.executeSocialFixture(actorUserID: senderID, targetUserID: recipient, operation: .relationship(.init(uuid: UUID())), action: .relationship(.request), now:  now)
+                _ = try await social.executeSocialFixture(actorUserID: recipient, targetUserID: senderID, operation: .relationship(.init(uuid: UUID())), action: .relationship(.accept), now:  now)
             }
             try await ownerSQL.raw("CREATE TABLE im_v2.control_policy_test_commits (value int NOT NULL)").run()
             let fence = V2DirectSendControlPolicyFence(database: control)
@@ -1551,14 +1561,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let writer = Task {
                 switch kind {
                 case "block":
-                    _ = try await social.changeUserBlock(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                        targetUserID: senderID, action: .block), now: now)
+                    _ = try await social.executeSocialFixture(actorUserID: recipient, targetUserID: senderID, operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now:  now)
                 case "relationship":
-                    _ = try await social.changeRelationship(.init(actorUserID: recipient, operationID: .init(uuid: UUID()),
-                        targetUserID: senderID, action: .remove), now: now)
+                    _ = try await social.executeSocialFixture(actorUserID: recipient, targetUserID: senderID, operation: .relationship(.init(uuid: UUID())), action: .relationship(.remove), now:  now)
                 case "preference":
-                    _ = try await direct.setStrangerMessagePermission(command: .init(actorUserID: recipient,
-                        operationID: .init(uuid: UUID()), permission: .deny), now: now)
+                    _ = try await PostgresV2AccountPreferenceOperationStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: .init(controlDatabase: control, ownerDatabases: [:])).executePreferenceFixture(owner: recipient, operation: .strangerMessagePreference(.init(uuid: UUID())), value: .strangerMessage(.deny), now: now)
                 default:
                     _ = try await V2PostgresAccountDisableService(database: control, operatorPrincipal: "test-policy", now: { now })
                         .disable(.init(userID: recipient, operationID: UUID(), reason: .userRequested))
@@ -1625,6 +1632,18 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("Special-account audit clocks preserve message retries and concurrent recording", arguments: [V2AccountKind.system, .customerSupport])
     func specialAccountMessageClockBounds(kind: V2AccountKind) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
+            let controlResources = makeV2DatabaseTestResources()
+            let identityPoolID = DatabaseID(string: "special-audit-identity")
+            let routePoolID = DatabaseID(string: "special-audit-route")
+            let primary = try #require(Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"))
+            controlResources.databases.use(try .postgres(url: primary, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
+            controlResources.databases.use(try .postgres(url: primary, maxConnectionsPerEventLoop: 4), as: identityPoolID)
+            // The pair-route fence holds a transaction across the handoff call.
+            // Waiting route transactions must not occupy the handoff's pool.
+            controlResources.databases.use(try .postgres(url: primary, maxConnectionsPerEventLoop: 4), as: routePoolID)
+            let control = controlResources.database(.psql)
+            let identityDatabase = controlResources.database(identityPoolID)
+            do {
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             let customer = UserID(uuid: memberTwoUUID)
             let profile = try forwardImportTestProfile()
@@ -1632,17 +1651,23 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw("INSERT INTO im_v2.special_accounts (account_user_id, stable_key, account_kind, allows_customer_messages, allows_service_messages, created_at, updated_at) VALUES (\(bind: senderUUID), 'clock_special_account', \(bind: kind.rawValue), \(bind: kind == .customerSupport), true, \(bind: base), \(bind: base))").run()
             let store = PostgresV2SpecialAccountMessagingStore(database: database)
             let account = try #require(try await store.resolveActiveAccount(stableKey: "clock_special_account"))
-            let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: database, projectionDelivery: SuccessfulProjectionDelivery()), capacityProfile: profile, roomShardID: "room-a", now: { base })
-            guard case .opened(let opened) = try await direct.open(actorUserID: customer, operationID: .init(uuid: UUID()), targetUserID: senderID) else { throw V2SpecialAccountMessagingError.corruptPersistenceState }
+            let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: database, identityReader: PostgresV2DirectRoomIdentityReader(database: identityDatabase), projectionDelivery: SuccessfulProjectionDelivery()), capacityProfile: profile, roomShardID: "room-a", now: { base })
+            let opened = try await direct.openedIdentity(actorUserID: customer, operationID: .init(uuid: UUID()), targetUserID: senderID, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(base))
             let messages = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), now: { base.addingTimeInterval(1) })
             if kind == .customerSupport {
                 guard case .accepted = try await messages.send(.init(roomID: opened.roomID, actorUserID: customer, clientMessageID: .init(uuid: UUID()), text: "support request")) else { throw V2SpecialAccountMessagingError.corruptPersistenceState }
                 #expect(try await count("im_v2.support_conversation_sessions WHERE state = 'open'", on: sql) == 1)
             }
             let clock = TestSequenceClock([base])
-            let service = V2TrustedSpecialAccountMessagingService(store: store, directMessaging: direct, messages: messages, now: { clock.now() })
+            let bootstrap = try V2RoomBootstrapDomainExecutor(shardID: "room-a", direct: direct.store,
+                group: PostgresV2GroupMessagingStore(database: database), capacityProfile: profile, now: { base })
+            let bootstrapPort = V2ActorCreationBootstrapPort(execute: { command, _ in try await bootstrap.execute(command) },
+                stage: { intent, page, _ in try await bootstrap.stage(intent: intent, page: page) })
+            let directOperations = PostgresV2DirectRoomOperationStore(database: control,
+                routes: V2PostgresRoomShardRouter(database: controlResources.database(routePoolID)), selector: try .init(shardIDs: ["room-a"]), bootstrap: bootstrapPort)
+            let service = V2TrustedSpecialAccountMessagingService(store: store, directMessaging: directOperations, messages: messages, now: { clock.now() })
             func request(operation: ClientMessageID = .init(uuid: UUID()), fingerprint: String = "1234567890abcdef") throws -> V2TrustedSpecialAccountMessage {
-                try .init(stableAccountKey: "clock_special_account", servicePrincipal: "clock-service", operatorID: kind == .customerSupport ? "clock-operator" : nil, operationID: operation, requestFingerprint: fingerprint, customerUserID: customer, text: "service message")
+                try .init(stableAccountKey: "clock_special_account", servicePrincipal: "clock-service", operatorID: kind == .customerSupport ? "clock-operator" : nil, operationID: operation, requestFingerprint: fingerprint, firstSubmissionDeadlineMilliseconds: UInt64(base.timeIntervalSince1970 * 1000) + 600_000, customerUserID: customer, text: "service message")
             }
             let original = try request()
             func snapshot() async throws -> String {
@@ -1652,7 +1677,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         'audit', (SELECT jsonb_agg(to_jsonb(r) ORDER BY message_id) FROM im_v2.special_account_message_audit r),
                         'messages', (SELECT jsonb_agg(to_jsonb(r) ORDER BY message_id) FROM im_v2.messages r),
                         'events', (SELECT jsonb_agg(to_jsonb(r) ORDER BY event_id) FROM im_v2.room_events r),
-                        'direct_operations', (SELECT jsonb_agg(to_jsonb(r) ORDER BY actor_user_id, operation_id) FROM im_v2.direct_room_operations r),
+                        'direct_operations', (SELECT jsonb_agg(to_jsonb(r) ORDER BY actor_user_id, operation_id) FROM im_v2.direct_room_operation_handoffs r),
                         'sessions', (SELECT jsonb_agg(to_jsonb(r) ORDER BY room_id) FROM im_v2.support_conversation_sessions r),
                         'admission', (SELECT jsonb_agg(to_jsonb(r) ORDER BY room_id) FROM im_v2.room_admission r),
                         'shard', (SELECT to_jsonb(r) FROM im_v2.shard_admission_pools r WHERE room_shard_id = 'room-a')
@@ -1662,7 +1687,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let badClocks = [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12].map { Date(timeIntervalSince1970: $0) }
             var awaitingAudit: String?
             for bad in badClocks {
-                clock.set([bad])
+                // Keep admission time valid; this loop injects the audit clock failure.
+                clock.set([base, bad])
                 await #expect(throws: V2SpecialAccountMessagingError.corruptPersistenceState) { _ = try await service.send(original) }
                 #expect(try await count("im_v2.messages", on: sql) == (kind == .customerSupport ? 2 : 1))
                 #expect(try await count("im_v2.special_account_message_operations", on: sql) == 0)
@@ -1703,7 +1729,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(try await snapshot() == committed)
             }
             for valid in [Date(timeIntervalSince1970: 946_684_800 - 211_813_488_000), Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 10)] {
-                clock.set([valid])
+                clock.set([base, valid])
                 let next = try request()
                 guard case .accepted(let accepted) = try await service.send(next) else { throw V2SpecialAccountMessagingError.corruptPersistenceState }
                 #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.special_account_message_audit WHERE message_id = \(bind: accepted.messageID.uuidValue!) AND created_at = \(bind: valid)").first(decoding: CountRow.self)?.value == 1)
@@ -1711,7 +1737,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.messages", on: sql) == (kind == .customerSupport ? 4 : 3))
             #expect(try await count("im_v2.special_account_message_operations", on: sql) == 3)
             #expect(try await count("im_v2.special_account_message_audit", on: sql) == 3)
-
+            try await controlResources.shutdown()
+            } catch {
+                try? await controlResources.shutdown()
+                throw error
+            }
         }
     }
 
@@ -1721,14 +1751,18 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile()
             try await sql.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
-            let moderation = PostgresV2ModerationStore(database: database)
-            var operations: [(V2ModerationCommand, V2ModerationResult)] = []
+            var operations: [(V2MessageModerationCommand, V2MessageModerationReceipt)] = []
             for index in 0..<4 {
                 let time = base.addingTimeInterval(Double(index) * 10)
                 let sender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), now: { time })
                 guard case .accepted(let message) = try await sender.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "audit retention \(index)")) else { throw V2ModerationStoreError.corruptPersistenceState }
-                let command = try V2ModerationCommand(roomID: roomID, actorUserID: senderID, operationID: .init(uuid: UUID()), action: .redactMessage, messageID: message.messageID, reasonCode: .init("abuse_spam"))
-                guard case .applied(let result) = try await moderation.apply(command: command, capacityProfile: profile, eventID: .init(uuid: UUID()), now: time.addingTimeInterval(1)) else { throw V2ModerationStoreError.corruptPersistenceState }
+                let command = try await freezeMessageModerationFixture(database: database, roomID: roomID,
+                    actorUserID: senderID, operationID: .init(uuid: UUID()), messageID: message.messageID,
+                    reasonCode: .init("abuse_spam"), now: time)
+                guard case .receipt(let result) = try await submitMessageModerationFixture(database: database,
+                    command: command, profile: profile, eventID: .init(uuid: UUID()), now: time.addingTimeInterval(1)),
+                    case .redacted = result.outcome else { throw V2ModerationStoreError.corruptPersistenceState }
+                #expect(result.validates(intent: command.intent))
                 operations.append((command, result))
             }
             func snapshot(includeAudit: Bool) async throws -> String {
@@ -1736,6 +1770,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     SELECT jsonb_build_object(
                         'audit', CASE WHEN \(bind: includeAudit) THEN (SELECT jsonb_agg(to_jsonb(r) ORDER BY operation_id) FROM im_v2.moderation_audit_entries r) ELSE NULL END,
                         'operations', (SELECT jsonb_agg(to_jsonb(r) ORDER BY operation_id) FROM im_v2.moderation_operations r),
+                        'proofs', (SELECT jsonb_agg(to_jsonb(r) ORDER BY actor_user_id, operation_id) FROM im_v2.message_moderation_receipts r),
                         'messages', (SELECT jsonb_agg(to_jsonb(r) ORDER BY message_id) FROM im_v2.messages r),
                         'events', (SELECT jsonb_agg(to_jsonb(r) ORDER BY event_id) FROM im_v2.room_events r),
                         'room', (SELECT to_jsonb(r) FROM im_v2.rooms r WHERE room_id = \(bind: roomUUID)),
@@ -1796,12 +1831,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             // Expiring an audit copy does not undo redaction or discard the
             // operation result. A normal retry must not recreate the audit.
             for (command, result) in operations {
-                #expect(try await moderation.apply(command: command, capacityProfile: profile, eventID: .init(uuid: UUID()), now: base.addingTimeInterval(40)) == .idempotent(result))
+                #expect(try await submitMessageModerationFixture(database: database, command: command,
+                    profile: profile, eventID: .init(uuid: UUID()), now: base.addingTimeInterval(40)) == .receipt(result))
             }
             #expect(try await count("im_v2.moderation_audit_entries", on: sql) == 0)
             #expect(try await snapshot(includeAudit: false) == business)
             #expect(try await count("im_v2.messages WHERE withdrawn_at IS NOT NULL", on: sql) == 4)
-            #expect(try await count("im_v2.moderation_operations", on: sql) == 4)
+            #expect(try await count("im_v2.moderation_operations", on: sql) == 0)
+            #expect(try await count("im_v2.message_moderation_receipts", on: sql) == 4)
         }
     }
 
@@ -1857,10 +1894,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 _ = try? await delivery.value
                 throw error
             }
-            let preferences = PostgresV2ReadReceiptStore(database: control)
+            let preferences = PostgresV2AccountPreferenceOperationStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: V2DirectAuthorizationCoordinator(controlDatabase: control, ownerDatabases: [:]))
             let writer = Task {
-                try await preferences.setPreferences(command: .init(actorUserID: .init(uuid: closeViewer ? memberTwoUUID : senderUUID),
-                    operationID: .init(uuid: UUID()), allowsDirectReadReceipts: false, allowsGroupReadReceipts: true), now: now)
+                try await preferences.executePreferenceFixture(owner: .init(uuid: closeViewer ? memberTwoUUID : senderUUID), operation: .readReceiptPreference(.init(uuid: UUID())), value: .readReceipt(allowsDirectReadReceipts: false, allowsGroupReadReceipts: true), now: now)
             }
             do {
                 // The preference writer waits on the control server, which
@@ -1880,7 +1916,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             await gate.releaseTransaction()
             try await blocker.value
             #expect(try await delivery.value == 1)
-            guard case .updated = try await writer.value else { throw CancellationError() }
+            guard case .receipt(let proof) = try await writer.value, case .applied = proof.outcome else { throw CancellationError() }
             #expect(try await targetSQL.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: source.uuidValue!) AND (payload->>'is_visible')::boolean AND (payload->>'read_through_room_sequence')::bigint = 7").first(decoding: CountRow.self)?.value == 1)
             #expect(try await projector.project(event) == 1)
             let later = try candidate(.init(uuid: UUID()))

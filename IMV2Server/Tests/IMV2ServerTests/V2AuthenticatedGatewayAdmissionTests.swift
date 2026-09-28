@@ -230,12 +230,12 @@ struct V2AuthenticatedGatewayAdmissionTests {
         let second = try identity(user: 1, device: 2)
         let third = try identity(user: 1, device: 3)
 
-        #expect(try await registry.register(try stream(), connectionID: firstID, identity: first))
-        #expect(try await !registry.register(try stream(), connectionID: UUID(), identity: first))
-        #expect(try await registry.register(try stream(), connectionID: secondID, identity: second))
-        #expect(try await !registry.register(try stream(), connectionID: thirdID, identity: third))
+        #expect(try await registry.register(try stream(), connectionID: firstID, identity: first, publicationSuppressed: true))
+        #expect(try await !registry.register(try stream(), connectionID: UUID(), identity: first, publicationSuppressed: true))
+        #expect(try await registry.register(try stream(), connectionID: secondID, identity: second, publicationSuppressed: true))
+        #expect(try await !registry.register(try stream(), connectionID: thirdID, identity: third, publicationSuppressed: true))
         await registry.unregister(connectionID: firstID)
-        #expect(try await registry.register(try stream(), connectionID: thirdID, identity: third))
+        #expect(try await registry.register(try stream(), connectionID: thirdID, identity: third, publicationSuppressed: true))
         #expect(await registry.connectionMetricsSnapshot().activeConnections == 2)
     }
 
@@ -247,10 +247,10 @@ struct V2AuthenticatedGatewayAdmissionTests {
         let second = try identity(user: 2, device: 2)
 
         #expect(try await registry.register(
-            try stream(), connectionID: connectionID, identity: first
+            try stream(), connectionID: connectionID, identity: first, publicationSuppressed: true
         ))
         #expect(try await !registry.register(
-            try stream(), connectionID: connectionID, identity: second
+            try stream(), connectionID: connectionID, identity: second, publicationSuppressed: true
         ))
         #expect(await registry.connectionMetricsSnapshot().activeConnections == 1)
     }
@@ -268,7 +268,8 @@ struct V2AuthenticatedGatewayAdmissionTests {
         #expect(try await registry.register(
             try stream(),
             connectionID: connectionID,
-            identity: try identity(user: 1, device: 1)
+            identity: try identity(user: 1, device: 1),
+            publicationSuppressed: false
         ))
         #expect(await leases.activeConnectionIDs() == [connectionID])
 
@@ -276,6 +277,11 @@ struct V2AuthenticatedGatewayAdmissionTests {
             connectionID: connectionID,
             allowsOnlinePresence: false
         )
+        #expect(await leases.activeConnectionIDs() == [connectionID])
+        #expect(await leases.publicationSuppressed(connectionID: connectionID) == false)
+        try await registry.setPresencePublication(connectionID: connectionID,
+            identity: try identity(user: 1, device: 1), mode: .suppressed)
+        #expect(await leases.publicationSuppressed(connectionID: connectionID) == true)
         #expect(await leases.activeConnectionIDs() == [connectionID])
 
         await registry.unregister(connectionID: connectionID)
@@ -291,7 +297,8 @@ struct V2AuthenticatedGatewayAdmissionTests {
             try await registry.register(
                 try stream(),
                 connectionID: UUID(),
-                identity: try identity(user: 1, device: 1)
+                identity: try identity(user: 1, device: 1),
+                publicationSuppressed: true
             )
         }
         #expect(await registry.connectionMetricsSnapshot().activeConnections == 0)
@@ -330,9 +337,15 @@ private final class AdmissionMonotonicTestClock: Sendable {
 private enum PresenceAdmissionFixtureError: Error { case unavailable }
 
 private actor FailingPresenceAdmissionLeases: V2LivePresenceLeaseManaging {
+    func setPresencePublication(identity _: V2AuthenticatedConnection, connectionID _: UUID,
+        suppressed _: Bool, now _: Date) throws -> V2PresencePublicationLeaseObservation {
+        throw PresenceAdmissionFixtureError.unavailable
+    }
+
     func admitConnection(
         identity _: V2AuthenticatedConnection,
         connectionID _: UUID,
+        publicationSuppressed _: Bool,
         policy _: V2AuthenticatedConnectionAdmissionPolicy,
         now _: Date
     ) throws -> V2AuthenticatedConnectionLeaseOutcome {
@@ -356,35 +369,51 @@ private actor FailingPresenceAdmissionLeases: V2LivePresenceLeaseManaging {
 
 private actor HiddenPresenceAdmissionLeases: V2LivePresenceLeaseManaging {
     private var connectionIDs: Set<UUID> = []
+    private var identities: [UUID: V2AuthenticatedConnection] = [:]
+    private var publicationSuppressedByConnection: [UUID: Bool] = [:]
 
     func admitConnection(
-        identity _: V2AuthenticatedConnection,
+        identity: V2AuthenticatedConnection,
         connectionID: UUID,
+        publicationSuppressed: Bool,
         policy _: V2AuthenticatedConnectionAdmissionPolicy,
         now: Date
     ) -> V2AuthenticatedConnectionLeaseOutcome {
         connectionIDs.insert(connectionID)
+        identities[connectionID] = identity
+        publicationSuppressedByConnection[connectionID] = publicationSuppressed
         return .accepted(expiresAt: now.addingTimeInterval(90))
     }
 
     func renewConnection(
-        identity _: V2AuthenticatedConnection,
+        identity: V2AuthenticatedConnection,
         connectionID: UUID,
         now: Date
     ) -> V2AuthenticatedConnectionLeaseOutcome {
-        guard connectionIDs.contains(connectionID) else { return .rejected }
+        guard identities[connectionID] == identity else { return .rejected }
         return .accepted(expiresAt: now.addingTimeInterval(90))
     }
 
     func removePresence(
-        identity _: V2AuthenticatedConnection,
+        identity: V2AuthenticatedConnection,
         connectionID: UUID,
         now _: Date
     ) -> Bool {
+        guard identities[connectionID] == identity else { return false }
         connectionIDs.remove(connectionID)
+        identities.removeValue(forKey: connectionID)
+        publicationSuppressedByConnection.removeValue(forKey: connectionID)
         return !connectionIDs.isEmpty
     }
 
+    func setPresencePublication(identity: V2AuthenticatedConnection, connectionID: UUID,
+        suppressed: Bool, now: Date) throws -> V2PresencePublicationLeaseObservation {
+        guard identities[connectionID] == identity else { throw PresenceAdmissionFixtureError.unavailable }
+        publicationSuppressedByConnection[connectionID] = suppressed
+        // The account authority denies publication even when a connection opts in.
+        return .init(isOnline: false, expiresAt: now.addingTimeInterval(90))
+    }
+    func publicationSuppressed(connectionID: UUID) -> Bool? { publicationSuppressedByConnection[connectionID] }
     func allowsOnlinePresence(userID _: UserID) -> Bool { false }
     func activeConnectionIDs() -> Set<UUID> { connectionIDs }
 }

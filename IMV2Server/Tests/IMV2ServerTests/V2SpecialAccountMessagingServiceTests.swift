@@ -1,75 +1,36 @@
 import Foundation
+import IMV2ActorContracts
 import IMV2Core
 @testable import IMV2Server
 import Testing
 
-@Suite("V2 special-account messaging")
-struct V2SpecialAccountMessagingServiceTests {
-    @Test("a trusted system-account request opens the direct room, sends as the account, and is audited")
+extension PostgresV2RoomWriteStoreIntegrationTests {
+    @Test("a trusted system-account request uses the proven direct owner and is audited")
     func trustedSystemMessageUsesTheServerOnlyPath() async throws {
-        let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let roomID = try RoomID("00000000-0000-0000-0000-000000000a01")
-        let accountID = try UserID("00000000-0000-0000-0000-000000000a02")
-        let customerID = try UserID("00000000-0000-0000-0000-000000000a03")
-        let profile = try V2CapacityProfile(id: "standard", limits: .init(
-            maxEligibleMembers: 10,
-            maxCommandsPerWindow: 10,
-
-            retryAfterSeconds: 1
-        ))
-        let roomAdmission = try RoomAdmissionState(
-            eligibleMemberCount: 2,
-            commandWindow: .init(limit: 10))
-        let roomState = V2RoomCommandState(
-            roomID: roomID,
-            nextRoomSequence: 1,
-            admission: roomAdmission
-        )
-        let shardState = try ShardAdmissionState(
-            lease: .init(
-                id: try .init("00000000-0000-0000-0000-000000000a04"),
-                generation: 1,
-                validUntil: now.addingTimeInterval(60),
-                commandWindow: .init(limit: 10)))
-        let specialStore = SpecialAccountStoreSpy(account: .init(userID: accountID, stableKey: "system_notice", kind: .system))
-        let direct = try V2DirectMessagingService(
-            store: DirectRoomStoreSpy(roomID: roomID),
-            capacityProfile: profile,
-            roomShardID: "rooms-primary",
-            identifiers: .init(makeUUID: { UUID(uuidString: roomID.rawValue)! }),
-            now: { now }
-        )
-        let messageStore = InMemoryV2RoomWriteStore(seed: [(roomState, shardState)], authorizedActors: [accountID])
-        let messages = V2SendMessageService(
-            store: messageStore,
-            capacityProfile: profile,
-            limits: try .init(maxUTF8Bytes: 64),
-            now: { now }
-        )
-        let service = V2TrustedSpecialAccountMessagingService(
-            store: specialStore,
-            directMessaging: direct,
-            messages: messages,
-            now: { now }
-        )
-        let request = try V2TrustedSpecialAccountMessage(
-            stableAccountKey: "system_notice",
-            servicePrincipal: "notification-worker",
-            operationID: try .init("00000000-0000-0000-0000-000000000a05"),
-            requestFingerprint: "8b548c1791c509d9",
-            customerUserID: customerID,
-            text: "维护通知"
-        )
-
-        let outcome = try await service.send(request)
-
-        guard case .accepted(let accepted) = outcome else {
-            Issue.record("expected accepted special-account message")
-            return
+        try await withForwardOwnerDatabases(mode: .standard) { database, _, _, _, _ in
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let profile = try forwardImportTestProfile()
+            let customer = UserID(uuid: memberTwoUUID)
+            let specialStore = SpecialAccountStoreSpy(account: .init(userID: senderID, stableKey: "system_notice", kind: .system))
+            let bootstrap = try V2RoomBootstrapDomainExecutor(shardID: "room-a",
+                direct: PostgresV2DirectMessagingStore(database: database, identityReader: PostgresV2DirectRoomIdentityReader(database: database), projectionDelivery: SuccessfulProjectionDelivery()), group: PostgresV2GroupMessagingStore(database: database),
+                capacityProfile: profile, now: { now })
+            let port = V2ActorCreationBootstrapPort(execute: { command, _ in try await bootstrap.execute(command) },
+                stage: { intent, page, _ in try await bootstrap.stage(intent: intent, page: page) })
+            let direct = PostgresV2DirectRoomOperationStore(database: database,
+                routes: V2PostgresRoomShardRouter(database: database), selector: try .init(shardIDs: ["room-a"]), bootstrap: port)
+            let messages = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
+                capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), now: { now })
+            let service = V2TrustedSpecialAccountMessagingService(store: specialStore, directMessaging: direct, messages: messages, now: { now })
+            let request = try V2TrustedSpecialAccountMessage(stableAccountKey: "system_notice", servicePrincipal: "notification-worker",
+                operationID: .init(uuid: UUID()), requestFingerprint: "8b548c1791c509d9",
+                firstSubmissionDeadlineMilliseconds: 1_750_000_600_000, customerUserID: customer, text: "维护通知")
+            let outcome = try await service.send(request)
+            guard case .accepted(let accepted) = outcome else { Issue.record("expected accepted special-account message"); return }
+            #expect(accepted.senderUserID == senderID)
+            #expect(await specialStore.authorizedRoomID() == accepted.roomID)
+            #expect(await specialStore.recordedMessageID() == accepted.messageID)
         }
-        #expect(accepted.senderUserID == accountID)
-        #expect(await specialStore.authorizedRoomID() == roomID)
-        #expect(await specialStore.recordedMessageID() == accepted.messageID)
     }
 }
 
@@ -99,22 +60,4 @@ private actor SpecialAccountStoreSpy: V2SpecialAccountMessagingStore {
 
     func authorizedRoomID() -> RoomID? { authorizedRoom }
     func recordedMessageID() -> MessageID? { recordedMessage }
-}
-
-private actor DirectRoomStoreSpy: V2DirectMessagingStore {
-    private let roomID: RoomID
-
-    init(roomID: RoomID) { self.roomID = roomID }
-
-    func open(command: V2OpenDirectRoomCommand, capacityProfile _: V2CapacityProfile, roomShardID _: String, roomID _: RoomID, now: Date) async throws -> V2OpenDirectRoomOutcome {
-        .opened(.init(roomID: roomID, actorUserID: command.actorUserID, targetUserID: command.targetUserID, createdAt: now))
-    }
-
-    func setStrangerMessagePermission(command: V2SetStrangerMessagePermissionCommand, now: Date) async throws -> V2SetStrangerMessagePermissionOutcome {
-        .idempotent(permission: command.permission, updatedAt: now)
-    }
-
-    func setUserAddPermission(command: V2SetUserAddPermissionCommand, now: Date) async throws -> V2SetUserAddPermissionOutcome {
-        .idempotent(permission: command.permission, updatedAt: now)
-    }
 }

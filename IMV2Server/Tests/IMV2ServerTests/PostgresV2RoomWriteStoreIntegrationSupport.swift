@@ -741,14 +741,14 @@ internal struct ForwardInboxUUIDAssertion: Decodable { let value: UUID }
 
 internal struct ForwardImportDigestAssertion: Decodable { let value: String }
 internal actor ForwardMediaFailOnceScanner: V2MediaScanProvider {
-    let scanner: V2LocalEICARMediaScanner
+    let scanner: any V2MediaScanProvider
     /// 首次扫描抛出确定性失败，使导入工作进入暂停而不是持续重试。
     ///
     /// 瞬时失败在新契约下不再因预算耗尽而暂停，因此需要构造暂停行的场景
     /// 必须注入一个重试无法改变结论的失败。
     let deterministicFailure: Bool
     private var fail = true
-    init(scanner: V2LocalEICARMediaScanner, deterministicFailure: Bool = false) {
+    init(scanner: any V2MediaScanProvider, deterministicFailure: Bool = false) {
         self.scanner = scanner
         self.deterministicFailure = deterministicFailure
     }

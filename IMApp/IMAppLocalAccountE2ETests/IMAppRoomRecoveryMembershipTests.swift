@@ -15,18 +15,16 @@ extension IMAppRoomRecoveryScaleTests {
                 deviceID: owner.deviceID, supportedCapabilityProfiles: ["base"])
             let ownerTransport = V2ProtobufSyncTransport(wire: ownerConnection, protocolVersion: ownerSession.protocolVersion)
             let operation = try GroupRoomOperationID(UUID().uuidString.lowercased())
-            _ = try await ownerTransport.beginGroupRoomCreation(operationID: operation, title: "Recovery membership race")
-            _ = try await ownerTransport.appendGroupRoomCreationMembers(operationID: operation, memberUserIDs: [account.userID])
-            let room = try await ownerTransport.finalizeGroupRoomCreation(operationID: operation)
-            let members = try await ownerTransport.listRoomMembers(roomID: room.roomID, cursor: nil, pageSize: 10)
-            let initial = try await ownerTransport.sendMessage(roomID: room.roomID,
+            let roomID = try await owner.createGroup(operationID: operation, title: "Recovery membership race", members: [account.userID])
+            let members = try await ownerTransport.listRoomMembers(roomID: roomID, cursor: nil, pageSize: 10)
+            let initial = try await owner.sendMessage(roomID: roomID,
                 clientMessageID: .init(UUID().uuidString.lowercased()), text: "membership-before-scan", media: [], mentions: [])
             let session = try await coordinator.connect()
             let transport = V2ProtobufSyncTransport(wire: connection, protocolVersion: session.protocolVersion)
             let personal = V2SyncEngine(transport: transport, store: store, capabilityProfile: session.capabilityProfile)
             try await synchronizeInitialState(personal)
-            let race = RecoveryMembershipRaceTransport(transport: transport, owner: ownerTransport,
-                roomID: room.roomID, userID: account.userID, membershipRevision: members.membershipRevision,
+            let race = RecoveryMembershipRaceTransport(transport: transport, owner: owner,
+                roomID: roomID, userID: account.userID, membershipRevision: members.membershipRevision,
                 initialHead: initial.roomSequence)
             for attempt in 0..<3 {
                 do {
@@ -40,13 +38,13 @@ extension IMAppRoomRecoveryScaleTests {
                             let deadline = ContinuousClock.now.advanced(by: .seconds(120))
                             while true {
                                 if let head = await race.finalHead, await engine.phase == .live {
-                                    let messages = try await store.messages(in: room.roomID)
+                                    let messages = try await store.messages(in: roomID)
                                     guard !messages.contains(where: { $0.text == "membership-gap" }) else {
                                         throw V2RealtimeTransportError.unexpectedResponse
                                     }
                                     if messages.contains(where: { $0.text == "membership-after-rejoin" }),
-                                       try await store.groupEventCursor(roomID: room.roomID) == head,
-                                       try await store.groupEventAccess(roomID: room.roomID)?.isAuthorized == true { break }
+                                       try await store.groupEventCursor(roomID: roomID) == head,
+                                       try await store.groupEventAccess(roomID: roomID)?.isAuthorized == true { break }
                                 }
                                 guard ContinuousClock.now < deadline else { throw V2RealtimeTransportError.unexpectedResponse }
                                 try await Task.sleep(for: .milliseconds(20))
@@ -66,9 +64,9 @@ extension IMAppRoomRecoveryScaleTests {
                 }
             }
             try await verifyJoinAfterDirectory(connection: connection, coordinator: coordinator, account: account,
-                store: store, owner: ownerTransport, roomID: room.roomID)
+                store: store, owner: owner, ownerTransport: ownerTransport, roomID: roomID)
             try await verifyUnknownJoinAfterDirectory(connection: connection, coordinator: coordinator, account: account,
-                store: store, owner: ownerTransport)
+                store: store, owner: owner, ownerTransport: ownerTransport)
             await ownerConnection.disconnect()
         } catch {
             await ownerConnection.disconnect()
@@ -81,14 +79,14 @@ extension IMAppRoomRecoveryScaleTests {
 /// The returned state remains untouched; production fences decide how to apply it.
 private actor RecoveryMembershipRaceTransport: V2ClientRoomRecoveryTransport {
     let transport: V2ProtobufSyncTransport
-    let owner: V2ProtobufSyncTransport
+    let owner: LocalE2EAccountCredentials
     let roomID: RoomID
     let userID: UserID
     let membershipRevision: UInt64
     let initialHead: UInt64
     private var started = false
     private(set) var finalHead: UInt64?
-    init(transport: V2ProtobufSyncTransport, owner: V2ProtobufSyncTransport, roomID: RoomID,
+    init(transport: V2ProtobufSyncTransport, owner: LocalE2EAccountCredentials, roomID: RoomID,
          userID: UserID, membershipRevision: UInt64, initialHead: UInt64) {
         self.transport = transport; self.owner = owner; self.roomID = roomID
         self.userID = userID; self.membershipRevision = membershipRevision; self.initialHead = initialHead

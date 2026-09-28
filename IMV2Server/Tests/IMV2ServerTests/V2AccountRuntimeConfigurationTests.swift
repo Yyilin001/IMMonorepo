@@ -3,6 +3,18 @@ import Foundation
 import Testing
 
 struct V2AccountRuntimeConfigurationTests {
+    @Test("account database budget reserves separate direct-route and social connections")
+    func validatesDirectRouteConnectionBudget() throws {
+        var configured = values
+        configured["IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP"] = "1"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP")) {
+            _ = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(configured))
+        }
+        configured["IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP"] = "2"
+        let configuration = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(configured))
+        #expect(configuration.databasePolicy.maximumConnectionsPerEventLoop == 2)
+    }
+
     @Test("runtime rejects unencodable account rate-limit settings", arguments: [
         "IM_V2_PASSWORD_LOGIN_MAX_FAILURES", "IM_V2_PASSWORD_LOGIN_WINDOW_SECONDS",
         "IM_V2_PASSWORD_LOGIN_LOCKOUT_SECONDS", "IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_WINDOW_SECONDS",
@@ -52,6 +64,8 @@ struct V2AccountRuntimeConfigurationTests {
         var configured = values
         configured.removeValue(forKey: "IM_V2_USER_SHARD_STORES_JSON")
         configured["IM_V2_ROOM_SHARD_STORES_JSON"] = #"[{"shard_id":"room-b","database_url":"postgres://v2:password@db/room_b","schema":"im_v2"}]"#
+        configured["IM_V2_DIRECT_ROOM_SHARD_ID"] = "room-b"
+        configured["IM_V2_GROUP_ROOM_SHARD_ID"] = "room-b"
         #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_USER_SHARD_STORES_JSON")) {
             _ = try V2AccountRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(configured))
         }
@@ -162,6 +176,8 @@ struct V2AccountRuntimeConfigurationTests {
     private var values: [String: String] {
         [
             "IM_V2_DATABASE_URL": "postgres://v2:password@db/im_v2",
+            "IM_V2_DIRECT_ROOM_SHARD_ID": "room-a",
+            "IM_V2_GROUP_ROOM_SHARD_ID": "room-a",
             "IM_V2_ROOM_SHARD_STORES_JSON": #"[{"shard_id":"room-a","database_url":"postgres://v2:password@db/im_v2","schema":"im_v2"}]"#,
             "IM_V2_USER_SHARD_STORES_JSON": #"[{"bucket":"users-primary","database_url":"postgres://v2:password@db/im_v2","schema":"im_v2"}]"#,
             "IM_V2_DATABASE_EVENT_LOOP_THREADS": "2",

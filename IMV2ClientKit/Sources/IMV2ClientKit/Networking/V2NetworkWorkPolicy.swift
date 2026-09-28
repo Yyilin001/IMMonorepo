@@ -1,0 +1,56 @@
+import Foundation
+
+/// Domain steps may carry scheduling metadata to their leaf transport without
+/// taking a parent permit. This scope grants no credential or durable claim.
+public enum V2NetworkWorkScope {
+    @TaskLocal public static var context: V2NetworkWorkContext?
+}
+
+/// Pure retry decisions. Callers persist attempt counts and budgets; this type never retries I/O.
+public struct V2NetworkWorkPolicy: Sendable {
+    public let maximumAttempts: Int
+    public let totalBudget: TimeInterval
+    public let transmissionBudget: TimeInterval
+    public init(maximumAttempts: Int, totalBudget: TimeInterval, transmissionBudget: TimeInterval) {
+        precondition(maximumAttempts > 0 && totalBudget > 0 && transmissionBudget > 0)
+        self.maximumAttempts = maximumAttempts; self.totalBudget = totalBudget; self.transmissionBudget = transmissionBudget
+    }
+    public static let interactiveRead = Self(maximumAttempts: 2, totalBudget: 10, transmissionBudget: 10)
+    public static let commandRecovery = Self(maximumAttempts: 5, totalBudget: 60, transmissionBudget: 15)
+    /// Returns nil when exhausted or when the server cooldown cannot fit the remaining budget.
+    public func nextAttempt(now: Date, startedAt: Date, attemptsCompleted: Int,
+                            randomUnit: Double, serverRetryNotBefore: Date? = nil) -> Date? {
+        guard attemptsCompleted < maximumAttempts else { return nil }
+        let exponent = min(max(0, attemptsCompleted - 1), 16)
+        let ceiling = min(30, 0.5 * pow(2, Double(exponent)))
+        let proposed = now.addingTimeInterval(ceiling * min(1, max(0, randomUnit)))
+        let next = max(proposed, serverRetryNotBefore ?? now)
+        return next < startedAt.addingTimeInterval(totalBudget) ? next : nil
+    }
+    public static func acceptedResultPollDelay(attempt: Int, serverDelay: TimeInterval? = nil) -> TimeInterval {
+        let defaults: [TimeInterval] = [2, 5, 10, 30]
+        return max(defaults[min(3, max(0, attempt))], serverDelay ?? 0)
+    }
+}
+
+/// Failed-history retry quota; initial interactive attempts do not consume this bucket.
+public struct V2NetworkRetryTokenBucket: Sendable {
+    private var tokens: Int = 5
+    private var lastRefill: TimeInterval
+    public init(now: TimeInterval) { lastRefill = now }
+    private mutating func refill(now: TimeInterval) {
+        if now >= lastRefill + 2 {
+            let intervals = floor((now - lastRefill) / 2)
+            tokens = min(5, tokens + Int(min(5, intervals))); lastRefill += intervals * 2
+        }
+    }
+    public mutating func nextAvailableAt(now: TimeInterval) -> TimeInterval {
+        refill(now: now)
+        return tokens > 0 ? now : lastRefill + 2
+    }
+    public mutating func consume(now: TimeInterval) -> Bool {
+        refill(now: now)
+        guard tokens > 0 else { return false }
+        tokens -= 1; return true
+    }
+}

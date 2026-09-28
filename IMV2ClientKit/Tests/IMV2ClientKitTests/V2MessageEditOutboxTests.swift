@@ -1,95 +1,73 @@
 import Foundation
-@testable import IMV2ClientKit
 import IMV2Core
+@testable import IMV2ClientKit
 import Testing
 
-@Suite("V2 message edit outbox")
-struct V2MessageEditOutboxTests {
-    @Test("restart retries the identical edit operation and persists its result")
-    func retrySurvivesRestart() async throws {
-        let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-edit-\(UUID().uuidString).sqlite")
-        let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let transport = EditTransport(results: [.offline, .accepted])
-        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: editBinding)
-        let first = V2MessageEditOutboxEngine(store: store, transport: transport, makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000961")! }, now: { now })
-        let command = try await first.enqueueEdit(roomID: .init("00000000-0000-0000-0000-000000000962"), messageID: .init("00000000-0000-0000-0000-000000000963"), expectedMessageRevision: 1, text: "replacement")
-        #expect(try await first.flushOnce() == .retryScheduled(command.operationID))
-
-        let restarted = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: editBinding)
-        let second = V2MessageEditOutboxEngine(store: restarted, transport: transport, now: { now.addingTimeInterval(1) })
-        #expect(try await second.flushOnce() == .acknowledged(command.operationID))
-        let saved = try #require(await restarted.pendingMessageEdits().first)
-        #expect(saved.operationID == command.operationID)
-        #expect(saved.state == .acknowledged)
-        #expect(saved.resultingMessageRevision == 2)
-        #expect(await transport.operationIDs() == [command.operationID, command.operationID])
+@Suite("Message mutation authoritative outcomes", .serialized)
+struct V2MessageMutationTerminalTests {
+    @Test("only a bound terminal receipt completes a mutation",arguments:["committed","conflicted","rejected","closed"])
+    func terminal(kind:String) async throws {
+        let f=try V2MutationTestFixture(kind:kind);defer { f.remove() }
+        let payload=try f.payload(),id=try await f.service.enqueue(payload)
+        try await f.service.execute(f.claim(id))
+        let work=try #require(try await f.store.operationWork(id:id))
+        let expected:V2OperationExecutionState = kind=="committed" ? .committed : kind=="conflicted" ? .conflicted : kind=="closed" ? .closed : .rejected
+        #expect(work.execution==expected && work.scheduling == .finished)
+        #expect(try await f.store.messageMutationPayload(workID:id)==payload)
+        #expect(try await f.store.messages(in:f.room).isEmpty)
+        try await f.store.close()
     }
-
-    @Test("revision conflict is a durable terminal edit outcome")
-    func revisionConflictIsTerminal() async throws {
-        let store = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-v2-edit-\(UUID().uuidString).sqlite"), installationBinding: editBinding)
-        let engine = V2MessageEditOutboxEngine(store: store, transport: EditTransport(results: [.conflict]), makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000964")! })
-        let command = try await engine.enqueueEdit(roomID: .init("00000000-0000-0000-0000-000000000965"), messageID: .init("00000000-0000-0000-0000-000000000966"), expectedMessageRevision: 1, text: "new")
-        #expect(try await engine.flushOnce() == .rejected(command.operationID, code: "REVISION_CONFLICT"))
-        let saved = try #require(await store.pendingMessageEdits().first)
-        #expect(saved.terminalCurrentRevision == 2)
-    }
-
-    @Test("duplicate pending edit after restart reuses its original operation ID")
-    func duplicatePendingEditReusesTheOriginalOperationAfterRestart() async throws {
-        let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-edit-\(UUID().uuidString).sqlite")
-        let roomID = try RoomID("00000000-0000-0000-0000-000000000968")
-        let messageID = try MessageID("00000000-0000-0000-0000-000000000969")
-        let originalStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: editBinding)
-        let originalEngine = V2MessageEditOutboxEngine(
-            store: originalStore,
-            transport: EditTransport(results: []),
-            makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000970")! }
-        )
-        let original = try await originalEngine.enqueueEdit(
-            roomID: roomID,
-            messageID: messageID,
-            expectedMessageRevision: 4,
-            text: "replacement"
-        )
-
-        let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: editBinding)
-        let restartedEngine = V2MessageEditOutboxEngine(
-            store: restartedStore,
-            transport: EditTransport(results: [])
-        )
-        let reused = try await restartedEngine.enqueueEdit(
-            roomID: roomID,
-            messageID: messageID,
-            expectedMessageRevision: 4,
-            text: "replacement"
-        )
-
-        #expect(reused.operationID == original.operationID)
-        let changedText = try await restartedEngine.enqueueEdit(
-            roomID: roomID,
-            messageID: messageID,
-            expectedMessageRevision: 4,
-            text: "a distinct replacement"
-        )
-        #expect(changedText.operationID != original.operationID)
-        #expect(try await restartedStore.pendingMessageEdits().count == 2)
+    @Test("an unrelated receipt cannot turn an unknown mutation into success")
+    func unrelatedReceipt() async throws {
+        let f=try V2MutationTestFixture(kind:"mismatch");defer { f.remove() }
+        let id=try await f.service.enqueue(f.payload())
+        try await f.service.execute(f.claim(id))
+        let work=try #require(try await f.store.operationWork(id:id))
+        #expect(work.execution == .awaitingConfirmation && work.scheduling == .needsAttention)
+        try await f.store.close()
     }
 }
-
-private actor EditTransport: V2ClientMessageEditTransport {
-    enum Result: Sendable { case offline, conflict, accepted }
-    private var results: [Result]; private var received: [MessageEditOperationID] = []
-    init(results: [Result]) { self.results = results }
-    func editMessage(roomID: RoomID, operationID: MessageEditOperationID, messageID: MessageID, expectedMessageRevision _: UInt64, text: String) throws -> V2ClientMessageEdit {
-        received.append(operationID)
-        switch results.removeFirst() {
-        case .offline: throw V2RealtimeTransportError.unexpectedResponse
-        case .conflict: throw V2RealtimeTransportError.server(code: "REVISION_CONFLICT", retryable: false, retryAfterSeconds: 0, currentRevision: 2)
-        case .accepted: return try .init(roomID: roomID, messageID: messageID, text: text, messageRevision: 2, roomSequence: 9, createdAt: .distantPast)
+struct V2MutationTestFixture {
+    let url:URL,binding=V2LocalInstallationBinding(value:UUID()),account=UserID(uuid:UUID()),room=RoomID(uuid:UUID()),message=MessageID(uuid:UUID())
+    let store:GRDBV2LocalSyncStore,remote:V2MutationFixtureClient,service:V2MessageMutationOperationService
+    init(kind:String) throws {
+        url=FileManager.default.temporaryDirectory.appending(path:"mutation-terminal-"+UUID().uuidString).appending(path:"state.sqlite")
+        store=try .init(databaseURL:url,installationBinding:binding,userID:account)
+        remote=V2MutationFixtureClient(kind:kind)
+        service=V2MessageMutationOperationService(accountID:account,store:store,client:remote)
+    }
+    func payload(withdraw:Bool=false) throws -> V2MessageMutationPayload {
+        let deadline=UInt64(Date().addingTimeInterval(600).timeIntervalSince1970*1_000)
+        if withdraw { return .withdraw(try .init(command:.init(roomID:room,actorUserID:account,operationID:.init(uuid:UUID()),messageID:message,expectedMessageRevision:1),firstSubmissionDeadlineMilliseconds:deadline)) }
+        return .edit(try .init(command:.init(roomID:room,actorUserID:account,operationID:.init(uuid:UUID()),messageID:message,expectedMessageRevision:1,text:"saved draft",maximumUTF8Bytes:65_536),firstSubmissionDeadlineMilliseconds:deadline))
+    }
+    func claim(_ id:UUID) async throws -> V2OperationWorkClaim {
+        let work=try #require(try await store.operationWork(id:id))
+        guard case .claimed(let claim)=try await store.claimOperationWork(id:id,ownerID:UUID(),action:work.nextAction,now:work.nextActionAt) else { throw V2OperationWorkError.invalidTransition }
+        return claim
+    }
+    func remove() { try? FileManager.default.removeItem(at:url.deletingLastPathComponent()) }
+}
+actor V2MutationFixtureClient:V2MessageMutationOperationClient {
+    let kind:String
+    let serverFloor=Date().addingTimeInterval(3_600)
+    var submissions=0
+    init(kind:String) { self.kind=kind }
+    func submit(_ payload:V2MessageMutationPayload) async throws -> V2MessageMutationRecoveryResult {
+        submissions += 1
+        if kind=="cancel" { throw CancellationError() }
+        if kind=="cooldown" { throw V2HTTPFailure(kind:.httpStatus,service:"accountAPI",statusCode:429,retryAfter:serverFloor) }
+        let identity=try payload.identity,fingerprint=try payload.fingerprint
+        guard case .message(_,let message)=identity.scope else { throw V2OperationWorkError.invalidRecord }
+        let outcome:V2MessageMutationTerminalOutcome
+        switch kind {
+        case "closed":outcome = .closed
+        case "conflicted":outcome = .rejected(.revisionConflict(current:2))
+        case "rejected":outcome = .rejected(.permissionDenied)
+        default:outcome = .committed(try .init(messageID:message,messageRevision:2,roomSequence:2,eventID:.init(uuid:UUID())))
         }
+        let bound = kind=="mismatch" ? try V2OperationFingerprint(kind:identity.kind,fields:[.init("wrong",.text("wrong"))]) : fingerprint
+        return .receipt(try .init(identity:identity,fingerprint:bound,outcome:outcome,resolvedAtMilliseconds:UInt64(Date().timeIntervalSince1970*1_000)))
     }
-    func operationIDs() -> [MessageEditOperationID] { received }
+    func recover(_ request:V2MessageMutationRecoveryRequest) async throws -> V2MessageMutationRecoveryResult { .unresolved }
 }
-
-private let editBinding = V2LocalInstallationBinding(value: UUID(uuidString: "00000000-0000-0000-0000-000000000967")!)

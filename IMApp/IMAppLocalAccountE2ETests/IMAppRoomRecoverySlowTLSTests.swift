@@ -34,7 +34,7 @@ extension IMAppRoomRecoveryScaleTests {
             guard !pressureRooms.isEmpty, Set(pressureRooms).count == pressureRooms.count else {
                 throw V2RealtimeTransportError.unexpectedResponse
             }
-            try await sendRecoveryOnlineMessage(transport: transport, auth: auth, roomID: roomID,
+            try await sendRecoveryOnlineMessage(transport: transport, auth: auth, account: account, roomID: roomID,
                 deadline: ContinuousClock.now.advanced(by: .seconds(30)))
             try await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTask {
@@ -52,8 +52,7 @@ extension IMAppRoomRecoveryScaleTests {
             }
             print("IMV2_TLS_ROOM_SLOW_TLS_COVERAGE_PROVEN")
             _ = try await transport.subscribeToGroupEvents(roomID: roomID, afterRoomSequence: 3)
-            let senderSession = try await senderCoordinator.connect()
-            let sender = V2ProtobufSyncTransport(wire: secondary, protocolVersion: senderSession.protocolVersion)
+            _ = try await senderCoordinator.connect()
             let baseline = try await controlSlowTLS(.pause)
             paused = true
             guard baseline.paused else { throw V2RealtimeTransportError.unexpectedResponse }
@@ -74,16 +73,10 @@ extension IMAppRoomRecoveryScaleTests {
                 let text = (0..<4).map { _ in UUID().uuidString.replacingOccurrences(of: "-", with: "") }.joined()
                 let id = try ClientMessageID(UUID().uuidString.lowercased())
                 let targetRoom = pressureRooms[committed % pressureRooms.count]
-                while true {
-                    try Task.checkCancellation()
-                    guard ContinuousClock.now < deadline else { throw V2RealtimeTransportError.unexpectedResponse }
-                    do {
-                        _ = try await sender.sendMessage(roomID: targetRoom, clientMessageID: id,
-                            text: text, media: [], mentions: [])
-                        break
-                    } catch V2RealtimeTransportError.server(code: _, retryable: true, retryAfterSeconds: let seconds, currentRevision: _) {
-                        try await Task.sleep(for: .seconds(max(1, seconds)))
-                    }
+                try Task.checkCancellation()
+                guard ContinuousClock.now < deadline else { throw V2RealtimeTransportError.unexpectedResponse }
+                _ = try await V2HTTPRequestDeadline.run(until: deadline, service: "accountAPI") {
+                    try await account.sendMessage(roomID: targetRoom, clientMessageID: id, text: text, auth: auth)
                 }
                 textsByRoom[targetRoom, default: []].insert(text)
                 committed += 1
@@ -190,11 +183,10 @@ extension IMAppRoomRecoveryScaleTests {
             app.terminate()
         }
         do {
-            let session = try await coordinator.connect()
-            let sender = V2ProtobufSyncTransport(wire: connection, protocolVersion: session.protocolVersion)
+            _ = try await coordinator.connect()
             let initialText = "app-reconnect-initial-" + UUID().uuidString.lowercased()
-            _ = try await sender.sendMessage(roomID: roomID, clientMessageID: ClientMessageID(UUID().uuidString.lowercased()),
-                text: initialText, media: [], mentions: [])
+            _ = try await account.sendMessage(roomID: roomID, clientMessageID: ClientMessageID(UUID().uuidString.lowercased()),
+                text: initialText, media: [], mentions: [], auth: auth)
             app.launchArguments = scope + ["-v2-ui-testing-account-handle", account.accountHandle,
                 "-v2-ui-testing-local-password", "local-clientkit-password"]
             app.launch()
@@ -223,8 +215,8 @@ extension IMAppRoomRecoveryScaleTests {
                 XCTAssertEqual(app.state, .runningForeground)
                 _ = try await controlSlowTLS(.disconnect)
                 let text = "app-reconnect-\(cycle)-" + UUID().uuidString.lowercased()
-                _ = try await sender.sendMessage(roomID: roomID, clientMessageID: ClientMessageID(UUID().uuidString.lowercased()),
-                    text: text, media: [], mentions: [])
+                _ = try await account.sendMessage(roomID: roomID, clientMessageID: ClientMessageID(UUID().uuidString.lowercased()),
+                    text: text, media: [], mentions: [], auth: auth)
                 let recoveredBody = app.staticTexts[text]
                 let bodyDeadline = ContinuousClock.now.advanced(by: .seconds(90))
                 while !recoveredBody.exists {

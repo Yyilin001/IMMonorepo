@@ -140,59 +140,79 @@ struct V2RoomHostPostgresOverloadDrainTests {
         }
     }
 
-    @Test("drain retains both leases while two granted room sends wait in the real shared batcher",
+    @Test("drain retains both leases until both typed scalar sends commit their permanent proofs",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_HOST_OVERLOAD_DATABASE_IS_DISPOSABLE"] == "1"))
     func pendingSharedBatchDrainsBeforeLeaseRelease() async throws {
         try await withOverloadDatabase(capacityClass: .large) { database, sql, fixture in
             let secondRoom = RoomID(uuid: UUID())
             try await overloadSeedRoom(secondRoom, capacityClass: .large, sql: sql)
-            // Production atomic group append is the large-room partition.
-            // Standard group rooms intentionally take the scalar path.
             let leases = PostgresV2RoomActivationStore(database: database)
             let hosted = try overloadHost(database: database, fixture: fixture, leases: leases,
-                configuration: overloadConfiguration(batchWaitMilliseconds: 800),
-                batchDelay: .milliseconds(800))
+                configuration: overloadConfiguration(), batchDelay: .milliseconds(2))
             let host = hosted.host
+            let gate = OverloadGate()
+            let advisoryKey: Int64 = 9_240_212
+            try await sql.raw("""
+                CREATE FUNCTION im_v2.test_block_scalar_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN PERFORM pg_advisory_xact_lock(9240212); RETURN NEW; END $$
+                """).run()
+            try await sql.raw("""
+                CREATE TRIGGER test_block_scalar_insert BEFORE INSERT ON im_v2.messages
+                FOR EACH ROW EXECUTE FUNCTION im_v2.test_block_scalar_insert()
+                """).run()
+            let locker = Task {
+                try await database.transaction { transaction in
+                    let tx = try #require(transaction as? any SQLDatabase)
+                    try await tx.raw("SELECT pg_advisory_xact_lock(\(bind: advisoryKey))").run()
+                    await gate.hold()
+                }
+            }
             await host.start()
             do {
+                try await gate.waitUntilHeld()
                 let firstToken = try await overloadActivate(host, room: roomID)
                 let secondToken = try await overloadActivate(host, room: secondRoom)
                 let firstID = UUID(), secondID = UUID()
-                let first = Task {
-                    try await host.invoke(token: firstToken,
-                        encodedRequest: try overloadSendBytes(room: roomID, operation: firstID),
-                        deadline: .now + .seconds(8))
-                }
-                let second = Task {
-                    try await host.invoke(token: secondToken,
-                        encodedRequest: try overloadSendBytes(room: secondRoom, operation: secondID),
-                        deadline: .now + .seconds(8))
-                }
+                let firstRequest = try overloadSendBytes(room: roomID, operation: firstID)
+                let secondRequest = try overloadSendBytes(room: secondRoom, operation: secondID)
+                let first = Task { try await host.invoke(token: firstToken,
+                    encodedRequest: firstRequest, deadline: .now + .seconds(8)) }
+                let second = Task { try await host.invoke(token: secondToken,
+                    encodedRequest: secondRequest, deadline: .now + .seconds(8)) }
                 try await overloadWaitUntil {
-                    let batch = await hosted.batcher.snapshot()
-                    return batch.pendingRequests == 2 && batch.inFlightBatches == 0
+                    try await sql.raw("""
+                        SELECT count(*)::bigint AS value FROM pg_stat_activity
+                        WHERE datname = current_database() AND pid <> pg_backend_pid()
+                          AND wait_event_type = 'Lock' AND wait_event = 'advisory'
+                          AND cardinality(pg_blocking_pids(pid)) > 0
+                        """).first(decoding: OverloadCountRow.self)?.value == 2
                 }
                 #expect(await hosted.budget.snapshot().commandCount == 2)
-                let drainedEarly = await host.drain(deadline: .now + .milliseconds(60))
-                #expect(!drainedEarly.completed)
+                #expect(try await overloadCompletionCount(sql, room: roomID, operation: firstID) == 0)
+                #expect(try await overloadCompletionCount(sql, room: secondRoom, operation: secondID) == 0)
+                #expect(!(await host.drain(deadline: .now + .milliseconds(60))).completed)
                 #expect(try await overloadLiveLease(sql, room: roomID, token: firstToken))
                 #expect(try await overloadLiveLease(sql, room: secondRoom, token: secondToken))
+                await gate.open()
+                try await locker.value
                 try overloadRequireAccepted(try await first.value)
                 try overloadRequireAccepted(try await second.value)
                 #expect(try await overloadCompletionCount(sql, room: roomID, operation: firstID) == 1)
                 #expect(try await overloadCompletionCount(sql, room: secondRoom, operation: secondID) == 1)
                 let batch = await hosted.batcher.snapshot()
-                #expect(batch.atomicBatchCommittedRequests == 2)
+                #expect(batch.atomicBatchCommittedRequests == 0)
                 #expect(batch.pendingRequests == 0 && batch.inFlightBatches == 0)
                 #expect((await host.drain(deadline: .now + .seconds(5))).completed)
-                try await overloadAssertReleased(hosted, leases: leases,
-                    rooms: [roomID, secondRoom])
+                try await overloadAssertReleased(hosted, leases: leases, rooms: [roomID, secondRoom])
             } catch {
+                await gate.open()
+                _ = try? await locker.value
                 _ = await host.stop(deadline: .now + .seconds(5))
                 throw error
             }
         }
     }
+
 }
 
 private struct OverloadHosted: Sendable {
@@ -224,6 +244,7 @@ private func overloadHost(database: any Database,
         sendBatcher: batcher,
         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
+        invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
         receiptProjectionDelivery: OverloadProjectionDelivery(),
         capacityProfile: fixture.forwardImportTestProfile(),
         messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
@@ -249,9 +270,9 @@ private func overloadActivate(_ host: V2RoomActivationHost<V2RoomRequest, V2Room
 }
 
 private func overloadSendBytes(room: RoomID, operation: UUID) throws -> Data {
-    try JSONEncoder().encode(V2RoomRequest.messaging(.send(.init(roomID: room,
-        actorUserID: senderID, clientMessageID: .init(uuid: operation), text: "overload",
-        media: [], mentions: [], entities: [], replyTo: nil))))
+    try JSONEncoder().encode(V2RoomRequest.messaging(.sendOperation(.init(command: .init(roomID: room,
+        senderUserID: senderID, clientMessageID: .init(uuid: operation), text: "overload",
+        media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 600_000))))
 }
 
 private func overloadRecoveryBytes(room: RoomID) throws -> Data {
@@ -260,7 +281,8 @@ private func overloadRecoveryBytes(room: RoomID) throws -> Data {
 }
 
 private func overloadRequireAccepted(_ response: V2RoomResponse) throws {
-    guard case .messaging(.send(.accepted(_))) = response else {
+    guard case .messaging(.sendOperation(.receipt(let proof))) = response,
+          case .accepted = proof.outcome else {
         throw OverloadFailure.unexpectedResult
     }
 }
@@ -289,9 +311,9 @@ private func overloadAdvisoryWait(sql: any SQLDatabase) async throws -> Bool {
 private func overloadCompletionCount(_ sql: any SQLDatabase, room: RoomID,
     operation: UUID) async throws -> Int64 {
     try #require(try await sql.raw("""
-        SELECT COUNT(*)::bigint AS value FROM im_v2.message_send_completions
-        WHERE room_id = \(bind: room.uuidValue!) AND sender_user_id = \(bind: senderUUID)
-          AND client_message_id = \(bind: operation)
+        SELECT COUNT(*)::bigint AS value FROM im_v2.message_send_operation_receipts
+        WHERE room_id = \(bind: room.uuidValue!) AND actor_user_id = \(bind: senderUUID)
+          AND operation_id = \(bind: operation)
         """).first(decoding: OverloadCountRow.self)).value
 }
 

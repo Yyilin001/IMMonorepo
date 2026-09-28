@@ -240,7 +240,7 @@ struct V2GroupPermissionsSheet: View {
     }
 }
 
-private extension V2GroupPermission {
+extension V2GroupPermission {
     var title: String {
         switch self {
         case .sendMessages: "发送消息"
@@ -351,7 +351,6 @@ struct V2GroupMembersSheet: View {
                             .accessibilityIdentifier("v2.group.members.add-input")
                         Button("添加") {
                             let target = newMemberUserID
-                            newMemberUserID = ""
                             runMembershipChange(target: target, action: .add)
                         }
                         .disabled(
@@ -370,7 +369,7 @@ struct V2GroupMembersSheet: View {
                 }
                 if store.groupActorRole == "群主" || store.groupActorRole == "管理员" {
                     Section {
-                        Text("禁言和管理员移除会以独立的可审计命令保存；网络中断时会自动重试。")
+                        Text("管理确认有两分钟授权窗口；超时需重新确认。已发送的请求会继续核对原操作结果。")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -483,7 +482,8 @@ struct V2GroupMembersSheet: View {
     private func runMembershipChange(target: String, action: V2RoomMembershipAction) {
         guard membershipChangeTask == nil else { return }
         membershipChangeTask = Task {
-            await store.changeGroupMembership(targetUserID: target, action: action)
+            let saved=await store.changeGroupMembership(targetUserID:target,action:action)
+            if saved,action == .add,newMemberUserID==target { newMemberUserID="" }
             guard !Task.isCancelled else { return }
             membershipChangeTask = nil
         }

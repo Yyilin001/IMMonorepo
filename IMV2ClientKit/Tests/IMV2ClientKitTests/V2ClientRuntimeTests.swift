@@ -5,7 +5,7 @@ import Testing
 
 @Suite("V2 client runtime lifecycle")
 struct V2ClientRuntimeTests {
-    @Test("initial durable sync completes before the live loops start, then stop owns cancellation")
+    @Test("authenticated connection starts live loops and independent initial recovery; stop drains both")
     func startsThenStopsOwnedLoops() async throws {
         let session = try authenticatedSession()
         let connection = RuntimeConnection(result: .success(session))
@@ -15,8 +15,8 @@ struct V2ClientRuntimeTests {
         #expect(try await runtime.start() == session)
         await activity.waitForLoops()
         await activity.waitForPolicyLoop()
+        await activity.waitForInitialRecovery(count: 1)
         #expect(await activity.syncCount() == 1)
-        #expect(await activity.commandFlushCount() == 1)
         #expect(await connection.connectCount() == 1)
         #expect(await runtime.currentState() == .running(session))
 
@@ -31,18 +31,37 @@ struct V2ClientRuntimeTests {
         #expect(await connection.disconnectCount() == 1)
     }
 
-    @Test("a failed initial sync disconnects and never starts live loops")
+    @Test("a blocked initial history sync does not block running state or heartbeat")
+    func slowInitialSyncDoesNotBlockConnectionReadiness() async throws {
+        let session = try authenticatedSession()
+        let connection = RuntimeConnection(result: .success(session))
+        let activity = SlowInitialRuntimeActivity()
+        let runtime = V2ClientRuntime(connection: connection, activity: activity)
+        #expect(try await runtime.start() == session)
+        await activity.waitForHeartbeat()
+        #expect(await runtime.currentState() == .running(session))
+        #expect(await activity.completedSynchronizations() == 0)
+        await activity.releaseSync()
+        for _ in 0..<1000 { if await activity.completedSynchronizations() == 1 { break }; await Task.yield() }
+        #expect(await activity.completedSynchronizations() == 1)
+        await runtime.stop()
+    }
+
+    @Test("a failed independent initial sync stops the authenticated connection")
     func initialSyncFailureStopsConnection() async throws {
         let connection = RuntimeConnection(result: .success(try authenticatedSession()))
         let activity = BlockingRuntimeActivity(syncFailure: RuntimeFailure.failed)
         let runtime = V2ClientRuntime(connection: connection, activity: activity)
 
-        await #expect(throws: RuntimeFailure.failed) {
-            _ = try await runtime.start()
+        _ = try await runtime.start()
+        await runtime.waitUntilStopped()
+        for _ in 0..<1000 {
+            if await connection.disconnectCount() == 1 { break }
+            await Task.yield()
         }
         #expect(await runtime.currentState() == .stopped)
         #expect(await connection.disconnectCount() == 1)
-        #expect(await activity.loopStartCount() == 0)
+        await runtime.stop()
     }
 
     @Test("a running runtime reuses its established session without another handshake")
@@ -67,19 +86,20 @@ struct V2ClientRuntimeTests {
         let runtime = V2ClientRuntime(connection: connection, activity: activity)
 
         _ = try await runtime.start()
+        await activity.waitForInitialRecovery(count: 1)
         await runtime.stop()
         _ = try await runtime.start()
+        await activity.waitForInitialRecovery(count: 2)
 
         #expect(await connection.connectCount() == 2)
         #expect(await activity.syncCount() == 2)
-        #expect(await activity.commandFlushCount() == 2)
         #expect(await runtime.currentState() == .running(session))
 
         await runtime.stop()
         #expect(await connection.disconnectCount() == 2)
     }
 
-    @Test("backgrounding during a handshake prevents initial sync and outbox work")
+    @Test("backgrounding during a handshake prevents initial sync")
     func stopDuringHandshakeCancelsPostHandshakeWork() async throws {
         let connection = BlockingRuntimeConnection(session: try authenticatedSession())
         let activity = BlockingRuntimeActivity()
@@ -93,7 +113,6 @@ struct V2ClientRuntimeTests {
             _ = try await start.value
         }
         #expect(await activity.syncCount() == 0)
-        #expect(await activity.commandFlushCount() == 0)
         #expect(await runtime.currentState() == .stopped)
     }
 
@@ -125,21 +144,24 @@ struct V2ClientRuntimeTests {
         #expect(try await first.value == session)
         #expect(try await second.value == session)
         #expect(await connection.connectCount() == 1)
+        await activity.waitForInitialRecovery(count: 1)
         #expect(await activity.syncCount() == 1)
         await runtime.stop()
     }
 
-    @Test("availability-driven synchronization replays queued commands after reconnect")
-    func availabilitySyncFlushesQueuedCommands() async throws {
+    @Test("availability-driven synchronization completes before projection maintenance")
+    func availabilitySyncPrecedesMaintenance() async throws {
         let sync = AvailabilitySyncDriver()
-        let outbox = AvailabilityCommandFlusher()
+        let maintenance = ProjectionSyncRecorder()
         let activity = V2DefaultClientRuntimeActivity(
             syncEngine: sync,
             availabilitySource: OneAvailabilityHintThenStop(),
             heartbeatSender: NoopHeartbeatSender(),
             heartbeatInterval: .seconds(30),
-            commandOutbox: outbox,
-            maximumInitialCommandFlushes: 4
+            afterDurableSynchronization: {
+                #expect(await sync.synchronizationCount() == 1)
+                await maintenance.record()
+            }
         )
 
         await #expect(throws: AvailabilityLoopStop.finished) {
@@ -147,7 +169,7 @@ struct V2ClientRuntimeTests {
         }
 
         #expect(await sync.synchronizationCount() == 1)
-        #expect(await outbox.flushCount() == 2)
+        #expect(await maintenance.count() == 1)
     }
 
     @Test("projection callback runs after initial and live synchronization")
@@ -171,8 +193,8 @@ struct V2ClientRuntimeTests {
         #expect(await recorder.count() == 2)
     }
 
-    @Test("terminal command maintenance follows each command flush after a successful sync")
-    func terminalCommandMaintenanceFollowsCommandFlush() async throws {
+    @Test("projection maintenance follows initial and availability synchronization")
+    func maintenanceFollowsSuccessfulSynchronization() async throws {
         let sync = AvailabilitySyncDriver()
         let recorder = ProjectionSyncRecorder()
         let activity = V2DefaultClientRuntimeActivity(
@@ -184,7 +206,6 @@ struct V2ClientRuntimeTests {
         )
 
         try await activity.synchronizeAfterConnection()
-        try await activity.flushDurableCommands()
         await #expect(throws: AvailabilityLoopStop.finished) {
             try await activity.runAvailabilityLoop()
         }
@@ -267,7 +288,6 @@ private actor BlockingRuntimeActivity: V2ClientRuntimeActivity {
 
     private let syncFailure: RuntimeFailure?
     private var synchronizations = 0
-    private var commandFlushes = 0
     private var starts = 0
     private var exits = 0
     func loopExitCount() -> Int { exits }
@@ -291,9 +311,6 @@ private actor BlockingRuntimeActivity: V2ClientRuntimeActivity {
         if let syncFailure { throw syncFailure }
     }
 
-    func flushDurableCommands() {
-        commandFlushes += 1
-    }
 
     func runAvailabilityLoop() async throws {
         defer { exits += 1 }
@@ -380,7 +397,12 @@ private actor BlockingRuntimeActivity: V2ClientRuntimeActivity {
     }
 
     func syncCount() -> Int { synchronizations }
-    func commandFlushCount() -> Int { commandFlushes }
+    func waitForInitialRecovery(count: Int) async {
+        for _ in 0..<10000 {
+            if synchronizations >= count { return }
+            await Task.yield()
+        }
+    }
     func loopStartCount() -> Int { starts }
 
     private func startedLoop() {
@@ -401,21 +423,6 @@ private actor AvailabilitySyncDriver: V2SyncDriving {
     func synchronizationCount() -> Int { count }
 }
 
-private actor AvailabilityCommandFlusher: V2ClientCommandFlushing {
-    private var results: [V2CommandFlushResult] = [
-        .accepted(try! .init("00000000-0000-0000-0000-000000000813")),
-        .idle,
-    ]
-    private var count = 0
-
-    func flushOnce() -> V2CommandFlushResult {
-        count += 1
-        return results.removeFirst()
-    }
-
-    func flushCount() -> Int { count }
-}
-
 private actor ProjectionSyncRecorder {
     private var value = 0
     func record() { value += 1 }
@@ -434,4 +441,28 @@ private actor OneAvailabilityHintThenStop: V2SyncAvailabilityHintSource {
 
 private struct NoopHeartbeatSender: V2HeartbeatSender {
     func sendHeartbeat(clientTime: Date) {}
+}
+
+private actor SlowInitialRuntimeActivity: V2ClientRuntimeActivity {
+    private var syncReleased = false
+    private var syncWaiter: CheckedContinuation<Void, Never>?
+    private var heartbeatStarted = false
+    private var heartbeatObserver: CheckedContinuation<Void, Never>?
+    private var syncCompletionCount = 0
+    func synchronizeAfterConnection() async throws {
+        if !syncReleased { await withCheckedContinuation { syncWaiter = $0 } }
+        try Task.checkCancellation()
+        syncCompletionCount += 1
+    }
+    func runAvailabilityLoop() async throws { while true { try await Task.sleep(for: .seconds(3600)) } }
+    func runHeartbeatLoop() async throws {
+        heartbeatStarted = true; heartbeatObserver?.resume(); heartbeatObserver = nil
+        while true { try await Task.sleep(for: .seconds(3600)) }
+    }
+    func waitForHeartbeat() async {
+        if heartbeatStarted { return }
+        await withCheckedContinuation { heartbeatObserver = $0 }
+    }
+    func releaseSync() { syncReleased = true; syncWaiter?.resume(); syncWaiter = nil }
+    func completedSynchronizations() -> Int { syncCompletionCount }
 }

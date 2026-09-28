@@ -13,8 +13,8 @@ import VaporTesting
 @testable import IMV2Server
 
 struct V2ResourceHTTPPostgresTests {
-    @Test(.enabled(if:ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil))
-    func persistentHTTPUploadRenewFinalizeAndHomeIsolation() async throws {
+    @Test(.enabled(if:ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil), arguments: [V2ResourceTransferMode.httpPut, .httpPartPut])
+    func persistentHTTPUploadRenewFinalizeAndHomeIsolation(mode: V2ResourceTransferMode) async throws {
         let resources=makeV2DatabaseTestResources()
         let app=try await Application(.testing)
         let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -34,7 +34,7 @@ struct V2ResourceHTTPPostgresTests {
             let byteDelivery=try V2LocalResourceDelivery(registry:registry,baseURL:URL(string:"https://resource.test")!,keyID:"test",keys:["test":Data(repeating:4,count:32)])
             V2VaporResourceByteRoutes(delivery:byteDelivery).register(on:app)
             let bytes=Data("verified resource HTTP pipeline".utf8)
-            let request=try V2ResourceUploadRequest(operationID:.init(uuid:UUID()),mediaID:.init(uuid:UUID()),usage:.messageAttachment(room),contentType:"text/plain",byteCount:Int64(bytes.count),checksum:.init(value:SHA256.hash(data:bytes).map {String(format:"%02x",$0)}.joined()),clientModes:[.httpPut])
+            let request=try V2ResourceUploadRequest(operationID:.init(uuid:UUID()),mediaID:.init(uuid:UUID()),usage:.messageAttachment(room),contentType:"text/plain",byteCount:Int64(bytes.count),checksum:.init(value:SHA256.hash(data:bytes).map {String(format:"%02x",$0)}.joined()),clientModes:[mode])
             let headers:HTTPFields=[.authorization:"Bearer test",HTTPField.Name("X-IM-Device-ID")!:device.rawValue]
             let session=try await app.testing { client in
                 let response=try await client.send(.post,headers:headers,to:"v2/resource-uploads",beforeSend:{ try $0.content.encode(request,using:JSONEncoder()) })
@@ -55,11 +55,14 @@ struct V2ResourceHTTPPostgresTests {
                 contentType:request.contentType,byteCount:request.byteCount,checksum:request.checksum,clientModes:request.clientModes)
             await #expect(throws:V2ResourceProviderError.unsupportedCapability) { _ = try await switched.create(newRequest,actor:user,device:device) }
             let plan=try #require(try await switched.targets(.init(locator:session.locator,generation:1),actor:user,device:device).first)
-            try await provider.storeUploadedObject(mediaID:request.mediaID,targetURL:plan.url,contentType:request.contentType,bytes:bytes)
+            let providerID = try MediaID(plan.url.lastPathComponent)
+            try await provider.storeUploadedObject(mediaID:providerID,targetURL:plan.url,contentType:request.contentType,bytes:bytes)
             // A successful upload whose response was lost safely replays identical bytes.
-            try await provider.storeUploadedObject(mediaID:request.mediaID,targetURL:plan.url,contentType:request.contentType,bytes:bytes)
+            try await provider.storeUploadedObject(mediaID:providerID,targetURL:plan.url,contentType:request.contentType,bytes:bytes)
+            let uploaded = try await service.status(session.locator,actor:user,device:device)
+            #expect(mode == .httpPut || uploaded.confirmedParts.count == 1)
             let completed=try await app.testing { client in
-                let response=try await client.send(.post,headers:headers,to:"v2/resource-uploads/finalize",beforeSend:{ try $0.content.encode(V2ResourceUploadFinalizeRequest(locator:session.locator,generation:1),using:JSONEncoder()) })
+                let response=try await client.send(.post,headers:headers,to:"v2/resource-uploads/finalize",beforeSend:{ try $0.content.encode(V2ResourceUploadFinalizeRequest(locator:session.locator,generation:1,parts:uploaded.confirmedParts),using:JSONEncoder()) })
                 #expect(response.status == .ok)
                 return try await response.content.decode(V2ResourceUploadSession.self)
             }
@@ -77,9 +80,35 @@ struct V2ResourceHTTPPostgresTests {
             try await transports[0].abort(mediaID:request.mediaID)
             try await app.testing { client in
                 let components=try #require(URLComponents(url:target.url,resolvingAgainstBaseURL:false))
-                let response=try await client.send(.get,to:URI(string:components.percentEncodedPath+"?"+(components.percentEncodedQuery ?? "")))
+                let uri=URI(string:components.percentEncodedPath+"?"+(components.percentEncodedQuery ?? ""))
+                let etag="\""+SHA256.hash(data:bytes).map { String(format:"%02x",$0) }.joined()+"\""
+                let response=try await client.send(.get,to:uri)
                 #expect(response.status == .ok)
+                #expect(response.headers[.eTag] == etag)
+                #expect(response.headers[.acceptRanges] == "bytes")
                 #expect(try await response.body.data() == bytes)
+                let partial=try await client.send(.get,headers:[.range:"bytes=2-7",.ifRange:etag],to:uri)
+                #expect(partial.status == .partialContent)
+                #expect(partial.headers[.eTag] == etag)
+                #expect(partial.headers[.contentRange] == "bytes 2-7/\(bytes.count)")
+                #expect(partial.headers[.contentLength] == "6")
+                #expect(try await partial.body.data() == bytes.subdata(in:2..<8))
+                // If-Range is checked before range satisfiability: an old validator
+                // restarts the full object, even when the saved offset is too large.
+                let restarted=try await client.send(.get,headers:[.range:"bytes=999-",.ifRange:"\"old-content\""],to:uri)
+                #expect(restarted.status == .ok)
+                #expect(restarted.headers[.contentRange] == nil)
+                #expect(try await restarted.body.data() == bytes)
+                let beyond=try await client.send(.get,headers:[.range:"bytes=999-",.ifRange:etag],to:uri)
+                #expect(beyond.status == .rangeNotSatisfiable)
+                #expect(beyond.headers[.contentRange] == "bytes */\(bytes.count)")
+                let beyondBytes=try await beyond.body.data() ?? Data()
+                #expect(beyondBytes.isEmpty)
+                let denied=try await client.send(.get,headers:[.range:"bytes=999-"],
+                    to:URI(string:components.percentEncodedPath+"?cap=invalid"))
+                #expect(denied.status == .notFound)
+                #expect(denied.headers[.eTag] == nil && denied.headers[.contentRange] == nil)
+                #expect(denied.headers[.acceptRanges] == nil)
             }
             await #expect(throws:V2MediaStoreError.uploadNotAuthorized) {
                 _ = try await service.status(.init(home:.room(.init(uuid:UUID())),sessionID:session.locator.sessionID),actor:user,device:device)

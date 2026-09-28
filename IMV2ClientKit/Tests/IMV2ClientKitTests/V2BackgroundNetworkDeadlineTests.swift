@@ -176,6 +176,9 @@ private actor DeadlineSocketServer {
             response.authenticated.userID = "deadline-user"
             response.authenticated.deviceID = authentication.deviceID
             response.authenticated.selectedCapabilityProfile = "base"
+        case .presencePublicationControl(let control):
+            current = .authenticate
+            response.presencePublicationControlled.mode = control.mode
         case .syncPull:
             current = .pull
             response.syncBatch = .init()

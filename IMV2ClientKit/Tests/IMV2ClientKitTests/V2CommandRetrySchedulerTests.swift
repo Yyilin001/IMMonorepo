@@ -29,20 +29,26 @@ struct V2CommandRetrySchedulerTests {
     @Test("a quiet connection retries at the durable deadline without new activity")
     func quietConnectionRetriesAtDeadline() async throws {
         let store = try makeStore()
-        let now = Date()
-        let command = V2PendingMessageCommand(roomID: .init(uuid: UUID()), clientMessageID: .init(uuid: UUID()), text: "quiet retry", state: .pending, attemptCount: 0, nextAttemptAt: now.addingTimeInterval(0.05), acceptedMessageID: nil, acceptedRoomSequence: nil, terminalCode: nil)
-        try await store.enqueue(command)
+        try await persistDurableMessage(in: store, roomID: .init(uuid: UUID()), clientMessageID: .init(uuid: UUID()), text: "quiet retry")
+        let work = try #require(try await store.dueOperationWork(now: Date(), kinds: [.sendMessage]).first)
+        guard case .claimed(let claim) = try await store.claimOperationWork(id: work.id, ownerID: UUID(), action: .submit, now: Date()) else {
+            Issue.record("Expected initial durable claim"); return
+        }
+        let retryAt = Date().addingTimeInterval(0.1)
+        try await store.deferOperationWork(claim, until: retryAt, code: "TEST_RESPONSE_LOST")
         let completed = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let worker = Task {
-            try await V2CommandRetryScheduler(schedule: store.commandRetrySchedule(lanes: [.messages]), flush: {
-                guard let ready = try await store.nextReadyMessage(now: Date()) else { return }
-                try await store.markMessageAccepted(clientMessageID: ready.clientMessageID, messageID: .init(uuid: UUID()), roomSequence: 1)
+            try await V2CommandRetryScheduler(schedule: store.operationWorkRetrySchedule(kinds: [.sendMessage]), flush: {
+                guard let ready = try await store.dueOperationWork(now: Date(), kinds: [.sendMessage]).first else { return }
+                #expect(Date() >= retryAt)
+                try await store.completeOperationWork(.init(identity: ready.identity, fingerprint: ready.fingerprint,
+                    state: .committed, receipt: "confirmed-test-result"), now: Date())
                 completed.continuation.yield(())
             }).run()
         }
         defer { worker.cancel(); completed.continuation.finish() }
         try await waitForCompletion(completed.stream)
-        #expect(try await store.pendingMessageCommands().first?.state == .accepted)
+        #expect(try await store.operationWork(id: work.id)?.execution == .committed)
         worker.cancel()
         _ = await worker.result
     }
@@ -64,38 +70,34 @@ struct V2CommandRetrySchedulerTests {
         _ = await worker.result
     }
 
-    @Test("a forward chunk waiting for retry is not created again or reported ready")
+    @Test("public forward work retains original identity while its retry floor is future")
     func delayedForwardChunkIsNotMaterializedTwice() async throws {
-        let store = try makeStore()
-        let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let engine = V2BulkForwardMessagesOutboxEngine(store: store, transport: UnusedForwardTransport(), now: { now })
-        _ = try await engine.enqueue(sources: [try testForwardReference(.init(uuid: UUID()))], targetRoomIDs: [.init(uuid: UUID())])
-        let chunk = try #require(try await store.nextReadyForwardPlanChunk(now: now))
-        let deadline = now.addingTimeInterval(60)
-        try await store.scheduleForwardPlanChunkRetry(operationID: chunk.command.operationID, nextAttemptAt: deadline)
-        #expect(try await store.nextReadyForwardPlanChunk(now: now) == nil)
-        let schedule = store.commandRetrySchedule(lanes: [.forwardPlans])
-        #expect(try await schedule.nextAttemptAt() == deadline)
-        #expect(try await store.nextReadyForwardPlanChunk(now: deadline)?.command.operationID == chunk.command.operationID)
+        let f=try DurableForwardFixture();defer { f.remove() }
+        let store=try f.open()
+        let id=try await store.enqueueForwardPlanOperation(f.command,now:f.now)
+        guard case .claimed(let claim)=try await store.claimOperationWork(id:id,ownerID:UUID(),action:.submit,now:f.now) else { throw V2OperationWorkError.invalidTransition }
+        let deadline=f.now.addingTimeInterval(60)
+        try await store.deferOperationWork(claim,until:deadline,code:"NETWORK_UNAVAILABLE")
+        #expect(try await store.dueOperationWork(now:f.now,kinds:[.forwardMessage]).isEmpty)
+        #expect(try await store.operationWorkRetrySchedule(kinds:[.forwardMessage]).nextAttemptAt()==deadline)
+        #expect(try await store.dueOperationWork(now:deadline,kinds:[.forwardMessage]).map(\.id)==[id])
+        try await store.close()
     }
 
     @Test("schedule summary uses ready indexes and excludes unregistered lanes")
     func scheduleUsesIndexedMinima() async throws {
         let store = try makeStore()
-        let query = GRDBV2LocalSyncStore.commandRetryScheduleQuery(lanes: [.messages, .edits, .forwardPlans])
         let plan = try await store.databasePool.read { db in
-            try Row.fetchAll(db, sql: "EXPLAIN QUERY PLAN " + query).map { $0["detail"] as String }
+            try Row.fetchAll(db, sql: "EXPLAIN QUERY PLAN SELECT MIN(next_action_at) FROM v2_operation_work WHERE scheduling_state IN ('ready','backingOff')").map { $0["detail"] as String }
         }
-        #expect(plan.contains { $0.contains("v2_pending_message_ready_idx") })
-        #expect(plan.contains { $0.contains("v2_pending_message_edits_ready_idx") })
-        #expect(plan.contains { $0.contains("v2_forward_message_chunks_ready_idx") })
-        let command = V2PendingMessageCommand(roomID: .init(uuid: UUID()), clientMessageID: .init(uuid: UUID()), text: "other lane", state: .pending, attemptCount: 0, nextAttemptAt: Date(), acceptedMessageID: nil, acceptedRoomSequence: nil, terminalCode: nil)
-        try await store.enqueue(command)
-        #expect(try await store.commandRetrySchedule(lanes: [.edits]).nextAttemptAt() == nil)
+        #expect(plan.contains { $0.contains("v2_operation_work_due") })
+        try await persistDurableMessage(in: store, roomID: .init(uuid: UUID()), clientMessageID: .init(uuid: UUID()), text: "other kind")
+        #expect(try await store.operationWorkRetrySchedule(kinds: [.editMessage]).nextAttemptAt() == nil)
+        #expect(try await store.operationWorkRetrySchedule(kinds: [.sendMessage]).nextAttemptAt() != nil)
     }
 
     private func makeStore() throws -> GRDBV2LocalSyncStore {
-        try .init(databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-retry-schedule-\(UUID()).sqlite"), installationBinding: .init(value: UUID()))
+        try .init(databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-retry-schedule-\(UUID()).sqlite"), installationBinding: .init(value: UUID()), userID: .init("retry-owner"))
     }
     private func waitForCompletion(_ events: AsyncStream<Void>) async throws {
         try await withThrowingTaskGroup(of: Void.self) { group in
@@ -127,10 +129,6 @@ private actor SleepRaceSchedule {
     }
     func consumeOne() -> Bool { flushCount += 1; return flushCount == 3 }
 }
-private struct UnusedForwardTransport: V2ClientForwardMessagesTransport {
-    func forwardMessages(command: V2ForwardMessagesCommand) async throws -> [V2ForwardMessageResult] { throw SchedulerTimeout() }
-}
-
 private actor InvalidRetryDateProbe {
     private(set) var flushCount = 0
     func flushed() { flushCount += 1 }

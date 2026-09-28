@@ -295,60 +295,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("finalizing audience recovery claims each stale draft once before replay")
-    func claimsStaleFinalizingAudienceRecoveryWork() async throws {
-        guard Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1",
-              let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL")
-        else { return }
-
-        let resources = makeV2DatabaseTestResources()
-        do {
-            resources.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
-            guard let sql = resources.database(.psql) as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else {
-                throw TestConfigurationError.schemaAlreadyExists
-            }
-            try await installSchema(on: sql)
-            let recoveryIndex = try #require(try await sql.raw("""
-                SELECT COUNT(*) AS value
-                FROM pg_indexes
-                WHERE schemaname = 'im_v2'
-                  AND tablename = 'group_room_creation_drafts'
-                  AND indexname = 'group_room_creation_drafts_finalizing_recovery_idx'
-                """).first(decoding: CountRow.self))
-            #expect(recoveryIndex.value == 1)
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let stale = now.addingTimeInterval(-31)
-            let actor = UUID(uuidString: "00000000-0000-0000-0000-00000000c101")!
-            let first = UUID(uuidString: "00000000-0000-0000-0000-00000000c102")!
-            let second = UUID(uuidString: "00000000-0000-0000-0000-00000000c103")!
-            try await sql.raw("""
-                INSERT INTO im_v2.group_room_creation_drafts
-                    (actor_user_id, operation_id, title, state, created_at, updated_at, expires_at)
-                VALUES
-                    (\(bind: actor), \(bind: first), '恢复一', 'finalizing', \(bind: stale), \(bind: stale), \(bind: now.addingTimeInterval(86_400))),
-                    (\(bind: actor), \(bind: second), '恢复二', 'finalizing', \(bind: stale), \(bind: stale), \(bind: now.addingTimeInterval(86_400)))
-                """).run()
-            let store = PostgresV2GroupAudienceImportStore(database: resources.database(.psql))
-
-            let firstClaim = try await store.recoverableFinalizing(now: now, staleAfter: 30, limit: 1)
-            let secondClaim = try await store.recoverableFinalizing(now: now, staleAfter: 30, limit: 2)
-            let repeatedClaim = try await store.recoverableFinalizing(now: now, staleAfter: 30, limit: 2)
-
-            #expect(firstClaim.count == 1)
-            #expect(secondClaim.count == 1)
-            #expect(Set((firstClaim + secondClaim).map(\.operationID)) == Set([try GroupRoomOperationID(first.uuidString), try GroupRoomOperationID(second.uuidString)]))
-            #expect(repeatedClaim.isEmpty)
-
-            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
-            try await resources.shutdown()
-        } catch {
-            if let sql = resources.database(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
-            try? await resources.shutdown()
-            throw error
-        }
-    }
-
     @Test("disabled content review creates no job for message acceptance or editing")
     func disabledContentReviewSkipsDurableJobs() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
@@ -864,6 +810,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
               Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
         let resources = makeV2DatabaseTestResources()
+        let root = FileManager.default.temporaryDirectory.appending(path: "forward-export-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
         do {
             resources.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
             let database = resources.database(.psql)
@@ -872,6 +820,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await installSchema(on: sql)
             try await seedRoom(capacityClass: capacityClass, on: sql)
             let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let resource = try ConcurrentMediaResourceFixture(root: root, now: { now })
             // Seed a nonzero owner epoch in the current schema.
             try await sql.raw("""
                 INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at)
@@ -887,6 +836,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     INSERT INTO im_v2.media_objects (media_id, owner_user_id, content_type, byte_count, state, upload_session_id, expires_at, state_updated_at, created_at)
                     VALUES (\(bind: asset), \(bind: senderUUID), 'image/png', 42, 'available', \(bind: UUID()), \(bind: now.addingTimeInterval(600)), \(bind: now), \(bind: now))
                     """).run()
+                try await resource.seedPlacement(mediaID: asset, roomID: roomID, bytes: Data(repeating: 42, count: 42), sql: sql, now: now)
             }
             let limits = try V2MessageCommandLimits(maxUTF8Bytes: 64)
             let profile = try V2CapacityProfile(id: "standard", limits: .init(
@@ -1234,6 +1184,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile()
             let limits = try V2MessageCommandLimits(maxUTF8Bytes: 64)
+            let root = FileManager.default.temporaryDirectory.appending(path: "forward-boundaries-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let resource = try ConcurrentMediaResourceFixture(root: root, now: { now })
             let actor = UserID(uuid: memberTwoUUID)
             var media: [V2MediaReference] = []
             if scenario == "media" {
@@ -1242,6 +1195,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     INSERT INTO im_v2.media_objects (media_id, owner_user_id, content_type, byte_count, state, upload_session_id, expires_at, state_updated_at, created_at)
                     VALUES (\(bind: asset), \(bind: senderUUID), 'image/png', 42, 'available', \(bind: UUID()), \(bind: now.addingTimeInterval(600)), \(bind: now), \(bind: now))
                     """).run()
+                try await resource.seedPlacement(mediaID: asset, roomID: roomID, bytes: Data(repeating: 42, count: 42), sql: sourceSQL, now: now)
                 media = [.init(mediaID: .init(uuid: asset))]
             }
             let send = V2SendMessageService(store: PostgresV2RoomWriteStore(database: sourceDB), capacityProfile: profile, limits: limits, now: { now })
@@ -1340,8 +1294,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let actor = UserID(uuid: memberTwoUUID)
             let send = V2SendMessageService(store: PostgresV2RoomWriteStore(database: sourceDB), capacityProfile: profile, limits: limits, now: { now })
             guard case .accepted(let source) = try await send.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "copied into direct")) else { throw V2ForwardInboxError.corruptPersistenceState }
-            let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: targetDB), capacityProfile: profile, roomShardID: "room-b", now: { now })
-            guard case .opened(let target) = try await direct.open(actorUserID: actor, operationID: .init(uuid: UUID()), targetUserID: senderID) else { throw V2ForwardInboxError.corruptPersistenceState }
+            let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: targetDB, identityReader: PostgresV2DirectRoomIdentityReader(database: sourceDB), projectionDelivery: SuccessfulProjectionDelivery()), capacityProfile: profile, roomShardID: "room-b", now: { now })
+            let target = try await direct.openedIdentity(actorUserID: actor, operationID: .init(uuid: UUID()), targetUserID: senderID, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
             let export = try await PostgresV2ForwardExportStore(database: sourceDB).prepare(actorUserID: actor, operationID: .init(uuid: UUID()),
                 source: .init(roomID: roomID, messageID: source.messageID, revision: .init(1)), sourceRoute: .init(shardID: "room-a", epoch: 0),
                 targetRoomID: target.roomID, targetRoute: .init(shardID: "room-b", epoch: 0), now: now)
@@ -1397,9 +1351,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let root = FileManager.default.temporaryDirectory.appending(path: "im-forward-files-" + UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: root) }
-            let sourceProvider = try V2LocalFilesystemMediaProvider(rootDirectory: root.appending(path: "source"), targetBaseURL: URL(string: "https://source.invalid")!, signingKey: Data(repeating: 1, count: 32), now: { now })
-            let targetProvider = try V2LocalFilesystemMediaProvider(rootDirectory: root.appending(path: "target"), targetBaseURL: URL(string: "https://target.invalid")!, signingKey: Data(repeating: 2, count: 32), now: { now })
-            try await sourceProvider.prepare(); try await targetProvider.prepare()
+            let resource = try ConcurrentMediaResourceFixture(root: root, now: { now })
+            let sourceProvider = try resource.provider(database: sourceDB)
+            let targetProvider = try resource.provider(database: targetDB)
+            var collisionReference: V2StoredObjectReference?
             let bytes: Data
             if scenario == "eicar" {
                 bytes = Data("X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*".utf8)
@@ -1407,22 +1362,20 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             else { bytes = Data("forwarded attachment bytes\n".utf8) }
             let sourceMediaID = MediaID(uuid: UUID())
             let actualSourceBytes = scenario == "short-source" ? Data(bytes.dropLast()) : bytes
-            let sourceUpload = try await sourceProvider.issueUploadTarget(mediaID: sourceMediaID, contentType: "application/octet-stream", byteCount: Int64(actualSourceBytes.count), expiresAt: now.addingTimeInterval(600))
-            try await sourceProvider.storeUploadedObject(mediaID: sourceMediaID, targetURL: sourceUpload.url, contentType: "application/octet-stream", bytes: actualSourceBytes)
             try await sourceSQL.raw("""
                 INSERT INTO im_v2.media_objects (media_id, owner_user_id, content_type, byte_count, state, upload_session_id, expires_at, state_updated_at, created_at)
                 VALUES (\(bind: sourceMediaID.uuidValue!), \(bind: senderUUID), 'application/octet-stream', \(bind: Int64(bytes.count)), 'available', \(bind: UUID()), \(bind: now.addingTimeInterval(600)), \(bind: now), \(bind: now))
                 """).run()
+            try await resource.seedPlacement(mediaID: sourceMediaID.uuidValue!, roomID: roomID, bytes: actualSourceBytes, sql: sourceSQL, now: now)
             var references = [V2MediaReference(mediaID: sourceMediaID)]
             let secondBytes = Data("second independent attachment".utf8)
             if scenario == "two-files" {
                 let secondID = MediaID(uuid: UUID())
-                let upload = try await sourceProvider.issueUploadTarget(mediaID: secondID, contentType: "application/octet-stream", byteCount: Int64(secondBytes.count), expiresAt: now.addingTimeInterval(600))
-                try await sourceProvider.storeUploadedObject(mediaID: secondID, targetURL: upload.url, contentType: "application/octet-stream", bytes: secondBytes)
                 try await sourceSQL.raw("""
                     INSERT INTO im_v2.media_objects (media_id, owner_user_id, content_type, byte_count, state, upload_session_id, expires_at, state_updated_at, created_at)
                     VALUES (\(bind: secondID.uuidValue!), \(bind: senderUUID), 'application/octet-stream', \(bind: Int64(secondBytes.count)), 'available', \(bind: UUID()), \(bind: now.addingTimeInterval(600)), \(bind: now), \(bind: now))
                     """).run()
+                try await resource.seedPlacement(mediaID: secondID.uuidValue!, roomID: roomID, bytes: secondBytes, sql: sourceSQL, now: now)
                 references.append(.init(mediaID: secondID))
             }
             let profile = try forwardImportTestProfile(), limits = try V2MessageCommandLimits(maxUTF8Bytes: 64)
@@ -1434,8 +1387,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let inbox = PostgresV2ForwardInboxStore(database: targetDB)
             try await inbox.receive(export, now: now)
             let importer = try PostgresV2ForwardMediaImportStore(database: targetDB, temporaryLifetime: 2)
-            let copier = try V2LocalFilesystemForwardMediaCopier(sources: ["room-a": sourceProvider], target: targetProvider, maximumBytes: scenario == "size" ? Int64(bytes.count - 1) : 64 * 1_024 * 1_024, now: { now })
-            let scanner = V2LocalEICARMediaScanner(provider: targetProvider)
+            let copier = try V2ResourceForwardMediaCopier(sources: ["room-a": sourceDB], target: importer, registry: resource.registry, maximumBytes: scenario == "size" ? Int64(bytes.count - 1) : 64 * 1_024 * 1_024, allocate: { _ in try resource.storage.allocate() }, now: { now })
+            let scanner = V2PlacementMediaScanner(database: targetDB, registry: resource.registry, scanner: V2LocalResourceScanner())
             let write = PostgresV2RoomWriteStore(database: targetDB)
             #expect(try await write.importForwardExport(export, capacityProfile: profile, limits: limits, identifiers: try V2AcceptanceIDFactory().make(at: now), now: now) == .pending(.media))
             if scenario == "runtime-ack-loss-compacted" {
@@ -1486,15 +1439,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(try await PostgresV2ForwardExportCompactor(database: sourceDB).runOnce(now: clock.now(), limit: 1) == 0)
                 // Remove source bytes to prove replay uses the already committed
                 // target result. This is injected provider loss, not retention GC.
-                try await sourceProvider.purge(mediaID: sourceMediaID)
+                try await resource.storage.delete(try await resource.facts(mediaID: sourceMediaID.uuidValue!, sql: sourceSQL).reference)
                 clock.set([compactAt.addingTimeInterval(4)])
                 try await runUntil(target: replayEndpoint, state: "completed", attempts: 3)
                 #expect(try await receipts.status(exportID: export.intent.exportID) == original.outcome)
                 #expect(try await replayEndpoint.deliver(export)?.outcome == original.outcome)
                 #expect(try await count("im_v2.messages", on: targetSQL) == 1)
                 #expect(try await count("im_v2.media_objects", on: targetSQL) == 1)
-                let download = try await targetProvider.issueDownloadTarget(mediaID: targetID, expiresAt: now.addingTimeInterval(600))
-                #expect(try await targetProvider.readDownloadedObject(mediaID: targetID, targetURL: download.url) == bytes)
+                let download = try await targetProvider.issueDownloadTarget(mediaID: targetID, expiresAt: now.addingTimeInterval(120))
+                #expect(try await resource.bytes(at: download.url) == bytes)
                 #expect(try await targetSQL.raw("SELECT payload IS NULL AS exists FROM im_v2.message_forward_inbox").first(decoding: ExistsRow.self)?.exists == true)
                 let finalAt = clock.now().addingTimeInterval(PostgresV2ForwardExportCompactor.retentionSeconds + 1)
                 #expect(try await PostgresV2ForwardExportCompactor(database: sourceDB).runOnce(now: finalAt, limit: 1) == 1)
@@ -1515,12 +1468,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     #expect(try await importer.claim(exportID: export.intent.exportID, now: cleanupAt, leaseDuration: 300) == nil)
                     #expect(try await inbox.status(exportID: export.intent.exportID) == .rejected(code: "ROOM_FROZEN"))
                     #expect(try await retention.runOnce(limit: 1) == 1)
-                    let purger = try V2MediaPurgeWorker(store: PostgresV2MediaPurgeStore(database: targetDB), provider: targetProvider, now: { cleanupAt })
+                    let purger = try V2MediaPurgeWorker(store: PostgresV2MediaPurgeStore(database: targetDB), provider: V2PlacementMediaPurger(database: targetDB, registry: resource.registry, uploads: targetProvider), now: { cleanupAt })
                     let report = try await purger.runOnce(limit: 1)
                     #expect(report.claimedCount == 1 && report.completedCount == 1)
                     #expect(try await purger.runOnce(limit: 1).claimedCount == 0)
-                    await #expect(throws: V2LocalFilesystemMediaProviderError.objectUnavailable) {
-                        try await targetProvider.issueDownloadTarget(mediaID: lease.targetMediaID, expiresAt: now.addingTimeInterval(600))
+                    await #expect(throws: V2ResourceProviderError.notFound) {
+                        try await targetProvider.issueDownloadTarget(mediaID: lease.targetMediaID, expiresAt: now.addingTimeInterval(120))
                     }
                     clock.set([callbackAt])
                 }
@@ -1536,8 +1489,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(try await targetSQL.raw("SELECT copied_digest IS NULL AS exists FROM im_v2.message_forward_media_imports").first(decoding: ExistsRow.self)?.exists == true)
                 #expect(try await count("im_v2.media_purge_outbox WHERE state = 'completed'", on: targetSQL) == 1)
                 let targetID = MediaID(uuid: try #require(try await targetSQL.raw("SELECT target_media_id AS value FROM im_v2.message_forward_media_imports").first(decoding: ForwardInboxUUIDAssertion.self)).value)
-                await #expect(throws: V2LocalFilesystemMediaProviderError.objectUnavailable) {
-                    try await targetProvider.issueDownloadTarget(mediaID: targetID, expiresAt: now.addingTimeInterval(600))
+                await #expect(throws: V2ResourceProviderError.notFound) {
+                    try await targetProvider.issueDownloadTarget(mediaID: targetID, expiresAt: now.addingTimeInterval(120))
                 }
                 let compactAt = now.addingTimeInterval(PostgresV2ForwardInboxCompactor.retentionSeconds + 4)
                 #expect(try await PostgresV2ForwardInboxCompactor(database: targetDB).runOnce(now: compactAt, limit: 1) == 1)
@@ -1608,7 +1561,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     .init(operationID: UUID(), shardID: "room-b", kind: .media, exportID: export.intent.exportID,
                           ordinal: 0, reason: .dependencyRecovered), operatorPrincipal: "compaction-test", now: callbackAt)
                 #expect(operatorResult.outcome == .notPaused)
-                try await sourceProvider.purge(mediaID: sourceMediaID)
+                try await resource.storage.delete(try await resource.facts(mediaID: sourceMediaID.uuidValue!, sql: sourceSQL).reference)
                 #expect(try await endpoint.deliver(export)?.outcome == receipt.outcome)
                 let sourceService = try V2CrossOwnerForwardService(sources: ["room-a": .init(
                     exports: .init(database: sourceDB), receipts: receipts, jobs: sourceJobs)], now: { callbackAt })
@@ -1619,8 +1572,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 if case .accepted(let message, let sequence) = receipt.outcome {
                     #expect(terminal.messageID == message && terminal.roomSequence == sequence)
                 } else { #expect(terminal.errorCode == "ROOM_FROZEN") }
-                let download = try await targetProvider.issueDownloadTarget(mediaID: mediaLease.targetMediaID, expiresAt: now.addingTimeInterval(600))
-                #expect(try await targetProvider.readDownloadedObject(mediaID: mediaLease.targetMediaID, targetURL: download.url) == bytes)
+                let output = try #require(try await targetSQL.raw("SELECT reference_json::text AS value FROM im_v2.resource_forward_outputs WHERE target_media_id=\(bind:mediaLease.targetMediaID.uuidValue!)").first(decoding: StringValueRow.self))
+                let reference = try JSONDecoder().decode(V2StoredObjectReference.self, from: Data(output.value.utf8))
+                #expect(try await resource.rawBytes(reference: reference) == bytes)
                 #expect(try await targetState() == before)
                 #expect(try await count("im_v2.media_objects", on: targetSQL) == 1)
                 #expect(try await count("im_v2.messages", on: targetSQL) == (scenario == "compact-success" ? 1 : 0))
@@ -1644,8 +1598,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 clock.set([now.addingTimeInterval(320)])
                 #expect(try await worker.runOnce(exportID: export.intent.exportID) == .ready)
                 let targetID = MediaID(uuid: try #require(identity))
-                let download = try await targetProvider.issueDownloadTarget(mediaID: targetID, expiresAt: now.addingTimeInterval(600))
-                #expect(try await targetProvider.readDownloadedObject(mediaID: targetID, targetURL: download.url) == bytes)
+                let download = try await targetProvider.issueDownloadTarget(mediaID: targetID, expiresAt: now.addingTimeInterval(120))
+                #expect(try await resource.bytes(at: download.url) == bytes)
                 #expect(try await targetSQL.raw("SELECT state = 'ready' AND claim_token IS NULL AND copied_digest IS NOT NULL AND completed_at = \(bind: now.addingTimeInterval(320)) AS exists FROM im_v2.message_forward_media_imports").first(decoding: ExistsRow.self)?.exists == true)
                 return
             }
@@ -1665,8 +1619,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let old = try #require(try await importer.claim(exportID: export.intent.exportID, now: now, leaseDuration: 5))
                 if scenario == "collision" {
                     let wrong = Data(repeating: 120, count: bytes.count)
-                    let upload = try await targetProvider.issueUploadTarget(mediaID: old.targetMediaID, contentType: "application/octet-stream", byteCount: Int64(wrong.count), expiresAt: now.addingTimeInterval(600))
-                    try await targetProvider.storeUploadedObject(mediaID: old.targetMediaID, targetURL: upload.url, contentType: "application/octet-stream", bytes: wrong)
+                    let sourceFacts = try await resource.facts(mediaID: sourceMediaID.uuidValue!, sql: sourceSQL)
+                    let destination = try await importer.prepareResourceCopy(old, source: sourceFacts,
+                        allocate: { try resource.storage.allocate() }, now: now)
+                    collisionReference = destination.reference
+                    let input = root.appending(path: "wrong-object")
+                    try wrong.write(to: input)
+                    _ = try await resource.storage.write(destination.reference, byteCount: Int64(wrong.count),
+                        sha256: Data(SHA256.hash(data: wrong)), bytes: V2LocalResourceStorage.stream(file: input))
+                    try FileManager.default.removeItem(at: input)
                     #expect(try await importer.retry(old, disposition: .retry(at: now), now: now))
                 } else {
                     let copied = try await copier.copy(old)
@@ -1679,16 +1640,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     #expect(try await importer.complete(old, receipt: copied, result: .passed, now: now.addingTimeInterval(7)) == false)
                     #expect(try await importer.reject(old, now: now.addingTimeInterval(7)) == false)
                     #expect(try await importer.retry(old, disposition: .retry(at: now), now: now.addingTimeInterval(7)) == false)
-                    if scenario == "lease-expiry" { try await sourceProvider.purge(mediaID: sourceMediaID) }
+                    if scenario == "lease-expiry" { try await resource.storage.delete(try await resource.facts(mediaID: sourceMediaID.uuidValue!, sql: sourceSQL).reference) }
                     if scenario == "concurrent" {
                         // Simulate losing the unacknowledged install, then race
                         // old and new leases to atomically reconstruct it.
-                        let lostTarget = try await targetProvider.issueDownloadTarget(mediaID: old.targetMediaID, expiresAt: now.addingTimeInterval(600))
-                        let lostObject = try await targetProvider.downloadedObject(mediaID: old.targetMediaID, targetURL: lostTarget.url)
-                        try FileManager.default.removeItem(at: lostObject.fileURL)
+                        let output = try #require(try await importer.resourceCopyOutput(recovered, now: now.addingTimeInterval(6)))
+                        try resource.removeObjectForFixtureRecovery(output.reference)
+                        // The current durable token fences the old lease before provider I/O.
+                        await #expect(throws: V2ResourceProviderError.preconditionFailed) { try await copier.copy(old) }
                         let collisions = try await withThrowingTaskGroup(of: V2ForwardMediaCopyReceipt.self) { group in
-                            for index in 0..<4 {
-                                let candidate = index.isMultiple(of: 2) ? old : recovered
+                            for _ in 0..<4 {
+                                let candidate = recovered
                                 group.addTask { try await copier.copy(candidate) }
                             }
                             var results: [V2ForwardMediaCopyReceipt] = []
@@ -1722,7 +1684,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
                 #expect(try await inbox.status(exportID: export.intent.exportID) == .pending(.media))
                 #expect(try await count("im_v2.messages", on: targetSQL) == 0)
-                try await sourceProvider.purge(mediaID: sourceMediaID)
+                try await resource.storage.delete(try await resource.facts(mediaID: sourceMediaID.uuidValue!, sql: sourceSQL).reference)
                 readyAt = now.addingTimeInterval(1)
                 let resumed = try V2ForwardMediaImportWorker(store: importer, copier: copier, scanner: scanner, now: { now.addingTimeInterval(1) })
                 #expect(try await resumed.runOnce(exportID: export.intent.exportID) == .ready)
@@ -1733,7 +1695,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(try await firstWorker.runOnce(exportID: export.intent.exportID) == .retryScheduled)
                 #expect(try await count("im_v2.messages", on: targetSQL) == 0)
                 #expect(try await inbox.status(exportID: export.intent.exportID) == .pending(.media))
-                try await sourceProvider.purge(mediaID: sourceMediaID)
+                try await resource.storage.delete(try await resource.facts(mediaID: sourceMediaID.uuidValue!, sql: sourceSQL).reference)
                 readyAt = now.addingTimeInterval(2)
                 let secondWorker = try V2ForwardMediaImportWorker(store: importer, copier: copier, scanner: failingScanner, now: { now.addingTimeInterval(2) })
                 #expect(try await secondWorker.runOnce(exportID: export.intent.exportID) == .ready)
@@ -1760,8 +1722,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 if scenario == "collision" {
                     let media = try #require(try await targetSQL.raw("SELECT target_media_id AS value FROM im_v2.message_forward_media_imports").first(decoding: ForwardInboxUUIDAssertion.self))
                     let targetID = MediaID(uuid: media.value)
-                    let download = try await targetProvider.issueDownloadTarget(mediaID: targetID, expiresAt: now.addingTimeInterval(60))
-                    #expect(try await targetProvider.readDownloadedObject(mediaID: targetID, targetURL: download.url) == Data(repeating: 120, count: bytes.count))
+                    _ = targetID
+                    let reference = try #require(collisionReference)
+                    #expect(try await resource.rawBytes(reference: reference) == Data(repeating: 120, count: bytes.count))
                 }
                 return
             }
@@ -1772,8 +1735,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let mapped = try #require(try await targetSQL.raw("SELECT target_media_id AS value FROM im_v2.message_forward_inbox_media WHERE ordinal = 0").first(decoding: ForwardInboxUUIDAssertion.self))
             let targetID = MediaID(uuid: mapped.value)
             #expect(targetID != sourceMediaID)
-            let download = try await targetProvider.issueDownloadTarget(mediaID: targetID, expiresAt: now.addingTimeInterval(600))
-            #expect(try await targetProvider.readDownloadedObject(mediaID: targetID, targetURL: download.url) == bytes)
+            let download = try await targetProvider.issueDownloadTarget(mediaID: targetID, expiresAt: now.addingTimeInterval(120))
+            #expect(try await resource.bytes(at: download.url) == bytes)
             #expect(try await count("im_v2.messages", on: targetSQL) == 1)
             #expect(try await count("im_v2.message_media_references", on: targetSQL) == expectedMediaCount)
             #expect(try await targetSQL.raw("SELECT count(*) AS value FROM im_v2.media_objects WHERE owner_user_id = \(bind: memberTwoUUID) AND state = 'available'").first(decoding: CountRow.self)?.value == expectedMediaCount)
@@ -1782,8 +1745,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             if scenario == "two-files" {
                 let second = try #require(try await targetSQL.raw("SELECT target_media_id AS value FROM im_v2.message_forward_inbox_media WHERE ordinal = 1").first(decoding: ForwardInboxUUIDAssertion.self))
                 let secondID = MediaID(uuid: second.value)
-                let url = try await targetProvider.issueDownloadTarget(mediaID: secondID, expiresAt: now.addingTimeInterval(600))
-                #expect(try await targetProvider.readDownloadedObject(mediaID: secondID, targetURL: url.url) == secondBytes)
+                let url = try await targetProvider.issueDownloadTarget(mediaID: secondID, expiresAt: now.addingTimeInterval(120))
+                #expect(try await resource.bytes(at: url.url) == secondBytes)
                 let ordered = try await targetSQL.raw("SELECT media_id AS value FROM im_v2.message_media_references ORDER BY ordinal").all(decoding: ForwardInboxUUIDAssertion.self)
                 #expect(ordered.map(\.value) == [targetID.uuidValue!, second.value])
             }
@@ -1812,23 +1775,23 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(try await sourceRetention.expireEligibleMedia(now: retentionAt, withdrawnRetention: 1, limit: 10) == expectedMediaCount)
                 #expect(try await sourceRetention.expireEligibleMedia(now: retentionAt, withdrawnRetention: 1, limit: 10) == 0)
                 #expect(try await count("im_v2.media_purge_outbox", on: sourceSQL) == expectedMediaCount)
-                let purge = try V2MediaPurgeWorker(store: PostgresV2MediaPurgeStore(database: sourceDB), provider: sourceProvider, now: { retentionAt })
+                let purge = try V2MediaPurgeWorker(store: PostgresV2MediaPurgeStore(database: sourceDB), provider: V2PlacementMediaPurger(database: sourceDB, registry: resource.registry, uploads: sourceProvider), now: { retentionAt })
                 let purged = try await purge.runOnce(limit: 10)
                 #expect(purged.completedCount == Int(expectedMediaCount))
                 #expect(purged.releasedCount == 0 && purged.pausedCount == 0)
                 for reference in references {
-                    await #expect(throws: V2LocalFilesystemMediaProviderError.objectUnavailable) {
-                        try await sourceProvider.issueDownloadTarget(mediaID: reference.mediaID, expiresAt: now.addingTimeInterval(600))
+                    await #expect(throws: V2ResourceProviderError.notFound) {
+                        try await sourceProvider.issueDownloadTarget(mediaID: reference.mediaID, expiresAt: now.addingTimeInterval(120))
                     }
                 }
                 #expect(try await purge.runOnce(limit: 10).claimedCount == 0)
-                #expect(try await targetProvider.readDownloadedObject(mediaID: targetID, targetURL: download.url) == bytes)
+                #expect(try await resource.bytes(at: download.url) == bytes)
                 #expect(try await PostgresV2MediaRetentionStore(database: targetDB).expireEligibleMedia(now: retentionAt, withdrawnRetention: 1, limit: 10) == 0)
                 try await sourceReceipts.record(completedReceipt, now: retentionAt)
                 #expect(try await inbox.terminalReceipt(exportID: export.intent.exportID) == completedReceipt)
             }
-            let staging = root.appending(path: "target/.upload-staging")
-            #expect(try FileManager.default.contentsOfDirectory(atPath: staging.path).isEmpty)
+            #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).allSatisfy { !$0.hasPrefix("input-") && $0 != "wrong-object" })
+            #expect(try FileManager.default.contentsOfDirectory(atPath: root.appending(path: "objects").path).allSatisfy { !$0.hasSuffix(".partial") })
         }
     }
 

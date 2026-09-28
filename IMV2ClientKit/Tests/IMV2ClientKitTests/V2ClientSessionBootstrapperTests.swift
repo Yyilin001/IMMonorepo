@@ -125,16 +125,14 @@ struct V2ClientSessionBootstrapperTests {
         let scope = try #require(await bootstrapper.storageScope(for: first))
         #expect(scope.accountID == credentials.userID)
         #expect(scope.database.primary != url)
-        let command = try V2PendingMessageCommand(roomID: .init("room-a"), clientMessageID: .init("pending-a"), text: "preserve",
-                                                   state: .pending, attemptCount: 0, nextAttemptAt: .distantPast,
-                                                   acceptedMessageID: nil, acceptedRoomSequence: nil, terminalCode: nil)
-        try await first.enqueue(command)
+        let command = try await persistDurableMessage(in: first, roomID: .init("room-a"),
+            clientMessageID: .init("pending-a"), text: "preserve")
         try await bootstrapper.closeLocalStore(first)
         let reopened = try await bootstrapper.openEstablishedSession()
         #expect(reopened !== first)
         #expect(try await bootstrapper.storageScope(for: reopened) == scope)
         try await bootstrapper.closeLocalStore(first)
-        #expect(try await reopened.pendingMessageCommands() == [command])
+        #expect(try await savedDurableMessages(in: reopened) == [command])
         try await bootstrapper.closeLocalStore(reopened)
     }
 

@@ -491,6 +491,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         let resources = makeV2DatabaseTestResources()
         do {
             resources.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            // The owner transaction retains its only connection while reading
+            // control identity. A separate same-database pool prevents self-wait.
+            let identityDatabaseID = DatabaseID(string: "direct-profile-identity")
+            resources.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: identityDatabaseID)
             guard let sql = resources.database(.psql) as? any SQLDatabase else {
                 throw V2DirectRoomProfilePropagationError.corruptPersistenceState
             }
@@ -522,19 +526,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                        (\(bind: secondPeerUUID), 'peer_a003', '同伴二', 1, \(bind: now), \(bind: now))
                 """).run()
 
-            let directService = try V2DirectMessagingService(
-                store: PostgresV2DirectMessagingStore(database: resources.database(.psql)),
+            let directService = try V2DirectRoomOperationTestFixture(
+                store: PostgresV2DirectMessagingStore(database: resources.database(.psql), identityReader: PostgresV2DirectRoomIdentityReader(database: resources.database(identityDatabaseID)), projectionDelivery: SuccessfulProjectionDelivery()),
                 capacityProfile: capacityProfile, roomShardID: "rooms-primary", now: { now }
             )
             var directRoomIDs: [RoomID] = []
             for peer in [firstPeerUUID, secondPeerUUID] {
-                guard case .opened(let room) = try await directService.open(
+                let room = try await directService.openedIdentity(
                     actorUserID: sourceUserID, operationID: try .init(UUID().uuidString),
                     targetUserID: try .init(peer.uuidString)
-                ) else {
-                    Issue.record("expected direct room")
-                    return
-                }
+                , firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
                 directRoomIDs.append(room.roomID)
             }
             // A direct peer becomes visible only once the first eligible
@@ -562,9 +563,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
             }
 
+            // Direct creation samples elapsed owner time, so its opening events
+            // can become eligible after the fixed first-message fixture clock.
+            struct ProjectionEligibility: Decodable { let value: Date }
+            let eligibleAt = try #require(try await sql.raw("SELECT MAX(next_attempt_at) AS value FROM im_v2.user_state_event_outbox").first(decoding: ProjectionEligibility.self)).value
             let personalWorker = V2UserStateEventWorker(
                 outbox: try PostgresV2UserStateEventOutbox(database: resources.database(.psql)),
-                projector: try PostgresV2UserStateEventProjector(database: resources.database(.psql)), now: { now })
+                projector: try PostgresV2UserStateEventProjector(database: resources.database(.psql)), now: { eligibleAt })
             #expect(try await personalWorker.runOnce(limit: 100) == 6)
             #expect(try await personalWorker.runOnce(limit: 100) == 0)
 
@@ -762,6 +767,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         let resources = makeV2DatabaseTestResources()
         do {
             resources.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+            // The owner transaction retains its only connection while reading
+            // control identity. A separate same-database pool prevents self-wait.
+            let identityDatabaseID = DatabaseID(string: "direct-log-identity")
+            resources.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: identityDatabaseID)
             guard let sql = resources.database(.psql) as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
@@ -790,29 +799,23 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     (\(bind: memberTwoUUID), 'member015', '成员二', 1, \(bind: now), \(bind: now)),
                     (\(bind: memberThreeUUID), 'member016', '成员三', 1, \(bind: now), \(bind: now))
                 """).run()
-            let direct = try V2DirectMessagingService(
-                store: PostgresV2DirectMessagingStore(database: resources.database(.psql)),
+            let direct = try V2DirectRoomOperationTestFixture(
+                store: PostgresV2DirectMessagingStore(database: resources.database(.psql), identityReader: PostgresV2DirectRoomIdentityReader(database: resources.database(identityDatabaseID)), projectionDelivery: SuccessfulProjectionDelivery()),
                 capacityProfile: profile,
                 roomShardID: "rooms-primary",
                 now: { now }
             )
             let recipient = try UserID(memberTwoUUID.uuidString)
-            guard case .opened(let room) = try await direct.open(
+            let room = try await direct.openedIdentity(
                 actorUserID: senderID,
                 operationID: try .init("00000000-0000-0000-0000-00000000c002"),
                 targetUserID: recipient
-            ) else {
-                Issue.record("expected direct room")
-                return
-            }
-            guard case .opened(let secondRoom) = try await direct.open(
+            , firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
+            let secondRoom = try await direct.openedIdentity(
                 actorUserID: senderID,
                 operationID: try .init("00000000-0000-0000-0000-00000000c005"),
                 targetUserID: try .init(memberThreeUUID.uuidString)
-            ) else {
-                Issue.record("expected second direct room")
-                return
-            }
+            , firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
             let activationScope: V2RoomActivationWriteScope?
             if actorScoped {
                 let activations = PostgresV2RoomActivationStore(database: resources.database(.psql))
@@ -1318,11 +1321,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             #expect(try await count("im_v2.content_review_jobs", on: sql) == 1)
 
-            _ = try await direct.setStrangerMessagePermission(
-                actorUserID: recipient,
-                operationID: try .init("00000000-0000-0000-0000-00000000c005"),
-                permission: .deny
-            )
+            _ = try await PostgresV2AccountPreferenceOperationStore(database: resources.database(.psql), projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: .init(controlDatabase: resources.database(.psql), ownerDatabases: [:])).executePreferenceFixture(owner: recipient, operation: .strangerMessagePreference(try .init("00000000-0000-0000-0000-00000000c005")), value: .strangerMessage(.deny), now: now)
             let fastAppendBeforeStalePolicy = await fastAppendCache.snapshot()
             let stalePolicyAttempt = try await messages.send(.init(
                 roomID: room.roomID, actorUserID: senderID,

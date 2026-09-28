@@ -79,7 +79,7 @@ struct PostgresV2GroupJoinQuotaTests {
         }
     }
 
-    @Test("definitive rejection retries with a fenced generation", arguments: [V2GroupJoinQuotaOutcome.unavailable, .rateLimited, .permissionDenied])
+    @Test("temporary pressure preserves the original attempt while definite rejection seals it", arguments: [V2GroupJoinQuotaOutcome.unavailable, .rateLimited, .permissionDenied])
     func deniedAttemptRetry(_ outcome: V2GroupJoinQuotaOutcome) async throws {
         try await withUserEventDatabase { database, _, schema in
             let store = try PostgresV2GroupJoinQuotaStore(database: database, schema: schema)
@@ -87,14 +87,22 @@ struct PostgresV2GroupJoinQuotaTests {
             let request = candidate(applicant: applicant)
             let original = try requireIntent(await store.reserve(request, roomID: room, inviteID: invite, now: now))
             #expect(try await store.resolve(original, outcome: outcome, targetRequestID: nil, now: now))
-            let retry = try requireIntent(await store.reserve(candidate(applicant: applicant, operation: request.operationID), roomID: room, inviteID: invite, now: now.addingTimeInterval(2)))
-            #expect(retry.generation == 2 && retry.requestID == original.requestID && retry.phase == .held)
-            #expect(retry.createdAt == original.createdAt && retry.attemptCreatedAt == now.addingTimeInterval(2))
-            #expect(try await !store.resolve(original, outcome: outcome, targetRequestID: nil, now: now.addingTimeInterval(3)))
-            #expect(try await store.reserve(candidate(applicant: applicant), roomID: room, inviteID: .init(uuid: UUID()), now: now) == .limited)
-            #expect(try await store.resolve(retry, outcome: .pending, targetRequestID: retry.requestID, now: now))
-            await #expect(throws: V2GroupInvitationServiceError.conflict) {
-                try await store.resolve(retry, outcome: outcome, targetRequestID: nil, now: now)
+            if outcome == .rateLimited {
+                let retry = try requireIntent(await store.reserve(request, roomID: room, inviteID: invite, now: now.addingTimeInterval(2)))
+                #expect(retry.generation == original.generation && retry.requestID == original.requestID && retry.phase == .held)
+                #expect(retry.createdAt == original.createdAt && retry.attemptCreatedAt == original.attemptCreatedAt && retry.outcome == nil)
+                #expect(retry.nextCheckAt == now.addingTimeInterval(30))
+                #expect(try await store.reserve(candidate(applicant: applicant), roomID: room, inviteID: .init(uuid: UUID()), now: now) == .limited)
+                #expect(try await store.resolve(retry, outcome: .pending, targetRequestID: retry.requestID, now: now))
+                #expect(try await !store.resolve(original, outcome: .rateLimited, targetRequestID: nil, now: now))
+            } else {
+                #expect(try await store.reserve(request, roomID: room, inviteID: invite, now: now.addingTimeInterval(2)) == .limited)
+                #expect(try await store.resolve(original, outcome: outcome, targetRequestID: nil, now: now.addingTimeInterval(3)))
+                // A new user confirmation gets a new identity, never a new generation of the denied operation.
+                let fresh = try requireIntent(await store.reserve(candidate(applicant: applicant), roomID: room, inviteID: invite, now: now))
+                #expect(fresh.operationID != original.operationID && fresh.requestID != original.requestID && fresh.generation == 1)
+                #expect(try await store.reserve(request, roomID: room, inviteID: invite, now: now) == .limited)
+                #expect(try await store.resolve(fresh, outcome: .pending, targetRequestID: fresh.requestID, now: now))
             }
         }
     }
@@ -117,7 +125,7 @@ struct PostgresV2GroupJoinQuotaTests {
         }
     }
 
-    @Test("generation exhaustion refuses a new attempt without trapping or releasing another slot")
+    @Test("sealed identities never increment an exhausted generation or borrow another slot")
     func generationLimit() async throws {
         try await withUserEventDatabase { database, sql, schema in
             let store = try PostgresV2GroupJoinQuotaStore(database: database, schema: schema)
@@ -126,9 +134,10 @@ struct PostgresV2GroupJoinQuotaTests {
             let intent = try requireIntent(await store.reserve(request, roomID: room, inviteID: invite, now: now))
             try await store.resolve(intent, outcome: .unavailable, targetRequestID: nil, now: now)
             try await sql.raw("UPDATE \(unsafeRaw: schema).group_join_quota_intents SET generation = \(bind: Int64.max)").run()
-            await #expect(throws: V2GroupInvitationServiceError.conflict) {
-                _ = try await store.reserve(request, roomID: room, inviteID: invite, now: now)
-            }
+            #expect(try await store.reserve(request, roomID: room, inviteID: invite, now: now) == .limited)
+            #expect(try await sql.raw("SELECT generation AS value FROM \(unsafeRaw: schema).group_join_quota_intents WHERE operation_id = \(bind: intent.operationID)").first(decoding: QuotaGeneration.self)?.value == Int64.max)
+            let fresh = try requireIntent(await store.reserve(candidate(applicant: applicant), roomID: room, inviteID: invite, now: now))
+            #expect(fresh.generation == 1 && fresh.operationID != intent.operationID)
         }
     }
 
@@ -195,9 +204,9 @@ struct PostgresV2GroupJoinQuotaTests {
         }
     }
 
-    @Test("denied canonical retries only bind to confirmed competing admissions")
+    @Test("denied canonical identities and aliases cannot rebind to competing admissions")
     func deniedOperationRebinding() async throws {
-        try await withUserEventDatabase { database, _, schema in
+        try await withUserEventDatabase { database, sql, schema in
             let store = try PostgresV2GroupJoinQuotaStore(database: database, schema: schema)
             let applicant = UserID(uuid: UUID()), room = RoomID(uuid: UUID()), invite = GroupInviteID(uuid: UUID())
             let now = Date(timeIntervalSince1970: 1_750_000_000)
@@ -205,19 +214,15 @@ struct PostgresV2GroupJoinQuotaTests {
             let first = try requireIntent(await store.reserve(original, roomID: room, inviteID: invite, now: now))
             _ = try await store.reserve(duplicate, roomID: room, inviteID: invite, now: now)
             try await store.resolve(first, outcome: .unavailable, targetRequestID: nil, now: now)
-            let renewed = try requireIntent(await store.reserve(duplicate, roomID: room, inviteID: invite, now: now))
-            #expect(renewed.generation == 2 && renewed.operationID == first.operationID && renewed.note == nil)
-            try await store.resolve(renewed, outcome: .unavailable, targetRequestID: nil, now: now)
-            let competing = try requireIntent(await store.reserve(candidate(applicant: applicant, note: "canonical note"), roomID: room, inviteID: invite, now: now))
             #expect(try await store.reserve(duplicate, roomID: room, inviteID: invite, now: now) == .limited)
+            let competing = try requireIntent(await store.reserve(candidate(applicant: applicant, note: "canonical note"), roomID: room, inviteID: invite, now: now))
             try await store.resolve(competing, outcome: .pending, targetRequestID: competing.requestID, now: now)
-            let linked = try requireIntent(await store.reserve(duplicate, roomID: room, inviteID: invite, now: now))
-            #expect(linked.operationID == competing.operationID && linked.phase == .tracking)
-            #expect(try await store.resolve(renewed, outcome: .unavailable, targetRequestID: nil, now: now))
-            #expect(try await store.reserve(original, roomID: room, inviteID: invite, now: now) == .reserved(linked))
+            #expect(try await store.reserve(duplicate, roomID: room, inviteID: invite, now: now) == .limited)
+            #expect(try await store.reserve(original, roomID: room, inviteID: invite, now: now) == .limited)
             try await store.resolve(competing, outcome: .cancelled, targetRequestID: competing.requestID, now: now)
-            let replay = try requireIntent(await store.reserve(duplicate, roomID: room, inviteID: invite, now: now))
-            #expect(replay.operationID == competing.operationID && replay.outcome == .cancelled)
+            #expect(try await store.reserve(duplicate, roomID: room, inviteID: invite, now: now) == .limited)
+            #expect(try await store.resolve(first, outcome: .unavailable, targetRequestID: nil, now: now))
+            #expect(try await sql.raw("SELECT count(*) AS value FROM \(unsafeRaw: schema).group_join_quota_aliases WHERE operation_id = \(bind: duplicate.operationID.uuidValue!) AND canonical_operation_id = \(bind: first.operationID)").first(decoding: QuotaTestCount.self)?.value == 1)
         }
     }
 
@@ -232,3 +237,5 @@ struct PostgresV2GroupJoinQuotaTests {
     }
 }
 private struct QuotaTestCount: Decodable { let value: Int }
+
+private struct QuotaGeneration: Decodable { let value: Int64 }

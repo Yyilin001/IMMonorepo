@@ -4,7 +4,7 @@
 WITH schema_visibility AS MATERIALIZED (
  SELECT pg_catalog.set_config('search_path', '', true) AS active_path
 )
-SELECT ((SELECT count(*) = 18 FROM information_schema.columns
+SELECT (EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.social_operation_receipts') AND tgname='social_operation_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND to_regclass('im_v2.social_relationship_revisions') IS NOT NULL AND to_regclass('im_v2.social_block_revisions') IS NOT NULL AND to_regclass('im_v2.user_relationship_operations') IS NULL AND to_regclass('im_v2.user_block_operations') IS NULL AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.membership_operation_admissions') AND tgname='membership_operation_admissions_immutable' AND tgtype=27 AND tgenabled='O') AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.membership_operation_receipts') AND tgname='membership_operation_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.group_capability_admissions') AND tgname='group_capability_admissions_immutable' AND tgtype=27 AND tgenabled='O') AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.group_capability_receipts') AND tgname='group_capability_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND to_regclass('im_v2.room_pinned_message_operations') IS NULL AND to_regclass('im_v2.group_announcement_operations') IS NULL AND to_regclass('im_v2.group_permission_operations') IS NULL AND to_regclass('im_v2.group_role_operations') IS NULL AND EXISTS(SELECT 1 FROM pg_proc WHERE pronamespace=to_regnamespace('im_v2') AND proname='reject_message_mutation_receipt_mutation' AND encode(sha256(convert_to(prosrc,'UTF8')),'hex')='3a110559fbb4f875263df3b192f1eebe272b3d51a0a6f7354ca389e00a8583b2') AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.member_administration_admissions') AND tgname='member_administration_admissions_immutable' AND tgtype=27 AND tgenabled='O') AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.member_administration_receipts') AND tgname='member_administration_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND to_regclass('im_v2.message_reaction_operations') IS NULL AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.message_reaction_receipts') AND tgname='message_reaction_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.message_mutation_receipts') AND tgname='message_mutation_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.message_send_operation_receipts') AND tgname='message_send_operation_receipts_immutable' AND tgtype=27 AND tgenabled='O') AND to_regclass('im_v2.message_edit_operations') IS NULL AND to_regclass('im_v2.message_withdrawal_operations') IS NULL AND (SELECT count(*) = 18 FROM information_schema.columns
  WHERE table_schema = 'im_v2' AND table_name = 'direct_authorization_intents'
  AND (column_name, udt_name, is_nullable, COALESCE(column_default,'')) IN (
  ('room_id','uuid','NO',''), ('sender_user_id','uuid','NO',''), ('client_message_id','uuid','NO',''),
@@ -530,9 +530,9 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
    AND to_regclass('im_v2.user_state_event_outbox_source_room_idx') IS NOT NULL
    AND to_regclass('im_v2.user_state_event_receipts') IS NOT NULL
    AND (
-     SELECT count(*) = 2 FROM information_schema.columns
+     SELECT count(*) = 1 FROM information_schema.columns
      WHERE table_schema = 'im_v2'
-       AND table_name IN ('user_read_receipt_preferences', 'read_receipt_preference_operations')
+       AND table_name = 'user_read_receipt_preferences'
        AND column_name = 'preference_revision' AND udt_name = 'int8' AND is_nullable = 'NO'
    )
    AND EXISTS (
@@ -547,6 +547,33 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
        AND pg_get_constraintdef(oid) = 'CHECK ((jsonb_typeof(projection_payload) = ''object''::text))'
    )
    AND to_regclass('im_v2.user_state_event_outbox_delivered_idx') IS NOT NULL
+   AND to_regclass('im_v2.personal_preference_operation_receipts') IS NOT NULL
+   AND NOT EXISTS (SELECT 1 FROM (VALUES
+       ('personal_preference_operation_receipts','receipt','jsonb','NO'),
+       ('personal_preference_operation_receipts','request_fingerprint','bytea','NO'),
+       ('personal_preference_operation_receipts','fingerprint_version','int2','NO'),
+       ('personal_preference_operation_receipts','identity_key','text','NO'),
+       ('user_room_preferences','revision','int8','NO'),
+       ('user_message_favorites','revision','int8','NO'),
+       ('user_message_favorites','is_favorited','bool','NO')) expected(table_name,column_name,udt_name,is_nullable)
+       LEFT JOIN information_schema.columns actual ON actual.table_schema='im_v2'
+          AND (actual.table_name,actual.column_name,actual.udt_name,actual.is_nullable)=
+              (expected.table_name,expected.column_name,expected.udt_name,expected.is_nullable)
+       WHERE actual.column_name IS NULL)
+   AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.personal_preference_operation_receipts')
+       AND tgname='personal_preference_operation_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27)
+   AND to_regclass('im_v2.public_profile_update_operations') IS NOT NULL
+   AND (SELECT count(*) = 3 FROM information_schema.columns
+        WHERE table_schema='im_v2' AND table_name='public_profile_update_operations'
+          AND (column_name,udt_name,is_nullable) IN
+          (('request_fingerprint','bytea','NO'),('receipt','jsonb','NO'),('outcome_kind','text','NO')))
+   AND EXISTS (SELECT 1 FROM pg_trigger
+        WHERE tgrelid=to_regclass('im_v2.public_profile_update_operations')
+          AND tgname='public_profile_operation_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27)
+   AND EXISTS (SELECT 1 FROM pg_constraint
+        WHERE conrelid=to_regclass('im_v2.public_profile_update_operations')
+          AND conname='public_profile_update_operations_result_check' AND convalidated
+          AND pg_get_constraintdef(oid) LIKE '%result_revision IS NOT NULL%')
    AND to_regclass('im_v2.message_send_completions') IS NOT NULL
    AND EXISTS (
      SELECT 1
@@ -555,7 +582,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
        AND table_name = 'schema_contract'
        AND column_name = 'schema_id'
        AND is_nullable = 'NO'
-       AND column_default = '''im-v2-current-53''::text'
+       AND column_default = '''im-v2-current-63''::text'
    )
    AND EXISTS (
      SELECT 1
@@ -565,7 +592,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
      WHERE namespace.nspname = 'im_v2'
        AND relation.relname = 'schema_contract'
        AND constraint_record.contype = 'c'
-       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-53%'
+       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-63%'
    )
    AND EXISTS (
      SELECT 1 FROM information_schema.columns
@@ -752,13 +779,9 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
    AND EXISTS (SELECT 1 FROM pg_index
        WHERE indexrelid = to_regclass('im_v2.room_activation_leases_pkey')
          AND indisunique AND indisvalid AND indisready)
-   AND NOT EXISTS (SELECT 1 FROM pg_constraint
-       WHERE conrelid = to_regclass('im_v2.group_room_creation_drafts')
-         AND contype = 'f' AND confrelid = to_regclass('im_v2.rooms'))
-   AND EXISTS (SELECT 1 FROM pg_constraint
-       WHERE conrelid = to_regclass('im_v2.group_room_creation_drafts')
-         AND convalidated AND conname = 'group_room_creation_drafts_check'
-         AND pg_get_constraintdef(oid) = 'CHECK (((state = ''completed''::text) = (room_id IS NOT NULL)))')
+   AND to_regclass('im_v2.group_room_operations') IS NULL
+   AND to_regclass('im_v2.group_room_creation_drafts') IS NULL
+   AND to_regclass('im_v2.group_room_creation_draft_members') IS NULL
    AND to_regclass('im_v2.local_schema_migrations') IS NULL)))
 AND (NOT EXISTS (
     SELECT 1 FROM (VALUES
@@ -961,4 +984,31 @@ AND (current_setting('transaction_isolation') = 'read committed'
                   AND p.proname='reject_group_avatar_operation_mutation'
                   AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='4296ae3a368755188ceb1df59239b3860fe445da8ab147d948b411c1645aa542'
             ))
+AND (to_regclass('im_v2.forward_plan_operations') IS NOT NULL AND to_regclass('im_v2.forward_preparation_rejections') IS NOT NULL
+ AND EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE t.tgrelid=to_regclass('im_v2.forward_plan_operations') AND t.tgname='forward_plan_operations_original' AND t.tgenabled='O' AND NOT t.tgisinternal AND t.tgtype=27 AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='80cbb1adb53b73cdadf02e34c635e15e575f28e6656a786af2eb041a97e718cd')
+ AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.forward_preparation_rejections') AND tgname='forward_preparation_rejections_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27))
+ AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.account_preference_receipts') AND tgname='account_preference_receipts_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27)
+ AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.group_creation_owner_receipts') AND tgname='group_creation_owner_receipts_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27)
+ AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.direct_room_owner_receipts') AND tgname='direct_room_owner_receipts_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27)
+ AND EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE tgrelid=to_regclass('im_v2.group_creation_operations') AND tgname='group_creation_operations_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27 AND p.pronamespace=to_regnamespace('im_v2') AND p.proname='protect_group_creation_operation' AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='55675fc998fe04d8e6cd2fd5bc8cfce6c5fa2f109a480deabc2a16404124374c')
+ AND EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE tgrelid=to_regclass('im_v2.group_creation_pages') AND tgname='group_creation_pages_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27 AND p.pronamespace=to_regnamespace('im_v2') AND p.proname='protect_group_creation_page' AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='96145f80f282327d00b5057937e88f4ce38c179485df552dbf8cd1fcf05a279d')
+ AND EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE tgrelid=to_regclass('im_v2.direct_room_operation_handoffs') AND tgname='direct_room_handoff_protected' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27 AND p.pronamespace=to_regnamespace('im_v2') AND p.proname='protect_direct_room_handoff' AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='50f166da94a12a8fbc19826e0180d1e483786cfae2f5ed96bafc42cd0883b9b1')
+ AND to_regclass('im_v2.direct_room_operations') IS NULL
+ AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.message_moderation_admissions') AND tgname='message_moderation_admissions_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27)
+ AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('im_v2.message_moderation_receipts') AND tgname='message_moderation_receipts_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27)
+ AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='im_v2' AND table_name='user_live_presence_leases' AND column_name='publication_suppressed' AND udt_name='bool' AND is_nullable='NO' AND column_default='true')
+ AND EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE tgrelid=to_regclass('im_v2.group_invitation_admissions') AND tgname='group_invitation_admission_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27 AND p.pronamespace=to_regnamespace('im_v2') AND p.proname='reject_group_invitation_operation_mutation' AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='ce8a82cb032c668a6f5bafaeec509440491e5284df8e4812ef2d0b5d3c54d3df')
+ AND EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE tgrelid=to_regclass('im_v2.group_invitation_receipts') AND tgname='group_invitation_receipt_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27 AND p.pronamespace=to_regnamespace('im_v2') AND p.proname='reject_group_invitation_operation_mutation' AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='ce8a82cb032c668a6f5bafaeec509440491e5284df8e4812ef2d0b5d3c54d3df')
+ AND EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE tgrelid=to_regclass('im_v2.group_invitation_control_commands') AND tgname='group_invitation_command_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27 AND p.pronamespace=to_regnamespace('im_v2') AND p.proname='reject_group_invitation_operation_mutation' AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='ce8a82cb032c668a6f5bafaeec509440491e5284df8e4812ef2d0b5d3c54d3df')
+ AND EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE tgrelid=to_regclass('im_v2.remote_device_revocation_baselines') AND tgname='remote_device_revocation_baseline_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27 AND p.pronamespace=to_regnamespace('im_v2') AND p.proname='guard_remote_device_revocation_metadata' AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='1454e5f25a2fc7b4b156af0e678ae84170cc1664029ac6b9df6af631f9595c60')
+ AND (SELECT count(*)=3 FROM information_schema.columns WHERE table_schema='im_v2' AND table_name='remote_device_revocation_baselines' AND is_nullable='NO' AND (column_name,udt_name) IN (('actor_user_id','uuid'),('current_device_id','uuid'),('baseline','jsonb')))
+ AND EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE tgrelid=to_regclass('im_v2.remote_device_revocation_receipts') AND tgname='remote_device_revocation_receipt_immutable' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27 AND p.pronamespace=to_regnamespace('im_v2') AND p.proname='guard_remote_device_revocation_metadata' AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='1454e5f25a2fc7b4b156af0e678ae84170cc1664029ac6b9df6af631f9595c60')
+ AND (SELECT count(*)=3 FROM information_schema.columns WHERE table_schema='im_v2' AND table_name='remote_device_revocation_receipts' AND is_nullable='NO' AND (column_name,udt_name) IN (('actor_user_id','uuid'),('current_device_id','uuid'),('receipt','jsonb')))
+ AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('im_v2.remote_device_revocation_baselines') AND contype='p' AND convalidated AND NOT condeferrable AND pg_get_constraintdef(oid)='PRIMARY KEY (baseline_id)')
+ AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('im_v2.remote_device_revocation_baselines') AND contype='c' AND convalidated AND position('jsonb_typeof' in pg_get_constraintdef(oid))>0 AND position('octet_length' in pg_get_constraintdef(oid))>0 AND position('32768' in pg_get_constraintdef(oid))>0)
+ AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('im_v2.remote_device_revocation_receipts') AND contype='p' AND convalidated AND NOT condeferrable AND pg_get_constraintdef(oid)='PRIMARY KEY (actor_user_id, operation_id)')
+ AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('im_v2.remote_device_revocation_receipts') AND contype='c' AND convalidated AND position('jsonb_typeof' in pg_get_constraintdef(oid))>0 AND position('octet_length' in pg_get_constraintdef(oid))>0 AND position('65536' in pg_get_constraintdef(oid))>0)
+ AND (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema='im_v2' AND table_name='remote_device_revocation_baselines' AND is_nullable='NO' AND (column_name,udt_name) IN (('baseline_id','uuid'),('expires_at','timestamptz')))
+ AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='im_v2' AND table_name='remote_device_revocation_receipts' AND column_name='operation_id' AND udt_name='uuid' AND is_nullable='NO')
+ AND EXISTS(SELECT 1 FROM pg_index i JOIN pg_class idx ON idx.oid=i.indexrelid JOIN pg_am am ON am.oid=idx.relam WHERE i.indrelid=to_regclass('im_v2.remote_device_revocation_baselines') AND idx.relname='remote_device_revocation_baseline_expiry_idx' AND am.amname='btree' AND i.indisvalid AND i.indisready AND i.indpred IS NULL AND i.indexprs IS NULL AND pg_get_indexdef(i.indexrelid,1,TRUE)='expires_at')
 FROM schema_visibility WHERE active_path = '';

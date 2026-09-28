@@ -21,7 +21,7 @@ struct V2GatewaySessionTests {
         var hello = IMV2Envelope()
         hello.requestID = 1
         hello.clientHello = .init()
-        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
         hello.clientHello.supportedFrameCompressions = [.zlib]
         let helloResponse = try await session.receiveBootstrap(
@@ -38,7 +38,7 @@ struct V2GatewaySessionTests {
         authenticate.protocolVersion = UInt32(protocolVersion)
         authenticate.authenticate = .init()
         authenticate.authenticate.accessToken = "opaque"
-        authenticate.authenticate.deviceID = "device-a"
+        authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         let authenticated = try await session.receiveBootstrap(
             try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion)
         )
@@ -86,7 +86,7 @@ struct V2GatewaySessionTests {
         var hello = IMV2Envelope()
         hello.requestID = 1
         hello.clientHello = .init()
-        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await session.receiveBootstrap(
             try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0)
@@ -96,7 +96,7 @@ struct V2GatewaySessionTests {
         authenticate.protocolVersion = UInt32(protocolVersion)
         authenticate.authenticate = .init()
         authenticate.authenticate.accessToken = "opaque"
-        authenticate.authenticate.deviceID = "device-a"
+        authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await session.receiveBootstrap(
             try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion)
         )
@@ -143,7 +143,7 @@ struct V2GatewaySessionTests {
         var hello = IMV2Envelope()
         hello.requestID = 1
         hello.clientHello = .init()
-        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await session.receiveBootstrap(
             try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0)
@@ -153,7 +153,7 @@ struct V2GatewaySessionTests {
         authenticate.protocolVersion = UInt32(protocolVersion)
         authenticate.authenticate = .init()
         authenticate.authenticate.accessToken = "opaque"
-        authenticate.authenticate.deviceID = "device-a"
+        authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await session.receiveBootstrap(
             try V2ServerProtobufFrameCodec.encode(
                 authenticate,
@@ -200,16 +200,31 @@ struct V2GatewaySessionTests {
             commandAdmission: V2AllowingGatewayCommandAdmission(),
             now: { Date(timeIntervalSince1970: 0) }
         )
-        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
+        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
         let helloResponse = try await session.receiveBootstrap(try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0))
         #expect(try V2ServerProtobufFrameCodec.decode(helloResponse).serverHello.selectedProtocolVersion == UInt32(protocolVersion))
-        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
+        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await session.receiveBootstrap(try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion))
-        #expect(await session.authenticatedIdentity() == .init(userID: try .init("user-a"), deviceID: try .init("device-a"), capabilityProfile: "base"))
+        #expect(await session.authenticatedIdentity() == .init(userID: try .init("user-a"), deviceID: try .init("00000000-0000-0000-0000-000000000A02"), capabilityProfile: "base"))
 
         var request = IMV2Envelope(); request.requestID = 3; request.protocolVersion = UInt32(protocolVersion); request.syncPull = .init()
         let response = try await session.receiveAuthenticated(try V2ServerProtobufFrameCodec.encode(request, frameVersion: protocolVersion), handler: GatewayCommandFake())
         #expect(try V2ServerProtobufFrameCodec.decode(response).error.code == "UNAVAILABLE")
+    }
+
+    @Test("hello rejects missing or non-UUID device identity", arguments: ["", "device-a"])
+    func rejectsInvalidHelloDeviceIdentity(raw: String) async throws {
+        let session = V2GatewaySession(limits: try .init(maximumInFlightRequests: 2),
+            authenticator: GatewayAuthFake(userID: try .init("user-a")), capabilityProfile: "base",
+            commandAdmission: V2AllowingGatewayCommandAdmission())
+        var hello = IMV2Envelope(); hello.requestID = 1
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        hello.clientHello.deviceID = raw
+        await #expect(throws: V2GatewaySessionError.invalidClientHello) {
+            _ = try await session.receiveBootstrap(V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0))
+        }
+        #expect(await session.authenticatedIdentity() == nil)
     }
 
     @Test("hello device identity must match authentication")
@@ -223,9 +238,9 @@ struct V2GatewaySessionTests {
         var hello = IMV2Envelope()
         hello.requestID = 1
         hello.clientHello = .init()
-        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
-        hello.clientHello.deviceID = "device-a"
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await session.receiveBootstrap(
             try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0)
         )
@@ -235,7 +250,7 @@ struct V2GatewaySessionTests {
         authenticate.protocolVersion = UInt32(protocolVersion)
         authenticate.authenticate = .init()
         authenticate.authenticate.accessToken = "opaque"
-        authenticate.authenticate.deviceID = "device-b"
+        authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000B02"
         await #expect(throws: V2GatewaySessionError.invalidAuthenticatePayload) {
             _ = try await session.receiveBootstrap(
                 try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion)
@@ -257,9 +272,9 @@ struct V2GatewaySessionTests {
         var hello = IMV2Envelope()
         hello.requestID = 1
         hello.clientHello = .init()
-        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
-        hello.clientHello.deviceID = "device-a"
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await session.receiveBootstrap(
             try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0)
         )
@@ -269,7 +284,7 @@ struct V2GatewaySessionTests {
         authenticate.protocolVersion = UInt32(protocolVersion)
         authenticate.authenticate = .init()
         authenticate.authenticate.accessToken = "opaque"
-        authenticate.authenticate.deviceID = "device-a"
+        authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await session.receiveBootstrap(
             try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion)
         )
@@ -301,25 +316,18 @@ struct V2GatewaySessionTests {
         groupPull.groupEventPull.pageSize = 500
         try await send(groupPull)
 
-        var forward = IMV2Envelope()
-        forward.requestID = 6
-        forward.protocolVersion = UInt32(protocolVersion)
-        forward.forwardMessages = .init()
-        forward.forwardMessages.sources = (0..<10).map { index in var source = IMV2ForwardMessageReference(); source.messageID = "source-\(index)"; return source }
-        forward.forwardMessages.targetRoomIds = (0..<10).map { "target-\($0)" }
-        try await send(forward)
-
-        var appendMembers = IMV2Envelope()
-        appendMembers.requestID = 7
-        appendMembers.protocolVersion = UInt32(protocolVersion)
-        appendMembers.appendGroupRoomCreationMembers = .init()
-        appendMembers.appendGroupRoomCreationMembers.memberUserIds = (0..<64).map { "user-\($0)" }
-        try await send(appendMembers)
+        var members = IMV2Envelope()
+        members.requestID = 6
+        members.protocolVersion = UInt32(protocolVersion)
+        members.listRoomMembers = .init()
+        members.listRoomMembers.roomID = "00000000-0000-0000-0000-000000000A03"
+        members.listRoomMembers.pageSize = 400
+        try await send(members)
 
         var baseline = IMV2Envelope(); baseline.requestID = 8; baseline.protocolVersion = UInt32(protocolVersion)
         baseline.getGroupRolePolicyBaseline.roomID = "00000000-0000-0000-0000-000000000A03"
         try await send(baseline)
-        #expect(await admission.recordedCosts() == [0, 6, 6, 5, 3, 2])
+        #expect(await admission.recordedCosts() == [0, 6, 6, 5, 2])
     }
 
     @Test("production receive returns the same validated request used for dispatch")
@@ -334,7 +342,7 @@ struct V2GatewaySessionTests {
         var hello = IMV2Envelope()
         hello.requestID = 1
         hello.clientHello = .init()
-        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
         let helloExchange = try await session.receive(
             try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0),
@@ -351,7 +359,7 @@ struct V2GatewaySessionTests {
         authenticate.protocolVersion = UInt32(protocolVersion)
         authenticate.authenticate = .init()
         authenticate.authenticate.accessToken = "opaque"
-        authenticate.authenticate.deviceID = "device-a"
+        authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         let authenticationExchange = try await session.receive(
             try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion),
             handler: GatewayCommandFake()
@@ -381,9 +389,9 @@ struct V2GatewaySessionTests {
             commandAdmission: V2AllowingGatewayCommandAdmission(),
             now: { Date(timeIntervalSince1970: 10) }
         )
-        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
+        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await session.receiveBootstrap(try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0))
-        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
+        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await session.receiveBootstrap(try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion))
 
         #expect(await auth.readCount == 1)
@@ -400,9 +408,9 @@ struct V2GatewaySessionTests {
             commandAdmission: V2AllowingGatewayCommandAdmission(),
             now: { Date(timeIntervalSince1970: 0) }
         )
-        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
+        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await session.receiveBootstrap(try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0))
-        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
+        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await session.receiveBootstrap(try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion))
 
         var nested = IMV2Envelope(); nested.requestID = 3; nested.protocolVersion = UInt32(protocolVersion); nested.syncBatch = .init(); nested.syncBatch.records = [.init()]
@@ -423,9 +431,9 @@ struct V2GatewaySessionTests {
             commandAdmission: V2AllowingGatewayCommandAdmission(),
             now: { clock.now }
         )
-        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
+        var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await session.receiveBootstrap(try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0))
-        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "device-a"
+        var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await session.receiveBootstrap(try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion))
         clock.now = Date(timeIntervalSince1970: 11)
         #expect(await session.authenticatedIdentity() == nil)
@@ -578,7 +586,7 @@ extension V2GatewaySessionTests {
         await #expect(throws: V2GatewaySessionError.unsupportedCommand) { try await session.receiveAuthenticated(frame, handler: handler) }
         #expect(await handler.identities().isEmpty)
         var hello = IMV2Envelope(); hello.requestID = 1
-        hello.clientHello.supportedProtocolVersions = [UInt32(version)]
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(version)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
         hello.clientHello.deviceID = device.rawValue
         _ = try await session.receiveBootstrap(V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0))

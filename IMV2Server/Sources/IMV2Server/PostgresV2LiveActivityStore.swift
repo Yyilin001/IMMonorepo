@@ -41,20 +41,13 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 偏好设置结果。
     /// - Throws: 时间戳非法或持久化失败时抛出。
-    public func setPreferences(command: V2SetLiveActivityPreferencesCommand, now: Date) async throws -> V2SetLiveActivityPreferencesOutcome {
-        return try await database.transaction { transaction in
+    func applyAccountLiveActivityPreferences(command:V2SetLiveActivityPreferencesCommand,transaction:any Database,now:Date) async throws -> V2LiveActivityPreferences {
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
             let actor = try liveActivityUUID(command.actorUserID), operation = try liveActivityUUID(command.operationID)
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: actor.uuidString + ":" + operation.uuidString), 0))").run()
-            if let prior = try await sql.raw("SELECT allows_online_presence, allows_typing_indicators, updated_at FROM im_v2.user_live_activity_preference_operations WHERE actor_user_id = \(bind: actor) AND operation_id = \(bind: operation)").first(decoding: LiveActivityPreferenceRow.self) {
-                guard prior.allowsOnlinePresence == command.allowsOnlinePresence, prior.allowsTypingIndicators == command.allowsTypingIndicators else { return .idempotencyConflict }
-                return .idempotent(try prior.validatedPreferences())
-            }
             guard v2PostgresTimestampCanEncode(now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
             try await sql.raw("INSERT INTO im_v2.user_live_activity_preferences (user_id, allows_online_presence, allows_typing_indicators, updated_at) VALUES (\(bind: actor), \(bind: command.allowsOnlinePresence), \(bind: command.allowsTypingIndicators), \(bind: now)) ON CONFLICT (user_id) DO UPDATE SET allows_online_presence = EXCLUDED.allows_online_presence, allows_typing_indicators = EXCLUDED.allows_typing_indicators, updated_at = EXCLUDED.updated_at").run()
-            guard let persisted = try await sql.raw("INSERT INTO im_v2.user_live_activity_preference_operations (actor_user_id, operation_id, allows_online_presence, allows_typing_indicators, updated_at) VALUES (\(bind: actor), \(bind: operation), \(bind: command.allowsOnlinePresence), \(bind: command.allowsTypingIndicators), \(bind: now)) RETURNING allows_online_presence, allows_typing_indicators, updated_at").first(decoding: LiveActivityPreferenceRow.self) else { throw V2LiveActivityStoreError.corruptPersistenceState }
-            return .updated(try persisted.validatedPreferences())
-        }
+            return .init(allowsOnlinePresence:command.allowsOnlinePresence,allowsTypingIndicators:command.allowsTypingIndicators,updatedAt:now)
     }
 
     /// 读取用户的实时活动隐私偏好。
@@ -95,7 +88,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             guard try await activeMember(room: room, user: viewer, sql: sql) else { throw V2LiveActivityStoreError.actorNotMember }
             guard !(try await usersAreBlocked(viewer, peer.userID, sql: sql)) else { throw V2LiveActivityStoreError.interactionBlocked }
             let preference = try await sql.raw("SELECT allows_online_presence FROM im_v2.user_live_activity_preferences WHERE user_id = \(bind: peer.userID)").first(decoding: LiveActivityOnlinePreferenceRow.self)?.allowsOnlinePresence ?? true
-            let expiry = try await sql.raw("SELECT MAX(expires_at) AS expires_at FROM im_v2.user_live_presence_leases WHERE user_id = \(bind: peer.userID) AND expires_at > \(bind: now)").first(decoding: LiveActivityExpiryRow.self)?.expiresAt
+            let expiry = try await sql.raw("SELECT MAX(expires_at) AS expires_at FROM im_v2.user_live_presence_leases WHERE user_id = \(bind: peer.userID) AND NOT publication_suppressed AND expires_at > \(bind: now)").first(decoding: LiveActivityExpiryRow.self)?.expiresAt
             let responseExpiry = preference ? (expiry ?? now) : now
             guard v2PostgresTimestampCanEncode(responseExpiry) else { throw V2LiveActivityStoreError.corruptPersistenceState }
             return try .init(roomID: roomID, targetUserID: .init(peer.userID.uuidString), isOnline: preference && expiry != nil, expiresAt: responseExpiry)
@@ -184,6 +177,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     public func admitConnection(
         identity: V2AuthenticatedConnection,
         connectionID: UUID,
+        publicationSuppressed: Bool,
         policy: V2AuthenticatedConnectionAdmissionPolicy,
         now: Date
     ) async throws -> V2AuthenticatedConnectionLeaseOutcome {
@@ -219,11 +213,12 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             else { return .rejected }
             guard let admitted = try await sql.raw("""
                 INSERT INTO im_v2.user_live_presence_leases
-                    (user_id, device_id, connection_id, expires_at, updated_at)
+                    (user_id, device_id, connection_id, expires_at, updated_at, publication_suppressed)
                 VALUES
-                    (\(bind: user), \(bind: device), \(bind: connectionID), \(bind: expiry), \(bind: now))
+                    (\(bind: user), \(bind: device), \(bind: connectionID), \(bind: expiry), \(bind: now), \(bind: publicationSuppressed))
                 ON CONFLICT (connection_id) DO UPDATE
-                SET expires_at = GREATEST(im_v2.user_live_presence_leases.expires_at, EXCLUDED.expires_at),
+                SET publication_suppressed = EXCLUDED.publication_suppressed,
+                    expires_at = GREATEST(im_v2.user_live_presence_leases.expires_at, EXCLUDED.expires_at),
                     updated_at = GREATEST(im_v2.user_live_presence_leases.updated_at, EXCLUDED.updated_at)
                 WHERE im_v2.user_live_presence_leases.user_id = EXCLUDED.user_id
                   AND im_v2.user_live_presence_leases.device_id = EXCLUDED.device_id
@@ -366,6 +361,19 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 该用户当前是否仍存在有效租约。
     /// - Throws: 时间戳无法编码或持久化失败时抛出。
+    public func setPresencePublication(identity: V2AuthenticatedConnection, connectionID: UUID,
+        suppressed: Bool, now: Date) async throws -> V2PresencePublicationLeaseObservation {
+        try await database.transaction { tx in
+            guard let sql=tx as? any SQLDatabase,v2PostgresTimestampCanEncode(now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
+            let user=try liveActivityUUID(identity.userID);let device=try liveActivityUUID(identity.deviceID)
+            try await lockConnectionIdentity(user:user,device:device,sql:sql)
+            guard try await sql.raw("UPDATE im_v2.user_live_presence_leases SET publication_suppressed=\(bind:suppressed) WHERE connection_id=\(bind:connectionID) AND user_id=\(bind:user) AND device_id=\(bind:device) AND expires_at>\(bind:now) RETURNING expires_at").first(decoding:LiveActivityExpiryRow.self) != nil else { throw V2LiveActivityStoreError.corruptPersistenceState }
+            let allowed=try await sql.raw("SELECT allows_online_presence FROM im_v2.user_live_activity_preferences WHERE user_id=\(bind:user)").first(decoding:LiveActivityOnlinePreferenceRow.self)?.allowsOnlinePresence ?? true
+            let expiry=try await sql.raw("SELECT MAX(expires_at) AS expires_at FROM im_v2.user_live_presence_leases WHERE user_id=\(bind:user) AND NOT publication_suppressed AND expires_at>\(bind:now)").first(decoding:LiveActivityExpiryRow.self)?.expiresAt
+            return .init(isOnline:allowed && expiry != nil,expiresAt:allowed ? (expiry ?? now):now)
+        }
+    }
+
     public func removePresence(
         identity: V2AuthenticatedConnection,
         connectionID: UUID,
@@ -391,6 +399,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
                     SELECT 1
                     FROM im_v2.user_live_presence_leases
                     WHERE user_id = \(bind: user)
+                      AND NOT publication_suppressed
                       AND expires_at > \(bind: now)
                 ) AS exists
                 """).first(decoding: LiveActivityBooleanRow.self)?.exists ?? false

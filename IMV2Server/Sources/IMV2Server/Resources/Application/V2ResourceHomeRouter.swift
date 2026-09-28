@@ -48,7 +48,7 @@ public struct V2ResourceHomeRouter: Sendable {
             let router = rooms
             let requiresGroupOwner: Bool
             if case .groupAvatar = usage { requiresGroupOwner = true } else { requiresGroupOwner = false }
-            return PostgresV2ResourceLifecycleStore(database: owner, authorizationExpiresAt: min(deviceExpiry, proof.activationExpiresAt)) { transaction in
+            return PostgresV2ResourceLifecycleStore(database: owner, authorizationExpiresAt: min(deviceExpiry, proof.activationExpiresAt), backgroundDelegationExpiresAt: deviceExpiry) { transaction in
                 try Self.checkBudget(deadline)
                 // No owner locks are held while the independent control authority is queried.
                 _ = try await Self.requireDevice(actor: actor, device: device, database: control)

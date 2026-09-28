@@ -106,9 +106,16 @@ private actor RecordingRenewalLeases: V2LivePresenceLeaseManaging {
         self.omitResults = omitResults
     }
 
+    func setPresencePublication(identity: V2AuthenticatedConnection, connectionID: UUID,
+        suppressed: Bool, now: Date) throws -> V2PresencePublicationLeaseObservation {
+        Issue.record("Renewing a lease must not change publication policy")
+        throw CancellationError()
+    }
+
     func admitConnection(
         identity _: V2AuthenticatedConnection,
         connectionID _: UUID,
+        publicationSuppressed _: Bool,
         policy _: V2AuthenticatedConnectionAdmissionPolicy,
         now: Date
     ) -> V2AuthenticatedConnectionLeaseOutcome {

@@ -31,7 +31,7 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
     /// 应用一次本人资料变更。
     ///
     /// 事务先读取并锁定当前资料行，使并发重试能看到其等待期间提交的操作，再检查修订与时钟。
-    /// 已有同一操作记录时校验载荷一致并返回当前权威视图；否则更新资料修订、写入传播源记录
+    /// 已有操作返回不可变原回执和独立当前快照；否则更新资料修订、写入传播源记录
     /// 并登记操作结果。
     ///
     /// - Parameter command: 资料变更命令。
@@ -39,53 +39,61 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
     /// - Throws: 标识无法解析或持久化状态异常时抛出
     ///   ``V2ProfileUpdateError/corruptPersistenceState``；同一操作标识载荷不一致时抛出
     ///   ``V2ProfileUpdateError/operationPayloadMismatch``；修订冲突时抛出
-    ///   ``V2ProfileUpdateError/revisionConflict(current:)``；头像不可用时抛出
-    ///   ``V2ProfileUpdateError/avatarUnavailable``。
-    public func update(_ command: V2ProfileUpdateCommand) async throws -> V2ProfileUpdateOutcome {
+    ///   业务版本冲突、头像不可用及到期返回持久拒绝回执，不作为传输异常。
+    public func update(_ command: V2ProfileUpdateCommand) async throws -> V2ProfileUpdateResult {
         guard let actorID = UUID(uuidString: command.actorUserID.rawValue),
               let operationID = UUID(uuidString: command.operationID.rawValue)
         else { throw V2ProfileUpdateError.corruptPersistenceState }
-        let requestedAvatarID = try command.avatar.map { avatar -> UUID in
-            guard let value = UUID(uuidString: avatar.mediaID.rawValue) else {
-                throw V2ProfileUpdateError.corruptPersistenceState
-            }
-            return value
-        }
         return try await database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase else {
-                throw V2ProfileUpdateError.corruptPersistenceState
-            }
-            // 在此记录上串行化台账读取与修改。并发重试在检查修订号或时钟前，
-            // 必须看到它等待的写入方已提交的操作。
-            let current = try await activeProfile(userID: actorID, sql: sql)
-            if let operation = try await operation(actorID: actorID, operationID: operationID, sql: sql) {
-                guard operation.matches(command: command) else {
+            guard let sql = transaction as? any SQLDatabase else { throw V2ProfileUpdateError.corruptPersistenceState }
+            try await lockOperation(actorID: actorID, operationID: operationID, sql: sql)
+            if let receipt = try await operation(actorID: actorID, operationID: operationID, sql: sql) {
+                guard receipt.validates(actorUserID: command.actorUserID, operationID: command.operationID, fingerprint: command.fingerprint) else {
                     throw V2ProfileUpdateError.operationPayloadMismatch
                 }
-                guard operation.resultRevision > 0 else {
-                    throw V2ProfileUpdateError.corruptPersistenceState
-                }
-                // 后续操作可能已经推进此资料。返回当前权威视图
-                // 比重放旧状态更安全；操作台账仍保证此次重试
-                // 不会创建第二个源事件。
-                return .idempotent(current)
+                return .init(receipt: receipt, currentSnapshot: try await optionalProfile(userID: actorID, sql: sql))
             }
-
-            guard current.revision == command.expectedRevision else {
-                throw V2ProfileUpdateError.revisionConflict(current: current.revision)
+            let current = try await activeProfile(userID: actorID, sql: sql)
+            let changedAt = now()
+            guard v2PostgresTimestampCanEncode(changedAt), changedAt.timeIntervalSince1970 >= 0 else { throw V2ProfileUpdateError.corruptPersistenceState }
+            func reject(_ reason: V2ProfileOperationRejection) async throws -> V2ProfileUpdateResult {
+                let receipt = try await record(actorID: actorID, operationID: operationID, fingerprint: command.fingerprint, outcome: .rejected(reason), resolvedAt: changedAt, sql: sql)
+                return .init(receipt: receipt, currentSnapshot: current)
+            }
+            guard let observation = try await sql.raw("SELECT clock_timestamp() AS observed_at").first(decoding: ProfileResourceClock.self)
+            else { throw V2ProfileUpdateError.corruptPersistenceState }
+            let admissionObservedAt = max(changedAt, observation.observedAt)
+            guard admissionObservedAt.timeIntervalSince1970 * 1000 <= Double(command.firstSubmissionDeadlineMilliseconds) else {
+                return try await reject(.expiredUnsubmitted)
+            }
+            guard current.revision == command.expectedRevision else { return try await reject(.revisionConflict(current: current.revision)) }
+            let requestedName: String
+            switch command.patch.displayName {
+            case .unchanged: guard let value = current.publicIdentity?.displayName else { throw V2ProfileUpdateError.corruptPersistenceState }; requestedName = value
+            case .set(let value): requestedName = value
+            }
+            let requestedAvatar: V2AvatarReference?
+            switch command.patch.avatar {
+            case .unchanged: requestedAvatar = current.avatar
+            case .remove: requestedAvatar = nil
+            case .set(let value): requestedAvatar = value
+            }
+            let requestedAvatarID = try requestedAvatar.map { avatar -> UUID in
+                guard let value = avatar.mediaID.uuidValue else { throw V2ProfileUpdateError.corruptPersistenceState }; return value
             }
             let previousAvatarID = current.avatar?.mediaID.uuidValue
             // Bind and retire under the same media-row locks used by GC. Lock
             // both identities in canonical order before observing expiration.
             for mediaID in Set([previousAvatarID, requestedAvatarID].compactMap { $0 }).sorted(by: { $0.uuidString < $1.uuidString }) {
                 guard try await sql.raw("SELECT 1 FROM im_v2.media_objects WHERE media_id=\(bind:mediaID) FOR UPDATE").first() != nil
-                else { throw V2ProfileUpdateError.avatarUnavailable }
+                else { return try await reject(.avatarUnavailable) }
             }
-            let changedAt = now()
-            guard v2PostgresTimestampCanEncode(changedAt) else { throw V2ProfileUpdateError.corruptPersistenceState }
-            guard let observation = try await sql.raw("SELECT clock_timestamp() AS observed_at").first(decoding: ProfileResourceClock.self)
+            guard let resourceClock = try await sql.raw("SELECT clock_timestamp() AS observed_at").first(decoding: ProfileResourceClock.self)
             else { throw V2ProfileUpdateError.corruptPersistenceState }
-            let bindingObservedAt = max(changedAt, observation.observedAt)
+            let bindingObservedAt = max(changedAt, resourceClock.observedAt)
+            guard bindingObservedAt.timeIntervalSince1970 * 1000 <= Double(command.firstSubmissionDeadlineMilliseconds) else {
+                return try await reject(.expiredUnsubmitted)
+            }
             if let requestedAvatarID,
                try await sql.raw("""
                     SELECT 1 FROM im_v2.media_objects media
@@ -104,10 +112,10 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
                               AND variant.size IN (128,256) AND variant.state='ready')=2
                       )
                     """).first() == nil {
-                throw V2ProfileUpdateError.avatarUnavailable
+                return try await reject(.avatarUnavailable)
             }
 
-            let changed = current.publicIdentity?.displayName != command.displayName || current.avatar != command.avatar
+            let changed = current.publicIdentity?.displayName != requestedName || current.avatar != requestedAvatar
             let result: V2ProfileView
             if changed {
                 guard current.revision.rawValue < UInt64(Int64.max),
@@ -115,7 +123,7 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
                 else { throw V2ProfileUpdateError.corruptPersistenceState }
                 guard let updated = try await sql.raw("""
                     UPDATE im_v2.public_user_profiles
-                    SET display_name = \(bind: command.displayName),
+                    SET display_name = \(bind: requestedName),
                         avatar_media_id = \(bind: requestedAvatarID),
                         revision = revision + 1,
                         visibility_revision = visibility_revision + 1,
@@ -144,15 +152,9 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
             } else {
                 result = current
             }
-            try await sql.raw("""
-                INSERT INTO im_v2.public_profile_update_operations
-                    (actor_user_id, operation_id, expected_revision, requested_display_name,
-                     requested_avatar_media_id, result_revision, created_at)
-                VALUES (\(bind: actorID), \(bind: operationID), \(bind: command.expectedRevision.signedValue),
-                        \(bind: command.displayName), \(bind: requestedAvatarID),
-                        \(bind: result.revision.signedValue), \(bind: changedAt))
-                """).run()
-            return .updated(result)
+            let receipt = try await record(actorID: actorID, operationID: operationID, fingerprint: command.fingerprint,
+                outcome: .committed(revision: result.revision, visibilityRevision: result.visibilityRevision), resolvedAt: changedAt, sql: sql)
+            return .init(receipt: receipt, currentSnapshot: result)
         }
     }
 
@@ -172,12 +174,62 @@ public struct PostgresV2ProfileUpdateStore: V2ProfileUpdateStore, V2OwnProfileRe
         return try await readActiveProfile(userID: actorID, sql: sql)
     }
 
-    private func operation(actorID: UUID, operationID: UUID, sql: any SQLDatabase) async throws -> ProfileOperationRow? {
+    public func recover(_ request: V2ProfileOperationRecoveryRequest) async throws -> V2ProfileOperationRecoveryResult {
+        guard let actorID = request.actorUserID.uuidValue, let operationID = request.operationID.uuidValue else { throw V2ProfileUpdateError.corruptPersistenceState }
+        return try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else { throw V2ProfileUpdateError.corruptPersistenceState }
+            try await lockOperation(actorID: actorID, operationID: operationID, sql: sql)
+            if let receipt = try await operation(actorID: actorID, operationID: operationID, sql: sql) {
+                guard receipt.validates(actorUserID: request.actorUserID, operationID: request.operationID, fingerprint: request.fingerprint) else { return .fingerprintConflict }
+                return .receipt(receipt, currentSnapshot: try await optionalProfile(userID: actorID, sql: sql))
+            }
+            guard request.action == .closeIfAbsent else { return .unresolved }
+            let receipt = try await record(actorID: actorID, operationID: operationID, fingerprint: request.fingerprint, outcome: .closed, resolvedAt: now(), sql: sql)
+            return .receipt(receipt, currentSnapshot: try await optionalProfile(userID: actorID, sql: sql))
+        }
+    }
+
+    private func lockOperation(actorID: UUID, operationID: UUID, sql: any SQLDatabase) async throws {
+        let key = "profile-operation:" + actorID.uuidString + ":" + operationID.uuidString
+        try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
+    }
+    private func optionalProfile(userID: UUID, sql: any SQLDatabase) async throws -> V2ProfileView? {
+        do { return try await readActiveProfile(userID: userID, sql: sql) }
+        catch V2ProfileUpdateError.unavailable { return nil }
+    }
+    private func operation(actorID: UUID, operationID: UUID, sql: any SQLDatabase) async throws -> V2ProfileOperationReceipt? {
+        guard let row = try await sql.raw("SELECT receipt::text AS receipt, fingerprint_version, request_fingerprint, outcome_kind, result_revision FROM im_v2.public_profile_update_operations WHERE actor_user_id=\(bind:actorID) AND operation_id=\(bind:operationID)").first(decoding: ProfileOperationRow.self) else { return nil }
+        let receipt = try JSONDecoder().decode(V2ProfileOperationReceipt.self, from: Data(row.receipt.utf8))
+        guard receipt.actorUserID.uuidValue == actorID, receipt.operationID.uuidValue == operationID,
+              row.fingerprintVersion > 0, Int16(receipt.fingerprint.version) == row.fingerprintVersion, receipt.fingerprint.digest == row.requestFingerprint else {
+            throw V2ProfileUpdateError.corruptPersistenceState
+        }
+        switch receipt.outcome {
+        case .committed(let revision, _):
+            guard row.outcomeKind == "committed", row.resultRevision == revision.signedValue else { throw V2ProfileUpdateError.corruptPersistenceState }
+        case .closed: guard row.outcomeKind == "closed", row.resultRevision == nil else { throw V2ProfileUpdateError.corruptPersistenceState }
+        case .rejected: guard row.outcomeKind == "rejected", row.resultRevision == nil else { throw V2ProfileUpdateError.corruptPersistenceState }
+        }
+        return receipt
+    }
+    private func record(actorID: UUID, operationID: UUID, fingerprint: V2OperationFingerprint, outcome: V2ProfileOperationTerminalOutcome, resolvedAt: Date, sql: any SQLDatabase) async throws -> V2ProfileOperationReceipt {
+        guard v2PostgresTimestampCanEncode(resolvedAt), resolvedAt.timeIntervalSince1970 >= 0 else { throw V2ProfileUpdateError.corruptPersistenceState }
+        let milliseconds = resolvedAt.timeIntervalSince1970 * 1000
+        guard milliseconds < Double(Int64.max) else { throw V2ProfileUpdateError.corruptPersistenceState }
+        let receipt = try V2ProfileOperationReceipt(actorUserID: .init(uuid:actorID), operationID: .init(uuid:operationID), fingerprint: fingerprint, outcome: outcome, resolvedAtMilliseconds: UInt64(milliseconds))
+        let encoded = String(decoding: try JSONEncoder().encode(receipt), as: UTF8.self)
+        let kind: String
+        let revision: Int64?
+        switch outcome {
+        case .committed(let value, _): kind = "committed"; revision = value.signedValue
+        case .rejected: kind = "rejected"; revision = nil
+        case .closed: kind = "closed"; revision = nil
+        }
         try await sql.raw("""
-            SELECT expected_revision, requested_display_name, requested_avatar_media_id, result_revision
-            FROM im_v2.public_profile_update_operations
-            WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)
-            """).first(decoding: ProfileOperationRow.self)
+            INSERT INTO im_v2.public_profile_update_operations (actor_user_id,operation_id,fingerprint_version,request_fingerprint,outcome_kind,result_revision,receipt,created_at)
+            VALUES (\(bind:actorID),\(bind:operationID),\(bind:Int16(fingerprint.version)),\(bind:fingerprint.digest),\(bind:kind),\(bind:revision),\(bind:encoded)::jsonb,\(bind:resolvedAt))
+            """).run()
+        return receipt
     }
 
     private func activeProfile(userID: UUID, sql: any SQLDatabase) async throws -> V2ProfileView {
@@ -222,26 +274,14 @@ private struct ProfileResourceClock: Decodable {
 }
 
 private struct ProfileOperationRow: Decodable {
-    let expectedRevision: Int64
-    let requestedDisplayName: String
-    let requestedAvatarMediaID: UUID?
-    let resultRevision: Int64
-
+    let receipt: String
+    let fingerprintVersion: Int16
+    let requestFingerprint: Data
+    let outcomeKind: String
+    let resultRevision: Int64?
     enum CodingKeys: String, CodingKey {
-        case expectedRevision = "expected_revision"
-        case requestedDisplayName = "requested_display_name"
-        case requestedAvatarMediaID = "requested_avatar_media_id"
-        case resultRevision = "result_revision"
-    }
-
-    func matches(command: V2ProfileUpdateCommand) -> Bool {
-        // 旧写入方校验规范化名称，但记录原始输入。
-        // 保持这些操作在相同名称语义下可重放。
-        let normalizedName = requestedDisplayName.precomposedStringWithCanonicalMapping
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return expectedRevision > 0 && UInt64(expectedRevision) == command.expectedRevision.rawValue &&
-            normalizedName == command.displayName &&
-            requestedAvatarMediaID?.uuidString == command.avatar?.mediaID.rawValue
+        case receipt, fingerprintVersion = "fingerprint_version", requestFingerprint = "request_fingerprint"
+        case outcomeKind = "outcome_kind", resultRevision = "result_revision"
     }
 }
 

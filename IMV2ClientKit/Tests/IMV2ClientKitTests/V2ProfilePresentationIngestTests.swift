@@ -5,6 +5,59 @@ import Testing
 
 @Suite("Profile HTTP and author delta ownership", .timeLimit(.minutes(1)))
 struct V2ProfilePresentationIngestTests {
+    @Test("alias durable floor fences cached and late HTTP without comparing public profile revision", arguments: [false, true])
+    func durableAliasFloor(lazy: Bool) async throws {
+        let floors = NicknameFloors(), f = Fixture(aliasRevisions: { await floors.read($0) })
+        let page = await f.repository.activate()
+        let initial = Task { try await f.repository.presentation(for: f.key, activation: page) }
+        try await f.reader.waitForCalls(1)
+        await f.reader.release(0, with: .success(try f.aliasBatch(1)))
+        #expect(try await initial.value?.contactAlias?.revision.rawValue == 1)
+        await floors.set(f.key, revision: 2)
+        if !lazy { try await f.repository.refreshAliasInvalidations() }
+        #expect(await f.repository.cachedSnapshot(for: f.key, activation: page) == nil)
+        await floors.set(f.key, revision: 1)
+        let old = Task { try await f.repository.presentation(for: f.key, activation: page) }
+        try await f.reader.waitForCalls(2)
+        await f.reader.release(1, with: .success(try f.aliasBatch(1)))
+        await #expect(throws: V2ProfilePresentationError.staleResponse) { _ = try await old.value }
+        let current = Task { try await f.repository.presentation(for: f.key, activation: page) }
+        try await f.reader.waitForCalls(3)
+        await f.reader.release(2, with: .success(try f.aliasBatch(2, name: nil)))
+        #expect(try await current.value?.contactAlias?.revision.rawValue == 2)
+        await f.repository.close()
+    }
+
+    @Test("alias floor blocks old early author candidates and allows same nonce to deliver a cleared revision")
+    func aliasAuthorFloor() async throws {
+        let floors = NicknameFloors(), f = Fixture(aliasRevisions: { await floors.read($0) })
+        await floors.set(f.key, revision: 2)
+        let page = await f.repository.activateVisiblePage()
+        let view = try await f.receiver.beginView(streamID: UUID(), roomID: f.room)
+        let binding = try await f.repository.bindAuthorView(view, activation: page)
+        try await f.repository.ingest(f.received(view: view, revision: 1, contactAlias: f.alias(1)), binding: binding)
+        #expect(await f.repository.diagnostics().bufferedAuthorEntries == 0)
+        try await f.repository.ingest(f.received(view: view, revision: 1, sequence: 2, contactAlias: f.alias(2, name: nil)), binding: binding)
+        _ = try await f.repository.retainVisibleInterest(for: f.key, activation: page)
+        #expect(try await f.repository.presentation(for: f.key, activation: page)?.contactAlias?.revision.rawValue == 2)
+        try await f.repository.ingest(f.received(view: view, revision: 1, sequence: 3, contactAlias: f.alias(2, name: "Conflicting same version")), binding: binding)
+        #expect(await f.repository.cachedPresentation(for: f.key, activation: page)?.contactAlias?.remarkName == nil)
+        #expect(await f.reader.calls == 0)
+        await f.repository.close()
+    }
+
+    @Test("an alias floor received while HTTP is pending rejects the old response")
+    func aliasFloorDuringHTTP() async throws {
+        let floors = NicknameFloors(), f = Fixture(aliasRevisions: { await floors.read($0) })
+        let page = await f.repository.activate()
+        let pending = Task { try await f.repository.presentation(for: f.key, activation: page) }
+        try await f.reader.waitForCalls(1)
+        await floors.set(f.key, revision: 2)
+        await f.reader.release(0, with: .success(try f.aliasBatch(1)))
+        await #expect(throws: V2ProfilePresentationError.staleResponse) { _ = try await pending.value }
+        await f.repository.close()
+    }
+
     @Test("a content-only nickname invalidation accepts the current version from the same author view")
     func nicknameInvalidationKeepsAuthorView() async throws {
         let floors = NicknameFloors(), f = Fixture(nicknameRevisions: { await floors.read($0) })
@@ -384,19 +437,20 @@ private struct Fixture: Sendable {
     let repository: V2ProfilePresentationRepository
     let receiver: V2AuthorPresentationReceiver
     var key: V2ProfileViewLookupKey { .init(userID: author, context: .room(room)) }
-    init(nicknameRevisions: (@Sendable (Set<V2ProfileViewLookupKey>) async throws -> [V2ProfileViewLookupKey: UInt64])? = nil) {
-        repository = .init(actorUserID: actor, deviceID: device, reader: reader, nicknameRevisions: nicknameRevisions)
+    init(nicknameRevisions: (@Sendable (Set<V2ProfileViewLookupKey>) async throws -> [V2ProfileViewLookupKey: UInt64])? = nil,
+         aliasRevisions: (@Sendable (Set<V2ProfileViewLookupKey>) async throws -> [V2ProfileViewLookupKey: UInt64])? = nil) {
+        repository = .init(actorUserID: actor, deviceID: device, reader: reader, nicknameRevisions: nicknameRevisions, aliasRevisions: aliasRevisions)
         receiver = .init(actorUserID: actor, deviceID: device)
     }
     func value(key: V2ProfileViewLookupKey, revision: UInt64, actor override: UserID? = nil, media: MediaID? = nil,
-               groupMember: V2GroupMemberPresentation? = nil, state: V2ProfileState = .active) throws -> V2AuthorizedProfilePresentation {
+               groupMember: V2GroupMemberPresentation? = nil, contactAlias: V2ContactAlias? = nil, state: V2ProfileState = .active) throws -> V2AuthorizedProfilePresentation {
         let rev = try #require(V2ProfileRevision(rawValue: revision))
         let view = try V2ProfileView(userID: key.userID,
             publicIdentity: state == .active ? .init(userID: key.userID, handle: .init("author"), displayName: "Name \(revision)", accountKind: .regular) : nil,
             avatar: state == .active ? media.map { .init(mediaID: $0) } : nil, state: state, revision: rev, visibilityRevision: rev)
         let lease = try V2PresentationAccessLease(actorUserID: override ?? actor, deviceID: device, key: key,
             profileRevision: rev, visibilityRevision: rev, contextRevision: revision, observedAt: date, validUntil: date.addingTimeInterval(120))
-        return try .init(view: view, lease: lease, groupMember: groupMember)
+        return try .init(view: view, lease: lease, groupMember: groupMember, contactAlias: contactAlias)
     }
     func batch(revision: UInt64, keys: [V2ProfileViewLookupKey]? = nil) throws -> V2ProfilePresentationBatch {
         .init(presentations: try Dictionary(uniqueKeysWithValues: (keys ?? [key]).map { ($0, try value(key: $0, revision: revision)) }), unavailable: [], serverNow: date)
@@ -406,11 +460,17 @@ private struct Fixture: Sendable {
                                                  revision: #require(.init(rawValue: revision)))
         return .init(presentations: [key: try value(key: key, revision: 1, groupMember: member)], unavailable: [], serverNow: date)
     }
+    func alias(_ revision: UInt64, name: String? = "Private name") throws -> V2ContactAlias {
+        try .init(ownerUserID: actor, targetUserID: author, remarkName: name, revision: #require(.init(rawValue: revision)))
+    }
+    func aliasBatch(_ revision: UInt64, name: String? = "Private name") throws -> V2ProfilePresentationBatch {
+        .init(presentations: [key: try value(key: key, revision: 1, contactAlias: alias(revision, name: name))], unavailable: [], serverNow: date)
+    }
     func received(view: V2AuthorPresentationView, revision: UInt64, sequence: UInt64 = 1,
-                  groupMember: V2GroupMemberPresentation? = nil, state: V2ProfileState = .active) async throws -> V2ReceivedAuthorPresentationDelta {
+                  groupMember: V2GroupMemberPresentation? = nil, contactAlias: V2ContactAlias? = nil, state: V2ProfileState = .active) async throws -> V2ReceivedAuthorPresentationDelta {
         let delta = try V2AuthorPresentationDelta(streamID: view.streamID, viewID: view.viewID, sequence: sequence,
             actorUserID: actor, deviceID: device, roomID: room,
-            batch: .init(serverNowUnixMilliseconds: 2_000_000_000_000, results: [.presentation(value(key: key, revision: revision, groupMember: groupMember, state: state), avatar: nil)]))
+            batch: .init(serverNowUnixMilliseconds: 2_000_000_000_000, results: [.presentation(value(key: key, revision: revision, groupMember: groupMember, contactAlias: contactAlias, state: state), avatar: nil)]))
         return try #require(await receiver.receive(delta.encoded(), for: view))
     }
 }

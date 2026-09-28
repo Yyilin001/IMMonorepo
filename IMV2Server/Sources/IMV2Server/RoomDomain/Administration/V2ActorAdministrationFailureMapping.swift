@@ -4,7 +4,9 @@ import IMV2Core
 extension V2ActorAdministrationFailureWire {
 /// 返回 nil 表示这不是 D2 业务或领域错误，应交由外层房间运行时分类。
     public init?(domainError error: any Error) {
-        if let value = error as? V2RoomMembershipStoreError {
+        if let value = error as? V2GroupInvitationServiceError {
+            self = .invitation(.init(domain:value))
+        } else if let value = error as? V2RoomMembershipStoreError {
             switch value {
             case .ownerChanged: self = .membership(.ownerChanged)
             case .roomNotFound: self = .membership(.roomNotFound)
@@ -89,6 +91,7 @@ extension V2ActorAdministrationFailureWire {
 
     public func domainError() throws -> any Error {
         switch self {
+        case .invitation(let value): return try value.toServiceError()
         case .membership(let value):
             switch value {
             case .ownerChanged: return V2RoomMembershipStoreError.ownerChanged

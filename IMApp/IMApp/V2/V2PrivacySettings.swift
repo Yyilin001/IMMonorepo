@@ -17,6 +17,9 @@ protocol V2ReadReceiptPreferenceReading: Sendable { func readReceiptPreference()
 @Observable
 final class V2UserBlockSettingsStore {
     private let resolver: any V2PublicIdentityResolving
+    private(set) var socialPending:[V2SocialOperationPending]=[]
+    private(set) var socialProposals:[V2SocialOperationProposal]=[]
+    var socialConfirmation:V2SocialConfirmationProposal?
     private let changer: any V2UserBlockChanging
     private let currentUserID: UserID
 
@@ -33,6 +36,33 @@ final class V2UserBlockSettingsStore {
         self.currentUserID = currentUserID
     }
 
+    func observeSocialProposals() async {
+        guard let manager=changer as? any V2SocialOperationManaging else { return }
+        do { for try await values in await manager.socialProposals() { guard !Task.isCancelled else {return};socialProposals=values } } catch is CancellationError {} catch {feedback="保存的联系人提案暂不可读。"}
+    }
+    func prepareSocialProposal(_ proposal:V2SocialOperationProposal) async {
+        guard let manager=changer as? any V2SocialOperationManaging else {return}
+        do { let baseline=try await manager.socialBaseline(target:proposal.targetUserID);socialConfirmation = .init(snapshot:baseline,action:proposal.action,proposalID:proposal.id) } catch {feedback="提案已保留，读取权威基线后才能确认。"}
+    }
+    func discardSocialProposal(_ id:UUID) async {
+        guard let manager=changer as? any V2SocialOperationManaging else {return}
+        do {try await manager.discardSocialProposal(id:id)} catch {feedback="无法取消提案。"}
+    }
+    func observeSocialOperations() async {
+        guard let manager=changer as? any V2SocialOperationManaging else { return }
+        do { for try await values in await manager.socialUpdates() { guard !Task.isCancelled else { return };socialPending=values.filter { $0.work.identity.kind == .userBlock } } }
+        catch is CancellationError {} catch { feedback="屏蔽操作状态暂时无法读取。" }
+    }
+    func confirmSocialOperation() async {
+        guard let proposal=socialConfirmation,let manager=changer as? any V2SocialOperationManaging else { return };socialConfirmation=nil
+        guard proposal.expiresAt > .now else { feedback="确认基线已过期，请重新读取后确认。";return }
+        do { if let id=proposal.proposalID {try await manager.confirmSocialProposal(id:id,snapshot:proposal.snapshot)} else {try await manager.enqueueSocial(action:proposal.action,snapshot:proposal.snapshot)};feedback="原屏蔽操作已保存，正在核对。" }
+        catch { feedback="无法保存屏蔽操作，请重新读取后确认。" }
+    }
+    func resumeSocialOperation(_ id:UUID) async {
+        guard let manager=changer as? any V2SocialOperationManaging else { return }
+        do { try await manager.resumeSocialConfirmation(workID:id) } catch { feedback="无法继续核对原屏蔽操作。" }
+    }
     func changeBlock(handle: String, action: V2UserBlockAction) async {
         guard !isChanging else { return }
         let trimmedHandle = handle.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -44,16 +74,22 @@ final class V2UserBlockSettingsStore {
         feedback = nil
         defer { isChanging = false }
         do {
-            let identity = try await resolver.resolve(handle: trimmedHandle)
+            let confirmationDeadline=ContinuousClock.now.advanced(by:.seconds(120))
+            let identity = try await V2HTTPRequestDeadline.run(until:min(confirmationDeadline,.now.advanced(by:.seconds(15))),service:"accountAPI") { try await self.resolver.resolve(handle:trimmedHandle) }
             try Task.checkCancellation()
             guard identity.userID != currentUserID else {
                 feedback = "不能屏蔽自己。"
                 return
             }
-            let outcome = try await changer.changeBlock(
-                targetUserID: identity.userID.rawValue,
-                action: action
-            )
+            if let manager=changer as? any V2SocialOperationManaging {
+                let id=try await manager.saveSocialProposal(action:.userBlock(action),target:identity.userID)
+                let baseline=try await manager.socialBaseline(target:identity.userID)
+                socialConfirmation = .init(snapshot:baseline,action:.userBlock(action),proposalID:id)
+                return
+            }
+            let outcome = try await V2HTTPRequestDeadline.$current.withValue(confirmationDeadline) {
+                try await self.changer.changeBlock(targetUserID:identity.userID.rawValue,action:action)
+            }
             try Task.checkCancellation()
             switch outcome {
             case .accepted:
@@ -83,7 +119,8 @@ actor V2GRDBStrangerMessagePreferenceDataSource: V2StrangerMessagePreferenceRead
     }
 
     func strangerMessagePreference() async throws -> Bool? {
-        try await localStore.strangerMessagePreference()?.allowsStrangerMessages
+        if let snapshot=try await localStore.cachedAccountPreference(kind:.strangerMessagePreference),case .strangerMessage(let permission)=snapshot.value { return permission == .allow }
+        return try await localStore.strangerMessagePreference()?.allowsStrangerMessages
     }
 }
 
@@ -93,13 +130,17 @@ actor V2GRDBUserAddPreferenceDataSource: V2UserAddPreferenceReading {
     init(localStore: GRDBV2LocalSyncStore) { self.localStore = localStore }
 
     func userAddPreference() async throws -> Bool? {
-        try await localStore.userAddPreference()?.allowsBeingAdded
+        if let snapshot=try await localStore.cachedAccountPreference(kind:.userAddPreference),case .userAdd(let permission)=snapshot.value {return permission == .allow}
+        return try await localStore.userAddPreference()?.allowsBeingAdded
     }
 }
 actor V2GRDBReadReceiptPreferenceDataSource: V2ReadReceiptPreferenceReading {
     private let localStore: GRDBV2LocalSyncStore
     init(localStore: GRDBV2LocalSyncStore) { self.localStore = localStore }
-    func readReceiptPreference() async throws -> V2ReadReceiptPreferences? { try await localStore.readReceiptPreference() }
+    func readReceiptPreference() async throws -> V2ReadReceiptPreferences? {
+        if let snapshot=try await localStore.cachedAccountPreference(kind:.readReceiptPreference),case .readReceipt(let direct,let group)=snapshot.value {return .init(allowsDirectReadReceipts:direct,allowsGroupReadReceipts:group,updatedAt:Date())}
+        return try await localStore.readReceiptPreference()
+    }
 }
 
 @MainActor
@@ -121,6 +162,7 @@ final class V2PrivacySettingsStore {
     private let liveActivityReader: (any V2LiveActivityPreferenceReading)?
     private let projectionChangeNotifier: V2ProjectionChangeNotifier?
     private(set) var state: State = .loading
+    private var hasLoadedPreferences = false
     private(set) var allowsStrangerMessages = true
     private(set) var allowsBeingAdded = true
     private(set) var allowsDirectReadReceipts = true
@@ -129,8 +171,104 @@ final class V2PrivacySettingsStore {
     private(set) var allowsTypingIndicators = true
     private(set) var isSaving = false
     private(set) var feedback: String?
+    private(set) var accountPreferenceDrafts:[V2AccountPreferenceDraft]=[]
+    private(set) var accountPreferencePending:[V2AccountPreferencePending]=[]
     private var refreshGeneration = 0
 
+    private struct ConfirmedPreferences {
+        var strangerMessages = true
+        var beingAdded = true
+        var directReadReceipts = true
+        var groupReadReceipts = true
+        var onlinePresence = true
+        var typingIndicators = true
+    }
+    private var confirmedPreferences = ConfirmedPreferences()
+    private var authoritySnapshots: [V2OperationKind: V2AccountPreferenceSnapshot] = [:]
+
+    private func loadCachedAuthority(_ service: V2AccountPreferenceService) async throws {
+        // Read the receipt-backed cache, not old command values: another device
+        // may already have published a newer revision of the same preference.
+        let kinds: [V2OperationKind] = [.strangerMessagePreference, .userAddPreference,
+                                       .readReceiptPreference, .liveActivityPreference]
+        var snapshots: [V2AccountPreferenceSnapshot] = []
+        for kind in kinds {
+            if let snapshot = try await service.cachedBaseline(kind: kind) { snapshots.append(snapshot) }
+        }
+        try Task.checkCancellation()
+        for snapshot in snapshots {
+            if let current = authoritySnapshots[snapshot.value.kind], current.revision > snapshot.revision { continue }
+            authoritySnapshots[snapshot.value.kind] = snapshot
+        }
+    }
+
+    private func applyPreferenceOverlay() {
+        allowsStrangerMessages = confirmedPreferences.strangerMessages
+        allowsBeingAdded = confirmedPreferences.beingAdded
+        allowsDirectReadReceipts = confirmedPreferences.directReadReceipts
+        allowsGroupReadReceipts = confirmedPreferences.groupReadReceipts
+        allowsOnlinePresence = confirmedPreferences.onlinePresence
+        allowsTypingIndicators = confirmedPreferences.typingIndicators
+        for snapshot in authoritySnapshots.values {
+            switch snapshot.value {
+            case .strangerMessage(let value): allowsStrangerMessages = value == .allow
+            case .userAdd(let value): allowsBeingAdded = value == .allow
+            case .readReceipt(let direct, let group): allowsDirectReadReceipts = direct; allowsGroupReadReceipts = group
+            case .liveActivity(let online, let typing): allowsOnlinePresence = online; allowsTypingIndicators = typing
+            }
+        }
+        var seen = Set<V2OperationKind>()
+        for item in accountPreferencePending.sorted(by: { $0.work.localSequence > $1.work.localSequence }) {
+            guard !item.work.execution.isTerminal, seen.insert(item.command.value.kind).inserted else { continue }
+            switch item.command.value {
+            case .strangerMessage(.deny): allowsStrangerMessages = false
+            case .userAdd(.deny): allowsBeingAdded = false
+            case .readReceipt(let direct, let group):
+                if !direct { allowsDirectReadReceipts = false }; if !group { allowsGroupReadReceipts = false }
+            case .liveActivity(let online, let typing):
+                if !online { allowsOnlinePresence = false }; if !typing { allowsTypingIndicators = false }
+            default: break
+            }
+        }
+        for draft in accountPreferenceDrafts {
+            switch draft.patch {
+            case .strangerMessage(.deny):allowsStrangerMessages=false
+            case .userAdd(.deny):allowsBeingAdded=false
+            case .readReceipt(let direct,let group):if direct==false {allowsDirectReadReceipts=false};if group==false {allowsGroupReadReceipts=false}
+            case .liveActivity(let online,let typing):if online==false {allowsOnlinePresence=false};if typing==false {allowsTypingIndicators=false}
+            default:break
+            }
+        }
+    }
+    func observeAccountPreferenceOperations() async {
+        guard let manager=updater as? any V2AccountPreferenceManaging else { return }
+        do {
+            for try await values in await manager.accountPreferenceService.updates() {
+                try Task.checkCancellation()
+                try await loadCachedAuthority(manager.accountPreferenceService)
+                accountPreferencePending = values
+                applyPreferenceOverlay()
+            }
+        }
+        catch is CancellationError {} catch { feedback="设置操作状态暂时无法读取，已保存的请求不会撤销。" }
+    }
+    func observeAccountPreferenceDrafts() async {
+        guard let manager=updater as? any V2AccountPreferenceManaging else { return }
+        do { for try await values in await manager.accountPreferenceService.draftUpdates() { guard !Task.isCancelled else { return };accountPreferenceDrafts=values;applyPreferenceOverlay() } }
+        catch is CancellationError {} catch { feedback="离线设置提案暂时无法读取。" }
+    }
+    func discardAccountPreferenceDraft(_ id:UUID) async {
+        guard let manager=updater as? any V2AccountPreferenceManaging else { return }
+        do { try await manager.accountPreferenceService.discardDraft(id:id) } catch { feedback="无法取消未提交的设置提案。" }
+    }
+    func reconfirmAccountPreferenceDraft(_ id:UUID) async {
+        guard let manager=updater as? any V2AccountPreferenceManaging else { return }
+        do { try await manager.accountPreferenceService.reconfirmDraft(id:id) } catch { feedback="无法重新确认设置提案。" }
+    }
+    func resumeAccountPreference(_ id:UUID) async {
+        guard let manager=updater as? any V2AccountPreferenceManaging else { return }
+        do { try await manager.accountPreferenceService.resumeConfirmation(workID:id) } catch { feedback="无法继续核对原设置操作。" }
+    }
     init(
         reader: any V2StrangerMessagePreferenceReading,
         updater: any V2StrangerMessagePreferenceUpdating,
@@ -156,7 +294,7 @@ final class V2PrivacySettingsStore {
     func refresh() async {
         refreshGeneration &+= 1
         let generation = refreshGeneration
-        state = .loading
+        if !hasLoadedPreferences { state = .loading }
         do {
             // The server defaults to allow. Absence only means this device has
             // not yet received a projection, not that the preference is deny.
@@ -172,18 +310,40 @@ final class V2PrivacySettingsStore {
             let liveActivityPreference = try await liveActivityReader?.preferences()
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
-            allowsStrangerMessages = refreshedPreference
-            allowsBeingAdded = refreshedUserAddPreference
-            allowsDirectReadReceipts = receiptPreference?.allowsDirectReadReceipts ?? true
-            allowsGroupReadReceipts = receiptPreference?.allowsGroupReadReceipts ?? true
-            allowsOnlinePresence = liveActivityPreference?.allowsOnlinePresence ?? true
-            allowsTypingIndicators = liveActivityPreference?.allowsTypingIndicators ?? true
+            if let manager = updater as? any V2AccountPreferenceManaging {
+                // Merge current local projection revisions before publishing or
+                // waiting for the network; an old in-memory receipt must not win.
+                try await loadCachedAuthority(manager.accountPreferenceService)
+                guard generation == refreshGeneration else { return }
+            }
+            confirmedPreferences = .init(
+                strangerMessages: refreshedPreference, beingAdded: refreshedUserAddPreference,
+                directReadReceipts: receiptPreference?.allowsDirectReadReceipts ?? true,
+                groupReadReceipts: receiptPreference?.allowsGroupReadReceipts ?? true,
+                onlinePresence: liveActivityPreference?.allowsOnlinePresence ?? true,
+                typingIndicators: liveActivityPreference?.allowsTypingIndicators ?? true)
+            hasLoadedPreferences = true
             state = .loaded
+            applyPreferenceOverlay()
+            // Publish local settings before waiting for an online authority refresh.
+            if let manager = updater as? any V2AccountPreferenceManaging {
+                await manager.accountPreferenceService.refreshAuthority()
+                try Task.checkCancellation()
+                guard generation == refreshGeneration else { return }
+                try await loadCachedAuthority(manager.accountPreferenceService)
+                guard generation == refreshGeneration else { return }
+                applyPreferenceOverlay()
+            }
         } catch is CancellationError {
             return
         } catch {
             guard !Task.isCancelled, generation == refreshGeneration else { return }
-            state = .failed
+            if hasLoadedPreferences {
+                state = .loaded
+                feedback = "无法刷新设置，保留上次读取的内容。"
+            } else {
+                state = .failed
+            }
         }
     }
 
@@ -209,10 +369,11 @@ final class V2PrivacySettingsStore {
             try Task.checkCancellation()
             switch outcome {
             case .accepted:
-                allowsStrangerMessages = desiredValue
+                confirmedPreferences.strangerMessages = desiredValue
+                applyPreferenceOverlay()
                 feedback = "已更新消息接收设置。"
             case .queuedForRetry:
-                allowsStrangerMessages = desiredValue
+                if !desiredValue { allowsStrangerMessages = false }
                 feedback = "设置已安全保存，连接恢复后会同步。"
             case .rejected(let code):
                 feedback = "设置被拒绝（\(code)）。"
@@ -234,10 +395,11 @@ final class V2PrivacySettingsStore {
             try Task.checkCancellation()
             switch outcome {
             case .accepted:
-                allowsBeingAdded = desiredValue
+                confirmedPreferences.beingAdded = desiredValue
+                applyPreferenceOverlay()
                 feedback = "已更新添加权限。"
             case .queuedForRetry:
-                allowsBeingAdded = desiredValue
+                if !desiredValue { allowsBeingAdded = false }
                 feedback = "设置已安全保存，连接恢复后会同步。"
             case .rejected:
                 feedback = "无法保存设置，请稍后重试。"
@@ -255,12 +417,19 @@ final class V2PrivacySettingsStore {
         guard !isSaving, (desiredDirect != allowsDirectReadReceipts || desiredGroup != allowsGroupReadReceipts), let readReceiptUpdater else { return }
         isSaving = true; feedback = nil; defer { isSaving = false }
         do {
-            switch try await readReceiptUpdater.update(allowsDirectReadReceipts: desiredDirect, allowsGroupReadReceipts: desiredGroup) {
+            let outcome:V2ReadReceiptPreferenceUpdateOutcome
+            if let manager=readReceiptUpdater as? any V2AccountPreferenceManaging {
+                _ = try await manager.accountPreferenceService.enqueue(patch:.readReceipt(direct:direct,group:group));outcome = .queuedForRetry
+            } else { outcome=try await readReceiptUpdater.update(allowsDirectReadReceipts:desiredDirect,allowsGroupReadReceipts:desiredGroup) }
+            try Task.checkCancellation()
+            switch outcome {
             case .accepted:
-                allowsDirectReadReceipts = desiredDirect; allowsGroupReadReceipts = desiredGroup
+                confirmedPreferences.directReadReceipts = desiredDirect
+                confirmedPreferences.groupReadReceipts = desiredGroup
+                applyPreferenceOverlay()
                 feedback = "已更新已读回执设置。"
             case .queuedForRetry:
-                allowsDirectReadReceipts = desiredDirect; allowsGroupReadReceipts = desiredGroup
+                if !desiredDirect { allowsDirectReadReceipts=false };if !desiredGroup { allowsGroupReadReceipts=false }
                 feedback = "已保存已读回执设置，连接恢复后会同步。"
             case .rejected:
                 feedback = "无法保存设置，请稍后重试。"
@@ -281,19 +450,23 @@ final class V2PrivacySettingsStore {
         feedback = nil
         defer { isSaving = false }
         do {
-            let outcome = try await liveActivityUpdater.update(
-                allowsOnlinePresence: desiredOnline,
-                allowsTypingIndicators: desiredTyping
-            )
+            let outcome:V2LiveActivityPreferenceUpdateOutcome
+            if let manager=liveActivityUpdater as? any V2AccountPreferenceManaging {
+                _ = try await manager.accountPreferenceService.enqueue(patch:.liveActivity(online:online,typing:typing));outcome = .queuedForRetry
+            } else { outcome=try await liveActivityUpdater.update(allowsOnlinePresence:desiredOnline,allowsTypingIndicators:desiredTyping) }
             // A view can be dismissed while the authenticated update is in
             // flight. Do not let a late response overwrite fresher projected
             // settings or a new editing intent after its task was cancelled.
             try Task.checkCancellation()
             switch outcome {
             case .accepted:
-                allowsOnlinePresence = desiredOnline
-                allowsTypingIndicators = desiredTyping
+                confirmedPreferences.onlinePresence = desiredOnline
+                confirmedPreferences.typingIndicators = desiredTyping
+                applyPreferenceOverlay()
                 feedback = "已更新在线与输入状态设置。"
+            case .queuedForRetry:
+                if !desiredOnline { allowsOnlinePresence=false };if !desiredTyping { allowsTypingIndicators=false }
+                feedback = "在线与输入状态设置已保存，正在核对原操作。"
             case .rejected(let code):
                 feedback = "设置被拒绝（\(code)）。"
             }
@@ -388,6 +561,12 @@ struct V2PrivacySettingsView: View {
             }
         }
         .navigationTitle("消息接收设置")
+        .safeAreaInset(edge:.bottom) { VStack { ForEach(store.accountPreferenceDrafts,id:\.id) { draft in HStack { Text(draft.patch.confirmationDescription + (draft.paused ? "；等待重新确认。" : "；已保存，正在准备原版本。"))
+                    if draft.paused { Button("重新确认") { Task {await store.reconfirmAccountPreferenceDraft(draft.id)} } }
+                    Button("取消提案") { Task {await store.discardAccountPreferenceDraft(draft.id)} } } }
+                V2AccountPreferencePendingView(pending:store.accountPreferencePending) { id in await store.resumeAccountPreference(id) } } }
+        .task { await store.observeAccountPreferenceDrafts() }
+        .task { await store.observeAccountPreferenceOperations() }
         .task { await store.refresh() }
         .task { await store.observeProjectionChanges() }
         .onDisappear { preferenceTask?.cancel() }
@@ -469,6 +648,11 @@ private struct V2UserBlockSettingsSection: View {
                     .accessibilityIdentifier("v2.privacy.block.feedback")
             }
         }
+        .confirmationDialog("确认屏蔽设置",isPresented:Binding(get:{store.socialConfirmation != nil},set:{if !$0 {store.socialConfirmation=nil}})) { Button("确认保存原操作") { Task {await store.confirmSocialOperation()} } } message: { Text(store.socialConfirmation?.description ?? "") }
+        .task { await store.observeSocialProposals() }
+            .task { await store.observeSocialOperations() }
+        .overlay(alignment:.bottom) { VStack { V2SocialProposalList(proposals:store.socialProposals,prepare:{await store.prepareSocialProposal($0)},discard:{await store.discardSocialProposal($0)})
+                V2SocialPendingStatusView(pending:store.socialPending) { id in await store.resumeSocialOperation(id) } } }
         .onDisappear { changeTask?.cancel() }
     }
 

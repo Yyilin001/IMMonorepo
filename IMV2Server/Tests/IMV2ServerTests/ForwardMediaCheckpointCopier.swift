@@ -3,7 +3,7 @@
 /// Runs a controlled database/provider interleaving inside the real worker's
 /// outstanding copy call. Byte I/O still uses the actual local copier.
 struct ForwardMediaCheckpointCopier: V2ForwardMediaObjectCopying {
-    let base: V2LocalFilesystemForwardMediaCopier
+    let base: any V2ForwardMediaObjectCopying
     let beforeCopy: Bool
     let checkpoint: @Sendable (V2ForwardMediaImportLease) async throws -> Void
 

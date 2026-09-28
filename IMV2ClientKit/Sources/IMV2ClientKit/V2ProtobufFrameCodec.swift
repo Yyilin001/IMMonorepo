@@ -210,15 +210,10 @@ public enum V2ProtobufFrameCodec {
         case .authenticated?: return .authenticated
         case .heartbeat?: return .heartbeat
         case .heartbeatAck?: return .heartbeatAck
-        case .sendMessage?: return .sendMessage
         case .messageAccepted?: return .messageAccepted
-        case .changeRoomMembership?: return .changeRoomMembership
         case .membershipChanged?: return .membershipChanged
-        case .withdrawMessage?: return .withdrawMessage
         case .messageWithdrawn?: return .messageWithdrawn
-        case .changeMessageReaction?: return .changeMessageReaction
         case .messageReactionChanged?: return .messageReactionChanged
-        case .editMessage?: return .editMessage
         case .messageEdited?: return .messageEdited
         case .syncPull?: return .syncPull
         case .syncBatch?: return .syncBatch
@@ -233,9 +228,6 @@ public enum V2ProtobufFrameCodec {
         case .syncAvailable?: return .syncAvailable
         case .recordReadReceipt?: return .recordReadReceipt
         case .readReceiptRecorded?: return .readReceiptRecorded
-        case .openDirectRoom?: return .openDirectRoom
-        case .directRoomOpened?: return .directRoomOpened
-        case .groupRoomCreated?: return .groupRoomCreated
         case .listRoomMembers?: return .listRoomMembers
         case .roomMembersPage?: return .roomMembersPage
         case .userRoomDirectoryList?: return .userRoomDirectoryList
@@ -251,6 +243,7 @@ public enum V2ProtobufFrameCodec {
         case .authorPresentationDelta?: return .authorPresentationDelta
         case .authorPresentationEnd?: return .authorPresentationEnd
         case .authorPresentationEnded?: return .authorPresentationEnded
+        case .personalPreferenceReceipt?: return .personalPreferenceReceipt
 
         case .groupEventPull?: return .groupEventPull
         case .groupEventPage?: return .groupEventPage
@@ -258,22 +251,11 @@ public enum V2ProtobufFrameCodec {
         case .groupEventSubscribed?: return .groupEventSubscribed
         case .groupEventUnsubscribe?: return .groupEventUnsubscribe
         case .groupEventAvailable?: return .groupEventAvailable
-        case .beginGroupRoomCreation?: return .beginGroupRoomCreation
-        case .groupRoomCreationPrepared?: return .groupRoomCreationPrepared
-        case .appendGroupRoomCreationMembers?: return .appendGroupRoomCreationMembers
-        case .groupRoomCreationMembersAppended?: return .groupRoomCreationMembersAppended
-        case .finalizeGroupRoomCreation?: return .finalizeGroupRoomCreation
-        case .cancelGroupRoomCreation?: return .cancelGroupRoomCreation
-        case .groupRoomCreationCancelled?: return .groupRoomCreationCancelled
-        case .setStrangerMessagePermission?: return .setStrangerMessagePermission
         case .strangerMessagePermissionSet?: return .strangerMessagePermissionSet
-        case .setUserAddPermission?: return .setUserAddPermission
         case .userAddPermissionSet?: return .userAddPermissionSet
-        case .setReadReceiptPreferences?: return .setReadReceiptPreferences
         case .readReceiptPreferencesSet?: return .readReceiptPreferencesSet
         case .listReadReceiptReaders?: return .listReadReceiptReaders
         case .readReceiptReadersPage?: return .readReceiptReadersPage
-        case .setLiveActivityPreferences?: return .setLiveActivityPreferences
         case .liveActivityPreferencesSet?: return .liveActivityPreferencesSet
         case .subscribePresence?: return .subscribePresence
         case .presenceSubscribed?: return .presenceSubscribed
@@ -283,33 +265,23 @@ public enum V2ProtobufFrameCodec {
         case .setTypingState?: return .setTypingState
         case .typingStateChanged?: return .typingStateChanged
         case .presenceChanged?: return .presenceChanged
+        case .presencePublicationControl?: return .presencePublicationControl
+        case .presencePublicationControlled?: return .presencePublicationControlled
         case .getLiveActivityPreferences?: return .getLiveActivityPreferences
         case .liveActivityPreferences?: return .liveActivityPreferences
         case .setConversationState?: return .setConversationState
         case .conversationStateSet?: return .conversationStateSet
         case .setMessageFavorite?: return .setMessageFavorite
         case .messageFavoriteChanged?: return .messageFavoriteChanged
-        case .setPinnedMessage?: return .setPinnedMessage
         case .pinnedMessageChanged?: return .pinnedMessageChanged
-        case .setGroupAnnouncement?: return .setGroupAnnouncement
         case .groupAnnouncementChanged?: return .groupAnnouncementChanged
-        case .setGroupRolePermissions?: return .setGroupRolePermissions
         case .groupRolePermissionsChanged?: return .groupRolePermissionsChanged
-        case .changeGroupMemberRole?: return .changeGroupMemberRole
         case .groupMemberRoleChanged?: return .groupMemberRoleChanged
-        case .forwardMessages?: return .forwardMessages
-        case .messagesForwarded?: return .messagesForwarded
         case .getGroupRolePolicyBaseline?: return .getGroupRolePolicyBaseline
         case .groupRolePolicyBaseline?: return .groupRolePolicyBaseline
-        case .changeRelationship?: return .changeRelationship
         case .relationshipChanged?: return .relationshipChanged
-        case .changeUserBlock?: return .changeUserBlock
         case .userBlockChanged?: return .userBlockChanged
-        case .moderateMessage?: return .moderateMessage
-        case .messageRedacted?: return .messageRedacted
-        case .muteMember?: return .muteMember
         case .memberMuted?: return .memberMuted
-        case .moderateMemberRemoval?: return .moderateMemberRemoval
         case .memberRemovedByModerator?: return .memberRemovedByModerator
         case .error?: return .error
         case nil: throw V2ProtobufFrameCodecError.missingEnvelopeBody

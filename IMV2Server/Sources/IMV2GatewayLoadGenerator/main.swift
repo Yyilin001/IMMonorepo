@@ -9,6 +9,7 @@ import Foundation
 import IMV2Compression
 import IMV2Core
 import IMV2Server
+import IMV2ToolHTTP
 @preconcurrency import NIOConcurrencyHelpers
 @preconcurrency import NIOCore
 @preconcurrency import NIOPosix
@@ -96,7 +97,6 @@ private func loadResponseKind(_ body: IMV2Envelope.OneOf_Body?) -> String {
     case .authenticated: "authenticated"
     case .heartbeatAck: "heartbeat_ack"
     case .messageAccepted: "message_accepted"
-    case .directRoomOpened: "direct_room_opened"
     case .groupEventPage: "group_event_page"
     case .groupEventSubscribed: "group_event_subscribed"
     case .groupEventAvailable: "group_event_available"
@@ -114,6 +114,7 @@ private struct LoadConfiguration: Sendable {
     let port: Int
     let revision: String
     let serverName: String
+    let accountBaseURL:URL
     let caPath: String
     let credentialsPath: String
     let reportPath: String
@@ -140,6 +141,14 @@ private struct LoadConfiguration: Sendable {
     let maximumFailurePercent: Double
     let scenario: LoadScenario?
     let scenarioRateScale: Double
+    let recoveryBurst: Bool
+    let recoveryBurstWorkers: Int
+    let recoveryBurstMaximumAttempts: Int
+    let recoveryBurstObserveSeconds: Int
+    let recoveryBurstOfflineSeconds: Int
+    let recoveryBurstOfflineMessagesPerRoom: Int
+    let recoveryBurstOfflineWriteWorkers: Int
+    let recoveryBurstOfflineWriteDeadlineSeconds: Int
 
     var scenarioSendDispatch: ScenarioSendDispatch {
         scenario?.sendDispatch ?? .strictPerDevice
@@ -168,6 +177,8 @@ private struct LoadConfiguration: Sendable {
         self.host = host
         revision = values["--revision"] ?? "unknown"
         serverName = values["--server-name"] ?? "localhost"
+        guard let accountBaseURL=URL(string:values["--account-base-url"] ?? "https://localhost:8443") else { throw LoadError.invalidCredentialFile }
+        self.accountBaseURL=accountBaseURL
         self.caPath = caPath
         self.credentialsPath = credentialsPath
         self.reportPath = reportPath
@@ -254,6 +265,19 @@ private struct LoadConfiguration: Sendable {
               scenarioRateScale > 0, scenarioRateScale <= 1
         else { throw LoadError.invalidArguments }
         self.scenarioRateScale = scenarioRateScale
+        recoveryBurst = try Self.integer(values["--recovery-burst"] ?? "0", range: 0...1) == 1
+        recoveryBurstWorkers = try Self.integer(values["--recovery-burst-workers"] ?? "128", range: 1...connections)
+        recoveryBurstMaximumAttempts = try Self.integer(values["--recovery-burst-max-attempts"] ?? "1", range: 1...3)
+        recoveryBurstOfflineSeconds = try Self.integer(values["--recovery-burst-offline-seconds"] ?? "0", range: 0...300)
+        recoveryBurstOfflineMessagesPerRoom = try Self.integer(values["--recovery-burst-offline-messages-per-room"] ?? "0", range: 0...16)
+        recoveryBurstOfflineWriteWorkers = try Self.integer(values["--recovery-burst-offline-write-workers"] ?? "8", range: 1...32)
+        recoveryBurstOfflineWriteDeadlineSeconds = try Self.integer(values["--recovery-burst-offline-write-deadline-seconds"] ?? "60", range: 1...300)
+        guard recoveryBurst || recoveryBurstOfflineMessagesPerRoom == 0 else { throw LoadError.invalidArguments }
+        recoveryBurstObserveSeconds = try Self.integer(values["--recovery-burst-observe-seconds"] ?? "60", range: 1...300)
+        guard !recoveryBurst || (scenario != nil && roomLogReads &&
+            scenario!.phases.allSatisfy { $0.reconnectPercentPerMinute == 0 }) else {
+            throw LoadError.invalidArguments
+        }
         guard (messagesPerSecond == 0 && scenario == nil)
                   || targetOffset + targetsPerConnection - 1 < connections else {
             throw LoadError.invalidArguments
@@ -741,7 +765,228 @@ private final class LoadStatistics: @unchecked Sendable {
     }
 }
 
-private struct LoadRun {
+/// All bounded workers register before any connection attempt is released.
+private actor RecoveryBurstBarrier {
+    private let workers: Int
+    private var waiting: [CheckedContinuation<NIODeadline, Never>] = []
+    private var released: NIODeadline?
+    private var releasedAt: Date?
+    init(workers: Int) { self.workers = workers }
+    func arrive() async -> NIODeadline {
+        await withCheckedContinuation { continuation in
+            waiting.append(continuation)
+            if waiting.count == workers {
+                let start = NIODeadline.now()
+                released = start
+                releasedAt = Date()
+                let pending = waiting
+                waiting.removeAll()
+                for waiter in pending { waiter.resume(returning: start) }
+            }
+        }
+    }
+    func origin() -> NIODeadline { released! }
+    func wallTime() -> Date { releasedAt! }
+}
+
+/// Cancellation owns the actual socket even while authentication is pending.
+private final class RecoveryBurstAttempt: @unchecked Sendable {
+    private let lock = NIOLock()
+    private var channel: Channel?
+    private var cancelled = false
+    func install(_ channel: Channel) {
+        let shouldClose = lock.withLock { self.channel = channel; return cancelled }
+        if shouldClose { channel.close(promise: nil) }
+    }
+    func cancel() {
+        let current = lock.withLock { cancelled = true; return channel }
+        current?.close(promise: nil)
+    }
+}
+
+private struct OfflineWriteReceipt: Encodable, Sendable {
+    let roomID: String
+    let roomSequence: UInt64
+}
+private struct OfflineRoomWrite: Sendable {
+    let credential: LoadCredential
+    let commands: [V2MessageSendOperationCommand]
+}
+private struct OfflineWriteResult: Sendable {
+    let receipts: [OfflineWriteReceipt]
+    let failed: Int
+}
+private struct RecoveryCursorProgress: Encodable, Sendable {
+    let connectionIndex: Int
+    let roomID: String
+    let beforeSequence: UInt64
+    let appliedSequence: UInt64?
+    let recoveryTarget: UInt64?
+    let injectedThrough: UInt64?
+    let remainingGap: UInt64?
+}
+
+private struct RecoveryBurstReport: Encodable {
+    let offlineInjectedRooms: Int
+    let offlineWritesRequested: Int
+    let offlineWritesAccepted: Int
+    let offlineWritesFailed: Int
+    let offlineWriteReceipts: [OfflineWriteReceipt]
+    let cursorProgress: [RecoveryCursorProgress]
+    let requestedConnections: Int
+    let barrierReleasedAt: Date
+    let workers: Int
+    let maximumAttemptsPerConnection: Int
+    let observationSeconds: Int
+    let actualObservationMilliseconds: Double
+    let offlineSeconds: Int
+    let startedConnections: Int
+    let connectAuthenticated: Int
+    let connectUnsuccessful: Int
+    let attempts: Int
+    let failedAttempts: Int
+    let attemptAmplification: Double
+    /// Raw bounded per-connection offsets preserve distribution above the histogram's 10s bound.
+    let firstAttemptStartMilliseconds: [Double?]
+    let allAttemptStartMilliseconds: [[Double]]
+    let expectedCursorRooms: Int
+    let observedTargetRooms: Int
+    let roomsWithCursorBacklog: Int
+    let cursorTargetCompletedRooms: Int
+    let cursorTargetUncompletedOrUnknownRooms: Int
+    let syncPullRequests: Int
+    let roomEventPullRequests: Int
+    let roomEventRetryableRejections: Int
+    let roomSyncStateBatch: RecoveryBatchReport
+    let roomLatestVisibleBatch: RecoveryBatchReport
+}
+
+private final class RecoveryBurstSamples: @unchecked Sendable {
+    private let lock = NIOLock()
+    private var next = 0
+    private var starts: [[Double]]
+    private var successes: Set<Int> = []
+    private var failures = 0
+    init(count: Int) { starts = Array(repeating: [], count: count) }
+    func take() -> Int? {
+        lock.withLock {
+            guard next < starts.count else { return nil }
+            defer { next += 1 }
+            return next
+        }
+    }
+    func started(index: Int, offset: Int64) {
+        lock.withLock { starts[index].append(Double(max(0, offset)) / 1_000_000) }
+    }
+    func succeeded(index: Int) { lock.withLock { _ = successes.insert(index) } }
+    func failedAttempt() { lock.withLock { failures += 1 } }
+    func report(workers: Int, barrierReleasedAt: Date, maximumAttempts: Int, observationSeconds: Int, actualObservationMilliseconds: Double, offlineSeconds: Int,
+                before: LoadStatistics.State, after: LoadStatistics.State,
+                expectedRooms: Int, observedRooms: Int, backlogRooms: Int, completedRooms: Int,
+                offlineRequested: Int, offlineResult: OfflineWriteResult, cursorProgress: [RecoveryCursorProgress]) -> RecoveryBurstReport {
+        lock.withLock {
+            let attempts = starts.reduce(0) { $0 + $1.count }
+            return .init(offlineInjectedRooms: Set(offlineResult.receipts.map(\.roomID)).count,
+                offlineWritesRequested: offlineRequested, offlineWritesAccepted: offlineResult.receipts.count,
+                offlineWritesFailed: offlineResult.failed, offlineWriteReceipts: offlineResult.receipts,
+                cursorProgress: cursorProgress, requestedConnections: starts.count, barrierReleasedAt: barrierReleasedAt, workers: workers,
+                maximumAttemptsPerConnection: maximumAttempts, observationSeconds: observationSeconds, actualObservationMilliseconds: actualObservationMilliseconds, offlineSeconds: offlineSeconds,
+                startedConnections: starts.filter { !$0.isEmpty }.count,
+                connectAuthenticated: successes.count, connectUnsuccessful: starts.count - successes.count,
+                attempts: attempts, failedAttempts: failures,
+                attemptAmplification: Double(attempts) / Double(starts.count),
+                firstAttemptStartMilliseconds: starts.map(\.first), allAttemptStartMilliseconds: starts,
+                expectedCursorRooms: expectedRooms, observedTargetRooms: observedRooms, roomsWithCursorBacklog: backlogRooms,
+                cursorTargetCompletedRooms: completedRooms,
+                cursorTargetUncompletedOrUnknownRooms: expectedRooms - completedRooms,
+                syncPullRequests: after.syncPullsSent - before.syncPullsSent,
+                roomEventPullRequests: after.roomEventPullsSent - before.roomEventPullsSent,
+                roomEventRetryableRejections: after.roomEventPullRetryableRejections - before.roomEventPullRetryableRejections,
+                roomSyncStateBatch: .init(start: before.roomSyncStateBatch, end: after.roomSyncStateBatch),
+                roomLatestVisibleBatch: .init(start: before.roomLatestVisibleBatch, end: after.roomLatestVisibleBatch))
+        }
+    }
+}
+
+/// The TCP ramp stays independent of account HTTP control work. Keep only a
+/// fixed number of HTTPS operations active while retaining frozen operations
+/// for the bounded number of planned room opens.
+private final class DirectRoomHTTPTaskOwner: @unchecked Sendable {
+    static let configuredMaximumConcurrent = 32
+    static let configuredMaximumQueued = 10_000
+    private struct Work: Sendable {
+        let id: UUID
+        let operation: @Sendable () async -> Void
+    }
+    private struct State {
+        var closing = false
+        var pending: [Work] = []
+        var active: [UUID: Task<Void, Never>] = [:]
+    }
+    private let lock = NIOLock()
+    private var state = State()
+    private let maximumConcurrent: Int
+    private let maximumQueued: Int
+
+    init(maximumConcurrent: Int, maximumQueued: Int) {
+        precondition(maximumConcurrent > 0 && maximumQueued > 0)
+        self.maximumConcurrent = maximumConcurrent
+        self.maximumQueued = maximumQueued
+    }
+
+    @discardableResult
+    func start(id: UUID, operation: @escaping @Sendable () async -> Void) -> Bool {
+        lock.withLock {
+            guard !state.closing, state.pending.count < maximumQueued,
+                  state.active[id] == nil, !state.pending.contains(where: { $0.id == id })
+            else { return false }
+            state.pending.append(.init(id: id, operation: operation))
+            startPendingLocked()
+            return true
+        }
+    }
+
+    private func startPendingLocked() {
+        while !state.closing, state.active.count < maximumConcurrent, !state.pending.isEmpty {
+            let work = state.pending.removeFirst()
+            state.active[work.id] = Task {
+                await work.operation()
+                self.finished(id: work.id)
+            }
+        }
+    }
+
+    private func finished(id: UUID) {
+        lock.withLock {
+            state.active.removeValue(forKey: id)
+            startPendingLocked()
+        }
+    }
+
+    func cancel(id: UUID) {
+        lock.withLock {
+            state.pending.removeAll(where: { $0.id == id })
+            state.active[id]?.cancel()
+        }
+    }
+
+    func closeAndDrain() async {
+        let tasks = lock.withLock { () -> [Task<Void, Never>] in
+            state.closing = true
+            state.pending.removeAll()
+            let tasks = Array(state.active.values)
+            for task in tasks { task.cancel() }
+            return tasks
+        }
+        for task in tasks { await task.value }
+    }
+}
+
+private struct LoadRun: Sendable {
+    let sendTasks = V2ToolHTTPSendTaskOwner()
+    let directRoomTasks = DirectRoomHTTPTaskOwner(
+        maximumConcurrent: DirectRoomHTTPTaskOwner.configuredMaximumConcurrent,
+        maximumQueued: DirectRoomHTTPTaskOwner.configuredMaximumQueued)
     let configuration: LoadConfiguration
     let credentials: [LoadCredential]
 
@@ -761,6 +1006,7 @@ private struct LoadRun {
         var terminalError: Error?
         var scenarioPhases: [ScenarioPhaseReport] = []
         var scenarioDrain: ScenarioDrainReport?
+        var recoveryBurstReport: RecoveryBurstReport?
 
         do {
             var offset = 0
@@ -817,6 +1063,23 @@ private struct LoadRun {
             }
             if let scenario = configuration.scenario {
                 try await waitForRoomWarmup(scenario: scenario, statistics: statistics)
+                if configuration.recoveryBurst {
+                    recoveryBurstReport = try await runRecoveryBurst(slots: slots, group: group,
+                        sslContext: sslContext, statistics: statistics)
+                    guard let burst = recoveryBurstReport,
+                          burst.connectAuthenticated == burst.requestedConnections,
+                          burst.cursorTargetUncompletedOrUnknownRooms == 0,
+                          burst.offlineWritesFailed == 0, burst.offlineWritesAccepted == burst.offlineWritesRequested else { throw LoadError.unexpectedResponse }
+                    if configuration.recoveryBurstOfflineMessagesPerRoom > 0 {
+                        guard burst.cursorProgress.count == burst.expectedCursorRooms,
+                              burst.cursorProgress.allSatisfy({ cursor in
+                                  guard let injected = cursor.injectedThrough,
+                                        let target = cursor.recoveryTarget,
+                                        let applied = cursor.appliedSequence else { return false }
+                                  return cursor.beforeSequence < injected && injected <= target && target <= applied && cursor.remainingGap == 0
+                              }) else { throw LoadError.unexpectedResponse }
+                    }
+                }
                 try await runScenario(
                     scenario,
                     slots: slots,
@@ -874,10 +1137,12 @@ private struct LoadRun {
         scenarioPhases = scenarioPhaseReports.snapshot()
         let roomCursorSnapshots = await snapshotRoomCursors(channels: slots.compactMap(\.channel))
         await close(channels: slots.compactMap(\.channel))
+        await sendTasks.closeAndDrain()
+        await directRoomTasks.closeAndDrain()
         eventLoopLagMetrics.stop()
         let eventLoopLag = eventLoopLagMetrics.snapshot()
         try await group.shutdownGracefully()
-        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), eventLoopLag: eventLoopLag, scenarioPhases: scenarioPhases, scenarioDrain: scenarioDrain, terminalError: terminalError, roomCursorSnapshots: roomCursorSnapshots)
+        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), eventLoopLag: eventLoopLag, scenarioPhases: scenarioPhases, scenarioDrain: scenarioDrain, terminalError: terminalError, roomCursorSnapshots: roomCursorSnapshots, recoveryBurst: recoveryBurstReport)
         if let terminalError {
             let data = try JSONEncoder.loadReport.encode(report)
             try data.write(to: URL(fileURLWithPath: configuration.reportPath), options: .atomic)
@@ -892,23 +1157,31 @@ private struct LoadRun {
         connectionIndex: Int,
         group: MultiThreadedEventLoopGroup,
         sslContext: NIOSSLContext,
-        statistics: LoadStatistics
+        statistics: LoadStatistics,
+        restoredCursors: [String: UInt64]? = nil,
+        deadline: NIODeadline? = nil,
+        attempt: RecoveryBurstAttempt? = nil
     ) -> EventLoopFuture<Channel> {
         statistics.recordAttempt()
         let eventLoop = group.next()
         let authenticated = eventLoop.makePromise(of: Void.self)
         let started = NIODeadline.now()
         let connection = ClientBootstrap(group: eventLoop)
-            .connectTimeout(.seconds(10))
+            .connectTimeout(deadline.map { .nanoseconds(max(1, min(10_000_000_000, ($0 - .now()).nanoseconds))) } ?? .seconds(10))
             .channelOption(ChannelOptions.tcpOption(.tcp_nodelay), value: 1)
             .channelInitializer { channel in
-                channel.eventLoop.makeCompletedFuture {
+                attempt?.install(channel)
+                return channel.eventLoop.makeCompletedFuture {
                     try channel.pipeline.syncOperations.addHandler(
                         NIOSSLClientHandler(context: sslContext, serverHostname: configuration.serverName)
                     )
                     try channel.pipeline.syncOperations.addHandler(
                         LoadConnectionHandler(
                             credential: credential,
+                            accountBaseURL:configuration.accountBaseURL,
+                            sendTasks: sendTasks,
+                            directRoomTasks: directRoomTasks,
+                            caPath:configuration.caPath,
                             targetUserIDs: targetUserIDs,
                             connectionIndex: connectionIndex,
                             heartbeatSeconds: configuration.heartbeatSeconds,
@@ -927,7 +1200,7 @@ private struct LoadRun {
                                 configuration.roomLogRecoveryGraceMilliseconds,
                             started: started,
                             authenticated: authenticated,
-                            statistics: statistics
+                            statistics: statistics, restoredCursors: restoredCursors
                         )
                     )
                 }
@@ -938,7 +1211,20 @@ private struct LoadRun {
         // authentication promise. Resolve that otherwise-unowned branch so a
         // failed ramp can shut its EventLoopGroup down without leaking promises.
         connection.cascadeFailure(to: authenticated)
-        return connection.flatMap { channel in authenticated.futureResult.map { channel } }
+        guard deadline != nil else {
+            return connection.flatMap { channel in authenticated.futureResult.map { channel } }
+        }
+        return connection.flatMap { channel in
+            attempt?.install(channel)
+            let timeout = deadline.map { end in
+                channel.eventLoop.scheduleTask(deadline: end) {
+                    channel.close(promise: nil)
+                }
+            }
+            return authenticated.futureResult.map { channel }.flatMapError { error in
+                channel.close().flatMapError { _ in channel.eventLoop.makeSucceededFuture(()) }.flatMapThrowing { throw error }
+            }.always { _ in timeout?.cancel() }
+        }
     }
 
     private func enforceGuards(statistics: LoadStatistics) throws {
@@ -1173,8 +1459,8 @@ private struct LoadRun {
         if configuration.scenario != nil {
             // Scenario peers are symmetric: a passive recipient has the same
             // room ID in its local set and can therefore perform a real room
-            // log pull for traffic sent by its neighbour.  The legacy fixed
-            // workload remains forward-only for backwards-compatible baselines.
+            // log pull for traffic sent by its neighbour. Fixed-rate workloads
+            // use the configured forward target offset instead.
             let offsets = (1...configuration.targetsPerConnection).map { ordinal -> Int in
                 let magnitude = (ordinal + 1) / 2
                 return ordinal.isMultiple(of: 2) ? -magnitude : magnitude
@@ -1186,6 +1472,181 @@ private struct LoadRun {
         return (configuration.targetOffset..<(configuration.targetOffset + configuration.targetsPerConnection)).map {
             credentials[(connectionIndex + $0) % credentials.count].userID
         }
+    }
+
+    /// One opt-in outage. Worker availability and actual start offsets are reported separately.
+    private func runRecoveryBurst(slots: [LoadConnectionSlot], group: MultiThreadedEventLoopGroup,
+                                  sslContext: NIOSSLContext, statistics: LoadStatistics) async throws -> RecoveryBurstReport {
+        guard slots.count == configuration.connections,
+              slots.allSatisfy({ $0.credential.targetRoomIDs?.count == configuration.targetsPerConnection })
+        else { throw LoadError.invalidCredentialFile }
+        let cursors = await snapshotRoomCursors(channels: slots.compactMap(\.channel))
+        guard cursors.count == slots.count * configuration.targetsPerConnection else { throw LoadError.unexpectedResponse }
+        let byConnection = Dictionary(grouping: cursors, by: \.connectionIndex)
+        // Submit every close before awaiting any of them; all close futures are drained before release.
+        let closes = slots.compactMap { slot -> EventLoopFuture<Void>? in
+            guard let channel = slot.channel else { return nil }
+            statistics.recordPlannedReconnect()
+            return channel.close()
+        }
+        let closeResults = try await EventLoopFuture.whenAllComplete(closes, on: group.next()).get()
+        for result in closeResults { try result.get() }
+        let offline = try await injectOfflineRecoveryWrites(slots: slots, cursors: cursors)
+        if configuration.recoveryBurstOfflineSeconds > 0 {
+            try await Task.sleep(nanoseconds: UInt64(configuration.recoveryBurstOfflineSeconds) * 1_000_000_000)
+        }
+        let before = statistics.snapshot()
+        let workers = min(configuration.recoveryBurstWorkers, slots.count)
+        let barrier = RecoveryBurstBarrier(workers: workers)
+        let samples = RecoveryBurstSamples(count: slots.count)
+        try await withThrowingTaskGroup(of: Void.self) { tasks in
+            for _ in 0..<workers {
+                tasks.addTask {
+                    let origin = await barrier.arrive()
+                    let deadline = origin + .seconds(Int64(configuration.recoveryBurstObserveSeconds))
+                    while !Task.isCancelled, let index = samples.take() {
+                        let slot = slots[index]
+                        let restored = Dictionary(uniqueKeysWithValues: byConnection[slot.connectionIndex]!.map { ($0.roomID, $0.appliedRoomSequence) })
+                        for ordinal in 1...configuration.recoveryBurstMaximumAttempts {
+                            guard !Task.isCancelled, NIODeadline.now() < deadline else { break }
+                            samples.started(index: index, offset: (NIODeadline.now() - origin).nanoseconds)
+                            let attempt = RecoveryBurstAttempt()
+                            do {
+                                let channel = try await withTaskCancellationHandler {
+                                    try await connect(credential: slot.credential, targetUserIDs: slot.targetUserIDs,
+                                        connectionIndex: slot.connectionIndex, group: group, sslContext: sslContext,
+                                        statistics: statistics, restoredCursors: restored, deadline: deadline, attempt: attempt).get()
+                                } onCancel: { attempt.cancel() }
+                                if Task.isCancelled || NIODeadline.now() >= deadline {
+                                    _ = try? await channel.close().get()
+                                    samples.failedAttempt()
+                                    break
+                                }
+                                slot.replace(channel)
+                                samples.succeeded(index: index)
+                                channel.pipeline.fireUserInboundEventTriggered(StartWorkloadEvent())
+                                break
+                            } catch {
+                                statistics.recordFailure(error)
+                                samples.failedAttempt()
+                                if ordinal < configuration.recoveryBurstMaximumAttempts {
+                                    try await Task.sleep(nanoseconds: UInt64(100 + index % 100) * 1_000_000)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            try await tasks.waitForAll()
+        }
+        let origin = await barrier.origin()
+        let remaining = (origin + .seconds(Int64(configuration.recoveryBurstObserveSeconds))) - .now()
+        if remaining.nanoseconds > 0 { try await Task.sleep(nanoseconds: UInt64(remaining.nanoseconds)) }
+        try Task.checkCancellation()
+        let finalCursors = await snapshotRoomCursors(channels: slots.compactMap(\.channel))
+        let verified = finalCursors.filter { $0.recoveryTarget != nil }
+        // Only a subscription response establishes a target; a successful socket is not completion.
+        let completed = finalCursors.filter { cursor in
+            guard let target = cursor.recoveryTarget else { return false }
+            return cursor.appliedRoomSequence >= target
+        }.count
+        let finalByConnection = Dictionary(grouping: finalCursors, by: \.connectionIndex)
+        var injectedByRoom: [String: UInt64] = [:]
+        for receipt in offline.result.receipts { injectedByRoom[receipt.roomID] = max(injectedByRoom[receipt.roomID] ?? 0, receipt.roomSequence) }
+        let initial = Dictionary(uniqueKeysWithValues: cursors.map { ("\($0.connectionIndex):\($0.roomID)", $0.appliedRoomSequence) })
+        let backlog = verified.filter { cursor in
+            guard let start = initial["\(cursor.connectionIndex):\(cursor.roomID)"], let target = cursor.recoveryTarget else { return false }
+            return target > start
+        }.count
+        return samples.report(workers: workers, barrierReleasedAt: await barrier.wallTime(), maximumAttempts: configuration.recoveryBurstMaximumAttempts,
+            observationSeconds: configuration.recoveryBurstObserveSeconds, actualObservationMilliseconds: Double((NIODeadline.now() - origin).nanoseconds) / 1_000_000, offlineSeconds: configuration.recoveryBurstOfflineSeconds, before: before, after: statistics.snapshot(),
+            expectedRooms: cursors.count, observedRooms: verified.count, backlogRooms: backlog, completedRooms: completed,
+            offlineRequested: offline.requested, offlineResult: offline.result,
+            cursorProgress: cursors.map { original in
+                let recovered = finalByConnection[original.connectionIndex]?.first { $0.roomID == original.roomID }
+                let injected = injectedByRoom[original.roomID]
+                let target = recovered?.recoveryTarget
+                let required = max(target ?? 0, injected ?? 0)
+                return .init(connectionIndex: original.connectionIndex, roomID: original.roomID,
+                    beforeSequence: original.appliedRoomSequence, appliedSequence: recovered?.appliedRoomSequence,
+                    recoveryTarget: target, injectedThrough: injected,
+                    remainingGap: recovered.map { required > $0.appliedRoomSequence ? required - $0.appliedRoomSequence : 0 })
+            })
+    }
+
+    private func injectOfflineRecoveryWrites(slots: [LoadConnectionSlot], cursors: [RoomCursorSnapshot]) async throws -> (requested: Int, result: OfflineWriteResult) {
+        let count = configuration.recoveryBurstOfflineMessagesPerRoom
+        guard count > 0 else { return (0, .init(receipts: [], failed: 0)) }
+        var owners: [String: LoadCredential] = [:]
+        for slot in slots {
+            guard slot.channel?.isActive != true else { throw LoadError.unexpectedResponse }
+            for room in slot.credential.targetRoomIDs ?? [] where owners[room] == nil { owners[room] = slot.credential }
+        }
+        guard !owners.isEmpty, owners.count <= 100_000 / count else { throw LoadError.invalidArguments }
+        var beforeByRoom: [String: UInt64] = [:]
+        for cursor in cursors { beforeByRoom[cursor.roomID] = max(beforeByRoom[cursor.roomID] ?? 0, cursor.appliedRoomSequence) }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(configuration.recoveryBurstOfflineWriteDeadlineSeconds))
+        let raw = Date().timeIntervalSince1970 * 1000
+        guard raw.isFinite, raw > 0, raw < Double(Int64.max) - 600_000 else { throw LoadError.invalidArguments }
+        let frozenDeadline = UInt64(raw) + UInt64(configuration.recoveryBurstOfflineWriteDeadlineSeconds) * 1000
+        let jobs = try owners.keys.sorted().map { room -> OfflineRoomWrite in
+            let credential = owners[room]!
+            let commands = try (0..<count).map { _ in
+                try V2MessageSendOperationCommand(command: .init(roomID: .init(room), senderUserID: .init(credential.userID),
+                    clientMessageID: .init(UUID().uuidString), text: String(repeating: "r", count: configuration.messageBytes),
+                    limits: .init(maxUTF8Bytes: 65_536)), firstSubmissionDeadlineMilliseconds: frozenDeadline)
+            }
+            return .init(credential: credential, commands: commands)
+        }
+        let beforeSequenceByRoom = beforeByRoom
+        let result = try await V2ToolOperationHTTP.scoped(baseURL: configuration.accountBaseURL, caPath: configuration.caPath) { client in
+            await withTaskGroup(of: OfflineWriteResult.self) { tasks in
+                var next = 0, receipts: [OfflineWriteReceipt] = [], failed = 0
+                let workers = min(configuration.recoveryBurstOfflineWriteWorkers, jobs.count)
+                func add(_ job: OfflineRoomWrite) {
+                    tasks.addTask {
+                        var accepted: [OfflineWriteReceipt] = []
+                        for command in job.commands {
+                            do {
+                                try Task.checkCancellation()
+                                guard ContinuousClock.now < deadline else { throw LoadError.unexpectedResponse }
+                                let value = try await withThrowingTaskGroup(of: V2MessageOperationAcceptance.self) { request in
+                                    request.addTask {
+                                        guard case .accepted(let proof) = try await client.sendMessage(command,
+                                            token: job.credential.accessToken, deviceID: job.credential.deviceID) else { throw LoadError.unexpectedResponse }
+                                        return proof
+                                    }
+                                    request.addTask {
+                                        try await Task.sleep(until: deadline, clock: .continuous)
+                                        throw LoadError.unexpectedResponse
+                                    }
+                                    defer { request.cancelAll() }
+                                    guard let proof = try await request.next() else { throw LoadError.unexpectedResponse }
+                                    return proof
+                                }
+                                guard value.roomSequence > (beforeSequenceByRoom[command.command.roomID.rawValue] ?? 0) else { throw LoadError.unexpectedResponse }
+                                accepted.append(.init(roomID: command.command.roomID.rawValue, roomSequence: value.roomSequence))
+                            } catch { return .init(receipts: accepted, failed: job.commands.count - accepted.count) }
+                        }
+                        return .init(receipts: accepted, failed: 0)
+                    }
+                }
+                for _ in 0..<workers { add(jobs[next]); next += 1 }
+                while let value = await tasks.next() {
+                    receipts.append(contentsOf: value.receipts); failed += value.failed
+                    if next < jobs.count { add(jobs[next]); next += 1 }
+                }
+                let sortedReceipts: [OfflineWriteReceipt] = receipts.sorted { (lhs: OfflineWriteReceipt, rhs: OfflineWriteReceipt) -> Bool in
+                    if lhs.roomID == rhs.roomID {
+                        return lhs.roomSequence < rhs.roomSequence
+                    }
+                    return lhs.roomID < rhs.roomID
+                }
+                return OfflineWriteResult(receipts: sortedReceipts, failed: failed)
+            }
+        }
+        try Task.checkCancellation()
+        return (jobs.count * count, result)
     }
 
     private func reconnect(
@@ -1274,6 +1735,7 @@ private struct RoomCursorSnapshot: Encodable, Sendable {
     let connectionIndex: Int
     let roomID: String
     let appliedRoomSequence: UInt64
+    let recoveryTarget: UInt64?
 }
 
 private struct RoomCursorProbe {
@@ -1458,12 +1920,6 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private enum Stage { case awaitingHello, awaitingAuthentication, authenticated }
     private enum PendingRequest {
         case heartbeat(sent: NIODeadline)
-        case directRoom(
-            targetUserID: String,
-            operationID: String,
-            retryCount: Int,
-            sent: NIODeadline
-        )
         case message(sent: NIODeadline, roomID: String)
         case syncPull(sent: NIODeadline)
         case roomEventPull(sent: NIODeadline, roomID: String, afterRoomSequence: UInt64)
@@ -1473,6 +1929,12 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         case syncAck(hasMore: Bool)
     }
 
+    private let sendTasks: V2ToolHTTPSendTaskOwner
+    private let directRoomTasks: DirectRoomHTTPTaskOwner
+    private var directRoomTaskIDs: Set<UUID> = []
+    private var httpSendTaskIDs: [UInt64: UUID] = [:]
+    private let accountBaseURL:URL
+    private let caPath:String
     private let credential: LoadCredential
     private let targetUserIDs: [String]
     private let connectionIndex: Int
@@ -1507,6 +1969,8 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private var syncInFlight = false
     private var syncRequested = false
     private var roomEventCursors: [String: UInt64] = [:]
+    private let isRestoredRecovery: Bool
+    private var restoredRecoveryTargets: [String: UInt64] = [:]
     private var roomEventAnnouncedHighWatermarks: [String: UInt64] = [:]
     private var roomEventPullRooms: Set<String> = []
     private var roomEventPullRetryCounts: [String: Int] = [:]
@@ -1530,6 +1994,10 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
 
     init(
         credential: LoadCredential,
+        accountBaseURL:URL,
+        sendTasks: V2ToolHTTPSendTaskOwner,
+        directRoomTasks: DirectRoomHTTPTaskOwner,
+        caPath:String,
         targetUserIDs: [String],
         connectionIndex: Int,
         heartbeatSeconds: Int,
@@ -1547,8 +2015,14 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         roomLogRecoveryGraceMilliseconds: Int,
         started: NIODeadline,
         authenticated: EventLoopPromise<Void>,
-        statistics: LoadStatistics
+        statistics: LoadStatistics,
+        restoredCursors: [String: UInt64]? = nil
     ) {
+        isRestoredRecovery = restoredCursors != nil
+        roomEventCursors = restoredCursors ?? [:]
+        self.sendTasks = sendTasks
+        self.directRoomTasks = directRoomTasks
+        self.accountBaseURL=accountBaseURL;self.caPath=caPath
         self.credential = credential
         self.targetUserIDs = targetUserIDs
         // PostgreSQL JSON exports UUIDs in lowercase while Swift UUID values
@@ -1625,6 +2099,10 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     }
 
     func channelInactive(context: ChannelHandlerContext) {
+        for id in directRoomTaskIDs { directRoomTasks.cancel(id: id) }
+        directRoomTaskIDs.removeAll()
+        for id in httpSendTaskIDs.values { sendTasks.cancel(id: id) }
+        for requestID in httpSendTaskIDs.keys { pendingRequests.removeValue(forKey: requestID); messageRequestIDs.remove(requestID) }
         heartbeatTask?.cancel()
         messageTask?.cancel()
         for task in roomEventPullRetryTasks.values { task.cancel() }
@@ -1819,48 +2297,9 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 guard case .heartbeatAck? = envelope.body else { throw LoadError.unexpectedResponse }
                 statistics.recordHeartbeatAcknowledged(milliseconds: (NIODeadline.now() - sent).millisecondsDouble)
 
-            case .directRoom(let targetUserID, _, _, _):
-                guard case .directRoomOpened(let response)? = envelope.body,
-                      response.targetUserID == targetUserID,
-                      !response.roomID.isEmpty
-                else { throw LoadError.unexpectedResponse }
-                if !directRoomIDs.contains(response.roomID) { directRoomIDs.append(response.roomID) }
-                statistics.recordDirectRoomOpened()
-                if directRoomIDs.count == targetUserIDs.count {
-                    try initializeRoomLogCursorThenScheduleMessages(context: context)
-                }
-
-            case .message(let sent, let roomID):
-                messageRequestIDs.remove(frame.requestID)
-                guard case .messageAccepted(let response)? = envelope.body else {
-                    FileHandle.standardError.write(Data(
-                        "protocol mismatch expected=message_accepted actual=\(loadResponseKind(envelope.body))\n".utf8
-                    ))
-                    throw LoadError.unexpectedResponse
-                }
-                guard response.roomID == roomID, response.roomSequence > 0 else {
-                    FileHandle.standardError.write(Data(
-                        "protocol mismatch expected=message_accepted room_match=\(response.roomID == roomID) sequence_positive=\(response.roomSequence > 0)\n".utf8
-                    ))
-                    throw LoadError.unexpectedResponse
-                }
-                statistics.recordMessageAcknowledged(milliseconds: (NIODeadline.now() - sent).millisecondsDouble)
-                if roomLogReads {
-                    switch roomLogReadTrigger {
-                    case .availabilityHint:
-                        // Match the production hybrid-group client: the send
-                        // acknowledgement completes the command outbox, but
-                        // only an ordered live batch or a durable recovery
-                        // page may advance the room-log cursor. In a hot room,
-                        // treating the sender's sparse acknowledgements as a
-                        // cursor creates a false gap for messages sent by
-                        // every other member and amplifies recovery reads.
-                        break
-                    case .messageAcknowledgement:
-                        try sendRoomEventPullIfNeeded(roomID: roomID, context: context)
-                    }
-                }
-                try drainQueuedScenarioMessages(context: context)
+            case .message:
+                // Current message operations complete through Account HTTP.
+                throw LoadError.unexpectedResponse
 
             case .readReceipt(let sent, let roomID, let requestedSequence):
                 readReceiptInFlightRooms.remove(roomID)
@@ -1977,13 +2416,16 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                     throw LoadError.unexpectedResponse
                 }
                 activeRoomLogRoomID = roomID
-                if roomLogInitialCursor == .tail {
+                if isRestoredRecovery {
+                    if restoredRecoveryTargets[roomID] == nil { restoredRecoveryTargets[roomID] = subscription.highWatermark }
+                }
+                if roomLogInitialCursor == .tail && !isRestoredRecovery {
                     roomEventCursors[roomID] = subscription.highWatermark
                 }
                 roomEventAnnouncedHighWatermarks[roomID] = subscription.highWatermark
                 roomEventCursorSubscriptionInFlightRoom = nil
                 roomEventCursorSubscriptionRetryCounts.removeValue(forKey: roomID)
-                if roomLogInitialCursor == .zero {
+                if roomLogInitialCursor == .zero || isRestoredRecovery {
                     try sendRoomEventPullIfNeeded(roomID: roomID, context: context)
                 }
                 try sendNextRoomEventCursorSubscriptionOrScheduleMessages(context: context)
@@ -2086,7 +2528,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         case let probe as RoomCursorProbe:
             probe.completion.succeed(directRoomIDs.map { roomID in
                 RoomCursorSnapshot(connectionIndex: connectionIndex, roomID: roomID,
-                                   appliedRoomSequence: roomEventCursors[roomID, default: 0])
+                                   appliedRoomSequence: roomEventCursors[roomID, default: 0], recoveryTarget: restoredRecoveryTargets[roomID])
             })
         case let probe as ScenarioDrainProbe:
             probe.completion.succeed(.init(
@@ -2133,67 +2575,50 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         try write(heartbeat, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
     }
 
-    private func sendOpenDirectRoom(
-        targetUserID: String,
-        operationID: String = UUID().uuidString,
-        retryCount: Int = 0,
-        context: ChannelHandlerContext
-    ) throws {
-        let requestID = takeRequestID()
-        var request = IMV2Envelope()
-        request.requestID = requestID
-        request.protocolVersion = IMV2ProtocolVersion.current
-        request.openDirectRoom = .init()
-        request.openDirectRoom.operationID = operationID
-        request.openDirectRoom.targetUserID = targetUserID
-        pendingRequests[requestID] = .directRoom(
-            targetUserID: targetUserID,
-            operationID: operationID,
-            retryCount: retryCount,
-            sent: .now()
-        )
-        statistics.recordDirectRoomAttempted()
-        try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
-    }
-
-    /// 只要保留同一个操作 ID，开单聊房间就是幂等的。
-    ///
-    /// 只重试服务端显式标记为可重试的响应，并把预算保持有界，
-    /// 使真正的故障对负载运行仍然可见，而不会变成一个无界的客户端队列。
-    private static let maximumDirectRoomRetries = 6
-
-    private func scheduleDirectRoomRetry(
-        targetUserID: String,
-        operationID: String,
-        retryCount: Int,
-        context: ChannelHandlerContext
-    ) {
-        let exponent = min(retryCount - 1, 5)
-        let delay = Int64(50 * (1 << exponent))
-        let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
-        let boundContext = context.loopBound
-        context.eventLoop.scheduleTask(in: .milliseconds(delay)) {
-            let handler = handler.value
-            let context = boundContext.value
-            guard case .authenticated = handler.stage,
-                  handler.workloadStarted,
-                  context.channel.isActive
-            else { return }
+    private func sendOpenDirectRoom(targetUserID:String,context:ChannelHandlerContext) throws {
+        let actor=try UserID(credential.userID),target=try UserID(targetUserID),operationID=try DirectRoomOperationID(UUID().uuidString)
+        let command=try V2DirectRoomOperationCommand(actorUserID:actor,operationID:operationID,
+            targetUserID:target,firstSubmissionDeadlineMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+600_000)
+        let credential=self.credential,baseURL=accountBaseURL,caPath=self.caPath
+        let handler=NIOLoopBound(self,eventLoop:context.eventLoop),boundContext=context.loopBound
+        let eventLoop=context.eventLoop,taskID=UUID()
+        let installed=directRoomTasks.start(id:taskID) {
             do {
-                try handler.sendOpenDirectRoom(
-                    targetUserID: targetUserID,
-                    operationID: operationID,
-                    retryCount: retryCount,
-                    context: context
-                )
+                try Task.checkCancellation()
+                let opened=try await V2ToolOperationHTTP.scoped(baseURL:baseURL,caPath:caPath) { client in
+                    try await client.openDirectRoom(command:command,token:credential.accessToken,deviceID:credential.deviceID)
+                }
+                guard !Task.isCancelled else { return }
+                eventLoop.execute {
+                    let handler=handler.value,context=boundContext.value
+                    handler.directRoomTaskIDs.remove(taskID)
+                    guard case .authenticated=handler.stage,handler.workloadStarted,context.channel.isActive else { return }
+                    do {
+                        let roomID=opened.rawValue
+                        if !handler.directRoomIDs.contains(roomID) { handler.directRoomIDs.append(roomID) }
+                        handler.statistics.recordDirectRoomOpened()
+                        if handler.directRoomIDs.count==handler.targetUserIDs.count {
+                            try handler.initializeRoomLogCursorThenScheduleMessages(context:context)
+                        }
+                    } catch {
+                        handler.statistics.recordWorkloadFailure(kind:"direct_room",code:"CURSOR_INITIALIZATION_FAILURE")
+                        context.close(promise:nil)
+                    }
+                }
             } catch {
-                handler.statistics.recordWorkloadFailure(
-                    kind: "direct_room",
-                    code: "CLIENT_WRITE_FAILURE"
-                )
-                context.close(promise: nil)
+                guard !Task.isCancelled else { return }
+                eventLoop.execute {
+                    let handler=handler.value,context=boundContext.value
+                    handler.directRoomTaskIDs.remove(taskID)
+                    guard case .authenticated=handler.stage,handler.workloadStarted,context.channel.isActive else { return }
+                    handler.statistics.recordWorkloadFailure(kind:"direct_room",code:"ACCOUNT_HTTP_FAILURE")
+                    context.close(promise:nil)
+                }
             }
         }
+        guard installed else { throw LoadError.directRoomControlQueueFull }
+        directRoomTaskIDs.insert(taskID)
+        statistics.recordDirectRoomAttempted()
     }
 
     private func scheduleMessages(context: ChannelHandlerContext) {
@@ -2235,7 +2660,9 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             scheduleMessages(context: context)
             return
         }
-        switch roomLogReadTrigger {
+        if isRestoredRecovery {
+            roomEventCursorSubscriptionPendingRooms = directRoomIDs.sorted()
+        } else { switch roomLogReadTrigger {
         case .messageAcknowledgement:
             // Preserve the original synthetic stress mode, which exercises
             // every opened room independently.
@@ -2247,6 +2674,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             // per connection.  Selecting the opened room in request order
             // gives the paired topology a deterministic shared active room.
             roomEventCursorSubscriptionPendingRooms = directRoomIDs.prefix(1).map { $0 }
+        }
         }
         guard !roomEventCursorSubscriptionPendingRooms.isEmpty else {
             scheduleMessages(context: context)
@@ -2340,18 +2768,56 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             nextRoomIndex += 1
         }
         let requestID = takeRequestID()
-        var request = IMV2Envelope()
-        request.requestID = requestID
-        request.protocolVersion = IMV2ProtocolVersion.current
-        request.sendMessage = .init()
-        request.sendMessage.roomID = directRoomID
-        request.sendMessage.clientMessageID = UUID().uuidString
-        request.sendMessage.content = .init()
-        request.sendMessage.content.text = messageText
+        let command = try V2MessageSendOperationCommand(command: .init(roomID: .init(directRoomID),
+            senderUserID: .init(credential.userID), clientMessageID: .init(UUID().uuidString),
+            text: messageText, limits: .init(maxUTF8Bytes: 65_536)),
+            firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1_000) + 86_400_000)
+        let sent = NIODeadline.now()
         messageRequestIDs.insert(requestID)
-        pendingRequests[requestID] = .message(sent: .now(), roomID: directRoomID)
+        pendingRequests[requestID] = .message(sent: sent, roomID: directRoomID)
         statistics.recordMessageSent()
-        try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
+        let credential = self.credential, baseURL = accountBaseURL, caPath = self.caPath
+        let handler = NIOLoopBound(self, eventLoop: context.eventLoop), boundContext = context.loopBound
+        let taskID = UUID(); httpSendTaskIDs[requestID] = taskID
+        let completionLoop = context.eventLoop
+        let installed = sendTasks.start(id: taskID) {
+            let result: Result<V2MessageSendOperationTerminalOutcome, any Error>
+            do { result = .success(try await V2ToolOperationHTTP.scoped(baseURL: baseURL, caPath: caPath) { client in
+                try await client.sendMessage(command, token: credential.accessToken, deviceID: credential.deviceID)
+            }) }
+            catch { result = .failure(error) }
+            _ = try? await completionLoop.submit {
+
+            let handler = handler.value, context = boundContext.value
+            handler.httpSendTaskIDs.removeValue(forKey: requestID)
+            let ownedSlot = handler.pendingRequests.removeValue(forKey: requestID) != nil
+            handler.messageRequestIDs.remove(requestID)
+            guard case .authenticated = handler.stage, context.channel.isActive, ownedSlot else { return }
+            do {
+                switch try result.get() {
+                case .accepted:
+                    handler.statistics.recordMessageAcknowledged(milliseconds: (NIODeadline.now() - sent).millisecondsDouble)
+                    if handler.roomLogReads, handler.roomLogReadTrigger == .messageAcknowledgement {
+                        try handler.sendRoomEventPullIfNeeded(roomID: directRoomID, context: context)
+                    }
+                case .rejected(let reason):
+                    handler.statistics.recordWorkloadFailure(kind: "message", code: reason.rawValue)
+                case .closed:
+                    handler.statistics.recordWorkloadFailure(kind: "message", code: "CLOSED")
+                }
+                try handler.drainQueuedScenarioMessages(context: context)
+            } catch {
+                handler.statistics.recordWorkloadFailure(kind: "message", code: "ACCOUNT_HTTP_FAILURE")
+                do { try handler.drainQueuedScenarioMessages(context: context) }
+                catch { context.close(promise: nil) }
+            }
+            }.get()
+        }
+        guard installed else {
+            httpSendTaskIDs.removeValue(forKey: requestID)
+            pendingRequests.removeValue(forKey: requestID); messageRequestIDs.remove(requestID)
+            throw CancellationError()
+        }
     }
 
     /// 仅当每设备队列存在硬性上限时才保留场景选中的动作。
@@ -2378,7 +2844,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     /// ACK 与拒绝都会释放一个设备的在途槽位。
     ///
     /// 最多排空所通告的窗口，绝不通过事件循环递归调用，
-    /// 并让 `messagesSent` 始终表示真正写入套接字的数量。
+    /// 并让 `messagesSent` 始终表示实际开始的 HTTP 发送操作数量。
     ///
     /// - Parameter context: 目标通道上下文。
     /// - Throws: 发送或写入失败时抛出。
@@ -2808,17 +3274,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             recoveryDeadlineTask = nil
             recoveryInFlightRequestID = nil
             statistics.recordRecoveryRejected(kind, code: code, retryable: retryable)
-        case .directRoom(let targetUserID, let operationID, let retryCount, _):
-            if retryable, retryCount < Self.maximumDirectRoomRetries {
-                scheduleDirectRoomRetry(
-                    targetUserID: targetUserID,
-                    operationID: operationID,
-                    retryCount: retryCount + 1,
-                    context: context
-                )
-                return
-            }
-            statistics.recordWorkloadFailure(kind: "direct_room", code: code, retryable: retryable)
+
         }
     }
 
@@ -2883,6 +3339,8 @@ private struct LoadReport: Encodable {
     let rampPerSecond: Int
     let rampBatchSize: Int
     let workloadRampPerSecond: Int
+    let directRoomHTTPMaximumConcurrent: Int
+    let directRoomHTTPMaximumQueued: Int
     let holdSeconds: Int
     let eventLoops: Int
     let messagesPerSecond: Int
@@ -2966,8 +3424,10 @@ private struct LoadReport: Encodable {
     let roomCursorSnapshots: [RoomCursorSnapshot]
     let scenarioPostDrainHoldSeconds: Int?
     let terminalError: String?
+    let recoveryBurst: RecoveryBurstReport?
 
-    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, eventLoopLag: V2RuntimeLatencyHistogramSnapshot, scenarioPhases: [ScenarioPhaseReport], scenarioDrain: ScenarioDrainReport?, terminalError: Error?, roomCursorSnapshots: [RoomCursorSnapshot]) {
+    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, eventLoopLag: V2RuntimeLatencyHistogramSnapshot, scenarioPhases: [ScenarioPhaseReport], scenarioDrain: ScenarioDrainReport?, terminalError: Error?, roomCursorSnapshots: [RoomCursorSnapshot], recoveryBurst: RecoveryBurstReport?) {
+        self.recoveryBurst = recoveryBurst
         revision = configuration.revision
         host = configuration.host
         port = configuration.port
@@ -2975,6 +3435,8 @@ private struct LoadReport: Encodable {
         rampPerSecond = configuration.rampPerSecond
         rampBatchSize = configuration.rampBatchSize
         workloadRampPerSecond = configuration.workloadRampPerSecond
+        directRoomHTTPMaximumConcurrent = DirectRoomHTTPTaskOwner.configuredMaximumConcurrent
+        directRoomHTTPMaximumQueued = DirectRoomHTTPTaskOwner.configuredMaximumQueued
         holdSeconds = configuration.holdSeconds
         eventLoops = configuration.eventLoops
         messagesPerSecond = configuration.messagesPerSecond
@@ -3295,6 +3757,7 @@ private enum LoadError: Error, CustomStringConvertible {
     case unexpectedResponse
     case unexpectedSyncResponse(String)
     case connectionClosed
+    case directRoomControlQueueFull
     case memoryGuardTriggered(megabytes: Int)
     case failureGuardTriggered(failed: Int, attempted: Int)
     case connectionLossGuardTriggered(disconnected: Int, authenticated: Int)
@@ -3314,6 +3777,7 @@ private enum LoadError: Error, CustomStringConvertible {
         case .unexpectedSyncResponse(let reason):
             return "gateway returned an unexpected sync response: \(reason)"
         case .connectionClosed: return "gateway connection closed before authentication"
+        case .directRoomControlQueueFull: return "local direct-room HTTP control queue is full"
         case .memoryGuardTriggered(let megabytes): return "local memory guard triggered at \(megabytes) MB"
         case .failureGuardTriggered(let failed, let attempted): return "connection failure guard triggered: \(failed)/\(attempted)"
         case .connectionLossGuardTriggered(let disconnected, let authenticated): return "active connection loss guard triggered: \(disconnected)/\(authenticated)"

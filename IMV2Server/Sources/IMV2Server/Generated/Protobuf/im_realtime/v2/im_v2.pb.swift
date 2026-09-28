@@ -548,6 +548,22 @@ public nonisolated struct IMV2Envelope: Sendable {
 
   public var body: IMV2Envelope.OneOf_Body? = nil
 
+  public var presencePublicationControl: IMV2PresencePublicationControl {
+    get {
+      if case .presencePublicationControl(let v)? = body {return v}
+      return IMV2PresencePublicationControl()
+    }
+    set {body = .presencePublicationControl(newValue)}
+  }
+
+  public var presencePublicationControlled: IMV2PresencePublicationControlled {
+    get {
+      if case .presencePublicationControlled(let v)? = body {return v}
+      return IMV2PresencePublicationControlled()
+    }
+    set {body = .presencePublicationControlled(newValue)}
+  }
+
   public var clientHello: IMV2ClientHello {
     get {
       if case .clientHello(let v)? = body {return v}
@@ -596,28 +612,12 @@ public nonisolated struct IMV2Envelope: Sendable {
     set {body = .heartbeatAck(newValue)}
   }
 
-  public var sendMessage: IMV2SendMessage {
-    get {
-      if case .sendMessage(let v)? = body {return v}
-      return IMV2SendMessage()
-    }
-    set {body = .sendMessage(newValue)}
-  }
-
   public var messageAccepted: IMV2MessageAccepted {
     get {
       if case .messageAccepted(let v)? = body {return v}
       return IMV2MessageAccepted()
     }
     set {body = .messageAccepted(newValue)}
-  }
-
-  public var changeRoomMembership: IMV2ChangeRoomMembership {
-    get {
-      if case .changeRoomMembership(let v)? = body {return v}
-      return IMV2ChangeRoomMembership()
-    }
-    set {body = .changeRoomMembership(newValue)}
   }
 
   public var membershipChanged: IMV2MembershipChanged {
@@ -628,14 +628,6 @@ public nonisolated struct IMV2Envelope: Sendable {
     set {body = .membershipChanged(newValue)}
   }
 
-  public var withdrawMessage: IMV2WithdrawMessage {
-    get {
-      if case .withdrawMessage(let v)? = body {return v}
-      return IMV2WithdrawMessage()
-    }
-    set {body = .withdrawMessage(newValue)}
-  }
-
   public var messageWithdrawn: IMV2MessageWithdrawn {
     get {
       if case .messageWithdrawn(let v)? = body {return v}
@@ -644,28 +636,12 @@ public nonisolated struct IMV2Envelope: Sendable {
     set {body = .messageWithdrawn(newValue)}
   }
 
-  public var changeMessageReaction: IMV2ChangeMessageReaction {
-    get {
-      if case .changeMessageReaction(let v)? = body {return v}
-      return IMV2ChangeMessageReaction()
-    }
-    set {body = .changeMessageReaction(newValue)}
-  }
-
   public var messageReactionChanged: IMV2MessageReactionChanged {
     get {
       if case .messageReactionChanged(let v)? = body {return v}
       return IMV2MessageReactionChanged()
     }
     set {body = .messageReactionChanged(newValue)}
-  }
-
-  public var editMessage: IMV2EditMessage {
-    get {
-      if case .editMessage(let v)? = body {return v}
-      return IMV2EditMessage()
-    }
-    set {body = .editMessage(newValue)}
   }
 
   public var messageEdited: IMV2MessageEdited {
@@ -780,44 +756,12 @@ public nonisolated struct IMV2Envelope: Sendable {
     set {body = .readReceiptRecorded(newValue)}
   }
 
-  public var openDirectRoom: IMV2OpenDirectRoom {
-    get {
-      if case .openDirectRoom(let v)? = body {return v}
-      return IMV2OpenDirectRoom()
-    }
-    set {body = .openDirectRoom(newValue)}
-  }
-
-  public var directRoomOpened: IMV2DirectRoomOpened {
-    get {
-      if case .directRoomOpened(let v)? = body {return v}
-      return IMV2DirectRoomOpened()
-    }
-    set {body = .directRoomOpened(newValue)}
-  }
-
-  public var setStrangerMessagePermission: IMV2SetStrangerMessagePermission {
-    get {
-      if case .setStrangerMessagePermission(let v)? = body {return v}
-      return IMV2SetStrangerMessagePermission()
-    }
-    set {body = .setStrangerMessagePermission(newValue)}
-  }
-
   public var strangerMessagePermissionSet: IMV2StrangerMessagePermissionSet {
     get {
       if case .strangerMessagePermissionSet(let v)? = body {return v}
       return IMV2StrangerMessagePermissionSet()
     }
     set {body = .strangerMessagePermissionSet(newValue)}
-  }
-
-  public var changeRelationship: IMV2ChangeRelationship {
-    get {
-      if case .changeRelationship(let v)? = body {return v}
-      return IMV2ChangeRelationship()
-    }
-    set {body = .changeRelationship(newValue)}
   }
 
   public var relationshipChanged: IMV2RelationshipChanged {
@@ -828,44 +772,12 @@ public nonisolated struct IMV2Envelope: Sendable {
     set {body = .relationshipChanged(newValue)}
   }
 
-  public var changeUserBlock: IMV2ChangeUserBlock {
-    get {
-      if case .changeUserBlock(let v)? = body {return v}
-      return IMV2ChangeUserBlock()
-    }
-    set {body = .changeUserBlock(newValue)}
-  }
-
   public var userBlockChanged: IMV2UserBlockChanged {
     get {
       if case .userBlockChanged(let v)? = body {return v}
       return IMV2UserBlockChanged()
     }
     set {body = .userBlockChanged(newValue)}
-  }
-
-  public var moderateMessage: IMV2ModerateMessage {
-    get {
-      if case .moderateMessage(let v)? = body {return v}
-      return IMV2ModerateMessage()
-    }
-    set {body = .moderateMessage(newValue)}
-  }
-
-  public var messageRedacted: IMV2MessageRedacted {
-    get {
-      if case .messageRedacted(let v)? = body {return v}
-      return IMV2MessageRedacted()
-    }
-    set {body = .messageRedacted(newValue)}
-  }
-
-  public var muteMember: IMV2MuteMember {
-    get {
-      if case .muteMember(let v)? = body {return v}
-      return IMV2MuteMember()
-    }
-    set {body = .muteMember(newValue)}
   }
 
   public var memberMuted: IMV2MemberMuted {
@@ -876,28 +788,12 @@ public nonisolated struct IMV2Envelope: Sendable {
     set {body = .memberMuted(newValue)}
   }
 
-  public var moderateMemberRemoval: IMV2ModerateMemberRemoval {
-    get {
-      if case .moderateMemberRemoval(let v)? = body {return v}
-      return IMV2ModerateMemberRemoval()
-    }
-    set {body = .moderateMemberRemoval(newValue)}
-  }
-
   public var memberRemovedByModerator: IMV2MemberRemovedByModerator {
     get {
       if case .memberRemovedByModerator(let v)? = body {return v}
       return IMV2MemberRemovedByModerator()
     }
     set {body = .memberRemovedByModerator(newValue)}
-  }
-
-  public var groupRoomCreated: IMV2GroupRoomCreated {
-    get {
-      if case .groupRoomCreated(let v)? = body {return v}
-      return IMV2GroupRoomCreated()
-    }
-    set {body = .groupRoomCreated(newValue)}
   }
 
   public var listRoomMembers: IMV2ListRoomMembers {
@@ -968,84 +864,12 @@ public nonisolated struct IMV2Envelope: Sendable {
     set {body = .groupEventAvailable(newValue)}
   }
 
-  public var beginGroupRoomCreation: IMV2BeginGroupRoomCreation {
-    get {
-      if case .beginGroupRoomCreation(let v)? = body {return v}
-      return IMV2BeginGroupRoomCreation()
-    }
-    set {body = .beginGroupRoomCreation(newValue)}
-  }
-
-  public var groupRoomCreationPrepared: IMV2GroupRoomCreationPrepared {
-    get {
-      if case .groupRoomCreationPrepared(let v)? = body {return v}
-      return IMV2GroupRoomCreationPrepared()
-    }
-    set {body = .groupRoomCreationPrepared(newValue)}
-  }
-
-  public var appendGroupRoomCreationMembers: IMV2AppendGroupRoomCreationMembers {
-    get {
-      if case .appendGroupRoomCreationMembers(let v)? = body {return v}
-      return IMV2AppendGroupRoomCreationMembers()
-    }
-    set {body = .appendGroupRoomCreationMembers(newValue)}
-  }
-
-  public var groupRoomCreationMembersAppended: IMV2GroupRoomCreationMembersAppended {
-    get {
-      if case .groupRoomCreationMembersAppended(let v)? = body {return v}
-      return IMV2GroupRoomCreationMembersAppended()
-    }
-    set {body = .groupRoomCreationMembersAppended(newValue)}
-  }
-
-  public var finalizeGroupRoomCreation: IMV2FinalizeGroupRoomCreation {
-    get {
-      if case .finalizeGroupRoomCreation(let v)? = body {return v}
-      return IMV2FinalizeGroupRoomCreation()
-    }
-    set {body = .finalizeGroupRoomCreation(newValue)}
-  }
-
-  public var cancelGroupRoomCreation: IMV2CancelGroupRoomCreation {
-    get {
-      if case .cancelGroupRoomCreation(let v)? = body {return v}
-      return IMV2CancelGroupRoomCreation()
-    }
-    set {body = .cancelGroupRoomCreation(newValue)}
-  }
-
-  public var groupRoomCreationCancelled: IMV2GroupRoomCreationCancelled {
-    get {
-      if case .groupRoomCreationCancelled(let v)? = body {return v}
-      return IMV2GroupRoomCreationCancelled()
-    }
-    set {body = .groupRoomCreationCancelled(newValue)}
-  }
-
-  public var setUserAddPermission: IMV2SetUserAddPermission {
-    get {
-      if case .setUserAddPermission(let v)? = body {return v}
-      return IMV2SetUserAddPermission()
-    }
-    set {body = .setUserAddPermission(newValue)}
-  }
-
   public var userAddPermissionSet: IMV2UserAddPermissionSet {
     get {
       if case .userAddPermissionSet(let v)? = body {return v}
       return IMV2UserAddPermissionSet()
     }
     set {body = .userAddPermissionSet(newValue)}
-  }
-
-  public var setReadReceiptPreferences: IMV2SetReadReceiptPreferences {
-    get {
-      if case .setReadReceiptPreferences(let v)? = body {return v}
-      return IMV2SetReadReceiptPreferences()
-    }
-    set {body = .setReadReceiptPreferences(newValue)}
   }
 
   public var readReceiptPreferencesSet: IMV2ReadReceiptPreferencesSet {
@@ -1070,14 +894,6 @@ public nonisolated struct IMV2Envelope: Sendable {
       return IMV2ReadReceiptReadersPage()
     }
     set {body = .readReceiptReadersPage(newValue)}
-  }
-
-  public var setLiveActivityPreferences: IMV2SetLiveActivityPreferences {
-    get {
-      if case .setLiveActivityPreferences(let v)? = body {return v}
-      return IMV2SetLiveActivityPreferences()
-    }
-    set {body = .setLiveActivityPreferences(newValue)}
   }
 
   public var liveActivityPreferencesSet: IMV2LiveActivityPreferencesSet {
@@ -1208,28 +1024,12 @@ public nonisolated struct IMV2Envelope: Sendable {
     set {body = .messageFavoriteChanged(newValue)}
   }
 
-  public var setPinnedMessage: IMV2SetPinnedMessage {
-    get {
-      if case .setPinnedMessage(let v)? = body {return v}
-      return IMV2SetPinnedMessage()
-    }
-    set {body = .setPinnedMessage(newValue)}
-  }
-
   public var pinnedMessageChanged: IMV2PinnedMessageChanged {
     get {
       if case .pinnedMessageChanged(let v)? = body {return v}
       return IMV2PinnedMessageChanged()
     }
     set {body = .pinnedMessageChanged(newValue)}
-  }
-
-  public var setGroupAnnouncement: IMV2SetGroupAnnouncement {
-    get {
-      if case .setGroupAnnouncement(let v)? = body {return v}
-      return IMV2SetGroupAnnouncement()
-    }
-    set {body = .setGroupAnnouncement(newValue)}
   }
 
   public var groupAnnouncementChanged: IMV2GroupAnnouncementChanged {
@@ -1240,14 +1040,6 @@ public nonisolated struct IMV2Envelope: Sendable {
     set {body = .groupAnnouncementChanged(newValue)}
   }
 
-  public var setGroupRolePermissions: IMV2SetGroupRolePermissions {
-    get {
-      if case .setGroupRolePermissions(let v)? = body {return v}
-      return IMV2SetGroupRolePermissions()
-    }
-    set {body = .setGroupRolePermissions(newValue)}
-  }
-
   public var groupRolePermissionsChanged: IMV2GroupRolePermissionsChanged {
     get {
       if case .groupRolePermissionsChanged(let v)? = body {return v}
@@ -1256,36 +1048,12 @@ public nonisolated struct IMV2Envelope: Sendable {
     set {body = .groupRolePermissionsChanged(newValue)}
   }
 
-  public var changeGroupMemberRole: IMV2ChangeGroupMemberRole {
-    get {
-      if case .changeGroupMemberRole(let v)? = body {return v}
-      return IMV2ChangeGroupMemberRole()
-    }
-    set {body = .changeGroupMemberRole(newValue)}
-  }
-
   public var groupMemberRoleChanged: IMV2GroupMemberRoleChanged {
     get {
       if case .groupMemberRoleChanged(let v)? = body {return v}
       return IMV2GroupMemberRoleChanged()
     }
     set {body = .groupMemberRoleChanged(newValue)}
-  }
-
-  public var forwardMessages: IMV2ForwardMessages {
-    get {
-      if case .forwardMessages(let v)? = body {return v}
-      return IMV2ForwardMessages()
-    }
-    set {body = .forwardMessages(newValue)}
-  }
-
-  public var messagesForwarded: IMV2MessagesForwarded {
-    get {
-      if case .messagesForwarded(let v)? = body {return v}
-      return IMV2MessagesForwarded()
-    }
-    set {body = .messagesForwarded(newValue)}
   }
 
   public var getGroupRolePolicyBaseline: IMV2GetGroupRolePolicyBaseline {
@@ -1409,24 +1177,29 @@ public nonisolated struct IMV2Envelope: Sendable {
     set {body = .authorPresentationEnded(newValue)}
   }
 
+  public var personalPreferenceReceipt: IMV2PersonalPreferenceReceipt {
+    get {
+      if case .personalPreferenceReceipt(let v)? = body {return v}
+      return IMV2PersonalPreferenceReceipt()
+    }
+    set {body = .personalPreferenceReceipt(newValue)}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public nonisolated enum OneOf_Body: Equatable, Sendable {
+    case presencePublicationControl(IMV2PresencePublicationControl)
+    case presencePublicationControlled(IMV2PresencePublicationControlled)
     case clientHello(IMV2ClientHello)
     case serverHello(IMV2ServerHello)
     case authenticate(IMV2Authenticate)
     case authenticated(IMV2Authenticated)
     case heartbeat(IMV2Heartbeat)
     case heartbeatAck(IMV2HeartbeatAck)
-    case sendMessage(IMV2SendMessage)
     case messageAccepted(IMV2MessageAccepted)
-    case changeRoomMembership(IMV2ChangeRoomMembership)
     case membershipChanged(IMV2MembershipChanged)
-    case withdrawMessage(IMV2WithdrawMessage)
     case messageWithdrawn(IMV2MessageWithdrawn)
-    case changeMessageReaction(IMV2ChangeMessageReaction)
     case messageReactionChanged(IMV2MessageReactionChanged)
-    case editMessage(IMV2EditMessage)
     case messageEdited(IMV2MessageEdited)
     case syncPull(IMV2SyncPull)
     case syncBatch(IMV2SyncBatch)
@@ -1441,21 +1214,11 @@ public nonisolated struct IMV2Envelope: Sendable {
     case syncAvailable(IMV2SyncAvailable)
     case recordReadReceipt(IMV2RecordReadReceipt)
     case readReceiptRecorded(IMV2ReadReceiptRecorded)
-    case openDirectRoom(IMV2OpenDirectRoom)
-    case directRoomOpened(IMV2DirectRoomOpened)
-    case setStrangerMessagePermission(IMV2SetStrangerMessagePermission)
     case strangerMessagePermissionSet(IMV2StrangerMessagePermissionSet)
-    case changeRelationship(IMV2ChangeRelationship)
     case relationshipChanged(IMV2RelationshipChanged)
-    case changeUserBlock(IMV2ChangeUserBlock)
     case userBlockChanged(IMV2UserBlockChanged)
-    case moderateMessage(IMV2ModerateMessage)
-    case messageRedacted(IMV2MessageRedacted)
-    case muteMember(IMV2MuteMember)
     case memberMuted(IMV2MemberMuted)
-    case moderateMemberRemoval(IMV2ModerateMemberRemoval)
     case memberRemovedByModerator(IMV2MemberRemovedByModerator)
-    case groupRoomCreated(IMV2GroupRoomCreated)
     case listRoomMembers(IMV2ListRoomMembers)
     case roomMembersPage(IMV2RoomMembersPage)
     case groupEventPull(IMV2GroupEventPull)
@@ -1468,20 +1231,10 @@ public nonisolated struct IMV2Envelope: Sendable {
     /// standard group uses this only for an active-view preview; its reliable
     /// delivery and ACK still use the personal sync stream.
     case groupEventAvailable(IMV2GroupEventAvailable)
-    case beginGroupRoomCreation(IMV2BeginGroupRoomCreation)
-    case groupRoomCreationPrepared(IMV2GroupRoomCreationPrepared)
-    case appendGroupRoomCreationMembers(IMV2AppendGroupRoomCreationMembers)
-    case groupRoomCreationMembersAppended(IMV2GroupRoomCreationMembersAppended)
-    case finalizeGroupRoomCreation(IMV2FinalizeGroupRoomCreation)
-    case cancelGroupRoomCreation(IMV2CancelGroupRoomCreation)
-    case groupRoomCreationCancelled(IMV2GroupRoomCreationCancelled)
-    case setUserAddPermission(IMV2SetUserAddPermission)
     case userAddPermissionSet(IMV2UserAddPermissionSet)
-    case setReadReceiptPreferences(IMV2SetReadReceiptPreferences)
     case readReceiptPreferencesSet(IMV2ReadReceiptPreferencesSet)
     case listReadReceiptReaders(IMV2ListReadReceiptReaders)
     case readReceiptReadersPage(IMV2ReadReceiptReadersPage)
-    case setLiveActivityPreferences(IMV2SetLiveActivityPreferences)
     case liveActivityPreferencesSet(IMV2LiveActivityPreferencesSet)
     case subscribePresence(IMV2SubscribePresence)
     case presenceSubscribed(IMV2PresenceSubscribed)
@@ -1498,16 +1251,10 @@ public nonisolated struct IMV2Envelope: Sendable {
     case conversationStateSet(IMV2ConversationStateSet)
     case setMessageFavorite(IMV2SetMessageFavorite)
     case messageFavoriteChanged(IMV2MessageFavoriteChanged)
-    case setPinnedMessage(IMV2SetPinnedMessage)
     case pinnedMessageChanged(IMV2PinnedMessageChanged)
-    case setGroupAnnouncement(IMV2SetGroupAnnouncement)
     case groupAnnouncementChanged(IMV2GroupAnnouncementChanged)
-    case setGroupRolePermissions(IMV2SetGroupRolePermissions)
     case groupRolePermissionsChanged(IMV2GroupRolePermissionsChanged)
-    case changeGroupMemberRole(IMV2ChangeGroupMemberRole)
     case groupMemberRoleChanged(IMV2GroupMemberRoleChanged)
-    case forwardMessages(IMV2ForwardMessages)
-    case messagesForwarded(IMV2MessagesForwarded)
     case getGroupRolePolicyBaseline(IMV2GetGroupRolePolicyBaseline)
     case groupRolePolicyBaseline(IMV2GroupRolePolicyBaseline)
     case userRoomDirectoryList(IMV2UserRoomDirectoryList)
@@ -1524,6 +1271,7 @@ public nonisolated struct IMV2Envelope: Sendable {
     case authorPresentationDelta(IMV2AuthorPresentationDelta)
     case authorPresentationEnd(IMV2AuthorPresentationEnd)
     case authorPresentationEnded(IMV2AuthorPresentationEnded)
+    case personalPreferenceReceipt(IMV2PersonalPreferenceReceipt)
 
   }
 
@@ -1548,6 +1296,10 @@ public nonisolated struct IMV2SetConversationState: Sendable {
   /// zero means not muted
   public var muteUntilMs: Int64 = 0
 
+  public var expectedRevision: UInt64 = 0
+
+  public var firstSubmissionDeadlineMs: UInt64 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1568,6 +1320,8 @@ public nonisolated struct IMV2ConversationStateSet: Sendable {
 
   public var updatedAtMs: Int64 = 0
 
+  public var revision: UInt64 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1585,6 +1339,10 @@ public nonisolated struct IMV2SetMessageFavorite: Sendable {
   public var messageID: String = String()
 
   public var isFavorited: Bool = false
+
+  public var expectedRevision: UInt64 = 0
+
+  public var firstSubmissionDeadlineMs: UInt64 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1604,17 +1362,20 @@ public nonisolated struct IMV2MessageFavoriteChanged: Sendable {
 
   public var updatedAtMs: Int64 = 0
 
+  public var revision: UInt64 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
 }
 
-/// Group state is a room event. All changes are sequenced and delivered using
-/// the room's existing fan-out mode; the gateway never trusts a client role.
-public nonisolated struct IMV2SetPinnedMessage: Sendable {
+/// The immutable outcome of the original command, never a later current snapshot.
+public nonisolated struct IMV2PersonalPreferenceReceipt: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
+
+  public var actorUserID: String = String()
 
   public var operationID: String = String()
 
@@ -1622,11 +1383,169 @@ public nonisolated struct IMV2SetPinnedMessage: Sendable {
 
   public var messageID: String = String()
 
-  public var isPinned: Bool = false
+  public var kind: IMV2PersonalPreferenceReceipt.Kind = .unspecified
+
+  public var fingerprintVersion: UInt32 = 0
+
+  public var fingerprint: Data = Data()
+
+  public var resolvedAtMs: UInt64 = 0
+
+  public var outcome: IMV2PersonalPreferenceReceipt.OneOf_Outcome? = nil
+
+  public var conversationState: IMV2ConversationStateSet {
+    get {
+      if case .conversationState(let v)? = outcome {return v}
+      return IMV2ConversationStateSet()
+    }
+    set {outcome = .conversationState(newValue)}
+  }
+
+  public var messageFavorite: IMV2MessageFavoriteChanged {
+    get {
+      if case .messageFavorite(let v)? = outcome {return v}
+      return IMV2MessageFavoriteChanged()
+    }
+    set {outcome = .messageFavorite(newValue)}
+  }
+
+  public var rejected: IMV2PersonalPreferenceRejection {
+    get {
+      if case .rejected(let v)? = outcome {return v}
+      return IMV2PersonalPreferenceRejection()
+    }
+    set {outcome = .rejected(newValue)}
+  }
+
+  /// must be true
+  public var closed: Bool {
+    get {
+      if case .closed(let v)? = outcome {return v}
+      return false
+    }
+    set {outcome = .closed(newValue)}
+  }
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
+  public nonisolated enum OneOf_Outcome: Equatable, Sendable {
+    case conversationState(IMV2ConversationStateSet)
+    case messageFavorite(IMV2MessageFavoriteChanged)
+    case rejected(IMV2PersonalPreferenceRejection)
+    /// must be true
+    case closed(Bool)
+
+  }
+
+  public nonisolated enum Kind: SwiftProtobuf.Enum, Swift.CaseIterable {
+    public typealias RawValue = Int
+    case unspecified // = 0
+    case conversationState // = 1
+    case messageFavorite // = 2
+    case UNRECOGNIZED(Int)
+
+    public init() {
+      self = .unspecified
+    }
+
+    public init?(rawValue: Int) {
+      switch rawValue {
+      case 0: self = .unspecified
+      case 1: self = .conversationState
+      case 2: self = .messageFavorite
+      default: self = .UNRECOGNIZED(rawValue)
+      }
+    }
+
+    public var rawValue: Int {
+      switch self {
+      case .unspecified: return 0
+      case .conversationState: return 1
+      case .messageFavorite: return 2
+      case .UNRECOGNIZED(let i): return i
+      }
+    }
+
+    // The compiler won't synthesize support with the UNRECOGNIZED case.
+    public static let allCases: [IMV2PersonalPreferenceReceipt.Kind] = [
+      .unspecified,
+      .conversationState,
+      .messageFavorite,
+    ]
+
+  }
+
   public init() {}
+}
+
+public nonisolated struct IMV2PersonalPreferenceRejection: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var reason: IMV2PersonalPreferenceRejection.Reason = .unspecified
+
+  /// required only for REVISION_CONFLICT
+  public var currentRevision: UInt64 {
+    get {_currentRevision ?? 0}
+    set {_currentRevision = newValue}
+  }
+  /// Returns true if `currentRevision` has been explicitly set.
+  public var hasCurrentRevision: Bool {self._currentRevision != nil}
+  /// Clears the value of `currentRevision`. Subsequent reads from it will return its default value.
+  public mutating func clearCurrentRevision() {self._currentRevision = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public nonisolated enum Reason: SwiftProtobuf.Enum, Swift.CaseIterable {
+    public typealias RawValue = Int
+    case unspecified // = 0
+    case revisionConflict // = 1
+    case permissionDenied // = 2
+    case notFound // = 3
+    case expiredUnsubmitted // = 4
+    case UNRECOGNIZED(Int)
+
+    public init() {
+      self = .unspecified
+    }
+
+    public init?(rawValue: Int) {
+      switch rawValue {
+      case 0: self = .unspecified
+      case 1: self = .revisionConflict
+      case 2: self = .permissionDenied
+      case 3: self = .notFound
+      case 4: self = .expiredUnsubmitted
+      default: self = .UNRECOGNIZED(rawValue)
+      }
+    }
+
+    public var rawValue: Int {
+      switch self {
+      case .unspecified: return 0
+      case .revisionConflict: return 1
+      case .permissionDenied: return 2
+      case .notFound: return 3
+      case .expiredUnsubmitted: return 4
+      case .UNRECOGNIZED(let i): return i
+      }
+    }
+
+    // The compiler won't synthesize support with the UNRECOGNIZED case.
+    public static let allCases: [IMV2PersonalPreferenceRejection.Reason] = [
+      .unspecified,
+      .revisionConflict,
+      .permissionDenied,
+      .notFound,
+      .expiredUnsubmitted,
+    ]
+
+  }
+
+  public init() {}
+
+  fileprivate var _currentRevision: UInt64? = nil
 }
 
 public nonisolated struct IMV2PinnedMessageChanged: Sendable {
@@ -1643,24 +1562,6 @@ public nonisolated struct IMV2PinnedMessageChanged: Sendable {
   public var roomSequence: UInt64 = 0
 
   public var updatedAtMs: Int64 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public nonisolated struct IMV2SetGroupAnnouncement: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
-
-  public var roomID: String = String()
-
-  public var body: String = String()
-
-  public var expectedRevision: UInt64 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1748,26 +1649,6 @@ public nonisolated struct IMV2GroupRolePolicyBaseline: Sendable {
   public init() {}
 }
 
-public nonisolated struct IMV2SetGroupRolePermissions: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
-
-  public var roomID: String = String()
-
-  public var role: String = String()
-
-  public var permissions: [IMV2GroupRolePermission] = []
-
-  public var expectedRevision: UInt64 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
 public nonisolated struct IMV2GroupRolePermissionsChanged: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1782,26 +1663,6 @@ public nonisolated struct IMV2GroupRolePermissionsChanged: Sendable {
   public var revision: UInt64 = 0
 
   public var roomSequence: UInt64 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public nonisolated struct IMV2ChangeGroupMemberRole: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
-
-  public var roomID: String = String()
-
-  public var userID: String = String()
-
-  public var role: String = String()
-
-  public var expectedMembershipRevision: UInt64 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1828,73 +1689,6 @@ public nonisolated struct IMV2GroupMemberRoleChanged: Sendable {
   public init() {}
 }
 
-/// A forward creates a distinct message for each source/target pair. Results
-/// are per pair so callers can report partial target failures without retrying
-/// successful output. Source message order is preserved inside each target.
-public nonisolated struct IMV2ForwardMessageReference: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var roomID: String = String()
-
-  public var messageID: String = String()
-
-  public var revision: UInt64 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public nonisolated struct IMV2ForwardMessages: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
-
-  public var targetRoomIds: [String] = []
-
-  public var sources: [IMV2ForwardMessageReference] = []
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public nonisolated struct IMV2ForwardMessageResult: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var sourceMessageID: String = String()
-
-  public var targetRoomID: String = String()
-
-  public var messageID: String = String()
-
-  public var roomSequence: UInt64 = 0
-
-  public var errorCode: String = String()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public nonisolated struct IMV2MessagesForwarded: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var results: [IMV2ForwardMessageResult] = []
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
 public nonisolated struct IMV2Acknowledged: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -1914,9 +1708,7 @@ public nonisolated struct IMV2ClientHello: Sendable {
 
   public var supportedCapabilityProfiles: [String] = []
 
-  /// When present, Authenticate must repeat this exact device ID. Current
-  /// clients always send it; accepting an empty value remains a bounded bridge
-  /// for pre-binding protocol fixtures.
+  /// Required installation identity; Authenticate must repeat this exact ID.
   public var deviceID: String = String()
 
   public var supportedFrameCompressions: [IMV2FrameCompression] = []
@@ -1953,6 +1745,8 @@ public nonisolated struct IMV2Authenticate: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
+
+  public var presencePublicationSuppressed: Bool = false
 
   public var accessToken: String = String()
 
@@ -2004,25 +1798,6 @@ public nonisolated struct IMV2HeartbeatAck: Sendable {
   // methods supported on all messages.
 
   public var serverTimeMs: Int64 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-/// Live activity is intentionally ephemeral. It is never appended to a room
-/// log, user sync stream, or notification payload. A client must explicitly
-/// subscribe while the relevant conversation is visible.
-public nonisolated struct IMV2SetLiveActivityPreferences: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
-
-  public var allowsOnlinePresence: Bool = false
-
-  public var allowsTypingIndicators: Bool = false
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -2193,31 +1968,6 @@ public nonisolated struct IMV2PresenceChanged: Sendable {
   public init() {}
 }
 
-public nonisolated struct IMV2SendMessage: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var roomID: String = String()
-
-  public var clientMessageID: String = String()
-
-  public var content: IMV2MessageContent {
-    get {_content ?? IMV2MessageContent()}
-    set {_content = newValue}
-  }
-  /// Returns true if `content` has been explicitly set.
-  public var hasContent: Bool {self._content != nil}
-  /// Clears the value of `content`. Subsequent reads from it will return its default value.
-  public mutating func clearContent() {self._content = nil}
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-
-  fileprivate var _content: IMV2MessageContent? = nil
-}
-
 public nonisolated struct IMV2MessageContent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -2313,69 +2063,6 @@ public nonisolated struct IMV2MessageAccepted: Sendable {
   public init() {}
 }
 
-/// The initial gateway-exposed moderation action is explicit message redaction.
-/// It is separate from author withdrawal and carries only a bounded policy code,
-/// never report text or message content.
-public nonisolated struct IMV2ModerateMessage: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var roomID: String = String()
-
-  public var operationID: String = String()
-
-  public var messageID: String = String()
-
-  public var reasonCode: String = String()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public nonisolated struct IMV2MessageRedacted: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var roomID: String = String()
-
-  public var messageID: String = String()
-
-  public var roomSequence: UInt64 = 0
-
-  public var messageRevision: UInt64 = 0
-
-  public var serverCreatedAtMs: Int64 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-/// Owner/admin moderation command. The authenticated gateway identity is the
-/// actor; reason_code is an opaque bounded policy label, not report text.
-public nonisolated struct IMV2MuteMember: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var roomID: String = String()
-
-  public var operationID: String = String()
-
-  public var targetUserID: String = String()
-
-  public var muteUntilMs: Int64 = 0
-
-  public var reasonCode: String = String()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
 public nonisolated struct IMV2MemberMuted: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -2396,27 +2083,6 @@ public nonisolated struct IMV2MemberMuted: Sendable {
   public init() {}
 }
 
-/// This is deliberately not ChangeRoomMembership(action=REMOVE). It records a
-/// bounded moderation reason and is replayed from the moderation operation
-/// ledger, while still producing the canonical membership_changed room event.
-public nonisolated struct IMV2ModerateMemberRemoval: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var roomID: String = String()
-
-  public var operationID: String = String()
-
-  public var targetUserID: String = String()
-
-  public var reasonCode: String = String()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
 public nonisolated struct IMV2MemberRemovedByModerator: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -2431,28 +2097,6 @@ public nonisolated struct IMV2MemberRemovedByModerator: Sendable {
   public var roomSequence: UInt64 = 0
 
   public var serverCreatedAtMs: Int64 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-/// `operation_id` is durable client intent and remains stable across reconnects.
-/// `expected_membership_revision` fences stale administrative actions.
-public nonisolated struct IMV2ChangeRoomMembership: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var roomID: String = String()
-
-  public var operationID: String = String()
-
-  public var targetUserID: String = String()
-
-  public var action: IMV2MembershipChangeAction = .unspecified
-
-  public var expectedMembershipRevision: UInt64 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -2481,26 +2125,6 @@ public nonisolated struct IMV2MembershipChanged: Sendable {
   public init() {}
 }
 
-/// A withdrawal preserves the immutable message identity and room ordering,
-/// while turning its visible state into a revision-fenced tombstone.
-public nonisolated struct IMV2WithdrawMessage: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var roomID: String = String()
-
-  public var operationID: String = String()
-
-  public var messageID: String = String()
-
-  public var expectedMessageRevision: UInt64 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
 public nonisolated struct IMV2MessageWithdrawn: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -2515,28 +2139,6 @@ public nonisolated struct IMV2MessageWithdrawn: Sendable {
   public var roomSequence: UInt64 = 0
 
   public var serverCreatedAtMs: Int64 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-/// Reaction operations are stable client intent.  Reactions are a set keyed by
-/// message, actor, and normalized reaction value; they do not mutate text.
-public nonisolated struct IMV2ChangeMessageReaction: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var roomID: String = String()
-
-  public var operationID: String = String()
-
-  public var messageID: String = String()
-
-  public var reaction: String = String()
-
-  public var action: IMV2MessageReactionAction = .unspecified
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -2565,37 +2167,6 @@ public nonisolated struct IMV2MessageReactionChanged: Sendable {
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
-}
-
-/// Edits are author-only, revision-fenced mutations. `operation_id` is stable
-/// across retries and a concurrent withdrawal rejects the edit.
-public nonisolated struct IMV2EditMessage: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var roomID: String = String()
-
-  public var operationID: String = String()
-
-  public var messageID: String = String()
-
-  public var expectedMessageRevision: UInt64 = 0
-
-  public var content: IMV2MessageContent {
-    get {_content ?? IMV2MessageContent()}
-    set {_content = newValue}
-  }
-  /// Returns true if `content` has been explicitly set.
-  public var hasContent: Bool {self._content != nil}
-  /// Clears the value of `content`. Subsequent reads from it will return its default value.
-  public mutating func clearContent() {self._content = nil}
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-
-  fileprivate var _content: IMV2MessageContent? = nil
 }
 
 public nonisolated struct IMV2MessageEdited: Sendable {
@@ -2650,163 +2221,6 @@ public nonisolated struct IMV2ReadReceiptRecorded: Sendable {
   public var readThroughRoomSequence: UInt64 = 0
 
   public var recordedAtMs: Int64 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-/// Opens the unique two-user room. Opening a room does not bypass the
-/// recipient's stranger-message setting; that policy is enforced when a new
-/// message is accepted.
-public nonisolated struct IMV2OpenDirectRoom: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
-
-  public var targetUserID: String = String()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public nonisolated struct IMV2DirectRoomOpened: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var roomID: String = String()
-
-  public var targetUserID: String = String()
-
-  public var createdAtMs: Int64 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public nonisolated struct IMV2GroupRoomCreated: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var roomID: String = String()
-
-  public var title: String = String()
-
-  public var memberUserIds: [String] = []
-
-  public var createdAtMs: Int64 = 0
-
-  public var capacityClass: IMV2GroupCapacityClass = .unspecified
-
-  public var memberCount: UInt32 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-/// Group membership is collected in bounded pages, then frozen and committed
-/// under one durable operation ID. The room's immutable delivery mode is
-/// derived only from that frozen audience by the server. No roster is ever
-/// returned by this protocol path; use ListRoomMembers after creation.
-public nonisolated struct IMV2BeginGroupRoomCreation: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
-
-  public var title: String = String()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public nonisolated struct IMV2GroupRoomCreationPrepared: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
-
-  public var title: String = String()
-
-  public var stagedMemberCount: UInt32 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public nonisolated struct IMV2AppendGroupRoomCreationMembers: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
-
-  public var memberUserIds: [String] = []
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public nonisolated struct IMV2GroupRoomCreationMembersAppended: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
-
-  public var stagedMemberCount: UInt32 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public nonisolated struct IMV2FinalizeGroupRoomCreation: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-/// Cancels only a mutable staging draft. The operation is idempotent if the
-/// draft was already removed by expiry or an earlier cancellation; a frozen
-/// draft must continue through finalize so its room idempotency boundary stays
-/// unambiguous.
-public nonisolated struct IMV2CancelGroupRoomCreation: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-public nonisolated struct IMV2GroupRoomCreationCancelled: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -3307,23 +2721,6 @@ public nonisolated struct IMV2GroupEventAvailable: Sendable {
   public init() {}
 }
 
-/// Device-independent recipient privacy preference. It controls only new
-/// messages from non-friends before the recipient has replied in the direct
-/// room; block policy always takes precedence.
-public nonisolated struct IMV2SetStrangerMessagePermission: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
-
-  public var permission: IMV2StrangerMessagePermission = .unspecified
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
 public nonisolated struct IMV2StrangerMessagePermissionSet: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -3338,23 +2735,6 @@ public nonisolated struct IMV2StrangerMessagePermissionSet: Sendable {
   public init() {}
 }
 
-/// Device-independent privacy preference for incoming relationship requests.
-/// Rejections intentionally use the generic forbidden response so callers do
-/// not learn whether this setting, a block, or another policy caused it.
-public nonisolated struct IMV2SetUserAddPermission: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
-
-  public var permission: IMV2UserAddPermission = .unspecified
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
 public nonisolated struct IMV2UserAddPermissionSet: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -3363,25 +2743,6 @@ public nonisolated struct IMV2UserAddPermissionSet: Sendable {
   public var permission: IMV2UserAddPermission = .unspecified
 
   public var updatedAtMs: Int64 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-/// Receipt sharing affects disclosure only; the server still accepts a
-/// member's local viewing watermark while sharing is disabled. For direct
-/// rooms, visibility is reciprocal and requires both peers to allow it.
-public nonisolated struct IMV2SetReadReceiptPreferences: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
-
-  public var allowsDirectReadReceipts: Bool = false
-
-  public var allowsGroupReadReceipts: Bool = false
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -3456,24 +2817,6 @@ public nonisolated struct IMV2ReadReceiptReadersPage: Sendable {
   public init() {}
 }
 
-/// The authenticated user is the actor. While a request is pending only its
-/// recipient may accept or reject it; either participant may remove it.
-public nonisolated struct IMV2ChangeRelationship: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
-
-  public var targetUserID: String = String()
-
-  public var action: IMV2RelationshipAction = .unspecified
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
 public nonisolated struct IMV2RelationshipChanged: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -3486,25 +2829,6 @@ public nonisolated struct IMV2RelationshipChanged: Sendable {
   public var resultingState: IMV2RelationshipState = .unspecified
 
   public var updatedAtMs: Int64 = 0
-
-  public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public init() {}
-}
-
-/// Block state is private to the authenticated user. The server does not send
-/// a target-side block event or reveal whether a relationship failure is due to
-/// a block held by either user.
-public nonisolated struct IMV2ChangeUserBlock: Sendable {
-  // SwiftProtobuf.Message conformance is added in an extension below. See the
-  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
-  // methods supported on all messages.
-
-  public var operationID: String = String()
-
-  public var targetUserID: String = String()
-
-  public var action: IMV2UserBlockAction = .unspecified
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -3902,6 +3226,69 @@ public nonisolated struct IMV2RoomLatestVisibleBatchResult: Sendable {
   public init() {}
 }
 
+/// Connection-local privacy ceiling, reapplied before authenticated registration.
+public nonisolated struct IMV2PresencePublicationControl: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var mode: IMV2PresencePublicationControl.Mode = .unspecified
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public nonisolated enum Mode: SwiftProtobuf.Enum, Swift.CaseIterable {
+    public typealias RawValue = Int
+    case unspecified // = 0
+    case suppressed // = 1
+    case allowWhenAuthorized // = 2
+    case UNRECOGNIZED(Int)
+
+    public init() {
+      self = .unspecified
+    }
+
+    public init?(rawValue: Int) {
+      switch rawValue {
+      case 0: self = .unspecified
+      case 1: self = .suppressed
+      case 2: self = .allowWhenAuthorized
+      default: self = .UNRECOGNIZED(rawValue)
+      }
+    }
+
+    public var rawValue: Int {
+      switch self {
+      case .unspecified: return 0
+      case .suppressed: return 1
+      case .allowWhenAuthorized: return 2
+      case .UNRECOGNIZED(let i): return i
+      }
+    }
+
+    // The compiler won't synthesize support with the UNRECOGNIZED case.
+    public static let allCases: [IMV2PresencePublicationControl.Mode] = [
+      .unspecified,
+      .suppressed,
+      .allowWhenAuthorized,
+    ]
+
+  }
+
+  public init() {}
+}
+
+public nonisolated struct IMV2PresencePublicationControlled: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var mode: IMV2PresencePublicationControl.Mode = .unspecified
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
 fileprivate nonisolated let _protobuf_package = "im.realtime.v2"
@@ -3956,7 +3343,7 @@ nonisolated extension IMV2UserBlockAction: SwiftProtobuf._ProtoNameProviding {
 
 nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Envelope"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}protocol_version\0\u{4}\u{8}client_hello\0\u{3}server_hello\0\u{1}authenticate\0\u{1}authenticated\0\u{1}heartbeat\0\u{3}heartbeat_ack\0\u{4}\u{5}send_message\0\u{3}message_accepted\0\u{3}change_room_membership\0\u{3}membership_changed\0\u{3}withdraw_message\0\u{3}message_withdrawn\0\u{3}change_message_reaction\0\u{3}message_reaction_changed\0\u{3}edit_message\0\u{3}message_edited\0\u{3}sync_pull\0\u{3}sync_batch\0\u{3}sync_ack\0\u{3}reset_required\0\u{3}snapshot_ack\0\u{1}acknowledged\0\u{3}sync_snapshot\0\u{3}snapshot_manifest\0\u{3}snapshot_page_pull\0\u{3}snapshot_page\0\u{3}sync_available\0\u{3}record_read_receipt\0\u{3}read_receipt_recorded\0\u{3}open_direct_room\0\u{3}direct_room_opened\0\u{3}set_stranger_message_permission\0\u{3}stranger_message_permission_set\0\u{3}change_relationship\0\u{3}relationship_changed\0\u{3}change_user_block\0\u{3}user_block_changed\0\u{3}moderate_message\0\u{3}message_redacted\0\u{3}mute_member\0\u{3}member_muted\0\u{3}moderate_member_removal\0\u{3}member_removed_by_moderator\0\u{4}\u{2}group_room_created\0\u{3}list_room_members\0\u{3}room_members_page\0\u{3}group_event_pull\0\u{3}group_event_page\0\u{3}group_event_subscribe\0\u{3}group_event_subscribed\0\u{3}group_event_unsubscribe\0\u{3}group_event_available\0\u{3}begin_group_room_creation\0\u{3}group_room_creation_prepared\0\u{3}append_group_room_creation_members\0\u{3}group_room_creation_members_appended\0\u{3}finalize_group_room_creation\0\u{3}cancel_group_room_creation\0\u{3}group_room_creation_cancelled\0\u{3}set_user_add_permission\0\u{3}user_add_permission_set\0\u{3}set_read_receipt_preferences\0\u{3}read_receipt_preferences_set\0\u{3}list_read_receipt_readers\0\u{3}read_receipt_readers_page\0\u{3}set_live_activity_preferences\0\u{3}live_activity_preferences_set\0\u{3}subscribe_presence\0\u{3}presence_subscribed\0\u{3}unsubscribe_presence\0\u{3}subscribe_typing\0\u{3}unsubscribe_typing\0\u{3}set_typing_state\0\u{3}typing_state_changed\0\u{3}presence_changed\0\u{1}error\0\u{3}get_live_activity_preferences\0\u{3}live_activity_preferences\0\u{3}set_conversation_state\0\u{3}conversation_state_set\0\u{3}set_message_favorite\0\u{3}message_favorite_changed\0\u{3}set_pinned_message\0\u{3}pinned_message_changed\0\u{3}set_group_announcement\0\u{3}group_announcement_changed\0\u{3}set_group_role_permissions\0\u{3}group_role_permissions_changed\0\u{3}change_group_member_role\0\u{3}group_member_role_changed\0\u{3}forward_messages\0\u{3}messages_forwarded\0\u{3}get_group_role_policy_baseline\0\u{3}group_role_policy_baseline\0\u{4}\u{3}user_room_directory_list\0\u{3}user_room_directory_page\0\u{3}room_sync_state_batch\0\u{3}room_sync_state_batch_result\0\u{3}account_room_changes_start\0\u{3}account_room_changes_ready\0\u{3}account_room_changed\0\u{3}account_room_resync_required\0\u{3}room_latest_visible_batch\0\u{3}room_latest_visible_batch_result\0\u{3}author_presentation_delta\0\u{3}author_presentation_end\0\u{3}author_presentation_ended\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}protocol_version\0\u{4}\u{8}client_hello\0\u{3}server_hello\0\u{1}authenticate\0\u{1}authenticated\0\u{1}heartbeat\0\u{3}heartbeat_ack\0\u{4}\u{6}message_accepted\0\u{4}\u{2}membership_changed\0\u{4}\u{2}message_withdrawn\0\u{4}\u{2}message_reaction_changed\0\u{4}\u{2}message_edited\0\u{3}sync_pull\0\u{3}sync_batch\0\u{3}sync_ack\0\u{3}reset_required\0\u{3}snapshot_ack\0\u{1}acknowledged\0\u{3}sync_snapshot\0\u{3}snapshot_manifest\0\u{3}snapshot_page_pull\0\u{3}snapshot_page\0\u{3}sync_available\0\u{3}record_read_receipt\0\u{3}read_receipt_recorded\0\u{4}\u{4}stranger_message_permission_set\0\u{4}\u{2}relationship_changed\0\u{4}\u{2}user_block_changed\0\u{4}\u{4}member_muted\0\u{4}\u{2}member_removed_by_moderator\0\u{4}\u{3}list_room_members\0\u{3}room_members_page\0\u{3}group_event_pull\0\u{3}group_event_page\0\u{3}group_event_subscribe\0\u{3}group_event_subscribed\0\u{3}group_event_unsubscribe\0\u{3}group_event_available\0\u{4}\u{9}user_add_permission_set\0\u{4}\u{2}read_receipt_preferences_set\0\u{3}list_read_receipt_readers\0\u{3}read_receipt_readers_page\0\u{4}\u{2}live_activity_preferences_set\0\u{3}subscribe_presence\0\u{3}presence_subscribed\0\u{3}unsubscribe_presence\0\u{3}subscribe_typing\0\u{3}unsubscribe_typing\0\u{3}set_typing_state\0\u{3}typing_state_changed\0\u{3}presence_changed\0\u{1}error\0\u{3}get_live_activity_preferences\0\u{3}live_activity_preferences\0\u{3}set_conversation_state\0\u{3}conversation_state_set\0\u{3}set_message_favorite\0\u{3}message_favorite_changed\0\u{4}\u{2}pinned_message_changed\0\u{4}\u{2}group_announcement_changed\0\u{4}\u{2}group_role_permissions_changed\0\u{4}\u{2}group_member_role_changed\0\u{4}\u{3}get_group_role_policy_baseline\0\u{3}group_role_policy_baseline\0\u{4}\u{3}user_room_directory_list\0\u{3}user_room_directory_page\0\u{3}room_sync_state_batch\0\u{3}room_sync_state_batch_result\0\u{3}account_room_changes_start\0\u{3}account_room_changes_ready\0\u{3}account_room_changed\0\u{3}account_room_resync_required\0\u{3}room_latest_visible_batch\0\u{3}room_latest_visible_batch_result\0\u{3}author_presentation_delta\0\u{3}author_presentation_end\0\u{3}author_presentation_ended\0\u{3}personal_preference_receipt\0\u{3}presence_publication_control\0\u{3}presence_publication_controlled\0\u{b}begin_group_room_creation\0\u{b}append_group_room_creation_members\0\u{b}finalize_group_room_creation\0\u{b}cancel_group_room_creation\0\u{b}group_room_created\0\u{b}group_room_creation_prepared\0\u{b}group_room_creation_members_appended\0\u{b}group_room_creation_cancelled\0\u{b}set_stranger_message_permission\0\u{b}change_relationship\0\u{b}change_user_block\0\u{b}set_user_add_permission\0\u{b}set_read_receipt_preferences\0\u{b}set_live_activity_preferences\0\u{b}change_room_membership\0\u{b}mute_member\0\u{b}moderate_member_removal\0\u{b}set_pinned_message\0\u{b}set_group_announcement\0\u{b}set_group_role_permissions\0\u{b}change_group_member_role\0\u{b}open_direct_room\0\u{b}direct_room_opened\0\u{b}moderate_message\0\u{b}message_redacted\0\u{b}send_message\0\u{b}withdraw_message\0\u{b}change_message_reaction\0\u{b}edit_message\0\u{b}forward_messages\0\u{b}messages_forwarded\0\u{c}\u{16}\u{1}\u{c}-\u{1}\u{c}/\u{1}\u{c}1\u{1}\u{c}5\u{1}\u{c}7\u{1}\u{c}:\u{1}\u{c}C\u{1}\u{1}\u{c}D\u{1}\u{1}\u{c}E\u{1}\u{1}\u{c}F\u{1}\u{1}\u{c}G\u{1}\u{1}\u{c}H\u{1}\u{1}\u{c}I\u{1}\u{1}\u{c}J\u{1}\u{1}\u{c}L\u{1}\u{1}\u{c}P\u{1}\u{1}\u{c}a\u{1}\u{1}\u{c}c\u{1}\u{1}\u{c}e\u{1}\u{1}\u{c}g\u{1}\u{1}\u{c}+\u{1}\u{c},\u{1}\u{c}3\u{1}\u{c}4\u{1}\u{c}\u{14}\u{1}\u{c}\u{18}\u{1}\u{c}\u{1a}\u{1}\u{c}\u{1c}\u{1}\u{c}i\u{1}\u{1}\u{c}j\u{1}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4044,19 +3431,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.body = .heartbeatAck(v)
         }
       }()
-      case 20: try {
-        var v: IMV2SendMessage?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .sendMessage(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .sendMessage(v)
-        }
-      }()
       case 21: try {
         var v: IMV2MessageAccepted?
         var hadOneofValue = false
@@ -4068,19 +3442,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.body = .messageAccepted(v)
-        }
-      }()
-      case 22: try {
-        var v: IMV2ChangeRoomMembership?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .changeRoomMembership(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .changeRoomMembership(v)
         }
       }()
       case 23: try {
@@ -4096,19 +3457,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.body = .membershipChanged(v)
         }
       }()
-      case 24: try {
-        var v: IMV2WithdrawMessage?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .withdrawMessage(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .withdrawMessage(v)
-        }
-      }()
       case 25: try {
         var v: IMV2MessageWithdrawn?
         var hadOneofValue = false
@@ -4122,19 +3470,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.body = .messageWithdrawn(v)
         }
       }()
-      case 26: try {
-        var v: IMV2ChangeMessageReaction?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .changeMessageReaction(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .changeMessageReaction(v)
-        }
-      }()
       case 27: try {
         var v: IMV2MessageReactionChanged?
         var hadOneofValue = false
@@ -4146,19 +3481,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.body = .messageReactionChanged(v)
-        }
-      }()
-      case 28: try {
-        var v: IMV2EditMessage?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .editMessage(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .editMessage(v)
         }
       }()
       case 29: try {
@@ -4343,45 +3665,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.body = .readReceiptRecorded(v)
         }
       }()
-      case 43: try {
-        var v: IMV2OpenDirectRoom?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .openDirectRoom(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .openDirectRoom(v)
-        }
-      }()
-      case 44: try {
-        var v: IMV2DirectRoomOpened?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .directRoomOpened(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .directRoomOpened(v)
-        }
-      }()
-      case 45: try {
-        var v: IMV2SetStrangerMessagePermission?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .setStrangerMessagePermission(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .setStrangerMessagePermission(v)
-        }
-      }()
       case 46: try {
         var v: IMV2StrangerMessagePermissionSet?
         var hadOneofValue = false
@@ -4393,19 +3676,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.body = .strangerMessagePermissionSet(v)
-        }
-      }()
-      case 47: try {
-        var v: IMV2ChangeRelationship?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .changeRelationship(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .changeRelationship(v)
         }
       }()
       case 48: try {
@@ -4421,19 +3691,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.body = .relationshipChanged(v)
         }
       }()
-      case 49: try {
-        var v: IMV2ChangeUserBlock?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .changeUserBlock(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .changeUserBlock(v)
-        }
-      }()
       case 50: try {
         var v: IMV2UserBlockChanged?
         var hadOneofValue = false
@@ -4445,45 +3702,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.body = .userBlockChanged(v)
-        }
-      }()
-      case 51: try {
-        var v: IMV2ModerateMessage?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .moderateMessage(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .moderateMessage(v)
-        }
-      }()
-      case 52: try {
-        var v: IMV2MessageRedacted?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .messageRedacted(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .messageRedacted(v)
-        }
-      }()
-      case 53: try {
-        var v: IMV2MuteMember?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .muteMember(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .muteMember(v)
         }
       }()
       case 54: try {
@@ -4499,19 +3717,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.body = .memberMuted(v)
         }
       }()
-      case 55: try {
-        var v: IMV2ModerateMemberRemoval?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .moderateMemberRemoval(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .moderateMemberRemoval(v)
-        }
-      }()
       case 56: try {
         var v: IMV2MemberRemovedByModerator?
         var hadOneofValue = false
@@ -4523,19 +3728,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.body = .memberRemovedByModerator(v)
-        }
-      }()
-      case 58: try {
-        var v: IMV2GroupRoomCreated?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .groupRoomCreated(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .groupRoomCreated(v)
         }
       }()
       case 59: try {
@@ -4642,110 +3834,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.body = .groupEventAvailable(v)
         }
       }()
-      case 67: try {
-        var v: IMV2BeginGroupRoomCreation?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .beginGroupRoomCreation(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .beginGroupRoomCreation(v)
-        }
-      }()
-      case 68: try {
-        var v: IMV2GroupRoomCreationPrepared?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .groupRoomCreationPrepared(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .groupRoomCreationPrepared(v)
-        }
-      }()
-      case 69: try {
-        var v: IMV2AppendGroupRoomCreationMembers?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .appendGroupRoomCreationMembers(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .appendGroupRoomCreationMembers(v)
-        }
-      }()
-      case 70: try {
-        var v: IMV2GroupRoomCreationMembersAppended?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .groupRoomCreationMembersAppended(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .groupRoomCreationMembersAppended(v)
-        }
-      }()
-      case 71: try {
-        var v: IMV2FinalizeGroupRoomCreation?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .finalizeGroupRoomCreation(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .finalizeGroupRoomCreation(v)
-        }
-      }()
-      case 72: try {
-        var v: IMV2CancelGroupRoomCreation?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .cancelGroupRoomCreation(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .cancelGroupRoomCreation(v)
-        }
-      }()
-      case 73: try {
-        var v: IMV2GroupRoomCreationCancelled?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .groupRoomCreationCancelled(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .groupRoomCreationCancelled(v)
-        }
-      }()
-      case 74: try {
-        var v: IMV2SetUserAddPermission?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .setUserAddPermission(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .setUserAddPermission(v)
-        }
-      }()
       case 75: try {
         var v: IMV2UserAddPermissionSet?
         var hadOneofValue = false
@@ -4757,19 +3845,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.body = .userAddPermissionSet(v)
-        }
-      }()
-      case 76: try {
-        var v: IMV2SetReadReceiptPreferences?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .setReadReceiptPreferences(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .setReadReceiptPreferences(v)
         }
       }()
       case 77: try {
@@ -4809,19 +3884,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.body = .readReceiptReadersPage(v)
-        }
-      }()
-      case 80: try {
-        var v: IMV2SetLiveActivityPreferences?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .setLiveActivityPreferences(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .setLiveActivityPreferences(v)
         }
       }()
       case 81: try {
@@ -5032,19 +4094,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.body = .messageFavoriteChanged(v)
         }
       }()
-      case 97: try {
-        var v: IMV2SetPinnedMessage?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .setPinnedMessage(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .setPinnedMessage(v)
-        }
-      }()
       case 98: try {
         var v: IMV2PinnedMessageChanged?
         var hadOneofValue = false
@@ -5056,19 +4105,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.body = .pinnedMessageChanged(v)
-        }
-      }()
-      case 99: try {
-        var v: IMV2SetGroupAnnouncement?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .setGroupAnnouncement(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .setGroupAnnouncement(v)
         }
       }()
       case 100: try {
@@ -5084,19 +4120,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.body = .groupAnnouncementChanged(v)
         }
       }()
-      case 101: try {
-        var v: IMV2SetGroupRolePermissions?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .setGroupRolePermissions(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .setGroupRolePermissions(v)
-        }
-      }()
       case 102: try {
         var v: IMV2GroupRolePermissionsChanged?
         var hadOneofValue = false
@@ -5110,19 +4133,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.body = .groupRolePermissionsChanged(v)
         }
       }()
-      case 103: try {
-        var v: IMV2ChangeGroupMemberRole?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .changeGroupMemberRole(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .changeGroupMemberRole(v)
-        }
-      }()
       case 104: try {
         var v: IMV2GroupMemberRoleChanged?
         var hadOneofValue = false
@@ -5134,32 +4144,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
         if let v = v {
           if hadOneofValue {try decoder.handleConflictingOneOf()}
           self.body = .groupMemberRoleChanged(v)
-        }
-      }()
-      case 105: try {
-        var v: IMV2ForwardMessages?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .forwardMessages(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .forwardMessages(v)
-        }
-      }()
-      case 106: try {
-        var v: IMV2MessagesForwarded?
-        var hadOneofValue = false
-        if let current = self.body {
-          hadOneofValue = true
-          if case .messagesForwarded(let m) = current {v = m}
-        }
-        try decoder.decodeSingularMessageField(value: &v)
-        if let v = v {
-          if hadOneofValue {try decoder.handleConflictingOneOf()}
-          self.body = .messagesForwarded(v)
         }
       }()
       case 107: try {
@@ -5357,6 +4341,45 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.body = .authorPresentationEnded(v)
         }
       }()
+      case 124: try {
+        var v: IMV2PersonalPreferenceReceipt?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .personalPreferenceReceipt(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .personalPreferenceReceipt(v)
+        }
+      }()
+      case 125: try {
+        var v: IMV2PresencePublicationControl?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .presencePublicationControl(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .presencePublicationControl(v)
+        }
+      }()
+      case 126: try {
+        var v: IMV2PresencePublicationControlled?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .presencePublicationControlled(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .presencePublicationControlled(v)
+        }
+      }()
       default: break
       }
     }
@@ -5398,41 +4421,21 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .heartbeatAck(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 15)
     }()
-    case .sendMessage?: try {
-      guard case .sendMessage(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 20)
-    }()
     case .messageAccepted?: try {
       guard case .messageAccepted(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 21)
-    }()
-    case .changeRoomMembership?: try {
-      guard case .changeRoomMembership(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 22)
     }()
     case .membershipChanged?: try {
       guard case .membershipChanged(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 23)
     }()
-    case .withdrawMessage?: try {
-      guard case .withdrawMessage(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 24)
-    }()
     case .messageWithdrawn?: try {
       guard case .messageWithdrawn(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 25)
     }()
-    case .changeMessageReaction?: try {
-      guard case .changeMessageReaction(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 26)
-    }()
     case .messageReactionChanged?: try {
       guard case .messageReactionChanged(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 27)
-    }()
-    case .editMessage?: try {
-      guard case .editMessage(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 28)
     }()
     case .messageEdited?: try {
       guard case .messageEdited(let v)? = self.body else { preconditionFailure() }
@@ -5490,65 +4493,25 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .readReceiptRecorded(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 42)
     }()
-    case .openDirectRoom?: try {
-      guard case .openDirectRoom(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 43)
-    }()
-    case .directRoomOpened?: try {
-      guard case .directRoomOpened(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 44)
-    }()
-    case .setStrangerMessagePermission?: try {
-      guard case .setStrangerMessagePermission(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 45)
-    }()
     case .strangerMessagePermissionSet?: try {
       guard case .strangerMessagePermissionSet(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 46)
-    }()
-    case .changeRelationship?: try {
-      guard case .changeRelationship(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 47)
     }()
     case .relationshipChanged?: try {
       guard case .relationshipChanged(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 48)
     }()
-    case .changeUserBlock?: try {
-      guard case .changeUserBlock(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 49)
-    }()
     case .userBlockChanged?: try {
       guard case .userBlockChanged(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 50)
-    }()
-    case .moderateMessage?: try {
-      guard case .moderateMessage(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 51)
-    }()
-    case .messageRedacted?: try {
-      guard case .messageRedacted(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 52)
-    }()
-    case .muteMember?: try {
-      guard case .muteMember(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 53)
     }()
     case .memberMuted?: try {
       guard case .memberMuted(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 54)
     }()
-    case .moderateMemberRemoval?: try {
-      guard case .moderateMemberRemoval(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 55)
-    }()
     case .memberRemovedByModerator?: try {
       guard case .memberRemovedByModerator(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 56)
-    }()
-    case .groupRoomCreated?: try {
-      guard case .groupRoomCreated(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 58)
     }()
     case .listRoomMembers?: try {
       guard case .listRoomMembers(let v)? = self.body else { preconditionFailure() }
@@ -5582,45 +4545,9 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .groupEventAvailable(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 66)
     }()
-    case .beginGroupRoomCreation?: try {
-      guard case .beginGroupRoomCreation(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 67)
-    }()
-    case .groupRoomCreationPrepared?: try {
-      guard case .groupRoomCreationPrepared(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 68)
-    }()
-    case .appendGroupRoomCreationMembers?: try {
-      guard case .appendGroupRoomCreationMembers(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 69)
-    }()
-    case .groupRoomCreationMembersAppended?: try {
-      guard case .groupRoomCreationMembersAppended(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 70)
-    }()
-    case .finalizeGroupRoomCreation?: try {
-      guard case .finalizeGroupRoomCreation(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 71)
-    }()
-    case .cancelGroupRoomCreation?: try {
-      guard case .cancelGroupRoomCreation(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 72)
-    }()
-    case .groupRoomCreationCancelled?: try {
-      guard case .groupRoomCreationCancelled(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 73)
-    }()
-    case .setUserAddPermission?: try {
-      guard case .setUserAddPermission(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 74)
-    }()
     case .userAddPermissionSet?: try {
       guard case .userAddPermissionSet(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 75)
-    }()
-    case .setReadReceiptPreferences?: try {
-      guard case .setReadReceiptPreferences(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 76)
     }()
     case .readReceiptPreferencesSet?: try {
       guard case .readReceiptPreferencesSet(let v)? = self.body else { preconditionFailure() }
@@ -5633,10 +4560,6 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .readReceiptReadersPage?: try {
       guard case .readReceiptReadersPage(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 79)
-    }()
-    case .setLiveActivityPreferences?: try {
-      guard case .setLiveActivityPreferences(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 80)
     }()
     case .liveActivityPreferencesSet?: try {
       guard case .liveActivityPreferencesSet(let v)? = self.body else { preconditionFailure() }
@@ -5702,45 +4625,21 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .messageFavoriteChanged(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 96)
     }()
-    case .setPinnedMessage?: try {
-      guard case .setPinnedMessage(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 97)
-    }()
     case .pinnedMessageChanged?: try {
       guard case .pinnedMessageChanged(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 98)
-    }()
-    case .setGroupAnnouncement?: try {
-      guard case .setGroupAnnouncement(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 99)
     }()
     case .groupAnnouncementChanged?: try {
       guard case .groupAnnouncementChanged(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 100)
     }()
-    case .setGroupRolePermissions?: try {
-      guard case .setGroupRolePermissions(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 101)
-    }()
     case .groupRolePermissionsChanged?: try {
       guard case .groupRolePermissionsChanged(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 102)
     }()
-    case .changeGroupMemberRole?: try {
-      guard case .changeGroupMemberRole(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 103)
-    }()
     case .groupMemberRoleChanged?: try {
       guard case .groupMemberRoleChanged(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 104)
-    }()
-    case .forwardMessages?: try {
-      guard case .forwardMessages(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 105)
-    }()
-    case .messagesForwarded?: try {
-      guard case .messagesForwarded(let v)? = self.body else { preconditionFailure() }
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 106)
     }()
     case .getGroupRolePolicyBaseline?: try {
       guard case .getGroupRolePolicyBaseline(let v)? = self.body else { preconditionFailure() }
@@ -5802,6 +4701,18 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
       guard case .authorPresentationEnded(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 123)
     }()
+    case .personalPreferenceReceipt?: try {
+      guard case .personalPreferenceReceipt(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 124)
+    }()
+    case .presencePublicationControl?: try {
+      guard case .presencePublicationControl(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 125)
+    }()
+    case .presencePublicationControlled?: try {
+      guard case .presencePublicationControlled(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 126)
+    }()
     case nil: break
     }
     try unknownFields.traverse(visitor: &visitor)
@@ -5818,7 +4729,7 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
 
 nonisolated extension IMV2SetConversationState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SetConversationState"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{3}room_id\0\u{3}is_pinned\0\u{3}is_archived\0\u{3}mute_until_ms\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{3}room_id\0\u{3}is_pinned\0\u{3}is_archived\0\u{3}mute_until_ms\0\u{3}expected_revision\0\u{3}first_submission_deadline_ms\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5831,6 +4742,8 @@ nonisolated extension IMV2SetConversationState: SwiftProtobuf.Message, SwiftProt
       case 3: try { try decoder.decodeSingularBoolField(value: &self.isPinned) }()
       case 4: try { try decoder.decodeSingularBoolField(value: &self.isArchived) }()
       case 5: try { try decoder.decodeSingularInt64Field(value: &self.muteUntilMs) }()
+      case 6: try { try decoder.decodeSingularUInt64Field(value: &self.expectedRevision) }()
+      case 7: try { try decoder.decodeSingularUInt64Field(value: &self.firstSubmissionDeadlineMs) }()
       default: break
       }
     }
@@ -5852,6 +4765,12 @@ nonisolated extension IMV2SetConversationState: SwiftProtobuf.Message, SwiftProt
     if self.muteUntilMs != 0 {
       try visitor.visitSingularInt64Field(value: self.muteUntilMs, fieldNumber: 5)
     }
+    if self.expectedRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.expectedRevision, fieldNumber: 6)
+    }
+    if self.firstSubmissionDeadlineMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.firstSubmissionDeadlineMs, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -5861,6 +4780,8 @@ nonisolated extension IMV2SetConversationState: SwiftProtobuf.Message, SwiftProt
     if lhs.isPinned != rhs.isPinned {return false}
     if lhs.isArchived != rhs.isArchived {return false}
     if lhs.muteUntilMs != rhs.muteUntilMs {return false}
+    if lhs.expectedRevision != rhs.expectedRevision {return false}
+    if lhs.firstSubmissionDeadlineMs != rhs.firstSubmissionDeadlineMs {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -5868,7 +4789,7 @@ nonisolated extension IMV2SetConversationState: SwiftProtobuf.Message, SwiftProt
 
 nonisolated extension IMV2ConversationStateSet: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ConversationStateSet"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}is_pinned\0\u{3}is_archived\0\u{3}mute_until_ms\0\u{3}updated_at_ms\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}is_pinned\0\u{3}is_archived\0\u{3}mute_until_ms\0\u{3}updated_at_ms\0\u{1}revision\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5881,6 +4802,7 @@ nonisolated extension IMV2ConversationStateSet: SwiftProtobuf.Message, SwiftProt
       case 3: try { try decoder.decodeSingularBoolField(value: &self.isArchived) }()
       case 4: try { try decoder.decodeSingularInt64Field(value: &self.muteUntilMs) }()
       case 5: try { try decoder.decodeSingularInt64Field(value: &self.updatedAtMs) }()
+      case 6: try { try decoder.decodeSingularUInt64Field(value: &self.revision) }()
       default: break
       }
     }
@@ -5902,6 +4824,9 @@ nonisolated extension IMV2ConversationStateSet: SwiftProtobuf.Message, SwiftProt
     if self.updatedAtMs != 0 {
       try visitor.visitSingularInt64Field(value: self.updatedAtMs, fieldNumber: 5)
     }
+    if self.revision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.revision, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -5911,6 +4836,7 @@ nonisolated extension IMV2ConversationStateSet: SwiftProtobuf.Message, SwiftProt
     if lhs.isArchived != rhs.isArchived {return false}
     if lhs.muteUntilMs != rhs.muteUntilMs {return false}
     if lhs.updatedAtMs != rhs.updatedAtMs {return false}
+    if lhs.revision != rhs.revision {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -5918,7 +4844,7 @@ nonisolated extension IMV2ConversationStateSet: SwiftProtobuf.Message, SwiftProt
 
 nonisolated extension IMV2SetMessageFavorite: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".SetMessageFavorite"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{3}room_id\0\u{3}message_id\0\u{3}is_favorited\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{3}room_id\0\u{3}message_id\0\u{3}is_favorited\0\u{3}expected_revision\0\u{3}first_submission_deadline_ms\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5930,6 +4856,8 @@ nonisolated extension IMV2SetMessageFavorite: SwiftProtobuf.Message, SwiftProtob
       case 2: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
       case 3: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
       case 4: try { try decoder.decodeSingularBoolField(value: &self.isFavorited) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.expectedRevision) }()
+      case 6: try { try decoder.decodeSingularUInt64Field(value: &self.firstSubmissionDeadlineMs) }()
       default: break
       }
     }
@@ -5948,6 +4876,12 @@ nonisolated extension IMV2SetMessageFavorite: SwiftProtobuf.Message, SwiftProtob
     if self.isFavorited != false {
       try visitor.visitSingularBoolField(value: self.isFavorited, fieldNumber: 4)
     }
+    if self.expectedRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.expectedRevision, fieldNumber: 5)
+    }
+    if self.firstSubmissionDeadlineMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.firstSubmissionDeadlineMs, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -5956,6 +4890,8 @@ nonisolated extension IMV2SetMessageFavorite: SwiftProtobuf.Message, SwiftProtob
     if lhs.roomID != rhs.roomID {return false}
     if lhs.messageID != rhs.messageID {return false}
     if lhs.isFavorited != rhs.isFavorited {return false}
+    if lhs.expectedRevision != rhs.expectedRevision {return false}
+    if lhs.firstSubmissionDeadlineMs != rhs.firstSubmissionDeadlineMs {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -5963,7 +4899,7 @@ nonisolated extension IMV2SetMessageFavorite: SwiftProtobuf.Message, SwiftProtob
 
 nonisolated extension IMV2MessageFavoriteChanged: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".MessageFavoriteChanged"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}message_id\0\u{3}is_favorited\0\u{3}updated_at_ms\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}message_id\0\u{3}is_favorited\0\u{3}updated_at_ms\0\u{1}revision\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5975,6 +4911,7 @@ nonisolated extension IMV2MessageFavoriteChanged: SwiftProtobuf.Message, SwiftPr
       case 2: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
       case 3: try { try decoder.decodeSingularBoolField(value: &self.isFavorited) }()
       case 4: try { try decoder.decodeSingularInt64Field(value: &self.updatedAtMs) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.revision) }()
       default: break
       }
     }
@@ -5993,6 +4930,9 @@ nonisolated extension IMV2MessageFavoriteChanged: SwiftProtobuf.Message, SwiftPr
     if self.updatedAtMs != 0 {
       try visitor.visitSingularInt64Field(value: self.updatedAtMs, fieldNumber: 4)
     }
+    if self.revision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.revision, fieldNumber: 5)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -6001,14 +4941,15 @@ nonisolated extension IMV2MessageFavoriteChanged: SwiftProtobuf.Message, SwiftPr
     if lhs.messageID != rhs.messageID {return false}
     if lhs.isFavorited != rhs.isFavorited {return false}
     if lhs.updatedAtMs != rhs.updatedAtMs {return false}
+    if lhs.revision != rhs.revision {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
 }
 
-nonisolated extension IMV2SetPinnedMessage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".SetPinnedMessage"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{3}room_id\0\u{3}message_id\0\u{3}is_pinned\0")
+nonisolated extension IMV2PersonalPreferenceReceipt: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".PersonalPreferenceReceipt"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}actor_user_id\0\u{3}operation_id\0\u{3}room_id\0\u{3}message_id\0\u{1}kind\0\u{3}fingerprint_version\0\u{1}fingerprint\0\u{3}resolved_at_ms\0\u{3}conversation_state\0\u{3}message_favorite\0\u{1}rejected\0\u{1}closed\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6016,39 +4957,177 @@ nonisolated extension IMV2SetPinnedMessage: SwiftProtobuf.Message, SwiftProtobuf
       // allocates stack space for every case branch when no optimizations are
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
-      case 4: try { try decoder.decodeSingularBoolField(value: &self.isPinned) }()
+      case 1: try { try decoder.decodeSingularStringField(value: &self.actorUserID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
+      case 5: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
+      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.fingerprintVersion) }()
+      case 7: try { try decoder.decodeSingularBytesField(value: &self.fingerprint) }()
+      case 8: try { try decoder.decodeSingularUInt64Field(value: &self.resolvedAtMs) }()
+      case 9: try {
+        var v: IMV2ConversationStateSet?
+        var hadOneofValue = false
+        if let current = self.outcome {
+          hadOneofValue = true
+          if case .conversationState(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.outcome = .conversationState(v)
+        }
+      }()
+      case 10: try {
+        var v: IMV2MessageFavoriteChanged?
+        var hadOneofValue = false
+        if let current = self.outcome {
+          hadOneofValue = true
+          if case .messageFavorite(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.outcome = .messageFavorite(v)
+        }
+      }()
+      case 11: try {
+        var v: IMV2PersonalPreferenceRejection?
+        var hadOneofValue = false
+        if let current = self.outcome {
+          hadOneofValue = true
+          if case .rejected(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.outcome = .rejected(v)
+        }
+      }()
+      case 12: try {
+        var v: Bool?
+        try decoder.decodeSingularBoolField(value: &v)
+        if let v = v {
+          if self.outcome != nil {try decoder.handleConflictingOneOf()}
+          self.outcome = .closed(v)
+        }
+      }()
       default: break
       }
     }
   }
 
   public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.actorUserID.isEmpty {
+      try visitor.visitSingularStringField(value: self.actorUserID, fieldNumber: 1)
+    }
     if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
+      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 2)
     }
     if !self.roomID.isEmpty {
-      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 2)
+      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 3)
     }
     if !self.messageID.isEmpty {
-      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 3)
+      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 4)
     }
-    if self.isPinned != false {
-      try visitor.visitSingularBoolField(value: self.isPinned, fieldNumber: 4)
+    if self.kind != .unspecified {
+      try visitor.visitSingularEnumField(value: self.kind, fieldNumber: 5)
+    }
+    if self.fingerprintVersion != 0 {
+      try visitor.visitSingularUInt32Field(value: self.fingerprintVersion, fieldNumber: 6)
+    }
+    if !self.fingerprint.isEmpty {
+      try visitor.visitSingularBytesField(value: self.fingerprint, fieldNumber: 7)
+    }
+    if self.resolvedAtMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.resolvedAtMs, fieldNumber: 8)
+    }
+    switch self.outcome {
+    case .conversationState?: try {
+      guard case .conversationState(let v)? = self.outcome else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 9)
+    }()
+    case .messageFavorite?: try {
+      guard case .messageFavorite(let v)? = self.outcome else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 10)
+    }()
+    case .rejected?: try {
+      guard case .rejected(let v)? = self.outcome else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 11)
+    }()
+    case .closed?: try {
+      guard case .closed(let v)? = self.outcome else { preconditionFailure() }
+      try visitor.visitSingularBoolField(value: v, fieldNumber: 12)
+    }()
+    case nil: break
     }
     try unknownFields.traverse(visitor: &visitor)
   }
 
-  public static func ==(lhs: IMV2SetPinnedMessage, rhs: IMV2SetPinnedMessage) -> Bool {
+  public static func ==(lhs: IMV2PersonalPreferenceReceipt, rhs: IMV2PersonalPreferenceReceipt) -> Bool {
+    if lhs.actorUserID != rhs.actorUserID {return false}
     if lhs.operationID != rhs.operationID {return false}
     if lhs.roomID != rhs.roomID {return false}
     if lhs.messageID != rhs.messageID {return false}
-    if lhs.isPinned != rhs.isPinned {return false}
+    if lhs.kind != rhs.kind {return false}
+    if lhs.fingerprintVersion != rhs.fingerprintVersion {return false}
+    if lhs.fingerprint != rhs.fingerprint {return false}
+    if lhs.resolvedAtMs != rhs.resolvedAtMs {return false}
+    if lhs.outcome != rhs.outcome {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
+}
+
+nonisolated extension IMV2PersonalPreferenceReceipt.Kind: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0KIND_UNSPECIFIED\0\u{1}CONVERSATION_STATE\0\u{1}MESSAGE_FAVORITE\0")
+}
+
+nonisolated extension IMV2PersonalPreferenceRejection: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".PersonalPreferenceRejection"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}reason\0\u{3}current_revision\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.reason) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self._currentRevision) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if self.reason != .unspecified {
+      try visitor.visitSingularEnumField(value: self.reason, fieldNumber: 1)
+    }
+    try { if let v = self._currentRevision {
+      try visitor.visitSingularUInt64Field(value: v, fieldNumber: 2)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2PersonalPreferenceRejection, rhs: IMV2PersonalPreferenceRejection) -> Bool {
+    if lhs.reason != rhs.reason {return false}
+    if lhs._currentRevision != rhs._currentRevision {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2PersonalPreferenceRejection.Reason: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0REASON_UNSPECIFIED\0\u{1}REVISION_CONFLICT\0\u{1}PERMISSION_DENIED\0\u{1}NOT_FOUND\0\u{1}EXPIRED_UNSUBMITTED\0")
 }
 
 nonisolated extension IMV2PinnedMessageChanged: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
@@ -6096,51 +5175,6 @@ nonisolated extension IMV2PinnedMessageChanged: SwiftProtobuf.Message, SwiftProt
     if lhs.isPinned != rhs.isPinned {return false}
     if lhs.roomSequence != rhs.roomSequence {return false}
     if lhs.updatedAtMs != rhs.updatedAtMs {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2SetGroupAnnouncement: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".SetGroupAnnouncement"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{3}room_id\0\u{1}body\0\u{3}expected_revision\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.body) }()
-      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.expectedRevision) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    if !self.roomID.isEmpty {
-      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 2)
-    }
-    if !self.body.isEmpty {
-      try visitor.visitSingularStringField(value: self.body, fieldNumber: 3)
-    }
-    if self.expectedRevision != 0 {
-      try visitor.visitSingularUInt64Field(value: self.expectedRevision, fieldNumber: 4)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2SetGroupAnnouncement, rhs: IMV2SetGroupAnnouncement) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.roomID != rhs.roomID {return false}
-    if lhs.body != rhs.body {return false}
-    if lhs.expectedRevision != rhs.expectedRevision {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -6341,56 +5375,6 @@ nonisolated extension IMV2GroupRolePolicyBaseline: SwiftProtobuf.Message, SwiftP
   }
 }
 
-nonisolated extension IMV2SetGroupRolePermissions: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".SetGroupRolePermissions"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{3}room_id\0\u{1}role\0\u{1}permissions\0\u{3}expected_revision\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.role) }()
-      case 4: try { try decoder.decodeRepeatedMessageField(value: &self.permissions) }()
-      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.expectedRevision) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    if !self.roomID.isEmpty {
-      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 2)
-    }
-    if !self.role.isEmpty {
-      try visitor.visitSingularStringField(value: self.role, fieldNumber: 3)
-    }
-    if !self.permissions.isEmpty {
-      try visitor.visitRepeatedMessageField(value: self.permissions, fieldNumber: 4)
-    }
-    if self.expectedRevision != 0 {
-      try visitor.visitSingularUInt64Field(value: self.expectedRevision, fieldNumber: 5)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2SetGroupRolePermissions, rhs: IMV2SetGroupRolePermissions) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.roomID != rhs.roomID {return false}
-    if lhs.role != rhs.role {return false}
-    if lhs.permissions != rhs.permissions {return false}
-    if lhs.expectedRevision != rhs.expectedRevision {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
 nonisolated extension IMV2GroupRolePermissionsChanged: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".GroupRolePermissionsChanged"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{1}role\0\u{1}permissions\0\u{1}revision\0\u{3}room_sequence\0")
@@ -6441,56 +5425,6 @@ nonisolated extension IMV2GroupRolePermissionsChanged: SwiftProtobuf.Message, Sw
   }
 }
 
-nonisolated extension IMV2ChangeGroupMemberRole: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".ChangeGroupMemberRole"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{3}room_id\0\u{3}user_id\0\u{1}role\0\u{3}expected_membership_revision\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.userID) }()
-      case 4: try { try decoder.decodeSingularStringField(value: &self.role) }()
-      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.expectedMembershipRevision) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    if !self.roomID.isEmpty {
-      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 2)
-    }
-    if !self.userID.isEmpty {
-      try visitor.visitSingularStringField(value: self.userID, fieldNumber: 3)
-    }
-    if !self.role.isEmpty {
-      try visitor.visitSingularStringField(value: self.role, fieldNumber: 4)
-    }
-    if self.expectedMembershipRevision != 0 {
-      try visitor.visitSingularUInt64Field(value: self.expectedMembershipRevision, fieldNumber: 5)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2ChangeGroupMemberRole, rhs: IMV2ChangeGroupMemberRole) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.roomID != rhs.roomID {return false}
-    if lhs.userID != rhs.userID {return false}
-    if lhs.role != rhs.role {return false}
-    if lhs.expectedMembershipRevision != rhs.expectedMembershipRevision {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
 nonisolated extension IMV2GroupMemberRoleChanged: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".GroupMemberRoleChanged"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}user_id\0\u{1}role\0\u{3}membership_revision\0\u{3}room_sequence\0")
@@ -6536,166 +5470,6 @@ nonisolated extension IMV2GroupMemberRoleChanged: SwiftProtobuf.Message, SwiftPr
     if lhs.role != rhs.role {return false}
     if lhs.membershipRevision != rhs.membershipRevision {return false}
     if lhs.roomSequence != rhs.roomSequence {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2ForwardMessageReference: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".ForwardMessageReference"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}message_id\0\u{1}revision\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
-      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.revision) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.roomID.isEmpty {
-      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
-    }
-    if !self.messageID.isEmpty {
-      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 2)
-    }
-    if self.revision != 0 {
-      try visitor.visitSingularUInt64Field(value: self.revision, fieldNumber: 3)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2ForwardMessageReference, rhs: IMV2ForwardMessageReference) -> Bool {
-    if lhs.roomID != rhs.roomID {return false}
-    if lhs.messageID != rhs.messageID {return false}
-    if lhs.revision != rhs.revision {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2ForwardMessages: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".ForwardMessages"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{4}\u{2}target_room_ids\0\u{1}sources\0\u{b}source_message_ids\0\u{c}\u{2}\u{1}")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 3: try { try decoder.decodeRepeatedStringField(value: &self.targetRoomIds) }()
-      case 4: try { try decoder.decodeRepeatedMessageField(value: &self.sources) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    if !self.targetRoomIds.isEmpty {
-      try visitor.visitRepeatedStringField(value: self.targetRoomIds, fieldNumber: 3)
-    }
-    if !self.sources.isEmpty {
-      try visitor.visitRepeatedMessageField(value: self.sources, fieldNumber: 4)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2ForwardMessages, rhs: IMV2ForwardMessages) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.targetRoomIds != rhs.targetRoomIds {return false}
-    if lhs.sources != rhs.sources {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2ForwardMessageResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".ForwardMessageResult"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}source_message_id\0\u{3}target_room_id\0\u{3}message_id\0\u{3}room_sequence\0\u{3}error_code\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.sourceMessageID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.targetRoomID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
-      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.roomSequence) }()
-      case 5: try { try decoder.decodeSingularStringField(value: &self.errorCode) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.sourceMessageID.isEmpty {
-      try visitor.visitSingularStringField(value: self.sourceMessageID, fieldNumber: 1)
-    }
-    if !self.targetRoomID.isEmpty {
-      try visitor.visitSingularStringField(value: self.targetRoomID, fieldNumber: 2)
-    }
-    if !self.messageID.isEmpty {
-      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 3)
-    }
-    if self.roomSequence != 0 {
-      try visitor.visitSingularUInt64Field(value: self.roomSequence, fieldNumber: 4)
-    }
-    if !self.errorCode.isEmpty {
-      try visitor.visitSingularStringField(value: self.errorCode, fieldNumber: 5)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2ForwardMessageResult, rhs: IMV2ForwardMessageResult) -> Bool {
-    if lhs.sourceMessageID != rhs.sourceMessageID {return false}
-    if lhs.targetRoomID != rhs.targetRoomID {return false}
-    if lhs.messageID != rhs.messageID {return false}
-    if lhs.roomSequence != rhs.roomSequence {return false}
-    if lhs.errorCode != rhs.errorCode {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2MessagesForwarded: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".MessagesForwarded"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}results\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeRepeatedMessageField(value: &self.results) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.results.isEmpty {
-      try visitor.visitRepeatedMessageField(value: self.results, fieldNumber: 1)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2MessagesForwarded, rhs: IMV2MessagesForwarded) -> Bool {
-    if lhs.results != rhs.results {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -6822,7 +5596,7 @@ nonisolated extension IMV2ServerHello: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 nonisolated extension IMV2Authenticate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Authenticate"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}access_token\0\u{3}device_id\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}access_token\0\u{3}device_id\0\u{3}presence_publication_suppressed\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6832,6 +5606,7 @@ nonisolated extension IMV2Authenticate: SwiftProtobuf.Message, SwiftProtobuf._Me
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularStringField(value: &self.accessToken) }()
       case 2: try { try decoder.decodeSingularStringField(value: &self.deviceID) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.presencePublicationSuppressed) }()
       default: break
       }
     }
@@ -6844,10 +5619,14 @@ nonisolated extension IMV2Authenticate: SwiftProtobuf.Message, SwiftProtobuf._Me
     if !self.deviceID.isEmpty {
       try visitor.visitSingularStringField(value: self.deviceID, fieldNumber: 2)
     }
+    if self.presencePublicationSuppressed != false {
+      try visitor.visitSingularBoolField(value: self.presencePublicationSuppressed, fieldNumber: 3)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   public static func ==(lhs: IMV2Authenticate, rhs: IMV2Authenticate) -> Bool {
+    if lhs.presencePublicationSuppressed != rhs.presencePublicationSuppressed {return false}
     if lhs.accessToken != rhs.accessToken {return false}
     if lhs.deviceID != rhs.deviceID {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
@@ -6960,46 +5739,6 @@ nonisolated extension IMV2HeartbeatAck: SwiftProtobuf.Message, SwiftProtobuf._Me
 
   public static func ==(lhs: IMV2HeartbeatAck, rhs: IMV2HeartbeatAck) -> Bool {
     if lhs.serverTimeMs != rhs.serverTimeMs {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2SetLiveActivityPreferences: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".SetLiveActivityPreferences"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{3}allows_online_presence\0\u{3}allows_typing_indicators\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 2: try { try decoder.decodeSingularBoolField(value: &self.allowsOnlinePresence) }()
-      case 3: try { try decoder.decodeSingularBoolField(value: &self.allowsTypingIndicators) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    if self.allowsOnlinePresence != false {
-      try visitor.visitSingularBoolField(value: self.allowsOnlinePresence, fieldNumber: 2)
-    }
-    if self.allowsTypingIndicators != false {
-      try visitor.visitSingularBoolField(value: self.allowsTypingIndicators, fieldNumber: 3)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2SetLiveActivityPreferences, rhs: IMV2SetLiveActivityPreferences) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.allowsOnlinePresence != rhs.allowsOnlinePresence {return false}
-    if lhs.allowsTypingIndicators != rhs.allowsTypingIndicators {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -7394,50 +6133,6 @@ nonisolated extension IMV2PresenceChanged: SwiftProtobuf.Message, SwiftProtobuf.
   }
 }
 
-nonisolated extension IMV2SendMessage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".SendMessage"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}client_message_id\0\u{1}content\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.clientMessageID) }()
-      case 3: try { try decoder.decodeSingularMessageField(value: &self._content) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    // The use of inline closures is to circumvent an issue where the compiler
-    // allocates stack space for every if/case branch local when no optimizations
-    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-    // https://github.com/apple/swift-protobuf/issues/1182
-    if !self.roomID.isEmpty {
-      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
-    }
-    if !self.clientMessageID.isEmpty {
-      try visitor.visitSingularStringField(value: self.clientMessageID, fieldNumber: 2)
-    }
-    try { if let v = self._content {
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
-    } }()
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2SendMessage, rhs: IMV2SendMessage) -> Bool {
-    if lhs.roomID != rhs.roomID {return false}
-    if lhs.clientMessageID != rhs.clientMessageID {return false}
-    if lhs._content != rhs._content {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
 nonisolated extension IMV2MessageContent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".MessageContent"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}text\0\u{3}media_ids\0\u{3}mentioned_user_ids\0\u{3}mention_everyone\0\u{1}entities\0\u{3}reply_to_message_id\0")
@@ -7639,151 +6334,6 @@ nonisolated extension IMV2MessageAccepted: SwiftProtobuf.Message, SwiftProtobuf.
   }
 }
 
-nonisolated extension IMV2ModerateMessage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".ModerateMessage"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}operation_id\0\u{3}message_id\0\u{3}reason_code\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
-      case 4: try { try decoder.decodeSingularStringField(value: &self.reasonCode) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.roomID.isEmpty {
-      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
-    }
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 2)
-    }
-    if !self.messageID.isEmpty {
-      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 3)
-    }
-    if !self.reasonCode.isEmpty {
-      try visitor.visitSingularStringField(value: self.reasonCode, fieldNumber: 4)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2ModerateMessage, rhs: IMV2ModerateMessage) -> Bool {
-    if lhs.roomID != rhs.roomID {return false}
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.messageID != rhs.messageID {return false}
-    if lhs.reasonCode != rhs.reasonCode {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2MessageRedacted: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".MessageRedacted"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}message_id\0\u{3}room_sequence\0\u{3}message_revision\0\u{3}server_created_at_ms\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
-      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.roomSequence) }()
-      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.messageRevision) }()
-      case 5: try { try decoder.decodeSingularInt64Field(value: &self.serverCreatedAtMs) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.roomID.isEmpty {
-      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
-    }
-    if !self.messageID.isEmpty {
-      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 2)
-    }
-    if self.roomSequence != 0 {
-      try visitor.visitSingularUInt64Field(value: self.roomSequence, fieldNumber: 3)
-    }
-    if self.messageRevision != 0 {
-      try visitor.visitSingularUInt64Field(value: self.messageRevision, fieldNumber: 4)
-    }
-    if self.serverCreatedAtMs != 0 {
-      try visitor.visitSingularInt64Field(value: self.serverCreatedAtMs, fieldNumber: 5)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2MessageRedacted, rhs: IMV2MessageRedacted) -> Bool {
-    if lhs.roomID != rhs.roomID {return false}
-    if lhs.messageID != rhs.messageID {return false}
-    if lhs.roomSequence != rhs.roomSequence {return false}
-    if lhs.messageRevision != rhs.messageRevision {return false}
-    if lhs.serverCreatedAtMs != rhs.serverCreatedAtMs {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2MuteMember: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".MuteMember"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}operation_id\0\u{3}target_user_id\0\u{3}mute_until_ms\0\u{3}reason_code\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.targetUserID) }()
-      case 4: try { try decoder.decodeSingularInt64Field(value: &self.muteUntilMs) }()
-      case 5: try { try decoder.decodeSingularStringField(value: &self.reasonCode) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.roomID.isEmpty {
-      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
-    }
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 2)
-    }
-    if !self.targetUserID.isEmpty {
-      try visitor.visitSingularStringField(value: self.targetUserID, fieldNumber: 3)
-    }
-    if self.muteUntilMs != 0 {
-      try visitor.visitSingularInt64Field(value: self.muteUntilMs, fieldNumber: 4)
-    }
-    if !self.reasonCode.isEmpty {
-      try visitor.visitSingularStringField(value: self.reasonCode, fieldNumber: 5)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2MuteMember, rhs: IMV2MuteMember) -> Bool {
-    if lhs.roomID != rhs.roomID {return false}
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.targetUserID != rhs.targetUserID {return false}
-    if lhs.muteUntilMs != rhs.muteUntilMs {return false}
-    if lhs.reasonCode != rhs.reasonCode {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
 nonisolated extension IMV2MemberMuted: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".MemberMuted"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}target_user_id\0\u{3}mute_until_ms\0\u{3}room_sequence\0\u{3}server_created_at_ms\0")
@@ -7834,51 +6384,6 @@ nonisolated extension IMV2MemberMuted: SwiftProtobuf.Message, SwiftProtobuf._Mes
   }
 }
 
-nonisolated extension IMV2ModerateMemberRemoval: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".ModerateMemberRemoval"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}operation_id\0\u{3}target_user_id\0\u{3}reason_code\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.targetUserID) }()
-      case 4: try { try decoder.decodeSingularStringField(value: &self.reasonCode) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.roomID.isEmpty {
-      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
-    }
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 2)
-    }
-    if !self.targetUserID.isEmpty {
-      try visitor.visitSingularStringField(value: self.targetUserID, fieldNumber: 3)
-    }
-    if !self.reasonCode.isEmpty {
-      try visitor.visitSingularStringField(value: self.reasonCode, fieldNumber: 4)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2ModerateMemberRemoval, rhs: IMV2ModerateMemberRemoval) -> Bool {
-    if lhs.roomID != rhs.roomID {return false}
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.targetUserID != rhs.targetUserID {return false}
-    if lhs.reasonCode != rhs.reasonCode {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
 nonisolated extension IMV2MemberRemovedByModerator: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".MemberRemovedByModerator"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}target_user_id\0\u{3}membership_revision\0\u{3}room_sequence\0\u{3}server_created_at_ms\0")
@@ -7924,56 +6429,6 @@ nonisolated extension IMV2MemberRemovedByModerator: SwiftProtobuf.Message, Swift
     if lhs.membershipRevision != rhs.membershipRevision {return false}
     if lhs.roomSequence != rhs.roomSequence {return false}
     if lhs.serverCreatedAtMs != rhs.serverCreatedAtMs {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2ChangeRoomMembership: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".ChangeRoomMembership"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}operation_id\0\u{3}target_user_id\0\u{1}action\0\u{3}expected_membership_revision\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.targetUserID) }()
-      case 4: try { try decoder.decodeSingularEnumField(value: &self.action) }()
-      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.expectedMembershipRevision) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.roomID.isEmpty {
-      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
-    }
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 2)
-    }
-    if !self.targetUserID.isEmpty {
-      try visitor.visitSingularStringField(value: self.targetUserID, fieldNumber: 3)
-    }
-    if self.action != .unspecified {
-      try visitor.visitSingularEnumField(value: self.action, fieldNumber: 4)
-    }
-    if self.expectedMembershipRevision != 0 {
-      try visitor.visitSingularUInt64Field(value: self.expectedMembershipRevision, fieldNumber: 5)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2ChangeRoomMembership, rhs: IMV2ChangeRoomMembership) -> Bool {
-    if lhs.roomID != rhs.roomID {return false}
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.targetUserID != rhs.targetUserID {return false}
-    if lhs.action != rhs.action {return false}
-    if lhs.expectedMembershipRevision != rhs.expectedMembershipRevision {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -8034,51 +6489,6 @@ nonisolated extension IMV2MembershipChanged: SwiftProtobuf.Message, SwiftProtobu
   }
 }
 
-nonisolated extension IMV2WithdrawMessage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".WithdrawMessage"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}operation_id\0\u{3}message_id\0\u{3}expected_message_revision\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
-      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.expectedMessageRevision) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.roomID.isEmpty {
-      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
-    }
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 2)
-    }
-    if !self.messageID.isEmpty {
-      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 3)
-    }
-    if self.expectedMessageRevision != 0 {
-      try visitor.visitSingularUInt64Field(value: self.expectedMessageRevision, fieldNumber: 4)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2WithdrawMessage, rhs: IMV2WithdrawMessage) -> Bool {
-    if lhs.roomID != rhs.roomID {return false}
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.messageID != rhs.messageID {return false}
-    if lhs.expectedMessageRevision != rhs.expectedMessageRevision {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
 nonisolated extension IMV2MessageWithdrawn: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".MessageWithdrawn"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}message_id\0\u{3}message_revision\0\u{3}room_sequence\0\u{3}server_created_at_ms\0")
@@ -8124,56 +6534,6 @@ nonisolated extension IMV2MessageWithdrawn: SwiftProtobuf.Message, SwiftProtobuf
     if lhs.messageRevision != rhs.messageRevision {return false}
     if lhs.roomSequence != rhs.roomSequence {return false}
     if lhs.serverCreatedAtMs != rhs.serverCreatedAtMs {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2ChangeMessageReaction: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".ChangeMessageReaction"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}operation_id\0\u{3}message_id\0\u{1}reaction\0\u{1}action\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
-      case 4: try { try decoder.decodeSingularStringField(value: &self.reaction) }()
-      case 5: try { try decoder.decodeSingularEnumField(value: &self.action) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.roomID.isEmpty {
-      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
-    }
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 2)
-    }
-    if !self.messageID.isEmpty {
-      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 3)
-    }
-    if !self.reaction.isEmpty {
-      try visitor.visitSingularStringField(value: self.reaction, fieldNumber: 4)
-    }
-    if self.action != .unspecified {
-      try visitor.visitSingularEnumField(value: self.action, fieldNumber: 5)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2ChangeMessageReaction, rhs: IMV2ChangeMessageReaction) -> Bool {
-    if lhs.roomID != rhs.roomID {return false}
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.messageID != rhs.messageID {return false}
-    if lhs.reaction != rhs.reaction {return false}
-    if lhs.action != rhs.action {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -8234,60 +6594,6 @@ nonisolated extension IMV2MessageReactionChanged: SwiftProtobuf.Message, SwiftPr
     if lhs.action != rhs.action {return false}
     if lhs.roomSequence != rhs.roomSequence {return false}
     if lhs.serverCreatedAtMs != rhs.serverCreatedAtMs {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2EditMessage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".EditMessage"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}operation_id\0\u{3}message_id\0\u{3}expected_message_revision\0\u{1}content\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 3: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
-      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.expectedMessageRevision) }()
-      case 5: try { try decoder.decodeSingularMessageField(value: &self._content) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    // The use of inline closures is to circumvent an issue where the compiler
-    // allocates stack space for every if/case branch local when no optimizations
-    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
-    // https://github.com/apple/swift-protobuf/issues/1182
-    if !self.roomID.isEmpty {
-      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
-    }
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 2)
-    }
-    if !self.messageID.isEmpty {
-      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 3)
-    }
-    if self.expectedMessageRevision != 0 {
-      try visitor.visitSingularUInt64Field(value: self.expectedMessageRevision, fieldNumber: 4)
-    }
-    try { if let v = self._content {
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
-    } }()
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2EditMessage, rhs: IMV2EditMessage) -> Bool {
-    if lhs.roomID != rhs.roomID {return false}
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.messageID != rhs.messageID {return false}
-    if lhs.expectedMessageRevision != rhs.expectedMessageRevision {return false}
-    if lhs._content != rhs._content {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -8428,371 +6734,6 @@ nonisolated extension IMV2ReadReceiptRecorded: SwiftProtobuf.Message, SwiftProto
     if lhs.userID != rhs.userID {return false}
     if lhs.readThroughRoomSequence != rhs.readThroughRoomSequence {return false}
     if lhs.recordedAtMs != rhs.recordedAtMs {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2OpenDirectRoom: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".OpenDirectRoom"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{3}target_user_id\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.targetUserID) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    if !self.targetUserID.isEmpty {
-      try visitor.visitSingularStringField(value: self.targetUserID, fieldNumber: 2)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2OpenDirectRoom, rhs: IMV2OpenDirectRoom) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.targetUserID != rhs.targetUserID {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2DirectRoomOpened: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".DirectRoomOpened"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}target_user_id\0\u{3}created_at_ms\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.targetUserID) }()
-      case 3: try { try decoder.decodeSingularInt64Field(value: &self.createdAtMs) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.roomID.isEmpty {
-      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
-    }
-    if !self.targetUserID.isEmpty {
-      try visitor.visitSingularStringField(value: self.targetUserID, fieldNumber: 2)
-    }
-    if self.createdAtMs != 0 {
-      try visitor.visitSingularInt64Field(value: self.createdAtMs, fieldNumber: 3)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2DirectRoomOpened, rhs: IMV2DirectRoomOpened) -> Bool {
-    if lhs.roomID != rhs.roomID {return false}
-    if lhs.targetUserID != rhs.targetUserID {return false}
-    if lhs.createdAtMs != rhs.createdAtMs {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2GroupRoomCreated: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".GroupRoomCreated"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{1}title\0\u{3}member_user_ids\0\u{3}created_at_ms\0\u{3}capacity_class\0\u{3}member_count\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.title) }()
-      case 3: try { try decoder.decodeRepeatedStringField(value: &self.memberUserIds) }()
-      case 4: try { try decoder.decodeSingularInt64Field(value: &self.createdAtMs) }()
-      case 5: try { try decoder.decodeSingularEnumField(value: &self.capacityClass) }()
-      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.memberCount) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.roomID.isEmpty {
-      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
-    }
-    if !self.title.isEmpty {
-      try visitor.visitSingularStringField(value: self.title, fieldNumber: 2)
-    }
-    if !self.memberUserIds.isEmpty {
-      try visitor.visitRepeatedStringField(value: self.memberUserIds, fieldNumber: 3)
-    }
-    if self.createdAtMs != 0 {
-      try visitor.visitSingularInt64Field(value: self.createdAtMs, fieldNumber: 4)
-    }
-    if self.capacityClass != .unspecified {
-      try visitor.visitSingularEnumField(value: self.capacityClass, fieldNumber: 5)
-    }
-    if self.memberCount != 0 {
-      try visitor.visitSingularUInt32Field(value: self.memberCount, fieldNumber: 6)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2GroupRoomCreated, rhs: IMV2GroupRoomCreated) -> Bool {
-    if lhs.roomID != rhs.roomID {return false}
-    if lhs.title != rhs.title {return false}
-    if lhs.memberUserIds != rhs.memberUserIds {return false}
-    if lhs.createdAtMs != rhs.createdAtMs {return false}
-    if lhs.capacityClass != rhs.capacityClass {return false}
-    if lhs.memberCount != rhs.memberCount {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2BeginGroupRoomCreation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".BeginGroupRoomCreation"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{1}title\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.title) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    if !self.title.isEmpty {
-      try visitor.visitSingularStringField(value: self.title, fieldNumber: 2)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2BeginGroupRoomCreation, rhs: IMV2BeginGroupRoomCreation) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.title != rhs.title {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2GroupRoomCreationPrepared: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".GroupRoomCreationPrepared"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{1}title\0\u{3}staged_member_count\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.title) }()
-      case 3: try { try decoder.decodeSingularUInt32Field(value: &self.stagedMemberCount) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    if !self.title.isEmpty {
-      try visitor.visitSingularStringField(value: self.title, fieldNumber: 2)
-    }
-    if self.stagedMemberCount != 0 {
-      try visitor.visitSingularUInt32Field(value: self.stagedMemberCount, fieldNumber: 3)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2GroupRoomCreationPrepared, rhs: IMV2GroupRoomCreationPrepared) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.title != rhs.title {return false}
-    if lhs.stagedMemberCount != rhs.stagedMemberCount {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2AppendGroupRoomCreationMembers: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".AppendGroupRoomCreationMembers"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{3}member_user_ids\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 2: try { try decoder.decodeRepeatedStringField(value: &self.memberUserIds) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    if !self.memberUserIds.isEmpty {
-      try visitor.visitRepeatedStringField(value: self.memberUserIds, fieldNumber: 2)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2AppendGroupRoomCreationMembers, rhs: IMV2AppendGroupRoomCreationMembers) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.memberUserIds != rhs.memberUserIds {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2GroupRoomCreationMembersAppended: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".GroupRoomCreationMembersAppended"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{3}staged_member_count\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.stagedMemberCount) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    if self.stagedMemberCount != 0 {
-      try visitor.visitSingularUInt32Field(value: self.stagedMemberCount, fieldNumber: 2)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2GroupRoomCreationMembersAppended, rhs: IMV2GroupRoomCreationMembersAppended) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.stagedMemberCount != rhs.stagedMemberCount {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2FinalizeGroupRoomCreation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".FinalizeGroupRoomCreation"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2FinalizeGroupRoomCreation, rhs: IMV2FinalizeGroupRoomCreation) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2CancelGroupRoomCreation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".CancelGroupRoomCreation"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2CancelGroupRoomCreation, rhs: IMV2CancelGroupRoomCreation) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2GroupRoomCreationCancelled: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".GroupRoomCreationCancelled"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2GroupRoomCreationCancelled, rhs: IMV2GroupRoomCreationCancelled) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -9850,41 +7791,6 @@ nonisolated extension IMV2GroupEventAvailable: SwiftProtobuf.Message, SwiftProto
   }
 }
 
-nonisolated extension IMV2SetStrangerMessagePermission: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".SetStrangerMessagePermission"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{1}permission\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 2: try { try decoder.decodeSingularEnumField(value: &self.permission) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    if self.permission != .unspecified {
-      try visitor.visitSingularEnumField(value: self.permission, fieldNumber: 2)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2SetStrangerMessagePermission, rhs: IMV2SetStrangerMessagePermission) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.permission != rhs.permission {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
 nonisolated extension IMV2StrangerMessagePermissionSet: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".StrangerMessagePermissionSet"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}permission\0\u{3}updated_at_ms\0")
@@ -9920,41 +7826,6 @@ nonisolated extension IMV2StrangerMessagePermissionSet: SwiftProtobuf.Message, S
   }
 }
 
-nonisolated extension IMV2SetUserAddPermission: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".SetUserAddPermission"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{1}permission\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 2: try { try decoder.decodeSingularEnumField(value: &self.permission) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    if self.permission != .unspecified {
-      try visitor.visitSingularEnumField(value: self.permission, fieldNumber: 2)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2SetUserAddPermission, rhs: IMV2SetUserAddPermission) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.permission != rhs.permission {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
 nonisolated extension IMV2UserAddPermissionSet: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".UserAddPermissionSet"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}permission\0\u{3}updated_at_ms\0")
@@ -9985,46 +7856,6 @@ nonisolated extension IMV2UserAddPermissionSet: SwiftProtobuf.Message, SwiftProt
   public static func ==(lhs: IMV2UserAddPermissionSet, rhs: IMV2UserAddPermissionSet) -> Bool {
     if lhs.permission != rhs.permission {return false}
     if lhs.updatedAtMs != rhs.updatedAtMs {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2SetReadReceiptPreferences: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".SetReadReceiptPreferences"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{3}allows_direct_read_receipts\0\u{3}allows_group_read_receipts\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 2: try { try decoder.decodeSingularBoolField(value: &self.allowsDirectReadReceipts) }()
-      case 3: try { try decoder.decodeSingularBoolField(value: &self.allowsGroupReadReceipts) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    if self.allowsDirectReadReceipts != false {
-      try visitor.visitSingularBoolField(value: self.allowsDirectReadReceipts, fieldNumber: 2)
-    }
-    if self.allowsGroupReadReceipts != false {
-      try visitor.visitSingularBoolField(value: self.allowsGroupReadReceipts, fieldNumber: 3)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2SetReadReceiptPreferences, rhs: IMV2SetReadReceiptPreferences) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.allowsDirectReadReceipts != rhs.allowsDirectReadReceipts {return false}
-    if lhs.allowsGroupReadReceipts != rhs.allowsGroupReadReceipts {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -10190,46 +8021,6 @@ nonisolated extension IMV2ReadReceiptReadersPage: SwiftProtobuf.Message, SwiftPr
   }
 }
 
-nonisolated extension IMV2ChangeRelationship: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".ChangeRelationship"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{3}target_user_id\0\u{1}action\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.targetUserID) }()
-      case 3: try { try decoder.decodeSingularEnumField(value: &self.action) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    if !self.targetUserID.isEmpty {
-      try visitor.visitSingularStringField(value: self.targetUserID, fieldNumber: 2)
-    }
-    if self.action != .unspecified {
-      try visitor.visitSingularEnumField(value: self.action, fieldNumber: 3)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2ChangeRelationship, rhs: IMV2ChangeRelationship) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.targetUserID != rhs.targetUserID {return false}
-    if lhs.action != rhs.action {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
 nonisolated extension IMV2RelationshipChanged: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".RelationshipChanged"
   public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}target_user_id\0\u{1}action\0\u{3}resulting_state\0\u{3}updated_at_ms\0")
@@ -10270,46 +8061,6 @@ nonisolated extension IMV2RelationshipChanged: SwiftProtobuf.Message, SwiftProto
     if lhs.action != rhs.action {return false}
     if lhs.resultingState != rhs.resultingState {return false}
     if lhs.updatedAtMs != rhs.updatedAtMs {return false}
-    if lhs.unknownFields != rhs.unknownFields {return false}
-    return true
-  }
-}
-
-nonisolated extension IMV2ChangeUserBlock: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
-  public static let protoMessageName: String = _protobuf_package + ".ChangeUserBlock"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}operation_id\0\u{3}target_user_id\0\u{1}action\0")
-
-  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
-    while let fieldNumber = try decoder.nextFieldNumber() {
-      // The use of inline closures is to circumvent an issue where the compiler
-      // allocates stack space for every case branch when no optimizations are
-      // enabled. https://github.com/apple/swift-protobuf/issues/1034
-      switch fieldNumber {
-      case 1: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
-      case 2: try { try decoder.decodeSingularStringField(value: &self.targetUserID) }()
-      case 3: try { try decoder.decodeSingularEnumField(value: &self.action) }()
-      default: break
-      }
-    }
-  }
-
-  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
-    if !self.operationID.isEmpty {
-      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 1)
-    }
-    if !self.targetUserID.isEmpty {
-      try visitor.visitSingularStringField(value: self.targetUserID, fieldNumber: 2)
-    }
-    if self.action != .unspecified {
-      try visitor.visitSingularEnumField(value: self.action, fieldNumber: 3)
-    }
-    try unknownFields.traverse(visitor: &visitor)
-  }
-
-  public static func ==(lhs: IMV2ChangeUserBlock, rhs: IMV2ChangeUserBlock) -> Bool {
-    if lhs.operationID != rhs.operationID {return false}
-    if lhs.targetUserID != rhs.targetUserID {return false}
-    if lhs.action != rhs.action {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -11208,6 +8959,70 @@ nonisolated extension IMV2RoomLatestVisibleBatchResult: SwiftProtobuf.Message, S
 
   public static func ==(lhs: IMV2RoomLatestVisibleBatchResult, rhs: IMV2RoomLatestVisibleBatchResult) -> Bool {
     if lhs.rooms != rhs.rooms {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2PresencePublicationControl: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".PresencePublicationControl"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}mode\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.mode) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.mode != .unspecified {
+      try visitor.visitSingularEnumField(value: self.mode, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2PresencePublicationControl, rhs: IMV2PresencePublicationControl) -> Bool {
+    if lhs.mode != rhs.mode {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2PresencePublicationControl.Mode: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0UNSPECIFIED\0\u{1}SUPPRESSED\0\u{1}ALLOW_WHEN_AUTHORIZED\0")
+}
+
+nonisolated extension IMV2PresencePublicationControlled: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".PresencePublicationControlled"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}mode\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.mode) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.mode != .unspecified {
+      try visitor.visitSingularEnumField(value: self.mode, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2PresencePublicationControlled, rhs: IMV2PresencePublicationControlled) -> Bool {
+    if lhs.mode != rhs.mode {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

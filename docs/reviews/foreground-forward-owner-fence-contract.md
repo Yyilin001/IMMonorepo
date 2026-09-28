@@ -2,7 +2,15 @@
 
 对应 B04/B27。Gateway 的前台转发必须保留每个来源房间和目标房间的持久 shard/epoch；同物理库只是执行位置，不能跳过目录或 owner 检查。
 
-## 路由和批量处理
+## 当前账户 HTTP 路径
+
+current59/protocol37 的生产转发由账户父计划承接；`V2OwnerAwareForwardPlanPort` 按冻结的稳定子身份调用源 RoomRef recover/prepare、目标 RoomRef import 和源 RoomRef recordReceipt。control 元数据事务不接触房间事实，不跨 owner 共享 SQL 事务。原结果查询先于当前成员授权，但所有调用仍经过精确 activation fence；归属变更/结果不明不能转换为永久业务拒绝。
+
+worker 重建后先核对已有 processing 子块，不重新生成身份；取消只关闭未交接子块或由源权威证明尚未 export 的配对。已 export 配对继续核对目标最小原回执。父最终摘要与有序完整结果绑定，禁止已核对子结果回退为 pending。账户提交/恢复均为有界 HTTP，旧无截止 TLS 转发停止准入。
+
+下面保留原同库执行器的 owner 栅栏分析，作为内部原语约束；它不再描述当前 App 的生产提交入口。
+
+## 原同库执行器的路由和批量处理
 
 `V2RoutedForwardMessagesService` 先批量解析所有房间路由。目录故障、未知配置 owner 不允许扫描其他数据库或回退默认库。部分房间不存在时，保留原有有界点查及逐对 NOT_FOUND 行为。
 

@@ -112,11 +112,12 @@ public enum V2RoomReceiptQuery: Codable, Equatable, Sendable {
     /// 房间本地的读者候选项。所有者绝不返回最终读者页面；
     /// 候选项必须经过权威控制侧隐私过滤。
     case readerCandidates(V2ActorReadReceiptReadersQueryWire)
+    case recover(V2ReadReceiptRecoveryRequest)
     public var roomID: RoomID {
-        switch self { case .readerCandidates(let value): value.roomID }
+        switch self { case .readerCandidates(let value): value.roomID; case .recover(let value):value.command.roomID }
     }
     public var actorUserID: UserID {
-        switch self { case .readerCandidates(let value): value.actorUserID }
+        switch self { case .readerCandidates(let value): value.actorUserID; case .recover(let value):value.command.actorUserID }
     }
     public var replayPolicy: V2RoomReplayPolicy { .readOnly }
 }
@@ -130,6 +131,7 @@ public enum V2RoomReceiptResult: Codable, Equatable, Sendable {
     case recordFailure(V2ActorRoomReceiptFailureWire)
     case readersFailure(V2ActorReadReceiptStoreErrorWire)
     case record(V2ActorRecordReadReceiptResultWire)
+    case recovery(V2ReadReceiptRecoveryResult)
     case readers(V2ActorReadReceiptReadersPageWire)
     case readerCandidates(V2ActorReadReceiptCandidatePageWire)
 }

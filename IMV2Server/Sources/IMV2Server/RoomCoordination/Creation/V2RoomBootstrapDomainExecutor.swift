@@ -6,13 +6,13 @@ import IMV2Core
 /// 调用方通过固定分片标识选定现有所有者，绝不通过解析未知房间来选择。
 public struct V2RoomBootstrapDomainExecutor: Sendable {
     private let shardID: String
-    private let direct: any V2DirectMessagingStore
-    private let group: any V2ControlValidatedStagedGroupMessagingStore
+    private let direct: PostgresV2DirectMessagingStore
+    private let group: PostgresV2GroupMessagingStore
     private let capacityProfile: V2CapacityProfile
     private let now: @Sendable () -> Date
 
-    public init(shardID: String, direct: any V2DirectMessagingStore,
-                group: any V2ControlValidatedStagedGroupMessagingStore,
+    public init(shardID: String, direct: PostgresV2DirectMessagingStore,
+                group: PostgresV2GroupMessagingStore,
                 capacityProfile: V2CapacityProfile,
                 now: @escaping @Sendable () -> Date = Date.init) throws {
         guard !shardID.isEmpty, shardID == shardID.trimmingCharacters(in: .whitespacesAndNewlines) else {
@@ -27,36 +27,18 @@ public struct V2RoomBootstrapDomainExecutor: Sendable {
 
     public func execute(_ input: V2ActorRoomBootstrapCommand) async throws -> V2ActorRoomCreationResult {
         switch input {
-        case .direct(let value):
+        case .provenDirect(let value):
+            guard value.roomShardID == shardID, value.roomID.uuidValue != nil else { throw V2GroupMessagingPolicyError.invalidRoomShard }
+            return .provenDirect(try await direct.submitDirectRoomOperation(value.command, roomID:value.roomID,
+                roomShardID:shardID, capacityProfile:capacityProfile, now:now()))
+        case .provenDirectRecovery(let value):
             guard value.roomShardID == shardID else { throw V2GroupMessagingPolicyError.invalidRoomShard }
-            let result = try await direct.open(command: value.validatedCommand(),
-                capacityProfile: capacityProfile, roomShardID: shardID,
-                roomID: value.roomID, now: now())
-            return .direct(.init(domain: result))
-        case .group(let value):
-            let command = try value.validatedCommand()
-            let intent = try value.intent.toDomain()
-            guard intent.roomShardID == shardID, intent.roomID == input.roomID,
-                  intent.routeEpoch == 0,
-                  intent.requestFingerprint == (try groupCreationFingerprint(command)) else {
-                throw V2GroupRoomCreationIntentStoreError.invalidIntent
-            }
-            let result = try await group.createControlValidated(command: command,
-                validatedMemberUserIDs: value.validatedMemberUserIDs,
-                capacityProfile: capacityProfile, roomShardID: shardID,
-                roomID: intent.roomID, eventID: intent.eventID, now: now())
-            return .group(.init(domain: result))
-        case .stagedGroup(let value):
-            let command = try value.validatedCommand()
-            let intent = try value.intent.toDomain()
-            guard intent.roomShardID == shardID, intent.roomID == input.roomID,
-                  intent.routeEpoch == 0,
-                  intent.requestFingerprint == (try stagedGroupCreationFingerprint(command)) else {
-                throw V2GroupRoomCreationIntentStoreError.invalidIntent
-            }
-            let result = try await group.createControlValidatedStaged(command: command,
-                intent: intent, capacityProfile: capacityProfile, now: now())
-            return .group(.init(domain: result))
+            return .provenDirect(try await direct.recoverDirectRoomOperation(value.request, now:now()))
+        case .provenGroup(let value):
+            let placement=try value.placement.toDomain()
+            guard placement.roomShardID==shardID,placement.routeEpoch==0,placement.roomID==input.roomID else { throw V2GroupRoomCreationIntentStoreError.invalidIntent }
+            return .provenGroup(try await group.createProvenGroup(intent:value.intent,placement:placement,capacityProfile:capacityProfile,now:now()))
+
         }
     }
 

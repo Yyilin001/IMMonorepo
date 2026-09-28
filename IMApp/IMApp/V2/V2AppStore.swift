@@ -81,6 +81,16 @@ struct V2SignOutAttemptGate {
     }
 }
 
+/// Injects local trust/storage ports without constructing platform Keychain or remote cleanup runners.
+struct V2AppLocalRestorationDependencies {
+    let configuration: V2AppConfiguration
+    let authSession: V2AuthSession
+    let bootstrapper: V2ClientSessionBootstrapper
+    let exitMarker: any V2PendingCredentialDeletionStoring
+    let databaseURL: URL
+    let serviceIdentifier: String
+}
+
 @MainActor
 @Observable
 /// 应用账号根状态与依赖生命周期的 MainActor 所有者。
@@ -132,6 +142,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         case signedOut
         case authenticating
         case signedIn(userID: String)
+        case localReadOnly(userID: String)
         /// 在受保护数据不可用期间，一次 Keychain 读取被临时拒绝。
         ///
         /// 它与终态配置或本地存储失败不同，因为前台重试可能使其恢复。
@@ -143,6 +154,13 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         case uiTestingLiveLocalAccountCleanupCompleted
         case unavailable(message: String)
     }
+
+    enum AccountAccessMode: Equatable { case blocked, localReadOnly, authenticated }
+    private(set) var accountAccessMode: AccountAccessMode = .blocked
+    private(set) var offlinePresentation: V2OfflineProjectionPresentation?
+    @ObservationIgnored private var offlinePermit: V2OfflineReadBootstrap?
+    @ObservationIgnored private var offlineLocalStore: GRDBV2LocalSyncStore?
+    @ObservationIgnored private var offlineUpgradeTask: (id: UUID, task: Task<Void, Never>)?
 
     enum PasswordMode: Sendable { case register, signIn }
 
@@ -182,6 +200,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     @ObservationIgnored private let pendingCredentialDeletionStore: (any V2PendingCredentialDeletionStoring)?
     @ObservationIgnored private weak var remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)?
     @ObservationIgnored private var realtimeRuntime: V2ClientRuntime?
+    @ObservationIgnored private var accountRuntime: V2AccountRuntime?
     @ObservationIgnored private var backgroundSync: V2BackgroundSyncRunner?
     @ObservationIgnored private var realtimeTask: Task<Void, Never>?
     @ObservationIgnored private var messageSearchIndexTask: Task<Void, Never>?
@@ -202,6 +221,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     private(set) var mediaThumbnailCache: V2LocalMediaThumbnailCache? = nil
     private(set) var avatarPipeline: V2AvatarPipeline? = nil
     @ObservationIgnored private var avatarInvalidationTask: Task<Void, Never>?
+    @ObservationIgnored private var accountActivityObservation: Task<Void, Never>?
+    @ObservationIgnored private var networkDiagnosticsObservation: Task<Void, Never>?
+    private(set) var accountWorkPaused = false
+    private(set) var isResumingAccountWork = false
     private(set) var conversationStore: V2ConversationListStore?
     private(set) var contactsStore: V2ContactsStore?
     private(set) var privacySettingsStore: V2PrivacySettingsStore?
@@ -216,7 +239,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         startupMode: StartupMode = .production,
         liveLocalAccountE2ETestScope: V2LiveLocalAccountE2ETestScope? = nil,
         debugForcesUnavailableRealtimeForLiveLocalAccountE2E: Bool = false,
-        remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)? = nil
+        remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)? = nil,
+        localRestorationDependencies: V2AppLocalRestorationDependencies? = nil
     ) {
         self.startupMode = startupMode
         self.remoteNotificationRegistrar = remoteNotificationRegistrar
@@ -246,6 +270,21 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             realtimeRuntime = nil
             realtimeTask = nil
             messageSearchIndexTask = nil
+            return
+        }
+        if let dependencies = localRestorationDependencies {
+            configuration = dependencies.configuration
+            authSession = dependencies.authSession; bootstrapper = dependencies.bootstrapper
+            pendingCredentialDeletionStore = dependencies.exitMarker
+            localDatabaseURL = dependencies.databaseURL; localKeychainService = dependencies.serviceIdentifier
+            self.liveLocalAccountE2ETestScope = nil
+            deviceRegistrationStore = nil; deviceRevocationStore = nil; issuedCredentialRecovery = nil
+            deviceRevocationRunner = nil; registrationCancellationRunner = nil
+            route = .launching; authenticationMessage = nil
+            conversationStore = nil; contactsStore = nil; privacySettingsStore = nil
+            userBlockSettingsStore = nil; publicIdentitySettingsStore = nil; pushWakeSettingsStore = nil
+            deviceSessionsStore = nil; groupInvitationStore = nil
+            realtimeRuntime = nil; realtimeTask = nil; messageSearchIndexTask = nil
             return
         }
         do {
@@ -385,6 +424,38 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         route = .launching
         authenticationMessage = nil
         do {
+            if let marker = pendingCredentialDeletionStore {
+                do {
+                    let permit = try await bootstrapper.localReadBootstrap(isLocalExitPending: { try await marker.isPending() })
+                    let store = try await bootstrapper.openLocalReadSession(permit, isLocalExitPending: { try await marker.isPending() })
+                    do {
+                        let presentation = V2OfflineProjectionPresentation(userID: permit.identity.userID, store: store,
+                            validate: { try await bootstrapper.requireLocalReadBootstrap(permit, isLocalExitPending: { try await marker.isPending() }) },
+                            onTrustFailure: { [weak self] error in
+                                guard let self, self.authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
+                                await self.withdrawOfflineTrust(error)
+                            })
+                        try await presentation.loadConversations()
+                        try Task.checkCancellation()
+                        guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration), !signOutAttemptGate.isInFlight else {
+                            presentation.invalidate(); try await bootstrapper.closeLocalStore(store); return
+                        }
+                        offlineLocalStore = store; offlinePermit = permit; offlinePresentation = presentation
+                        accountAccessMode = .localReadOnly
+                        route = .localReadOnly(userID: permit.identity.userID.rawValue)
+                        if let authSession {
+                            authenticationObserver.start(session: authSession, epoch: permit.identity.epoch) { [weak self] change in
+                                await self?.authenticationStateDidChange(change)
+                            }
+                        }
+                        startOfflineUpgradeIfNeeded()
+                        return
+                    } catch { try? await bootstrapper.closeLocalStore(store); throw error }
+                } catch V2OfflineReadBootstrapError.localStoreUnavailable {
+                    // No trusted existing projection: the authenticated path may create
+                    // fresh local storage, but expired offline credentials cannot do so.
+                }
+            }
             let localStore = try await bootstrapper.openEstablishedSession()
             try Task.checkCancellation()
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
@@ -392,6 +463,15 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         } catch V2ClientSessionBootstrapError.authenticationRequired, V2AuthSessionError.unauthenticated {
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .signedOut
+        } catch V2OfflineReadBootstrapError.localExitPending {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
+            await discardAuthenticatedPresentation(route: .signOutPendingCredentialDeletion)
+        } catch V2OfflineReadBootstrapError.installationBindingUnavailable {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
+            route = .protectedDataUnavailable
+        } catch V2OfflineReadBootstrapError.installationBindingMismatch {
+            guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
+            route = .unavailable(message: "无法确认本地数据的安装与账户归属。")
         } catch V2ClientSessionBootstrapError.credentialsUnavailable, V2AuthSessionError.credentialsUnavailable {
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .protectedDataUnavailable
@@ -401,6 +481,95 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
             route = .unavailable(message: "无法打开本地 V2 数据。")
         }
+    }
+
+    private func withdrawOfflineTrust(_ error: any Error) async {
+        _ = authenticationAttemptGate.begin()
+        let destination: Route
+        if (error as? V2OfflineReadBootstrapError) == .localExitPending { destination = .signOutPendingCredentialDeletion }
+        else if (error as? V2AuthSessionError) == .credentialsUnavailable || (error as? V2OfflineReadBootstrapError) == .installationBindingUnavailable {
+            destination = .protectedDataUnavailable
+        } else { destination = .signedOut }
+        await discardAuthenticatedPresentation(route: destination)
+    }
+
+    func retryOnlineFromLocalReadOnly() async {
+        guard case .localReadOnly = route, let permit = offlinePermit, let bootstrapper,
+              let marker = pendingCredentialDeletionStore else { return }
+        do {
+            try await bootstrapper.requireLocalReadBootstrap(permit, isLocalExitPending: { try await marker.isPending() })
+            startOfflineUpgradeIfNeeded()
+        } catch V2OfflineReadBootstrapError.localExitPending {
+            await discardAuthenticatedPresentation(route: .signOutPendingCredentialDeletion)
+        } catch V2AuthSessionError.credentialsUnavailable, V2OfflineReadBootstrapError.installationBindingUnavailable {
+            await discardAuthenticatedPresentation(route: .protectedDataUnavailable)
+        } catch { await discardAuthenticatedPresentation(route: .signedOut) }
+    }
+
+    private func startOfflineUpgradeIfNeeded() {
+        guard offlineUpgradeTask == nil, case .localReadOnly = route,
+              let permit = offlinePermit, let bootstrapper, let authSession,
+              let marker = pendingCredentialDeletionStore else { return }
+        let generation = authenticationAttemptGate.generation
+        let id = UUID()
+        offlineUpgradeTask = (id, Task { [weak self] in
+            guard let self else { return }
+            defer { if self.offlineUpgradeTask?.id == id { self.offlineUpgradeTask = nil } }
+            do {
+                _ = try await V2HTTPRequestDeadline.run(until: .now.advanced(by: .seconds(15)), service: "authentication") {
+                    try await authSession.realtimeCredentials()
+                }
+                try Task.checkCancellation()
+                try await bootstrapper.requireLocalReadBootstrap(permit, isLocalExitPending: { try await marker.isPending() })
+                guard self.authenticationAttemptGate.matchesCurrentGeneration(generation), !self.signOutAttemptGate.isInFlight,
+                      case .localReadOnly = self.route, let readOnlyStore = self.offlineLocalStore else { return }
+                // Remove the read-only dependency, then close and drain it before any writable adoption.
+                self.offlinePresentation?.invalidate(); self.offlinePresentation = nil
+                self.accountAccessMode = .blocked; self.route = .launching
+                try await bootstrapper.closeLocalStore(readOnlyStore)
+                // Closing may yield to sign-out or another activation. Do not
+                // clear the next account's offline dependencies on a late return.
+                try Task.checkCancellation()
+                guard self.authenticationAttemptGate.matchesCurrentGeneration(generation),
+                      !self.signOutAttemptGate.isInFlight, self.offlineUpgradeTask?.id == id else { return }
+                self.offlineLocalStore = nil; self.offlinePermit = nil
+                let writable = try await bootstrapper.openEstablishedSession()
+                do {
+                    try Task.checkCancellation()
+                    guard self.authenticationAttemptGate.matchesCurrentGeneration(generation), !self.signOutAttemptGate.isInFlight else {
+                        try await bootstrapper.closeLocalStore(writable); return
+                    }
+                    try await self.activate(localStore: writable, authenticationAttemptGeneration: generation)
+                } catch { try await bootstrapper.closeLocalStore(writable); throw error }
+            } catch V2AuthSessionError.unauthenticated {
+                guard self.authenticationAttemptGate.matchesCurrentGeneration(generation) else { return }
+                await self.discardAuthenticatedPresentation(route: .signedOut)
+            } catch V2AuthSessionError.credentialsUnavailable, V2OfflineReadBootstrapError.installationBindingUnavailable {
+                guard self.authenticationAttemptGate.matchesCurrentGeneration(generation) else { return }
+                await self.discardAuthenticatedPresentation(route: .protectedDataUnavailable)
+            } catch V2ClientSessionBootstrapError.localStoreCloseFailed {
+                guard self.authenticationAttemptGate.matchesCurrentGeneration(generation) else { return }
+                self.accountAccessMode = .blocked
+                self.route = .unavailable(message: "无法关闭本地只读数据，请重新启动应用后重试。")
+            } catch let trustError as V2AuthSessionError where trustError == .sessionInvalidated {
+                guard self.authenticationAttemptGate.matchesCurrentGeneration(generation) else { return }
+                await self.withdrawOfflineTrust(trustError)
+            } catch let trustError as V2OfflineReadBootstrapError {
+                guard self.authenticationAttemptGate.matchesCurrentGeneration(generation) else { return }
+                await self.withdrawOfflineTrust(trustError)
+            } catch is CancellationError { return }
+            catch {
+                guard self.authenticationAttemptGate.matchesCurrentGeneration(generation), !self.signOutAttemptGate.isInFlight else { return }
+                if case .localReadOnly = self.route {
+                    do {
+                        try await bootstrapper.requireLocalReadBootstrap(permit, isLocalExitPending: { try await marker.isPending() })
+                        self.authenticationMessage = "暂时无法连接账户服务，本地内容仍可查看。"
+                    } catch { await self.withdrawOfflineTrust(error) }
+                } else if self.route == .launching {
+                    await self.performRestore()
+                }
+            }
+        })
     }
 
     /// 只重试明确可恢复的受保护数据状态。
@@ -642,7 +811,26 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     ///
     /// - Parameter nextRoute: 全部本地收尾成功后要进入的 route。
     private func discardAuthenticatedPresentation(route nextRoute: Route) async {
+        let closingGeneration = authenticationAttemptGate.generation
+        let closingBootstrapper = bootstrapper
+        let closingBackgroundSync = backgroundSync
+        let closingAccountRuntime = accountRuntime
+        let closingRealtimeRuntime = realtimeRuntime
+        let closingRealtimeTask = realtimeTask
+        // Capture and detach every account owner before the first suspension.
+        // Cleanup of an old account must never stop a subsequently adopted one.
+        backgroundSync = nil; accountRuntime = nil; realtimeRuntime = nil
+        realtimeAttemptGate.cancel()
+        closingRealtimeTask?.cancel(); realtimeTask = nil
         authenticationObserver.stop()
+        let oldActivityObservation=accountActivityObservation
+        oldActivityObservation?.cancel(); accountActivityObservation=nil; accountWorkPaused=false
+        networkDiagnosticsObservation?.cancel(); networkDiagnosticsObservation=nil
+        offlineUpgradeTask?.task.cancel()
+        accountAccessMode = .blocked
+        let closingOfflineStore = offlineLocalStore
+        offlineLocalStore = nil; offlinePermit = nil
+        offlinePresentation?.invalidate(); offlinePresentation = nil
         groupInvitationStore?.invalidate()
         let thumbnails = mediaThumbnailCache
         let closingAvatarInvalidations = avatarInvalidationTask
@@ -676,33 +864,38 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         userBlockSettingsStore = nil
         publicIdentitySettingsStore = nil
         pushWakeSettingsStore = nil
+        let closingDeviceSessions = deviceSessionsStore
         deviceSessionsStore = nil
         groupInvitationStore = nil
+        await closingDeviceSessions?.close()
         await closingPendingGroupAvatars?.close()
         await closingProfiles?.close()
         await oldAvatarPipeline?.close()
         await closingAvatarInvalidations?.value
+        await oldActivityObservation?.value
         await thumbnails?.close()
         await pushSettings?.stop()
-        await backgroundSync?.stop()
-        backgroundSync = nil
-        await stopRealtime()
-        realtimeRuntime = nil
+        await closingBackgroundSync?.stop()
+        await closingAccountRuntime?.suspendRealtime()
+        await closingRealtimeRuntime?.stop()
         await indexer?.value
         do {
             // The account database and unknown operation journal survive sign-out.
             // Keep source files too; next activation removes only aged orphans
             // after consulting that journal. Closing is not a cancellation proof.
-            let closingBootstrapper = bootstrapper
             try await V2AccountResourceCleanup.run([
                 { await closingUploader?.close() },
+                { await closingAccountRuntime?.close() },
                 { try await closingDownloader?.close() },
                 { try await closingStager?.close(preservingDurableFiles: true) },
+                { if let closingOfflineStore { try await closingBootstrapper?.closeLocalStore(closingOfflineStore) } },
                 { if let localStore { try await closingBootstrapper?.closeLocalStore(localStore) } }
             ])
+            guard authenticationAttemptGate.matchesCurrentGeneration(closingGeneration) else { return }
             authenticationMessage = nil
             route = nextRoute
         } catch {
+            guard authenticationAttemptGate.matchesCurrentGeneration(closingGeneration) else { return }
             route = .unavailable(message: "无法关闭本地数据，请重新启动应用后重试。")
         }
     }
@@ -768,17 +961,32 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             activation.onDiscard {
                 await realtime.backgroundSync.stop()
                 await realtime.runtime.stop()
+                await realtime.accountRuntime.close()
                 await realtime.profileRepository.close()
                 await realtime.profilePresentations.close()
                 await realtime.attachmentUploader.close()
                 try await realtime.mediaCacheMaintenance.close()
             }
+            let backgroundTransfers=try await V2BackgroundTransferCoordinator.native(store:localStore,
+                scheduler:realtime.accountRuntime.scheduler,activationID:realtime.accountRuntime.ownerID,
+                diagnostics:realtime.accountRuntime.networkDiagnostics)
+            activation.onDiscard { await backgroundTransfers.close() }
+            // Adopt existing system I/O before any foreground activity can request the same slots.
+            try await realtime.resourceTransfers.attachBackground(backgroundTransfers)
+            try Task.checkCancellation()
+            try await authSession.requireAuthenticatedEpoch(authEpoch)
+            // No source reader is running yet. Multipart slices and interrupted
+            // import copies cannot be referenced by any durable resource intent.
+            try await attachmentStager.discardInterruptedCopies()
             let retainedTokens = try await localStore.retainedResourceFileTokens()
             await attachmentStager.discardOrphanedStagedFiles(retaining: retainedTokens, olderThan: Date().addingTimeInterval(-86_400))
             try Task.checkCancellation()
             await realtime.mediaCacheMaintenance.performMaintenance()
             try Task.checkCancellation()
-            let accountHTTP = V2SessionHTTPAuthorization(session: authSession, epoch: authEpoch)
+            let accountHTTP = V2SessionHTTPAuthorization(session: authSession, epoch: authEpoch,
+                transport: try V2RegisteredAccountHTTPTransport(executor: realtime.accountRuntime.httpExecutor,
+                    allowedBases: [configuration.accountBaseURL, configuration.mediaEdgeEndpoint.deletingLastPathComponent().deletingLastPathComponent()],
+                    scope: realtime.accountRuntime.queryScope(accountID: userID.rawValue, authorizationDomain: "accountHTTP")), scheduler: realtime.accountRuntime.scheduler)
             let publicIdentityDirectory = try V2HTTPPublicIdentityDirectory(
                 endpoint: configuration.endpoint("v2/public-identities/resolve"),
                 actorUserID: userID,
@@ -808,6 +1016,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                     readReceiptReporter: realtime.readReceiptReporter,
                     stateChanger: realtime.conversationStateChanger,
                     favoriter: realtime.messageFavoriter,
+                    moderator: realtime.messageModerationOperations,
                     groupPinner: realtime.groupMessagePinner,
                     forwarder: realtime.messageForwarder
                 ),
@@ -821,7 +1030,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                     membershipChanger: realtime.groupMembershipChanger,
                     memberMuter: realtime.groupMemberMuter,
                     moderatedMemberRemover: realtime.moderatedGroupMemberRemover,
-                    avatarManager: realtime.groupAvatarManager
+                    avatarManager: realtime.groupAvatarManager,
+                    nameOperations: realtime.nameOperations
                 ),
                 discovery: .init(
                     directConversationOpener: realtime.directConversationOpener,
@@ -858,32 +1068,84 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 userBlockChanger: realtime.userBlockChanger,
                 directConversationOpener: realtime.directConversationOpener,
                 currentUserID: userID,
-                projectionChangeNotifier: realtime.projectionChangeNotifier
+                projectionChangeNotifier: realtime.projectionChangeNotifier,
+                nameOperations: realtime.nameOperations
             )
             let userBlockSettings = V2UserBlockSettingsStore(
                 resolver: publicIdentityDirectory,
                 changer: realtime.userBlockChanger,
                 currentUserID: userID
             )
-            let publicIdentitySettings = V2PublicIdentitySettingsStore(
+            let profileService = V2ProfileIntentService(
+                store: localStore, accountID: userID,
                 manager: try V2HTTPOwnProfileClient(
                     endpoint: configuration.endpoint("v2/profile/me"),
-                    credentials: accountHTTP, transport: accountHTTP
+                    credentials: accountHTTP, transport: accountHTTP,
+                    queries: realtime.accountRuntime.ownProfileQueries,
+                    queryScope: realtime.accountRuntime.queryScope(accountID: userID.rawValue, authorizationDomain: "self-profile")
                 ),
-                attachmentStager: attachmentStager,
-                attachmentUploader: realtime.attachmentUploader
+                avatars: V2ProfileAvatarUploadAdapter(uploader: realtime.attachmentUploader)
             )
-            let deviceSessions = try V2DeviceSessionsStore(
-                manager: V2HTTPDeviceSessionClient(
-                    endpoint: configuration.endpoint("v2/devices"),
-                    credentials: accountHTTP, transport: accountHTTP
-                )
+            let invitationOperations=V2InvitationOperationService(accountID:userID,activationID:realtime.accountRuntime.ownerID,store:localStore,
+                client:try V2HTTPInvitationOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP),
+                secrets:V2KeychainInvitationSecretStore(installationBinding:try await localStore.boundInstallationBinding()))
+            let profileDispatcher = V2OperationWorkDispatcher(
+                store: localStore,
+                handlers: [.init(kind:.groupInvite) {try await invitationOperations.execute($0)},
+                    .init(kind:.groupJoinRequest) {try await invitationOperations.execute($0)},
+                    .init(kind:.groupJoinDecision) {try await invitationOperations.execute($0)},
+                    .init(kind: .profileUpdate) { try await profileService.execute($0) },
+                    .init(kind: .conversationPreference) { try await realtime.personalPreferences.execute($0) },
+                    .init(kind: .messageFavorite) { try await realtime.personalPreferences.execute($0) },
+                    .init(kind: .contactAlias) { try await realtime.nameOperations.execute($0) },
+                    .init(kind: .groupNickname) { try await realtime.nameOperations.execute($0) },
+                    .init(kind: .readReceipt) { try await realtime.readReceiptOperations.execute($0) },
+                    .init(kind: .sendMessage) { try await realtime.messageSendOperations.execute($0) },
+                    .init(kind: .editMessage) { try await realtime.messageMutationOperations.execute($0) },
+                    .init(kind: .withdrawMessage) { try await realtime.messageMutationOperations.execute($0) },
+                    .init(kind: .moderation) { try await realtime.messageModerationOperations.execute($0) },
+                    .init(kind: .directRoom) { try await realtime.directRoomOperations.execute($0) },
+                    .init(kind: .groupRoom) { try await realtime.groupCreationOperations.execute($0) },
+                    .init(kind: .pinnedMessage) { try await realtime.groupCapabilityOperations.execute($0) },
+                    .init(kind: .groupAnnouncement) { try await realtime.groupCapabilityOperations.execute($0) },
+                    .init(kind: .groupPermission) { try await realtime.groupCapabilityOperations.execute($0) },
+                    .init(kind: .groupRole) { try await realtime.groupCapabilityOperations.execute($0) },
+                    .init(kind:.strangerMessagePreference) { try await realtime.accountPreferences.execute($0) },
+                    .init(kind:.userAddPreference) { try await realtime.accountPreferences.execute($0) },
+                    .init(kind:.readReceiptPreference) { try await realtime.accountPreferences.execute($0) },
+                    .init(kind:.liveActivityPreference) { try await realtime.accountPreferences.execute($0) },
+                    .init(kind:.relationship) { try await realtime.socialOperations.execute($0) },
+                    .init(kind:.userBlock) { try await realtime.socialOperations.execute($0) },
+                    .init(kind: .membership) { try await realtime.membershipOperations.execute($0) },
+                    .init(kind: .memberMute) { try await realtime.memberAdministrationOperations.execute($0) },
+                    .init(kind: .moderatedMemberRemoval) { try await realtime.memberAdministrationOperations.execute($0) },
+                    .init(kind: .reaction) { try await realtime.messageReactionOperations.execute($0) },
+                    .init(kind: .forwardMessage) { try await realtime.forwardPlanOperations.execute($0) }],
+                ownerID: realtime.accountRuntime.ownerID, diagnostics: realtime.accountRuntime.networkDiagnostics
             )
+            let publicIdentitySettings = V2PublicIdentitySettingsStore(
+                service: profileService, attachmentStager: attachmentStager
+            )
+            let remoteDeviceRevocations = V2RemoteDeviceRevocationService(
+                accountID: userID, currentDeviceID: credentials.deviceID,
+                storage: V2KeychainRemoteDeviceRevocationMetadataStore(
+                    installationBinding: try await localStore.boundInstallationBinding(),
+                    accountID: userID, currentDeviceID: credentials.deviceID),
+                client: try V2HTTPRemoteDeviceRevocationClient(baseURL: configuration.accountBaseURL,
+                    credentials: accountHTTP, transport: accountHTTP))
+            let deviceSessions = V2DeviceSessionsStore(
+                manager: try V2HTTPDeviceSessionClient(endpoint: configuration.endpoint("v2/devices"),
+                    credentials: accountHTTP, transport: accountHTTP), operations: remoteDeviceRevocations)
+            activation.onDiscard { await deviceSessions.close() }
+            let invitationQueries = V2QueryCoordinator<Data>()
+            activation.onDiscard { await invitationQueries.closeAndDrain() }
+            let invitationScope = realtime.accountRuntime.queryScope(accountID: userID.rawValue, authorizationDomain: "groupInvitationManagement")
             let groupInvitations = V2GroupInvitationStore(
                 client: try V2HTTPGroupInvitationClient(
                     baseURL: configuration.accountBaseURL,
-                    credentials: accountHTTP, transport: accountHTTP
-                )
+                    credentials: accountHTTP, transport: accountHTTP,
+                    queries: invitationQueries, queryScope: invitationScope
+                ),operations:invitationOperations
             )
             let groupAvatarManager = realtime.groupAvatarManager, groupAvatarNotifier = realtime.projectionChangeNotifier
             let pendingGroupAvatars = V2PendingGroupAvatarsStore(reader: groupAvatarManager,
@@ -903,7 +1165,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 try await authSession.requireAuthenticatedEpoch(authEpoch)
                 let reconciler = try await V2PushIntentReconciler.activate(
                     store: localStore,
-                    transport: V2HTTPPushEndpointClient(endpoint: configuration.pushEndpoint, session: authSession, epoch: authEpoch),
+                    transport: V2HTTPPushEndpointClient(endpoint: configuration.pushEndpoint, session: authSession, epoch: authEpoch,
+                        transport: V2URLSessionPushEndpointHTTPTransport(executor: realtime.accountRuntime.httpExecutor),
+                        scheduler: realtime.accountRuntime.scheduler),
                     scope: pushScope, initialPreference: initialPreference
                 )
                 guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else {
@@ -966,10 +1230,17 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                             try? await presentations.refreshNicknameInvalidations()
                         }
                     }
+                    group.addTask {
+                        for await _ in await notifier.updates(scopes: .contactAliases) {
+                            guard !Task.isCancelled else { return }
+                            try? await presentations.refreshAliasInvalidations()
+                        }
+                    }
                     await group.waitForAll()
                 }
             }
             realtimeRuntime = realtime.runtime
+            accountRuntime = realtime.accountRuntime
             backgroundSync = realtime.backgroundSync
             conversationStore = conversations
             contactsStore = contacts
@@ -981,11 +1252,50 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             groupInvitationStore = groupInvitations
             pendingGroupAvatarsStore = pendingGroupAvatars
             messageSearchLocalStore = localStore
+            accountAccessMode = .authenticated
             route = .signedIn(userID: userID.rawValue)
             authenticationObserver.start(session: authSession, epoch: authEpoch) { [weak self] change in
                 await self?.authenticationStateDidChange(change)
             }
-            await realtime.attachmentUploader.durable.startRecovery()
+            await realtime.accountRuntime.startActivity(id: "remoteDeviceRevocations") {
+                try await remoteDeviceRevocations.run()
+            }
+            await realtime.accountRuntime.startActivity(id: "profilePreparation") {
+                try await profileService.runPreparation()
+            }
+            await realtime.accountRuntime.startActivity(id: "personalPreferencePreparation") {
+                try await realtime.personalPreferences.runPreparation()
+            }
+            await realtime.accountRuntime.startActivity(id:"groupCapabilityPreparation") { try await realtime.groupCapabilityOperations.runPreparation() }
+            await realtime.accountRuntime.startActivity(id:"accountPreferencePreparation") { try await realtime.accountPreferences.runPreparation() }
+            await realtime.accountRuntime.startActivity(id:"invitationSecretCleanup") {
+                let wakeups=V2InvitationUnlockWakeups()
+                try await invitationOperations.releaseProtectedSecrets()
+                for await _ in wakeups.stream {try Task.checkCancellation();try await invitationOperations.releaseProtectedSecrets()}
+            }
+            await realtime.accountRuntime.startActivity(id:"invitationPreparation") {try await invitationOperations.runPreparation()}
+            await realtime.accountRuntime.startActivity(id:"membershipPreparation") { try await realtime.membershipOperations.runPreparation() }
+            await realtime.accountRuntime.startActivity(id:"memberAdministrationPreparation") { try await realtime.memberAdministrationOperations.runPreparation() }
+            await realtime.accountRuntime.startActivity(id:"reactionPreparation") { try await realtime.messageReactionOperations.runPreparation() }
+            await realtime.accountRuntime.startActivity(id: "readReceiptPreparation") {
+                try await realtime.readReceiptOperations.runPreparation()
+            }
+            await realtime.accountRuntime.startActivity(id: "profileOperations") {
+                try await profileDispatcher.run()
+            }
+            await realtime.accountRuntime.startActivity(id: "resourceTransfers") {
+                try await realtime.resourceTransfers.runRecovery()
+            }
+            await realtime.accountRuntime.startActivity(id:"backgroundByteTransfers") {
+                try await backgroundTransfers.run()
+            }
+            await realtime.accountRuntime.startActivity(id: "resourcePreparation", operation: {
+                try await realtime.attachmentUploader.durable.runRecovery()
+            }, onFailure: { _ in
+                Logger(subsystem: "IMApp", category: "ResourceRecovery").error("Resource preparation paused; durable drafts remain available.")
+            })
+            observeAccountActivities(realtime.accountRuntime)
+            recordAccountWorkSnapshot(localStore: localStore, owner: realtime.accountRuntime)
             guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true,
                   accountAttachmentUploader === realtime.attachmentUploader, isApplicationActive else { return }
             startMessageSearchIndexing(localStore: localStore)
@@ -998,7 +1308,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     }
 
     private func authenticationStateDidChange(_ change: V2AuthenticationStateObserver.Change) async {
-        guard case .signedIn = route, signOutAttemptGate.begin() else { return }
+        guard accountAccessMode != .blocked, signOutAttemptGate.begin() else { return }
         defer { signOutAttemptGate.finish() }
         _ = authenticationAttemptGate.begin()
         route = .launching
@@ -1023,6 +1333,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     /// `inactive` 刻意不被视为进入后台，因为系统权限弹窗覆盖在 App 之上时也会出现该状态。
     func applicationDidEnterBackground() async {
         isApplicationActive = false
+        offlineUpgradeTask?.task.cancel()
         deviceRevocationTask?.cancel()
         deviceRevocationObservation?.cancel()
         registrationCancellationTask?.cancel()
@@ -1047,6 +1358,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         }
         if route == .protectedDataUnavailable {
             await retryProtectedDataAccess()
+            return
+        }
+        if case .localReadOnly = route {
+            await retryOnlineFromLocalReadOnly()
             return
         }
         guard case .signedIn = route,
@@ -1159,8 +1474,112 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     }
 
     deinit {
+        networkDiagnosticsObservation?.cancel()
+        accountActivityObservation?.cancel()
         deviceRevocationTask?.cancel(); deviceRevocationObservation?.cancel()
         registrationCancellationTask?.cancel(); registrationCancellationObservation?.cancel()
+    }
+
+    private func observeAccountActivities(_ owner:V2AccountRuntime) {
+        networkDiagnosticsObservation?.cancel()
+        networkDiagnosticsObservation = Task { [weak self] in
+            var lastHTTPRecord: UInt64 = 0, lastOperationRecord: UInt64 = 0, lastProjectionRecord: UInt64 = 0, lastResourceRecord: UInt64 = 0, lastBackgroundRecord: UInt64 = 0
+            do {
+                for await snapshot in try owner.networkDiagnostics.updates() {
+                    try Task.checkCancellation()
+                    guard let self, self.accountRuntime === owner, self.accountAccessMode == .authenticated else { return }
+                    if snapshot.backgroundRecorded > lastBackgroundRecord, let background = snapshot.backgrounds.last {
+                        lastBackgroundRecord = snapshot.backgroundRecorded
+                        let sent = background.bodyBytesSent.map(String.init) ?? "unknown"
+                        let received = background.bodyBytesReceived.map(String.init) ?? "unknown"
+                        let cancellationRelease = background.cancellationToPermitRelease.map { String($0) } ?? "unknown"
+                        Logger(subsystem: "IMApp", category: "NetworkDiagnostics").debug("Background bodySent=\(sent, privacy: .public) bodyReceived=\(received, privacy: .public) completionObserved=\(background.completionObserved) cancellationToPermitReleaseSeconds=\(cancellationRelease, privacy: .public)")
+                    }
+                    if snapshot.resourceRecorded > lastResourceRecord, let resource = snapshot.resources.last {
+                        lastResourceRecord = snapshot.resourceRecorded
+                        let mode = resource.mode.rawValue, response = resource.response.rawValue
+                        let rebuiltPrefix = resource.verifiedRangeRebuildPrefixBytes.map { String($0) } ?? "unknown"
+                        Logger(subsystem: "IMApp", category: "NetworkDiagnostics").debug("Resource mode=\(mode, privacy: .public) response=\(response, privacy: .public) bodySent=\(resource.bodyBytesSent) bodyReceived=\(resource.bodyBytesReceived) elapsed=\(resource.elapsed) retryAttempt=\(resource.retryAttempt) failed=\(resource.failed) cancelled=\(resource.cancelled) verifiedRangeRebuildPrefixBytes=\(rebuiltPrefix, privacy: .public)")
+                    }
+                    if snapshot.projectionRecorded > lastProjectionRecord, let projection = snapshot.projections.last {
+                        lastProjectionRecord = snapshot.projectionRecorded
+                        let phase = projection.phase.rawValue
+                        Logger(subsystem: "IMApp", category: "NetworkDiagnostics").debug("Projection phase=\(phase, privacy: .public) elapsed=\(projection.elapsed) scopes=\(projection.scopes.rawValue)")
+                    }
+                    if snapshot.operationRecorded > lastOperationRecord, let step = snapshot.operationSteps.last {
+                        lastOperationRecord = snapshot.operationRecorded
+                        let kind = step.kind.rawValue, action = step.action.rawValue
+                        let completion = step.completion.rawValue, certainty = step.certainty.rawValue
+                        Logger(subsystem: "IMApp", category: "NetworkDiagnostics").debug("Operation kind=\(kind, privacy: .public) action=\(action, privacy: .public) attempt=\(step.attempt) candidateWait=\(step.candidateWait) handler=\(step.handlerElapsed) completion=\(completion, privacy: .public) certainty=\(certainty, privacy: .public)")
+                    }
+                    guard snapshot.httpRecorded > lastHTTPRecord, let sample = snapshot.samples.last else { continue }
+                    lastHTTPRecord = snapshot.httpRecorded
+                    // Fixed vocabulary and numbers only; never log URL, account,
+                    // operation identity, credentials, payload or error text.
+                    let logger = Logger(subsystem: "IMApp", category: "NetworkDiagnostics")
+                    let status = sample.statusCode.map { String($0) } ?? "missing"
+                    logger.debug("HTTP service=\(sample.service, privacy: .public) queue=\(sample.queued) transport=\(sample.elapsed) status=\(status, privacy: .public) cancelled=\(sample.cancelled) samples=\(snapshot.recorded)")
+                    if let phases = sample.phases {
+                        let dns = phases.dns.map { String($0) } ?? "missing"
+                        let connect = phases.connect.map { String($0) } ?? "missing"
+                        let tls = phases.tls.map { String($0) } ?? "missing"
+                        let request = phases.request.map { String($0) } ?? "missing"
+                        let response = phases.response.map { String($0) } ?? "missing"
+                        let networkProtocol = phases.networkProtocol ?? "missing"
+                        logger.debug("HTTP phases dns=\(dns, privacy: .public) connect=\(connect, privacy: .public) tls=\(tls, privacy: .public) request=\(request, privacy: .public) response=\(response, privacy: .public) protocol=\(networkProtocol, privacy: .public)")
+                    }
+                }
+            } catch is CancellationError { }
+            catch { /* Diagnostic pressure cannot pause business work. */ }
+        }
+        accountActivityObservation?.cancel()
+        accountActivityObservation=Task { [weak self] in
+            do {
+                for await states in try await owner.activityUpdates() {
+                    try Task.checkCancellation()
+                    guard let self, self.accountRuntime === owner, self.accountAccessMode == .authenticated else { return }
+                    self.accountWorkPaused=states.values.contains(.failed)
+                }
+            } catch is CancellationError { }
+            catch {
+                guard let self, self.accountRuntime === owner, self.accountAccessMode == .authenticated else { return }
+                self.accountWorkPaused=true
+            }
+        }
+    }
+
+    /// Explicit account reconstruction preserves durable unknown operations and their existing budgets.
+    func resumeAccountWork() async {
+        guard accountWorkPaused, !isResumingAccountWork, case .signedIn = route else { return }
+        isResumingAccountWork=true
+        defer { isResumingAccountWork=false }
+        let generation=authenticationAttemptGate.begin()
+        await discardAuthenticatedPresentation(route:.launching)
+        guard route == .launching, authenticationAttemptGate.matchesCurrentGeneration(generation), !signOutAttemptGate.isInFlight else { return }
+        await restore()
+        // A successful restore samples through the newly installed runtime.
+    }
+
+    /// An explicit read at installation/resume, never a per-wake backlog scan.
+    private func recordAccountWorkSnapshot(localStore: GRDBV2LocalSyncStore, owner: V2AccountRuntime) {
+        let generation = authenticationAttemptGate.generation
+        Task { [weak self] in
+            do {
+                let snapshot = try await localStore.accountWorkSnapshot()
+                try Task.checkCancellation()
+                guard let self, self.accountRuntime === owner,
+                      self.authenticationAttemptGate.matchesCurrentGeneration(generation),
+                      self.accountAccessMode == .authenticated else { return }
+                let originalAge = snapshot.oldestUnresolvedOriginalAge.map { String($0) } ?? "none"
+                Logger(subsystem: "IMApp", category: "AccountWorkDiagnostics").debug("Work ordinaryCount=\(snapshot.ordinaryCount) ordinaryReservedBytes=\(snapshot.ordinaryReservedBytes) controlCount=\(snapshot.controlCount) controlReservedBytes=\(snapshot.controlReservedBytes) submitting=\(snapshot.submittingCount) processing=\(snapshot.processingCount) awaitingConfirmation=\(snapshot.awaitingConfirmationCount) needsAttention=\(snapshot.needsAttentionCount) oldestUnresolvedOriginalAge=\(originalAge, privacy: .public)")
+            } catch is CancellationError { }
+            catch {
+                guard let self, self.accountRuntime === owner,
+                      self.authenticationAttemptGate.matchesCurrentGeneration(generation),
+                      self.accountAccessMode == .authenticated else { return }
+                Logger(subsystem: "IMApp", category: "AccountWorkDiagnostics").debug("Work snapshot unavailable")
+            }
+        }
     }
 
     private func startMessageSearchIndexing(localStore: GRDBV2LocalSyncStore) {
@@ -1184,42 +1603,14 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         guard let taskGeneration = realtimeAttemptGate.begin(ifApplicationActive: isApplicationActive) else { return }
         realtimeTask = Task { [weak self, runtime, conversations] in
             defer { self?.finishRealtimeAttempt(generation: taskGeneration) }
-            var retryDelay: Duration = .seconds(1)
-            while !Task.isCancelled {
-                do {
-                    let establishedAt = ContinuousClock.now
-                    _ = try await runtime.start()
-                    try Task.checkCancellation()
-                    await conversations.refresh()
-                    // A live-loop failure moves the runtime to `.stopped`.
-                    // Waiting on that explicit transition avoids treating a
-                    // foreground network handoff as permanent offline mode.
-                    await runtime.waitUntilStopped()
-                    // Only a genuinely stable session clears backoff. An
-                    // immediately failing loop otherwise turns into a one-
-                    // second reconnect storm on a bad network path.
-                    if establishedAt.duration(to: .now) >= .seconds(15) {
-                        retryDelay = .seconds(1)
-                    }
-                } catch is CancellationError {
-                    return
-                } catch V2RealtimeSessionCoordinatorError.authenticationRequired {
-                    await self?.signOutIfCurrentRealtimeAttempt(taskGeneration)
-                    return
-                } catch {
-                    // Keep local projections readable, but recover while the
-                    // app remains foregrounded. The bounded exponential delay
-                    // avoids a hot reconnect loop during an outage.
-                }
-                do {
-                    try await Task.sleep(for: retryDelay)
-                } catch is CancellationError {
-                    return
-                } catch {
-                    return
-                }
-                retryDelay = min(retryDelay * 2, .seconds(30))
-            }
+            guard let owner = self?.accountRuntime else { return }
+            do {
+                try await owner.runRealtime(runtime, onConnected: { await conversations.refresh() })
+            } catch is CancellationError {
+                return
+            } catch V2RealtimeSessionCoordinatorError.authenticationRequired {
+                await self?.signOutIfCurrentRealtimeAttempt(taskGeneration)
+            } catch { return }
         }
     }
 
@@ -1227,7 +1618,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         realtimeAttemptGate.cancel()
         realtimeTask?.cancel()
         realtimeTask = nil
-        await realtimeRuntime?.stop()
+        let stoppingOwner = accountRuntime
+        let stoppingRuntime = realtimeRuntime
+        await stoppingOwner?.suspendRealtime()
+        await stoppingRuntime?.stop()
     }
 
     private func signOutIfCurrentRealtimeAttempt(_ taskGeneration: UInt64) async {
@@ -1338,4 +1732,16 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             try fileManager.removeItem(at: artifact)
         }
     }
+}
+
+/// Emits no Notification or bearer across isolation; the account activity owns its lifetime.
+private final class V2InvitationUnlockWakeups:@unchecked Sendable {
+    let stream:AsyncStream<Void>
+    private let token:any NSObjectProtocol
+    init() {
+        let pair=AsyncStream<Void>.makeStream(bufferingPolicy:.bufferingNewest(1))
+        stream=pair.stream
+        token=NotificationCenter.default.addObserver(forName:UIApplication.protectedDataDidBecomeAvailableNotification,object:nil,queue:nil) {_ in pair.continuation.yield(())}
+    }
+    deinit {NotificationCenter.default.removeObserver(token)}
 }

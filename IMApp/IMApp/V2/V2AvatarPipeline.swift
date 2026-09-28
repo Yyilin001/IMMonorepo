@@ -46,13 +46,14 @@ final class V2AvatarPipeline {
               let current = await profiles.cachedSnapshot(for: key, activation: activation),
               current.presentation.view == initial.presentation.view,
               current.presentation.groupMember == initial.presentation.groupMember,
+              current.presentation.contactAlias == initial.presentation.contactAlias,
               current.presentation.lease.contextRevision == initial.presentation.lease.contextRevision,
               initial.deadline > .now else { return nil }
         // Compare immutable content identity, not a rotating signed URL. A
         // concurrent lease extension cannot extend this older decode's deadline.
         if current.avatar?.mediaID != initial.avatar?.mediaID || current.avatar?.variantID != initial.avatar?.variantID
             || current.avatar?.version != initial.avatar?.version || current.avatar?.checksum != initial.avatar?.checksum { image = nil }
-        return .init(key: key, name: current.presentation.groupMember?.groupNickname ?? current.presentation.view.publicIdentity?.displayName ?? "用户",
+        return .init(key: key, name: current.presentation.contactAlias?.remarkName ?? current.presentation.groupMember?.groupNickname ?? current.presentation.view.publicIdentity?.displayName ?? "用户",
                      image: image, deadline: min(initial.deadline, current.deadline))
     }
     struct GroupSnapshot: Sendable {
@@ -242,7 +243,7 @@ private struct V2AuthorizedProfileView: View {
             catch V2ProfilePresentationError.inactive { snapshot = nil; break }
             catch V2ProfilePresentationError.throttled(let retryAfter) {
                 snapshot = nil
-                let delay = retryAfter.isFinite ? min(61, max(0.1, retryAfter)) : 1
+                let delay = retryAfter.isFinite ? min(315_576_000, max(0.1, retryAfter)) : 1
                 do { try await Task.sleep(for: .seconds(delay)) } catch { break }
             }
             catch {

@@ -8,12 +8,41 @@ import Testing
 
 @Suite(.serialized)
 struct V2ProfilePresentationThrottleTests {
-    @Test("HTTP Retry-After is bounded independently of an error body", arguments: ["2", "-5", "nan", "100000", "invalid"])
+    @Test("long cooldown survives page replacement without another remote read")
+    func longCooldown() async throws {
+        let reader = ProfileThrottlingReader(delay: 100_000)
+        let repository = V2ProfilePresentationRepository(actorUserID: .init(uuid: UUID()), deviceID: .init(uuid: UUID()),
+            reader: reader, retryJitter: { 0 })
+        let first = await repository.activate()
+        let delay = try await requireThrottle { _ = try await repository.presentation(for: throttleKey(), activation: first) }
+        #expect(delay > 99_900)
+        await repository.deactivate(first)
+        let second = await repository.activate()
+        let retained = try await requireThrottle { _ = try await repository.presentation(for: throttleKey(), activation: second) }
+        #expect(retained > 99_900)
+        #expect(await reader.calls == 1)
+        await repository.endAllActivations()
+    }
+
+    @Test("HTTP-date Retry-After is preserved by the presentation adapter", arguments: [429, 503])
+    func httpDateCooldown(status: Int) async throws {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss 'GMT'"
+        let transport = ProfileThrottleHTTPTransport(status: status,
+            retryAfter: formatter.string(from: Date().addingTimeInterval(3600)))
+        let client = try V2HTTPProfilePresentationClient(endpoint: #require(URL(string: "https://account.invalid/v2/profile-presentations/batch")),
+            credentials: ProfileThrottleCredentials(), transport: transport)
+        let delay = try await requireThrottle { _ = try await client.readPresentations([throttleKey()]) }
+        #expect(delay > 3500 && delay <= 3600)
+    }
+    @Test("HTTP Retry-After preserves the server floor independently of an error body", arguments: ["2", "-5", "nan", "100000", "invalid"])
     func httpRetryAfter(header: String) async throws {
         let transport = ProfileThrottleHTTPTransport(status: 429, retryAfter: header)
         let client = try V2HTTPProfilePresentationClient(endpoint: #require(URL(string: "https://account.invalid/v2/profile-presentations/batch")),
             credentials: ProfileThrottleCredentials(), transport: transport)
-        let expected: Double = header == "2" ? 2 : (header == "100000" ? 60 : 1)
+        let expected: Double = header == "2" ? 2 : (header == "100000" ? 100000 : 1)
         await #expect(throws: V2ProfilePresentationError.throttled(retryAfter: expected)) {
             _ = try await client.readPresentations([throttleKey()])
         }
@@ -115,14 +144,15 @@ private actor ProfileThrottleHTTPTransport: V2ClientMediaEdgeHTTPTransport {
 private actor ProfileThrottlingReader: V2ProfilePresentationReading {
     var calls = 0
     private let holdFirst: Bool
+    private let delay: TimeInterval
     private var released = false
     private var continuation: CheckedContinuation<Void, Never>?
-    init(holdFirst: Bool = false) { self.holdFirst = holdFirst }
+    init(holdFirst: Bool = false, delay: TimeInterval = 1) { self.holdFirst = holdFirst; self.delay = delay }
     func readPresentations(_ keys: [V2ProfileViewLookupKey]) async throws -> V2ProfilePresentationBatch {
         calls += 1
         if calls == 1 {
             if holdFirst && !released { await withCheckedContinuation { continuation = $0 } }
-            throw V2ProfilePresentationError.throttled(retryAfter: 1)
+            throw V2ProfilePresentationError.throttled(retryAfter: delay)
         }
         return .init(presentations: [:], unavailable: Set(keys), serverNow: Date())
     }

@@ -1,105 +1,111 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 import IMV2Core
 @testable import IMV2ClientKit
 import Testing
 
 @Suite("V2 HTTP own profile client")
 struct V2HTTPOwnProfileClientTests {
-    @Test("profile read and revision-fenced write use the authenticated no-store contract")
-    func readsAndWritesProfile() async throws {
-        let endpoint = try #require(URL(string: "https://account.invalid/v2/profile/me"))
-        let response = try #require(HTTPURLResponse(url: endpoint, statusCode: 200, httpVersion: nil, headerFields: [:]))
-        let body = try JSONEncoder().encode(ProfileBody(
-            userID: "00000000-0000-0000-0000-000000000761",
-            handle: "own_profile",
-            displayName: "更新后的名称",
-            accountKind: "regular",
-            avatarMediaID: "00000000-0000-0000-0000-000000000762",
-            state: "active",
-            revision: 4,
-            visibilityRevision: 4
-        ))
-        let transport = OwnProfileHTTPTransport(responses: [(body, response), (body, response)])
+    @Test("production own-profile reads share credentials and transport while subscribers cancel independently")
+    func mergedOwnProfileRead() async throws {
+        let user = UserID(uuid: UUID())
+        let profile = try V2ProfileView(userID: user, publicIdentity: .init(userID: user, handle: .init("profile_read"), displayName: "Name", accountKind: .regular),
+            avatar: nil, state: .active, revision: .init(rawValue: 1)!, visibilityRevision: .init(rawValue: 1)!)
+        let endpoint = URL(string: "https://account.invalid/v2/profile/me")!
+        let response = HTTPURLResponse(url: endpoint, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+        let transport = SharedOwnProfileTransport(value: (try JSONEncoder().encode(profile), response))
+        let queries = V2QueryCoordinator<V2ProfileView>()
+        let credentials = SharedOwnProfileCredentials()
+        let client = try V2HTTPOwnProfileClient(endpoint: endpoint, credentials: credentials, transport: transport,
+            queries: queries, queryScope: .init(accountID: user.rawValue, authorizationDomain: "self", activationID: UUID()))
+        let a = Task { try await client.currentProfile() }
+        for _ in 0..<10000 { if await transport.count() == 1 { break }; await Task.yield() }
+        let b = Task { try await client.currentProfile() }
+        for _ in 0..<10000 { if await queries.snapshot().subscribers == 2 { break }; await Task.yield() }
+        #expect(await queries.snapshot().subscribers == 2)
+        a.cancel()
+        await #expect(throws: CancellationError.self) { _ = try await a.value }
+        #expect(await transport.count() == 1)
+        #expect(await credentials.count() == 1)
+        await transport.complete()
+        #expect(try await b.value == profile)
+        await queries.closeAndDrain()
+    }
+    @Test("patch preserves unchanged avatar and matches original receipt")
+    func patchAndRecovery() async throws {
+        let endpoint = URL(string: "https://account.invalid/v2/profile/me")!
+        let actor = UserID(uuid: UUID())
+        let command = try V2ProfileUpdateCommand(actorUserID: actor, operationID: .init(uuid: UUID()), expectedRevision: .init(rawValue: 4)!, patch: .init(displayName: .set("New name")), firstSubmissionDeadlineMilliseconds: 9999999999999)
+        let receipt = try V2ProfileOperationReceipt(actorUserID: actor, operationID: command.operationID, fingerprint: command.fingerprint, outcome: .committed(revision: .init(rawValue: 5)!, visibilityRevision: .init(rawValue: 5)!), resolvedAtMilliseconds: 1)
+        let response = HTTPURLResponse(url: endpoint, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type":"application/json"])!
+        let transport = OwnProfileHTTPTransport(responses: [(try JSONEncoder().encode(V2ProfileUpdateResult(receipt: receipt, currentSnapshot: nil)), response), (try JSONEncoder().encode(V2ProfileOperationRecoveryResult.receipt(receipt, currentSnapshot: nil)), response)])
         let client = try V2HTTPOwnProfileClient(endpoint: endpoint, credentials: OwnProfileCredentials(), transport: transport)
-
-        let current = try await client.currentProfile()
-        #expect(current.publicIdentity?.displayName == "更新后的名称")
-        #expect(current.avatar?.mediaID.rawValue == "00000000-0000-0000-0000-000000000762")
-        let operationID = try ProfileUpdateOperationID("00000000-0000-0000-0000-000000000763")
-        _ = try await client.updateProfile(
-            operationID: operationID,
-            expectedRevision: current.revision,
-            displayName: "更新后的名称",
-            avatar: current.avatar
-        )
-
+        #expect(try await client.patchProfile(command).receipt == receipt)
+        #expect(try await client.recoverProfile(.init(actorUserID: actor, operationID: command.operationID, fingerprint: command.fingerprint, action: .query)) == .receipt(receipt, currentSnapshot: nil))
         let requests = await transport.requests()
         #expect(requests.count == 2)
-        #expect(requests[0].httpMethod == "GET")
-        #expect(requests[1].httpMethod == "PUT")
-        #expect(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == "Bearer access-token" })
+        #expect(requests[0].httpMethod == "PUT")
+        #expect(requests[1].url?.path == "/v2/profile/me/operations/recover")
         #expect(requests.allSatisfy { $0.value(forHTTPHeaderField: "Cache-Control") == "no-store" })
-        let payload = try #require(requests[1].httpBody)
-        let decoded = try JSONSerialization.jsonObject(with: payload) as? [String: Any]
-        #expect(decoded?["operation_id"] as? String == operationID.rawValue)
-        #expect(decoded?["expected_revision"] as? Int == 4)
+        let payload = try #require(requests[0].httpBody)
+        let body = try #require(JSONSerialization.jsonObject(with: payload) as? [String:Any])
+        #expect(body["first_submission_deadline_ms"] as? UInt64 == command.firstSubmissionDeadlineMilliseconds)
+        let encodedPatch = try JSONSerialization.data(withJSONObject: body["patch"]!)
+        #expect(try JSONDecoder().decode(V2ProfilePatch.self, from: encodedPatch).avatar == .unchanged)
     }
-
-    @Test("revision conflict exposes the current version")
-    func exposesRevisionConflict() async throws {
-        let endpoint = try #require(URL(string: "https://account.invalid/v2/profile/me"))
-        let response = try #require(HTTPURLResponse(url: endpoint, statusCode: 409, httpVersion: nil, headerFields: [:]))
-        let transport = OwnProfileHTTPTransport(responses: [(Data("{\"current_revision\":9}".utf8), response)])
-        let client = try V2HTTPOwnProfileClient(endpoint: endpoint, credentials: OwnProfileCredentials(), transport: transport)
-        await #expect(throws: V2OwnProfileClientError.revisionConflict(.init(rawValue: 9)!)) {
-            try await client.updateProfile(
-                operationID: try .init("00000000-0000-0000-0000-000000000764"),
-                expectedRevision: .init(rawValue: 4)!,
-                displayName: "名称",
-                avatar: nil
-            )
-        }
+    @Test("503 preserves retry advice and is not terminal rejection")
+    func preservesStatus() async throws {
+        let endpoint = URL(string: "https://account.invalid/v2/profile/me")!
+        let response = HTTPURLResponse(url: endpoint, statusCode: 503, httpVersion: nil, headerFields: ["Retry-After":"30"])!
+        let client = try V2HTTPOwnProfileClient(endpoint: endpoint, credentials: OwnProfileCredentials(), transport: OwnProfileHTTPTransport(responses: [(Data(),response)]))
+        do { _ = try await client.currentProfile(); Issue.record("must fail") }
+        catch let error as V2HTTPFailure { #expect(error.statusCode == 503); #expect(error.retryAfter != nil); #expect(error.certainty == .responseReceived) }
+    }
+    @Test("401 refresh result preserves a retryable request boundary")
+    func distinguishes401From403() async throws {
+        let endpoint = URL(string: "https://account.invalid/v2/profile/me")!
+        let unauthorized = HTTPURLResponse(url: endpoint,statusCode: 401,httpVersion: nil,headerFields: [:])!
+        let forbidden = HTTPURLResponse(url: endpoint,statusCode: 403,httpVersion: nil,headerFields: [:])!
+        let client = try V2HTTPOwnProfileClient(endpoint: endpoint,credentials: OwnProfileCredentials(),transport: OwnProfileHTTPTransport(responses: [(Data(),unauthorized),(Data(),forbidden)]))
+        await #expect(throws: V2OwnProfileClientError.authorizationUnavailable) { try await client.currentProfile() }
+        await #expect(throws: V2OwnProfileClientError.authorizationDenied) { try await client.currentProfile() }
+    }
+    @Test("receipt for another operation is rejected")
+    func rejectsMismatchedReceipt() async throws {
+        let endpoint = URL(string: "https://account.invalid/v2/profile/me")!
+        let actor = UserID(uuid: UUID())
+        let command = try V2ProfileUpdateCommand(actorUserID: actor, operationID: .init(uuid: UUID()), expectedRevision: .init(rawValue: 1)!, patch: .init(displayName: .set("New name")), firstSubmissionDeadlineMilliseconds: 9999999999999)
+        let receipt = try V2ProfileOperationReceipt(actorUserID: actor, operationID: .init(uuid: UUID()), fingerprint: command.fingerprint, outcome: .closed, resolvedAtMilliseconds: 1)
+        let response = HTTPURLResponse(url: endpoint, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type":"application/json"])!
+        let client = try V2HTTPOwnProfileClient(endpoint: endpoint, credentials: OwnProfileCredentials(), transport: OwnProfileHTTPTransport(responses: [(try JSONEncoder().encode(V2ProfileUpdateResult(receipt: receipt,currentSnapshot: nil)),response)]))
+        await #expect(throws: V2OwnProfileClientError.invalidResponse) { try await client.patchProfile(command) }
     }
 }
-
 private struct OwnProfileCredentials: V2ClientPushEndpointCredentialProvider {
-    func pushEndpointCredentials() async throws -> V2ClientPushEndpointCredentials {
-        .init(accessToken: "access-token", deviceID: try .init("00000000-0000-0000-0000-000000000765"))
-    }
+    func pushEndpointCredentials() async throws -> V2ClientPushEndpointCredentials { .init(accessToken: "access-token", deviceID: .init(uuid: UUID())) }
 }
-
 private actor OwnProfileHTTPTransport: V2ClientPushEndpointHTTPTransport {
     private var pending: [(Data, HTTPURLResponse)]
     private var recorded: [URLRequest] = []
-
     init(responses: [(Data, HTTPURLResponse)]) { pending = responses }
-
-    func data(for request: URLRequest) throws -> (Data, HTTPURLResponse) {
-        recorded.append(request)
-        guard !pending.isEmpty else { throw URLError(.badServerResponse) }
-        return pending.removeFirst()
-    }
-
+    func data(for request: URLRequest) throws -> (Data, HTTPURLResponse) { recorded.append(request); return pending.removeFirst() }
     func requests() -> [URLRequest] { recorded }
 }
 
-private struct ProfileBody: Encodable {
-    let userID: String
-    let handle: String
-    let displayName: String
-    let accountKind: String
-    let avatarMediaID: String?
-    let state: String
-    let revision: UInt64
-    let visibilityRevision: UInt64
-
-    enum CodingKeys: String, CodingKey {
-        case userID = "user_id", handle
-        case displayName = "display_name", accountKind = "account_kind"
-        case avatarMediaID = "avatar_media_id", state, revision
-        case visibilityRevision = "visibility_revision"
+private actor SharedOwnProfileCredentials: V2ClientPushEndpointCredentialProvider {
+    private var calls = 0
+    func pushEndpointCredentials() -> V2ClientPushEndpointCredentials {
+        calls += 1; return .init(accessToken: "test", deviceID: .init(uuid: UUID()))
     }
+    func count() -> Int { calls }
+}
+private actor SharedOwnProfileTransport: V2ClientPushEndpointHTTPTransport {
+    private let value: (Data, HTTPURLResponse)
+    private var calls = 0
+    private var pending: CheckedContinuation<(Data, HTTPURLResponse), Never>?
+    init(value: (Data, HTTPURLResponse)) { self.value = value }
+    func data(for request: URLRequest) async -> (Data, HTTPURLResponse) {
+        calls += 1; return await withCheckedContinuation { pending = $0 }
+    }
+    func count() -> Int { calls }
+    func complete() { pending?.resume(returning: value); pending = nil }
 }

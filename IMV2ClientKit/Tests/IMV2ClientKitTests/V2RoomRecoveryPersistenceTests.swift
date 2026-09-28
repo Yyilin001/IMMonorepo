@@ -323,7 +323,7 @@ struct V2RoomRecoveryPersistenceTests {
         #expect(try await store.groupEventCursor(roomID: room) == 0)
     }
 
-    @Test(arguments: ["owner_epoch", "membership_revision", "head", "trimmed_through", "read_through", "latest_own_sequence", "member", "watermark", "pending", "acknowledged"], [1.5, Double(Int64.max)])
+    @Test(arguments: ["owner_epoch", "membership_revision", "head", "trimmed_through", "read_through", "latest_own_sequence", "member", "watermark", "pending", "intent"], [1.5, Double(Int64.max)])
     func unreadSnapshotStorageTypes(field: String, value: Double) async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: "unread-storage-\(UUID())")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -338,14 +338,10 @@ struct V2RoomRecoveryPersistenceTests {
         let initial = try await store.roomUnreadSnapshot(roomIDs: [room])
         #expect(initial[room]?.localReadWatermark == nil)
         #expect(initial[room]?.displayedUnread == 5)
-        func command(_ sequence: UInt64) -> V2PendingReadReceipt {
-            .init(roomID: room, operationID: .init(uuid: UUID()), readThroughRoomSequence: sequence, state: .pending,
-                attemptCount: 0, nextAttemptAt: .init(timeIntervalSince1970: 10), resultingRoomSequence: nil, terminalCode: nil)
-        }
-        let small = command(1)
-        try await store.enqueue(small)
-        try await store.enqueue(command(10))
-        if field == "acknowledged" { try await store.markReadReceiptAcknowledged(operationID: small.operationID, roomSequence: 1) }
+        _ = try await store.enqueueReadReceiptIntent(accountID:user,roomID:room,readThrough:1)
+        _ = try await store.prepareNextReadReceiptIntent(accountID:user)
+        let small = try #require(try await store.dueOperationWork(now:.now,kinds:[.readReceipt]).first)
+        _ = try await store.enqueueReadReceiptIntent(accountID:user,roomID:room,readThrough:10)
         try await store.databasePool.write { db in
             try db.execute(sql: "INSERT INTO v2_room_read_watermarks VALUES (?, 1, 0)", arguments: [room.rawValue])
             try db.execute(sql: "INSERT INTO v2_room_membership_states VALUES (?, 1, 'member', 1)", arguments: [room.rawValue])
@@ -354,11 +350,12 @@ struct V2RoomRecoveryPersistenceTests {
         switch field {
         case "member": table = "v2_room_membership_states"; column = "membership_revision"; key = "room_id"; identifier = room.rawValue
         case "watermark": table = "v2_room_read_watermarks"; column = "read_through_room_sequence"; key = "room_id"; identifier = room.rawValue
-        case "pending", "acknowledged": table = "v2_pending_read_receipts"; column = field == "pending" ? "read_through_room_sequence" : "resulting_room_sequence"; key = "operation_id"; identifier = small.operationID.rawValue
+        case "pending": table = "v2_read_receipt_operations"; column = "requested_sequence"; key = "work_id"; identifier = small.id.uuidString
+        case "intent": table = "v2_read_receipt_intents"; column = "desired_sequence"; key = "room_id"; identifier = room.rawValue
         default: table = "v2_room_sync_states"; column = field; key = "room_id"; identifier = room.rawValue
         }
         // Bypass only the head/child relationship CHECK for otherwise unreachable fixtures.
-        let bypass = (field == "head" && value < 7) || (["trimmed_through", "read_through", "latest_own_sequence"].contains(field) && value > 12)
+        let bypass = ["pending","intent"].contains(field) || (field == "head" && value < 7) || (["trimmed_through", "read_through", "latest_own_sequence"].contains(field) && value > 12)
         let original = try await store.databasePool.write { db in
             let original = try #require(try Int64.fetchOne(db, sql: "SELECT \(column) FROM \(table) WHERE \(key) = ?", arguments: [identifier]))
             if bypass { try db.execute(sql: "PRAGMA ignore_check_constraints = ON") }

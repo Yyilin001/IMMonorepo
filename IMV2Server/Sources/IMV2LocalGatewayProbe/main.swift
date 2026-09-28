@@ -1,6 +1,7 @@
 import Foundation
 import IMV2Core
 import IMV2Server
+import IMV2ToolHTTP
 @preconcurrency import NIOCore
 @preconcurrency import NIOPosix
 @preconcurrency import NIOSSL
@@ -10,7 +11,7 @@ import IMV2Server
 /// 它用于证明：通过本地 HTTPS 账号边缘签发的凭据，能够在真实的 TLS/protobuf 网关上完成认证
 /// 并交换普通私聊命令。它不暴露任何网关路由，不持久化凭据，
 /// 也不会打印身份或凭据材料。
-/// `sendDirectMessage` 可选 CLIENT_MESSAGE_ID，用于测试进程故障后按原业务操作重放。
+/// `sendDirectMessage` 可选 CLIENT_MESSAGE_ID；提供时须同时提供原 SEND_DEADLINE_MS，确保跨进程恢复冻结指纹不变。
 /// `sendRoomMediaMessage` 另要求 EXPECTED_ROOM_ID、MEDIA_ID、CLIENT_MESSAGE_ID；
 /// 它只输出接受结果的 room/message ID，供外部 smoke 在 SQL 中校验唯一消息与媒体归属。
 @main
@@ -18,6 +19,7 @@ enum IMV2LocalGatewayProbe {
     static func main() async throws {
         let configuration = try Configuration(environment: ProcessInfo.processInfo.environment)
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let sendTasks = V2ToolHTTPSendTaskOwner()
         do {
             var tls = TLSConfiguration.makeClientConfiguration()
             tls.minimumTLSVersion = .tlsv13
@@ -33,7 +35,7 @@ enum IMV2LocalGatewayProbe {
                             NIOSSLClientHandler(context: sslContext, serverHostname: configuration.serverName)
                         )
                         try channel.pipeline.syncOperations.addHandler(
-                            GatewayProbeHandler(configuration: configuration, completion: completion)
+                            GatewayProbeHandler(configuration: configuration, completion: completion, sendTasks: sendTasks)
                         )
                     }
                 }
@@ -51,9 +53,11 @@ enum IMV2LocalGatewayProbe {
                     // The peer closed between isActive and close().
                 }
             }
+            await sendTasks.closeAndDrain()
             try await group.shutdownGracefully()
             print(result.standardOutput)
         } catch {
+            await sendTasks.closeAndDrain()
             try? await group.shutdownGracefully()
             throw error
         }
@@ -83,6 +87,7 @@ private struct Configuration: Sendable {
     let expectedMessageID: MessageID?
     let mediaID: MediaID?
     let clientMessageID: ClientMessageID?
+    let sendDeadlineMilliseconds: UInt64
     let heldReadyPath: String?
     let heldReleasePath: String?
     let heldDisableStartedPath: String?
@@ -91,6 +96,7 @@ private struct Configuration: Sendable {
     let host: String
     let port: Int
     let serverName: String
+    let accountBaseURL:URL
     let caPath: String
 
     static let messageText = "local-gateway-smoke-message"
@@ -109,6 +115,14 @@ private struct Configuration: Sendable {
         expectedMessageID = try environment["IM_V2_GATEWAY_PROBE_EXPECTED_MESSAGE_ID"].map(MessageID.init)
         mediaID = try environment["IM_V2_GATEWAY_PROBE_MEDIA_ID"].map(MediaID.init)
         clientMessageID = try environment["IM_V2_GATEWAY_PROBE_CLIENT_MESSAGE_ID"].map(ClientMessageID.init)
+        if let rawDeadline = environment["IM_V2_GATEWAY_PROBE_SEND_DEADLINE_MS"] {
+            guard let deadline = UInt64(rawDeadline), deadline > 0, deadline <= UInt64(Int64.max) else { throw ProbeError.invalidConfiguration }
+            sendDeadlineMilliseconds = deadline
+        } else {
+            // A caller-supplied ID must carry the same frozen deadline on replay.
+            guard clientMessageID == nil else { throw ProbeError.invalidConfiguration }
+            sendDeadlineMilliseconds = UInt64(Date().timeIntervalSince1970 * 1_000) + 86_400_000
+        }
         heldReadyPath = environment["IM_V2_GATEWAY_PROBE_HELD_READY_PATH"]
         heldReleasePath = environment["IM_V2_GATEWAY_PROBE_HELD_RELEASE_PATH"]
         heldDisableStartedPath = environment["IM_V2_GATEWAY_PROBE_HELD_DISABLE_STARTED_PATH"]
@@ -175,6 +189,8 @@ private struct Configuration: Sendable {
                 throw ProbeError.invalidConfiguration
             }
         }
+        guard let accountBaseURL=URL(string:environment["IM_V2_GATEWAY_PROBE_ACCOUNT_BASE_URL"] ?? "https://localhost:8443") else { throw ProbeError.invalidConfiguration }
+        self.accountBaseURL=accountBaseURL
         host = environment["IM_V2_GATEWAY_PROBE_HOST"] ?? "127.0.0.1"
         serverName = environment["IM_V2_GATEWAY_PROBE_SERVER_NAME"] ?? "localhost"
         caPath = environment["IM_V2_GATEWAY_PROBE_CA_PATH"] ?? "/caddy/caddy/pki/authorities/local/root.crt"
@@ -238,12 +254,16 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
     private var nextRequestID: UInt64 = 3
     private var nextRoomSequence: UInt64 = 0
     private var deliveryPolls = 0
+    private let sendTasks: V2ToolHTTPSendTaskOwner
+    private var sendTaskID: UUID?
     private var finished = false
+    private var authenticatedUserID: UserID?
     private var heldAuthenticated = false
     private var heldRequestDispatched = false
     private var heldStartedAt: Date?
 
-    init(configuration: Configuration, completion: EventLoopPromise<ProbeResult>) {
+    init(configuration: Configuration, completion: EventLoopPromise<ProbeResult>, sendTasks: V2ToolHTTPSendTaskOwner) {
+        self.sendTasks = sendTasks
         self.configuration = configuration
         self.completion = completion
         decoder = .init(limits: limits)
@@ -282,6 +302,7 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
     }
 
     func channelInactive(context: ChannelHandlerContext) {
+        if let sendTaskID { sendTasks.cancel(id: sendTaskID) }
         if heldAuthenticated {
             let reason = heldCloseReason()
             markHeldConnectionClosed()
@@ -339,13 +360,14 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
                   response.selectedCapabilityProfile == "base",
                   !response.userID.isEmpty
             else { throw ProbeError.unexpectedResponse }
+            authenticatedUserID = try UserID(response.userID)
             switch configuration.mode {
             case .authenticate:
                 finish(context: context, result: .success(.authenticated), closeChannel: false)
             case .sendDirectMessage:
-                try sendOpenDirectRoom(context: context)
+                try sendOpenDirectRoom(actor:UserID(response.userID),context:context)
             case .relationshipRequest, .relationshipAccept:
-                try sendRelationshipChange(context: context)
+                try sendRelationshipChange(actor:UserID(response.userID),context:context)
             case .receiveDirectMessage:
                 try sendRoomEventPull(context: context)
             case .sendRoomMediaMessage:
@@ -385,46 +407,9 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
         case .holdingBatchSend:
             throw ProbeError.unexpectedResponse
 
-        case .awaitingDirectRoom(let requestID):
-            guard frame.requestID == requestID,
-                  case .directRoomOpened(let response)? = envelope.body,
-                  response.targetUserID == configuration.targetUserID?.rawValue,
-                  let roomID = try? RoomID(response.roomID)
-            else { throw ProbeError.unexpectedResponse }
-            try sendMessage(roomID: roomID, context: context)
-
-        case .awaitingRelationshipChange(let requestID):
-            guard frame.requestID == requestID,
-                  case .relationshipChanged(let response)? = envelope.body,
-                  response.targetUserID == configuration.targetUserID?.rawValue,
-                  ((configuration.mode == .relationshipRequest && response.resultingState == .pending) ||
-                   (configuration.mode == .relationshipAccept && response.resultingState == .accepted))
-            else { throw ProbeError.unexpectedResponse }
-            finish(context: context, result: .success(.relationshipChanged))
-
-        case .awaitingMessageAcceptance(let requestID, let roomID):
-            if configuration.mode == .heldRoomSend {
-                try finishHeldRejection(frame: frame, envelope: envelope,
-                    expectedRequestID: requestID, context: context)
-                return
-            }
-            if configuration.mode == .sendKnownRoomExpectDenied {
-                guard frame.requestID == requestID,
-                      case .error(let error)? = envelope.body,
-                      (error.code == "FORBIDDEN" || error.code == "DIRECT_MESSAGE_RESTRICTED"),
-                      !error.retryable else { throw ProbeError.unexpectedResponse }
-                finish(context: context, result: .success(.knownRoomDenied(reason: error.code)))
-                return
-            }
-            guard frame.requestID == requestID,
-                  case .messageAccepted(let response)? = envelope.body,
-                  response.roomID == roomID.rawValue,
-                  response.roomSequence > 0,
-                  Int64(exactly: response.roomSequence) != nil,
-                  response.serverCreatedAtMs >= 0,
-                  let messageID = try? MessageID(response.messageID)
-            else { throw ProbeError.unexpectedResponse }
-            finish(context: context, result: .success(.messageAccepted(roomID: roomID, messageID: messageID)), closeChannel: false)
+        case .awaitingHTTP:
+            if case .error? = envelope.body { throw ProbeError.unexpectedResponse }
+            return
 
         case .awaitingRoomEventPage(let requestID, let requestedAfterRoomSequence):
             if configuration.mode == .heldRoomRead {
@@ -579,48 +564,88 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
         }
     }
 
-    private func sendOpenDirectRoom(context: ChannelHandlerContext) throws {
-        guard let targetUserID = configuration.targetUserID else { throw ProbeError.invalidConfiguration }
-        let requestID = takeRequestID()
-        var request = IMV2Envelope()
-        request.requestID = requestID
-        request.protocolVersion = IMV2ProtocolVersion.current
-        request.openDirectRoom = .init()
-        request.openDirectRoom.operationID = UUID().uuidString
-        request.openDirectRoom.targetUserID = targetUserID.rawValue
-        stage = .awaitingDirectRoom(requestID)
-        try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
+    private func sendOpenDirectRoom(actor:UserID,context:ChannelHandlerContext) throws {
+        guard let target=configuration.targetUserID else { throw ProbeError.invalidConfiguration }
+        let configuration=self.configuration,operationID=try DirectRoomOperationID(UUID().uuidString)
+        let command=try V2DirectRoomOperationCommand(actorUserID:actor,operationID:operationID,
+            targetUserID:target,firstSubmissionDeadlineMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+600_000)
+        stage = .awaitingHTTP
+        let handler=NIOLoopBound(self,eventLoop:context.eventLoop),boundContext=context.loopBound
+        context.eventLoop.makeFutureWithTask {
+            try await V2ToolOperationHTTP.scoped(baseURL:configuration.accountBaseURL,caPath:configuration.caPath) { client in
+                try await client.openDirectRoom(command:command,token:configuration.accessToken,deviceID:configuration.deviceID.rawValue)
+            }
+        }.whenComplete { result in
+            let handler=handler.value,context=boundContext.value
+            guard !handler.finished,context.channel.isActive else { return }
+            do { try handler.sendMessage(roomID:result.get(),context:context) }
+            catch { handler.finish(context:context,result:.failure(error)) }
+        }
     }
 
-    private func sendRelationshipChange(context: ChannelHandlerContext) throws {
-        guard let targetUserID = configuration.targetUserID else { throw ProbeError.invalidConfiguration }
-        let requestID = takeRequestID()
-        var request = IMV2Envelope()
-        request.requestID = requestID
-        request.protocolVersion = IMV2ProtocolVersion.current
-        request.changeRelationship = .init()
-        request.changeRelationship.operationID = UUID().uuidString
-        request.changeRelationship.targetUserID = targetUserID.rawValue
-        request.changeRelationship.action = configuration.mode == .relationshipRequest ? .request : .accept
-        stage = .awaitingRelationshipChange(requestID)
-        try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
+    private func sendRelationshipChange(actor:UserID,context:ChannelHandlerContext) throws {
+        guard let target=configuration.targetUserID else { throw ProbeError.invalidConfiguration }
+        let configuration=self.configuration
+        stage = .awaitingHTTP
+        let handler=NIOLoopBound(self,eventLoop:context.eventLoop),boundContext=context.loopBound
+        context.eventLoop.makeFutureWithTask {
+            try await V2ToolOperationHTTP.scoped(baseURL:configuration.accountBaseURL,caPath:configuration.caPath) { client in
+                try await client.changeRelationship(actor:actor,target:target,action:configuration.mode == .relationshipRequest ? .request:.accept,token:configuration.accessToken,deviceID:configuration.deviceID.rawValue)
+            }
+        }.whenComplete { result in
+            let handler=handler.value,context=boundContext.value
+            guard !handler.finished,context.channel.isActive else { return }
+            switch result {
+            case .success:handler.finish(context:context,result:.success(.relationshipChanged))
+            case .failure(let error):handler.finish(context:context,result:.failure(error))
+            }
+        }
     }
 
     private func sendMessage(roomID: RoomID, context: ChannelHandlerContext) throws {
-        let requestID = takeRequestID()
-        var request = IMV2Envelope()
-        request.requestID = requestID
-        request.protocolVersion = IMV2ProtocolVersion.current
-        request.sendMessage = .init()
-        request.sendMessage.roomID = roomID.rawValue
-        request.sendMessage.clientMessageID = configuration.clientMessageID?.rawValue ?? UUID().uuidString
-        request.sendMessage.content = .init()
-        request.sendMessage.content.text = Configuration.messageText
-        if let mediaID = configuration.mediaID {
-            request.sendMessage.content.mediaIds = [mediaID.rawValue]
+        guard let actor = authenticatedUserID else { throw ProbeError.unexpectedResponse }
+        let command = try V2MessageSendOperationCommand(command: .init(roomID: roomID,
+            senderUserID: actor, clientMessageID: configuration.clientMessageID ?? .init(UUID().uuidString),
+            text: Configuration.messageText, media: configuration.mediaID.map { [.init(mediaID: $0)] } ?? [],
+            limits: .init(maxUTF8Bytes: 65_536)),
+            firstSubmissionDeadlineMilliseconds: configuration.sendDeadlineMilliseconds)
+        let configuration = self.configuration
+        stage = .awaitingHTTP
+        let handler = NIOLoopBound(self, eventLoop: context.eventLoop), boundContext = context.loopBound
+        let taskID = UUID(); sendTaskID = taskID
+        let completionLoop = context.eventLoop
+        let installed = sendTasks.start(id: taskID) {
+            let result: Result<V2MessageSendOperationTerminalOutcome, any Error>
+            do { result = .success(try await V2ToolOperationHTTP.scoped(baseURL: configuration.accountBaseURL, caPath: configuration.caPath) { client in
+                try await client.sendMessage(command, token: configuration.accessToken, deviceID: configuration.deviceID.rawValue)
+            }) }
+            catch { result = .failure(error) }
+            _ = try? await completionLoop.submit {
+
+            let handler = handler.value, context = boundContext.value
+            handler.sendTaskID = nil
+            guard !handler.finished else { return }
+            do {
+                let outcome = try result.get()
+                switch outcome {
+                case .accepted(let acceptance):
+                    guard configuration.mode != .heldRoomSend, configuration.mode != .sendKnownRoomExpectDenied else { throw ProbeError.unexpectedResponse }
+                    handler.finish(context: context, result: .success(.messageAccepted(roomID: roomID, messageID: acceptance.messageID)), closeChannel: false)
+                case .rejected(let reason) where reason == .permissionDenied || reason == .directPolicyDenied:
+                    let code = reason == .directPolicyDenied ? "DIRECT_MESSAGE_RESTRICTED" : "FORBIDDEN"
+                    if configuration.mode == .heldRoomSend {
+                        handler.finish(context: context, result: .success(.heldRequestDenied(reason: code)))
+                    } else if configuration.mode == .sendKnownRoomExpectDenied {
+                        handler.finish(context: context, result: .success(.knownRoomDenied(reason: code)))
+                    } else { throw ProbeError.unexpectedResponse }
+                default: throw ProbeError.unexpectedResponse
+                }
+            } catch V2ToolOperationHTTP.Failure.status(let status) where configuration.mode == .heldRoomSend && (status == 401 || status == 403) {
+                handler.finish(context: context, result: .success(.heldRequestDenied(reason: status == 401 ? "UNAUTHENTICATED" : "FORBIDDEN")))
+            } catch { handler.finish(context: context, result: .failure(error)) }
+            }.get()
         }
-        stage = .awaitingMessageAcceptance(requestID, roomID)
-        try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
+        guard installed else { sendTaskID = nil; throw CancellationError() }
     }
 
     private func sendRoomEventPull(context: ChannelHandlerContext) throws {
@@ -689,9 +714,7 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
         case awaitingHeldWarmPage(UInt64)
         case holdingAuthenticated
         case holdingBatchSend
-        case awaitingDirectRoom(UInt64)
-        case awaitingRelationshipChange(UInt64)
-        case awaitingMessageAcceptance(UInt64, RoomID)
+        case awaitingHTTP
         case awaitingRoomEventPage(UInt64, UInt64)
     }
 }

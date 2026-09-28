@@ -1,17 +1,55 @@
 import Foundation
 import GRDB
+import IMV2Core
 @testable import IMV2ClientKit
 import Testing
 
 struct V2OptionalCommandResultBoundsTests {
-    @Test(arguments: ["send", "redactionRevision", "redactionSequence", "mute", "removalRevision", "removalSequence", "reaction"],
+    @Test("member administration persisted proofs require complete bounded integers",
+          arguments: ["muteSequence", "muteRevision", "removalSequence", "removalRevision"],
+          [nil, Int64.min, -1, 0, 1, Int64.max] as [Int64?])
+    func memberAdministrationProof(kind: String, value: Int64?) throws {
+        let removal = kind.hasPrefix("removal")
+        let intent = try V2MemberAdministrationIntent(roomID: .init(uuid: UUID()), actorUserID: .init(uuid: UUID()),
+            operationID: .init(uuid: UUID()), targetUserID: .init(uuid: UUID()),
+            action: removal ? .remove : .mute(untilMilliseconds: 2_000), reasonCode: .init("test_reason"),
+            expectedMembershipRevision: 0, confirmedUntilMilliseconds: 1_000)
+        let outcome: V2MemberAdministrationTerminalOutcome = removal
+            ? .applied(.removed(membershipRevision: 1, roomSequence: 1, eventID: .init(uuid: UUID())))
+            : .applied(.muted(untilMilliseconds: 2_000, membershipRevision: 0, roomSequence: 1, eventID: .init(uuid: UUID())))
+        let receipt = try V2MemberAdministrationReceipt(identity: intent.identity, fingerprint: intent.fingerprint,
+            outcome: outcome, resolvedAtMilliseconds: 900)
+        let field = kind.hasSuffix("Revision") ? "membershipRevision" : "roomSequence"
+        let encoded = try JSONEncoder().encode(receipt)
+        func replace(_ object: Any) -> Any {
+            guard let dictionary = object as? [String: Any] else { return object }
+            var result = dictionary.mapValues(replace)
+            if dictionary[field] != nil {
+                if let value { result[field] = NSNumber(value: value) }
+                else { result[field] = NSNull() }
+            }
+            return result
+        }
+        let bytes = try JSONSerialization.data(withJSONObject: replace(JSONSerialization.jsonObject(with: encoded)))
+        if let value, value > 0 || (value == 0 && kind == "muteRevision") {
+            let decoded = try JSONDecoder().decode(V2MemberAdministrationReceipt.self, from: bytes)
+            switch decoded.outcome {
+            case .applied(.muted(_, let revision, let sequence, _)), .applied(.removed(let revision, let sequence, _)):
+                #expect((kind.hasSuffix("Revision") ? revision : sequence) == UInt64(value))
+            default: Issue.record("Expected a complete applied proof")
+            }
+        } else {
+            #expect(throws: (any Error).self) { try JSONDecoder().decode(V2MemberAdministrationReceipt.self, from: bytes) }
+        }
+    }
+
+    @Test(arguments: ["send", "reaction"],
           [nil, Int64.min, -1, 0, 1, Int64.max] as [Int64?])
     func persistedResults(kind: String, value: Int64?) throws {
         let field: String
         switch kind {
         case "send": field = "accepted_room_sequence"
         case "redactionRevision": field = "resulting_message_revision"
-        case "removalRevision": field = "resulting_membership_revision"
         default: field = "resulting_room_sequence"
         }
         var columns: [String: (any DatabaseValueConvertible)?] = [
@@ -31,20 +69,19 @@ struct V2OptionalCommandResultBoundsTests {
             columns["resulting_membership_revision"] = 2
         }
         columns.updateValue(value, forKey: field)
-        let row = Row(columns)
         func decodedValue() throws -> UInt64? {
             switch kind {
-            case "send": return try GRDBV2LocalSyncStore.decodePendingCommand(row).acceptedRoomSequence
-            case "redactionRevision": return try GRDBV2LocalSyncStore.decodePendingMessageRedaction(row).resultingMessageRevision
-            case "redactionSequence": return try GRDBV2LocalSyncStore.decodePendingMessageRedaction(row).resultingRoomSequence
-            case "mute": return try GRDBV2LocalSyncStore.decodePendingMemberMute(row).resultingRoomSequence
-            case "removalRevision": return try GRDBV2LocalSyncStore.decodePendingModeratedMemberRemoval(row).resultingMembershipRevision
-            case "removalSequence": return try GRDBV2LocalSyncStore.decodePendingModeratedMemberRemoval(row).resultingRoomSequence
-            default: return try GRDBV2LocalSyncStore.decodePendingMessageReaction(row).resultingRoomSequence
+            case "send":
+                guard let value else { return nil }
+                return try V2MessageOperationAcceptance(messageID:.init(uuid:UUID()),roomSequence:UInt64(exactly:value) ?? 0).roomSequence
+            default:
+                guard let value else { return nil }
+                return try V2MessageReactionEventProof(roomSequence:UInt64(exactly:value) ?? 0,eventID:.init(uuid:UUID())).roomSequence
             }
         }
-        if let value, value < 0 {
-            #expect(throws: V2ClientCommandError.commandConflict) { _ = try decodedValue() }
+        if let value, value < 0 || (["send","reaction"].contains(kind) && value==0) {
+            if ["send","reaction"].contains(kind) { #expect(throws:(any Error).self) { _ = try decodedValue() } }
+            else { #expect(throws:V2ClientCommandError.commandConflict) { _ = try decodedValue() } }
         } else {
             #expect(try decodedValue() == value.map(UInt64.init))
         }

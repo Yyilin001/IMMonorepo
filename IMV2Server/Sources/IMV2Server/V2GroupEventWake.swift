@@ -123,12 +123,25 @@ public final class V2CommittedHybridGroupEventObserver:
         }
     }
 
+    public func observeCommittedRoomSequence(roomID: RoomID, roomSequence: UInt64) {
+        state.withLock { $0.sink }?.submitForegroundHint(.init(roomID: roomID, highWatermark: roomSequence))
+    }
+
     public func observeCommittedMessages(_ outcomes: [V2SendMessageOutcome]) {
         guard !outcomes.isEmpty else { return }
         let sink = state.withLock { $0.sink }
-        var events = outcomes.compactMap { outcome -> V2DirectRoomLiveEvent? in
-            guard case .accepted(let message) = outcome else { return nil }
-            return V2GroupRoomLiveEventDraft(message)?.materialized()
+        var events: [V2DirectRoomLiveEvent] = []
+        events.reserveCapacity(outcomes.count)
+        for outcome in outcomes {
+            guard case .accepted(let message) = outcome else { continue }
+            // Direct drafts preserve the exact two-person audience; group drafts
+            // retain the existing large-group eligibility boundary.
+            if let event = V2DirectRoomLiveEventDraft(message)?.materialized()
+                ?? V2GroupRoomLiveEventDraft(message)?.materialized() {
+                events.append(event)
+            } else {
+                sink?.submitForegroundHint(.init(roomID: message.roomID, highWatermark: message.roomSequence))
+            }
         }
         guard !events.isEmpty else { return }
         events.sort {

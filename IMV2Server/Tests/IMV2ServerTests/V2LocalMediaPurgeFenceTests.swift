@@ -1,12 +1,11 @@
-import Crypto
 import Foundation
 import IMV2Core
 @testable import IMV2Server
 import Testing
 
 struct V2LocalMediaPurgeFenceTests {
-    @Test(arguments: [false, true])
-    func purgeFencesStagedAndConcurrentCommits(forward: Bool) async throws {
+    @Test
+    func purgeFencesStagedAndConcurrentCommits() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "im-purge-fence-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let now = Date(timeIntervalSince1970: 1_750_000_000)
@@ -17,7 +16,6 @@ struct V2LocalMediaPurgeFenceTests {
         let writer = try provider(), remover = try provider()
         try await writer.prepare()
         let bytes = Data("staged before removal".utf8)
-        let receipt = try V2ForwardMediaCopyReceipt(byteCount: Int64(bytes.count), digest: Data(SHA256.hash(data: bytes)))
         func stage(_ id: MediaID) async throws -> V2LocalFilesystemStagedUpload {
             let target = try await writer.issueUploadTarget(mediaID: id, contentType: "text/plain",
                 byteCount: Int64(bytes.count), expiresAt: now.addingTimeInterval(60))
@@ -27,8 +25,7 @@ struct V2LocalMediaPurgeFenceTests {
             return upload
         }
         @Sendable func commit(_ upload: V2LocalFilesystemStagedUpload) async throws {
-            if forward { try await writer.commitForwardImportedObject(upload, receipt: receipt) }
-            else { try await writer.commitUploadedObject(upload, actualByteCount: Int64(bytes.count)) }
+            try await writer.commitUploadedObject(upload, actualByteCount: Int64(bytes.count))
         }
         let removed = MediaID(uuid: UUID())
         let staged = try await stage(removed)
@@ -81,7 +78,7 @@ struct V2LocalMediaPurgeFenceTests {
             _ = try await provider.localBytesForScanning(mediaID: id)
         }
         await #expect(throws: V2LocalFilesystemMediaProviderError.objectUnavailable) {
-            _ = try await provider.verifyForwardImportedObject(mediaID: id, byteCount: 3, digest: Data(SHA256.hash(data: bytes)))
+            _ = try await provider.issueDownloadTarget(mediaID: id, expiresAt: now.addingTimeInterval(60))
         }
         try await provider.purge(mediaID: id)
         #expect(!FileManager.default.fileExists(atPath: object.fileURL.path))

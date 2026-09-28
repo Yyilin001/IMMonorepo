@@ -62,7 +62,8 @@ struct PostgresV2ProfileControlReader: Sendable {
                    direct.room_id AS direct_room_id, direct.route_epoch AS direct_route_epoch,
                    direct.room_shard_id AS direct_shard_id,
                    (input.target_user_id=input.actor_user_id OR relationship.state IN ('pending','accepted')) IS TRUE AS relationship_allowed,
-                   relationship.updated_at AS relationship_updated_at
+                   relationship.updated_at AS relationship_updated_at,
+                   alias.owner_user_id AS alias_owner_user_id, alias.remark_name AS alias_remark_name, alias.revision AS alias_revision
             FROM requested input
             LEFT JOIN identities identity ON identity.request_ordinal=input.request_ordinal
             LEFT JOIN im_v2.public_user_profiles profile ON profile.user_id=input.target_user_id
@@ -79,6 +80,9 @@ struct PostgresV2ProfileControlReader: Sendable {
               ON identity.session_expires_at IS NOT NULL
              AND relationship.lower_user_id=LEAST(input.actor_user_id,input.target_user_id)
              AND relationship.higher_user_id=GREATEST(input.actor_user_id,input.target_user_id)
+            LEFT JOIN im_v2.user_contact_aliases alias
+              ON alias.owner_user_id=input.actor_user_id AND alias.target_user_id=profile.user_id
+             AND profile.state='active' AND input.actor_user_id<>input.target_user_id
             ORDER BY input.request_ordinal,input.key_ordinal
             """).all(decoding: Row.self)
         guard rows.count == requests.reduce(0, { $0 + $1.keys.count }),
@@ -108,8 +112,10 @@ struct PostgresV2ProfileControlReader: Sendable {
         let state: String?; let revision: Int64?; let visibilityRevision: Int64?; let avatarMediaID: UUID?
         let directRoomID: UUID?; let directRouteEpoch: Int64?; let directShardID: String?
         let relationshipAllowed: Bool; let relationshipUpdatedAt: Date?
+        let aliasOwnerUserID: UUID?; let aliasRemarkName: String?; let aliasRevision: Int64?
         enum CodingKeys: String, CodingKey {
             case ordinal, state, revision
+            case aliasOwnerUserID = "alias_owner_user_id", aliasRemarkName = "alias_remark_name", aliasRevision = "alias_revision"
             case requestOrdinal = "request_ordinal", deviceExpiresAt = "device_expires_at", observedAt = "observed_at"
             case userID = "user_id", publicHandle = "public_handle", displayName = "display_name", accountKind = "account_kind"
             case visibilityRevision = "visibility_revision", avatarMediaID = "avatar_media_id", directRoomID = "direct_room_id"
@@ -131,8 +137,15 @@ struct PostgresV2ProfileControlReader: Sendable {
                     avatar: state == .active ? avatarMediaID.map { V2AvatarReference(mediaID: .init(uuid: $0)) } : nil,
                     state: state, revision: version, visibilityRevision: visibility)
             } else { view = nil }
+            let contactAlias: V2ContactAlias?
+            if let aliasOwnerUserID {
+                guard let userID, let aliasRevision, aliasRevision > 0,
+                      let version = V2ProfileRevision(rawValue: UInt64(aliasRevision)) else { throw V2ProfileViewReadError.corruptPersistenceState }
+                contactAlias = try .init(ownerUserID: .init(uuid:aliasOwnerUserID), targetUserID:.init(uuid:userID),
+                    remarkName:aliasRemarkName, revision:version)
+            } else { contactAlias = nil }
             return .init(view: view, directRoomID: directRoomID, directRouteEpoch: directRouteEpoch, directShardID: directShardID,
-                relationshipAllowed: relationshipAllowed, relationshipUpdatedAt: relationshipUpdatedAt)
+                relationshipAllowed: relationshipAllowed, relationshipUpdatedAt: relationshipUpdatedAt, contactAlias:contactAlias)
         }
     }
 }

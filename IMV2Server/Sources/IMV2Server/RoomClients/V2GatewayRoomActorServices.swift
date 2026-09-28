@@ -6,7 +6,7 @@ import IMV2ActorRuntime
 /// 创建操作交由独立的控制域协调者处理，因为此时房间尚不存在。
 public struct V2GatewayRoomActorServices: Sendable {
     let messaging: V2RoomRefMessagingClient
-    let administration: V2RoomRefAdministrationClient
+    public let administration: V2RoomRefAdministrationClient
     let queries: V2RoomRefQueryClient
     let receipts: V2RoomRefReadReceiptClient
     let eventLog: V2RoomRefGroupEventLogClient

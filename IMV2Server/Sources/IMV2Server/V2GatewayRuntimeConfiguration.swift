@@ -204,6 +204,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         databasePolicy.maximumConnectionsPerEventLoop
     }
     public let tls: V2TLSListenerConfiguration
+    public let groupInviteSecretIssuer: V2GroupInviteSecretIssuer
     public let accessTokenKey: V2AccessTokenHMACKey
     public let capacityProfile: V2CapacityProfile
     public let messageLimits: V2MessageCommandLimits
@@ -452,6 +453,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             certificateChainPath: try Self.required("IM_V2_TLS_CERTIFICATE_CHAIN_PATH", environment: environment),
             privateKeyPath: try Self.required("IM_V2_TLS_PRIVATE_KEY_PATH", environment: environment)
         )
+        groupInviteSecretIssuer = try .init(base64EncodedKey: Self.required("IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64", environment: environment))
         accessTokenKey = try .init(base64Encoded: try Self.required("IM_V2_ACCESS_TOKEN_HMAC_KEY_BASE64", environment: environment))
         capabilityProfile = try Self.required("IM_V2_CAPABILITY_PROFILE", environment: environment)
         messageLimits = try .init(maxUTF8Bytes: try Self.integer("IM_V2_MAX_MESSAGE_UTF8_BYTES", environment: environment))

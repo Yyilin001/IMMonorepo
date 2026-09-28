@@ -298,6 +298,14 @@ final class V2AppPushDelegate: NSObject, UIApplicationDelegate, V2RemoteNotifica
     weak var tokenReceiver: (any V2PushDeviceTokenReceiving)?
     weak var wakeHandler: (any V2PushWakeHandling)?
 
+    func application(_: UIApplication, handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        do {
+            V2BackgroundTransferEvents.handle(identifier: identifier,
+                root: try V2BackgroundTransferCoordinator.defaultRoot(), completion: completionHandler)
+        } catch { completionHandler() }
+    }
+
     func registerForRemoteNotifications() {
         UIApplication.shared.registerForRemoteNotifications()
     }

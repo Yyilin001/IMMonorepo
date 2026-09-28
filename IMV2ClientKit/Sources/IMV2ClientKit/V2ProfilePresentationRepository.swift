@@ -72,12 +72,14 @@ public actor V2ProfilePresentationRepository {
         let profile: V2ProfileRevision, visibility: V2ProfileRevision
         let context: UInt64, observedAt: Int64
         let groupMember: V2GroupMemberPresentation?
+        let contactAlias: V2ContactAlias?
         init(_ value: V2AuthorizedProfilePresentation, previous: RevisionFloor? = nil) {
             profile = value.view.revision; visibility = value.view.visibilityRevision
             context = value.lease.contextRevision; observedAt = value.lease.observedAtUnixMilliseconds
             // A hidden profile must omit nickname content, but that omission
             // must not erase a version already observed in this context.
             groupMember = value.view.state == .active ? value.groupMember : previous?.groupMember
+            contactAlias = value.view.state == .active ? value.contactAlias : previous?.contactAlias
         }
     }
     private struct KeyState {
@@ -86,6 +88,7 @@ public actor V2ProfilePresentationRepository {
         var deniedAt: ContinuousClock.Instant?
         var floor: RevisionFloor?
         var nicknameRevisionFloor: UInt64 = 0
+        var aliasRevisionFloor: UInt64 = 0
         var retryUntil: ContinuousClock.Instant?
     }
     private struct Waiter {
@@ -119,6 +122,7 @@ public actor V2ProfilePresentationRepository {
     private let actorUserID: UserID
     private let deviceID: DeviceID
     private let reader: any V2ProfilePresentationReading
+    private let aliasRevisions: (@Sendable (Set<V2ProfileViewLookupKey>) async throws -> [V2ProfileViewLookupKey: UInt64])?
     private let nicknameRevisions: (@Sendable (Set<V2ProfileViewLookupKey>) async throws -> [V2ProfileViewLookupKey: UInt64])?
     private let clock = ContinuousClock()
     private let retryJitter: @Sendable () -> TimeInterval
@@ -144,15 +148,17 @@ public actor V2ProfilePresentationRepository {
     private let maximumBytes = 2 * 1_024 * 1_024
 
     public init(actorUserID: UserID, deviceID: DeviceID, reader: any V2ProfilePresentationReading,
-                nicknameRevisions: (@Sendable (Set<V2ProfileViewLookupKey>) async throws -> [V2ProfileViewLookupKey: UInt64])? = nil) {
+                nicknameRevisions: (@Sendable (Set<V2ProfileViewLookupKey>) async throws -> [V2ProfileViewLookupKey: UInt64])? = nil,
+                aliasRevisions: (@Sendable (Set<V2ProfileViewLookupKey>) async throws -> [V2ProfileViewLookupKey: UInt64])? = nil) {
         self.actorUserID = actorUserID; self.deviceID = deviceID; self.reader = reader
         self.nicknameRevisions = nicknameRevisions
+        self.aliasRevisions = aliasRevisions
         retryJitter = { Double.random(in: 0.1...0.5) }
     }
     init(actorUserID: UserID, deviceID: DeviceID, reader: any V2ProfilePresentationReading,
          retryJitter: @escaping @Sendable () -> TimeInterval) {
         self.actorUserID = actorUserID; self.deviceID = deviceID; self.reader = reader; self.retryJitter = retryJitter
-        nicknameRevisions = nil
+        nicknameRevisions = nil; aliasRevisions = nil
     }
     public func activate() -> V2ProfilePageActivation {
         activate(tracksVisibleRows: false)
@@ -180,6 +186,19 @@ public actor V2ProfilePresentationRepository {
         invalidate(keys, fenceAuthorView: true)
     }
 
+    /// A committed own-field edit invalidates tracked presentations; it never
+    /// constructs or extends another user's display authorization from a receipt.
+    public func invalidateEditedName(_ target: V2NameTarget) {
+        let tracked = Set(states.keys).union(access.keys).union(candidates.keys).union(demand.keys)
+        let keys = tracked.filter { key in
+            switch target {
+            case .contact(let user): return key.userID == user
+            case .group(let room): return key.userID == actorUserID && key.context == .room(room)
+            }
+        }
+        invalidate(Set(keys), fenceAuthorView: true)
+    }
+
     private func invalidate(_ keys: Set<V2ProfileViewLookupKey>, fenceAuthorView: Bool) {
         for key in keys {
             removeCandidate(key)
@@ -190,8 +209,9 @@ public actor V2ProfilePresentationRepository {
                 // denials keep their own observation fence.
                 let floor = states[key]?.floor
                 let nicknameFloor = states[key]?.nicknameRevisionFloor ?? 0
+                let aliasFloor = states[key]?.aliasRevisionFloor ?? 0
                 let deniedAt = fenceAuthorView ? clock.now : states[key]?.deniedAt
-                states[key] = .init(deniedAt: deniedAt, floor: floor, nicknameRevisionFloor: nicknameFloor)
+                states[key] = .init(deniedAt: deniedAt, floor: floor, nicknameRevisionFloor: nicknameFloor, aliasRevisionFloor: aliasFloor)
             } else if fenceAuthorView { fenceUntrackedAuthor(key, at: clock.now) }
             revokeGrants(key, includeInterests: true)
             complete(key, result: .failure(V2ProfilePresentationError.inactive))
@@ -204,7 +224,7 @@ public actor V2ProfilePresentationRepository {
     public func refreshNicknameInvalidations() async throws {
         let capturedEpoch = epoch
         let keys = Set(states.keys).union(candidates.keys)
-        do { try await refreshNicknameFloors(keys) }
+        do { try await refreshPresentationFloors(keys) }
         catch {
             if !closed, capturedEpoch == epoch { invalidate(keys) }
             throw error
@@ -234,6 +254,43 @@ public actor V2ProfilePresentationRepository {
         return values
     }
 
+    public func refreshAliasInvalidations() async throws {
+        let capturedEpoch = epoch
+        let keys = Set(states.keys).union(candidates.keys)
+        do { try await refreshPresentationFloors(keys) }
+        catch {
+            if !closed, capturedEpoch == epoch { invalidate(keys) }
+            throw error
+        }
+    }
+
+    @discardableResult
+    private func refreshPresentationFloors(_ keys: Set<V2ProfileViewLookupKey>) async throws -> (nicknames: [V2ProfileViewLookupKey: UInt64], aliases: [V2ProfileViewLookupKey: UInt64]) {
+        let nicknames = try await refreshNicknameFloors(keys)
+        guard let aliasRevisions, !keys.isEmpty else { return (nicknames, [:]) }
+        guard !closed, keys.count <= 2_064 else { throw V2ProfilePresentationError.inactive }
+        let capturedEpoch = epoch
+        let values = try await aliasRevisions(keys)
+        guard !closed, capturedEpoch == epoch else { throw V2ProfilePresentationError.inactive }
+        guard Set(values.keys) == keys, values.values.allSatisfy({ $0 <= UInt64(Int64.max) }) else {
+            throw V2ProfilePresentationError.invalidResponse
+        }
+        var stale = Set<V2ProfileViewLookupKey>()
+        for (key, revision) in values {
+            let minimum = max(revision, states[key]?.aliasRevisionFloor ?? 0)
+            states[key]?.aliasRevisionFloor = minimum
+            if let candidate = candidates[key]?.access, !meetsAliasFloor(candidate.presentation, minimum: minimum) {
+                removeCandidate(key)
+            }
+            if let cached = access[key], !meetsAliasFloor(cached.presentation, minimum: minimum) { stale.insert(key) }
+        }
+        invalidate(stale, fenceAuthorView: false)
+        return (nicknames, values)
+    }
+
+    private func meetsAliasFloor(_ value: V2AuthorizedProfilePresentation, minimum: UInt64) -> Bool {
+        value.view.state != .active || (value.contactAlias?.revision.rawValue ?? 0) >= minimum
+    }
     private func meetsNicknameFloor(_ value: V2AuthorizedProfilePresentation, minimum: UInt64) -> Bool {
         value.view.state != .active || (value.groupMember?.revision.rawValue ?? 0) >= minimum
     }
@@ -310,7 +367,7 @@ public actor V2ProfilePresentationRepository {
 
     public func cachedSnapshot(for key: V2ProfileViewLookupKey, activation: V2ProfilePageActivation) async -> V2ProfilePresentationSnapshot? {
         guard activation.epoch == epoch, activations[activation.id]?.grants[key] != nil, access[key] != nil else { return nil }
-        do { try await refreshNicknameFloors([key]) }
+        do { try await refreshPresentationFloors([key]) }
         catch { if activation.epoch == epoch { invalidate([key]) }; return nil }
         return currentSnapshot(for: key, activation: activation)
     }
@@ -337,7 +394,7 @@ public actor V2ProfilePresentationRepository {
         if activations[activation.id]?.tracksVisibleRows == true,
            activations[activation.id]?.visibleRows[key]?.isEmpty != false { throw V2ProfilePresentationError.inactive }
         try registerInterest(key, activation: activation)
-        try await refreshNicknameFloors([key])
+        try await refreshPresentationFloors([key])
         try Task.checkCancellation(); try requireActive(activation)
         promoteCandidate(key, activation: activation)
         if let cached = currentSnapshot(for: key, activation: activation)?.presentation { return cached }
@@ -412,7 +469,7 @@ public actor V2ProfilePresentationRepository {
                 }
             }
         }
-        let floors = try await refreshNicknameFloors(seen)
+        let floors = try await refreshPresentationFloors(seen)
         try Task.checkCancellation(); try requireActive(expected.activation)
         guard binding == expected, expected.view.renewBy > clock.now else { throw V2ProfilePresentationError.inactive }
         let interests = activations[expected.activation.id]?.interests ?? []
@@ -420,7 +477,7 @@ public actor V2ProfilePresentationRepository {
         for entry in delta.entries {
             let key = entry.key
             if case .presentation(let value, _, _, _) = entry,
-               !meetsNicknameFloor(value, minimum: floors[key] ?? 0) { continue }
+               (!meetsNicknameFloor(value, minimum: floors.nicknames[key] ?? 0) || !meetsAliasFloor(value, minimum: floors.aliases[key] ?? 0)) { continue }
             if interests.contains(key) {
                 removeCandidate(key)
                 applyAuthorEntry(entry, access: prepared[key], binding: expected)
@@ -441,7 +498,7 @@ public actor V2ProfilePresentationRepository {
         switch entry {
         case .presentation(let presentation, _, _, _):
             guard authorCanGrant(key, binding: expected), let value, value.deadline > clock.now,
-                  isNotOlder(presentation, than: state.floor), meetsNicknameFloor(presentation, minimum: state.nicknameRevisionFloor) else { return }
+                  isNotOlder(presentation, than: state.floor), meetsNicknameFloor(presentation, minimum: state.nicknameRevisionFloor), meetsAliasFloor(presentation, minimum: state.aliasRevisionFloor) else { return }
             let newlyGranted = activations[expected.activation.id]?.grants[key] == nil
             let hasWaiter = demand[key]?.waiters.values.contains { $0.activation == expected.activation } == true
             install(value, key: key)
@@ -468,6 +525,7 @@ public actor V2ProfilePresentationRepository {
             guard let value, authorCanGrant(key, binding: expected),
                   isNotOlder(presentation, than: states[key]?.floor),
                   meetsNicknameFloor(presentation, minimum: states[key]?.nicknameRevisionFloor ?? 0),
+                  meetsAliasFloor(presentation, minimum: states[key]?.aliasRevisionFloor ?? 0),
                   isNotOlder(presentation, than: candidates[key]?.access.map { RevisionFloor($0.presentation) }) else { return }
             if case .unavailable? = candidates[key]?.entry { return }
             deadline = min(deadline, value.deadline)
@@ -567,7 +625,7 @@ public actor V2ProfilePresentationRepository {
             let response: Result<V2ProfilePresentationBatch, Error>
             do {
                 let batch = try await reader.readPresentations(selected.map(\.key))
-                if batchEpoch == epoch, !closed { try await refreshNicknameFloors(Set(selected.map(\.key))) }
+                if batchEpoch == epoch, !closed { try await refreshPresentationFloors(Set(selected.map(\.key))) }
                 response = .success(batch)
             }
             catch { response = .failure(error) }
@@ -616,7 +674,8 @@ public actor V2ProfilePresentationRepository {
                 guard demand[key]?.id == read.demandID else { continue }
                 guard states[key]?.valueID == read.valueID else { continue }
                 if let entry = prepared[key], isNotOlder(entry.presentation, than: states[key]?.floor),
-                   meetsNicknameFloor(entry.presentation, minimum: states[key]?.nicknameRevisionFloor ?? 0) {
+                   meetsNicknameFloor(entry.presentation, minimum: states[key]?.nicknameRevisionFloor ?? 0),
+                   meetsAliasFloor(entry.presentation, minimum: states[key]?.aliasRevisionFloor ?? 0) {
                     let floor = RevisionFloor(entry.presentation, previous: states[key]?.floor)
                     install(entry, key: key); states[key]?.floor = floor; negative.removeValue(forKey: key)
                     for activation in read.activations where activation.epoch == epoch && activations[activation.id] != nil {
@@ -645,9 +704,13 @@ public actor V2ProfilePresentationRepository {
         let previousNicknameRevision = floor.groupMember?.revision.rawValue ?? 0
         let nicknameMatches = value.view.state != .active || nicknameRevision > previousNicknameRevision
             || (nicknameRevision == previousNicknameRevision && value.groupMember == floor.groupMember)
+        let aliasRevision = value.contactAlias?.revision.rawValue ?? 0
+        let previousAliasRevision = floor.contactAlias?.revision.rawValue ?? 0
+        let aliasMatches = value.view.state != .active || aliasRevision > previousAliasRevision
+            || (aliasRevision == previousAliasRevision && value.contactAlias == floor.contactAlias)
         return value.view.revision >= floor.profile && value.view.visibilityRevision >= floor.visibility
             && value.lease.contextRevision >= floor.context
-            && nicknameMatches
+            && nicknameMatches && aliasMatches
             && value.lease.observedAtUnixMilliseconds >= floor.observedAt
     }
     private func makeAccess(_ value: V2AuthorizedProfilePresentation, deadline: ContinuousClock.Instant,
@@ -667,6 +730,7 @@ public actor V2ProfilePresentationRepository {
         if let previous {
             let contentChanged = previous.presentation.view != entry.presentation.view
                 || previous.presentation.groupMember != entry.presentation.groupMember
+                || previous.presentation.contactAlias != entry.presentation.contactAlias
                 || previous.presentation.lease.contextRevision != entry.presentation.lease.contextRevision
                 || previous.avatar?.mediaID != entry.avatar?.mediaID || previous.avatar?.variantID != entry.avatar?.variantID
                 || previous.avatar?.version != entry.avatar?.version || previous.avatar?.checksum != entry.avatar?.checksum
@@ -702,7 +766,7 @@ public actor V2ProfilePresentationRepository {
         complete(key, result: .success(nil))
     }
     private func applyThrottling(_ retryAfter: TimeInterval, failedReads: [ReadKey]) {
-        let base = retryAfter.isFinite ? min(60, max(1, retryAfter)) : 1
+        let base = retryAfter.isFinite ? min(315_576_000, max(1, retryAfter)) : 1
         let proposedJitter = retryJitter(), jitter = proposedJitter.isFinite ? min(1, max(0, proposedJitter)) : 0.25
         let proposed = clock.now + .seconds(base + jitter)
         throttleUntil = max(throttleUntil ?? proposed, proposed)

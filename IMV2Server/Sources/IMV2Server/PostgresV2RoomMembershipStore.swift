@@ -4,102 +4,8 @@ import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 
-/// 采用显式房间权限模型的成员变更实现。
-///
-/// 只有群主可以添加成员，群主或管理员可以移除非群主成员。
-/// 事务会在改变成员关系之前冻结精确受众，因此添加与移除事件不依赖工作器运行时
-/// 恰好存在哪些成员行。
-public struct PostgresV2RoomMembershipStore:
-    V2ControlValidatedRoomMembershipStore {
-    private let database: any Database
-    private let activationScope: V2RoomActivationWriteScope?
-
-    /// 组合数据库。
-    ///
-    /// - Parameter database: 存放房间、成员关系与准入状态的数据库。
-    public init(database: any Database) {
-        self.database = database
-        activationScope = nil
-    }
-
-    /// 房间 Actor 的每次重放与修改都要求这份固定的激活权限。
-    public init(database: any Database, activationScope: V2RoomActivationWriteScope) {
-        self.database = database
-        self.activationScope = activationScope
-    }
-
-    /// 执行一次成员变更（不做控制面身份校验）。
-    ///
-    /// - Parameters:
-    ///   - command: 成员变更命令。
-    ///   - capacityProfile: 本次命令使用的容量档位。
-    ///   - eventID: 命令幂等标识。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 变更结果。
-    /// - Throws: 无权限、修订冲突、容量不足或持久化失败时抛出。
-    public func change(command: V2ChangeRoomMembershipCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2RoomMembershipChangeOutcome {
-        try await change(
-            command: command,
-            identitySnapshot: nil,
-            ownerRoute: nil,
-            capacityProfile: capacityProfile,
-            eventID: eventID,
-            now: now
-        )
-    }
-
-    /// 以控制面校验过的身份快照与房间归属执行成员变更。
-    ///
-    /// - Parameters:
-    ///   - command: 成员变更命令。
-    ///   - ownerRoute: 已选定的房间归属，事务内据此校验归属。
-    ///   - identitySnapshot: 控制面提供的目标身份快照。
-    ///   - capacityProfile: 本次命令使用的容量档位。
-    ///   - eventID: 命令幂等标识。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 变更结果。
-    /// - Throws: 归属已变更、身份不符、无权限、修订冲突或持久化失败时抛出。
-    public func changeControlValidated(
-        command: V2ChangeRoomMembershipCommand,
-        ownerRoute: V2RoomShardRoute,
-        identitySnapshot: V2MembershipIdentitySnapshot,
-        capacityProfile: V2CapacityProfile,
-        eventID: EventID,
-        now: Date
-    ) async throws -> V2RoomMembershipChangeOutcome {
-        guard identitySnapshot.actorUserID == command.actorUserID,
-              identitySnapshot.targetUserID == command.targetUserID
-        else { throw V2RoomMembershipStoreError.corruptPersistenceState }
-        return try await change(
-            command: command,
-            identitySnapshot: identitySnapshot,
-            ownerRoute: ownerRoute,
-            capacityProfile: capacityProfile,
-            eventID: eventID,
-            now: now
-        )
-    }
-
-    private func change(
-        command: V2ChangeRoomMembershipCommand,
-        identitySnapshot: V2MembershipIdentitySnapshot?,
-        ownerRoute: V2RoomShardRoute?,
-        capacityProfile: V2CapacityProfile,
-        eventID: EventID,
-        now: Date
-    ) async throws -> V2RoomMembershipChangeOutcome {
-        return try await v2WithPostgresTransactionRetry(
-            database: database, maximumRetryCount: 0,
-            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil
-        ) { transaction in
-            guard let sql = transaction as? any SQLDatabase else { throw V2RoomMembershipStoreError.corruptPersistenceState }
-            return try await Self.change(
-                in: sql, command: command, identitySnapshot: identitySnapshot, ownerRoute: ownerRoute,
-                activationScope: activationScope, capacityProfile: capacityProfile, eventID: eventID, now: now
-            )
-        }
-    }
-
+/// RoomRef-bound operations and trusted invitation coordination share this transaction primitive.
+enum PostgresV2RoomMembershipStore {
     /// 在调用方的 PostgreSQL 事务内执行成员变更。
     ///
     /// 提交与回滚由调用方负责，包括全部成员、准入、事件与发件箱写入。
@@ -124,7 +30,8 @@ public struct PostgresV2RoomMembershipStore:
         activationScope: V2RoomActivationWriteScope? = nil,
         capacityProfile: V2CapacityProfile,
         eventID: EventID,
-        now: Date
+        now: Date,
+        writeOperationLedger: Bool = true
     ) async throws -> V2RoomMembershipChangeOutcome {
         let roomID = try membershipUUID(command.roomID)
         let actorID = try membershipUUID(command.actorUserID)
@@ -154,7 +61,7 @@ public struct PostgresV2RoomMembershipStore:
             // 房间本地组合层会在写入事务中校验成员资格。
             fencedRoom = nil
         }
-        if let prior = try await sql.raw("""
+        if writeOperationLedger, let prior = try await sql.raw("""
             SELECT room_id, target_user_id, action, expected_membership_revision,
                    resulting_membership_revision, room_sequence, event_id, created_at
             FROM im_v2.room_membership_operations
@@ -341,6 +248,7 @@ public struct PostgresV2RoomMembershipStore:
             SELECT event_id, \(bind: targetID), 'membership', payload, created_at, created_at, room_id
             FROM im_v2.room_events WHERE event_id = \(bind: eventUUID)
             """).run()
+        if writeOperationLedger {
         try await sql.raw("""
             INSERT INTO im_v2.room_membership_operations
                 (actor_user_id, operation_id, room_id, target_user_id, action, expected_membership_revision,
@@ -348,6 +256,7 @@ public struct PostgresV2RoomMembershipStore:
             VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), \(bind: targetID), \(bind: command.action.rawValue),
                     \(bind: try membershipSigned(command.expectedMembershipRevision)), \(bind: nextRevision), \(bind: nextSequence), \(bind: eventUUID), \(bind: now))
             """).run()
+        }
         return .changed(try .init(roomID: command.roomID, targetUserID: command.targetUserID, action: command.action,
                                   membershipRevision: membershipUnsigned(nextRevision), roomSequence: membershipUnsigned(nextSequence),
                                   eventID: eventID, createdAt: timestamp.createdAt))

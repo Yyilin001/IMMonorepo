@@ -14,8 +14,8 @@ struct V2GroupNicknameEventPostgresTests {
     func eventsAndAdmission(capacityClass: String) async throws {
         try await withFixture(capacityClass: capacityClass) { f in
             let originalOperation = GroupNicknameOperationID(uuid: UUID())
-            let first = try await f.store.updateOwnGroupNickname(actorUserID: f.user, roomID: f.room,
-                operationID: originalOperation, expectedRevision: nil, nickname: "Secret first name")
+            let first = try await f.store.updateOwnGroupNickname(.init(actorUserID: f.user, roomID: f.room,
+                operationID: originalOperation, expectedRevision: nil, nickname: "Secret first name",firstSubmissionDeadlineMilliseconds:UInt64(Int64.max))).committedValue
             let wakeToken = UUID()
             try await f.sql.raw("""
                 UPDATE im_v2.group_event_wake_outbox SET state='leased',lease_token=\(bind: wakeToken),
@@ -23,36 +23,36 @@ struct V2GroupNicknameEventPostgresTests {
                 WHERE room_id=\(bind: f.room.uuidValue!)
                 """).run()
             let initialWake = try await f.wake()
-            let noOp = try await f.store.updateOwnGroupNickname(actorUserID: f.user, roomID: f.room,
-                operationID: .init(uuid: UUID()), expectedRevision: first.revision, nickname: first.groupNickname)
-            #expect(noOp == first)
-            #expect(try await f.wake() == initialWake)
-            let second = try await f.store.updateOwnGroupNickname(actorUserID: f.user, roomID: f.room,
-                operationID: .init(uuid: UUID()), expectedRevision: first.revision, nickname: "Secret second name")
+            let noOp = try await f.store.updateOwnGroupNickname(.init(actorUserID: f.user, roomID: f.room,
+                operationID: .init(uuid: UUID()), expectedRevision: first.revision, nickname: first.groupNickname,firstSubmissionDeadlineMilliseconds:UInt64(Int64.max))).committedValue
+            #expect(noOp.revision.rawValue == 2 && noOp.groupNickname == first.groupNickname)
+            #expect(try await f.wake() != initialWake)
+            let second = try await f.store.updateOwnGroupNickname(.init(actorUserID: f.user, roomID: f.room,
+                operationID: .init(uuid: UUID()), expectedRevision: noOp.revision, nickname: "Secret second name",firstSubmissionDeadlineMilliseconds:UInt64(Int64.max))).committedValue
             let replacedWake = try await f.wake()
             #expect(replacedWake.state == "pending" && replacedWake.revision == 2 && replacedWake.leaseToken == nil)
-            #expect(replacedWake.target == 2 && replacedWake.high == 2)
-            let third = try await f.store.updateOwnGroupNickname(actorUserID: f.user, roomID: f.room,
-                operationID: .init(uuid: UUID()), expectedRevision: second.revision, nickname: nil)
-            #expect(third.revision.rawValue == 3 && third.groupNickname == nil)
+            #expect(replacedWake.target == 2 && replacedWake.high == 3)
+            let third = try await f.store.updateOwnGroupNickname(.init(actorUserID: f.user, roomID: f.room,
+                operationID: .init(uuid: UUID()), expectedRevision: second.revision, nickname: nil,firstSubmissionDeadlineMilliseconds:UInt64(Int64.max))).committedValue
+            #expect(third.revision.rawValue == 4 && third.groupNickname == nil)
             let coalescedWake = try await f.wake()
-            #expect(coalescedWake.revision == 2 && coalescedWake.target == 2 && coalescedWake.high == 3)
+            #expect(coalescedWake.revision == 2 && coalescedWake.target == 2 && coalescedWake.high == 4)
             // A publisher completing the previous lease cannot delete the new wake.
             try await PostgresV2GroupEventWakeStore(database: f.database).markPublished(.init(
                 wake: .init(roomID: f.room, highWatermark: 1), revision: 1, claimToken: wakeToken, attempt: 1))
             #expect(try await f.wake() == coalescedWake)
             await #expect(throws: V2RoomCallFailure.rolledBack(.overloaded)) {
-                _ = try await f.store.updateOwnGroupNickname(actorUserID: f.user, roomID: f.room,
-                    operationID: .init(uuid: UUID()), expectedRevision: third.revision, nickname: "Must roll back")
+                _ = try await f.store.updateOwnGroupNickname(.init(actorUserID: f.user, roomID: f.room,
+                    operationID: .init(uuid: UUID()), expectedRevision: third.revision, nickname: "Must roll back",firstSubmissionDeadlineMilliseconds:UInt64(Int64.max))).committedValue
             }
-            #expect(try await f.store.updateOwnGroupNickname(actorUserID: f.user, roomID: f.room,
-                operationID: originalOperation, expectedRevision: nil, nickname: "Secret first name") == first)
+            #expect(try await f.store.updateOwnGroupNickname(.init(actorUserID: f.user, roomID: f.room,
+                operationID: originalOperation, expectedRevision: nil, nickname: "Secret first name",firstSubmissionDeadlineMilliseconds:UInt64(Int64.max))).committedValue == first)
             let state = try await f.state()
-            #expect(state.sequence == 3 && state.used == 3 && state.operations == 4 && state.revision == 3)
+            #expect(state.sequence == 4 && state.used == 4 && state.operations == 4 && state.revision == 4)
             #expect(state.nickname == nil)
             let log = PostgresV2GroupEventLogStore(database: f.database)
             let page = try await log.pull(roomID: f.room, actorUserID: f.user, afterRoomSequence: 0, pageSize: 10)
-            #expect(page.events.count == 3 && page.nextRoomSequence == 3)
+            #expect(page.events.count == 4 && page.nextRoomSequence == 4)
             for (index, event) in page.events.enumerated() {
                 #expect(event.projectionKind == "group_capability" && event.roomSequence == UInt64(index + 1))
                 let payload = try #require(JSONSerialization.jsonObject(with: event.payload) as? [String: Any])
@@ -75,11 +75,11 @@ struct V2GroupNicknameEventPostgresTests {
             let now = f.now
             let store = PostgresV2ProfilePresentationStore(database: f.database, nicknameCapacityProfile: f.profile,
                                                          makeEventID: { event }, now: { now })
-            let first = try await store.updateOwnGroupNickname(actorUserID: f.user, roomID: f.room,
-                operationID: .init(uuid: UUID()), expectedRevision: nil, nickname: "Original")
+            let first = try await store.updateOwnGroupNickname(.init(actorUserID: f.user, roomID: f.room,
+                operationID: .init(uuid: UUID()), expectedRevision: nil, nickname: "Original",firstSubmissionDeadlineMilliseconds:UInt64(Int64.max))).committedValue
             await #expect(throws: (any Error).self) {
-                _ = try await store.updateOwnGroupNickname(actorUserID: f.user, roomID: f.room,
-                    operationID: .init(uuid: UUID()), expectedRevision: first.revision, nickname: "Failed")
+                _ = try await store.updateOwnGroupNickname(.init(actorUserID: f.user, roomID: f.room,
+                    operationID: .init(uuid: UUID()), expectedRevision: first.revision, nickname: "Failed",firstSubmissionDeadlineMilliseconds:UInt64(Int64.max))).committedValue
             }
             let state = try await f.state()
             #expect(state.sequence == 1 && state.used == 1 && state.operations == 1 && state.revision == 1)
@@ -87,10 +87,12 @@ struct V2GroupNicknameEventPostgresTests {
             try await f.sql.raw("UPDATE im_v2.rooms SET membership_revision=2 WHERE room_id=\(bind: f.room.uuidValue!)").run()
             try await f.sql.raw("UPDATE im_v2.room_memberships SET left_revision=2 WHERE room_id=\(bind: f.room.uuidValue!) AND user_id=\(bind: f.user.uuidValue!)").run()
             await #expect(throws: V2ProfilePresentationError.forbidden) {
-                _ = try await f.store.updateOwnGroupNickname(actorUserID: f.user, roomID: f.room,
-                    operationID: .init(uuid: UUID()), expectedRevision: first.revision, nickname: "Departed")
+                _ = try await f.store.updateOwnGroupNickname(.init(actorUserID: f.user, roomID: f.room,
+                    operationID: .init(uuid: UUID()), expectedRevision: first.revision, nickname: "Departed",firstSubmissionDeadlineMilliseconds:UInt64(Int64.max))).committedValue
             }
-            #expect(try await f.state() == state)
+            let denied = try await f.state()
+            #expect(denied.sequence == state.sequence && denied.used == state.used && denied.revision == state.revision)
+            #expect(denied.nickname == state.nickname && denied.operations == state.operations + 1)
         }
     }
 
@@ -101,13 +103,13 @@ struct V2GroupNicknameEventPostgresTests {
             let database = resources.database(.psql), sql = try #require(database as? any SQLDatabase)
             let user = UserID(uuid: UUID()), room = RoomID(uuid: UUID()), lease = UUID(), now = Date()
             let shard = "nickname-" + UUID().uuidString
-            let profile = try V2CapacityProfile(id: "nickname-test", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 3, retryAfterSeconds: 1))
+            let profile = try V2CapacityProfile(id: "nickname-test", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 4, retryAfterSeconds: 1))
             let handle = "nickname" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(16)
             try await sql.raw("INSERT INTO im_v2.public_user_profiles(user_id,public_handle,display_name,revision,created_at,updated_at) VALUES(\(bind: user.uuidValue!),\(bind: handle), 'Member',1,\(bind: now),\(bind: now))").run()
             try await sql.raw("INSERT INTO im_v2.rooms(room_id,room_shard_id,capacity_profile_id,capacity_class,membership_revision) VALUES(\(bind: room.uuidValue!),\(bind: shard),\(bind: profile.id),\(bind: capacityClass),1)").run()
             try await sql.raw("INSERT INTO im_v2.room_memberships(room_id,user_id,joined_revision,role) VALUES(\(bind: room.uuidValue!),\(bind: user.uuidValue!),1,'member')").run()
-            try await sql.raw("INSERT INTO im_v2.shard_admission_pools(room_shard_id,capacity_profile_id,lease_id,generation,valid_until,command_window_limit) VALUES(\(bind: shard),\(bind: profile.id),\(bind: lease),1,\(bind: now.addingTimeInterval(300)),3)").run()
-            try await sql.raw("INSERT INTO im_v2.room_admission(room_id,eligible_member_count,command_window_limit,shard_lease_id,shard_lease_generation) VALUES(\(bind: room.uuidValue!),1,3,\(bind: lease),1)").run()
+            try await sql.raw("INSERT INTO im_v2.shard_admission_pools(room_shard_id,capacity_profile_id,lease_id,generation,valid_until,command_window_limit) VALUES(\(bind: shard),\(bind: profile.id),\(bind: lease),1,\(bind: now.addingTimeInterval(300)),4)").run()
+            try await sql.raw("INSERT INTO im_v2.room_admission(room_id,eligible_member_count,command_window_limit,shard_lease_id,shard_lease_generation) VALUES(\(bind: room.uuidValue!),1,4,\(bind: lease),1)").run()
             let store = PostgresV2ProfilePresentationStore(database: database, nicknameCapacityProfile: profile, now: { now })
             try await body(.init(database: database, sql: sql, user: user, room: room, store: store, profile: profile, now: now))
             try await resources.shutdown()
@@ -135,7 +137,7 @@ private struct NicknameFixture {
     func state() async throws -> NicknameState {
         try #require(try await sql.raw("""
             SELECT r.room_sequence AS sequence, a.command_window_used AS used, n.revision, n.nickname,
-                   (SELECT COUNT(*) FROM im_v2.room_member_nickname_operations WHERE room_id=r.room_id) AS operations
+                   (SELECT COUNT(*) FROM im_v2.group_nickname_operation_receipts WHERE room_id=r.room_id) AS operations
             FROM im_v2.rooms r JOIN im_v2.room_admission a ON a.room_id=r.room_id
             JOIN im_v2.room_member_nicknames n ON n.room_id=r.room_id AND n.user_id=\(bind: user.uuidValue!)
             WHERE r.room_id=\(bind: room.uuidValue!)

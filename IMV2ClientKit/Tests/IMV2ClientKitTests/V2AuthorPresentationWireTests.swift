@@ -332,6 +332,8 @@ private actor AuthorWirePeer {
             response.authenticated.userID = user.rawValue; response.authenticated.deviceID = device.rawValue
             response.authenticated.selectedCapabilityProfile = "base"
             response.authenticated.authorPresentationStreamID = select ? (mismatch ? UUID().uuidString : streamID.uuidString) : ""
+        case .presencePublicationControl(let control):
+            response.presencePublicationControlled.mode = control.mode
         case .groupEventSubscribe(let subscribe):
             if !subscribe.authorPresentationViewID.isEmpty {
                 authorSendStarted = true

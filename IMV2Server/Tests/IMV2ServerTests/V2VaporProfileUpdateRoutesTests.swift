@@ -1,3 +1,4 @@
+import Foundation
 import HTTPTypes
 import IMV2Core
 import IMV2Server
@@ -14,7 +15,7 @@ struct V2VaporProfileUpdateRoutesTests {
         defer { Task { try? await app.shutdown() } }
         let actor = try UserID("00000000-0000-0000-0000-000000000811")
         let view = try updateFixtureProfile(userID: actor, revision: 2)
-        let profiles = ProfileUpdateRouteStore(result: .updated(view))
+        let profiles = ProfileUpdateRouteStore(snapshot: view)
         V2VaporProfileUpdateRoutes(
             authenticator: ProfileUpdateRouteAuthenticator(userID: actor),
             profiles: .init(store: profiles, reader: profiles)
@@ -27,26 +28,25 @@ struct V2VaporProfileUpdateRoutesTests {
             try request.content.encode(V2ProfileUpdateHTTPRequest(
                 operationID: "00000000-0000-0000-0000-000000000813",
                 expectedRevision: 1,
-                displayName: "更新后名称",
-                avatarMediaID: nil
+                patch: .init(displayName: .set("更新后名称")),
+                firstSubmissionDeadlineMilliseconds: 4_000_000_000_000
             ))
         })
             #expect(response.status == .ok)
             #expect(response.headers[.cacheControl] == "no-store")
-            let body = try await response.content.decode(V2ProfileUpdateHTTPResponse.self)
-            #expect(body.displayName == "资料名称")
-            #expect(body.revision == 2)
-            #expect(body.idempotent == false)
+            let body = try await response.content.decode(V2ProfileUpdateResult.self)
+            #expect(body.currentSnapshot?.publicIdentity?.displayName == "资料名称")
+            #expect(body.receipt.outcome == .committed(revision: try #require(V2ProfileRevision(rawValue: 2)), visibilityRevision: try #require(V2ProfileRevision(rawValue: 2))))
         }
     }
 
-    @Test("revision conflict returns the current revision without leaking a profile")
+    @Test("revision conflict returns an authoritative rejection receipt")
     func reportsConflict() async throws {
         let app = try await Application(.testing)
         defer { Task { try? await app.shutdown() } }
         let actor = try UserID("00000000-0000-0000-0000-000000000821")
         let currentRevision = try #require(V2ProfileRevision(rawValue: 9))
-        let profiles = ProfileUpdateRouteStore(result: nil, error: .revisionConflict(current: currentRevision))
+        let profiles = ProfileUpdateRouteStore(snapshot: try updateFixtureProfile(userID: actor, revision: 9), rejection: .revisionConflict(current: currentRevision))
         V2VaporProfileUpdateRoutes(
             authenticator: ProfileUpdateRouteAuthenticator(userID: actor),
             profiles: .init(store: profiles, reader: profiles)
@@ -59,16 +59,41 @@ struct V2VaporProfileUpdateRoutesTests {
             try request.content.encode(V2ProfileUpdateHTTPRequest(
                 operationID: "00000000-0000-0000-0000-000000000823",
                 expectedRevision: 1,
-                displayName: "冲突名称",
-                avatarMediaID: nil
+                patch: .init(displayName: .set("冲突名称")),
+                firstSubmissionDeadlineMilliseconds: 4_000_000_000_000
             ))
         })
-            #expect(response.status == .conflict)
-            let body = try await response.content.decode(V2ProfileUpdateHTTPResponse.self)
-            #expect(body.currentRevision == 9)
-            #expect(body.displayName == nil)
+            #expect(response.status == .ok)
+            let body = try await response.content.decode(V2ProfileUpdateResult.self)
+            #expect(body.receipt.outcome == .rejected(.revisionConflict(current: currentRevision)))
         }
     }
+    @Test("own-profile reads and unresolved recovery use the Core wire contract with no-store")
+    func readsAndRecovery() async throws {
+        let app=try await Application(.testing)
+        defer { Task { try? await app.shutdown() } }
+        let actor=UserID(uuid:UUID()), snapshot=try updateFixtureProfile(userID:actor,revision:3)
+        let store=ProfileUpdateRouteStore(snapshot:snapshot)
+        V2VaporProfileUpdateRoutes(authenticator:ProfileUpdateRouteAuthenticator(userID:actor),profiles:.init(store:store,reader:store)).register(on:app)
+        try await app.testing { client in
+            let read=try await client.send(.get,to:"v2/profile/me",beforeSend:{ request in
+                request.headers.bearerAuthorization = .init(token:"access-token")
+                request.headers[HTTPField.Name("X-IM-Device-ID")!] = UUID().uuidString
+            })
+            #expect(try await read.content.decode(V2ProfileView.self) == snapshot)
+            #expect(read.headers[.cacheControl] == "no-store")
+            let fingerprint=try V2OperationFingerprint(kind:.profileUpdate,fields:[.init("field",.text("name"))])
+            let recovery=try await client.send(.post,to:"v2/profile/me/operations/recover",beforeSend:{ request in
+                request.headers.bearerAuthorization = .init(token:"access-token")
+                request.headers[HTTPField.Name("X-IM-Device-ID")!] = UUID().uuidString
+                try request.content.encode(V2ProfileOperationRecoveryHTTPRequest(operationID:UUID().uuidString,fingerprint:fingerprint,action:.query))
+            })
+            #expect(recovery.status == .ok)
+            #expect(recovery.headers[.cacheControl] == "no-store")
+            #expect(try await recovery.content.decode(V2ProfileOperationRecoveryResult.self) == .unresolved)
+        }
+    }
+
 }
 
 private struct ProfileUpdateRouteAuthenticator: V2GatewayAuthenticator {
@@ -80,23 +105,15 @@ private struct ProfileUpdateRouteAuthenticator: V2GatewayAuthenticator {
 }
 
 private actor ProfileUpdateRouteStore: V2ProfileUpdateStore, V2OwnProfileReading {
-    let result: V2ProfileUpdateOutcome?
-    let error: V2ProfileUpdateError?
-    init(result: V2ProfileUpdateOutcome?, error: V2ProfileUpdateError? = nil) {
-        self.result = result
-        self.error = error
+    let snapshot: V2ProfileView
+    let rejection: V2ProfileOperationRejection?
+    init(snapshot: V2ProfileView, rejection: V2ProfileOperationRejection? = nil) { self.snapshot=snapshot; self.rejection=rejection }
+    func update(_ command: V2ProfileUpdateCommand) async throws -> V2ProfileUpdateResult {
+        let outcome: V2ProfileOperationTerminalOutcome = rejection.map { .rejected($0) } ?? .committed(revision:snapshot.revision,visibilityRevision:snapshot.visibilityRevision)
+        return try .init(receipt:.init(actorUserID:command.actorUserID,operationID:command.operationID,fingerprint:command.fingerprint,outcome:outcome,resolvedAtMilliseconds:1000),currentSnapshot:snapshot)
     }
-    func update(_: V2ProfileUpdateCommand) async throws -> V2ProfileUpdateOutcome {
-        if let error { throw error }
-        return try #require(result)
-    }
-
-    func currentProfile(for _: UserID) async throws -> V2ProfileView {
-        switch try #require(result) {
-        case .updated(let profile), .idempotent(let profile):
-            return profile
-        }
-    }
+    func recover(_ request:V2ProfileOperationRecoveryRequest) async throws -> V2ProfileOperationRecoveryResult { .unresolved }
+    func currentProfile(for _:UserID) async throws -> V2ProfileView { snapshot }
 }
 
 private func updateFixtureProfile(userID: UserID, revision: UInt64) throws -> V2ProfileView {

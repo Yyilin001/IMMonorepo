@@ -79,11 +79,10 @@ struct V2RoomClusterBridgeTests {
             _ = try await actor.exchange(fixture.client.sign(lookup, maximumBytes: 10_000))
         }
         let user = UserID(uuid: UUID())
-        let request = V2RoomRequest.messaging(.send(.init(
-            roomID: fixture.room, actorUserID: user,
+        let request = try V2RoomRequest.messaging(.sendOperation(try .init(command: try .init(
+            roomID: fixture.room, senderUserID: user,
             clientMessageID: ClientMessageID(uuid: UUID()), text: "signed",
-            media: [], mentions: [], entities: [], replyTo: nil
-        )))
+            media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 65_536)), firstSubmissionDeadlineMilliseconds: 1_900_000_000_000)))
         let otherEpoch = V2RoomActivationToken(roomID: fixture.room, owner: fixture.owner,
                                                 activationEpoch: try .init(2), host: fixture.identity)
         let wrongToken = fixture.call(grant: grant, sequence: 4,
@@ -132,9 +131,9 @@ struct V2RoomClusterBridgeTests {
         let user = UserID(uuid: UUID())
         do {
             _ = try await caller.invokeCachedLocally(token,
-                request: .messaging(.send(.init(roomID: fixture.room, actorUserID: user,
+                request: .messaging(.sendOperation(try .init(command: try .init(roomID: fixture.room, senderUserID: user,
                     clientMessageID: .init(uuid: UUID()), text: "remote-hint-denied",
-                    media: [], mentions: [], entities: [], replyTo: nil))),
+                    media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 65_536)), firstSubmissionDeadlineMilliseconds: 1_900_000_000_000))),
                 principal: .user(user), deadline: deadline)
             Issue.record("remote host accepted a local-only hint")
         } catch {
@@ -195,11 +194,10 @@ struct V2RoomClusterBridgeTests {
         ))
         #expect(try await caller.lookup(token, deadline: .now + .seconds(3)))
         let user = UserID(uuid: UUID())
-        let request = V2RoomRequest.messaging(.send(.init(
-            roomID: fixture.room, actorUserID: user,
+        let request = try V2RoomRequest.messaging(.sendOperation(try .init(command: try .init(
+            roomID: fixture.room, senderUserID: user,
             clientMessageID: ClientMessageID(uuid: UUID()), text: "hold",
-            media: [], mentions: [], entities: [], replyTo: nil
-        )))
+            media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 65_536)), firstSubmissionDeadlineMilliseconds: 1_900_000_000_000)))
         let executing = Task {
             try await fixture.host.invoke(token: token, encodedRequest: JSONEncoder().encode(request),
                                           deadline: .now + .seconds(3))
@@ -335,11 +333,10 @@ struct V2RoomClusterBridgeTests {
                 throw V2ActorAuthenticationError.invalidConfiguration
             }
             let user = UserID(uuid: UUID())
-            let request = V2RoomRequest.messaging(.send(.init(
-                roomID: fixture.room, actorUserID: user,
+            let request = try V2RoomRequest.messaging(.sendOperation(try .init(command: try .init(
+                roomID: fixture.room, senderUserID: user,
                 clientMessageID: ClientMessageID(uuid: UUID()), text: "late-completion",
-                media: [], mentions: [], entities: [], replyTo: nil
-            )))
+                media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 65_536)), firstSubmissionDeadlineMilliseconds: 1_900_000_000_000)))
             let call = Task {
                 try await caller.invoke(token, request: request, principal: .user(user),
                                         deadline: .now + .seconds(3))

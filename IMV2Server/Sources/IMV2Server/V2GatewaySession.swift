@@ -183,6 +183,8 @@ private struct V2GatewaySessionResponse: Sendable {
 /// 这些状态检查不撤销已发生的业务副作用，也不替代领域存储的权威检查。
 public actor V2GatewaySession {
     /// 本连接的握手阶段、身份和在途请求关联状态。
+    private var presencePublicationSuppressed=true
+    public func initialPresencePublicationSuppressed()->Bool {presencePublicationSuppressed}
     private var state: V2ConnectionStateMachine
     /// 可信的令牌与设备认证边界。
     private let authenticator: any V2GatewayAuthenticator
@@ -331,12 +333,10 @@ public actor V2GatewaySession {
             let profiles = Set(hello.supportedCapabilityProfiles.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
             guard profiles.contains(capabilityProfile) else { throw V2GatewaySessionError.unsupportedCapabilityProfile }
             let clock = try currentServerTime()
-            if !hello.deviceID.isEmpty {
-                guard let deviceID = try? DeviceID(hello.deviceID) else {
-                    throw V2GatewaySessionError.invalidClientHello
-                }
-                helloDeviceID = deviceID
+            guard let deviceID = try? DeviceID(hello.deviceID), deviceID.uuidValue != nil else {
+                throw V2GatewaySessionError.invalidClientHello
             }
+            helloDeviceID = deviceID
             let selected = try state.receiveClientHello(frame, clientSupportedVersions: versions, serverSupportedVersions: supportedVersions)
             if supportedFrameCompression == .zlib,
                hello.supportedFrameCompressions.contains(.zlib) {
@@ -368,7 +368,7 @@ public actor V2GatewaySession {
             try state.receiveAuthenticate(frame)
             guard !request.accessToken.isEmpty else { throw V2GatewaySessionError.invalidAuthenticatePayload }
             let deviceID = try DeviceID(request.deviceID)
-            guard helloDeviceID.map({ $0 == deviceID }) ?? true else {
+            guard helloDeviceID == deviceID else {
                 throw V2GatewaySessionError.invalidAuthenticatePayload
             }
             let authentication: V2GatewayAuthentication
@@ -399,6 +399,7 @@ public actor V2GatewaySession {
             let clock = try currentServerTime()
             guard expiresAt.map({ $0 > clock.date }) ?? true else { throw V2GatewaySessionError.sessionExpired }
             try state.completeAuthentication(.init(userID: userID, deviceID: deviceID, capabilityProfile: capabilityProfile))
+            presencePublicationSuppressed=request.presencePublicationSuppressed
             authenticatedSessionExpiresAt = expiresAt
             guard case .authenticated(let version, _) = state.phase else { throw V2GatewaySessionError.unsupportedCommand }
             var response = IMV2Envelope()
@@ -666,11 +667,6 @@ public actor V2GatewaySession {
         case .heartbeat:
             // 客户端自身的前台工作不能饿死存活性检查。
             return 0
-        case .forwardMessages(let request):
-            let combinations = request.sources.count * request.targetRoomIds.count
-            return min(64, max(1, 1 + combinations / 25))
-        case .appendGroupRoomCreationMembers(let request):
-            return min(32, max(1, 1 + request.memberUserIds.count / 32))
         case .getGroupRolePolicyBaseline:
             return 2
         case .listRoomMembers(let request):

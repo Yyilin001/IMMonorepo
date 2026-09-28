@@ -251,7 +251,7 @@ public enum V2AuthSessionError: Error, Equatable, Sendable {
 ///
 /// 通过 actor 隔离内存状态，并用独立 I/O 队列串行化跨挂起点的存储副作用。刷新由多个调用者共享，单个等待者取消不会取消整个轮换。
 /// 新登录和退出推进代际，使迟到的加载、刷新和认证结果不能重新接管当前会话。
-public actor V2AuthSession: V2ClientMediaEdgeCredentialProvider, V2ClientPushEndpointCredentialProvider, V2ClientDeviceSessionCredentialProvider {
+public actor V2AuthSession {
     /// 完整凭证记录的持久化边界，所有副作用通过 credentialIO 排队执行。
     private let credentialStore: any V2CredentialStore
     /// 设备凭证轮换传输，不负责本地记录保存。
@@ -402,6 +402,42 @@ public actor V2AuthSession: V2ClientMediaEdgeCredentialProvider, V2ClientPushEnd
     /// 读取本实例当前的进程内代际标识，不建立会话或改变凭证。
     public func currentEpoch() -> V2AuthSessionEpoch { .init(owner: epochOwner, generation: sessionGeneration) }
 
+    /// 只读取设备限定凭据的账号绑定；过期访问令牌不会触发刷新。
+    /// 不收养记录、不清理退出记录，也不产生网络或显示权限。
+    public func localAccountIdentity() async throws -> V2LocalAccountIdentity {
+        try Task.checkCancellation()
+        let epoch = currentEpoch()
+        try requireLocalIdentityEpoch(epoch)
+        let loaded: V2AuthCredentialRecord?
+        do { loaded = try await credentialIO(generation: sessionGeneration) { try await $0.load() } }
+        catch let error as V2CredentialStoreError {
+            switch error {
+            case .unavailable, .unexpectedStatus: throw V2AuthSessionError.credentialsUnavailable
+            case .malformedRecord, .permanentlyInvalidated: throw V2AuthSessionError.unauthenticated
+            }
+        }
+        try Task.checkCancellation()
+        try requireLocalIdentityEpoch(epoch)
+        guard let loaded, loaded.pendingRevocationOperationID == nil else {
+            throw V2AuthSessionError.unauthenticated
+        }
+        if let record {
+            guard record.credentials.userID == loaded.credentials.userID,
+                  record.credentials.deviceID == loaded.credentials.deviceID else {
+                throw V2AuthSessionError.sessionInvalidated
+            }
+        }
+        return .init(userID: loaded.credentials.userID, deviceID: loaded.credentials.deviceID, epoch: epoch)
+    }
+
+    /// 本地读取期间的会话栅栏，不把本地身份升级为已联网认证。
+    public func requireLocalIdentityEpoch(_ epoch: V2AuthSessionEpoch) throws {
+        try requireCurrentEpoch(epoch)
+        guard !pendingTerminalDeletion else { throw V2AuthSessionError.unauthenticated }
+        guard state != .establishing else { throw V2AuthSessionError.sessionInvalidated }
+        if didLoad, state == .unauthenticated { throw V2AuthSessionError.unauthenticated }
+    }
+
     /// 校验异步操作仍属于当前代际。
     ///
     /// - Parameter epoch: 操作开始时捕获的代际。
@@ -534,29 +570,25 @@ public actor V2AuthSession: V2ClientMediaEdgeCredentialProvider, V2ClientPushEnd
     /// 返回一致凭证中的访问令牌，必要时恢复记录或共享刷新；错误沿认证流程传播。
     public func accessToken() async throws -> String { try await coherentCredentials().0.accessToken }
 
-    /// 从一次一致读取生成媒体服务使用的访问令牌与设备身份，必要时刷新凭证。
-    public func mediaEdgeCredentials() async throws -> V2ClientMediaEdgeCredentials {
-        let (credentials, _) = try await coherentCredentials()
-        return .init(accessToken: credentials.accessToken, deviceID: credentials.deviceID)
-    }
-
-    /// 生成推送端点管理凭证，复用一致的令牌与设备读取路径及其错误语义。
-    public func pushEndpointCredentials() async throws -> V2ClientPushEndpointCredentials {
-        let credentials = try await mediaEdgeCredentials()
-        return .init(accessToken: credentials.accessToken, deviceID: credentials.deviceID)
-    }
-
-    /// 生成设备会话管理凭证，复用一致的令牌与设备读取路径及其错误语义。
-    public func deviceSessionCredentials() async throws -> V2ClientDeviceSessionCredentials {
-        let credentials = try await mediaEdgeCredentials()
-        return .init(accessToken: credentials.accessToken, deviceID: credentials.deviceID)
-    }
-
+    // HTTP clients receive credentials only through V2SessionHTTPAuthorization,
+    // which fixes the activation epoch and carries the total request deadline.
     /// 从一次一致读取生成实时握手元组及所属代际，供协调器在网络握手后再次校验所有权。
     public func realtimeCredentials() async throws -> V2ClientRealtimeCredentials {
         let (credentials, epoch) = try await coherentCredentials()
         return .init(userID: credentials.userID, deviceID: credentials.deviceID,
                      accessToken: credentials.accessToken, sessionEpoch: epoch)
+    }
+
+    /// HTTP ownership waits for physical credential work before releasing its resources.
+    /// This does not cancel shared work or adopt a replacement generation's tasks.
+    func drainHTTPAuthorizationWork(ifCurrent epoch: V2AuthSessionEpoch) async {
+        guard epoch == currentEpoch() else { return }
+        let load = loadOperation?.task
+        let refresh = refreshOperation?.task
+        let io = credentialIOTail?.task
+        _ = await load?.result
+        _ = await refresh?.result
+        await io?.value
     }
 
     /// 执行或等待本代际共享的凭证轮换，即使访问令牌尚未到期也可主动调用。
@@ -863,13 +895,17 @@ public actor V2AuthSession: V2ClientMediaEdgeCredentialProvider, V2ClientPushEnd
                 guard let self else { throw V2AuthSessionError.sessionInvalidated }
                 let result: Result<V2AuthCredentials, Error>
                 do {
-                    result = .success(try await self.performRefresh(
-                        operationID: operationID,
-                        sessionGeneration: generation,
-                        pendingRecord: pendingRecord,
-                        recordToPersist: recordToPersist,
-                        request: request
-                    ))
+                    // Shared rotation has its own transport budget; one HTTP subscriber's
+                    // absolute deadline must not shorten every other subscriber's rotation.
+                    result = .success(try await V2HTTPRequestDeadline.$current.withValue(nil) {
+                        try await self.performRefresh(
+                            operationID: operationID,
+                            sessionGeneration: generation,
+                            pendingRecord: pendingRecord,
+                            recordToPersist: recordToPersist,
+                            request: request
+                        )
+                    })
                 } catch { result = .failure(error) }
                 // Finalize once inside the shared task. A resumed waiter must
                 // never finalize a failed attempt again or disturb a retry

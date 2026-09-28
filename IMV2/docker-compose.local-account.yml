@@ -33,6 +33,8 @@ services:
     environment:
       IMV2_ROOM_ACTOR_CONFIGURATION_FILE: /run/im-v2-room-actor/configuration.json
       IM_V2_DATABASE_URL: postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2
+      IM_V2_DIRECT_ROOM_SHARD_ID: rooms-primary
+      IM_V2_GROUP_ROOM_SHARD_ID: rooms-primary
       IM_V2_DATABASE_EVENT_LOOP_THREADS: 2
       IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP: 4
       IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS: 16

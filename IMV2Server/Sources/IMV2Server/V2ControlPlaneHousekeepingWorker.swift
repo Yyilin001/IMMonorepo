@@ -128,7 +128,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
     private let database: any Database
 
     // 供启动就绪检查与事务执行共用。
-    static var housekeepingRotationPeriod: Int64 { Int64(10 * idempotencyTables.count) }
+    static var housekeepingRotationPeriod: Int64 { Int64(11 * idempotencyTables.count) }
 
     /// 组合数据库。
     ///
@@ -186,7 +186,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             // 预算足以覆盖全部类别时，冷表也不会被持续繁忙的工作表饿死。
             var budget = ControlHousekeepingDeletionBudget(
                 total: limit,
-                categoryCount: 10,
+                categoryCount: 11,
                 rotation: rotation
             )
             var count = 0
@@ -248,15 +248,20 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 where: "expires_at <= ", order: "expires_at, connection_id",
                 cutoff: now, limit: budget.take()
             )
+            let remoteBaselines = try await deleteSimple(
+                sql: sql, table: "remote_device_revocation_baselines", identity: "baseline_id",
+                where: "expires_at <= ", order: "expires_at, baseline_id",
+                cutoff: now, limit: budget.take()
+            )
             let idempotencyRows = try await purgeIdempotencyResults(
                 sql: sql,
                 cutoff: idempotencyCutoff,
                 // 使用子类别预算时，每个外层周期只推进一次内部表轮转，
                 // 避免取模产生周期重合。
-                rotation: limit < 10 ? rotation / 10 : rotation,
+                rotation: limit < 11 ? rotation / 11 : rotation,
                 limit: budget.take()
             )
-            count += credentialReplays + refreshHistory + connectionLeases + idempotencyRows
+            count += credentialReplays + refreshHistory + connectionLeases + remoteBaselines + idempotencyRows
             return .init(
                 deletedRows: count,
                 purgedIdempotencyRows: idempotencyRows,
@@ -350,33 +355,13 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
     // 若没有服务端强制的转发过期时间，删除它会让旧转发生成新的发送标识，
     // 绕过已保留的发送完成记录。
     static let idempotencyTables: [IdempotencyTable] = [
-        .init(table: "direct_room_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
-        .init(table: "user_relationship_operations", timestamp: "updated_at", additionalPredicate: ""),
-        .init(table: "user_block_operations", timestamp: "updated_at", additionalPredicate: ""),
-        .init(table: "stranger_message_preference_operations", timestamp: "updated_at", additionalPredicate: ""),
         // 即使申请人离开，审批决定仍保留精确的成员关系结果。
         // 匹配操作标识，避免绑定不一致时误删证据。
         .init(table: "room_membership_operations", timestamp: "created_at", additionalPredicate: "AND NOT EXISTS (SELECT 1 FROM im_v2.group_join_requests AS request WHERE request.decided_by_user_id = target.actor_user_id AND request.decision_operation_id = target.operation_id)", roomOwned: true),
-        .init(table: "message_withdrawal_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
         .init(table: "moderation_operations", timestamp: "created_at", additionalPredicate: "AND NOT EXISTS (SELECT 1 FROM im_v2.moderation_audit_entries AS audit WHERE audit.actor_user_id = target.actor_user_id AND audit.operation_id = target.operation_id)", roomOwned: true),
-        .init(table: "message_edit_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
         .init(table: "read_receipt_operations", timestamp: "recorded_at", additionalPredicate: "", roomOwned: true),
-        .init(table: "message_reaction_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
-        .init(table: "group_room_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
-        .init(table: "public_profile_update_operations", timestamp: "created_at", additionalPredicate: ""),
-        .init(table: "user_add_preference_operations", timestamp: "updated_at", additionalPredicate: ""),
-        .init(table: "read_receipt_preference_operations", timestamp: "updated_at", additionalPredicate: "AND NOT EXISTS (SELECT 1 FROM im_v2.read_receipt_preference_propagation_outbox AS outbox WHERE outbox.actor_user_id = target.actor_user_id AND outbox.operation_id = target.operation_id)"),
-        .init(table: "user_live_activity_preference_operations", timestamp: "updated_at", additionalPredicate: ""),
-        .init(table: "user_room_preference_operations", timestamp: "updated_at", additionalPredicate: ""),
-        .init(table: "user_message_favorite_operations", timestamp: "updated_at", additionalPredicate: ""),
-        .init(table: "room_pinned_message_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
-        .init(table: "group_announcement_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
-        .init(table: "group_permission_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
-        .init(table: "group_role_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
         .init(table: "device_session_operations", timestamp: "created_at", additionalPredicate: ""),
         .init(table: "special_account_message_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true),
-        .init(table: "user_contact_alias_operations", timestamp: "created_at", additionalPredicate: ""),
-        .init(table: "room_member_nickname_operations", timestamp: "created_at", additionalPredicate: "", roomOwned: true)
     ]
 }
 

@@ -60,18 +60,21 @@ struct V2ActorMessagingMapperTests {
         #expect(returnedSend.mentions == send.mentions)
         #expect(returnedSend.entities == send.entities)
         #expect(returnedSend.replyTo == send.replyTo)
-        let edit = V2AuthenticatedMessageEdit(roomID: room, actorUserID: user,
-            operationID: try MessageEditOperationID("edit-1"), messageID: message,
-            expectedMessageRevision: 2, text: "replacement")
-        #expect(try V2ActorEditMessageWire(edit).toAuthenticated(maximumTextUTF8Bytes: 100).text == edit.text)
-        let withdrawal = V2AuthenticatedMessageWithdrawal(roomID: room, actorUserID: user,
-            operationID: try MessageWithdrawalOperationID("withdraw-1"), messageID: message,
-            expectedMessageRevision: 3)
-        #expect(try V2ActorWithdrawMessageWire(withdrawal).toAuthenticated().expectedMessageRevision == 3)
-        let reaction = V2AuthenticatedMessageReaction(roomID: room, actorUserID: user,
-            operationID: try MessageReactionOperationID("reaction-1"), messageID: message,
-            reaction: "👍", action: .add)
-        #expect(try V2ActorReactionMessageWire(reaction).toAuthenticated().reaction == "👍")
+        let edit = try V2MessageEditOperationCommand(command: .init(roomID: room, actorUserID: user,
+            operationID: .init("edit-1"), messageID: message, expectedMessageRevision: 2,
+            text: "replacement", maximumUTF8Bytes: 100), firstSubmissionDeadlineMilliseconds: 1_700_000_600_000)
+        let returnedEdit = try JSONDecoder().decode(V2MessageEditOperationCommand.self, from: JSONEncoder().encode(edit))
+        #expect(try returnedEdit.domainCommand(maximumUTF8Bytes: 100).text == edit.text)
+        let withdrawal = try V2MessageWithdrawalOperationCommand(command: .init(roomID: room, actorUserID: user,
+            operationID: .init("withdraw-1"), messageID: message, expectedMessageRevision: 3),
+            firstSubmissionDeadlineMilliseconds: 1_700_000_600_000)
+        let returnedWithdrawal = try JSONDecoder().decode(V2MessageWithdrawalOperationCommand.self, from: JSONEncoder().encode(withdrawal))
+        #expect(try returnedWithdrawal.domainCommand().expectedMessageRevision == 3)
+        let reaction = try V2MessageReactionOperationCommand(command: .init(roomID: room, actorUserID: user,
+            operationID: .init("reaction-1"), messageID: message, reaction: "👍", action: .add),
+            expectedReactionRevision: 0, firstSubmissionDeadlineMilliseconds: 1_700_000_600_000)
+        let returnedReaction = try JSONDecoder().decode(V2MessageReactionOperationCommand.self, from: JSONEncoder().encode(reaction))
+        #expect(try returnedReaction.domainCommand().reaction == "👍")
     }
 
     @Test("edit, withdrawal and reaction outcomes preserve committed event details")
@@ -87,23 +90,10 @@ struct V2ActorMessagingMapperTests {
         let reaction = try V2MessageReactionChange(roomID: room, messageID: message,
             actorUserID: user, reaction: "👍", action: .add, roomSequence: 5,
             eventID: event, createdAt: time)
-        for value in [V2MessageEditOutcome.edited(edit), .idempotent(edit),
-                      .revisionConflict(current: 8), .alreadyWithdrawn,
-                      .idempotencyConflict, .rateLimited(retryAfterSeconds: 1),
-                      .unavailable(.missingShardLease)] {
-            #expect(try V2ActorMessageEditResultWire(value).toDomain() == value)
-        }
-        for value in [V2MessageWithdrawalOutcome.withdrawn(withdrawal), .idempotent(withdrawal),
-                      .revisionConflict(current: 8), .alreadyWithdrawn,
-                      .idempotencyConflict, .rateLimited(retryAfterSeconds: 1),
-                      .unavailable(.expiredShardLease)] {
-            #expect(try V2ActorMessageWithdrawalResultWire(value).toDomain() == value)
-        }
-        for value in [V2MessageReactionOutcome.changed(reaction), .idempotent(reaction),
-                      .alreadyInDesiredState, .idempotencyConflict,
-                      .rateLimited(retryAfterSeconds: 1), .unavailable(.missingShardLease)] {
-            #expect(try V2ActorMessageReactionResultWire(value).toDomain() == value)
-        }
+        // Projection leaves remain current even though unbound outcome envelopes retired.
+        #expect(try V2ActorMessageEditWire(edit).toDomain() == edit)
+        #expect(try V2ActorMessageWithdrawalWire(withdrawal).toDomain() == withdrawal)
+        #expect(try V2ActorMessageReactionChangeWire(reaction).toDomain() == reaction)
     }
 
     @Test("decoded malformed leaves and precondition inputs throw instead of trapping")
@@ -154,11 +144,7 @@ struct V2ActorMessagingMapperTests {
             try V2ActorMessageEditWire(roomID: room, messageID: message, text: "new",
                 messageRevision: 0, roomSequence: 1, eventID: event, createdAt: date).toDomain()
         }
-        #expect(throws: V2ActorMessagingMappingError.noncanonicalReaction) {
-            try V2ActorReactionMessageWire(roomID: room, actorUserID: user,
-                operationID: MessageReactionOperationID("reaction-1"), messageID: message,
-                reaction: "e\u{301}", action: .add).toAuthenticated()
-        }
+
     }
 }
 
@@ -173,7 +159,7 @@ struct V2ActorMessagingSpecialAccountAuditTests {
         let request = try V2TrustedSpecialAccountMessage(
             stableAccountKey: "support_bot", servicePrincipal: "service-principal",
             operatorID: "operator-1", operationID: client,
-            requestFingerprint: "0123456789abcdef", customerUserID: customer,
+            requestFingerprint: "0123456789abcdef", firstSubmissionDeadlineMilliseconds: 1_700_000_600_000, customerUserID: customer,
             text: "Hello", mentions: [.user(customer)],
             entities: [try V2MessageEntity(offsetUTF16: 0, lengthUTF16: 5, kind: .bold)])
         let account = V2ResolvedSpecialAccount(userID: special, stableKey: "support_bot",
@@ -190,6 +176,7 @@ struct V2ActorMessagingSpecialAccountAuditTests {
         let restored = try decoded.toDomain()
         #expect(restored.request.stableAccountKey == request.stableAccountKey)
         #expect(restored.request.requestFingerprint == request.requestFingerprint)
+        #expect(restored.request.firstSubmissionDeadlineMilliseconds == request.firstSubmissionDeadlineMilliseconds)
         #expect(restored.request.entities == request.entities)
         #expect(restored.request.mentions == request.mentions)
         #expect(restored.account == account)

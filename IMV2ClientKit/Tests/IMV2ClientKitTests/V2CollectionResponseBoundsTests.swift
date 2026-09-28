@@ -4,18 +4,25 @@ import IMV2Core
 import Testing
 
 struct V2CollectionResponseBoundsTests {
-    @Test(arguments: ["forward", "members", "emptyEvents", "event", "subscription"],
+    @Test(arguments:[UInt64(0),1,UInt64(Int64.max),UInt64(Int64.max)+1,UInt64.max])
+    func forwardAcceptedSequenceBounds(value:UInt64) throws {
+        let message=MessageID(uuid:UUID())
+        let encoded=String(decoding:try JSONEncoder().encode(message),as:UTF8.self)
+        let data=Data("{\"messageID\":\(encoded),\"roomSequence\":\(value)}".utf8)
+        if value==0 || value>UInt64(Int64.max) {
+            #expect(throws:(any Error).self) { try JSONDecoder().decode(V2MessageOperationAcceptance.self,from:data) }
+        } else {
+            #expect(try JSONDecoder().decode(V2MessageOperationAcceptance.self,from:data).roomSequence==value)
+        }
+    }
+
+    @Test(arguments: ["members", "emptyEvents", "event", "subscription"],
           [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max])
     func responseBounds(kind: String, value: UInt64) async throws {
         let transport = V2ProtobufSyncTransport(wire: CollectionBoundsWire(kind: kind, value: value), protocolVersion: 1)
         let room = RoomID(uuid: UUID())
         func receivedValue() async throws -> UInt64? {
             switch kind {
-            case "forward":
-                let command = try V2ForwardMessagesCommand(operationID: .init(uuid: UUID()), sources: [.init(roomID: .init(uuid: UUID()), messageID: .init(uuid: UUID()), revision: .init(1))], targetRoomIDs: [room])
-                let result = try await transport.forwardMessages(command: command)
-                #expect(result.count == 1)
-                return result.first?.roomSequence
             case "members":
                 return try await transport.listRoomMembers(roomID: room, cursor: nil, pageSize: 1).membershipRevision
             case "subscription":
@@ -46,11 +53,6 @@ private actor CollectionBoundsWire: V2AuthenticatedFrameTransport {
         response.protocolVersion = 1
         response.requestID = frame.requestID
         switch request.body {
-        case .forwardMessages(let request):
-            var item = IMV2ForwardMessageResult()
-            item.sourceMessageID = request.sources[0].messageID; item.targetRoomID = request.targetRoomIds[0]
-            item.messageID = UUID().uuidString; item.roomSequence = value
-            response.messagesForwarded.results = [item]
         case .listRoomMembers(let request):
             response.roomMembersPage.roomID = request.roomID
             response.roomMembersPage.membershipRevision = value; response.roomMembersPage.actorRole = .owner

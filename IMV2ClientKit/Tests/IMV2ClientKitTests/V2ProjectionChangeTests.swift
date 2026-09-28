@@ -5,6 +5,29 @@ import Testing
 
 @Suite("Committed projection invalidations", .timeLimit(.minutes(1)))
 struct V2ProjectionChangeTests {
+    @Test("commit metrics originate from successful transactions, never rollback or cold subscription")
+    func realCommitVisibilityMeasurement() async throws {
+        let store = try makeStore(), diagnostics = V2NetworkDiagnostics()
+        store.installNetworkDiagnostics(diagnostics)
+        var updates = await store.projectionChanges().makeAsyncIterator()
+        #expect(await updates.next()?.conversationCommit == nil)
+        enum Rollback: Error { case requested }
+        await #expect(throws: Rollback.self) {
+            try await store.databasePool.write { db in try insertMessage(1, db: db); throw Rollback.requested }
+        }
+        #expect(diagnostics.snapshot().projections.isEmpty)
+        try await store.databasePool.write { db in try insertMessage(2, db: db) }
+        let change = try #require(await updates.next())
+        let stamp = try #require(change.conversationCommit)
+        #expect(diagnostics.snapshot().projections.count == 1)
+        #expect(diagnostics.snapshot().projections.first?.phase == .willCommitToDidCommit)
+        stamp.didPublishSnapshot(); stamp.didPublishSnapshot()
+        #expect(diagnostics.snapshot().projections.count == 2)
+        #expect(diagnostics.snapshot().projections.last?.phase == .didCommitToConversationSnapshot)
+        #expect(diagnostics.snapshot().projections.allSatisfy { $0.elapsed.isFinite && $0.elapsed >= 0 })
+        try await store.close()
+    }
+
     @Test("ordinary writes publish once after commit and close finishes subscriptions")
     func ordinaryCommitAndClose() async throws {
         let store = try makeStore()
@@ -49,7 +72,7 @@ struct V2ProjectionChangeTests {
         #expect(await slow.next() == .all)
         #expect(await fast.next() == .all)
         try await store.databasePool.write { db in
-            try db.execute(sql: "INSERT INTO v2_user_add_preference(singleton, allows_being_added, updated_at) VALUES(1, 0, 1)")
+            try db.execute(sql: "INSERT INTO v2_user_add_preference(singleton, allows_being_added, revision, updated_at) VALUES(1, 0, 1, 1)")
         }
         #expect(await fast.next() == .init(scopes: [.privacy, .conversationDetails], requiresImmediateRefresh: true))
         for value in 1...40 {
@@ -76,7 +99,7 @@ struct V2ProjectionChangeTests {
         #expect(subscription.hub.take(subscription.identifier) == nil)
         try await store.databasePool.write { db in
             try db.inSavepoint {
-                try db.execute(sql: "INSERT INTO v2_user_add_preference(singleton, allows_being_added, updated_at) VALUES(1, 0, 1)")
+                try db.execute(sql: "INSERT INTO v2_user_add_preference(singleton, allows_being_added, revision, updated_at) VALUES(1, 0, 1, 1)")
                 return .rollback
             }
             try insertMessage(2, db: db)

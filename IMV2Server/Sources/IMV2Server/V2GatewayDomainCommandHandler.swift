@@ -84,34 +84,18 @@ private func v2ProtobufVarintByteCount(_ value: UInt64) -> Int {
     return count
 }
 
-protocol V2GatewaySendMessageHandling: Sendable {
-    var managesForegroundWriteAdmission: Bool { get }
-    var publishesCommittedGroupEvents: Bool { get }
-    func send(_ request: V2AuthenticatedSendMessage) async throws -> V2SendMessageOutcome
-}
 
-extension V2SendMessageService: V2GatewaySendMessageHandling {}
 
-protocol V2GatewayRoomMembershipHandling: Sendable {
-    func change(_ request: V2AuthenticatedMembershipChange) async throws -> V2RoomMembershipChangeOutcome
-}
 
-protocol V2GatewayMessageWithdrawalHandling: Sendable {
-    func withdraw(_ request: V2AuthenticatedMessageWithdrawal) async throws -> V2MessageWithdrawalOutcome
-}
 
-protocol V2GatewayMessageReactionHandling: Sendable {
-    func change(_ request: V2AuthenticatedMessageReaction) async throws -> V2MessageReactionOutcome
-}
 
-protocol V2GatewayMessageEditHandling: Sendable {
-    func edit(_ request: V2AuthenticatedMessageEdit) async throws -> V2MessageEditOutcome
-}
+
+
+
 
 protocol V2GatewayReadReceiptHandling: Sendable {
     var managesForegroundWriteAdmission: Bool { get }
     func record(_ request: V2AuthenticatedReadReceipt) async throws -> V2ReadReceiptOutcome
-    func setPreferences(actorUserID: UserID, operationID: ReadReceiptPreferenceOperationID, allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2SetReadReceiptPreferencesOutcome
     func readers(roomID: RoomID, messageID: MessageID, actorUserID: UserID, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage
 }
 
@@ -120,23 +104,9 @@ extension V2GatewayReadReceiptHandling {
 }
 
 protocol V2GatewayLiveActivityHandling: Sendable {
-    func setPreferences(_ command: V2SetLiveActivityPreferencesCommand, now: Date) async throws -> V2SetLiveActivityPreferencesOutcome
     func preferences(userID: UserID, now: Date) async throws -> V2LiveActivityPreferences
     func presence(roomID: RoomID, viewerUserID: UserID, now: Date) async throws -> V2PresenceState
     func authorizeTyping(roomID: RoomID, actorUserID: UserID, now: Date) async throws
-}
-
-protocol V2GatewayDirectMessagingHandling: Sendable {
-    func open(actorUserID: UserID, operationID: DirectRoomOperationID, targetUserID: UserID) async throws -> V2OpenDirectRoomOutcome
-    func setStrangerMessagePermission(actorUserID: UserID, operationID: StrangerMessagePreferenceOperationID, permission: V2StrangerMessagePermission) async throws -> V2SetStrangerMessagePermissionOutcome
-    func setUserAddPermission(actorUserID: UserID, operationID: UserAddPreferenceOperationID, permission: V2UserAddPermission) async throws -> V2SetUserAddPermissionOutcome
-}
-
-protocol V2GatewayGroupAudienceImportHandling: Sendable {
-    func begin(actorUserID: UserID, operationID: GroupRoomOperationID, title: String) async throws -> V2GroupAudienceDraft
-    func append(actorUserID: UserID, operationID: GroupRoomOperationID, memberUserIDs: [UserID]) async throws -> V2GroupAudienceDraft
-    func finalize(actorUserID: UserID, operationID: GroupRoomOperationID) async throws -> V2CreateGroupRoomOutcome
-    func cancel(actorUserID: UserID, operationID: GroupRoomOperationID) async throws
 }
 
 protocol V2GatewayGroupEventLogHandling: Sendable {
@@ -179,68 +149,31 @@ protocol V2GatewayRoomMembershipDirectoryHandling: Sendable {
 
 
 
-protocol V2GatewaySocialRelationshipHandling: Sendable {
-    func changeRelationship(actorUserID: UserID, operationID: RelationshipOperationID, targetUserID: UserID, action: V2RelationshipAction) async throws -> V2RelationshipOutcome
-    func changeUserBlock(actorUserID: UserID, operationID: UserBlockOperationID, targetUserID: UserID, action: V2UserBlockAction) async throws -> V2UserBlockOutcome
+public protocol V2GatewayConversationCapabilitiesHandling: Sendable {
+    func setConversationState(actorUserID: UserID, command: V2ConversationStateCommand) async throws -> V2PersonalPreferenceReceipt
+    func setMessageFavorite(actorUserID: UserID, command: V2MessageFavoriteCommand) async throws -> V2PersonalPreferenceReceipt
 }
 
-protocol V2GatewayModerationHandling: Sendable {
-    func apply(_ request: V2AuthenticatedModeration) async throws -> V2ModerationOutcome
-}
 
-protocol V2GatewayConversationCapabilitiesHandling: Sendable {
-    func setConversationState(actorUserID: UserID, command: V2ConversationStateCommand) async throws -> V2ConversationCapabilitiesOutcome<V2ConversationState>
-    func setMessageFavorite(actorUserID: UserID, command: V2MessageFavoriteCommand) async throws -> V2ConversationCapabilitiesOutcome<V2MessageFavorite>
-}
-
-protocol V2GatewayGroupCapabilitiesHandling: Sendable {
-    func setPinnedMessage(actorUserID: UserID, command: V2PinnedMessageCommand) async throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage>
-    func setAnnouncement(actorUserID: UserID, command: V2GroupAnnouncementCommand) async throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement>
-    func setRolePermissions(actorUserID: UserID, command: V2GroupRolePermissionsCommand) async throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange>
-    func changeMemberRole(actorUserID: UserID, command: V2GroupMemberRoleCommand) async throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange>
-}
-
-typealias V2GatewayForwardMessagesHandling = V2ForwardMessagesHandling
-
-extension V2RoomMembershipService: V2GatewayRoomMembershipHandling {}
-extension V2MessageWithdrawalService: V2GatewayMessageWithdrawalHandling {}
-extension V2MessageReactionService: V2GatewayMessageReactionHandling {}
-extension V2MessageEditService: V2GatewayMessageEditHandling {}
 extension V2ReadReceiptService: V2GatewayReadReceiptHandling {}
 extension V2LiveActivityService: V2GatewayLiveActivityHandling {}
-extension V2DirectMessagingService: V2GatewayDirectMessagingHandling {}
-extension V2GroupAudienceImportService: V2GatewayGroupAudienceImportHandling {}
 extension V2GroupEventLogService: V2GatewayGroupEventLogHandling {}
 extension V2RoomMembershipDirectoryService: V2GatewayRoomMembershipDirectoryHandling {}
-extension V2SocialRelationshipService: V2GatewaySocialRelationshipHandling {}
-extension V2ModerationService: V2GatewayModerationHandling {}
 extension V2ConversationCapabilitiesService: V2GatewayConversationCapabilitiesHandling {}
-extension V2GroupCapabilitiesService: V2GatewayGroupCapabilitiesHandling {}
 
 /// 把已校验的已认证 protobuf 命令路由到 V2 领域服务。
 public struct V2GatewayDomainCommandHandler:
     V2GatewayCommandHandler,
     V2PreparedGroupEventCommandHandling {
-    private let sendMessage: any V2GatewaySendMessageHandling
-    private let membership: any V2GatewayRoomMembershipHandling
-    private let withdrawal: any V2GatewayMessageWithdrawalHandling
-    private let reaction: any V2GatewayMessageReactionHandling
-    private let edit: any V2GatewayMessageEditHandling
     private let readReceipt: any V2GatewayReadReceiptHandling
     private let liveActivity: any V2GatewayLiveActivityHandling
-    private let directMessaging: any V2GatewayDirectMessagingHandling
-    private let groupAudienceImports: any V2GatewayGroupAudienceImportHandling
     private let groupEventLog: any V2GatewayGroupEventLogHandling
     private let foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting
     private let membershipDirectory: any V2GatewayRoomMembershipDirectoryHandling
     private let accountChanges: any V2AccountRoomChangesStarting
     private let roomRecovery: any V2RoomRecoveryCommandHandling
-    private let socialRelationships: any V2GatewaySocialRelationshipHandling
-    private let moderation: any V2GatewayModerationHandling
     private let conversationCapabilities: any V2GatewayConversationCapabilitiesHandling
-    private let groupCapabilities: any V2GatewayGroupCapabilitiesHandling
     private let groupRolePolicyBaseline: any V2GroupRolePolicyBaselineReading
-    private let forwardMessages: any V2GatewayForwardMessagesHandling
     private let sync: V2SyncService
     private let telemetry: any V2TelemetrySink
     private let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
@@ -257,14 +190,11 @@ public struct V2GatewayDomainCommandHandler:
     /// 生产环境中现有房间调用和创建房间前操作的组合入口。
     /// 用户服务与控制服务保持显式依赖，避免房间能力意外成为用户自有操作的授权依据。
     public init(roomActors: V2GatewayRoomActorServices,
-                roomCreation: V2GatewayRoomCreationServices,
                 liveActivity: V2LiveActivityService,
                 foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting,
                 roomRecovery: any V2RoomRecoveryCommandHandling,
                 accountChanges: any V2AccountRoomChangesStarting,
-                socialRelationships: V2SocialRelationshipService,
-                conversationCapabilities: V2ConversationCapabilitiesService,
-                forwardMessages: any V2ForwardMessagesHandling,
+                conversationCapabilities: any V2GatewayConversationCapabilitiesHandling,
                 sync: V2SyncService,
                 telemetry: any V2TelemetrySink,
                 databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
@@ -272,26 +202,15 @@ public struct V2GatewayDomainCommandHandler:
                 maximumGroupEventPagePayloadBytes: Int = 48 * 1_024,
                 now: @escaping @Sendable () -> Date = Date.init,
                 monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
-        self.init(sendMessage: roomActors.messaging,
-                  membershipHandler: roomActors.administration,
-                  withdrawalHandler: roomActors.messaging,
-                  reactionHandler: roomActors.messaging,
-                  editHandler: roomActors.messaging,
-                  readReceiptHandler: roomActors.receipts,
+        self.init(readReceiptHandler: roomActors.receipts,
                   liveActivityHandler: liveActivity,
-                  directMessagingHandler: roomCreation.direct,
-                  groupAudienceImportHandler: roomCreation.staged,
                   groupEventLogHandler: roomActors.eventLog,
                   foregroundGroupEventHints: foregroundGroupEventHints,
                   membershipDirectoryHandler: roomActors.queries,
                   roomRecovery: roomRecovery,
                   accountChanges: accountChanges,
-                  socialRelationshipHandler: socialRelationships,
-                  moderationHandler: roomActors.administration,
                   conversationCapabilitiesHandler: conversationCapabilities,
-                  groupCapabilitiesHandler: roomActors.administration,
                   groupRolePolicyBaseline: roomActors.queries,
-                  forwardMessagesHandler: forwardMessages,
                   sync: sync, telemetry: telemetry,
                   databaseWorkAdmission: databaseWorkAdmission,
                   roomCommandsHostAdmitted: true,
@@ -301,26 +220,15 @@ public struct V2GatewayDomainCommandHandler:
     }
 
     init(
-        sendMessage: any V2GatewaySendMessageHandling,
-        membershipHandler: any V2GatewayRoomMembershipHandling,
-        withdrawalHandler: any V2GatewayMessageWithdrawalHandling,
-        reactionHandler: any V2GatewayMessageReactionHandling,
-        editHandler: any V2GatewayMessageEditHandling,
         readReceiptHandler: any V2GatewayReadReceiptHandling,
         liveActivityHandler: any V2GatewayLiveActivityHandling,
-        directMessagingHandler: any V2GatewayDirectMessagingHandling,
-        groupAudienceImportHandler: any V2GatewayGroupAudienceImportHandling,
         groupEventLogHandler: any V2GatewayGroupEventLogHandling,
         foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting,
         membershipDirectoryHandler: any V2GatewayRoomMembershipDirectoryHandling,
         roomRecovery: any V2RoomRecoveryCommandHandling,
         accountChanges: any V2AccountRoomChangesStarting,
-        socialRelationshipHandler: any V2GatewaySocialRelationshipHandling,
-        moderationHandler: any V2GatewayModerationHandling,
         conversationCapabilitiesHandler: any V2GatewayConversationCapabilitiesHandling,
-        groupCapabilitiesHandler: any V2GatewayGroupCapabilitiesHandling,
         groupRolePolicyBaseline: any V2GroupRolePolicyBaselineReading,
-        forwardMessagesHandler: any V2GatewayForwardMessagesHandling,
         sync: V2SyncService,
         telemetry: any V2TelemetrySink,
         databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
@@ -331,26 +239,15 @@ public struct V2GatewayDomainCommandHandler:
         monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
     ) {
         precondition(maximumGroupEventPagePayloadBytes > 0)
-        self.sendMessage = sendMessage
-        membership = membershipHandler
-        withdrawal = withdrawalHandler
-        reaction = reactionHandler
-        edit = editHandler
         readReceipt = readReceiptHandler
         liveActivity = liveActivityHandler
-        directMessaging = directMessagingHandler
-        groupAudienceImports = groupAudienceImportHandler
         groupEventLog = groupEventLogHandler
         self.foregroundGroupEventHints = foregroundGroupEventHints
         membershipDirectory = membershipDirectoryHandler
         self.roomRecovery = roomRecovery
         self.accountChanges = accountChanges
-        socialRelationships = socialRelationshipHandler
-        moderation = moderationHandler
         conversationCapabilities = conversationCapabilitiesHandler
-        groupCapabilities = groupCapabilitiesHandler
         self.groupRolePolicyBaseline = groupRolePolicyBaseline
-        forwardMessages = forwardMessagesHandler
         self.sync = sync
         self.telemetry = telemetry
         self.databaseWorkAdmission = databaseWorkAdmission
@@ -617,10 +514,6 @@ public struct V2GatewayDomainCommandHandler:
         switch envelope.body {
         case .syncPull, .syncAck, .syncSnapshot, .snapshotPagePull, .snapshotAck:
             return .sync
-        case .openDirectRoom where controlWriteAdmissionEnabled:
-            // 建立关系或房间是持久化控制平面写入，并非追加事件。
-            // 不能因此耗尽已建立会话发送消息所用的预留容量。
-            return .foregroundControlWrite
         case .getGroupRolePolicyBaseline,
              .listRoomMembers,
              .userRoomDirectoryList,
@@ -648,22 +541,15 @@ public struct V2GatewayDomainCommandHandler:
     private func commandManagesDatabaseAdmission(for envelope: IMV2Envelope) -> Bool {
         if roomCommandsHostAdmitted {
             switch envelope.body {
-            case .sendMessage, .changeRoomMembership, .withdrawMessage,
-                 .changeMessageReaction, .editMessage, .recordReadReceipt,
+            case .recordReadReceipt,
                  .getGroupRolePolicyBaseline, .listRoomMembers,
                  .roomSyncStateBatch, .roomLatestVisibleBatch,
-                 .groupEventPull, .groupEventSubscribe, .listReadReceiptReaders,
-                 .moderateMessage, .muteMember, .moderateMemberRemoval,
-                 .setPinnedMessage, .setGroupAnnouncement,
-                 .setGroupRolePermissions, .changeGroupMemberRole,
-                 .forwardMessages:
+                 .groupEventPull, .groupEventSubscribe, .listReadReceiptReaders:
                 return true
             default: break
             }
         }
         switch envelope.body {
-        case .sendMessage:
-            return sendMessage.managesForegroundWriteAdmission
         case .recordReadReceipt:
             return readReceipt.managesForegroundWriteAdmission
         default:
@@ -678,22 +564,7 @@ public struct V2GatewayDomainCommandHandler:
     ) async throws -> IMV2Envelope {
         do {
             switch envelope.body {
-            case .sendMessage(let request):
-                return try await handleSend(
-                    request,
-                    identity: identity,
-                    originatingConnectionID: originatingConnectionID
-                )
-            case .changeRoomMembership(let request): return try await handleMembership(request, identity: identity)
-            case .withdrawMessage(let request): return try await handleWithdrawal(request, identity: identity)
-            case .changeMessageReaction(let request): return try await handleReaction(request, identity: identity)
-            case .editMessage(let request): return try await handleEdit(request, identity: identity)
             case .recordReadReceipt(let request): return try await handleReadReceipt(request, identity: identity)
-            case .openDirectRoom(let request): return try await handleOpenDirectRoom(request, identity: identity)
-            case .beginGroupRoomCreation(let request): return try await handleBeginGroupRoomCreation(request, identity: identity)
-            case .appendGroupRoomCreationMembers(let request): return try await handleAppendGroupRoomCreationMembers(request, identity: identity)
-            case .finalizeGroupRoomCreation(let request): return try await handleFinalizeGroupRoomCreation(request, identity: identity)
-            case .cancelGroupRoomCreation(let request): return try await handleCancelGroupRoomCreation(request, identity: identity)
             case .getGroupRolePolicyBaseline(let request): return try await handleGroupRolePolicyBaseline(request, identity: identity)
             case .listRoomMembers(let request): return try await handleListRoomMembers(request, identity: identity)
             case .accountRoomChangesStart:
@@ -710,11 +581,7 @@ public struct V2GatewayDomainCommandHandler:
             case .groupEventUnsubscribe(let request):
                 _ = try RoomID(request.roomID)
                 return successEnvelope()
-            case .setStrangerMessagePermission(let request): return try await handleStrangerMessagePermission(request, identity: identity)
-            case .setUserAddPermission(let request): return try await handleUserAddPermission(request, identity: identity)
-            case .setReadReceiptPreferences(let request): return try await handleReadReceiptPreferences(request, identity: identity)
             case .listReadReceiptReaders(let request): return try await handleReadReceiptReaders(request, identity: identity)
-            case .setLiveActivityPreferences(let request): return try await handleLiveActivityPreferences(request, identity: identity)
             case .getLiveActivityPreferences: return try await handleGetLiveActivityPreferences(identity: identity)
             case .subscribePresence(let request): return try await handleSubscribePresence(request, identity: identity)
             case .unsubscribePresence(let request):
@@ -725,18 +592,8 @@ public struct V2GatewayDomainCommandHandler:
                 _ = try RoomID(request.roomID)
                 return successEnvelope()
             case .setTypingState(let request): return try await handleTypingState(request, identity: identity)
-            case .changeRelationship(let request): return try await handleRelationship(request, identity: identity)
-            case .changeUserBlock(let request): return try await handleUserBlock(request, identity: identity)
-            case .moderateMessage(let request): return try await handleModerateMessage(request, identity: identity)
-            case .muteMember(let request): return try await handleMuteMember(request, identity: identity)
-            case .moderateMemberRemoval(let request): return try await handleModerateMemberRemoval(request, identity: identity)
             case .setConversationState(let request): return try await handleConversationState(request, identity: identity)
             case .setMessageFavorite(let request): return try await handleMessageFavorite(request, identity: identity)
-            case .setPinnedMessage(let request): return try await handlePinnedMessage(request, identity: identity)
-            case .setGroupAnnouncement(let request): return try await handleGroupAnnouncement(request, identity: identity)
-            case .setGroupRolePermissions(let request): return try await handleGroupRolePermissions(request, identity: identity)
-            case .changeGroupMemberRole(let request): return try await handleGroupMemberRole(request, identity: identity)
-            case .forwardMessages(let request): return try await handleForwardMessages(request, identity: identity)
             case .syncPull(let request): return try await handlePull(request, identity: identity)
             case .syncAck(let request):
                 try await sync.acknowledge(userID: identity.userID, deviceID: identity.deviceID, generation: request.generation, highestContiguousSequence: request.highestContiguousSequence, receipt: try .init(request.syncReceipt))
@@ -782,24 +639,16 @@ public struct V2GatewayDomainCommandHandler:
             }
         } catch V2RoomMembershipDirectoryError.revisionConflict(let currentRevision) {
             return errorEnvelope(code: "REVISION_CONFLICT", retryable: false, currentRevision: currentRevision)
-        } catch V2RevisionValidationError.outOfRange, V2CoreError.invalidIdentifier, V2CoreError.invalidPositiveValue, V2SendMessageValidationError.invalidTextLength, V2MediaStoreError.invalidReferenceSet, V2MentionValidationError.invalidLimits, V2MentionValidationError.invalidTargetSet, V2ModerationValidationError.invalidReasonCode, V2ModerationValidationError.invalidActionShape, V2ModerationValidationError.invalidMuteExpiry, V2RoomMembershipValidationError.selfTargetingNotAllowed, V2DirectMessagingValidationError.selfTargetingNotAllowed, V2SocialRelationshipValidationError.selfTargetingNotAllowed, V2MessageReactionValidationError.invalidReaction, V2MessageEditValidationError.invalidText, V2ReadReceiptValidationError.invalidRoomSequence, V2GroupMessagingValidationError.invalidTitle, V2GroupMessagingValidationError.invalidInitialMembers, V2GroupAudienceImportError.invalidInput, V2RoomMembershipDirectoryError.invalidRequest, V2RoomMembershipDirectoryError.invalidCursor, V2GroupEventLogError.invalidRequest {
+        } catch V2RevisionValidationError.outOfRange, V2CoreError.invalidIdentifier, V2CoreError.invalidPositiveValue, V2SendMessageValidationError.invalidTextLength, V2MediaStoreError.invalidReferenceSet, V2MentionValidationError.invalidLimits, V2MentionValidationError.invalidTargetSet, V2ModerationValidationError.invalidReasonCode, V2ModerationValidationError.invalidActionShape, V2ModerationValidationError.invalidMuteExpiry, V2RoomMembershipValidationError.selfTargetingNotAllowed, V2DirectMessagingValidationError.selfTargetingNotAllowed, V2SocialRelationshipValidationError.selfTargetingNotAllowed, V2MessageReactionValidationError.invalidReaction, V2MessageEditValidationError.invalidText, V2ReadReceiptValidationError.invalidRoomSequence, V2GroupMessagingValidationError.invalidTitle, V2GroupMessagingValidationError.invalidInitialMembers, V2RoomMembershipDirectoryError.invalidRequest, V2RoomMembershipDirectoryError.invalidCursor, V2GroupEventLogError.invalidRequest {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        } catch V2GroupAudienceImportError.memberLimitReached, V2GroupAudienceImportError.activeDraftLimitReached {
-            return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        } catch V2GroupAudienceImportError.missingDraft {
-            return errorEnvelope(code: "NOT_FOUND", retryable: false)
-        } catch V2GroupAudienceImportError.draftFrozen {
-            return errorEnvelope(code: "GROUP_CREATION_FROZEN", retryable: false)
-        } catch V2GroupAudienceImportError.idempotencyConflict {
-            return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        } catch V2GroupAudienceImportError.corruptPersistenceState {
-            return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2RoomMembershipStoreError.ownerChanged, V2RoomOwnerFenceError.ownerChanged, V2ReadReceiptStoreError.ownerChanged {
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2RoomMembershipStoreError.actorNotOwner {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
         } catch V2RoomMembershipStoreError.targetUnavailable {
             return errorEnvelope(code: "NOT_FOUND", retryable: false)
+        } catch V2ConversationCapabilitiesStoreError.operationPayloadMismatch {
+            return errorEnvelope(code:"IDEMPOTENCY_CONFLICT",retryable:false)
         } catch V2ConversationCapabilitiesStoreError.invalidTimestamp {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
         } catch V2ConversationCapabilitiesStoreError.actorNotMember {
@@ -948,79 +797,7 @@ public struct V2GatewayDomainCommandHandler:
         }
     }
 
-    private func handleSend(
-        _ request: IMV2SendMessage,
-        identity: V2AuthenticatedConnection,
-        originatingConnectionID: UUID?
-    ) async throws -> IMV2Envelope {
-        guard request.hasContent,
-              let roomUUID = UUID(uuidString: request.roomID),
-              let clientMessageUUID = UUID(uuidString: request.clientMessageID)
-        else { return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false) }
-        let text: String
-        switch request.content.body {
-        case .text(let value): text = value
-        case nil: text = ""
-        }
-        let media = try request.content.mediaIds.map { try V2MediaReference(mediaID: .init($0)) }
-        var mentions = try request.content.mentionedUserIds.map { try V2MentionTarget.user(.init($0)) }
-        if request.content.mentionEveryone { mentions.append(.everyone) }
-        let entities = try request.content.entities.map(v2MessageEntity)
-        let replyTo = try request.content.replyToMessageID.isEmpty ? nil : V2MessageReplyReference(messageID: .init(request.content.replyToMessageID))
-        let outcome: V2SendMessageOutcome
-        do {
-            outcome = try await sendMessage.send(.init(
-                roomID: .init(uuid: roomUUID),
-                actorUserID: identity.userID,
-                clientMessageID: .init(uuid: clientMessageUUID),
-                text: text,
-                media: media,
-                mentions: mentions,
-                entities: entities,
-                replyTo: replyTo
-            ))
-        } catch V2SendMessageAdmissionBatcherError.serverBusy {
-            return errorEnvelope(code: "SERVER_BUSY", retryable: true)
-        }
-        switch outcome {
-        case .accepted(let message):
-            let response = try acceptedMessageEnvelope(message.receipt)
-            if let directEvent = V2DirectRoomLiveEventDraft(
-                message,
-                excludingConnectionID: originatingConnectionID
-            )?.materialized() {
-                await groupEventLog.recordCommittedDirectRoomLogEvent(directEvent)
-                // 仅在提交后尽力执行。分发器校验并排队一个不可变载荷，
-                // 与本地房间日志加速缓存共用。
-                foregroundGroupEventHints.submitForegroundDirectEvent(directEvent)
-            } else if let groupEventDraft = V2GroupRoomLiveEventDraft(message) {
-                // 追加批处理器会在恢复此请求前调用已提交观察者。在这种配置下，
-                // 观察者已生成并提交这一条 Hybrid 事件。保留低成本的资格草稿，
-                // 以维持下方较丰富事件的回退逻辑；不要再编码一份最终会被丢弃的 JSON 载荷。
-                if !sendMessage.publishesCommittedGroupEvents,
-                   let groupEvent = groupEventDraft.materialized() {
-                    await groupEventLog.recordCommittedDirectRoomLogEvent(groupEvent)
-                    foregroundGroupEventHints.submitForegroundDirectEvent(groupEvent)
-                }
-            } else {
-                await groupEventLog.recordCommittedDirectRoomLogMessage(message)
-                foregroundGroupEventHints.submitForegroundHint(.init(
-                    roomID: message.roomID,
-                    highWatermark: message.roomSequence
-                ))
-            }
-            return response
-        case .idempotent(let message):
-            return try acceptedMessageEnvelope(message)
-        case .denied:
-            // 持久化的私有活动和输入能力分别同步。
-            // 实时响应不得透露对方的哪项策略导致此次拒绝。
-            return errorEnvelope(code: "DIRECT_MESSAGE_RESTRICTED", retryable: false)
-        case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds)
-        case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true)
-        }
-    }
+
 
     private func acceptedMessageEnvelope(_ message: V2MessageAcceptanceReceipt) throws -> IMV2Envelope {
             var response = IMV2Envelope(); response.messageAccepted = .init()
@@ -1031,118 +808,45 @@ public struct V2GatewayDomainCommandHandler:
             return response
     }
 
-    private func handleMembership(_ request: IMV2ChangeRoomMembership, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let action: V2RoomMembershipAction
-        switch request.action {
-        case .add: action = .add
-        case .remove: action = .remove
-        case .unspecified, .UNRECOGNIZED: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        }
-        let outcome = try await membership.change(.init(
-            roomID: try .init(request.roomID),
-            actorUserID: identity.userID,
-            operationID: try .init(request.operationID),
-            targetUserID: try .init(request.targetUserID),
-            action: action,
-            expectedMembershipRevision: request.expectedMembershipRevision
-        ))
-        switch outcome {
-        case .changed(let change), .idempotent(let change):
-            var response = IMV2Envelope(); response.membershipChanged = .init()
-            response.membershipChanged.roomID = change.roomID.rawValue
-            response.membershipChanged.targetUserID = change.targetUserID.rawValue
-            response.membershipChanged.action = change.action == .add ? .add : .remove
-            response.membershipChanged.membershipRevision = change.membershipRevision
-            response.membershipChanged.roomSequence = change.roomSequence
-            response.membershipChanged.serverCreatedAtMs = try v2GatewayMilliseconds(change.createdAt)
-            return response
-        case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        case .revisionConflict(let current): return errorEnvelope(code: "REVISION_CONFLICT", retryable: false, currentRevision: current)
-        case .targetAlreadyMember, .targetNotMember, .memberLimitReached: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds)
-        case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true)
-        }
-    }
 
-    private func handleWithdrawal(_ request: IMV2WithdrawMessage, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let outcome = try await withdrawal.withdraw(.init(roomID: try .init(request.roomID), actorUserID: identity.userID, operationID: try .init(request.operationID), messageID: try .init(request.messageID), expectedMessageRevision: request.expectedMessageRevision))
-        switch outcome {
-        case .withdrawn(let result), .idempotent(let result):
-            var response = IMV2Envelope(); response.messageWithdrawn = .init()
-            response.messageWithdrawn.roomID = result.roomID.rawValue
-            response.messageWithdrawn.messageID = result.messageID.rawValue
-            response.messageWithdrawn.messageRevision = result.messageRevision
-            response.messageWithdrawn.roomSequence = result.roomSequence
-            response.messageWithdrawn.serverCreatedAtMs = try v2GatewayMilliseconds(result.createdAt)
-            return response
-        case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        case .revisionConflict(let current): return errorEnvelope(code: "REVISION_CONFLICT", retryable: false, currentRevision: current)
-        case .alreadyWithdrawn: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds)
-        case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true)
-        }
-    }
 
-    private func handleModerateMessage(_ request: IMV2ModerateMessage, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let outcome = try await moderation.apply(.init(roomID: try .init(request.roomID), actorUserID: identity.userID, operationID: try .init(request.operationID), action: .redactMessage, messageID: try .init(request.messageID), reasonCode: try .init(request.reasonCode)))
-        switch outcome {
-        case .applied(let result), .idempotent(let result):
-            var response = IMV2Envelope(); response.messageRedacted = .init()
-            response.messageRedacted.roomID = result.roomID.rawValue
-            guard let messageID = result.messageID, let messageRevision = result.messageRevision else { throw V2ModerationStoreError.corruptPersistenceState }
-            response.messageRedacted.messageID = messageID.rawValue
-            response.messageRedacted.roomSequence = result.roomSequence
-            response.messageRedacted.messageRevision = messageRevision
-            response.messageRedacted.serverCreatedAtMs = try v2GatewayMilliseconds(result.createdAt)
-            return response
-        case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        case .messageAlreadyRedacted, .targetNotMember, .actionAlreadyInDesiredState: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds)
-        case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true)
-        }
-    }
 
     private func handleConversationState(_ request: IMV2SetConversationState, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let muteUntil = request.muteUntilMs == 0 ? nil : Date(timeIntervalSince1970: TimeInterval(request.muteUntilMs) / 1_000)
-        let command = try V2ConversationStateCommand(operationID: .init(request.operationID), roomID: .init(request.roomID), isPinned: request.isPinned, isArchived: request.isArchived, muteUntil: muteUntil)
-        let outcome = try await conversationCapabilities.setConversationState(actorUserID: identity.userID, command: command)
-        let value: V2ConversationState
-        switch outcome { case .applied(let result), .idempotent(let result): value = result; case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false) }
-        var response = IMV2Envelope(); response.conversationStateSet = .init()
-        response.conversationStateSet.roomID = value.roomID.rawValue; response.conversationStateSet.isPinned = value.isPinned; response.conversationStateSet.isArchived = value.isArchived
-        response.conversationStateSet.muteUntilMs = try value.muteUntil.map { try v2GatewayMilliseconds($0) } ?? 0; response.conversationStateSet.updatedAtMs = try v2GatewayMilliseconds(value.updatedAt)
-        return response
+        guard let revision=V2PersonalPreferenceRevision(rawValue:request.expectedRevision) else { return errorEnvelope(code:"INVALID_ARGUMENT",retryable:false) }
+        let command=try V2ConversationStateCommand(operationID:.init(request.operationID),roomID:.init(request.roomID),isPinned:request.isPinned,isArchived:request.isArchived,muteUntil:request.muteUntilMs==0 ? nil:Date(timeIntervalSince1970:Double(request.muteUntilMs)/1000),expectedRevision:revision,firstSubmissionDeadlineMilliseconds:request.firstSubmissionDeadlineMs)
+        var response=IMV2Envelope();response.personalPreferenceReceipt=try personalPreferenceWire(await conversationCapabilities.setConversationState(actorUserID:identity.userID,command:command));return response
     }
-
     private func handleMessageFavorite(_ request: IMV2SetMessageFavorite, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let command = try V2MessageFavoriteCommand(operationID: .init(request.operationID), roomID: .init(request.roomID), messageID: .init(request.messageID), isFavorited: request.isFavorited)
-        let outcome = try await conversationCapabilities.setMessageFavorite(actorUserID: identity.userID, command: command)
-        let value: V2MessageFavorite
-        switch outcome { case .applied(let result), .idempotent(let result): value = result; case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false) }
-        var response = IMV2Envelope(); response.messageFavoriteChanged = .init()
-        response.messageFavoriteChanged.roomID = value.roomID.rawValue; response.messageFavoriteChanged.messageID = value.messageID.rawValue; response.messageFavoriteChanged.isFavorited = value.isFavorited; response.messageFavoriteChanged.updatedAtMs = try v2GatewayMilliseconds(value.updatedAt)
-        return response
+        guard let revision=V2PersonalPreferenceRevision(rawValue:request.expectedRevision) else { return errorEnvelope(code:"INVALID_ARGUMENT",retryable:false) }
+        let command=try V2MessageFavoriteCommand(operationID:.init(request.operationID),roomID:.init(request.roomID),messageID:.init(request.messageID),isFavorited:request.isFavorited,expectedRevision:revision,firstSubmissionDeadlineMilliseconds:request.firstSubmissionDeadlineMs)
+        var response=IMV2Envelope();response.personalPreferenceReceipt=try personalPreferenceWire(await conversationCapabilities.setMessageFavorite(actorUserID:identity.userID,command:command));return response
+    }
+    private func personalPreferenceWire(_ receipt:V2PersonalPreferenceReceipt) throws -> IMV2PersonalPreferenceReceipt {
+        var wire=IMV2PersonalPreferenceReceipt();wire.actorUserID=receipt.identity.accountID.rawValue;wire.operationID=receipt.identity.operation.rawOperationID
+        switch receipt.identity.scope { case .room(let room):wire.roomID=room.rawValue;wire.kind = .conversationState
+        case .message(let room,let message):wire.roomID=room.rawValue;wire.messageID=message.rawValue;wire.kind = .messageFavorite
+        default:throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }
+        wire.fingerprintVersion=UInt32(receipt.fingerprint.version);wire.fingerprint=receipt.fingerprint.digest;wire.resolvedAtMs=receipt.resolvedAtMilliseconds
+        switch receipt.outcome {
+        case .closed:wire.closed=true
+        case .rejected(let rejection):
+            var value=IMV2PersonalPreferenceRejection()
+            switch rejection {case .revisionConflict(let current):value.reason = .revisionConflict;value.currentRevision=current.rawValue
+            case .permissionDenied:value.reason = .permissionDenied;case .notFound:value.reason = .notFound;case .expiredUnsubmitted:value.reason = .expiredUnsubmitted}
+            wire.rejected=value
+        case .committed(.conversationState(let value)):
+            var result=IMV2ConversationStateSet();result.roomID=value.roomID.rawValue;result.isPinned=value.isPinned;result.isArchived=value.isArchived
+            result.muteUntilMs=try value.muteUntil.map(v2GatewayMilliseconds) ?? 0;result.updatedAtMs=try v2GatewayMilliseconds(value.updatedAt);result.revision=value.revision.rawValue;wire.conversationState=result
+        case .committed(.messageFavorite(let value)):
+            var result=IMV2MessageFavoriteChanged();result.roomID=value.roomID.rawValue;result.messageID=value.messageID.rawValue;result.isFavorited=value.isFavorited
+            result.updatedAtMs=try v2GatewayMilliseconds(value.updatedAt);result.revision=value.revision.rawValue;wire.messageFavorite=result
+        }
+        return wire
     }
 
-    private func handlePinnedMessage(_ request: IMV2SetPinnedMessage, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let command = V2PinnedMessageCommand(operationID: try .init(request.operationID), roomID: try .init(request.roomID), messageID: try .init(request.messageID), isPinned: request.isPinned)
-        let outcome = try await groupCapabilities.setPinnedMessage(actorUserID: identity.userID, command: command)
-        let value: V2PinnedMessage
-        switch outcome { case .applied(let result), .idempotent(let result): value = result; case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false); case .alreadyInDesiredState: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false); case .revisionConflict: return errorEnvelope(code: "REVISION_CONFLICT", retryable: false); case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds); case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true) }
-        var response = IMV2Envelope(); response.pinnedMessageChanged = .init()
-        response.pinnedMessageChanged.roomID = value.roomID.rawValue; response.pinnedMessageChanged.messageID = value.messageID.rawValue; response.pinnedMessageChanged.isPinned = value.isPinned; response.pinnedMessageChanged.roomSequence = value.roomSequence; response.pinnedMessageChanged.updatedAtMs = try v2GatewayMilliseconds(value.updatedAt)
-        return response
-    }
 
-    private func handleGroupAnnouncement(_ request: IMV2SetGroupAnnouncement, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let command = try V2GroupAnnouncementCommand(operationID: .init(request.operationID), roomID: .init(request.roomID), body: request.body, expectedRevision: request.expectedRevision)
-        let outcome = try await groupCapabilities.setAnnouncement(actorUserID: identity.userID, command: command)
-        let value: V2GroupAnnouncement
-        switch outcome { case .applied(let result), .idempotent(let result): value = result; case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false); case .revisionConflict: return errorEnvelope(code: "REVISION_CONFLICT", retryable: false); case .alreadyInDesiredState: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false); case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds); case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true) }
-        var response = IMV2Envelope(); response.groupAnnouncementChanged = .init()
-        response.groupAnnouncementChanged.roomID = value.roomID.rawValue; response.groupAnnouncementChanged.body = value.body; response.groupAnnouncementChanged.revision = value.revision; response.groupAnnouncementChanged.roomSequence = value.roomSequence; response.groupAnnouncementChanged.updatedAtMs = try v2GatewayMilliseconds(value.updatedAt)
-        return response
-    }
+
+
 
     private func handleGroupRolePolicyBaseline(_ request: IMV2GetGroupRolePolicyBaseline, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
         guard let roomUUID = UUID(uuidString: request.roomID) else { return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false) }
@@ -1175,150 +879,13 @@ public struct V2GatewayDomainCommandHandler:
         return response
     }
 
-    private func handleGroupRolePermissions(_ request: IMV2SetGroupRolePermissions, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        guard let role = V2RoomMembershipRole(rawValue: request.role) else { return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false) }
-        let rawPermissions = request.permissions.map(\.permission)
-        let permissions = Set(rawPermissions.compactMap(V2GroupPermission.init(rawValue:)))
-        guard permissions.count == rawPermissions.count else { return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false) }
-        let command = try V2GroupRolePermissionsCommand(operationID: .init(request.operationID), roomID: .init(request.roomID), role: role, permissions: permissions, expectedRevision: request.expectedRevision)
-        let outcome = try await groupCapabilities.setRolePermissions(actorUserID: identity.userID, command: command)
-        let value: V2GroupRolePermissionsChange
-        switch outcome { case .applied(let result), .idempotent(let result): value = result; case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false); case .revisionConflict: return errorEnvelope(code: "REVISION_CONFLICT", retryable: false); case .alreadyInDesiredState: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false); case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds); case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true) }
-        var response = IMV2Envelope(); response.groupRolePermissionsChanged = .init()
-        response.groupRolePermissionsChanged.roomID = value.roomID.rawValue; response.groupRolePermissionsChanged.role = value.role.rawValue; response.groupRolePermissionsChanged.revision = value.revision; response.groupRolePermissionsChanged.roomSequence = value.roomSequence
-        response.groupRolePermissionsChanged.permissions = value.permissions.sorted { $0.rawValue < $1.rawValue }.map { var item = IMV2GroupRolePermission(); item.permission = $0.rawValue; return item }
-        return response
-    }
 
-    private func handleGroupMemberRole(_ request: IMV2ChangeGroupMemberRole, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        guard let role = V2RoomMembershipRole(rawValue: request.role) else { return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false) }
-        let command = try V2GroupMemberRoleCommand(operationID: .init(request.operationID), roomID: .init(request.roomID), targetUserID: .init(request.userID), role: role, expectedMembershipRevision: request.expectedMembershipRevision)
-        let outcome = try await groupCapabilities.changeMemberRole(actorUserID: identity.userID, command: command)
-        let value: V2GroupMemberRoleChange
-        switch outcome { case .applied(let result), .idempotent(let result): value = result; case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false); case .revisionConflict: return errorEnvelope(code: "REVISION_CONFLICT", retryable: false); case .alreadyInDesiredState: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false); case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds); case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true) }
-        var response = IMV2Envelope(); response.groupMemberRoleChanged = .init()
-        response.groupMemberRoleChanged.roomID = value.roomID.rawValue; response.groupMemberRoleChanged.userID = value.targetUserID.rawValue; response.groupMemberRoleChanged.role = value.role.rawValue; response.groupMemberRoleChanged.membershipRevision = value.membershipRevision; response.groupMemberRoleChanged.roomSequence = value.roomSequence
-        return response
-    }
 
-    private func handleForwardMessages(_ request: IMV2ForwardMessages, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        guard let operation = UUID(uuidString: request.operationID) else { return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false) }
-        let command = try V2ForwardMessagesCommand(operationID: .init(uuid: operation), sources: try request.sources.map { try .init(roomID: .init($0.roomID), messageID: .init($0.messageID), revision: .init($0.revision)) }, targetRoomIDs: try request.targetRoomIds.map(RoomID.init))
-        let results = try await forwardMessages.forward(actorUserID: identity.userID, command: command)
-        guard results.allSatisfy({ result in
-            result.roomSequence.map { $0 > 0 && $0 <= UInt64(Int64.max) } ?? true
-        }) else { return errorEnvelope(code: "UNAVAILABLE", retryable: true) }
-        var response = IMV2Envelope(); response.messagesForwarded = .init()
-        response.messagesForwarded.results = results.map { result in
-            var wire = IMV2ForwardMessageResult(); wire.sourceMessageID = result.sourceMessageID.rawValue; wire.targetRoomID = result.targetRoomID.rawValue; wire.messageID = result.messageID?.rawValue ?? ""; wire.roomSequence = result.roomSequence ?? 0; wire.errorCode = result.errorCode ?? ""; return wire
-        }
-        return response
-    }
 
-    private func handleMuteMember(_ request: IMV2MuteMember, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        guard request.muteUntilMs > 0 else { return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false) }
-        let outcome = try await moderation.apply(.init(
-            roomID: try .init(request.roomID),
-            actorUserID: identity.userID,
-            operationID: try .init(request.operationID),
-            action: .muteMember,
-            targetUserID: try .init(request.targetUserID),
-            muteUntil: Date(timeIntervalSince1970: TimeInterval(request.muteUntilMs) / 1_000),
-            reasonCode: try .init(request.reasonCode)
-        ))
-        switch outcome {
-        case .applied(let result), .idempotent(let result):
-            guard result.action == .muteMember, let targetUserID = result.targetUserID,
-                  let muteUntil = result.muteUntil
-            else { throw V2ModerationStoreError.corruptPersistenceState }
-            var response = IMV2Envelope(); response.memberMuted = .init()
-            response.memberMuted.roomID = result.roomID.rawValue
-            response.memberMuted.targetUserID = targetUserID.rawValue
-            response.memberMuted.muteUntilMs = try v2GatewayMilliseconds(muteUntil)
-            response.memberMuted.roomSequence = result.roomSequence
-            response.memberMuted.serverCreatedAtMs = try v2GatewayMilliseconds(result.createdAt)
-            return response
-        case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        case .targetNotMember, .messageAlreadyRedacted, .actionAlreadyInDesiredState: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds)
-        case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true)
-        }
-    }
 
-    private func handleModerateMemberRemoval(_ request: IMV2ModerateMemberRemoval, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let outcome = try await moderation.apply(.init(
-            roomID: try .init(request.roomID),
-            actorUserID: identity.userID,
-            operationID: try .init(request.operationID),
-            action: .removeMember,
-            targetUserID: try .init(request.targetUserID),
-            reasonCode: try .init(request.reasonCode)
-        ))
-        switch outcome {
-        case .applied(let result), .idempotent(let result):
-            guard result.action == .removeMember, let targetUserID = result.targetUserID,
-                  let membershipRevision = result.membershipRevision
-            else { throw V2ModerationStoreError.corruptPersistenceState }
-            var response = IMV2Envelope(); response.memberRemovedByModerator = .init()
-            response.memberRemovedByModerator.roomID = result.roomID.rawValue
-            response.memberRemovedByModerator.targetUserID = targetUserID.rawValue
-            response.memberRemovedByModerator.membershipRevision = membershipRevision
-            response.memberRemovedByModerator.roomSequence = result.roomSequence
-            response.memberRemovedByModerator.serverCreatedAtMs = try v2GatewayMilliseconds(result.createdAt)
-            return response
-        case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        case .targetNotMember, .messageAlreadyRedacted, .actionAlreadyInDesiredState: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds)
-        case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true)
-        }
-    }
 
-    private func handleReaction(_ request: IMV2ChangeMessageReaction, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let action: V2MessageReactionAction
-        switch request.action {
-        case .add: action = .add
-        case .remove: action = .remove
-        case .unspecified, .UNRECOGNIZED: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        }
-        let outcome = try await reaction.change(.init(roomID: try .init(request.roomID), actorUserID: identity.userID, operationID: try .init(request.operationID), messageID: try .init(request.messageID), reaction: request.reaction, action: action))
-        switch outcome {
-        case .changed(let result), .idempotent(let result):
-            var response = IMV2Envelope(); response.messageReactionChanged = .init()
-            response.messageReactionChanged.roomID = result.roomID.rawValue
-            response.messageReactionChanged.messageID = result.messageID.rawValue
-            response.messageReactionChanged.actorUserID = result.actorUserID.rawValue
-            response.messageReactionChanged.reaction = result.reaction
-            response.messageReactionChanged.action = result.action == .add ? .add : .remove
-            response.messageReactionChanged.roomSequence = result.roomSequence
-            response.messageReactionChanged.serverCreatedAtMs = try v2GatewayMilliseconds(result.createdAt)
-            return response
-        case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        case .alreadyInDesiredState: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds)
-        case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true)
-        }
-    }
 
-    private func handleEdit(_ request: IMV2EditMessage, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        guard request.hasContent, case .text(let text)? = request.content.body else { return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false) }
-        let outcome = try await edit.edit(.init(roomID: try .init(request.roomID), actorUserID: identity.userID, operationID: try .init(request.operationID), messageID: try .init(request.messageID), expectedMessageRevision: request.expectedMessageRevision, text: text))
-        switch outcome {
-        case .edited(let result), .idempotent(let result):
-            var response = IMV2Envelope(); response.messageEdited = .init()
-            response.messageEdited.roomID = result.roomID.rawValue
-            response.messageEdited.messageID = result.messageID.rawValue
-            response.messageEdited.text = result.text
-            response.messageEdited.messageRevision = result.messageRevision
-            response.messageEdited.roomSequence = result.roomSequence
-            response.messageEdited.serverCreatedAtMs = try v2GatewayMilliseconds(result.createdAt)
-            return response
-        case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        case .revisionConflict(let current): return errorEnvelope(code: "REVISION_CONFLICT", retryable: false, currentRevision: current)
-        case .alreadyWithdrawn: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds)
-        case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true)
-        }
-    }
+
 
     private func handleReadReceipt(_ request: IMV2RecordReadReceipt, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
         let outcome: V2ReadReceiptOutcome
@@ -1337,68 +904,6 @@ public struct V2GatewayDomainCommandHandler:
             return response
         case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
         }
-    }
-
-    private func handleOpenDirectRoom(_ request: IMV2OpenDirectRoom, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        switch try await directMessaging.open(actorUserID: identity.userID, operationID: try .init(request.operationID), targetUserID: try .init(request.targetUserID)) {
-        case .opened(let room), .idempotent(let room):
-            var response = IMV2Envelope(); response.directRoomOpened = .init()
-            response.directRoomOpened.roomID = room.roomID.rawValue
-            response.directRoomOpened.targetUserID = room.targetUserID.rawValue
-            response.directRoomOpened.createdAtMs = try v2GatewayMilliseconds(room.createdAt)
-            return response
-        case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true)
-        }
-    }
-
-    private func handleBeginGroupRoomCreation(_ request: IMV2BeginGroupRoomCreation, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let draft = try await groupAudienceImports.begin(actorUserID: identity.userID, operationID: try .init(request.operationID), title: request.title)
-        var response = IMV2Envelope(); response.groupRoomCreationPrepared = .init()
-        response.groupRoomCreationPrepared.operationID = draft.operationID.rawValue
-        response.groupRoomCreationPrepared.title = draft.title
-        response.groupRoomCreationPrepared.stagedMemberCount = try v2GatewayCount(draft.stagedMemberCount)
-        return response
-    }
-
-    private func handleAppendGroupRoomCreationMembers(_ request: IMV2AppendGroupRoomCreationMembers, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let members = try request.memberUserIds.map { try UserID($0) }
-        let draft = try await groupAudienceImports.append(actorUserID: identity.userID, operationID: try .init(request.operationID), memberUserIDs: members)
-        var response = IMV2Envelope(); response.groupRoomCreationMembersAppended = .init()
-        response.groupRoomCreationMembersAppended.operationID = draft.operationID.rawValue
-        response.groupRoomCreationMembersAppended.stagedMemberCount = try v2GatewayCount(draft.stagedMemberCount)
-        return response
-    }
-
-    private func handleFinalizeGroupRoomCreation(_ request: IMV2FinalizeGroupRoomCreation, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let outcome = try await groupAudienceImports.finalize(actorUserID: identity.userID, operationID: try .init(request.operationID))
-        switch outcome {
-        case .created(let room), .idempotent(let room):
-            return try groupRoomCreatedEnvelope(room)
-        case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        case .invalidMembers: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        case .memberLimitReached: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        case .rateLimited(let seconds): return errorEnvelope(code: "RATE_LIMITED", retryable: true, retryAfter: seconds)
-        case .unavailable: return errorEnvelope(code: "UNAVAILABLE", retryable: true)
-        }
-    }
-
-    private func handleCancelGroupRoomCreation(_ request: IMV2CancelGroupRoomCreation, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let operationID = try GroupRoomOperationID(request.operationID)
-        try await groupAudienceImports.cancel(actorUserID: identity.userID, operationID: operationID)
-        var response = IMV2Envelope(); response.groupRoomCreationCancelled = .init()
-        response.groupRoomCreationCancelled.operationID = operationID.rawValue
-        return response
-    }
-
-    private func groupRoomCreatedEnvelope(_ room: V2GroupRoom) throws -> IMV2Envelope {
-        var response = IMV2Envelope(); response.groupRoomCreated = .init()
-        response.groupRoomCreated.roomID = room.roomID.rawValue
-        response.groupRoomCreated.title = room.title
-        response.groupRoomCreated.createdAtMs = try v2GatewayMilliseconds(room.createdAt)
-        response.groupRoomCreated.capacityClass = room.capacityClass == .standard ? .standard : .large
-        response.groupRoomCreated.memberCount = try v2GatewayCount(room.memberCount)
-        return response
     }
 
     private func handleListRoomMembers(_ request: IMV2ListRoomMembers, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
@@ -1512,51 +1017,11 @@ public struct V2GatewayDomainCommandHandler:
         return response
     }
 
-    private func handleStrangerMessagePermission(_ request: IMV2SetStrangerMessagePermission, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let permission: V2StrangerMessagePermission
-        switch request.permission {
-        case .allow: permission = .allow
-        case .deny: permission = .deny
-        case .unspecified, .UNRECOGNIZED: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        }
-        switch try await directMessaging.setStrangerMessagePermission(actorUserID: identity.userID, operationID: try .init(request.operationID), permission: permission) {
-        case .updated(let result, let updatedAt), .idempotent(let result, let updatedAt):
-            var response = IMV2Envelope(); response.strangerMessagePermissionSet = .init()
-            response.strangerMessagePermissionSet.permission = result == .allow ? .allow : .deny
-            response.strangerMessagePermissionSet.updatedAtMs = try v2GatewayMilliseconds(updatedAt)
-            return response
-        case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        }
-    }
 
-    private func handleUserAddPermission(_ request: IMV2SetUserAddPermission, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let permission: V2UserAddPermission
-        switch request.permission {
-        case .allow: permission = .allow
-        case .deny: permission = .deny
-        case .unspecified, .UNRECOGNIZED: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        }
-        switch try await directMessaging.setUserAddPermission(actorUserID: identity.userID, operationID: try .init(request.operationID), permission: permission) {
-        case .updated(let result, let updatedAt), .idempotent(let result, let updatedAt):
-            var response = IMV2Envelope(); response.userAddPermissionSet = .init()
-            response.userAddPermissionSet.permission = result == .allow ? .allow : .deny
-            response.userAddPermissionSet.updatedAtMs = try v2GatewayMilliseconds(updatedAt)
-            return response
-        case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        }
-    }
 
-    private func handleReadReceiptPreferences(_ request: IMV2SetReadReceiptPreferences, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        switch try await readReceipt.setPreferences(actorUserID: identity.userID, operationID: try .init(request.operationID), allowsDirectReadReceipts: request.allowsDirectReadReceipts, allowsGroupReadReceipts: request.allowsGroupReadReceipts) {
-        case .updated(let preferences), .idempotent(let preferences):
-            var response = IMV2Envelope(); response.readReceiptPreferencesSet = .init()
-            response.readReceiptPreferencesSet.allowsDirectReadReceipts = preferences.allowsDirectReadReceipts
-            response.readReceiptPreferencesSet.allowsGroupReadReceipts = preferences.allowsGroupReadReceipts
-            response.readReceiptPreferencesSet.updatedAtMs = try v2GatewayMilliseconds(preferences.updatedAt)
-            return response
-        case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        }
-    }
+
+
+
 
     private func handleReadReceiptReaders(_ request: IMV2ListReadReceiptReaders, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
         guard request.pageSize > 0, request.pageSize <= 100, request.cursor.utf8.count <= 512 else {
@@ -1580,18 +1045,7 @@ public struct V2GatewayDomainCommandHandler:
         return response
     }
 
-    private func handleLiveActivityPreferences(_ request: IMV2SetLiveActivityPreferences, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        switch try await liveActivity.setPreferences(.init(actorUserID: identity.userID, operationID: try .init(request.operationID), allowsOnlinePresence: request.allowsOnlinePresence, allowsTypingIndicators: request.allowsTypingIndicators), now: now()) {
-        case .updated(let preferences), .idempotent(let preferences):
-            var response = IMV2Envelope(); response.liveActivityPreferencesSet = .init()
-            response.liveActivityPreferencesSet.allowsOnlinePresence = preferences.allowsOnlinePresence
-            response.liveActivityPreferencesSet.allowsTypingIndicators = preferences.allowsTypingIndicators
-            response.liveActivityPreferencesSet.updatedAtMs = try v2GatewayMilliseconds(preferences.updatedAt)
-            return response
-        case .idempotencyConflict:
-            return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        }
-    }
+
 
     private func handleGetLiveActivityPreferences(identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
         let preferences = try await liveActivity.preferences(userID: identity.userID, now: now())
@@ -1622,47 +1076,9 @@ public struct V2GatewayDomainCommandHandler:
         return successEnvelope()
     }
 
-    private func handleRelationship(_ request: IMV2ChangeRelationship, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let action: V2RelationshipAction
-        switch request.action {
-        case .request: action = .request
-        case .accept: action = .accept
-        case .reject: action = .reject
-        case .remove: action = .remove
-        case .unspecified, .UNRECOGNIZED: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        }
-        switch try await socialRelationships.changeRelationship(actorUserID: identity.userID, operationID: try .init(request.operationID), targetUserID: try .init(request.targetUserID), action: action) {
-        case .changed(let change), .idempotent(let change):
-            var response = IMV2Envelope(); response.relationshipChanged = .init()
-            response.relationshipChanged.targetUserID = change.targetUserID.rawValue
-            response.relationshipChanged.action = switch change.action { case .request: .request; case .accept: .accept; case .reject: .reject; case .remove: .remove }
-            response.relationshipChanged.resultingState = switch change.resultingState { case .none: .none; case .pending: .pending; case .accepted: .accepted }
-            response.relationshipChanged.updatedAtMs = try v2GatewayMilliseconds(change.updatedAt)
-            return response
-        case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        case .invalidState: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        case .forbidden: return errorEnvelope(code: "FORBIDDEN", retryable: false)
-        }
-    }
 
-    private func handleUserBlock(_ request: IMV2ChangeUserBlock, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let action: V2UserBlockAction
-        switch request.action {
-        case .block: action = .block
-        case .unblock: action = .unblock
-        case .unspecified, .UNRECOGNIZED: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
-        }
-        switch try await socialRelationships.changeUserBlock(actorUserID: identity.userID, operationID: try .init(request.operationID), targetUserID: try .init(request.targetUserID), action: action) {
-        case .changed(let change), .idempotent(let change):
-            var response = IMV2Envelope(); response.userBlockChanged = .init()
-            response.userBlockChanged.targetUserID = change.targetUserID.rawValue
-            response.userBlockChanged.action = change.action == .block ? .block : .unblock
-            response.userBlockChanged.isBlocked = change.isBlocked
-            response.userBlockChanged.updatedAtMs = try v2GatewayMilliseconds(change.updatedAt)
-            return response
-        case .idempotencyConflict: return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        }
-    }
+
+
 
     private func handlePull(_ request: IMV2SyncPull, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
         let token = request.syncToken.isEmpty ? nil : try V2SyncToken(request.syncToken)

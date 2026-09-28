@@ -41,8 +41,9 @@ struct V2AuthenticatedAccountMiddlewareTests {
                 authenticator: AccountAuthenticationFake(fixture: .accepted)
             ))
             .grouped(V2AuthenticatedAccountRateLimitMiddleware(limiter: limiter))
-        routes.post("v2", "profile-views", "batch") { _ in Response(status: .ok) }
         routes.put("v2", "profile", "me") { _ in Response(status: .ok) }
+        routes.post("v2","rooms",":roomID","personal-preferences","operations","recover") { _ in Response(status:.ok) }
+        routes.post("v2", "profile", "me", "operations", "recover") { _ in Response(status:.ok) }
         routes.get("v2", "profile-presentations", "contact-aliases") { _ in Response(status: .ok) }
         routes.get("v2", "devices") { _ in Response(status: .ok) }
         routes.get("v2", "public-identities", "me") { _ in Response(status: .ok) }
@@ -52,8 +53,9 @@ struct V2AuthenticatedAccountMiddlewareTests {
         routes.put("v2", "push-endpoint", "intent") { _ in Response(status: .ok) }
 
         for (method, path) in [
-            (HTTPRequest.Method.post, "v2/profile-views/batch"),
-            (.put, "v2/profile/me"),
+            (HTTPRequest.Method.put, "v2/profile/me"),
+            (.post, "v2/profile/me/operations/recover"),
+            (.post,"v2/rooms/00000000-0000-0000-0000-000000000001/personal-preferences/operations/recover"),
             (.get, "v2/profile-presentations/contact-aliases?limit=500"),
             (.get, "v2/devices?page_size=100"),
             (.get, "v2/public-identities/me"),
@@ -69,9 +71,9 @@ struct V2AuthenticatedAccountMiddlewareTests {
         }
         let charges = await limiter.charges()
         #expect(charges.map(\.scope) == [
-            "profile-views", "profile", "profile-presentations", "devices", "public-identities", "push", "push", "push",
+            "profile", "profile-recovery", "personal-preference-recovery", "profile-presentations", "devices", "public-identities", "push", "push", "push",
         ])
-        #expect(charges.map(\.cost) == [5, 3, 6, 2, 1, 1, 3, 3])
+        #expect(charges.map(\.cost) == [3, 3, 3, 6, 2, 1, 1, 3, 3])
     }
 
     @Test("authenticated limiter returns a no-store retry interval")
@@ -86,12 +88,17 @@ struct V2AuthenticatedAccountMiddlewareTests {
                 limiter: AccountRateLimitRecorder(result: .rateLimited(retryAfterSeconds: 7))
             ))
         routes.get("v2", "devices") { _ in "unreachable" }
+        routes.post("v2", "profile", "me", "operations", "recover") { _ in "unreachable" }
 
         try await app.testing { client in
             let response = try await client.send(.get, to: "v2/devices", beforeSend: authenticatedHeaders)
             #expect(response.status == .tooManyRequests)
             #expect(response.headers[.retryAfter] == "7")
             #expect(response.headers[.cacheControl] == "no-store")
+            let recovery = try await client.send(.post,to:"v2/profile/me/operations/recover",beforeSend:authenticatedHeaders)
+            #expect(recovery.status == .tooManyRequests)
+            #expect(recovery.headers[.retryAfter] == "7")
+            #expect(recovery.headers[.cacheControl] == "no-store")
         }
     }
 }

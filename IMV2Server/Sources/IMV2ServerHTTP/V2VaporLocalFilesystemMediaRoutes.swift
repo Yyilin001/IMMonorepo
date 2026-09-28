@@ -68,7 +68,7 @@ public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
                 throw Abort(.serviceUnavailable)
             }
             do {
-                let byteCounter = V2StreamingUploadByteCounter(maximumBytes: maximumUploadBytes)
+                let byteCounter = V2StreamingUploadByteCounter(maximumBytes: Int(contentLength))
                 let written = try await FileSystem.shared.withFileHandle(
                     forWritingAt: .init(upload.fileURL.path),
                     options: .newFile(replaceExisting: false)
@@ -118,11 +118,20 @@ public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
                 throw Abort(.serviceUnavailable)
             }
             guard object.byteCount <= Int64(Int.max) else { throw Abort(.serviceUnavailable) }
+            let eTag = try await object.strongETag()
+            var downloadRequest = request
+            // Compare before FileIO parses Range: stale offsets may exceed the new
+            // object's length. FileIO's default validator is not a content hash.
+            if let validator = downloadRequest.headers[.ifRange], validator != eTag {
+                downloadRequest.headers[.range] = nil
+            }
+            downloadRequest.headers[.ifNoneMatch] = nil
             var response = try await fileIO.streamFile(
                 at: object.fileURL.path,
-                for: request,
+                for: downloadRequest,
                 mediaType: .init(type: "application", subType: "octet-stream")
             )
+            response.headers[.eTag] = eTag
             for header in noStoreHeaders() {
                 response.headers[header.name] = header.value
             }

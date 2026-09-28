@@ -10,6 +10,8 @@ import SQLKit
 /// 因此一次被接受的撤回不会留下部分可见的墓碑。
 public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore, V2OwnerValidatedMessageWithdrawalStore {
     private let database: any Database
+    private var existingOperationTransaction = false
+    func usingOperationTransaction() -> Self { var copy=self;copy.existingOperationTransaction=true;return copy }
     private var activationScope: V2RoomActivationWriteScope?
 
     public func usingActivationScope(_ scope: V2RoomActivationWriteScope) -> Self {
@@ -62,7 +64,7 @@ public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore, V2Owne
     /// - Throws: 房间或消息不存在、发起者非作者、状态冲突或持久化失败时抛出。
     private func withdraw(command: V2WithdrawMessageCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageWithdrawalOutcome {
         return try await v2WithPostgresTransactionRetry(database: database,
-            maximumRetryCount: 0, classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil) { transaction in
+            maximumRetryCount: 0, classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil,existingTransaction:existingOperationTransaction) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2MessageWithdrawalStoreError.corruptPersistenceState }
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             let roomID = try withdrawalUUID(command.roomID)
@@ -73,17 +75,6 @@ public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore, V2Owne
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             if let ownerRoute { try await v2RequireRoomOwner(roomID: roomID, route: ownerRoute, sql: sql) }
             try await activationScope?.require([roomID], sql: sql)
-
-            if let prior = try await sql.raw("""
-                SELECT room_id, message_id, expected_message_revision, resulting_message_revision,
-                       room_sequence, event_id, created_at
-                FROM im_v2.message_withdrawal_operations
-                WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)
-                """).first(decoding: WithdrawalOperationRow.self) {
-                guard prior.matches(command: command, roomID: roomID, messageID: messageID) else { return .idempotencyConflict }
-                guard v2PostgresTimestampCanEncode(prior.createdAt) else { throw V2MessageWithdrawalStoreError.corruptPersistenceState }
-                return .idempotent(try prior.result())
-            }
 
             guard v2PostgresTimestampCanEncode(now) else { throw V2MessageWithdrawalStoreError.corruptPersistenceState }
             guard let room = try await sql.raw("""
@@ -194,13 +185,6 @@ public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore, V2Owne
                 ),
                 sql: sql
             )
-            try await sql.raw("""
-                INSERT INTO im_v2.message_withdrawal_operations
-                    (actor_user_id, operation_id, room_id, message_id, expected_message_revision,
-                     resulting_message_revision, room_sequence, event_id, created_at)
-                VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), \(bind: messageID), \(bind: try withdrawalSigned(command.expectedMessageRevision)),
-                        \(bind: nextMessageRevision), \(bind: nextRoomSequence), \(bind: eventUUID), \(bind: now))
-                """).run()
             return .withdrawn(try .init(roomID: command.roomID, messageID: command.messageID,
                                         messageRevision: withdrawalUnsigned(nextMessageRevision), roomSequence: withdrawalUnsigned(nextRoomSequence),
                                         eventID: eventID, createdAt: timestamp.createdAt))
@@ -213,12 +197,6 @@ private struct WithdrawalMessageRow: Decodable { let roomID: UUID; let senderUse
 private struct WithdrawalCommittedTimestampRow: Decodable {
     let createdAt: Date
     enum CodingKeys: String, CodingKey { case createdAt = "created_at" }
-}
-private struct WithdrawalOperationRow: Decodable {
-    let roomID: UUID; let messageID: UUID; let expectedMessageRevision: Int64; let resultingMessageRevision: Int64; let roomSequence: Int64; let eventID: UUID; let createdAt: Date
-    enum CodingKeys: String, CodingKey { case roomID = "room_id", messageID = "message_id", expectedMessageRevision = "expected_message_revision", resultingMessageRevision = "resulting_message_revision", roomSequence = "room_sequence", eventID = "event_id", createdAt = "created_at" }
-    func matches(command: V2WithdrawMessageCommand, roomID: UUID, messageID: UUID) -> Bool { self.roomID == roomID && self.messageID == messageID && expectedMessageRevision == command.expectedRevision.signedValue }
-    func result() throws -> V2MessageWithdrawal { try .init(roomID: .init(roomID.uuidString), messageID: .init(messageID.uuidString), messageRevision: withdrawalUnsigned(resultingMessageRevision), roomSequence: withdrawalUnsigned(roomSequence), eventID: .init(eventID.uuidString), createdAt: createdAt) }
 }
 private struct WithdrawalAdmissionRow { let eligibleMemberCount: Int; let commandWindowLimit: Int; let commandWindowUsed: Int; let shardLeaseID: UUID; let shardLeaseGeneration: Int64 }
 extension WithdrawalAdmissionRow: Decodable { enum CodingKeys: String, CodingKey { case eligibleMemberCount = "eligible_member_count", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", shardLeaseID = "shard_lease_id", shardLeaseGeneration = "shard_lease_generation" }; func state() throws -> RoomAdmissionState { try .init(eligibleMemberCount: eligibleMemberCount, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed)) } }

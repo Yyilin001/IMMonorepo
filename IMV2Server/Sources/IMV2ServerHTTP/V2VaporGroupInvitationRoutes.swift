@@ -34,15 +34,7 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
     ///
     /// 错误策略由 `mapErrors` 与顶层错误转换统一处理，常见映射到 400/403/404/409/422/429/503。
     public func register(on routes: RoutesBuilder) {
-        routes.post("v2", "group-invites") { request async throws -> Response in
-            let actor = try await authenticate(request)
-            let body = try await request.content.decode(CreateBody.self)
-            guard let room = try? RoomID(body.roomID), let operation = try? GroupInviteOperationID(body.operationID) else { throw Abort(.badRequest) }
-            let link = try await mapErrors {
-                try await invitations.create(.init(roomID: room, actorUserID: actor.userID, operationID: operation, lifetime: TimeInterval(body.lifetimeSeconds), maximumApprovedUses: body.maximumApprovedUses))
-            }
-            return try response(LinkResponse(link))
-        }
+
 
         routes.get("v2", "group-invites") { request async throws -> Response in
             let actor = try await authenticate(request)
@@ -50,13 +42,7 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
             return try response(LinksResponse(items: try await mapErrors { try await invitations.activeInvites(roomID: room, actorUserID: actor.userID) }.map(LinkResponse.init)))
         }
 
-        routes.post("v2", "group-invites", ":inviteID", "revoke") { request async throws -> Response in
-            let actor = try await authenticate(request)
-            let body = try await request.content.decode(RevokeBody.self)
-            guard let rawInvite = request.parameters.get("inviteID"), let invite = try? GroupInviteID(rawInvite), let room = try? RoomID(body.roomID), let operation = try? GroupInviteOperationID(body.operationID) else { throw Abort(.badRequest) }
-            try await mapErrors { try await invitations.revoke(inviteID: invite, roomID: room, actorUserID: actor.userID, operationID: operation) }
-            return noContentResponse()
-        }
+
 
         routes.post("v2", "group-invites", "preview") { request async throws -> Response in
             let actor = try await authenticate(request)
@@ -66,20 +52,7 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
             return try response(PreviewResponse(preview))
         }
 
-        routes.post("v2", "group-join-requests") { request async throws -> Response in
-            let actor = try await authenticate(request)
-            let body = try await request.content.decode(SubmitBody.self)
-            guard let secret = try? V2GroupInviteSecret(body.token), let operation = try? GroupJoinRequestOperationID(body.operationID) else { throw Abort(.badRequest) }
-            switch try await mapErrors({ try await invitations.submit(.init(applicantUserID: actor.userID, operationID: operation, secret: secret, note: body.note)) }) {
-            case .submitted(let value): return try response(SubmissionResponse(kind: "submitted", request: RequestResponse(value), preview: nil))
-            case .alreadyPending(let value): return try response(SubmissionResponse(kind: "already_pending", request: RequestResponse(value), preview: nil))
-            case .cancelled(let value): return try response(SubmissionResponse(kind: "cancelled", request: RequestResponse(value), preview: nil))
-            case .rejected(let value): return try response(SubmissionResponse(kind: "rejected", request: RequestResponse(value), preview: nil))
-            case .alreadyMember(let value): return try response(SubmissionResponse(kind: "already_member", request: nil, preview: PreviewResponse(value)))
-            case .unavailable: throw Abort(.notFound)
-            case .rateLimited: throw Abort(.tooManyRequests)
-            }
-        }
+
 
         routes.get("v2", "group-join-requests") { request async throws -> Response in
             let actor = try await authenticate(request)
@@ -100,31 +73,9 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
             return try response(RequestPageResponse(items: items, nextCursor: page.nextCursor))
         }
 
-        routes.post("v2", "group-join-requests", ":requestID", "cancel") { request async throws -> Response in
-            let actor = try await authenticate(request)
-            let body = try await request.content.decode(CancelBody.self)
-            guard let rawID = request.parameters.get("requestID"), let requestID = try? GroupJoinRequestID(rawID),
-                  let room = try? RoomID(body.roomID) else { throw Abort(.badRequest) }
-            let value = try await mapErrors {
-                try await invitations.cancel(roomID: room, requestID: requestID, applicantUserID: actor.userID)
-            }
-            return try response(RequestResponse(value))
-        }
 
-        routes.post("v2", "group-join-requests", ":requestID", "decision") { request async throws -> Response in
-            let actor = try await authenticate(request)
-            let body = try await request.content.decode(DecisionBody.self)
-            guard let rawID = request.parameters.get("requestID"), let requestID = try? GroupJoinRequestID(rawID), let room = try? RoomID(body.roomID), let operation = try? GroupJoinDecisionOperationID(body.operationID), let decision = V2GroupJoinDecision(rawValue: body.decision) else { throw Abort(.badRequest) }
-            switch try await mapErrors({ try await invitations.decide(.init(roomID: room, requestID: requestID, reviewerUserID: actor.userID, operationID: operation, decision: decision)) }) {
-            case .approved(let value): return try response(DecisionResponse(kind: "approved", request: RequestResponse(value)))
-            case .rejected(let value): return try response(DecisionResponse(kind: "rejected", request: RequestResponse(value)))
-            case .alreadyDecided(let value): return try response(DecisionResponse(kind: "already_decided", request: RequestResponse(value)))
-            case .conflict: throw Abort(.conflict)
-            case .memberLimitReached: throw Abort(.unprocessableContent, reason: "member_limit_reached")
-            case .rateLimited(let seconds): return retryAfter(seconds)
-            case .unavailable: throw unavailableResponseError()
-            }
-        }
+
+
     }
 
     private func authenticate(_ request: Request) async throws -> V2AuthenticatedConnection {

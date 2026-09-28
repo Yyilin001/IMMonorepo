@@ -12,17 +12,7 @@ extension V2ActorRoomCreationErrorWire {
         case .invalidMemberCount: self = .invalidMemberCount
         }
     }
-    public init(domain: V2GroupAudienceImportError) {
-        switch domain {
-        case .invalidInput: self = .invalidInput
-        case .missingDraft: self = .missingDraft
-        case .draftFrozen: self = .draftFrozen
-        case .memberLimitReached: self = .memberLimitReached
-        case .activeDraftLimitReached: self = .activeDraftLimitReached
-        case .idempotencyConflict: self = .idempotencyConflict
-        case .corruptPersistenceState: self = .corruptPersistenceState
-        }
-    }
+
     public init(domain: V2GroupRoomCreationIntentStoreError) {
         switch domain {
         case .invalidIntent: self = .invalidIntent
@@ -44,18 +34,7 @@ extension V2ActorRoomCreationErrorWire {
         default: throw V2GroupRoomCreationIntentStoreError.invalidIntent
         }
     }
-    public func toAudienceImportError() throws -> V2GroupAudienceImportError {
-        switch self {
-        case .invalidInput: .invalidInput
-        case .missingDraft: .missingDraft
-        case .draftFrozen: .draftFrozen
-        case .memberLimitReached: .memberLimitReached
-        case .activeDraftLimitReached: .activeDraftLimitReached
-        case .idempotencyConflict: .idempotencyConflict
-        case .corruptPersistenceState: .corruptPersistenceState
-        default: throw V2GroupRoomCreationIntentStoreError.invalidIntent
-        }
-    }
+
     public func toCreationIntentError() throws -> V2GroupRoomCreationIntentStoreError {
         switch self {
         case .invalidIntent: .invalidIntent

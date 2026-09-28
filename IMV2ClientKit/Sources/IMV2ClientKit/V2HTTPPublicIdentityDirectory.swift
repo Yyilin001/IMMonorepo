@@ -86,8 +86,7 @@ public struct V2HTTPPublicIdentityDirectory: V2PublicIdentityResolving, V2Public
         let canonical: V2PublicHandle
         do { canonical = try .init(handle) } catch { throw V2PublicIdentityDirectoryClientError.invalidHandle }
         let edgeCredentials: V2ClientPushEndpointCredentials
-        do { edgeCredentials = try await credentials.pushEndpointCredentials() } catch is CancellationError { throw CancellationError() }
-        catch { throw V2PublicIdentityDirectoryClientError.authorizationUnavailable }
+        do { edgeCredentials = try await credentials.pushEndpointCredentials() } catch is CancellationError { throw CancellationError() } catch let failure as V2HTTPFailure { throw failure } catch { throw V2PublicIdentityDirectoryClientError.authorizationUnavailable }
         try Task.checkCancellation()
         guard !edgeCredentials.accessToken.isEmpty,
               !edgeCredentials.accessToken.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 })
@@ -100,20 +99,22 @@ public struct V2HTTPPublicIdentityDirectory: V2PublicIdentityResolving, V2Public
         request.httpMethod = "GET"
         request.setValue("Bearer \(edgeCredentials.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue(edgeCredentials.deviceID.rawValue, forHTTPHeaderField: "X-IM-Device-ID")
+        V2HTTPRequestDeadline.attach(edgeCredentials.requestDeadline, to: &request)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         request.setValue("no-cache", forHTTPHeaderField: "Pragma")
         let data: Data
         let response: HTTPURLResponse
         do { (data, response) = try await transport.data(for: request) } catch is CancellationError { throw CancellationError() }
+        catch let failure as V2HTTPFailure { throw failure }
+        catch let error as V2AuthSessionError { throw error }
         catch { throw V2PublicIdentityDirectoryClientError.networkFailure }
         try Task.checkCancellation()
         switch response.statusCode {
         case 200 where V2HTTPContract.isJSON(response): break
         case 200: throw V2PublicIdentityDirectoryClientError.invalidResponse
-        case 401, 403: throw V2PublicIdentityDirectoryClientError.authorizationDenied
+        case 401, 403, 429, 503: throw V2HTTPFailure.status(response, service: "accountAPI")
         case 404: throw V2PublicIdentityDirectoryClientError.notFound
-        case 429: throw V2PublicIdentityDirectoryClientError.rateLimited(retryAfterSeconds: response.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init))
         default: throw V2PublicIdentityDirectoryClientError.serverStatus(response.statusCode)
         }
         guard data.count <= 8 * 1_024,

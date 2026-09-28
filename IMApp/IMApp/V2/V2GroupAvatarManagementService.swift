@@ -133,7 +133,7 @@ actor V2GroupAvatarManagementService: V2GroupAvatarManaging, V2PendingGroupAvata
         catch is CancellationError { throw CancellationError() }
         catch V2GroupAvatarReadError.forbidden { access = .forbidden }
         catch V2GroupAvatarManagementError.forbidden { access = .forbidden }
-        catch { access = .unavailable }
+        catch { throw error }
         // Losing current membership must not hide recovery of one's old command.
         return try await .init(access: access, pending: readPending(roomID: roomID))
     }
@@ -157,6 +157,7 @@ actor V2GroupAvatarManagementService: V2GroupAvatarManaging, V2PendingGroupAvata
                     maximum = min(supported.maximumBytes, 10 * 1_024 * 1_024)
                 }
             } catch is CancellationError { throw CancellationError() }
+            catch let error as V2AuthSessionError where error != .credentialsUnavailable { throw error }
             catch { /* New uploads remain disabled; existing commands can recover. */ }
         }
         try requireOpen()

@@ -100,7 +100,7 @@ public struct V2ReadReceiptReadersPage: Equatable, Sendable {
 /// 用户明确阅读行为的幂等声明，与设备传输确认及同步 ACK 分开。
 ///
 /// 已读位置只允许向前推进，由服务端事务与现有值比较；构造器只校验单个输入范围。
-public struct V2RecordReadReceiptCommand: Equatable, Sendable {
+public struct V2RecordReadReceiptCommand: Equatable, Codable, Sendable {
     /// 已读房间。
     public let roomID: RoomID
     /// 声明已读的用户。
@@ -121,7 +121,7 @@ public struct V2RecordReadReceiptCommand: Equatable, Sendable {
 }
 
 /// 服务端记录的用户房间已读位置及记录时间。
-public struct V2ReadReceipt: Equatable, Sendable {
+public struct V2ReadReceipt: Equatable, Codable, Sendable {
     /// 已读位置所属房间。
     public let roomID: RoomID
     /// 阅读用户。

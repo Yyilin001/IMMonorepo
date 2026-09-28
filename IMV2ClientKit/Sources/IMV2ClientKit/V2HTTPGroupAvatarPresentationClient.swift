@@ -38,6 +38,7 @@ public struct V2HTTPGroupAvatarPresentationClient: V2GroupAvatarPresentationRead
         request.httpMethod = "GET"
         request.setValue("Bearer \(identity.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue(identity.deviceID.rawValue, forHTTPHeaderField: "X-IM-Device-ID")
+        V2HTTPRequestDeadline.attach(identity.requestDeadline, to: &request)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         let (data, response) = try await transport.data(for: request)
@@ -47,8 +48,8 @@ public struct V2HTTPGroupAvatarPresentationClient: V2GroupAvatarPresentationRead
         case 401: throw V2ClientMediaTransferError.authorizationUnavailable
         case 403: throw V2GroupAvatarReadError.forbidden
         case 429:
-            let raw = response.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init) ?? 1
-            throw V2GroupAvatarReadError.throttled(retryAfter: raw.isFinite ? min(60, max(1, raw)) : 1)
+            let delay = V2RetryAfter.delay(from: response.value(forHTTPHeaderField: "Retry-After"))
+            throw V2GroupAvatarReadError.throttled(retryAfter: delay)
         default: throw V2GroupAvatarReadError.unavailable
         }
         guard V2HTTPContract.isJSON(response), data.count <= 64 * 1_024 else { throw V2GroupAvatarReadError.invalidResponse }

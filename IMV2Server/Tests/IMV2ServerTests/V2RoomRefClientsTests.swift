@@ -10,20 +10,32 @@ struct V2RoomRefClientsTests {
     func administrationFailure() async throws {
         let room = RoomID(uuid: UUID()), actor = UserID(uuid: UUID()), target = UserID(uuid: UUID())
         let operation = try MembershipOperationID(UUID().uuidString)
-        let request = V2AuthenticatedMembershipChange(roomID: room, actorUserID: actor,
+        let request = try V2MembershipIntent(roomID: room, actorUserID: actor,
             operationID: operation, targetUserID: target, action: .add,
-            expectedMembershipRevision: 1)
+            expectedMembershipRevision: 1, confirmedUntilMilliseconds: 1_750_000_120_000)
         let caller = V2RoomRefUserCaller(timeout: .seconds(5)) { wire, principal, deadline in
             #expect(principal == actor && deadline > .now)
-            guard case .administration(.membership(let value)) = wire else {
+            guard case .administration(.membershipAdmission(let value)) = wire else {
                 Issue.record("wrong administration request"); throw V2RoomCallFailure.outcomeUnknown
             }
             #expect(value.roomID == room && value.operationID == operation && value.actorUserID == actor)
             return .administration(.failure(.membership(.actorNotOwner)))
         }
+        let cancelled = V2RoomRefUserCaller(timeout: .seconds(5)) { _, _, _ in
+            throw V2RoomCallFailure.notAccepted(.cancelled)
+        }
+        await #expect(throws: CancellationError.self) {
+            _ = try await V2RoomRefAdministrationClient(caller: cancelled).admitMembershipOperation(request)
+        }
+        let unknown = V2RoomRefUserCaller(timeout: .seconds(5)) { _, _, _ in
+            throw V2RoomCallFailure.outcomeUnknown
+        }
+        await #expect(throws: V2RoomCallFailure.outcomeUnknown) {
+            _ = try await V2RoomRefAdministrationClient(caller: unknown).admitMembershipOperation(request)
+        }
         let client = V2RoomRefAdministrationClient(caller: caller)
         await #expect(throws: V2RoomMembershipStoreError.actorNotOwner) {
-            _ = try await client.change(request)
+            _ = try await client.admitMembershipOperation(request)
         }
     }
 
@@ -31,17 +43,20 @@ struct V2RoomRefClientsTests {
     func administrationResultIdentity() async throws {
         let room = RoomID(uuid: UUID()), otherRoom = RoomID(uuid: UUID())
         let actor = UserID(uuid: UUID()), target = UserID(uuid: UUID())
-        let request = V2AuthenticatedMembershipChange(roomID: room, actorUserID: actor,
+        let request = try V2MembershipIntent(roomID: room, actorUserID: actor,
             operationID: try .init(UUID().uuidString), targetUserID: target, action: .add,
-            expectedMembershipRevision: 1)
-        let result = V2ActorMembershipChangeResultWire(roomID: otherRoom, targetUserID: target,
-            action: .add, membershipRevision: 2, roomSequence: 1,
-            eventID: try .init(UUID().uuidString), createdAt: Date())
+            expectedMembershipRevision: 1, confirmedUntilMilliseconds: 1_750_000_120_000)
+        let wrongIntent = try V2MembershipIntent(roomID: otherRoom, actorUserID: actor,
+            operationID: request.operationID, targetUserID: target, action: .add, expectedMembershipRevision: 1,
+            confirmedUntilMilliseconds: request.confirmedUntilMilliseconds)
+        let result = try V2MembershipAdmission(id: .init(uuid: UUID()), identity: wrongIntent.identity,
+            intentFingerprint: wrongIntent.fingerprint, action: .add, membershipRevision: 1, targetJoinedRevision: nil,
+            issuedAtMilliseconds: 1_750_000_000_000, expiresAtMilliseconds: request.confirmedUntilMilliseconds)
         let caller = V2RoomRefUserCaller(timeout: .seconds(5)) { _, _, _ in
-            .administration(.membership(.changed(result)))
+            .administration(.membershipAdmission(.admitted(result)))
         }
         await #expect(throws: V2RoomCallFailure.outcomeUnknown) {
-            _ = try await V2RoomRefAdministrationClient(caller: caller).change(request)
+            _ = try await V2RoomRefAdministrationClient(caller: caller).admitMembershipOperation(request)
         }
     }
 
@@ -166,8 +181,8 @@ struct V2RoomRefClientsTests {
         }
         let client = V2RoomRefProfilePresentationClient(aliases: UnusedAliases(), caller: caller)
         await #expect(throws: V2ProfilePresentationError.forbidden) {
-            _ = try await client.updateOwnGroupNickname(actorUserID: actor, roomID: room,
-                operationID: operation, expectedRevision: nil, nickname: "member")
+            _ = try await client.updateOwnGroupNickname(.init(actorUserID: actor, roomID: room,
+                operationID: operation, expectedRevision: nil, nickname: "member",firstSubmissionDeadlineMilliseconds:UInt64(Int64.max))).committedValue
         }
     }
 
@@ -247,18 +262,14 @@ private struct UnusedAliases: V2ProfilePresentationManaging {
     func contactAliases(ownerUserID: UserID, afterTargetUserID: UserID?, limit: Int) async throws -> V2ContactAliasPage {
         .init(values: [], nextCursor: nil)
     }
-    func updateContactAlias(ownerUserID: UserID, targetUserID: UserID,
-                            operationID: ContactAliasOperationID, expectedRevision: V2ProfileRevision?,
-                            remarkName: String?) async throws -> V2ContactAlias {
-        throw V2ProfilePresentationError.corruptPersistenceState
-    }
+    func updateContactAlias(_ command: V2ContactAliasUpdateCommand) async throws -> V2ContactAliasUpdateReceipt { throw V2ProfilePresentationError.corruptPersistenceState }
+    func recoverContactAlias(_ request: V2ContactAliasRecoveryRequest) async throws -> V2ContactAliasRecoveryResult { throw V2ProfilePresentationError.corruptPersistenceState }
+    func contactAliasSnapshot(ownerUserID: UserID, targetUserID: UserID) async throws -> V2ContactAliasSnapshot { throw V2ProfilePresentationError.corruptPersistenceState }
     func groupNicknames(actorUserID: UserID, roomID: RoomID,
                         afterUserID: UserID?, limit: Int) async throws -> V2GroupNicknamePage {
         throw V2ProfilePresentationError.corruptPersistenceState
     }
-    func updateOwnGroupNickname(actorUserID: UserID, roomID: RoomID,
-                                operationID: GroupNicknameOperationID, expectedRevision: V2ProfileRevision?,
-                                nickname: String?) async throws -> V2GroupMemberPresentation {
-        throw V2ProfilePresentationError.corruptPersistenceState
-    }
+    func updateOwnGroupNickname(_ command: V2GroupNicknameUpdateCommand) async throws -> V2GroupNicknameUpdateReceipt { throw V2ProfilePresentationError.corruptPersistenceState }
+    func recoverGroupNickname(_ request: V2GroupNicknameRecoveryRequest) async throws -> V2GroupNicknameRecoveryResult { throw V2ProfilePresentationError.corruptPersistenceState }
+    func ownGroupNicknameSnapshot(actorUserID: UserID, roomID: RoomID) async throws -> V2GroupNicknameSnapshot { throw V2ProfilePresentationError.corruptPersistenceState }
 }

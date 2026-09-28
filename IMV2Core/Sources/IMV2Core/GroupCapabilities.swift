@@ -131,12 +131,11 @@ public struct V2GroupMemberRoleCommand: Equatable, Sendable {
     ///   - roomID: 目标群。
     ///   - targetUserID: 待修改角色的成员。
     ///   - role: 目标角色，只允许 admin 或 member。
-    ///   - expectedMembershipRevision: 预期成员修订号，1 到 Int64.max。
+    ///   - expectedMembershipRevision: 预期成员修订号，0 到 Int64.max；0 是有效的初始成员基线。
     ///
-    /// 目标角色为 owner 时抛出 memberRoleCannotBeOwner，版本为零时抛出 invalidPositiveValue，超范围时抛出 outOfRange；不读取目标当前角色或成员资格。
+    /// 目标角色为 owner 时抛出 memberRoleCannotBeOwner，版本超范围时抛出 outOfRange；不读取目标当前角色或成员资格。
     public init(operationID: GroupRoleOperationID, roomID: RoomID, targetUserID: UserID, role: V2RoomMembershipRole, expectedMembershipRevision: UInt64) throws {
         guard role != .owner else { throw V2GroupPermissionValidationError.memberRoleCannotBeOwner }
-        guard expectedMembershipRevision > 0 else { throw V2CoreError.invalidPositiveValue }
         guard expectedMembershipRevision <= UInt64(Int64.max) else { throw V2RevisionValidationError.outOfRange }
         self.operationID = operationID; self.roomID = roomID; self.targetUserID = targetUserID; self.role = role; self.expectedMembershipRevision = expectedMembershipRevision
     }

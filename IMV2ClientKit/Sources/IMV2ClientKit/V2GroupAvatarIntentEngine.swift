@@ -156,6 +156,13 @@ public actor V2GroupAvatarIntentEngine {
         return replacement
     }
 
+    /// Account activity cancellation drains shared command I/O before network admission closes.
+    public func stopRecoveryAndDrain() async {
+        let running = Array(flights.values)
+        for flight in running { flight.cancel() }
+        for flight in running { _ = await flight.result }
+    }
+
     public func close() async {
         closed = true
         async let drainOperations: Void = operations.close()
@@ -186,7 +193,12 @@ public actor V2GroupAvatarIntentEngine {
         if !value.submissionStarted, let jobID = value.uploadJobID {
             do {
                 guard let job = try await store.resourceTransfer(id: jobID) else { throw V2GroupAvatarIntentError.invalidRecord }
-                if job.stage != .ready { _ = try await transfers.resume(id: jobID) }
+                if job.stage != .ready || job.cancellationRequested {
+                    if job.cancellationRequested || job.needsAttention || [.cancelled,.rejected,.expired].contains(job.stage) {
+                        try await store.pauseGroupAvatarPreparation(id)
+                    }
+                    return try await requireIntent(id)
+                }
             } catch is CancellationError { throw CancellationError() }
             catch {
                 try requireOpen()
@@ -200,24 +212,33 @@ public actor V2GroupAvatarIntentEngine {
         do { claim = try await store.claimGroupAvatarSubmission(id, now: now()) }
         catch V2ResourceJournalError.bindingExpired { try await store.pauseGroupAvatarPreparation(id); throw V2ResourceJournalError.bindingExpired }
         do {
-            if let action = claim.intent.recoveryAction {
-                guard let recovery else { throw V2GroupAvatarIntentError.recoveryUnavailable }
-                let request = V2GroupAvatarRecoveryRequest(command: claim.intent.command, action: action)
-                let response = try await recovery.recoverGroupAvatar(request)
-                try await store.finishGroupAvatarRecovery(claim, response: response, now: now())
-            } else {
-                let response = try await submissions.submitGroupAvatar(claim.intent.command)
-                try await store.finishGroupAvatarSubmission(claim, response: response, now: now())
+            try await V2NetworkWorkScope.$context.withValue(.init(service: "groupAvatar", priority: .recovery, isRetry: claim.intent.attempts>1)) {
+                try await V2HTTPRequestDeadline.$current.withValue(ContinuousClock.now.advanced(by: .seconds(15))) {
+                    if let action = claim.intent.recoveryAction {
+                        guard let recovery else { throw V2GroupAvatarIntentError.recoveryUnavailable }
+                        let request = V2GroupAvatarRecoveryRequest(command: claim.intent.command, action: action)
+                        let response = try await recovery.recoverGroupAvatar(request)
+                        try await store.finishGroupAvatarRecovery(claim, response: response, now: now())
+                    } else {
+                        let response = try await submissions.submitGroupAvatar(claim.intent.command)
+                        try await store.finishGroupAvatarSubmission(claim, response: response, now: now())
+                    }
+                }
             }
         } catch {
             let issue: V2GroupAvatarIntent.Issue
             let attention: Bool
-            var delay = min(60, pow(2, Double(min(6, claim.intent.attempts))))
+            var delay = Double.random(in: 0.5...1) * min(30, pow(2, Double(min(5, claim.intent.attempts))))
             switch error {
-            case V2GroupAvatarSubmissionError.authorizationUnavailable: issue = .authorizationUnavailable; attention = true
+            case V2GroupAvatarSubmissionError.authorizationUnavailable: issue = .authorizationUnavailable; attention = false
+            case V2GroupAvatarSubmissionError.authorizationDenied: issue = .forbidden; attention = true
             case V2GroupAvatarSubmissionError.invalidResponse: issue = .invalidResponse; attention = true
             case V2GroupAvatarSubmissionError.operationClosed: issue = .outcomeUnknown; attention = true
-            case V2GroupAvatarSubmissionError.throttled(let retry): issue = .throttled; attention = false; delay = max(delay, min(60, max(1, retry.isFinite ? retry : 1)))
+            case V2GroupAvatarSubmissionError.throttled(let retry):
+                issue = .throttled
+                // A lower bound outside this recovery step's budget requires user attention.
+                attention = !retry.isFinite || retry < 0 || retry > V2NetworkWorkPolicy.commandRecovery.totalBudget
+                if retry.isFinite && retry>=0 { delay = max(delay,retry) }
             default: issue = .outcomeUnknown; attention = false
             }
             try await store.failGroupAvatarSubmission(claim, issue: issue, retryAt: now().addingTimeInterval(delay), attention: attention)

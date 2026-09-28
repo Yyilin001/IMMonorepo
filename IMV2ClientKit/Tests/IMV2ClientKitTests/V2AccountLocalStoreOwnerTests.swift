@@ -13,19 +13,17 @@ struct V2AccountLocalStoreOwnerTests {
         defer { fixture.removeFiles() }
         let owner = fixture.owner()
         let a = try await owner.open(accountID: .init("account-a"))
-        let original = try command("first-a")
-        try await a.enqueue(original)
+        let original = try await persistDurableMessage(in: a, roomID: .init("room"), clientMessageID: .init("first-a"), text: "first-a")
         try await owner.close(a)
         let b = try await owner.open(accountID: .init("account-b"))
         try await owner.close(b)
         let newA = try await owner.open(accountID: .init("account-a"))
         #expect(newA !== a)
         try await owner.close(a)
-        #expect(try await newA.pendingMessageCommands() == [original])
-        await #expect(throws: DatabaseError.self) { try await a.enqueue(command("stale")) }
-        let next = try command("new-a")
-        try await newA.enqueue(next)
-        #expect(try await newA.pendingMessageCommands().count == 2)
+        #expect(try await savedDurableMessages(in: newA) == [original])
+        await #expect(throws: DatabaseError.self) { try await persistDurableMessage(in: a, roomID: .init("room"), clientMessageID: .init("stale"), text: "stale") }
+        try await persistDurableMessage(in: newA, roomID: .init("room"), clientMessageID: .init("new-a"), text: "new-a")
+        #expect(try await savedDurableMessages(in: newA).count == 2)
         try await owner.close(newA)
     }
 
@@ -60,21 +58,17 @@ struct V2AccountLocalStoreOwnerTests {
         defer { fixture.removeFiles() }
         let owner = fixture.owner()
         let a = try await owner.open(accountID: .init("account-a"))
-        let pending = try command("only-a")
-        try await a.enqueue(pending)
+        try await persistDurableMessage(in: a, roomID: .init("room"), clientMessageID: .init("only-a"), text: "only-a")
         let aScope = try await owner.scope(for: a)
         try await owner.close(a)
         let b = try await owner.open(accountID: .init("account-b"))
-        #expect(try await b.pendingMessageCommands().isEmpty)
+        #expect(try await savedDurableMessages(in: b).isEmpty)
         #expect(try await owner.scope(for: b).directory != aScope.directory)
         #expect(try fixture.root.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
         try await owner.close(b)
     }
 
-    private func command(_ id: String) throws -> V2PendingMessageCommand {
-        try .init(roomID: .init("room"), clientMessageID: .init(id), text: id, state: .pending, attemptCount: 0,
-                  nextAttemptAt: .distantPast, acceptedMessageID: nil, acceptedRoomSequence: nil, terminalCode: nil)
-    }
+
 }
 
 private struct Fixture {

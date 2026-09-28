@@ -21,10 +21,12 @@ extension GRDBV2LocalSyncStore {
                             SELECT read_through_room_sequence AS value FROM v2_room_read_watermarks
                             WHERE room_id = state.room_id
                             UNION ALL
-                            SELECT CASE WHEN state = 'acknowledged' THEN resulting_room_sequence
-                                        ELSE read_through_room_sequence END AS value
-                            FROM v2_pending_read_receipts
-                            WHERE room_id = state.room_id AND state IN ('pending', 'acknowledged')
+                            SELECT desired_sequence AS value FROM v2_read_receipt_intents WHERE room_id=state.room_id
+                            UNION ALL
+                            SELECT requested_sequence AS value FROM v2_read_receipt_archives WHERE room_id=state.room_id
+                            UNION ALL
+                            SELECT r.requested_sequence AS value FROM v2_read_receipt_operations r JOIN v2_operation_work w ON w.work_id=r.work_id
+                            WHERE r.room_id=state.room_id AND w.execution_state NOT IN ('rejected','closed','cancelledLocally','expiredUnsubmitted')
                         )) AS local_read
                     FROM v2_room_sync_states AS state
                     JOIN v2_room_recovery_scan AS scan ON scan.singleton = 1

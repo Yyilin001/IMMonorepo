@@ -119,76 +119,6 @@ struct V2ProtobufSyncTransportTests {
         #expect(await wire.receivedHeartbeat())
     }
 
-    @Test("membership operations preserve their stable operation ID on the authenticated wire")
-    func membershipChangeRoundTrips() async throws {
-        let wire = MembershipWire()
-        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1)
-        let result = try await transport.changeMembership(
-            roomID: .init("00000000-0000-0000-0000-000000000311"),
-            operationID: .init("00000000-0000-0000-0000-000000000312"),
-            targetUserID: .init("00000000-0000-0000-0000-000000000313"),
-            action: .add,
-            expectedMembershipRevision: 4
-        )
-        #expect(result.membershipRevision == 5)
-        #expect(await wire.operationID() == "00000000-0000-0000-0000-000000000312")
-    }
-
-    @Test("direct room and stranger-message preference preserve their operation IDs")
-    func directMessagingRoundTrips() async throws {
-        let wire = DirectMessagingWire()
-        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1)
-        let target = try UserID("00000000-0000-0000-0000-000000000318")
-        let room = try await transport.openDirectRoom(operationID: try .init("00000000-0000-0000-0000-000000000319"), targetUserID: target)
-        let updatedAt = try await transport.setStrangerMessagePermission(operationID: try .init("00000000-0000-0000-0000-000000000320"), permission: .deny)
-        #expect(room.targetUserID == target)
-        #expect(updatedAt == Date(timeIntervalSince1970: 1_750_000_000))
-        #expect(await wire.operationIDs() == ["00000000-0000-0000-0000-000000000319", "00000000-0000-0000-0000-000000000320"])
-    }
-
-    @Test("staged group creation preserves durable intent and bounded response")
-    func groupCreationRoundTrips() async throws {
-        let wire = GroupMessagingWire()
-        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1)
-        let member = try UserID("00000000-0000-0000-0000-000000000327")
-        let operationID: GroupRoomOperationID = try .init("00000000-0000-0000-0000-000000000326")
-        let prepared = try await transport.beginGroupRoomCreation(operationID: operationID, title: "  Project  ")
-        let appended = try await transport.appendGroupRoomCreationMembers(operationID: operationID, memberUserIDs: [member])
-        let room = try await transport.finalizeGroupRoomCreation(operationID: operationID)
-        #expect(prepared.title == "Project")
-        #expect(appended.stagedMemberCount == 1)
-        #expect(room.title == "Project")
-        #expect(room.memberUserIDs.isEmpty)
-        #expect(await wire.operationID() == "00000000-0000-0000-0000-000000000326")
-    }
-
-    @Test("relationship and block commands preserve operation IDs and canonical state")
-    func socialRelationshipRoundTrips() async throws {
-        let wire = SocialRelationshipWire()
-        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1)
-        let target = try UserID("00000000-0000-0000-0000-000000000323")
-        let relationship = try await transport.changeRelationship(operationID: try .init("00000000-0000-0000-0000-000000000324"), targetUserID: target, action: .request)
-        let block = try await transport.changeUserBlock(operationID: try .init("00000000-0000-0000-0000-000000000325"), targetUserID: target, action: .block)
-        #expect(relationship.targetUserID == target)
-        #expect(relationship.resultingState == .pending)
-        #expect(block.isBlocked)
-        #expect(await wire.operationIDs() == ["00000000-0000-0000-0000-000000000324", "00000000-0000-0000-0000-000000000325"])
-    }
-
-    @Test("membership revision conflict preserves the authoritative revision")
-    func membershipRevisionConflictCarriesCurrentRevision() async throws {
-        let transport = V2ProtobufSyncTransport(wire: MembershipRevisionConflictWire(), protocolVersion: 1)
-        await #expect(throws: V2RealtimeTransportError.server(code: "REVISION_CONFLICT", retryable: false, retryAfterSeconds: 0, currentRevision: 12)) {
-            try await transport.changeMembership(
-                roomID: .init("00000000-0000-0000-0000-000000000314"),
-                operationID: .init("00000000-0000-0000-0000-000000000315"),
-                targetUserID: .init("00000000-0000-0000-0000-000000000316"),
-                action: .remove,
-                expectedMembershipRevision: 11
-            )
-        }
-    }
-
     @Test("snapshot manifests with a different projection schema are rejected before a reset begins")
     func rejectsUnsupportedSnapshotSchema() async throws {
         let reset = try V2ClientResetRequired(
@@ -203,42 +133,21 @@ struct V2ProtobufSyncTransportTests {
         }
     }
 
-    @Test("message withdrawal preserves its operation ID and validates the authoritative revision")
-    func messageWithdrawalRoundTrips() async throws {
-        let wire = MessageWithdrawalWire()
-        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1)
-        let result = try await transport.withdrawMessage(
-            roomID: .init("00000000-0000-0000-0000-000000000321"),
-            operationID: .init("00000000-0000-0000-0000-000000000322"),
-            messageID: .init("00000000-0000-0000-0000-000000000323"),
-            expectedMessageRevision: 1
-        )
-        #expect(result.messageRevision == 2)
-        #expect(await wire.operationID() == "00000000-0000-0000-0000-000000000322")
+    @Test("frozen withdrawal preserves original identity across Codable transport")
+    func messageWithdrawalRoundTrips() throws {
+        let command = try V2MessageWithdrawalOperationCommand(command: .init(roomID: .init(uuid: UUID()), actorUserID: .init(uuid: UUID()),
+            operationID: .init(uuid: UUID()), messageID: .init(uuid: UUID()), expectedMessageRevision: 1), firstSubmissionDeadlineMilliseconds: 1000)
+        let restored = try JSONDecoder().decode(V2MessageWithdrawalOperationCommand.self, from: JSONEncoder().encode(command))
+        #expect(restored == command)
+        #expect(try restored.identity == command.identity)
+        #expect(try restored.fingerprint == command.fingerprint)
     }
 
-    @Test("message redaction preserves its moderator operation ID and reason code")
-    func messageRedactionRoundTrips() async throws {
-        let wire = MessageRedactionWire()
-        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1)
-        let result = try await transport.redactMessage(
-            roomID: .init("00000000-0000-0000-0000-000000000326"),
-            operationID: .init("00000000-0000-0000-0000-000000000327"),
-            messageID: .init("00000000-0000-0000-0000-000000000328"),
-            reasonCode: .init("policy_violation")
-        )
-        #expect(result.messageRevision == 2)
-        #expect(await wire.command() == ("00000000-0000-0000-0000-000000000327", "policy_violation"))
-    }
-
-    @Test("member mute preserves its operation and bounded expiry on the authenticated wire")
-    func memberMuteRoundTrips() async throws {
-        let wire = MemberMuteWire()
-        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1)
-        let muteUntil = Date(timeIntervalSince1970: 1_750_000_300)
-        let result = try await transport.muteMember(roomID: .init("00000000-0000-0000-0000-000000000329"), operationID: .init("00000000-0000-0000-0000-000000000330"), targetUserID: .init("00000000-0000-0000-0000-000000000331"), muteUntil: muteUntil, reasonCode: .init("abuse_spam"))
-        #expect(result.muteUntil == muteUntil)
-        #expect(await wire.operationID() == "00000000-0000-0000-0000-000000000330")
+    @Test("retired mutation wire fields no longer decode as executable requests", arguments: [22,43,44,45,47,49,51,52,53,55,58,67,68,69,70,71,72,73,74,76,80,97,99,101,103])
+    func retiredMutationWire(field: Int) throws {
+        let tag=(field<<3)|2
+        let envelope = try IMV2Envelope(serializedBytes: [UInt8(tag & 127)|128, UInt8(tag>>7), UInt8(0)])
+        #expect(envelope.body == nil)
     }
 
     @Test("member directory uses a bounded page and maps canonical roles")
@@ -465,197 +374,7 @@ private actor ReadReceiptReadersWire: V2AuthenticatedFrameTransport {
     }
 }
 
-private actor MemberMuteWire: V2AuthenticatedFrameTransport {
-    private var receivedOperationID = ""
 
-    func request(_ frame: V2Frame) throws -> V2Frame {
-        let request = try V2ProtobufFrameCodec.decode(frame)
-        guard case .muteMember(let command)? = request.body else { throw V2RealtimeTransportError.unexpectedResponse }
-        receivedOperationID = command.operationID
-        var response = IMV2Envelope(); response.requestID = request.requestID; response.protocolVersion = request.protocolVersion
-        response.memberMuted = .init()
-        response.memberMuted.roomID = command.roomID
-        response.memberMuted.targetUserID = command.targetUserID
-        response.memberMuted.muteUntilMs = command.muteUntilMs
-        response.memberMuted.roomSequence = 9
-        response.memberMuted.serverCreatedAtMs = 1_750_000_000_000
-        return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
-    }
-
-    func operationID() -> String { receivedOperationID }
-}
-
-private actor MessageRedactionWire: V2AuthenticatedFrameTransport {
-    private var received: (String, String) = ("", "")
-
-    func request(_ frame: V2Frame) throws -> V2Frame {
-        let request = try V2ProtobufFrameCodec.decode(frame)
-        guard case .moderateMessage(let command)? = request.body else { throw V2RealtimeTransportError.unexpectedResponse }
-        received = (command.operationID, command.reasonCode)
-        var response = IMV2Envelope()
-        response.requestID = request.requestID
-        response.protocolVersion = request.protocolVersion
-        response.messageRedacted = .init()
-        response.messageRedacted.roomID = command.roomID
-        response.messageRedacted.messageID = command.messageID
-        response.messageRedacted.messageRevision = 2
-        response.messageRedacted.roomSequence = 8
-        response.messageRedacted.serverCreatedAtMs = 1_750_000_000_000
-        return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
-    }
-
-    func command() -> (String, String) { received }
-}
-
-private actor MessageWithdrawalWire: V2AuthenticatedFrameTransport {
-    private var receivedOperationID = ""
-
-    func request(_ frame: V2Frame) throws -> V2Frame {
-        let request = try V2ProtobufFrameCodec.decode(frame)
-        guard case .withdrawMessage(let command)? = request.body else { throw V2RealtimeTransportError.unexpectedResponse }
-        receivedOperationID = command.operationID
-        var response = IMV2Envelope()
-        response.requestID = request.requestID
-        response.protocolVersion = request.protocolVersion
-        response.messageWithdrawn = .init()
-        response.messageWithdrawn.roomID = command.roomID
-        response.messageWithdrawn.messageID = command.messageID
-        response.messageWithdrawn.messageRevision = command.expectedMessageRevision + 1
-        response.messageWithdrawn.roomSequence = 8
-        response.messageWithdrawn.serverCreatedAtMs = 1_750_000_000_000
-        return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
-    }
-
-    func operationID() -> String { receivedOperationID }
-}
-
-private actor MembershipWire: V2AuthenticatedFrameTransport {
-    private var receivedOperationID = ""
-
-    func request(_ frame: V2Frame) throws -> V2Frame {
-        let request = try V2ProtobufFrameCodec.decode(frame)
-        guard case .changeRoomMembership(let command)? = request.body else { throw V2RealtimeTransportError.unexpectedResponse }
-        receivedOperationID = command.operationID
-        var response = IMV2Envelope()
-        response.requestID = request.requestID
-        response.protocolVersion = request.protocolVersion
-        response.membershipChanged = .init()
-        response.membershipChanged.roomID = command.roomID
-        response.membershipChanged.targetUserID = command.targetUserID
-        response.membershipChanged.action = command.action
-        response.membershipChanged.membershipRevision = 5
-        response.membershipChanged.roomSequence = 8
-        response.membershipChanged.serverCreatedAtMs = 1_750_000_000_000
-        return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
-    }
-
-    func operationID() -> String { receivedOperationID }
-}
-
-private actor DirectMessagingWire: V2AuthenticatedFrameTransport {
-    private var receivedOperationIDs: [String] = []
-
-    func request(_ frame: V2Frame) throws -> V2Frame {
-        let request = try V2ProtobufFrameCodec.decode(frame)
-        var response = IMV2Envelope()
-        response.requestID = request.requestID
-        response.protocolVersion = request.protocolVersion
-        switch request.body {
-        case .openDirectRoom(let command):
-            receivedOperationIDs.append(command.operationID)
-            response.directRoomOpened = .init()
-            response.directRoomOpened.roomID = "00000000-0000-0000-0000-000000000321"
-            response.directRoomOpened.targetUserID = command.targetUserID
-            response.directRoomOpened.createdAtMs = 1_750_000_000_000
-        case .setStrangerMessagePermission(let command):
-            receivedOperationIDs.append(command.operationID)
-            response.strangerMessagePermissionSet = .init()
-            response.strangerMessagePermissionSet.permission = command.permission
-            response.strangerMessagePermissionSet.updatedAtMs = 1_750_000_000_000
-        default: throw V2RealtimeTransportError.unexpectedResponse
-        }
-        return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
-    }
-
-    func operationIDs() -> [String] { receivedOperationIDs }
-}
-
-private actor GroupMessagingWire: V2AuthenticatedFrameTransport {
-    private var receivedOperationID = ""
-    private var title = ""
-    private var stagedMembers: [String] = []
-
-    func request(_ frame: V2Frame) throws -> V2Frame {
-        let request = try V2ProtobufFrameCodec.decode(frame)
-        var response = IMV2Envelope(); response.requestID = request.requestID; response.protocolVersion = request.protocolVersion
-        switch request.body {
-        case .beginGroupRoomCreation(let command):
-            receivedOperationID = command.operationID; title = command.title.trimmingCharacters(in: .whitespacesAndNewlines)
-            response.groupRoomCreationPrepared = .init()
-            response.groupRoomCreationPrepared.operationID = command.operationID
-            response.groupRoomCreationPrepared.title = title
-        case .appendGroupRoomCreationMembers(let command):
-            receivedOperationID = command.operationID; stagedMembers.append(contentsOf: command.memberUserIds)
-            response.groupRoomCreationMembersAppended = .init()
-            response.groupRoomCreationMembersAppended.operationID = command.operationID
-            response.groupRoomCreationMembersAppended.stagedMemberCount = UInt32(stagedMembers.count)
-        case .finalizeGroupRoomCreation(let command):
-            receivedOperationID = command.operationID
-            response.groupRoomCreated = .init()
-            response.groupRoomCreated.roomID = "00000000-0000-0000-0000-000000000328"
-            response.groupRoomCreated.title = title
-            response.groupRoomCreated.createdAtMs = 1_750_000_000_000
-            response.groupRoomCreated.capacityClass = .standard
-            response.groupRoomCreated.memberCount = UInt32(stagedMembers.count + 1)
-        default: throw V2RealtimeTransportError.unexpectedResponse
-        }
-        return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
-    }
-
-    func operationID() -> String { receivedOperationID }
-}
-
-private actor SocialRelationshipWire: V2AuthenticatedFrameTransport {
-    private var receivedOperationIDs: [String] = []
-
-    func request(_ frame: V2Frame) throws -> V2Frame {
-        let request = try V2ProtobufFrameCodec.decode(frame)
-        var response = IMV2Envelope(); response.requestID = request.requestID; response.protocolVersion = request.protocolVersion
-        switch request.body {
-        case .changeRelationship(let command):
-            receivedOperationIDs.append(command.operationID)
-            response.relationshipChanged = .init()
-            response.relationshipChanged.targetUserID = command.targetUserID
-            response.relationshipChanged.action = command.action
-            response.relationshipChanged.resultingState = .pending
-            response.relationshipChanged.updatedAtMs = 1_750_000_000_000
-        case .changeUserBlock(let command):
-            receivedOperationIDs.append(command.operationID)
-            response.userBlockChanged = .init()
-            response.userBlockChanged.targetUserID = command.targetUserID
-            response.userBlockChanged.action = command.action
-            response.userBlockChanged.isBlocked = command.action == .block
-            response.userBlockChanged.updatedAtMs = 1_750_000_000_000
-        default: throw V2RealtimeTransportError.unexpectedResponse
-        }
-        return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
-    }
-
-    func operationIDs() -> [String] { receivedOperationIDs }
-}
-
-private struct MembershipRevisionConflictWire: V2AuthenticatedFrameTransport {
-    func request(_ frame: V2Frame) throws -> V2Frame {
-        let request = try V2ProtobufFrameCodec.decode(frame)
-        var response = IMV2Envelope()
-        response.requestID = request.requestID
-        response.protocolVersion = request.protocolVersion
-        response.error = .init()
-        response.error.code = "REVISION_CONFLICT"
-        response.error.currentRevision = 12
-        return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
-    }
-}
 
 private actor HeartbeatWire: V2AuthenticatedFrameTransport {
     private var didReceiveHeartbeat = false

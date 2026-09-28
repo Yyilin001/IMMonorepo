@@ -57,16 +57,18 @@ struct V2GroupAvatarManagementStoreTests {
         #expect(store.snapshot == nil)
     }
 
-    @Test func anUnknownOperationCanBeQueriedWithoutCurrentManagementPermission() async throws {
+    @Test(arguments: [false, true]) func anUnknownOperationCanBeQueriedWithoutCurrentManagementPermission(readFailure: Bool) async throws {
         let room = RoomID(uuid: UUID()), user = UserID(uuid: UUID())
         let command = try V2GroupAvatarCommand(operationID: .init(uuid: UUID()), roomID: room, expectedRevision: 0, mutation: .remove)
         let intent = V2GroupAvatarIntent(actorUserID: user, command: command, uploadJobID: nil, stage: .submitted,
             submissionStarted: true, recoveryAction: nil, closedDisposition: .awaitingDecision,
             attempts: 1, retryAt: Date(), issue: .outcomeUnknown, receipt: nil, closureProof: nil)
         let manager = PageAvatarManager(snapshot: .init(access: .forbidden, pending: [intent]))
+        if readFailure { await manager.fail(V2HTTPFailure(kind: .transport, service: "accountAPI")) }
         let store = V2GroupAvatarManagementStore(roomID: room, manager: manager, stager: PageAvatarStager(), notifier: nil)
         await store.observe()
         #expect(!store.canChange && !store.canReplace(intent))
+        #expect(store.didReadPending && store.pending.first?.id == intent.id)
         store.act(intent, action: .query); await settle(store)
         let actions = await manager.actions
         #expect(actions.count == 1 && actions.first?.id == command.operationID)
@@ -94,6 +96,33 @@ struct V2GroupAvatarManagementStoreTests {
         store.suspend()
     }
 
+    @Test("refresh preserves only unexpired display and never grants stale management", arguments: ["network", "forbidden", "session", "expired"])
+    func refreshDisplayAndAuthority(kind: String) async throws {
+        let clock = Mutex(ContinuousClock.now), room = RoomID(uuid: UUID())
+        let manager = PageAvatarManager(snapshot: try snapshot(room: room, deadline: clock.withLock { $0 }.advanced(by: .seconds(60))))
+        let store = V2GroupAvatarManagementStore(roomID: room, manager: manager, stager: PageAvatarStager(),
+            notifier: nil, now: { clock.withLock { $0 } })
+        await store.observe()
+        #expect(store.canUpload && store.canRemove)
+        if kind == "expired" { clock.withLock { $0 = $0.advanced(by: .seconds(61)) } }
+        if kind == "session" { await manager.fail(V2AuthSessionError.sessionInvalidated) }
+        else { await manager.fail(V2HTTPFailure(kind: .httpStatus, service: "accountAPI", statusCode: kind == "forbidden" ? 403 : 503)) }
+        store.refresh(); await settle(store)
+        #expect(store.isStale)
+        #expect(store.displayAuthority != nil ? kind == "network" : kind != "network")
+        #expect(store.authority == nil && !store.canUpload && !store.canRemove)
+        #expect(store.feedback != nil)
+        #expect(store.presentationInvalidationGeneration > 0 ? ["forbidden", "session"].contains(kind) : !["forbidden", "session"].contains(kind))
+        store.remove()
+        #expect(await manager.changes.isEmpty)
+        await manager.fail(nil)
+        await manager.update(try snapshot(room: room, deadline: clock.withLock { $0 }.advanced(by: .seconds(60))))
+        store.refresh(); await settle(store)
+        #expect(!store.isStale && store.canUpload && store.canRemove)
+        store.suspend()
+        #expect(store.displayAuthority == nil)
+    }
+
     private func snapshot(room: RoomID, deadline: ContinuousClock.Instant = .now.advanced(by: .seconds(60)),
                           upload: Bool = true) throws -> V2GroupAvatarManagementSnapshot {
         .init(access: .authorized(.init(state: try .init(roomID: room, mediaID: .init(uuid: UUID()), revision: 7),
@@ -118,6 +147,7 @@ private actor PageAvatarManager: V2GroupAvatarManaging {
     var snapshot: V2GroupAvatarManagementSnapshot
     let loadGate: AvatarPageGate?, changeGate: AvatarPageGate?
     let extraPending: V2GroupAvatarIntent?
+    private var failure: (any Error)?
     private(set) var changes: [Change] = []
     private(set) var actions: [Action] = []
     init(snapshot: V2GroupAvatarManagementSnapshot, loadGate: AvatarPageGate? = nil, changeGate: AvatarPageGate? = nil,
@@ -126,7 +156,8 @@ private actor PageAvatarManager: V2GroupAvatarManaging {
         self.extraPending = extraPending
     }
     func update(_ snapshot: V2GroupAvatarManagementSnapshot) { self.snapshot = snapshot }
-    func load(roomID: RoomID) async -> V2GroupAvatarManagementSnapshot { await loadGate?.wait(); return snapshot }
+    func fail(_ error: (any Error)?) { failure = error }
+    func load(roomID: RoomID) async throws -> V2GroupAvatarManagementSnapshot { await loadGate?.wait(); if let failure { throw failure }; return snapshot }
     func pending(roomID: RoomID) -> [V2GroupAvatarIntent] { snapshot.pending }
     func pendingIntent(roomID: RoomID, operationID: GroupAvatarOperationID) -> V2GroupAvatarIntent? {
         snapshot.pending.first { $0.id == operationID } ?? (extraPending?.id == operationID ? extraPending : nil)

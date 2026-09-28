@@ -62,7 +62,7 @@ struct V2TimelineWindowTests {
         try await f.store.databasePool.write { db in
             try db.execute(sql: "INSERT INTO v2_timeline_activity_projections VALUES (?, ?, 5, 'direct_message_restricted', 5)", arguments: [target.rawValue, room.rawValue])
             try db.execute(sql: "INSERT INTO v2_message_reactions VALUES (?, ?, ?, '👍')", arguments: [target.rawValue, room.rawValue, self.user.rawValue])
-            try db.execute(sql: "INSERT INTO v2_message_favorites VALUES (?, ?, 1, 5)", arguments: [target.rawValue, room.rawValue])
+            try db.execute(sql: "INSERT INTO v2_message_favorites(message_id,room_id,is_favorited,updated_at,revision) VALUES (?, ?, 1, 5, 1)", arguments: [target.rawValue, room.rawValue])
             try db.execute(sql: "INSERT INTO v2_group_pinned_messages (room_id, message_id, is_pinned, updated_at) VALUES (?, ?, 1, 5)", arguments: [room.rawValue, target.rawValue])
         }
         guard case .found(let window) = try await f.store.conversationTimelineWindow(in: room, for: user, around: target, before: 1, after: 1) else { throw CancellationError() }

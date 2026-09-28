@@ -33,45 +33,6 @@ public struct V2RoomInvitationDomainExecutor: Sendable {
                          activationToken: token, inviteID: inviteID)
     }
 
-    public func execute(_ command: V2RoomInvitationCommand) async throws -> V2RoomInvitationResult {
-        let owner = try store(roomID: command.roomID,
-                              inviteID: command.inviteIDForOwnerBinding)
-        switch command {
-        case .create:
-            // 创建用户前，必须先有持久的控制意图和固定的摘要。
-            throw V2GroupInvitationServiceError.invalidRequest
-        case .commitCreation(let request):
-            let created = try await owner.create(request.toDomain())
-            return .createdStored(.init(domain: created))
-        case .revoke(let request):
-            try await owner.revoke(inviteID: request.inviteID, roomID: request.roomID,
-                                   actorUserID: request.actorUserID, operationID: request.operationID,
-                                   now: now())
-            return .revoked
-        case .decide(let request):
-            switch request.decision {
-            case .approve:
-                let outcome = try await owner.approve(roomID: request.roomID,
-                    requestID: request.requestID, reviewerUserID: request.reviewerUserID,
-                    operationID: request.operationID, capacityProfile: capacityProfile,
-                    eventID: makeEventID(), now: now())
-                return .approval(.init(domain: outcome))
-            case .reject:
-                let outcome = try await owner.reject(roomID: request.roomID,
-                    requestID: request.requestID, reviewerUserID: request.reviewerUserID,
-                    operationID: request.operationID, now: now())
-                return .rejection(.init(domain: outcome))
-            }
-        case .cancel(let request):
-            let record = try await owner.cancel(roomID: request.roomID,
-                requestID: request.requestID, applicantUserID: request.applicantUserID, now: now())
-            return .cancelledRecord(.init(record: record))
-        case .submitReserved(let request):
-            let result = try await owner.applyReservedSubmission(request.toDomain(), now: now())
-            return .reservedSubmission(.init(domain: result))
-        }
-    }
-
     public func execute(_ query: V2RoomInvitationQuery) async throws -> V2RoomInvitationResult {
         let owner = try store(roomID: query.roomID,
                               inviteID: query.inviteIDForOwnerBinding)
@@ -92,6 +53,8 @@ public struct V2RoomInvitationDomainExecutor: Sendable {
         case .preflightCreation(let request):
             let existing = try await owner.preflightCreation(request.toDomain())
             return .preflightStored(existing.map(V2ActorStoredGroupInviteWire.init(domain:)))
+        case .reservedObservation(let request):
+            return .reservedObservation(try await owner.observeReservedSubmission(request.toDomain()).map(V2ActorGroupJoinOwnerSubmissionWire.init(domain:)))
         case .reservedSubmissionResponse(let request):
             let response = try await owner.reservedSubmissionResponse(
                 request.intent.toDomain(), observed: request.observed.toDomain())
@@ -100,21 +63,11 @@ public struct V2RoomInvitationDomainExecutor: Sendable {
     }
 }
 
-private extension V2RoomInvitationCommand {
-    var inviteIDForOwnerBinding: GroupInviteID? {
-        switch self {
-        case .commitCreation(let value): value.inviteID
-        case .revoke(let value): value.inviteID
-        case .submitReserved(let value): value.inviteID
-        case .create, .decide, .cancel: nil
-        }
-    }
-}
-
 private extension V2RoomInvitationQuery {
     var inviteIDForOwnerBinding: GroupInviteID? {
         switch self {
         case .resolvedPreview(let value): value.inviteID
+        case .reservedObservation(let value): value.inviteID
         case .reservedSubmissionResponse(let value): value.intent.inviteID
         case .preflightCreation(let value): value.inviteID
         case .active, .pending: nil

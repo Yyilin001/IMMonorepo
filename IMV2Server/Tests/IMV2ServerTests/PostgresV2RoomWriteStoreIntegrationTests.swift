@@ -47,20 +47,22 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await PostgresV2NATSInstallationTests.verifyInstallation(database: database,
                 user: senderID, room: roomID, url: url, beforeSubscription: beforeSubscription, awaitForegroundPublication: beforeSubscription && mode == .standard, publish: publish) { dispatcher in
                 if mode == .standard {
-                    let handler = makeGatewayDomainCommandHandler(sendMessage: sender,
-                        groupEventLog: .init(store: PostgresV2GroupEventLogStore(database: database)),
-                        foregroundGroupEventHints: dispatcher,
-                        sync: .init(store: PostgresV2SyncStore(database: database)))
-                    var request = IMV2Envelope()
-                    request.sendMessage.roomID = roomID.rawValue
-                    request.sendMessage.clientMessageID = UUID().uuidString
-                    request.sendMessage.content.text = "installation-body"
-                    let response = try await handler.handle(envelope: request,
-                        identity: .init(userID: senderID, deviceID: .init(uuid: UUID()), capabilityProfile: "base"))
-                    guard case .messageAccepted(let accepted)? = response.body else {
+                    let command = try V2MessageSendOperationCommand(command: .init(roomID: roomID,
+                        senderUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "installation-body", limits: .init(maxUTF8Bytes: 64)),
+                        firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
+                    let result = try await withRoomActivation(database: database, roomID: roomID) { token in
+                        try await PostgresV2MessageSendOperationStore(database: database,
+                            writes: PostgresV2RoomWriteStore(database: database), clock: { now })
+                            .send(command, token: token, capacityProfile: forwardImportTestProfile(),
+                                identifiers: V2AcceptanceIDFactory().make(at: now))
+                    }
+                    guard case .receipt(let proof) = result,
+                          proof.validates(identity: try command.identity, fingerprint: try command.fingerprint),
+                          case .accepted(let accepted) = proof.outcome else {
                         throw V2RoomWriteStoreError.corruptPersistenceState
                     }
-                    let messageID = try #require(UUID(uuidString: accepted.messageID))
+                    dispatcher.submitForegroundHint(.init(roomID: roomID, highWatermark: accepted.roomSequence))
+                    let messageID = try #require(accepted.messageID.uuidValue)
                     let row = try #require(try await sql.raw("""
                         SELECT text_body, room_sequence FROM im_v2.messages WHERE message_id = \(bind: messageID)
                         """).first())
@@ -144,11 +146,16 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                             'standard', \(bind: base))
                     """).run()
             }
+            let resourceRoot = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: resourceRoot) }
+            let resource = try ConcurrentMediaResourceFixture(root: resourceRoot, now: { base })
             var mediaByMessage: [UUID: UUID] = [:]
             for message in [visibleMessage, gapMessage] {
                 let media = UUID()
                 mediaByMessage[message] = media
                 try await insertSummaryFixtureMediaObject(on: sql, media: media, owner: peer, at: base)
+                try await resource.seedPlacement(mediaID: media, roomID: .init(uuid: room),
+                    bytes: Data([7]), sql: sql, now: base)
                 try await sql.raw("""
                     INSERT INTO im_v2.message_media_references (message_id, media_id, ordinal, referenced_at)
                     VALUES (\(bind: message), \(bind: media), 0, \(bind: base))
@@ -240,9 +247,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try forwardImportTestProfile()
             var destination = roomID
             if kind.hasPrefix("direct") {
-                guard case .opened(let room) = try await PostgresV2DirectMessagingStore(database: database).open(
-                    command: .init(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID)),
-                    capacityProfile: profile, roomShardID: "room-a", roomID: .init(uuid: UUID()), now: now) else { throw CancellationError() }
+                let room = try await V2DirectRoomOperationTestFixture(database: database, capacityProfile: profile,
+                    roomShardID: "room-a", now: { now }).openedIdentity(actorUserID: senderID,
+                        operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID),
+                        firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
                 destination = room.roomID
             }
             let service = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database,
@@ -327,27 +335,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 now: { base }
             )
             func makeStandardGroup(title: String) async throws -> RoomID {
-                let room = RoomID(uuid: UUID())
-                let outcome = try await PostgresV2GroupMessagingStore(
-                    database: database).create(
-                    command: try V2CreateGroupRoomCommand(
-                        actorUserID: senderID,
-                        operationID: GroupRoomOperationID(uuid: UUID()),
-                        title: title,
-                        capacityClass: .standard,
-                        initialMemberUserIDs: [.init(uuid: memberTwoUUID)]
-                    ),
-                    capacityProfile: profile,
-                    roomShardID: "room-a",
-                    roomID: room,
-                    eventID: EventID(uuid: UUID()),
-                    now: base
-                )
-                guard case .created(_) = outcome else {
-                    Issue.record("expected \(title) to be created")
-                    throw CancellationError()
-                }
-                return room
+                try await createCurrentGroup(database: database, title: title, capacity: .standard,
+                    members: [.init(uuid: memberTwoUUID)], profile: profile, now: base)
             }
             func message(_ room: RoomID, clientID: String) throws -> V2AuthenticatedSendMessage {
                 try .init(
@@ -384,28 +373,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     """).run()
             }
 
-            let payload = try forwardImportTestProfile()
+            let payload = try groupCreationCapacityTestProfile()
             // 被 @ 的人必须是房间成员，否则提及授权会先拒绝。
-            let room = RoomID(uuid: UUID())
-            let groupStore = PostgresV2GroupMessagingStore(database: database)
-            let created = try await groupStore.create(
-                command: try V2CreateGroupRoomCommand(
-                    actorUserID: senderID,
-                    operationID: GroupRoomOperationID(uuid: UUID()),
-                    title: "Mention room",
-                    capacityClass: .large,
-                    initialMemberUserIDs: [.init(uuid: mentioned)]
-                ),
-                capacityProfile: payload,
-                roomShardID: "room-a",
-                roomID: room,
-                eventID: EventID(uuid: UUID()),
-                now: base
-            )
-            guard case .created(_) = created else {
-                Issue.record("expected the mention room to be created")
-                return
-            }
+            let room = try await createCurrentGroup(database: database, title: "Mention room", capacity: .large,
+                members: [.init(uuid: mentioned)], profile: payload, now: base)
             // 群创建本身会给初始成员建一次投递；这里只关心提及带来的增量。
             let service = V2SendMessageService(
                 store: PostgresV2RoomWriteStore(database: database),
@@ -458,28 +429,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     func roomProjectionsDeclareCapacityClass() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let profile = try forwardImportTestProfile()
+            let profile = try groupCreationCapacityTestProfile()
             for mode in [V2GroupCapacityClass.standard, .large] {
-                let store = PostgresV2GroupMessagingStore(database: database)
-                let newRoom = RoomID(uuid: UUID())
-                let outcome = try await store.create(
-                    command: try V2CreateGroupRoomCommand(
-                        actorUserID: senderID,
-                        operationID: GroupRoomOperationID(uuid: UUID()),
-                        title: "Capacity \(mode.rawValue)",
-                        capacityClass: mode,
-                        initialMemberUserIDs: [.init(uuid: memberTwoUUID)]
-                    ),
-                    capacityProfile: profile,
-                    roomShardID: "room-a",
-                    roomID: newRoom,
-                    eventID: EventID(uuid: UUID()),
-                    now: base
-                )
-                guard case .created(_) = outcome else {
-                    Issue.record("group creation did not report a created room")
-                    return
-                }
+                let newRoom = try await createCurrentGroup(database: database, title: "Capacity \(mode.rawValue)", capacity: mode,
+                    members: [.init(uuid: memberTwoUUID)], profile: profile, now: base)
                 let room = try #require(newRoom.uuidValue)
                 #expect(try await sql.raw("""
                     SELECT payload->>'capacity_class' AS value FROM im_v2.room_events
@@ -493,33 +446,50 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    private func groupCreationCapacityTestProfile() throws -> V2CapacityProfile {
+        try .init(id: "standard", limits: .init(
+            maxEligibleMembers: V2GroupCapacityPolicy.standardMaximumMembers + 1,
+            maxCommandsPerWindow: 10, retryAfterSeconds: 3))
+    }
+
+    private func createCurrentGroup(database: any Database, title: String, capacity: V2GroupCapacityClass,
+                                    members: [UserID], profile: V2CapacityProfile, now: Date) async throws -> RoomID {
+        var audience = members
+        if capacity == .large {
+            // Large capacity is derived from an actual audience above 5,000;
+            // a two-member request cannot select this class in the current contract.
+            let fillerCount = max(0, V2GroupCapacityPolicy.standardMaximumMembers - audience.count)
+            let fillers = (0..<fillerCount).map { _ in UUID() }
+            if !fillers.isEmpty {
+                let sql = try #require(database as? any SQLDatabase)
+                let encoded = String(decoding: try JSONEncoder().encode(fillers), as: UTF8.self)
+                try await sql.raw("""
+                    INSERT INTO im_v2.public_user_profiles
+                        (user_id, public_handle, display_name, revision, visibility_revision, created_at, updated_at)
+                    SELECT value::uuid, lower(replace(value, '-', '')), 'Capacity member',
+                           1, 1, \(bind: now), \(bind: now)
+                    FROM jsonb_array_elements_text(\(bind: encoded)::jsonb)
+                    """).run()
+                audience.append(contentsOf: fillers.map { UserID(uuid: $0) })
+            }
+        }
+        let canonical = try V2GroupCreationAudience.canonical(audience, actorUserID: senderID)
+        let intent = try V2GroupCreationIntent(identity: .init(accountID: senderID, scope: .account(senderID),
+            operation: .groupRoom(.init(uuid: UUID()))), title: title, capacityClass: capacity,
+            initialMemberCount: canonical.count, audienceDigest: V2GroupCreationAudience.digest(canonical),
+            firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
+        let fixture = try V2GroupCreationOperationTestFixture(control: database, owner: database,
+            shardID: "room-a", capacityProfile: profile, now: { now })
+        return try await fixture.create(intent: intent, canonicalMembers: canonical, now: now).roomID
+    }
+
     @Test("Group creation initializes every initial member's read watermark at the room head")
     func groupCreationInitializesMemberReadWatermarks() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile()
-            let store = PostgresV2GroupMessagingStore(database: database)
-            let operation = GroupRoomOperationID(uuid: UUID())
-            let newRoom = RoomID(uuid: UUID())
-            let command = try V2CreateGroupRoomCommand(
-                actorUserID: senderID,
-                operationID: operation,
-                title: "Watermark group",
-                capacityClass: .standard,
-                initialMemberUserIDs: [.init(uuid: memberTwoUUID)]
-            )
-            let outcome = try await store.create(
-                command: command,
-                capacityProfile: profile,
-                roomShardID: "room-a",
-                roomID: newRoom,
-                eventID: EventID(uuid: UUID()),
-                now: base
-            )
-            guard case .created(_) = outcome else {
-                Issue.record("group creation did not report a created room")
-                return
-            }
+            let newRoom = try await createCurrentGroup(database: database, title: "Watermark group", capacity: .standard,
+                members: [.init(uuid: memberTwoUUID)], profile: profile, now: base)
             let room = try #require(newRoom.uuidValue)
             // The room head after creation is the room.created event at
             // sequence 1. Every initial member must already have read it,
@@ -922,28 +892,44 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 100, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
             let coordinator = V2ActorInvitationCoordinator(controlDatabase: control,
                 room: invitationRoomPort(control: control, owner: owner, shardID: "room-b", capacityProfile: profile, now: { sequence.now() }),
+                operations: invitationOperationPort(control: control, owner: owner, shardID: "room-b", issuer: issuer, capacityProfile: profile, now: { sequence.now() }),
                 secretIssuer: issuer, now: { sequence.now() })
-            func create(_ request: V2GroupInviteCreatePersistenceRequest, at time: Date) async throws -> V2ActorGroupInviteLinkWire {
-                sequence.set([time])
-                guard case .created(let link) = try await coordinator.create(.init(roomID: room, actorUserID: senderID,
-                    operationID: request.operationID, lifetime: TimeInterval(request.requestedLifetimeSeconds),
-                    maximumApprovedUses: request.maximumApprovedUses), deadline: invitationTestDeadline()) else {
-                    throw V2GroupInvitationServiceError.corruptPersistenceState
+            if base.timeIntervalSince1970 <= 0 {
+                let invalidClockIntent = try V2GroupInvitationOperationIntent(identity: .init(accountID: senderID, scope: .room(room), operation: .groupInvite(.init(uuid: UUID()))),
+                    action: .create(lifetimeSeconds: 300, maximumApprovedUses: 5, expectedMembershipRevision: 0), confirmedUntilMilliseconds: 1_750_000_120_000)
+                await #expect(throws: (any Error).self) {
+                    _ = try await coordinator.admitOperation(.init(intent: invalidClockIntent), deadline: invitationTestDeadline())
                 }
-                return link
+                #expect(try await count("im_v2.group_invitation_admissions", on: ownerSQL) == 0)
+                #expect(try await count("im_v2.group_invite_links", on: ownerSQL) == 0)
+                return
             }
-            func request() throws -> V2GroupInviteCreatePersistenceRequest {
-                let operation = GroupInviteOperationID(uuid: UUID())
-                return .init(inviteID: .init(uuid: UUID()), roomID: room, actorUserID: senderID, operationID: operation,
-                    tokenDigest: issuer.digest(try issuer.secret(actorUserID: senderID, operationID: operation)), requestedLifetimeSeconds: 300,
-                    expiresAt: base.addingTimeInterval(300), maximumApprovedUses: 5, maximumActiveInvitesPerRoom: 20, createdAt: base)
+            func freeze() async throws -> (V2GroupInvitationOperationCommand, V2GroupInviteCreatePersistenceRequest) {
+                let baseline = try await coordinator.operationBaseline(roomID: room, actorUserID: senderID, deadline: invitationTestDeadline())
+                let intent = try V2GroupInvitationOperationIntent(identity: .init(accountID: senderID, scope: .room(room), operation: .groupInvite(.init(uuid: UUID()))),
+                    action: .create(lifetimeSeconds: 300, maximumApprovedUses: 5, expectedMembershipRevision: baseline.membershipRevision),
+                    confirmedUntilMilliseconds: UInt64(base.timeIntervalSince1970 * 1000) + 120_000)
+                guard case .admitted(let admission) = try await coordinator.admitOperation(.init(intent: intent), deadline: invitationTestDeadline()) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+                let command = try V2GroupInvitationOperationCommand(intent: intent, admission: admission)
+                try await PostgresV2GroupInvitationControlCommandStore(database: control).save(command)
+                return (command, try v2GroupInvitationCreationRequest(command, issuer: issuer, policy: .standard, now: base))
             }
-            let first = try request(), healthy = try request()
-            _ = try await PostgresV2GroupInvitationStore(database: owner).create(first)
+            let (firstCommand, first) = try await freeze(), (healthyCommand, healthy) = try await freeze()
+            let ownerOperations = invitationOperationPort(control: control, owner: owner, shardID: "room-b", issuer: issuer, capacityProfile: profile, now: { sequence.now() })
+            _ = try await ownerOperations.submit(.init(command: firstCommand), invitationTestDeadline())
+            _ = try await ownerOperations.submit(.init(command: healthyCommand), invitationTestDeadline())
+            func create(_ request: V2GroupInviteCreatePersistenceRequest, at time: Date) async throws -> GroupInviteID {
+                sequence.set([time])
+                let command = request.operationID == first.operationID ? firstCommand : healthyCommand
+                guard case .receipt(let proof) = try await coordinator.recoverOperation(.init(intent: command.intent, action: .query), deadline: invitationTestDeadline()),
+                    case .applied(.inviteCreated(let id, _, _, _)) = proof.outcome else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+                #expect(proof.validates(intent: command.intent))
+                return id
+            }
             if !matches {
                 let column = difference.hasPrefix("created") ? "created_at" : "expires_at"
                 let delta: Int64 = difference.hasSuffix("before") ? -1 : 1
-                // Model a disagreement between independently persisted legacy
+                // Model a disagreement between independently persisted
                 // bindings; both timestamps remain valid and encodable.
                 try await ownerSQL.raw("UPDATE im_v2.group_invite_links SET \(unsafeRaw: column) = \(unsafeRaw: column) + \(bind: delta) * INTERVAL '1 microsecond' WHERE invite_id = \(bind: first.inviteID.uuidValue!)").run()
             }
@@ -958,7 +944,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let jobBefore = try await snapshot(sql, table: "group_invite_creation_recovery", key: "operation_id", id: first.operationID.uuidValue!)
             for _ in 0..<2 {
                 if matches {
-                    #expect(try await create(first, at: base.addingTimeInterval(1)).inviteID == first.inviteID)
+                    #expect(try await create(first, at: base.addingTimeInterval(1)) == first.inviteID)
                 } else {
                     await #expect(throws: V2GroupInviteDirectoryError.ownerResultMismatch) {
                         _ = try await create(first, at: base.addingTimeInterval(1))
@@ -990,34 +976,50 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
     }
 
 
-    @Test("Invite creation preserves exact control and owner timestamps across foreground, recovery and legacy adoption",
-          arguments: 0..<6, ["foreground", "recovery", "legacy"])
+    @Test("Invite creation preserves exact control and owner timestamps across foreground, recovery and owner-first recovery",
+          arguments: 0..<6, ["foreground", "recovery", "owner_first"])
     func inviteCreationBindingPrecision(clock: Int, path: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { control, owner, sql, ownerSQL, room in
             let instants: [Double] = [1_750_000_000, 946_684_800 + 0.00000125,
                 946_684_800 - 0.00000125, 1_750_000_000.1234567,
                 -210_866_803_200 + 10.223, 9_224_318_016_000 - 1000.223]
             let base = Date(timeIntervalSince1970: instants[clock])
-            let deadline = base.addingTimeInterval(300)
             try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE user_id = \(bind: senderUUID)").run()
             let directory = PostgresV2GroupInviteDirectory(database: control)
             // Production path: coordinator plus a room turn on the owner. The
             // request carries the issued digest, and foreground creation mints
             // its preset invite ID at `base`, so every path binds identically.
             let issuer = try V2GroupInviteSecretIssuer(rawKey: Data(repeating: 0x62, count: 32))
-            let operation = GroupInviteOperationID(uuid: UUID()), inviteID = GroupInviteID(uuid: UUID())
+            let operation = GroupInviteOperationID(uuid: UUID())
             let sequence = TestSequenceClock([base])
             let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 100, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
             let coordinator = V2ActorInvitationCoordinator(controlDatabase: control,
                 room: invitationRoomPort(control: control, owner: owner, shardID: "room-b", capacityProfile: profile, now: { sequence.now() }),
-                secretIssuer: issuer, makeUUID: { inviteID.uuidValue! }, now: { sequence.now() })
-            func create(at time: Date) async throws -> V2ActorGroupInviteLinkWire {
-                sequence.set([time])
-                guard case .created(let link) = try await coordinator.create(.init(roomID: room, actorUserID: senderID,
-                    operationID: operation, lifetime: 300, maximumApprovedUses: 5), deadline: invitationTestDeadline()) else {
-                    throw V2GroupInvitationServiceError.corruptPersistenceState
+                operations: invitationOperationPort(control: control, owner: owner, shardID: "room-b", issuer: issuer, capacityProfile: profile, now: { sequence.now() }),
+                secretIssuer: issuer, now: { sequence.now() })
+            if base.timeIntervalSince1970 <= 0 {
+                let invalidClockIntent = try V2GroupInvitationOperationIntent(identity: .init(accountID: senderID, scope: .room(room), operation: .groupInvite(.init(uuid: UUID()))),
+                    action: .create(lifetimeSeconds: 300, maximumApprovedUses: 5, expectedMembershipRevision: 0), confirmedUntilMilliseconds: 1_750_000_120_000)
+                await #expect(throws: (any Error).self) {
+                    _ = try await coordinator.admitOperation(.init(intent: invalidClockIntent), deadline: invitationTestDeadline())
                 }
-                return link
+                #expect(try await count("im_v2.group_invitation_admissions", on: ownerSQL) == 0)
+                #expect(try await count("im_v2.group_invite_links", on: ownerSQL) == 0)
+                return
+            }
+            let baseline = try await coordinator.operationBaseline(roomID: room, actorUserID: senderID, deadline: invitationTestDeadline())
+            let frozenIntent = try V2GroupInvitationOperationIntent(identity: .init(accountID: senderID, scope: .room(room), operation: .groupInvite(operation)),
+                action: .create(lifetimeSeconds: 300, maximumApprovedUses: 5, expectedMembershipRevision: baseline.membershipRevision),
+                confirmedUntilMilliseconds: UInt64(base.timeIntervalSince1970 * 1000) + 120_000)
+            guard case .admitted(let admission) = try await coordinator.admitOperation(.init(intent: frozenIntent), deadline: invitationTestDeadline()) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+            let command = try V2GroupInvitationOperationCommand(intent: frozenIntent, admission: admission)
+            let request = try v2GroupInvitationCreationRequest(command, issuer: issuer, policy: .standard, now: base)
+            let deadline = request.expiresAt
+            func create(at time: Date) async throws -> V2GroupInvitationOperationReceipt {
+                sequence.set([time])
+                guard case .receipt(let proof) = try await coordinator.submitOperation(.init(command: command), deadline: invitationTestDeadline()) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+                #expect(proof.validates(intent: frozenIntent))
+                return proof
             }
             func active(at time: Date) async throws -> [V2ActorGroupInviteLinkWire] {
                 sequence.set([time])
@@ -1025,14 +1027,13 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     deadline: invitationTestDeadline()) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
                 return links
             }
-            let request = V2GroupInviteCreatePersistenceRequest(inviteID: inviteID, roomID: room,
-                actorUserID: senderID, operationID: operation, tokenDigest: issuer.digest(try issuer.secret(actorUserID: senderID, operationID: operation)),
-                requestedLifetimeSeconds: 300, expiresAt: deadline, maximumApprovedUses: 5,
-                maximumActiveInvitesPerRoom: 20, createdAt: base)
-            if path == "legacy" {
-                _ = try await PostgresV2GroupInvitationStore(database: owner).create(request)
-            } else if path == "recovery" {
+            if path != "foreground" {
+                try await PostgresV2GroupInvitationControlCommandStore(database: control).save(command)
                 _ = try await directory.prepare(request)
+                if path == "owner_first" {
+                    let operations = invitationOperationPort(control: control, owner: owner, shardID: "room-b", issuer: issuer, capacityProfile: profile, now: { sequence.now() })
+                    _ = try await operations.submit(.init(command: command), invitationTestDeadline())
+                }
                 let recoveredAt = base.addingTimeInterval(31)
                 sequence.set([recoveredAt])
                 let result = try await V2GroupInviteCreationRecoveryWorker(jobs: directory, coordinator: coordinator,
@@ -1040,9 +1041,10 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(result.attempted == 1 && result.completed == 1 && result.deferred == 0 && result.paused == 0)
             }
             let first = try await create(at: path == "foreground" ? base : base.addingTimeInterval(32))
-            #expect(first.inviteID == request.inviteID && first.state == .active)
+            #expect(first.validates(intent: frozenIntent))
+            let exactTimestamps = try #require(request.persistedTimestamps)
             for (database, table) in [(sql, "group_invite_directory"), (ownerSQL, "group_invite_links")] {
-                #expect(try await database.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table) WHERE created_at = \(bind: base) AND expires_at = \(bind: deadline)").first(decoding: CountRow.self)?.value == 1)
+                #expect(try await database.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table) WHERE created_at = \(bind: exactTimestamps.createdAt) AND expires_at = \(bind: exactTimestamps.expiresAt)").first(decoding: CountRow.self)?.value == 1)
             }
             func binding(_ database: any SQLDatabase, table: String) async throws -> String {
                 try #require(try await database.raw("SELECT jsonb_build_object('created', created_at, 'expires', expires_at)::text AS value FROM im_v2.\(unsafeRaw: table)").first(decoding: StringValueRow.self)).value
@@ -1055,13 +1057,13 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let later = base.addingTimeInterval(40)
             let replay = try await create(at: later)
             #expect(replay == first)
-            #expect(try await active(at: later) == [replay])
+            #expect(try await active(at: later).first?.inviteID == request.inviteID)
             #expect(try await V2GroupInviteCreationRecoveryWorker(jobs: directory, coordinator: coordinator,
                 deadline: invitationTestDeadline, now: { later }).runOnce().attempted == 0)
             let edge = deadline.addingTimeInterval(-0.00000025)
             let stillLive = try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_directory WHERE expires_at > \(bind: edge)").first(decoding: CountRow.self)?.value == 1
             let atEdge = try await create(at: edge)
-            #expect(atEdge.state == (stillLive ? .active : .expired))
+            #expect(atEdge == first)
             #expect(try await active(at: edge).count == (stillLive ? 1 : 0))
             #expect(try await binding(sql, table: "group_invite_directory") == controlBinding)
             #expect(try await binding(ownerSQL, table: "group_invite_links") == ownerBinding)
@@ -1270,8 +1272,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             var primaryRoom = UUID()
             for (offset, actor) in [senderUUID, memberThreeUUID].enumerated() {
                 let time = base.addingTimeInterval(Double(offset))
-                let direct = try V2DirectMessagingService(store: PostgresV2DirectMessagingStore(database: database), capacityProfile: profile, roomShardID: "room-a", now: { time })
-                guard case .opened(let room) = try await direct.open(actorUserID: .init(uuid: actor), operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID)) else { throw CancellationError() }
+                let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: database, identityReader: PostgresV2DirectRoomIdentityReader(database: database), projectionDelivery: SuccessfulProjectionDelivery()), capacityProfile: profile, roomShardID: "room-a", now: { time })
+                let room = try await direct.openedIdentity(actorUserID: .init(uuid: actor), operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID), firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(time))
                 if offset == 0 { primaryRoom = try #require(room.roomID.uuidValue) }
                 let sender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), now: { time })
                 guard case .accepted = try await sender.send(.init(roomID: room.roomID, actorUserID: .init(uuid: actor), clientMessageID: .init(uuid: UUID()), text: "propagation retry")) else { throw CancellationError() }
@@ -1280,8 +1282,13 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     let directory = V2PostgresPublicIdentityDirectory(database: database, policy: try .init(maximumQueries: 10, window: 60), makeUUID: { operation }, now: { time })
                     _ = try await directory.updateDisplayName(for: .init(uuid: actor), displayName: "Retry profile \(offset)")
                 } else {
-                    let preferences = V2ReadReceiptService(store: PostgresV2ReadReceiptStore(database: database), now: { time })
-                    guard case .updated = try await preferences.setPreferences(actorUserID: .init(uuid: actor), operationID: .init(uuid: operation), allowsDirectReadReceipts: false, allowsGroupReadReceipts: true) else { throw CancellationError() }
+                    let preferences = PostgresV2AccountPreferenceOperationStore(database: database,
+                        projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator:
+                            V2DirectAuthorizationCoordinator(controlDatabase: database, ownerDatabases: ["room-a": database]))
+                    guard case .receipt(let proof) = try await preferences.executePreferenceFixture(owner: .init(uuid: actor),
+                        operation: .readReceiptPreference(.init(uuid: operation)),
+                        value: .readReceipt(allowsDirectReadReceipts: false, allowsGroupReadReceipts: true), now: time),
+                        case .applied = proof.outcome else { throw CancellationError() }
                 }
             }
             if path == "receipt" {
@@ -1450,12 +1457,30 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             #expect(list.allSatisfy { $0.state == .active })
             // An existing fixture member exercises normal submission response
             // mapping without adding a member or changing invitation capacity.
-            let submitted = try await store.submit(.init(requestID: .init(uuid: UUID()), applicantUserID: .init(uuid: memberTwoUUID), operationID: .init(uuid: UUID()), tokenDigest: request.tokenDigest, note: nil, createdAt: now, maximumPendingRequestsPerApplicant: 20, maximumPendingRequestsPerInvite: 100))
+            let applicant = UserID(uuid: memberTwoUUID)
+            let intent = try V2GroupInvitationOperationIntent(identity: .init(accountID: applicant, scope: .room(roomID),
+                operation: .groupJoinRequest(.init(uuid: UUID()))),
+                action: .submit(inviteID: request.inviteID, tokenDigest: request.tokenDigest, note: nil),
+                confirmedUntilMilliseconds: UInt64(now.timeIntervalSince1970 * 1_000) + 120_000)
+            let issuer = try V2GroupInviteSecretIssuer(rawKey: Data(repeating: 0x61, count: 32))
+            let operations = invitationOperationPort(control: database, owner: database, issuer: issuer,
+                capacityProfile: try forwardImportTestProfile(), now: { now })
+            let admission = try await operations.admit(intent, invitationTestDeadline())
             if live && state == "active" {
-                guard case .alreadyMember(let preview) = submitted else { Issue.record("Expected existing-member response for the live invite"); return }
+                guard case .admitted(let context) = admission else { Issue.record("Expected live invite admission"); return }
+                let quotaRequest = V2GroupJoinSubmissionPersistenceRequest(requestID: .init(uuid: UUID()), applicantUserID: applicant,
+                    operationID: try .init(intent.identity.operation.rawOperationID), tokenDigest: request.tokenDigest, note: nil,
+                    createdAt: now, maximumPendingRequestsPerApplicant: 20, maximumPendingRequestsPerInvite: 100)
+                guard case .reserved(let quota) = try await PostgresV2GroupJoinQuotaStore(database: database)
+                    .reserve(quotaRequest, roomID: roomID, inviteID: request.inviteID, now: now) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+                let execution = V2GroupInvitationExecutionRequest(command: try .init(intent: intent, admission: context), quotaIntent: .init(domain: quota))
+                guard case .receipt(let proof) = try await operations.submit(execution, invitationTestDeadline()) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+                #expect(proof.validates(intent: intent) && proof.outcome == .rejected(.alreadyMember))
+                #expect(try await operations.submit(execution, invitationTestDeadline()) == .receipt(proof))
+                guard case .available(let preview) = try await store.preview(tokenDigest: request.tokenDigest, applicantUserID: applicant, now: now) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
                 #expect(preview.inviteID == request.inviteID && preview.isAlreadyMember)
                 #expect(preview.expiresAt == replay.expiresAt)
-            } else { #expect(submitted == .unavailable) }
+            } else { #expect(admission == .currentUnavailable(.inviteUnavailable)) }
             if state == "revoked" {
                 for time in [Double.nan, .infinity] {
                     #expect(try await store.create(request.evaluated(at: Date(timeIntervalSince1970: time))) == replay)
@@ -1513,6 +1538,11 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let deadline = deadlineMicros[boundary]
             let media = MediaID(uuid: UUID())
             try await sourceSQL.raw("INSERT INTO im_v2.media_objects (media_id, owner_user_id, content_type, byte_count, state, upload_session_id, expires_at, state_updated_at, created_at) VALUES (\(bind: media.uuidValue!), \(bind: senderUUID), 'text/plain', 42, 'available', \(bind: UUID()), \(bind: base.addingTimeInterval(600)), \(bind: base), \(bind: base))").run()
+            let resourceRoot = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: resourceRoot) }
+            let resource = try ConcurrentMediaResourceFixture(root: resourceRoot, now: { base })
+            try await resource.seedPlacement(mediaID: media.uuidValue!, roomID: roomID,
+                bytes: Data(repeating: 7, count: 42), sql: sourceSQL, now: base)
             let profile = try forwardImportTestProfile(), limits = try V2MessageCommandLimits(maxUTF8Bytes: 64)
             let sender = V2SendMessageService(store: PostgresV2RoomWriteStore(database: sourceDB), capacityProfile: profile, limits: limits, now: { base })
             guard case .accepted(let message) = try await sender.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "forward deadline", media: [.init(mediaID: media)])) else { throw CancellationError() }
@@ -1527,15 +1557,13 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let live = try #require(try await sourceSQL.raw("SELECT (\(bind: epoch)::timestamptz + \(bind: deadline) * INTERVAL '1 microsecond') > \(bind: now) AS exists").first(decoding: ExistsRow.self)).exists
             if path == "export" {
                 try await sourceSQL.raw("UPDATE im_v2.media_objects SET expires_at = \(bind: epoch)::timestamptz + \(bind: deadline) * INTERVAL '1 microsecond'").run()
-                if live {
-                    let export = try await prepare(now)
-                    #expect(export.intent.media.map(\.mediaID) == [media.uuidValue!])
-                    for invalid in [Double.nan, .infinity] { #expect(try await prepare(Date(timeIntervalSince1970: invalid)) == export) }
-                } else {
-                    await #expect(throws: V2ForwardExportError.mediaUnavailable) { try await prepare(now) }
-                }
-                #expect(try await count("im_v2.message_forward_exports", on: sourceSQL) == (live ? 1 : 0))
-                #expect(try await count("im_v2.message_forward_delivery_jobs", on: sourceSQL) == (live ? 1 : 0))
+                // A bound message attachment outlives its original upload
+                // deadline. Export preserves its identity on either side of it.
+                let export = try await prepare(now)
+                #expect(export.intent.media.map(\.mediaID) == [media.uuidValue!])
+                for invalid in [Double.nan, .infinity] { #expect(try await prepare(Date(timeIntervalSince1970: invalid)) == export) }
+                #expect(try await count("im_v2.message_forward_exports", on: sourceSQL) == 1)
+                #expect(try await count("im_v2.message_forward_delivery_jobs", on: sourceSQL) == 1)
                 #expect(try await count("im_v2.media_objects WHERE state = 'available'", on: sourceSQL) == 1)
                 #expect(try await sourceSQL.raw("SELECT COUNT(*) AS value FROM im_v2.media_objects WHERE expires_at = \(bind: epoch)::timestamptz + \(bind: deadline) * INTERVAL '1 microsecond'").first(decoding: CountRow.self)?.value == 1)
                 return
@@ -1545,8 +1573,11 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await inbox.receive(export, now: base)
             let importer = try PostgresV2ForwardMediaImportStore(database: targetDB, temporaryLifetime: 600)
             let old = try #require(try await importer.claim(exportID: export.intent.exportID, now: base, leaseDuration: 30))
-            // A deterministic receipt isolates database state transitions from provider I/O.
-            let receipt = try V2ForwardMediaCopyReceipt(byteCount: 42, digest: Data(repeating: 7, count: 32))
+            // Persist a real verified output before isolating the database lease transitions.
+            let copier = try V2ResourceForwardMediaCopier(sources: ["room-a": sourceDB], target: importer,
+                registry: resource.registry, maximumBytes: 1024,
+                allocate: { _ in try resource.storage.allocate() }, now: { base })
+            let receipt = try await copier.copy(old)
             #expect(try await importer.recordCopied(old, receipt: receipt, now: base))
             if path == "retry-due" {
                 #expect(try await importer.retry(old, disposition: .retry(at: epoch), now: base))

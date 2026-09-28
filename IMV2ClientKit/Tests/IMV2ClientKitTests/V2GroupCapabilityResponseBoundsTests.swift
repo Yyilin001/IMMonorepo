@@ -6,83 +6,56 @@ import Testing
 struct V2GroupCapabilityResponseBoundsTests {
     @Test(arguments: ["pinSequence", "announcementRevision", "announcementSequence", "permissionsRevision", "permissionsSequence", "roleRevision", "roleSequence"],
           [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max])
-    func responseBounds(kind: String, value: UInt64) async throws {
-        let transport = V2ProtobufSyncTransport(wire: CapabilityBoundsWire(kind: kind, value: value), protocolVersion: 1)
-        let room = RoomID(uuid: UUID())
-        let expected: UInt64 = kind.hasSuffix("Revision") && value > 1 && value <= UInt64(Int64.max) ? value - 1 : 1
-        func resultValue() async throws -> UInt64 {
-            switch kind {
-            case "pinSequence":
-                return try await transport.setPinnedMessage(command: .init(operationID: .init(uuid: UUID()), roomID: room, messageID: .init(uuid: UUID()), isPinned: true)).roomSequence
-            case "announcementRevision", "announcementSequence":
-                let result = try await transport.setGroupAnnouncement(command: .init(operationID: .init(uuid: UUID()), roomID: room, body: "notice", expectedRevision: kind == "announcementRevision" && value == 1 ? 0 : expected))
-                return kind.hasSuffix("Revision") ? result.revision : result.roomSequence
-            case "permissionsRevision", "permissionsSequence":
-                let result = try await transport.setGroupRolePermissions(command: .init(operationID: .init(uuid: UUID()), roomID: room, role: .member, permissions: [], expectedRevision: expected))
-                return kind.hasSuffix("Revision") ? result.revision : result.roomSequence
-            default:
-                let result = try await transport.changeGroupMemberRole(command: .init(operationID: .init(uuid: UUID()), roomID: room, targetUserID: .init(uuid: UUID()), role: .admin, expectedMembershipRevision: expected))
-                return kind.hasSuffix("Revision") ? result.membershipRevision : result.roomSequence
-            }
+    func responseBounds(kind: String, value: UInt64) throws {
+        let command = try command(kind: kind, expected: 1)
+        let revision = kind.hasSuffix("Revision") ? value : 2
+        let sequence = kind.hasSuffix("Sequence") ? value : 2
+        func receipt() throws -> V2GroupCapabilityReceipt {
+            try .init(identity: command.identity, fingerprint: command.fingerprint,
+                outcome: .applied(result(command: command, revision: revision, sequence: sequence)), resolvedAtMilliseconds: 100)
         }
-        if value == 0 || value > UInt64(Int64.max) || (value == 1 && ["permissionsRevision", "roleRevision"].contains(kind)) {
-            await #expect(throws: V2RealtimeTransportError.unexpectedResponse) { _ = try await resultValue() }
-        } else {
-            #expect(try await resultValue() == value)
-        }
+        if (value == 0 && kind != "roleRevision") || value > UInt64(Int64.max) {
+            #expect(throws: (any Error).self) { try receipt() }
+        } else { _ = try JSONDecoder().decode(V2GroupCapabilityReceipt.self, from: JSONEncoder().encode(receipt())) }
     }
-
     @Test(arguments: ["announcementRevision", "permissionsRevision", "roleRevision"],
-          [UInt64(1), UInt64(Int64.max) - 1, UInt64(Int64.max)])
-    func committedRevision(kind: String, expected: UInt64) async throws {
-        let room = RoomID(uuid: UUID())
+          [UInt64(1), UInt64(Int64.max) - 2, UInt64(Int64.max) - 1])
+    func committedRevision(kind: String, expected: UInt64) throws {
+        let command = try command(kind: kind, expected: expected)
         for returned in [expected - 1, expected, expected + 1, expected + 2] {
-            let transport = V2ProtobufSyncTransport(wire: CapabilityBoundsWire(kind: kind, value: returned), protocolVersion: 1)
-            func result() async throws -> UInt64 {
-                switch kind {
-                case "announcementRevision":
-                    return try await transport.setGroupAnnouncement(command: .init(operationID: .init(uuid: UUID()), roomID: room, body: "notice", expectedRevision: expected)).revision
-                case "permissionsRevision":
-                    return try await transport.setGroupRolePermissions(command: .init(operationID: .init(uuid: UUID()), roomID: room, role: .member, permissions: [], expectedRevision: expected)).revision
-                default:
-                    return try await transport.changeGroupMemberRole(command: .init(operationID: .init(uuid: UUID()), roomID: room, targetUserID: .init(uuid: UUID()), role: .admin, expectedMembershipRevision: expected)).membershipRevision
-                }
-            }
-            if returned == expected + 1 && returned <= UInt64(Int64.max) {
-                #expect(try await result() == returned)
+            if (returned == 0 && kind != "roleRevision") || returned > UInt64(Int64.max) {
+                #expect(throws: (any Error).self) { try V2GroupCapabilityReceipt(identity: command.identity, fingerprint: command.fingerprint,
+                    outcome: .applied(result(command: command, revision: returned, sequence: 1)), resolvedAtMilliseconds: 100) }
             } else {
-                await #expect(throws: V2RealtimeTransportError.unexpectedResponse) { _ = try await result() }
+                let receipt = try V2GroupCapabilityReceipt(identity: command.identity, fingerprint: command.fingerprint,
+                    outcome: .applied(result(command: command, revision: returned, sequence: 1)), resolvedAtMilliseconds: 100)
+                #expect(receipt.validates(command: command) == (returned == expected + 1))
             }
         }
     }
-}
-
-private actor CapabilityBoundsWire: V2AuthenticatedFrameTransport {
-    let kind: String
-    let value: UInt64
-    init(kind: String, value: UInt64) { self.kind = kind; self.value = value }
-    func request(_ frame: V2Frame) throws -> V2Frame {
-        let request = try V2ProtobufFrameCodec.decode(frame)
-        let revision: UInt64 = kind.hasSuffix("Revision") ? value : 2
-        let sequence: UInt64 = kind.hasSuffix("Sequence") ? value : 2
-        var response = IMV2Envelope()
-        response.protocolVersion = 1
-        response.requestID = frame.requestID
-        switch request.body {
-        case .setPinnedMessage(let request):
-            response.pinnedMessageChanged.roomID = request.roomID; response.pinnedMessageChanged.messageID = request.messageID
-            response.pinnedMessageChanged.isPinned = request.isPinned; response.pinnedMessageChanged.roomSequence = sequence; response.pinnedMessageChanged.updatedAtMs = 1_000
-        case .setGroupAnnouncement(let request):
-            response.groupAnnouncementChanged.roomID = request.roomID; response.groupAnnouncementChanged.body = request.body
-            response.groupAnnouncementChanged.revision = revision; response.groupAnnouncementChanged.roomSequence = sequence; response.groupAnnouncementChanged.updatedAtMs = 1_000
-        case .setGroupRolePermissions(let request):
-            response.groupRolePermissionsChanged.roomID = request.roomID; response.groupRolePermissionsChanged.role = request.role
-            response.groupRolePermissionsChanged.permissions = request.permissions; response.groupRolePermissionsChanged.revision = revision; response.groupRolePermissionsChanged.roomSequence = sequence
-        case .changeGroupMemberRole(let request):
-            response.groupMemberRoleChanged.roomID = request.roomID; response.groupMemberRoleChanged.userID = request.userID; response.groupMemberRoleChanged.role = request.role
-            response.groupMemberRoleChanged.membershipRevision = revision; response.groupMemberRoleChanged.roomSequence = sequence
-        default: throw V2RealtimeTransportError.unexpectedResponse
+    private func command(kind: String, expected: UInt64) throws -> V2GroupCapabilityCommand {
+        let room = RoomID(uuid: UUID()), actor = UserID(uuid: UUID()), message = MessageID(uuid: UUID())
+        let action: V2GroupCapabilityAction, operation: V2OperationReference, scope: V2OperationScope
+        if kind.hasPrefix("pin") {
+            action = .pin(messageID: message, isPinned: true, expectedRoomSequence: expected); operation = .pinnedMessage(.init(uuid: UUID())); scope = .message(room, message)
+        } else if kind.hasPrefix("announcement") {
+            action = .announcement(body: "notice", expectedRevision: expected); operation = .groupAnnouncement(.init(uuid: UUID())); scope = .room(room)
+        } else if kind.hasPrefix("permissions") {
+            action = .rolePermissions(role: .member, permissions: [], expectedRevision: expected); operation = .groupPermission(.init(uuid: UUID())); scope = .room(room)
+        } else {
+            action = .memberRole(targetUserID: .init(uuid: UUID()), role: .admin, expectedMembershipRevision: expected); operation = .groupRole(.init(uuid: UUID())); scope = .room(room)
         }
-        return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
+        let intent = try V2GroupCapabilityIntent(identity: .init(accountID: actor, scope: scope, operation: operation), action: action, confirmedUntilMilliseconds: 1000)
+        let admission = try V2GroupCapabilityAdmission(id: .init(uuid: UUID()), identity: intent.identity, intentFingerprint: intent.fingerprint,
+            issuedAtMilliseconds: 1, expiresAtMilliseconds: 1000, targetJoinedRevision: kind.hasPrefix("role") ? 0 : nil)
+        return try .init(intent: intent, admission: admission)
+    }
+    private func result(command: V2GroupCapabilityCommand, revision: UInt64, sequence: UInt64) -> V2GroupCapabilityValue {
+        switch command.intent.action {
+        case .pin(let message, let pinned, _): .pinned(messageID: message, isPinned: pinned, roomSequence: sequence)
+        case .announcement(let body, _): .announcement(body: body, revision: revision, roomSequence: sequence)
+        case .rolePermissions(let role, let permissions, _): .rolePermissions(role: role, permissions: permissions, revision: revision, roomSequence: sequence)
+        case .memberRole(let target, let role, _): .memberRole(targetUserID: target, role: role, membershipRevision: revision, roomSequence: sequence)
+        }
     }
 }

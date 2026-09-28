@@ -20,6 +20,8 @@ public struct V2SessionHTTPAuthorization: Sendable,
     private let epoch: V2AuthSessionEpoch
     /// 执行一次 HTTP 请求的底层传输。
     private let transport: any V2AuthHTTPTransport
+    private let scheduler: V2AccountWorkScheduler?
+    private let requestTimeout: TimeInterval
 
     /// 绑定认证会话、固定代际与业务 HTTP 传输，不立即读取凭证。
     ///
@@ -28,28 +30,43 @@ public struct V2SessionHTTPAuthorization: Sendable,
     ///   - epoch: 本客户端生命周期允许使用的代际。
     ///   - transport: 默认使用账户服务的隔离 URLSession 传输。
     public init(session: V2AuthSession, epoch: V2AuthSessionEpoch,
-                transport: any V2AuthHTTPTransport = V2URLSessionAuthHTTPTransport()) {
+                transport: any V2AuthHTTPTransport = V2URLSessionAuthHTTPTransport(), scheduler: V2AccountWorkScheduler? = nil, requestTimeout: TimeInterval = 15) {
         self.session = session
         self.epoch = epoch
         self.transport = transport
+        precondition(requestTimeout.isFinite && requestTimeout > 0 && requestTimeout <= 86_400)
+        self.requestTimeout = requestTimeout
+        self.scheduler = scheduler
     }
 
     /// 读取本代际的一致令牌与设备身份，转换为推送端点凭证；代际失效映射为取消。
     public func pushEndpointCredentials() async throws -> V2ClientPushEndpointCredentials {
-        let credentials = try await credentials()
-        return .init(accessToken: credentials.accessToken, deviceID: credentials.deviceID)
+        let limit = ContinuousClock.now.advanced(by: .seconds(requestTimeout))
+        let deadline = min(V2HTTPRequestDeadline.current ?? limit, limit)
+        let credentials = try await V2HTTPRequestDeadline.run(until: deadline, service: "authentication") {
+            try await self.admittedCredentials(deadline: deadline)
+        }
+        return .init(accessToken: credentials.accessToken, deviceID: credentials.deviceID, requestDeadline: deadline)
     }
 
     /// 读取本代际的一致令牌与设备身份，转换为设备管理凭证；不允许借用后续登录的凭证。
     public func deviceSessionCredentials() async throws -> V2ClientDeviceSessionCredentials {
-        let credentials = try await credentials()
-        return .init(accessToken: credentials.accessToken, deviceID: credentials.deviceID)
+        let limit = ContinuousClock.now.advanced(by: .seconds(requestTimeout))
+        let deadline = min(V2HTTPRequestDeadline.current ?? limit, limit)
+        let credentials = try await V2HTTPRequestDeadline.run(until: deadline, service: "authentication") {
+            try await self.admittedCredentials(deadline: deadline)
+        }
+        return .init(accessToken: credentials.accessToken, deviceID: credentials.deviceID, requestDeadline: deadline)
     }
 
     /// 读取本代际的一致令牌与设备身份，转换为媒体服务凭证；必要时由认证会话刷新。
     public func mediaEdgeCredentials() async throws -> V2ClientMediaEdgeCredentials {
-        let credentials = try await credentials()
-        return .init(accessToken: credentials.accessToken, deviceID: credentials.deviceID)
+        let limit = ContinuousClock.now.advanced(by: .seconds(requestTimeout))
+        let deadline = min(V2HTTPRequestDeadline.current ?? limit, limit)
+        let credentials = try await V2HTTPRequestDeadline.run(until: deadline, service: "authentication") {
+            try await self.admittedCredentials(deadline: deadline)
+        }
+        return .init(accessToken: credentials.accessToken, deviceID: credentials.deviceID, requestDeadline: deadline)
     }
 
     /// 在请求前后校验账户代际，并处理业务接口的 401 响应。
@@ -61,6 +78,13 @@ public struct V2SessionHTTPAuthorization: Sendable,
     /// 此方法只校验请求头格式；401 时才由会话检查设备及被拒绝令牌是否仍适用。
     /// 旧令牌的迟到 401 不能发起额外轮换，只有刷新接口的明确拒绝才允许终止会话。
     public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let limit = ContinuousClock.now.advanced(by: .seconds(requestTimeout))
+        let deadline = min([V2HTTPRequestDeadline.deadline(for: request), V2HTTPRequestDeadline.current].compactMap { $0 }.min() ?? limit, limit)
+        return try await V2HTTPRequestDeadline.run(until: deadline, service: "account", certainty: .outcomeUnknown) {
+            try await self.performData(for: request, deadline: deadline)
+        }
+    }
+    private func performData(for request: URLRequest, deadline: ContinuousClock.Instant) async throws -> (Data, HTTPURLResponse) {
         try await requireCurrent()
         guard let authorization = request.value(forHTTPHeaderField: "Authorization"),
               authorization.hasPrefix("Bearer "), authorization.count > 7,
@@ -80,16 +104,47 @@ public struct V2SessionHTTPAuthorization: Sendable,
             // Only the refresh contract can make that terminal decision. Do
             // not replay an application write or one-use media grant here.
             do {
-                try await session.refreshAfterHTTPUnauthorized(
-                    ifCurrent: epoch, rejectedAccessToken: String(authorization.dropFirst(7)),
-                    deviceID: device
-                )
+                if let scheduler {
+                    // execute() has drained and released the ordinary HTTP slot before this refresh.
+                    try await scheduler.withPermit(.init(service: "authentication", priority: .critical, kind: .authentication), deadline: deadline) { _ in
+                        try await V2HTTPRequestDeadline.$authenticationAdmission.withValue(scheduler) {
+                            do {
+                                try await session.refreshAfterHTTPUnauthorized(ifCurrent: epoch,
+                                    rejectedAccessToken: String(authorization.dropFirst(7)), deviceID: device)
+                            } catch {
+                                await session.drainHTTPAuthorizationWork(ifCurrent: epoch)
+                                throw error
+                            }
+                        }
+                    }
+                } else {
+                    do {
+                        try await session.refreshAfterHTTPUnauthorized(ifCurrent: epoch,
+                            rejectedAccessToken: String(authorization.dropFirst(7)), deviceID: device)
+                    } catch {
+                        await session.drainHTTPAuthorizationWork(ifCurrent: epoch)
+                        throw error
+                    }
+                }
             } catch V2AuthSessionError.sessionInvalidated {
                 throw CancellationError()
             }
             try await requireCurrent()
         }
         return result
+    }
+
+    private func admittedCredentials(deadline: ContinuousClock.Instant) async throws -> V2ClientRealtimeCredentials {
+        guard let scheduler else { return try await credentials() }
+        do {
+            return try await scheduler.withPermit(.init(service: "authentication", priority: .critical, kind: .authentication), deadline: deadline) { _ in
+                try await V2HTTPRequestDeadline.$authenticationAdmission.withValue(scheduler) {
+                    try await credentials()
+                }
+            }
+        } catch V2AccountWorkScheduler.AdmissionError.deadlineExceeded {
+            throw V2HTTPFailure(kind: .deadlineExceeded, service: "authentication", certainty: .notStarted)
+        }
     }
 
     /// 在一致凭证读取前后校验固定代际，并要求返回元组的代际相同。
@@ -101,6 +156,7 @@ public struct V2SessionHTTPAuthorization: Sendable,
         let credentials: V2ClientRealtimeCredentials
         do { credentials = try await session.realtimeCredentials() }
         catch {
+            await session.drainHTTPAuthorizationWork(ifCurrent: epoch)
             // Preserve terminal/locked-store errors from this epoch. A
             // replacement login is instead cancellation of the old owner.
             if case V2AuthSessionError.sessionInvalidated = error { throw CancellationError() }

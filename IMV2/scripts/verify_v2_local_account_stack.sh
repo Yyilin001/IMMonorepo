@@ -242,6 +242,7 @@ peer_user_id="$(printf '%s' "${peer_issued_credentials}" | jq -er '.userID')"
 phase="authenticated V2 direct-message send"
 gateway_send_result="$(compose \
   exec -T \
+  --env "IM_V2_GATEWAY_PROBE_ACCOUNT_BASE_URL=${account_base_url}" \
   --env 'IM_V2_GATEWAY_PROBE_MODE=sendDirectMessage' \
   --env "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN=${access_token}" \
   --env "IM_V2_GATEWAY_PROBE_DEVICE_ID=${device_id}" \
@@ -256,6 +257,7 @@ test -n "${gateway_room_id}" && test -n "${gateway_message_id}" && test -z "${ga
 phase="authenticated V2 recipient room-log delivery"
 gateway_receive_output="$(compose \
   exec -T \
+  --env "IM_V2_GATEWAY_PROBE_ACCOUNT_BASE_URL=${account_base_url}" \
   --env 'IM_V2_GATEWAY_PROBE_MODE=receiveDirectMessage' \
   --env "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN=${peer_access_token}" \
   --env "IM_V2_GATEWAY_PROBE_DEVICE_ID=${peer_device_id}" \
@@ -301,7 +303,8 @@ if [[ -n "${remote_batch_fixture}" || -n "${remote_batch_release}" ]]; then
 
   remote_batch_warm_send() {
     compose exec -T \
-      --env 'IM_V2_GATEWAY_PROBE_MODE=sendDirectMessage' \
+      --env "IM_V2_GATEWAY_PROBE_ACCOUNT_BASE_URL=${account_base_url}" \
+  --env 'IM_V2_GATEWAY_PROBE_MODE=sendDirectMessage' \
       --env "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN=$1" \
       --env "IM_V2_GATEWAY_PROBE_DEVICE_ID=$2" \
       --env "IM_V2_GATEWAY_PROBE_TARGET_USER_ID=$3" \

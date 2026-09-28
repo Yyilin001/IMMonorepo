@@ -6,9 +6,9 @@ import XCTest
 extension IMAppRoomRecoveryScaleTests {
     func verifyJoinAfterDirectory(connection: V2TLSFrameConnection, coordinator: V2RealtimeSessionCoordinator,
                                  account: LocalE2EAccountCredentials, store: GRDBV2LocalSyncStore,
-                                 owner: V2ProtobufSyncTransport, roomID: RoomID) async throws {
+                                 owner: LocalE2EAccountCredentials, ownerTransport: V2ProtobufSyncTransport, roomID: RoomID) async throws {
         await coordinator.disconnect()
-        let members = try await owner.listRoomMembers(roomID: roomID, cursor: nil, pageSize: 10)
+        let members = try await ownerTransport.listRoomMembers(roomID: roomID, cursor: nil, pageSize: 10)
         let removed = try await owner.changeMembership(roomID: roomID,
             operationID: .init(UUID().uuidString.lowercased()), targetUserID: account.userID,
             action: .remove, expectedMembershipRevision: members.membershipRevision)
@@ -21,27 +21,26 @@ extension IMAppRoomRecoveryScaleTests {
 
     func verifyUnknownJoinAfterDirectory(connection: V2TLSFrameConnection, coordinator: V2RealtimeSessionCoordinator,
                                         account: LocalE2EAccountCredentials, store: GRDBV2LocalSyncStore,
-                                        owner: V2ProtobufSyncTransport) async throws {
+                                        owner: LocalE2EAccountCredentials, ownerTransport: V2ProtobufSyncTransport) async throws {
         await coordinator.disconnect()
         let operation = try GroupRoomOperationID(UUID().uuidString.lowercased())
-        _ = try await owner.beginGroupRoomCreation(operationID: operation, title: "Unknown directory join")
-        // An owner-only room has never granted this viewer membership or emitted its personal projections.
-        let room = try await owner.finalizeGroupRoomCreation(operationID: operation)
-        let members = try await owner.listRoomMembers(roomID: room.roomID, cursor: nil, pageSize: 10)
-        _ = try await owner.sendMessage(roomID: room.roomID, clientMessageID: .init(UUID().uuidString.lowercased()),
+        // An owner-only room has never granted this viewer membership.
+        let roomID = try await owner.createGroup(operationID: operation, title: "Unknown directory join", members: [])
+        let members = try await ownerTransport.listRoomMembers(roomID: roomID, cursor: nil, pageSize: 10)
+        _ = try await owner.sendMessage(roomID: roomID, clientMessageID: .init(UUID().uuidString.lowercased()),
             text: "directory-join-gap", media: [], mentions: [])
-        let existingAccess = try await store.groupEventAccess(roomID: room.roomID)
-        let existingMessages = try await store.messages(in: room.roomID)
+        let existingAccess = try await store.groupEventAccess(roomID: roomID)
+        let existingMessages = try await store.messages(in: roomID)
         XCTAssertNil(existingAccess)
         XCTAssertTrue(existingMessages.isEmpty)
         try await runDirectoryJoin(connection: connection, coordinator: coordinator, account: account,
-            store: store, owner: owner, roomID: room.roomID, membershipRevision: members.membershipRevision)
+            store: store, owner: owner, roomID: roomID, membershipRevision: members.membershipRevision)
         print("IMV2_TLS_ROOM_UNKNOWN_DIRECTORY_JOIN_PASSED")
     }
 
     private func runDirectoryJoin(connection: V2TLSFrameConnection, coordinator: V2RealtimeSessionCoordinator,
                                   account: LocalE2EAccountCredentials, store: GRDBV2LocalSyncStore,
-                                  owner: V2ProtobufSyncTransport, roomID: RoomID, membershipRevision: UInt64) async throws {
+                                  owner: LocalE2EAccountCredentials, roomID: RoomID, membershipRevision: UInt64) async throws {
         let session = try await coordinator.connect()
         let transport = V2ProtobufSyncTransport(wire: connection, protocolVersion: session.protocolVersion)
         let personal = V2SyncEngine(transport: transport, store: store, capabilityProfile: session.capabilityProfile)
@@ -98,13 +97,13 @@ extension IMAppRoomRecoveryScaleTests {
 /// Returning that unchanged response ensures pagination cannot discover the join.
 private actor RecoveryDirectoryJoinTransport: V2ClientRoomRecoveryTransport {
     let transport: V2ProtobufSyncTransport
-    let owner: V2ProtobufSyncTransport
+    let owner: LocalE2EAccountCredentials
     let roomID: RoomID
     let userID: UserID
     let membershipRevision: UInt64
     private var started = false
     private(set) var finalHead: UInt64?
-    init(transport: V2ProtobufSyncTransport, owner: V2ProtobufSyncTransport, roomID: RoomID,
+    init(transport: V2ProtobufSyncTransport, owner: LocalE2EAccountCredentials, roomID: RoomID,
          userID: UserID, membershipRevision: UInt64) {
         self.transport = transport; self.owner = owner; self.roomID = roomID
         self.userID = userID; self.membershipRevision = membershipRevision

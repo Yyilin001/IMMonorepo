@@ -528,7 +528,9 @@ def verify(first, second, owner, old_host):
     stale = json.loads((EVIDENCE / f"host-{old_host}-stale.json").read_text())
     tokens = [race_a["token"], race_b["token"]]
     assert race_a["messageID"] == race_b["messageID"] == replay["messageID"]
-    assert {race_a["outcome"], race_b["outcome"]} == {"accepted", "idempotent"}
+    # Typed operations return the same permanent receipt for first commit and replay.
+    # SQL uniqueness and identical message IDs below prove one durable effect.
+    assert race_a["outcome"] == race_b["outcome"] == "originalReceipt"
     assert all(t["activationEpoch"] == int(first[2]) for t in tokens)
     assert all(t["host"]["hostID"]["rawValue"].lower() == owner.lower() for t in tokens)
     assert second[0].lower() != first[0].lower()

@@ -7,6 +7,7 @@ import HTTPTypes
 import Darwin
 #endif
 import IMV2Core
+import IMV2ActorContracts
 import IMV2ServerHTTP
 import PostgresNIO
 @testable import IMV2Server
@@ -33,68 +34,45 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw("UPDATE im_v2.room_admission SET command_window_limit = 20").run()
             let destination: RoomID
             if deliveryKind.hasPrefix("direct") {
-                guard case .opened(let room) = try await PostgresV2DirectMessagingStore(database: database).open(
-                    command: .init(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID)),
-                    capacityProfile: profile, roomShardID: "room-a", roomID: .init(uuid: UUID()), now: base) else { throw CancellationError() }
+                let room = try await V2DirectRoomOperationTestFixture(database: database, capacityProfile: profile,
+                        roomShardID: "room-a", roomID: .init(uuid: UUID()), now: { base }).openedIdentity(
+                        actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID),
+                        firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
                 destination = room.roomID
             } else { destination = roomID }
             let destinationUUID = try #require(destination.uuidValue)
             let writer = PostgresV2RoomWriteStore(database: database,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
             let send = try V2SendMessageService(store: writer, capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), now: { base })
-            let edits = PostgresV2MessageEditStore(database: database)
-            let withdrawals = PostgresV2MessageWithdrawalStore(database: database)
-            let reactions = PostgresV2MessageReactionStore(database: database)
-            let owner = try V2RoomShardRoute(shardID: "room-a", epoch: 0)
-            let ownerValidated = path.hasSuffix("-owner")
-            let kind = String(path.split(separator: "-")[0])
-            let table = kind == "edit" ? "message_edit_operations" : kind == "withdraw" ? "message_withdrawal_operations" : "message_reaction_operations"
-            func invoke(_ id: UUID, message: MessageID, remove: Bool, now: Date, replay: Bool) async throws -> (Date, UInt64, EventID) {
-                let event = EventID(uuid: UUID())
+            guard case .acquired(let lease)=try await PostgresV2RoomActivationStore(database:database).acquire(roomID:destination,owner:.init(shardID:"room-a",epoch:0),host:.init(hostID:.init("mutation-precision"),incarnationID:UUID()),duration:.init(30_000)) else { throw CancellationError() }
+            let mutations=PostgresV2MessageMutationOperationStore(database:database,contentReviewMode:.disabled,clock:{base})
+            let reactions=PostgresV2MessageReactionOperationStore(database:database,clock:{base})
+            let kind=String(path.split(separator:"-")[0])
+            let table=kind=="reaction" ? "message_reaction_receipts" : "message_mutation_receipts"
+            func invoke(_ id:UUID,message:MessageID,remove:Bool,now:Date,replay:Bool) async throws -> (Date,UInt64,EventID) {
+                let deadline=UInt64(base.timeIntervalSince1970*1000)+60_000
+                let sequence:UInt64,event:EventID
                 switch kind {
                 case "edit":
-                    let command = try V2EditMessageCommand(roomID: destination, actorUserID: senderID, operationID: .init(uuid: id),
-                        messageID: message, expectedMessageRevision: 1, text: "Edited clock fixture", maximumUTF8Bytes: 64)
-                    let outcome = try await ownerValidated
-                        ? edits.editOwnerValidated(command: command, ownerRoute: owner, capacityProfile: profile, eventID: event, now: now)
-                        : edits.edit(command: command, capacityProfile: profile, eventID: event, now: now)
-                    let value: V2MessageEdit
-                    switch outcome {
-                    case .edited(let state): #expect(!replay); value = state
-                    case .idempotent(let state): #expect(replay); value = state
-                    default: throw CancellationError()
-                    }
-                    #expect(value.roomID == destination && value.messageID == message && value.text == command.text && value.messageRevision == 2)
-                    return (value.createdAt, value.roomSequence, value.eventID)
+                    let command=try V2MessageEditOperationCommand(command:.init(roomID:destination,actorUserID:senderID,operationID:.init(uuid:id),messageID:message,expectedMessageRevision:1,text:"Edited clock fixture",maximumUTF8Bytes:64),firstSubmissionDeadlineMilliseconds:deadline)
+                    guard case .receipt(let receipt)=try await mutations.edit(command,token:lease.token,capacityProfile:profile,eventID:.init(uuid:UUID()),now:now,maximumUTF8Bytes:64),case .committed(let commit)=receipt.outcome else { throw CancellationError() }
+                    #expect(commit.messageRevision==2)
+                    sequence=commit.roomSequence;event=commit.eventID
                 case "withdraw":
-                    let command = try V2WithdrawMessageCommand(roomID: destination, actorUserID: senderID, operationID: .init(uuid: id),
-                        messageID: message, expectedMessageRevision: 1)
-                    let outcome = try await ownerValidated
-                        ? withdrawals.withdrawOwnerValidated(command: command, ownerRoute: owner, capacityProfile: profile, eventID: event, now: now)
-                        : withdrawals.withdraw(command: command, capacityProfile: profile, eventID: event, now: now)
-                    let value: V2MessageWithdrawal
-                    switch outcome {
-                    case .withdrawn(let state): #expect(!replay); value = state
-                    case .idempotent(let state): #expect(replay); value = state
-                    default: throw CancellationError()
-                    }
-                    #expect(value.roomID == destination && value.messageID == message && value.messageRevision == 2)
-                    return (value.createdAt, value.roomSequence, value.eventID)
+                    let command=try V2MessageWithdrawalOperationCommand(command:.init(roomID:destination,actorUserID:senderID,operationID:.init(uuid:id),messageID:message,expectedMessageRevision:1),firstSubmissionDeadlineMilliseconds:deadline)
+                    guard case .receipt(let receipt)=try await mutations.withdraw(command,token:lease.token,capacityProfile:profile,eventID:.init(uuid:UUID()),now:now),case .committed(let commit)=receipt.outcome else { throw CancellationError() }
+                    #expect(commit.messageRevision==2)
+                    sequence=commit.roomSequence;event=commit.eventID
                 default:
-                    let command = try V2ChangeMessageReactionCommand(roomID: destination, actorUserID: senderID, operationID: .init(uuid: id),
-                        messageID: message, reaction: "👍", action: remove ? .remove : .add)
-                    let outcome = try await ownerValidated
-                        ? reactions.changeOwnerValidated(command: command, ownerRoute: owner, capacityProfile: profile, eventID: event, now: now)
-                        : reactions.change(command: command, capacityProfile: profile, eventID: event, now: now)
-                    let value: V2MessageReactionChange
-                    switch outcome {
-                    case .changed(let state): #expect(!replay); value = state
-                    case .idempotent(let state): #expect(replay); value = state
-                    default: throw CancellationError()
-                    }
-                    #expect(value.roomID == destination && value.messageID == message && value.actorUserID == senderID && value.reaction == command.reaction && value.action == command.action)
-                    return (value.createdAt, value.roomSequence, value.eventID)
+                    let command=try V2MessageReactionOperationCommand(command:.init(roomID:destination,actorUserID:senderID,operationID:.init(uuid:id),messageID:message,reaction:"👍",action:remove ? .remove : .add),expectedReactionRevision:remove ? 1 : 0,firstSubmissionDeadlineMilliseconds:deadline)
+                    guard case .receipt(let receipt)=try await reactions.change(command,token:lease.token,capacityProfile:profile,eventID:.init(uuid:UUID()),now:now),case .committed(let commit)=receipt.outcome,let proof=commit.event else { throw CancellationError() }
+                    #expect(commit.targetState==(remove ? .absent : .present))
+                    sequence=proof.roomSequence;event=proof.eventID
                 }
+                // Minimal original receipts do not carry a message body or grant
+                // display access. This owner fixture independently inspects its event.
+                let timestamp=try #require(try await sql.raw("SELECT created_at FROM im_v2.room_events WHERE event_id=\(bind:event.uuidValue!)").first(decoding:MutationPrecisionTimestamp.self))
+                return (timestamp.createdAt,sequence,event)
             }
             func snapshot() async throws -> [String] {
                 var result: [String] = []
@@ -115,17 +93,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     let operation = UUID()
                     let first = try await invoke(operation, message: message.messageID, remove: remove, now: now, replay: false)
                     #expect(first.1 == message.roomSequence + (remove ? 2 : 1))
-                    let row = try await sql.raw("SELECT created_at AS value FROM im_v2.\(unsafeRaw: table) WHERE operation_id = \(bind: operation)").first(decoding: RevocationClockDateRow.self)
+                    let row = try await sql.raw("SELECT created_at AS value FROM im_v2.room_events WHERE event_id = \(bind: first.2.uuidValue!)").first(decoding: RevocationClockDateRow.self)
                     let stored = try #require(row).value
                     #expect(first.0 == stored)
                     #expect(try v2GatewayMilliseconds(first.0) == v2GatewayMilliseconds(stored))
                     let exact = try await sql.raw("""
                         SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table) o
-                        JOIN im_v2.room_events e ON e.event_id = o.event_id
-                        WHERE o.operation_id = \(bind: operation) AND o.created_at = \(bind: now)
-                            AND e.created_at = o.created_at
+                        CROSS JOIN im_v2.room_events e
+                        WHERE o.operation_id = \(bind: operation) AND o.resolved_at = \(bind: base)
+                            AND e.created_at = \(bind: now)
                             AND e.event_id = \(bind: first.2.uuidValue!)
-                            AND e.room_sequence = o.room_sequence AND e.room_sequence = \(bind: Int64(first.1))
+                            AND e.room_sequence = \(bind: Int64(first.1))
                         """).first(decoding: CountRow.self)
                     #expect(exact?.value == 1)
                     let payload = try await sql.raw("SELECT (payload->>'server_created_at_ms')::bigint AS value FROM im_v2.room_events WHERE event_id = \(bind: first.2.uuidValue!)").first(decoding: CountRow.self)
@@ -148,247 +126,179 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Group controls preserve response and event timestamp precision for both delivery modes and owner paths",
-          arguments: [V2GroupCapacityClass.standard, .large],
-          ["pin", "pin-owner", "announcement", "announcement-owner", "permissions", "permissions-owner", "role", "role-owner"])
-    func groupCapabilityTimestampPrecision(mode: V2GroupCapacityClass, path: String) async throws {
+    @Test("Group controls preserve original proof and event precision through the fenced owner",
+          arguments: [V2GroupCapacityClass.standard, .large], ["pin", "announcement", "permissions", "role"])
+    func groupCapabilityTimestampPrecision(mode: V2GroupCapacityClass, kind: String) async throws {
         try await withForwardOwnerDatabases(mode: mode) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile()
-            let groups = PostgresV2GroupCapabilitiesStore(database: database)
-            let owner = try V2RoomShardRoute(shardID: "room-a", epoch: 0)
-            let ownerValidated = path.hasSuffix("-owner")
-            let kind = String(path.split(separator: "-")[0])
-            try await sql.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: senderUUID)").run()
-            try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 1 WHERE room_id = \(bind: roomUUID)").run()
+            try await sql.raw("UPDATE im_v2.room_memberships SET role='owner' WHERE room_id=\(bind: roomUUID) AND user_id=\(bind: senderUUID)").run()
+            try await sql.raw("UPDATE im_v2.rooms SET membership_revision=1 WHERE room_id=\(bind: roomUUID)").run()
             let expiry = Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 1)
-            try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until = \(bind: expiry)").run()
+            try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until=\(bind: expiry)").run()
             let send = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: profile,
                 limits: try .init(maxUTF8Bytes: 64), now: { base })
             guard case .accepted(let message) = try await send.send(.init(roomID: roomID, actorUserID: senderID,
                 clientMessageID: .init(uuid: UUID()), text: "Group timestamp fixture")) else { throw CancellationError() }
-            let table = kind == "pin" ? "room_pinned_message_operations" : kind == "announcement" ? "group_announcement_operations"
-                : kind == "permissions" ? "group_permission_operations" : "group_role_operations"
-            func invoke(_ id: UUID, index: Int, now: Date, replay: Bool) async throws -> (Date?, UInt64) {
-                let event = EventID(uuid: UUID())
+            guard case .acquired(let lease) = try await PostgresV2RoomActivationStore(database: database).acquire(
+                roomID: roomID, owner: .init(shardID: "room-a", epoch: 0),
+                host: .init(hostID: .init("group-precision"), incarnationID: UUID()), duration: .init(30_000)) else { throw CancellationError() }
+            let dates: [Double] = [946_684_800 - 0.00000075, 946_684_800 + 0.00000075, 946_684_800 + 0.00000125,
+                1_750_000_000 + 0.99999975, 946_684_800 + 9_223_371_331_200 - 180]
+            for (index, seconds) in dates.enumerated() {
+                let now = Date(timeIntervalSince1970: seconds), operation = UUID(), event = EventID(uuid: UUID())
+                let action: V2GroupCapabilityAction
+                let reference: V2OperationReference
+                let scope: V2OperationScope
                 switch kind {
                 case "pin":
-                    let command = V2PinnedMessageCommand(operationID: .init(uuid: id), roomID: roomID, messageID: message.messageID, isPinned: index % 2 == 0)
-                    let outcome = try await ownerValidated
-                        ? groups.setPinnedMessageOwnerValidated(actorUserID: senderID, command: command, ownerRoute: owner, capacityProfile: profile, eventID: event, now: now)
-                        : groups.setPinnedMessage(actorUserID: senderID, command: command, capacityProfile: profile, eventID: event, now: now)
-                    let value: V2PinnedMessage
-                    switch outcome {
-                    case .applied(let state): #expect(!replay); value = state
-                    case .idempotent(let state): #expect(replay); value = state
-                    default: throw CancellationError()
-                    }
-                    #expect(value.roomID == roomID && value.messageID == message.messageID && value.isPinned == command.isPinned)
-                    return (value.updatedAt, value.roomSequence)
+                    action = .pin(messageID: message.messageID, isPinned: index % 2 == 0, expectedRoomSequence: UInt64(index + 1))
+                    reference = .pinnedMessage(.init(uuid: operation)); scope = .message(roomID, message.messageID)
                 case "announcement":
-                    let command = try V2GroupAnnouncementCommand(operationID: .init(uuid: id), roomID: roomID, body: "Announcement \(index)", expectedRevision: UInt64(index))
-                    let outcome = try await ownerValidated
-                        ? groups.setAnnouncementOwnerValidated(actorUserID: senderID, command: command, ownerRoute: owner, capacityProfile: profile, eventID: event, now: now)
-                        : groups.setAnnouncement(actorUserID: senderID, command: command, capacityProfile: profile, eventID: event, now: now)
-                    let value: V2GroupAnnouncement
-                    switch outcome {
-                    case .applied(let state): #expect(!replay); value = state
-                    case .idempotent(let state): #expect(replay); value = state
-                    default: throw CancellationError()
-                    }
-                    #expect(value.roomID == roomID && value.body == command.body && value.revision == UInt64(index + 1))
-                    return (value.updatedAt, value.roomSequence)
+                    action = .announcement(body: "Announcement \(index)", expectedRevision: UInt64(index))
+                    reference = .groupAnnouncement(.init(uuid: operation)); scope = .room(roomID)
                 case "permissions":
-                    let command = try V2GroupRolePermissionsCommand(operationID: .init(uuid: id), roomID: roomID, role: .member,
-                        permissions: index % 2 == 0 ? [.sendMessages] : [], expectedRevision: UInt64(index + 1))
-                    let outcome = try await ownerValidated
-                        ? groups.setRolePermissionsOwnerValidated(actorUserID: senderID, command: command, ownerRoute: owner, capacityProfile: profile, eventID: event, now: now)
-                        : groups.setRolePermissions(actorUserID: senderID, command: command, capacityProfile: profile, eventID: event, now: now)
-                    let value: V2GroupRolePermissionsChange
-                    switch outcome {
-                    case .applied(let state): #expect(!replay); value = state
-                    case .idempotent(let state): #expect(replay); value = state
-                    default: throw CancellationError()
-                    }
-                    #expect(value.roomID == roomID && value.role == .member && value.permissions == command.permissions && value.revision == UInt64(index + 2))
-                    return (nil, value.roomSequence)
+                    action = .rolePermissions(role: .member, permissions: index % 2 == 0 ? [.sendMessages] : [], expectedRevision: UInt64(index + 1))
+                    reference = .groupPermission(.init(uuid: operation)); scope = .room(roomID)
                 default:
-                    let command = try V2GroupMemberRoleCommand(operationID: .init(uuid: id), roomID: roomID,
-                        targetUserID: .init(uuid: memberTwoUUID), role: index % 2 == 0 ? .admin : .member, expectedMembershipRevision: UInt64(index + 1))
-                    let outcome = try await ownerValidated
-                        ? groups.changeMemberRoleOwnerValidated(actorUserID: senderID, command: command, ownerRoute: owner, capacityProfile: profile, eventID: event, now: now)
-                        : groups.changeMemberRole(actorUserID: senderID, command: command, capacityProfile: profile, eventID: event, now: now)
-                    let value: V2GroupMemberRoleChange
-                    switch outcome {
-                    case .applied(let state): #expect(!replay); value = state
-                    case .idempotent(let state): #expect(replay); value = state
-                    default: throw CancellationError()
-                    }
-                    #expect(value.roomID == roomID && value.targetUserID == command.targetUserID && value.role == command.role && value.membershipRevision == UInt64(index + 2))
-                    return (nil, value.roomSequence)
+                    action = .memberRole(targetUserID: .init(uuid: memberTwoUUID), role: index % 2 == 0 ? .admin : .member, expectedMembershipRevision: UInt64(index + 1))
+                    reference = .groupRole(.init(uuid: operation)); scope = .room(roomID)
                 }
-            }
-            func snapshot() async throws -> [String] {
-                var result: [String] = []
-                for name in ["rooms", "room_memberships", "room_admission", "shard_admission_pools", "room_events",
-                    "room_pinned_messages", "group_announcements", "group_role_policies", "group_role_permissions", table] {
-                    let row = try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: name) r").first(decoding: StringValueRow.self)
-                    result.append(try #require(row).value)
-                }
-                return result
-            }
-            let dates: [Double] = [946_684_800 - 0.00000075, 946_684_800 + 0.00000075, 946_684_800 + 0.00000125,
-                1_750_000_000 + 0.99999975, 946_684_800 - 211_813_488_000, 946_684_800 + 9_223_371_331_200 - 10]
-            for (index, seconds) in dates.enumerated() {
-                let now = Date(timeIntervalSince1970: seconds), operation = UUID()
-                let first = try await invoke(operation, index: index, now: now, replay: false)
-                #expect(first.1 == UInt64(index + 2))
-                let row = try await sql.raw("SELECT created_at AS value FROM im_v2.\(unsafeRaw: table) WHERE operation_id = \(bind: operation)").first(decoding: RevocationClockDateRow.self)
+                let milliseconds = UInt64(try v2GatewayMilliseconds(now))
+                let intent = try V2GroupCapabilityIntent(identity: .init(accountID: senderID, scope: scope, operation: reference),
+                    action: action, confirmedUntilMilliseconds: milliseconds + 120_000)
+                let store = PostgresV2GroupCapabilityOperationStore(database: database, clock: { now })
+                guard case .admitted(let admission) = try await store.admit(intent, token: lease.token) else { throw CancellationError() }
+                let command = try V2GroupCapabilityCommand(intent: intent, admission: admission)
+                let first = try await store.submit(command, token: lease.token, capacityProfile: profile, eventID: event)
+                guard case .receipt(let proof) = first, case .applied(let value) = proof.outcome else { throw CancellationError() }
+                #expect(proof.validates(command: command))
+                #expect(proof.resolvedAtMilliseconds == milliseconds)
+                #expect(value.roomSequence == UInt64(index + 2))
+                let row = try await sql.raw("SELECT created_at AS value FROM im_v2.room_events WHERE event_id=\(bind: event.uuidValue!)").first(decoding: RevocationClockDateRow.self)
                 let stored = try #require(row).value
-                if ["pin", "announcement"].contains(kind) {
-                    #expect(first.0 == stored)
-                    #expect(try first.0.map(v2GatewayMilliseconds) == v2GatewayMilliseconds(stored))
-                }
+                let storedMilliseconds = try v2GatewayMilliseconds(stored)
                 let exact = try await sql.raw("""
-                    SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table) o
-                    JOIN im_v2.room_events e ON e.event_id = o.event_id
-                    WHERE o.operation_id = \(bind: operation) AND o.created_at = \(bind: now) AND e.created_at = o.created_at
-                        AND e.room_sequence = o.room_sequence AND e.room_sequence = \(bind: Int64(first.1))
-                        AND (e.payload->>'room_sequence')::bigint = e.room_sequence
+                    SELECT COUNT(*) AS value FROM im_v2.room_events
+                    WHERE event_id=\(bind: event.uuidValue!) AND created_at=\(bind: now)
+                      AND room_sequence=\(bind: Int64(value.roomSequence))
+                      AND (payload->>'room_sequence')::bigint=room_sequence
+                      AND (payload->>'server_created_at_ms')::bigint=\(bind: storedMilliseconds)
                     """).first(decoding: CountRow.self)
                 #expect(exact?.value == 1)
-                let payload = try await sql.raw("SELECT (e.payload->>'server_created_at_ms')::bigint AS value FROM im_v2.room_events e JOIN im_v2.\(unsafeRaw: table) o ON o.event_id = e.event_id WHERE o.operation_id = \(bind: operation)").first(decoding: CountRow.self)
-                #expect(try payload?.value == v2GatewayMilliseconds(stored))
-                let before = try await snapshot()
-                let replay = try await invoke(operation, index: index, now: base, replay: true)
-                #expect(replay.0 == first.0 && replay.1 == first.1)
-                #expect(try await snapshot() == before)
+                let replay = PostgresV2GroupCapabilityOperationStore(database: database, clock: { Date(timeIntervalSince1970: .nan) })
+                #expect(try await replay.submit(command, token: lease.token, capacityProfile: profile, eventID: .init(uuid: UUID())) == first)
+                #expect(try await count("im_v2.group_capability_receipts", on: sql) == Int64(index + 1))
+                #expect(try await count("im_v2.room_events", on: sql) == Int64(index + 2))
             }
-            #expect(try await count("im_v2." + table, on: sql) == 6)
-            #expect(try await count("im_v2.room_events", on: sql) == 7)
             let page = try await PostgresV2GroupEventLogStore(database: database).pull(roomID: roomID, actorUserID: senderID, afterRoomSequence: 1, pageSize: 20)
-            #expect(page.events.count == 6 && page.nextRoomSequence == 7 && !page.hasMore)
+            #expect(page.events.count == dates.count && page.nextRoomSequence == UInt64(dates.count + 1) && !page.hasMore)
         }
     }
 
-    @Test("Direct and social responses preserve database timestamp precision across transitions and retries",
+    @Test("Direct, preference and social proofs retain their original timestamp across retries",
           arguments: ["direct", "stranger", "userAdd", "request", "accept", "reject", "remove", "block", "unblock", "block-remove"],
           [Double](arrayLiteral: 946_684_800 - 0.00000075, 946_684_800 + 0.00000075, 946_684_800 + 0.00000125,
-              1_750_000_000 + 0.99999975,
-              946_684_800 - 211_813_488_000, 946_684_800 + 9_223_371_331_200 - 10))
+              1_750_000_000 + 0.99999975, 946_684_800 + 9_223_371_331_200 - 660))
     func directSocialResponseTimestampPrecision(kind: String, seconds: Double) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, deliveryDB, sql, deliverySQL, _ in
-            let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let now = Date(timeIntervalSince1970: seconds)
-            let direct = PostgresV2DirectMessagingStore(database: database)
+            let base = Date(timeIntervalSince1970: 1_750_000_000), now = Date(timeIntervalSince1970: seconds)
+            let direct = PostgresV2DirectMessagingStore(database: database, identityReader: PostgresV2DirectRoomIdentityReader(database: database), projectionDelivery: SuccessfulProjectionDelivery())
             let social = PostgresV2SocialRelationshipStore(database: database)
-            let profile = try forwardImportTestProfile()
-            let target = UserID(uuid: memberTwoUUID)
-            let newRoom = RoomID(uuid: UUID())
-            let table: String
-            switch kind {
-            case "direct": table = "direct_room_operations"
-            case "stranger": table = "stranger_message_preference_operations"
-            case "userAdd": table = "user_add_preference_operations"
-            case "block", "unblock", "block-remove": table = "user_block_operations"
-            default: table = "user_relationship_operations"
-            }
-            let column = kind == "direct" ? "created_at" : "updated_at"
+            let preferences = PostgresV2AccountPreferenceOperationStore(database: database,
+                projectionDelivery: SuccessfulProjectionDelivery(),
+                authorizationCoordinator: .init(controlDatabase: database, ownerDatabases: ["room-a": database]))
+            let profile = try forwardImportTestProfile(), target = UserID(uuid: memberTwoUUID)
+            let newRoom = RoomID(uuid: UUID()), operation = UUID()
             let relationshipAction: V2RelationshipAction = kind == "accept" ? .accept : kind == "reject" ? .reject : kind == "remove" ? .remove : .request
             let blockAction: V2UserBlockAction = kind == "unblock" ? .unblock : .block
             if ["accept", "reject", "remove", "block-remove"].contains(kind) {
-                guard case .changed = try await social.changeRelationship(.init(actorUserID: target,
-                    operationID: .init(uuid: UUID()), targetUserID: senderID, action: .request), now: base) else { throw CancellationError() }
+                guard case .receipt(let proof) = try await social.executeSocialFixture(actorUserID: target, targetUserID: senderID,
+                    operation: .relationship(.init(uuid: UUID())), action: .relationship(.request), now: base), case .applied = proof.outcome else { throw CancellationError() }
                 if ["remove", "block-remove"].contains(kind) {
-                    guard case .changed = try await social.changeRelationship(.init(actorUserID: senderID,
-                        operationID: .init(uuid: UUID()), targetUserID: target, action: .accept), now: base) else { throw CancellationError() }
+                    guard case .receipt(let proof) = try await social.executeSocialFixture(actorUserID: senderID, targetUserID: target,
+                        operation: .relationship(.init(uuid: UUID())), action: .relationship(.accept), now: base), case .applied = proof.outcome else { throw CancellationError() }
                 }
             }
             if kind == "unblock" {
-                guard case .changed = try await social.changeUserBlock(.init(actorUserID: senderID,
-                    operationID: .init(uuid: UUID()), targetUserID: target, action: .block), now: base) else { throw CancellationError() }
+                guard case .receipt(let proof) = try await social.executeSocialFixture(actorUserID: senderID, targetUserID: target,
+                    operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now: base), case .applied = proof.outcome else { throw CancellationError() }
             }
+            let directCommand: V2DirectRoomOperationCommand?
+            let preferenceCommand: V2AccountPreferenceCommand?
+            let socialCommand: V2SocialOperationCommand?
+            let table: String
             if kind == "direct" {
                 let expiry = Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 1)
-                try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until = \(bind: expiry)").run()
+                try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until=\(bind: expiry)").run()
+                directCommand = try .init(actorUserID: senderID, operationID: .init(uuid: operation), targetUserID: target,
+                    firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
+                preferenceCommand = nil; socialCommand = nil; table = "direct_room_owner_receipts"
+            } else if ["stranger", "userAdd"].contains(kind) {
+                preferenceCommand = try await preferences.freezePreferenceFixture(owner: senderID,
+                    operation: kind == "stranger" ? .strangerMessagePreference(.init(uuid: operation)) : .userAddPreference(.init(uuid: operation)),
+                    value: kind == "stranger" ? .strangerMessage(.deny) : .userAdd(.deny), now: now)
+                directCommand = nil; socialCommand = nil; table = "account_preference_receipts"
+            } else {
+                let block = ["block", "unblock", "block-remove"].contains(kind)
+                socialCommand = try await social.freezeSocialFixture(actorUserID: senderID, targetUserID: target,
+                    operation: block ? .userBlock(.init(uuid: operation)) : .relationship(.init(uuid: operation)),
+                    action: block ? .userBlock(blockAction) : .relationship(relationshipAction), now: now)
+                directCommand = nil; preferenceCommand = nil; table = "social_operation_receipts"
             }
-            func invoke(_ operation: UUID, replay: Bool, at clock: Date) async throws -> Date {
-                switch kind {
-                case "direct":
-                    let outcome = try await direct.open(command: .init(actorUserID: senderID, operationID: .init(uuid: operation), targetUserID: target),
-                        capacityProfile: profile, roomShardID: "room-a", roomID: newRoom, now: clock)
-                    let value: V2DirectRoom
-                    switch outcome {
-                    case .opened(let room): #expect(!replay); value = room
-                    case .idempotent(let room): #expect(replay); value = room
-                    default: throw CancellationError()
+            enum Proof: Equatable {
+                case direct(V2DirectRoomOperationReceipt), preference(V2AccountPreferenceReceipt), social(V2SocialOperationReceipt)
+                var milliseconds: UInt64 {
+                    switch self {
+                    case .direct(let proof): if case .opened(_, let value) = proof.outcome { return value }; return proof.resolvedAtMilliseconds
+                    case .preference(let proof): return proof.resolvedAtMilliseconds
+                    case .social(let proof): return proof.resolvedAtMilliseconds
                     }
-                    #expect(value.roomID == newRoom && value.actorUserID == senderID && value.targetUserID == target)
-                    return value.createdAt
-                case "stranger":
-                    switch try await direct.setStrangerMessagePermission(command: .init(actorUserID: senderID,
-                        operationID: .init(uuid: operation), permission: .deny), now: clock) {
-                    case .updated(let permission, let date): #expect(!replay && permission == .deny); return date
-                    case .idempotent(let permission, let date): #expect(replay && permission == .deny); return date
-                    default: throw CancellationError()
-                    }
-                case "userAdd":
-                    switch try await direct.setUserAddPermission(command: .init(actorUserID: senderID,
-                        operationID: .init(uuid: operation), permission: .deny), now: clock) {
-                    case .updated(let permission, let date): #expect(!replay && permission == .deny); return date
-                    case .idempotent(let permission, let date): #expect(replay && permission == .deny); return date
-                    default: throw CancellationError()
-                    }
-                case "block", "unblock", "block-remove":
-                    let outcome = try await social.changeUserBlock(.init(actorUserID: senderID,
-                        operationID: .init(uuid: operation), targetUserID: target, action: blockAction), now: clock)
-                    let value: V2UserBlockChange
-                    switch outcome {
-                    case .changed(let change): #expect(!replay); value = change
-                    case .idempotent(let change): #expect(replay); value = change
-                    default: throw CancellationError()
-                    }
-                    #expect(value.actorUserID == senderID && value.targetUserID == target && value.action == blockAction && value.isBlocked == (blockAction == .block))
-                    return value.updatedAt
-                default:
-                    let outcome = try await social.changeRelationship(.init(actorUserID: senderID,
-                        operationID: .init(uuid: operation), targetUserID: target, action: relationshipAction), now: clock)
-                    let value: V2RelationshipChange
-                    switch outcome {
-                    case .changed(let change): #expect(!replay); value = change
-                    case .idempotent(let change): #expect(replay); value = change
-                    default: throw CancellationError()
-                    }
-                    let state: V2RelationshipState = kind == "request" ? .pending : kind == "accept" ? .accepted : .none
-                    #expect(value.actorUserID == senderID && value.targetUserID == target && value.action == relationshipAction && value.resultingState == state)
-                    return value.updatedAt
                 }
+            }
+            func invoke(at clock: Date) async throws -> Proof {
+                if let command = directCommand {
+                    guard case .receipt(let proof) = try await direct.submitDirectRoomOperation(command, roomID: newRoom,
+                        roomShardID: "room-a", capacityProfile: profile, now: clock), case .opened(let room, _) = proof.outcome else { throw CancellationError() }
+                    #expect(try room == newRoom && proof.identity == command.identity && proof.fingerprint == command.fingerprint)
+                    return .direct(proof)
+                }
+                if let command = preferenceCommand {
+                    guard case .receipt(let proof) = try await preferences.submit(command, now: clock),
+                          case .applied(let value, _) = proof.outcome else { throw CancellationError() }
+                    #expect(value == command.value && proof.validates(command: command))
+                    return .preference(proof)
+                }
+                let command = try #require(socialCommand)
+                guard case .receipt(let proof) = try await social.submitSocialOperation(command, now: clock),
+                      case .applied(let value) = proof.outcome else { throw CancellationError() }
+                #expect(proof.validates(command: command))
+                switch value {
+                case .relationship(let state, _):
+                    #expect(state == (kind == "request" ? .pending : kind == "accept" ? .accepted : .none))
+                case .userBlock(let blocked, _): #expect(blocked == (blockAction == .block))
+                }
+                return .social(proof)
             }
             func snapshot() async throws -> [String] {
                 var result: [String] = []
                 for name in ["rooms", "room_memberships", "room_admission", "shard_admission_pools", "direct_room_pairs",
-                    "direct_room_operations", "user_stranger_message_preferences", "stranger_message_preference_operations",
-                    "user_add_preferences", "user_add_preference_operations", "user_relationships", "user_relationship_operations",
-                    "user_blocks", "user_block_operations", "user_direct_send_policy_versions", "user_sync_sequences", "user_sync_log", "user_state_event_outbox"] {
+                    "direct_room_owner_receipts", "user_stranger_message_preferences", "user_add_preferences", "account_preference_receipts",
+                    "user_relationships", "social_operation_receipts", "social_relationship_revisions", "social_block_revisions",
+                    "user_blocks", "user_direct_send_policy_versions", "user_sync_sequences", "user_sync_log", "user_state_event_outbox"] {
                     let row = try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: name) r").first(decoding: StringValueRow.self)
                     result.append(try #require(row).value)
                 }
                 return result
             }
-            let operation = UUID()
-            let first = try await invoke(operation, replay: false, at: now)
-            let row = try await sql.raw("SELECT \(unsafeRaw: column) AS value FROM im_v2.\(unsafeRaw: table) WHERE operation_id = \(bind: operation)").first(decoding: RevocationClockDateRow.self)
-            let stored = try #require(row).value
-            #expect(first == stored)
-            #expect(try v2GatewayMilliseconds(first) == v2GatewayMilliseconds(stored))
-            let exact = try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table) WHERE operation_id = \(bind: operation) AND \(unsafeRaw: column) = \(bind: now)").first(decoding: CountRow.self)
-            #expect(exact?.value == 1)
-            let projectionCount: Int64 = kind == "block-remove" ? 3 : ["request", "accept", "reject", "remove"].contains(kind) ? 2 : 1
+            let first = try await invoke(at: now)
+            let proofCount = try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table) WHERE operation_id=\(bind: operation)").first(decoding: CountRow.self)
+            #expect(proofCount?.value == 1)
             if kind == "direct" {
                 #expect(try await count("im_v2.user_sync_log", on: sql) == 0)
                 let outbox = try PostgresV2UserStateEventOutbox(database: database)
                 let projector = try PostgresV2UserStateEventProjector(database: deliveryDB)
-                let deliveryTime = max(base, now)
+                let deliveryTime = max(base, now).addingTimeInterval(60)
                 let leases = try await outbox.claim(now: deliveryTime, leaseDuration: 1, limit: 100)
                 #expect(leases.count == 1)
                 for lease in leases {
@@ -396,141 +306,78 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     #expect(try await projector.project(lease.event) == sequence)
                     #expect(try await outbox.acknowledge(lease, sequence: sequence, now: deliveryTime))
                 }
+                let roomTime = try await sql.raw("SELECT floor(extract(epoch FROM created_at)*1000)::bigint AS value FROM im_v2.rooms WHERE room_id=\(bind: newRoom.uuidValue!)").first(decoding: CountRow.self)
+                #expect(roomTime?.value == Int64(first.milliseconds))
+            } else {
+                // The owner samples again after waiting for its policy lock.
+                // The receipt must match that persisted sample, not the caller's initial clock.
+                #expect(first.milliseconds >= UInt64(try v2GatewayMilliseconds(now)))
             }
+            let projectionCount: Int64 = kind == "block-remove" ? 3 : ["request", "accept", "reject", "remove"].contains(kind) ? 2 : 1
             let projectionSQL: any SQLDatabase = kind == "direct" ? deliverySQL : sql
-            let projections = try await projectionSQL.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: operation) AND created_at = \(bind: now)").first(decoding: CountRow.self)
+            let key = kind == "direct" ? "room_created_at_ms" : "updated_at_ms"
+            let projections = try await projectionSQL.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE source_event_id=\(bind: operation) AND (payload->>\(bind: key))::bigint=\(bind: Int64(first.milliseconds))").first(decoding: CountRow.self)
             #expect(projections?.value == projectionCount)
-            if kind != "direct" {
-                let payloads = try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: operation) AND (payload->>'updated_at_ms')::bigint = \(bind: try v2GatewayMilliseconds(stored))").first(decoding: CountRow.self)
-                #expect(payloads?.value == projectionCount)
-            }
             let beforeReplay = try await snapshot()
-            #expect(try await invoke(operation, replay: true, at: base) == first)
+            #expect(try await invoke(at: Date(timeIntervalSince1970: .nan)) == first)
             #expect(try await snapshot() == beforeReplay)
             if kind == "direct" {
-                // A new operation opening the existing pair must copy its native timestamp exactly.
-                let reopen = UUID()
-                #expect(try await invoke(reopen, replay: false, at: base) == stored)
-                let copied = try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.direct_room_operations o JOIN im_v2.direct_room_pairs p USING (room_id) WHERE o.operation_id = \(bind: reopen) AND o.created_at = p.created_at").first(decoding: CountRow.self)
-                #expect(copied?.value == 1)
-                let beforeReopenReplay = try await snapshot()
-                #expect(try await invoke(reopen, replay: true, at: base) == stored)
-                #expect(try await snapshot() == beforeReopenReplay)
+                let reopen = try V2DirectRoomOperationCommand(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: target,
+                    firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(base))
+                let result = try await direct.submitDirectRoomOperation(reopen, roomID: .init(uuid: UUID()), roomShardID: "room-a", capacityProfile: profile, now: base)
+                guard case .receipt(let proof) = result, case .opened(let room, let createdAt) = proof.outcome else { throw CancellationError() }
+                #expect(room == newRoom && createdAt == first.milliseconds)
+                #expect(try await direct.submitDirectRoomOperation(reopen, roomID: .init(uuid: UUID()), roomShardID: "room-a", capacityProfile: profile, now: .init(timeIntervalSince1970: .nan)) == result)
                 #expect(try await count("im_v2.direct_room_pairs", on: sql) == 1)
-                #expect(try await count("im_v2.direct_room_operations", on: sql) == 2)
+                #expect(try await count("im_v2.direct_room_owner_receipts", on: sql) == 2)
             }
         }
     }
 
     @Test("Preference responses and projections use the persisted timestamp on first write and replay",
-          arguments: ["conversation", "favorite", "receipts", "live"])
+          arguments: ["receipts", "live"])
     func preferenceResponseTimestampPrecision(kind: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             let shadow = PreferenceReplayClockDelivery()
-            let conversations = PostgresV2ConversationCapabilitiesStore(database: database, projectionDelivery: shadow)
-            let receipts = PostgresV2ReadReceiptStore(database: database, projectionDelivery: shadow)
-            let live = try PostgresV2LiveActivityStore(database: database)
-            var messageID = MessageID(uuid: UUID())
-            if kind == "favorite" {
-                let send = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: try forwardImportTestProfile(),
-                    limits: try .init(maxUTF8Bytes: 64), now: { base })
-                guard case .accepted(let message) = try await send.send(.init(roomID: roomID, actorUserID: senderID,
-                    clientMessageID: .init(uuid: UUID()), text: "Preference precision fixture")) else { throw CancellationError() }
-                messageID = message.messageID
-            }
-            let table = kind == "conversation" ? "user_room_preference_operations" : kind == "favorite" ? "user_message_favorite_operations"
-                : kind == "receipts" ? "read_receipt_preference_operations" : "user_live_activity_preference_operations"
-            func invoke(_ id: UUID, at now: Date, muteUntil: Date, replay: Bool) async throws -> (Date, Date?) {
-                switch kind {
-                case "conversation":
-                    let outcome = try await conversations.setConversationState(actorUserID: senderID,
-                        command: .init(operationID: .init(uuid: id), roomID: roomID, isPinned: true, isArchived: true, muteUntil: muteUntil), now: now)
-                    let value: V2ConversationState
-                    switch outcome {
-                    case .applied(let state): #expect(!replay); value = state
-                    case .idempotent(let state): #expect(replay); value = state
-                    default: throw CancellationError()
-                    }
-                    #expect(value.roomID == roomID && value.isPinned && value.isArchived)
-                    return (value.updatedAt, value.muteUntil)
-                case "favorite":
-                    let outcome = try await conversations.setMessageFavorite(actorUserID: senderID,
-                        command: .init(operationID: .init(uuid: id), roomID: roomID, messageID: messageID, isFavorited: true), now: now)
-                    let value: V2MessageFavorite
-                    switch outcome {
-                    case .applied(let state): #expect(!replay); value = state
-                    case .idempotent(let state): #expect(replay); value = state
-                    default: throw CancellationError()
-                    }
-                    #expect(value.roomID == roomID && value.messageID == messageID && value.isFavorited)
-                    return (value.updatedAt, nil)
-                case "receipts":
-                    let outcome = try await receipts.setPreferences(command: .init(actorUserID: senderID,
-                        operationID: .init(uuid: id), allowsDirectReadReceipts: false, allowsGroupReadReceipts: true), now: now)
-                    let value: V2ReadReceiptPreferences
-                    switch outcome {
-                    case .updated(let state): #expect(!replay); value = state
-                    case .idempotent(let state): #expect(replay); value = state
-                    default: throw CancellationError()
-                    }
-                    #expect(!value.allowsDirectReadReceipts && value.allowsGroupReadReceipts)
-                    return (value.updatedAt, nil)
-                default:
-                    let outcome = try await live.setPreferences(command: .init(actorUserID: senderID,
-                        operationID: .init(uuid: id), allowsOnlinePresence: false, allowsTypingIndicators: true), now: now)
-                    let value: V2LiveActivityPreferences
-                    switch outcome {
-                    case .updated(let state): #expect(!replay); value = state
-                    case .idempotent(let state): #expect(replay); value = state
-                    default: throw CancellationError()
-                    }
-                    #expect(!value.allowsOnlinePresence && value.allowsTypingIndicators)
-                    return (value.updatedAt, nil)
-                }
-            }
+            let store = PostgresV2AccountPreferenceOperationStore(database: database, projectionDelivery: shadow,
+                authorizationCoordinator: .init(controlDatabase: database, ownerDatabases: ["room-a": database]))
+            let stateTable = kind == "receipts" ? "user_read_receipt_preferences" : "user_live_activity_preferences"
+            let value: V2AccountPreferenceValue = kind == "receipts" ? .readReceipt(allowsDirectReadReceipts: false, allowsGroupReadReceipts: true) : .liveActivity(allowsOnlinePresence: false, allowsTypingIndicators: true)
             func snapshot() async throws -> [String] {
                 var result: [String] = []
-                for name in [table, "user_room_preferences", "user_message_favorites", "user_read_receipt_preferences",
-                    "user_live_activity_preferences", "read_receipt_preference_propagation_outbox", "user_sync_sequences", "user_sync_log"] {
+                for name in ["account_preference_receipts", "account_preference_revisions", stateTable,
+                    "read_receipt_preference_propagation_outbox", "user_sync_sequences", "user_sync_log"] {
                     let row = try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: name) r").first(decoding: StringValueRow.self)
                     result.append(try #require(row).value)
                 }
                 return result
             }
-            for seconds in [Double](arrayLiteral: 946_684_800 - 0.00000075, 946_684_800 + 0.00000075, 1_750_000_000 + 0.99999975,
-                946_684_800 - 211_813_488_000, 946_684_800 + 9_223_371_331_200 - 10) {
-                let now = Date(timeIntervalSince1970: seconds)
-                // Mute deadlines are positive client values; the server clock may be historical.
-                let muteUntil = seconds > 0 ? now : base
-                let operation = UUID()
-                let first = try await invoke(operation, at: now, muteUntil: muteUntil, replay: false)
-                let storedRow = try await sql.raw("SELECT updated_at AS value FROM im_v2.\(unsafeRaw: table) WHERE operation_id = \(bind: operation)").first(decoding: RevocationClockDateRow.self)
-                let stored = try #require(storedRow).value
-                #expect(first.0 == stored)
-                #expect(try v2GatewayMilliseconds(first.0) == v2GatewayMilliseconds(stored))
-                let exact = try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.\(unsafeRaw: table) WHERE operation_id = \(bind: operation) AND updated_at = \(bind: now)").first(decoding: CountRow.self)
-                #expect(exact?.value == 1)
-                let storedMute = seconds > 0 ? stored : base
-                if kind == "conversation" { #expect(first.1 == storedMute) }
-                if kind == "live" {
-                    let queried = try await live.preferences(userID: senderID, now: base)
-                    #expect(queried.updatedAt == first.0)
-                } else {
-                    let projection = try await sql.raw("SELECT (payload->>'updated_at_ms')::bigint AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: operation)").first(decoding: CountRow.self)
-                    #expect(try projection?.value == v2GatewayMilliseconds(stored))
-                    let timestamp = try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: operation) AND created_at = \(bind: now)").first(decoding: CountRow.self)
-                    #expect(timestamp?.value == 1)
-                    if kind == "conversation" {
-                        let mute = try await sql.raw("SELECT (payload->>'mute_until_ms')::bigint AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: operation)").first(decoding: CountRow.self)
-                        #expect(try mute?.value == v2GatewayMilliseconds(storedMute))
-                    }
-                }
-                let beforeReplay = try await snapshot()
-                let replay = try await invoke(operation, at: base, muteUntil: muteUntil, replay: true)
-                #expect(replay.0 == first.0 && replay.1 == first.1)
-                #expect(try await snapshot() == beforeReplay)
+            for seconds in [946_684_800 - 0.00000075, 946_684_800 + 0.00000075, 1_750_000_000 + 0.99999975,
+                946_684_800 + 9_223_371_331_200 - 10] as [Double] {
+                let now = Date(timeIntervalSince1970: seconds), operation = UUID()
+                let reference: V2OperationReference = kind == "receipts" ? .readReceiptPreference(.init(uuid: operation)) : .liveActivityPreference(.init(uuid: operation))
+                let command = try await store.freezePreferenceFixture(owner: senderID, operation: reference, value: value, now: now)
+                guard case .receipt(let first) = try await store.submit(command, now: now), case .applied(let saved, _) = first.outcome else { throw CancellationError() }
+                #expect(first.validates(command: command) && saved == value)
+                let row = try await sql.raw("SELECT updated_at AS value FROM im_v2.\(unsafeRaw: stateTable) WHERE user_id = \(bind: senderUUID)").first(decoding: RevocationClockDateRow.self)
+                let stored = try #require(row).value
+                #expect(try UInt64(v2GatewayMilliseconds(stored)) == first.resolvedAtMilliseconds)
+                let projection = try await sql.raw("SELECT (payload->>'updated_at_ms')::bigint AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: operation)").first(decoding: CountRow.self)
+                #expect(try projection?.value == v2GatewayMilliseconds(stored))
+                let timestamp = try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: operation) AND created_at = \(bind: stored)").first(decoding: CountRow.self)
+                #expect(timestamp?.value == 1)
+                let before = try await snapshot()
+                // Even an invalid current clock cannot replace the saved proof.
+                #expect(try await store.submit(command, now: base) == .receipt(first))
+                #expect(try await store.submit(command, now: Date(timeIntervalSince1970: -.infinity)) == .receipt(first))
+                #expect(try await snapshot() == before)
             }
+            let reference: V2OperationReference = kind == "receipts" ? .readReceiptPreference(.init(uuid: UUID())) : .liveActivityPreference(.init(uuid: UUID()))
+            let command = try await store.freezePreferenceFixture(owner: senderID, operation: reference, value: value, now: base)
+            let before = try await snapshot()
+            await #expect(throws: (any Error).self) { try await store.submit(command, now: Date(timeIntervalSince1970: 946_684_800 - 211_813_488_000)) }
+            #expect(try await snapshot() == before)
         }
     }
 
@@ -540,21 +387,20 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: .standard) { database, deliveryDB, sql, deliverySQL, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile()
-            let direct = PostgresV2DirectMessagingStore(database: database)
+            let direct = PostgresV2DirectMessagingStore(database: database, identityReader: PostgresV2DirectRoomIdentityReader(database: database), projectionDelivery: SuccessfulProjectionDelivery())
             var rooms: [RoomID] = []
             for target in [memberTwoUUID, memberThreeUUID] {
-                guard case .opened(let room) = try await direct.open(
-                    command: .init(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: target)),
-                    capacityProfile: profile, roomShardID: "room-a", roomID: .init(uuid: UUID()), now: base)
-                else { throw CancellationError() }
+                let room = try await V2DirectRoomOperationTestFixture(database: database, capacityProfile: profile,
+                        roomShardID: "room-a", roomID: .init(uuid: UUID()), now: { base }).openedIdentity(
+                        actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: target),
+                        firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
                 rooms.append(room.roomID)
             }
             if reason == "system" {
                 try await sql.raw("INSERT INTO im_v2.special_accounts (account_user_id, stable_key, account_kind, allows_customer_messages, allows_service_messages, created_at, updated_at) VALUES (\(bind: memberTwoUUID), 'clock_system_target', 'system', false, true, \(bind: base), \(bind: base))").run()
                 try await sql.raw("UPDATE im_v2.public_user_profiles SET account_kind = 'system', revision = revision + 1 WHERE user_id = \(bind: memberTwoUUID)").run()
             } else {
-                _ = try await direct.setStrangerMessagePermission(command: .init(actorUserID: .init(uuid: memberTwoUUID),
-                    operationID: .init(uuid: UUID()), permission: .deny), now: base)
+                _ = try await PostgresV2AccountPreferenceOperationStore(database: database, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: .init(controlDatabase: database, ownerDatabases: [:])).executePreferenceFixture(owner: .init(uuid: memberTwoUUID), operation: .strangerMessagePreference(.init(uuid: UUID())), value: .strangerMessage(.deny), now: base)
             }
             let writer = PostgresV2RoomWriteStore(database: database,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled,
@@ -642,10 +488,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try forwardImportTestProfile()
             var rooms: [RoomID] = []
             for target in [memberTwoUUID, memberThreeUUID] {
-                guard case .opened(let room) = try await PostgresV2DirectMessagingStore(database: database).open(
-                    command: .init(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: target)),
-                    capacityProfile: profile, roomShardID: "room-a", roomID: .init(uuid: UUID()), now: base)
-                else { throw CancellationError() }
+                let room = try await V2DirectRoomOperationTestFixture(database: database, capacityProfile: profile,
+                        roomShardID: "room-a", roomID: .init(uuid: UUID()), now: { base }).openedIdentity(
+                        actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: target),
+                        firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
                 rooms.append(room.roomID)
             }
             let interval: TimeInterval = scenario == "precision" ? 0.1234567 : scenario == "tiny" ? 0.0000001 : 86_400
@@ -739,10 +585,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 rooms = []
                 senders = [senderID, senderID]
                 for target in [memberTwoUUID, memberThreeUUID] {
-                    guard case .opened(let room) = try await PostgresV2DirectMessagingStore(database: database).open(
-                        command: .init(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: target)),
-                        capacityProfile: profile, roomShardID: "room-a", roomID: .init(uuid: UUID()), now: base)
-                    else { throw CancellationError() }
+                    let room = try await V2DirectRoomOperationTestFixture(database: database, capacityProfile: profile,
+                        roomShardID: "room-a", roomID: .init(uuid: UUID()), now: { base }).openedIdentity(
+                        actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: target),
+                        firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
                     rooms.append(room.roomID)
                 }
             }
@@ -827,10 +673,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             if path.hasPrefix("direct") {
                 rooms = []
                 for target in [memberTwoUUID, memberThreeUUID] {
-                    guard case .opened(let room) = try await PostgresV2DirectMessagingStore(database: database).open(
-                        command: .init(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: target)),
-                        capacityProfile: profile, roomShardID: "room-a", roomID: .init(uuid: UUID()), now: base)
-                    else { throw CancellationError() }
+                    let room = try await V2DirectRoomOperationTestFixture(database: database, capacityProfile: profile,
+                        roomShardID: "room-a", roomID: .init(uuid: UUID()), now: { base }).openedIdentity(
+                        actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: target),
+                        firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
                     rooms.append(room.roomID)
                 }
             }
@@ -1063,10 +909,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try forwardImportTestProfile()
             let targetRoom: RoomID
             if path.hasPrefix("direct") {
-                guard case .opened(let room) = try await PostgresV2DirectMessagingStore(database: database).open(
-                    command: .init(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID)),
-                    capacityProfile: profile, roomShardID: "room-a", roomID: .init(uuid: UUID()), now: base)
-                else { throw CancellationError() }
+                let room = try await V2DirectRoomOperationTestFixture(database: database, capacityProfile: profile,
+                        roomShardID: "room-a", roomID: .init(uuid: UUID()), now: { base }).openedIdentity(
+                        actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID),
+                        firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
                 targetRoom = room.roomID
             } else { targetRoom = roomID }
             let store = PostgresV2RoomWriteStore(database: database,
@@ -1138,31 +984,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
           arguments: [V2GroupCapacityClass.standard, .large])
     func membershipSourceTimestampBounds(mode: V2GroupCapacityClass) async throws {
         try await withForwardOwnerDatabases(mode: mode) { database, _, sql, _, _ in
-            let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let profile = try forwardImportTestProfile()
+            let base = Date(timeIntervalSince1970: 1_750_000_000), profile = try forwardImportTestProfile()
             let target = UserID(uuid: memberTwoUUID)
-            try await sql.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: senderUUID)").run()
-            let store = PostgresV2RoomMembershipStore(database: database)
+            try await sql.raw("UPDATE im_v2.room_memberships SET role='owner' WHERE room_id=\(bind:roomUUID) AND user_id=\(bind:senderUUID)").run()
+            let store = PostgresV2MembershipOperationStore(database: database, clock: { base })
             let identity = try await V2PostgresMembershipIdentitySnapshotValidator(database: database).snapshot(actorUserID: senderID, targetUserID: target)
-            let route = try V2RoomShardRoute(shardID: "room-a", epoch: 0)
-            func invoke(_ command: V2ChangeRoomMembershipCommand, path: Int) async throws -> V2RoomMembershipChangeOutcome {
-                let event = EventID(uuid: UUID())
-                if path == 0 {
-                    return try await store.change(command: command, capacityProfile: profile, eventID: event, now: base)
-                }
-                if path == 1 {
-                    return try await store.changeControlValidated(command: command, ownerRoute: route, identitySnapshot: identity,
-                        capacityProfile: profile, eventID: event, now: base)
-                }
-                return try await database.transaction { transaction in
-                    let transactionSQL = try #require(transaction as? any SQLDatabase)
-                    return try await PostgresV2RoomMembershipStore.change(in: transactionSQL, command: command,
-                        capacityProfile: profile, eventID: event, now: base)
-                }
-            }
             func snapshot() async throws -> [String] {
                 var values: [String] = []
-                for table in ["group_rooms", "rooms", "room_memberships", "room_membership_operations",
+                for table in ["group_rooms", "rooms", "room_memberships", "membership_operation_receipts", "membership_operation_admissions",
                     "room_events", "user_state_event_outbox", "room_admission", "shard_admission_pools", "user_sync_log", "user_sync_sequences"] {
                     let row = try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: table) r").first(decoding: StringValueRow.self)
                     values.append(try #require(row).value)
@@ -1170,38 +999,46 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 return values
             }
             var revision: UInt64 = 0
-            for (index, date) in [Date(timeIntervalSince1970: 946_684_800 - 211_813_488_000),
-                                Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 10), base].enumerated() {
+            for date in [Date(timeIntervalSince1970: 946_684_800 - 211_813_488_000),
+                         Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 10), base] {
                 for action in [V2RoomMembershipAction.remove, .add] {
-                    let command = try V2ChangeRoomMembershipCommand(roomID: roomID, actorUserID: senderID, operationID: .init(uuid: UUID()),
-                        targetUserID: target, action: action, expectedMembershipRevision: revision)
-                    for literal in ["infinity", "-infinity", "294276-12-31 23:59:59.999999+00"] {
-                        try await sql.raw("UPDATE im_v2.group_rooms SET created_at = \(bind: literal)::timestamptz WHERE room_id = \(bind: roomUUID)").run()
-                        let before = try await snapshot()
-                        for path in 0..<3 {
-                            await #expect(throws: V2RoomMembershipStoreError.corruptPersistenceState) { try await invoke(command, path: path) }
-                            try #require(try await snapshot() == before)
+                    try await sql.raw("UPDATE im_v2.group_rooms SET created_at=\(bind:base) WHERE room_id=\(bind:roomUUID)").run()
+                    let intent = try V2MembershipIntent(roomID: roomID, actorUserID: senderID, operationID: .init(uuid: UUID()),
+                        targetUserID: target, action: action, expectedMembershipRevision: revision, confirmedUntilMilliseconds: 1_750_000_120_000)
+                    let admission = try await withRoomActivation(database: database, roomID: roomID) { token in
+                        guard case .admitted(let value) = try await store.admit(intent, identitySnapshot: identity, token: token) else { throw CancellationError() }
+                        return value
+                    }
+                    let command = try V2MembershipOperationCommand(intent: intent, admission: admission)
+                    func invoke() async throws -> V2MembershipRecoveryResult {
+                        try await withRoomActivation(database: database, roomID: roomID) { token in
+                            try await store.submit(command, token: token, capacityProfile: profile, eventID: .init(uuid: UUID()), identitySnapshot: identity)
                         }
                     }
-                    try await sql.raw("UPDATE im_v2.group_rooms SET created_at = \(bind: date) WHERE room_id = \(bind: roomUUID)").run()
-                    guard case .changed(let changed) = try await invoke(command, path: index) else { throw CancellationError() }
+                    for literal in ["infinity", "-infinity", "294276-12-31 23:59:59.999999+00"] {
+                        try await sql.raw("UPDATE im_v2.group_rooms SET created_at=\(bind:literal)::timestamptz WHERE room_id=\(bind:roomUUID)").run()
+                        let before = try await snapshot()
+                        await #expect(throws: V2RoomMembershipStoreError.corruptPersistenceState) { try await invoke() }
+                        #expect(try await snapshot() == before)
+                    }
+                    try await sql.raw("UPDATE im_v2.group_rooms SET created_at=\(bind:date) WHERE room_id=\(bind:roomUUID)").run()
+                    guard case .receipt(let receipt) = try await invoke(), case .changed(let changed) = receipt.outcome else { throw CancellationError() }
                     revision += 1
-                    #expect(changed.createdAt == base && changed.membershipRevision == revision && changed.roomSequence == revision)
-                    let eventUUID = try #require(UUID(uuidString: changed.eventID.rawValue))
-                    let projected = try await sql.raw("SELECT (payload->>'created_at_ms')::bigint AS value FROM im_v2.room_events WHERE event_id = \(bind: eventUUID)").first(decoding: CountRow.self)
+                    #expect(receipt.validates(command: command) && changed.membershipRevision == revision && changed.roomSequence == revision)
+                    let projected = try await sql.raw("SELECT (payload->>'created_at_ms')::bigint AS value FROM im_v2.room_events WHERE event_id=\(bind:changed.eventID.uuidValue!)").first(decoding: CountRow.self)
                     #expect(try #require(projected).value == v2GatewayMilliseconds(date))
-                    // A completed operation depends on its saved result, not
-                    // a later change to the group's source profile timestamp.
-                    try await sql.raw("UPDATE im_v2.group_rooms SET created_at = 'infinity'::timestamptz WHERE room_id = \(bind: roomUUID)").run()
+                    try await sql.raw("UPDATE im_v2.group_rooms SET created_at='infinity'::timestamptz WHERE room_id=\(bind:roomUUID)").run()
                     let before = try await snapshot()
-                    for path in 0..<3 { #expect(try await invoke(command, path: path) == .idempotent(changed)) }
-                    let conflict = try V2ChangeRoomMembershipCommand(roomID: roomID, actorUserID: senderID, operationID: command.operationID,
-                        targetUserID: target, action: action == .add ? .remove : .add, expectedMembershipRevision: command.expectedMembershipRevision)
-                    for path in 0..<3 { #expect(try await invoke(conflict, path: path) == .idempotencyConflict) }
+                    #expect(try await invoke() == .receipt(receipt))
+                    let wrongFingerprint = try V2OperationFingerprint(kind: .membership, fields: [.init("changed", .text("action"))])
+                    let conflict = try await withRoomActivation(database: database, roomID: roomID) { token in
+                        try await store.recover(.init(identity: command.identity, fingerprint: wrongFingerprint, action: .query), token: token)
+                    }
+                    #expect(conflict == .fingerprintConflict)
                     #expect(try await snapshot() == before)
                 }
             }
-            #expect(try await count("im_v2.room_membership_operations", on: sql) == 6)
+            #expect(try await count("im_v2.membership_operation_receipts", on: sql) == 6)
             #expect(try await count("im_v2.room_memberships WHERE left_revision IS NULL", on: sql) == 3)
         }
     }
@@ -1214,15 +1051,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try forwardImportTestProfile()
             let targetRoom: RoomID
             if path.hasPrefix("direct") {
-                let direct = PostgresV2DirectMessagingStore(database: database)
-                guard case .opened(let room) = try await direct.open(
-                    command: .init(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID)),
-                    capacityProfile: profile, roomShardID: "room-a", roomID: .init(uuid: UUID()), now: base)
-                else { throw CancellationError() }
+                let direct = PostgresV2DirectMessagingStore(database: database, identityReader: PostgresV2DirectRoomIdentityReader(database: database), projectionDelivery: SuccessfulProjectionDelivery())
+                let room = try await V2DirectRoomOperationTestFixture(database: database, capacityProfile: profile,
+                        roomShardID: "room-a", roomID: .init(uuid: UUID()), now: { base }).openedIdentity(
+                        actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID),
+                        firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
                 targetRoom = room.roomID
                 if path == "direct-denial" {
-                    _ = try await direct.setStrangerMessagePermission(command: .init(actorUserID: .init(uuid: memberTwoUUID),
-                        operationID: .init(uuid: UUID()), permission: .deny), now: base)
+                    _ = try await PostgresV2AccountPreferenceOperationStore(database: database, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: .init(controlDatabase: database, ownerDatabases: [:])).executePreferenceFixture(owner: .init(uuid: memberTwoUUID), operation: .strangerMessagePreference(.init(uuid: UUID())), value: .strangerMessage(.deny), now: base)
                 }
             } else { targetRoom = roomID }
             let store = PostgresV2RoomWriteStore(database: database)
@@ -1254,8 +1090,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await batched.send(command) == expected(at: base))
             let table = path == "direct-denial" ? "direct_message_denials" : "message_send_completions"
             func setSavedTime(_ literal: String) async throws {
-                // Replace only this disposable fixture row: completion UPDATEs
-                // are immutable. All production constraints remain enabled.
+                // Attempt replacement with all production constraints enabled.
+                // Permanent completion proofs must reject this operation.
                 try await sql.raw("""
                     WITH removed AS (
                         DELETE FROM im_v2.\(unsafeRaw: table)
@@ -1278,6 +1114,28 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
                 return values
             }
+            if path != "direct-denial" {
+                // Permanent completion proofs reject replacement, including
+                // extreme timestamps. Replays retain the original result.
+                for literal in ["infinity", "-infinity", "294276-12-31 23:59:59.999999+00"] {
+                    let before = try await snapshot()
+                    await #expect(throws: (any Error).self) { try await setSavedTime(literal) }
+                    #expect(try await snapshot() == before)
+                    for service in [scalar, batched] {
+                        #expect(try await service.send(command) == expected(at: base))
+                        #expect(try await service.send(conflict) == .idempotencyConflict)
+                    }
+                    let sibling = V2AuthenticatedSendMessage(roomID: targetRoom, actorUserID: .init(uuid: memberTwoUUID),
+                        clientMessageID: .init(uuid: UUID()), text: "normal sibling")
+                    async let replay = batched.send(command)
+                    async let accepted = batched.send(sibling)
+                    let (original, outcome) = try await (replay, accepted)
+                    let expectedOriginal = try expected(at: base)
+                    #expect(original == expectedOriginal)
+                    guard case .accepted(let message) = outcome else { throw CancellationError() }
+                    #expect(try await batched.send(sibling) == .idempotent(message.receipt))
+                }
+            } else {
             for literal in ["infinity", "-infinity", "294276-12-31 23:59:59.999999+00"] {
                 try await setSavedTime(literal)
                 let before = try await snapshot()
@@ -1308,6 +1166,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let before = try await snapshot()
                 for service in [scalar, batched] { #expect(try await service.send(command) == expected(at: date)) }
                 #expect(try await snapshot() == before)
+            }
             }
             #expect(try await count("im_v2.messages", on: sql) == (path == "direct-denial" ? 3 : 4))
         }
@@ -1654,10 +1513,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let store = PostgresV2ReadReceiptStore(database: database)
             let targetRoom: RoomID
             if path == "direct" || path == "mixed-batch" {
-                guard case .opened(let room) = try await PostgresV2DirectMessagingStore(database: database).open(
-                    command: .init(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID)),
-                    capacityProfile: forwardImportTestProfile(), roomShardID: "room-a", roomID: .init(uuid: UUID()), now: base)
-                else { throw CancellationError() }
+                let room = try await V2DirectRoomOperationTestFixture(database: database, capacityProfile: forwardImportTestProfile(),
+                    roomShardID: "room-a", roomID: .init(uuid: UUID()), now: { base }).openedIdentity(
+                    actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID),
+                    firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
                 targetRoom = room.roomID
             } else { targetRoom = roomID }
             let targetUUID = try #require(UUID(uuidString: targetRoom.rawValue))
@@ -1763,6 +1622,62 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             if kind == "unfreeze" {
                 try await sql.raw("UPDATE im_v2.rooms SET frozen_at = \(bind: base), frozen_by_user_id = \(bind: senderUUID) WHERE room_id = \(bind: roomUUID)").run()
             }
+            if kind == "mute" || kind == "remove" {
+                try await verifyMemberClockFixture(database:database,sql:sql,profile:profile,kind:kind)
+                return
+            }
+            if kind == "redact" {
+                let store = PostgresV2MessageModerationOperationStore(database: database, clock: { base })
+                try await withRoomActivation(database: database, roomID: roomID) { token in
+                    let baseline = try await store.baseline(.init(roomID: roomID, actorUserID: senderID, messageID: message.messageID), token: token)
+                    func intent(_ operation: UUID, reason: String = "abuse_spam") throws -> V2MessageModerationIntent {
+                        try .init(roomID: roomID, actorUserID: senderID, operationID: .init(uuid: operation), messageID: message.messageID,
+                            reasonCode: .init(reason), expectedMessageRevision: baseline.messageRevision,
+                            expectedMembershipRevision: baseline.membershipRevision, confirmedUntilMilliseconds: 1_750_000_120_000)
+                    }
+                    let original = try intent(UUID())
+                    guard case .admitted(let gate) = try await store.admit(original, token: token) else { throw CancellationError() }
+                    let command = try V2MessageModerationCommand(intent: original, admission: gate)
+                    guard case .receipt(let receipt) = try await store.submit(command, token: token, capacityProfile: profile, eventID: .init(uuid: UUID())),
+                          case .redacted(_, _, let sequence, let event) = receipt.outcome else { throw CancellationError() }
+                    #expect(receipt.validates(intent: original) && sequence == 2 && receipt.resolvedAtMilliseconds == 1_750_000_000_000)
+                    let eventTime = try #require(try await sql.raw("SELECT created_at AS value FROM im_v2.room_events WHERE event_id=\(bind:event.uuidValue!)").first(decoding: RevocationClockDateRow.self)).value
+                    let auditTime = try #require(try await sql.raw("SELECT occurred_at AS value FROM im_v2.moderation_audit_entries WHERE actor_user_id=\(bind:senderUUID) AND operation_id=\(bind:original.operationID.uuidValue!)").first(decoding: RevocationClockDateRow.self)).value
+                    #expect(eventTime == base && auditTime == eventTime)
+                    func snapshot() async throws -> [String] {
+                        var rows: [String] = []
+                        for table in ["message_moderation_receipts", "message_moderation_admissions", "messages", "moderation_audit_entries", "room_events", "room_admission", "shard_admission_pools"] {
+                            let value = try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw:table) r").first(decoding: StringValueRow.self)
+                            rows.append(try #require(value).value)
+                        }
+                        return rows
+                    }
+                    let saved = try await snapshot()
+                    let changed = try intent(original.operationID.uuidValue!, reason: "other_reason")
+                    for seconds in [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12, 946_684_800 + 9_223_371_331_200 - 10] {
+                        let invalidClock = PostgresV2MessageModerationOperationStore(database: database, clock: { Date(timeIntervalSince1970: seconds) })
+                        #expect(try await invalidClock.submit(command, token: token, capacityProfile: profile, eventID: .init(uuid: UUID())) == .receipt(receipt))
+                        #expect(try await invalidClock.recover(.init(intent: changed, action: .query), token: token) == .fingerprintConflict)
+                        let fresh = try V2MessageModerationIntent(roomID: roomID, actorUserID: senderID, operationID: .init(uuid: UUID()),
+                            messageID: message.messageID, reasonCode: .init("abuse_spam"), expectedMessageRevision: baseline.messageRevision + 1,
+                            expectedMembershipRevision: baseline.membershipRevision, confirmedUntilMilliseconds: 1_750_000_120_000)
+                        if seconds.isFinite && seconds > 0 && seconds <= Double(Int64.max) / 1_000 {
+                            #expect(try await invalidClock.admit(fresh, token: token) == .currentUnavailable(.confirmationExpired))
+                        } else {
+                            await #expect(throws: (any Error).self) { try await invalidClock.admit(fresh, token: token) }
+                        }
+                        #expect(try await snapshot() == saved)
+                    }
+                    // Permanent proofs reject corruption rather than exposing a
+                    // mutable historical timestamp through the retired ledger.
+                    await #expect(throws: (any Error).self) {
+                        try await sql.raw("UPDATE im_v2.message_moderation_receipts SET receipt=jsonb_set(receipt,'{resolvedAtMilliseconds}','0') WHERE actor_user_id=\(bind:senderUUID) AND operation_id=\(bind:original.operationID.uuidValue!)").run()
+                    }
+                    #expect(try await store.recover(.init(intent: original, action: .query), token: token) == .receipt(receipt))
+                    #expect(try await snapshot() == saved)
+                }
+                return
+            }
             let operation = UUID()
             let action: V2ModerationAction = switch kind {
             case "redact": .redactMessage
@@ -1778,17 +1693,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     reasonCode: .init(conflict ? "other_reason" : "abuse_spam"))
                 let event = EventID(uuid: UUID())
                 let route = try V2RoomShardRoute(shardID: "room-a", epoch: 0)
-                if kind == "freeze" || kind == "unfreeze" {
-                    if ownerValidated {
-                        return try await store.applyTrustedSafetyOwnerValidated(command: command, ownerRoute: route, capacityProfile: profile, eventID: event, now: now)
-                    }
-                    return try await store.applyTrustedSafety(command: command, capacityProfile: profile, eventID: event, now: now)
-                }
                 if ownerValidated {
-                    return try await store.applyOwnerValidated(command: command, ownerRoute: route, capacityProfile: profile, eventID: event, now: now)
+                    return try await store.applyTrustedSafetyOwnerValidated(command: command, ownerRoute: route, capacityProfile: profile, eventID: event, now: now)
                 }
-                return try await store.apply(command: command, capacityProfile: profile, eventID: event, now: now)
+                return try await store.applyTrustedSafety(command: command, capacityProfile: profile, eventID: event, now: now)
             }
+
             func snapshot() async throws -> [String] {
                 var result: [String] = []
                 for table in ["rooms", "room_memberships", "room_member_mutes", "messages", "message_media_references", "moderation_operations",
@@ -1843,60 +1753,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Member mute retries preserve PostgreSQL timestamp precision")
+    @Test("Member mute milliseconds and immutable proof preserve canonical replay")
     func moderationMuteReplayPrecision() async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let profile = try forwardImportTestProfile()
-            let store = PostgresV2ModerationStore(database: database)
-            try await sql.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: senderUUID)").run()
-            var differences = 0
-            for fraction in [0.00000025, 0.001, 0.1234567] {
-                let operation = UUID(), deadline = base.addingTimeInterval(60 + fraction)
-                func command(_ expiry: Date, operationID: UUID? = nil) throws -> V2ModerationCommand {
-                    try .init(roomID: roomID, actorUserID: senderID, operationID: .init(uuid: operationID ?? operation), action: .muteMember,
-                        targetUserID: .init(uuid: memberTwoUUID), muteUntil: expiry, reasonCode: .init("abuse_spam"))
-                }
-                guard case .applied(let applied) = try await store.apply(command: command(deadline), capacityProfile: profile,
-                    eventID: .init(uuid: UUID()), now: base) else { throw CancellationError() }
-                let stored = try #require(try await sql.raw("SELECT mute_until AS value FROM im_v2.moderation_operations WHERE operation_id = \(bind: operation)").first(decoding: RevocationClockDateRow.self)).value
-                if stored != deadline { differences += 1 }
-                func snapshot() async throws -> [String] {
-                    var result: [String] = []
-                    for table in ["rooms", "room_member_mutes", "moderation_operations", "moderation_audit_entries", "room_events", "room_admission", "shard_admission_pools"] {
-                        let row = try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: table) r").first(decoding: StringValueRow.self)
-                        result.append(try #require(row).value)
-                    }
-                    return result
-                }
-                let before = try await snapshot()
-                let expected = try V2ModerationResult(roomID: applied.roomID, operationID: applied.operationID, action: applied.action,
-                    targetUserID: applied.targetUserID, messageID: nil, muteUntil: stored, roomSequence: applied.roomSequence,
-                    eventID: applied.eventID, createdAt: applied.createdAt)
-                for now in [base, Date(timeIntervalSince1970: .nan)] {
-                    #expect(try await store.apply(command: command(deadline), capacityProfile: profile, eventID: .init(uuid: UUID()), now: now) == .idempotent(expected))
-                    #expect(try await store.applyOwnerValidated(command: command(deadline), ownerRoute: .init(shardID: "room-a", epoch: 0), capacityProfile: profile,
-                        eventID: .init(uuid: UUID()), now: now) == .idempotent(expected))
-                    #expect(try await store.apply(command: command(deadline.addingTimeInterval(0.01)), capacityProfile: profile,
-                        eventID: .init(uuid: UUID()), now: now) == .idempotencyConflict)
-                }
-                // A different operation requesting the same stored deadline
-                // must not append another event or consume admission again.
-                #expect(try await store.apply(command: command(deadline, operationID: UUID()), capacityProfile: profile,
-                    eventID: .init(uuid: UUID()), now: base) == .actionAlreadyInDesiredState)
-                let unrepresentableFuture = base.addingTimeInterval(0.00000025)
-                #expect(unrepresentableFuture > base && !v2PostgresTimestampPrecedes(base, unrepresentableFuture))
-                await #expect(throws: V2ModerationValidationError.invalidMuteExpiry) {
-                    try await store.apply(command: command(unrepresentableFuture, operationID: UUID()), capacityProfile: profile,
-                        eventID: .init(uuid: UUID()), now: base)
-                }
-                #expect(try await snapshot() == before)
-            }
-            #expect(differences > 0)
-            #expect(try await count("im_v2.moderation_operations", on: sql) == 3)
-            #expect(try await count("im_v2.moderation_audit_entries", on: sql) == 3)
-            #expect(try await count("im_v2.room_events", on: sql) == 3)
+        try await withForwardOwnerDatabases(mode:.standard) { database,_,sql,_,_ in
+            try await sql.raw("UPDATE im_v2.room_memberships SET role='owner' WHERE room_id=\(bind:roomUUID) AND user_id=\(bind:senderUUID)").run()
+            try await verifyMemberClockFixture(database:database,sql:sql,profile:forwardImportTestProfile(),kind:"mute")
         }
     }
 
 }
+
+private struct MutationPrecisionTimestamp:Decodable { let createdAt:Date;enum CodingKeys:String,CodingKey {case createdAt="created_at"} }

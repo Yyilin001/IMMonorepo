@@ -263,7 +263,7 @@ public actor V2GroupAvatarPresentationRepository {
                 let delay: TimeInterval?
                 switch failure {
                 case .forbidden: revokeVisibleAccess(room); delay = 30
-                case .throttled(let seconds): delay = seconds.isFinite ? min(60, max(1, seconds)) : 1
+                case .throttled(let seconds): delay = seconds.isFinite ? min(315_576_000, max(1, seconds)) : 1
                 default: delay = nil
                 }
                 if let delay {

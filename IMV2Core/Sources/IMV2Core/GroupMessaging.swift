@@ -43,63 +43,6 @@ public struct V2GroupCapacityPolicy: Equatable, Sendable {
     }
 }
 
-/// 持久创建操作的不可变初始成员与群资料输入，后续成员变更使用带版本的独立命令。
-public struct V2CreateGroupRoomCommand: Equatable, Sendable {
-    /// 裁剪后群标题的最大 UTF-8 字节数：120。
-    public static let maximumTitleUTF8Bytes = 120
-
-    /// 创建者及初始群主。
-    public let actorUserID: UserID
-    /// 本次群创建的稳定幂等身份。
-    public let operationID: GroupRoomOperationID
-    /// 移除首尾空白与换行后的群标题。
-    public let title: String
-    /// 调用方提供的容量等级，构造器不检查与成员规模是否一致。
-    public let capacityClass: V2GroupCapacityClass
-    /// 不含群主且无重复的初始成员，构造时排序以使等价输入顺序得到一致意图。
-    public let initialMemberUserIDs: [UserID]
-
-    /// 构造群创建意图，裁剪标题并校验字节长度、控制字符与成员唯一性。
-    ///
-    /// - Parameters:
-    ///   - actorUserID: 创建者，不能再次出现在初始成员列表中。
-    ///   - operationID: 稳定创建操作身份。
-    ///   - title: 裁剪后非空、最多 120 字节且无控制字符的标题。
-    ///   - capacityClass: 创建时选定的容量等级，需由业务层核对规模策略。
-    ///   - initialMemberUserIDs: 无重复的非群主初始成员，允许空列表。
-    /// - Throws: 标题或初始成员不满足条件时抛出对应校验错误。
-    ///
-    /// 保存排序后的成员，不执行成员资格、规模或模式一致性授权。
-    public init(
-        actorUserID: UserID,
-        operationID: GroupRoomOperationID,
-        title: String,
-        capacityClass: V2GroupCapacityClass,
-        initialMemberUserIDs: [UserID]
-    ) throws {
-        let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedTitle.isEmpty,
-              normalizedTitle.utf8.count <= Self.maximumTitleUTF8Bytes,
-              !normalizedTitle.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
-        else { throw V2GroupMessagingValidationError.invalidTitle }
-
-        guard !initialMemberUserIDs.contains(actorUserID),
-              Set(initialMemberUserIDs).count == initialMemberUserIDs.count
-        else { throw V2GroupMessagingValidationError.invalidInitialMembers }
-
-        self.actorUserID = actorUserID
-        self.operationID = operationID
-        self.title = normalizedTitle
-        self.capacityClass = capacityClass
-        self.initialMemberUserIDs = initialMemberUserIDs.sorted()
-    }
-
-    /// 将群主与初始成员合并并排序，返回完整创建受众。
-    public var allMemberUserIDs: [UserID] {
-        ([actorUserID] + initialMemberUserIDs).sorted()
-    }
-}
-
 /// 群创建或查询结果，分别携带权威成员总数与本次返回的成员标识列表。
 public struct V2GroupRoom: Equatable, Sendable {
     /// 群房间身份。

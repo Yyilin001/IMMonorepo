@@ -3,205 +3,312 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-/// 会话能力变更的通用结果。
-///
-/// `Value` 为变更后的领域值；幂等重放会返回与此前一致的取值。
-public enum V2ConversationCapabilitiesOutcome<Value: Equatable & Sendable>: Equatable, Sendable {
-    /// 本次调用实际完成了变更。
-    case applied(Value)
-    /// 该操作此前已成功提交，本次为重放，返回相同结果。
-    case idempotent(Value)
-    /// 同一操作标识提交了与首次不同的载荷。
-    case idempotencyConflict
-}
-
-/// 会话能力存储的错误分类。
 public enum V2ConversationCapabilitiesStoreError: Error, Equatable, Sendable {
-    /// 目标房间不存在。
-    case roomNotFound
-    /// 目标消息不存在或不属于该房间。
-    case messageNotFound
-    /// 发起者不是房间的活跃成员。
-    case actorNotMember
-    /// 时间戳无法被 PostgreSQL 时间类型编码。
-    case invalidTimestamp
-    /// 持久化状态与预期不一致。
-    case corruptPersistenceState
+    case roomNotFound, messageNotFound, actorNotMember, invalidTimestamp, corruptPersistenceState,
+        operationPayloadMismatch
 }
-
-/// 会话能力（会话状态与消息收藏）的持久化边界。
 public protocol V2ConversationCapabilitiesStore: Sendable {
-    /// 设置房间置顶、归档与免打扰等会话状态。
-    ///
-    /// - Parameters:
-    ///   - actorUserID: 发起变更的用户。
-    ///   - command: 会话状态命令，携带操作标识以支持幂等重试。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 变更结果。
-    /// - Throws: 非成员、时间戳非法或持久化失败时抛出。
-    func setConversationState(actorUserID: UserID, command: V2ConversationStateCommand, now: Date) async throws -> V2ConversationCapabilitiesOutcome<V2ConversationState>
-    /// 设置或取消某条消息的收藏。
-    ///
-    /// - Parameters:
-    ///   - actorUserID: 发起变更的用户。
-    ///   - command: 收藏命令，携带操作标识以支持幂等重试。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 变更结果。
-    /// - Throws: 非成员、消息不存在或持久化失败时抛出。
-    func setMessageFavorite(actorUserID: UserID, command: V2MessageFavoriteCommand, now: Date) async throws -> V2ConversationCapabilitiesOutcome<V2MessageFavorite>
+    func setConversationState(actorUserID: UserID, command: V2ConversationStateCommand, now: Date) async throws
+        -> V2PersonalPreferenceReceipt
+    func setMessageFavorite(actorUserID: UserID, command: V2MessageFavoriteCommand, now: Date) async throws
+        -> V2PersonalPreferenceReceipt
+    func recover(actorUserID: UserID, request: V2PersonalPreferenceRecoveryRequest, now: Date) async throws
+        -> V2PersonalPreferenceRecoveryResult
 }
-
-/// 会话能力服务。
-///
-/// 它在调用存储前统一注入服务端时钟，保证同一次请求内的时间语义一致。
 public struct V2ConversationCapabilitiesService: Sendable {
     private let store: any V2ConversationCapabilitiesStore
     private let now: @Sendable () -> Date
-    /// 创建会话能力服务。
-    ///
-    /// - Parameters:
-    ///   - store: 会话能力持久化边界。
-    ///   - now: 服务端时钟，默认取当前时间。
-    public init(store: any V2ConversationCapabilitiesStore, now: @escaping @Sendable () -> Date = Date.init) { self.store = store; self.now = now }
-    /// 设置会话状态。
-    ///
-    /// - Parameters:
-    ///   - actorUserID: 发起变更的用户。
-    ///   - command: 会话状态命令。
-    /// - Returns: 变更结果。
-    /// - Throws: 存储拒绝或持久化失败时抛出。
-    public func setConversationState(actorUserID: UserID, command: V2ConversationStateCommand) async throws -> V2ConversationCapabilitiesOutcome<V2ConversationState> { try await store.setConversationState(actorUserID: actorUserID, command: command, now: now()) }
-    /// 设置或取消消息收藏。
-    ///
-    /// - Parameters:
-    ///   - actorUserID: 发起变更的用户。
-    ///   - command: 收藏命令。
-    /// - Returns: 变更结果。
-    /// - Throws: 存储拒绝或持久化失败时抛出。
-    public func setMessageFavorite(actorUserID: UserID, command: V2MessageFavoriteCommand) async throws -> V2ConversationCapabilitiesOutcome<V2MessageFavorite> { try await store.setMessageFavorite(actorUserID: actorUserID, command: command, now: now()) }
+    public init(store: any V2ConversationCapabilitiesStore, now: @escaping @Sendable () -> Date = Date.init) {
+        self.store = store
+        self.now = now
+    }
+    public func setConversationState(actorUserID: UserID, command: V2ConversationStateCommand) async throws
+        -> V2PersonalPreferenceReceipt
+    { try await store.setConversationState(actorUserID: actorUserID, command: command, now: now()) }
+    public func setMessageFavorite(actorUserID: UserID, command: V2MessageFavoriteCommand) async throws
+        -> V2PersonalPreferenceReceipt
+    { try await store.setMessageFavorite(actorUserID: actorUserID, command: command, now: now()) }
+    public func recover(actorUserID: UserID, request: V2PersonalPreferenceRecoveryRequest) async throws
+        -> V2PersonalPreferenceRecoveryResult
+    { try await store.recover(actorUserID: actorUserID, request: request, now: now()) }
 }
 
-/// 会话能力的 PostgreSQL 持久化实现。
-///
-/// 每次变更都在单事务内完成操作台账写入、权威状态更新与用户同步投影，
-/// 并在事务提交之后按需把控制面记录投递到用户的当前写入归属。
+/// Room-owner facts, revision tombstones and immutable operation receipts share one transaction.
 public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitiesStore {
     private let database: any Database
-    private let projectionDelivery: any V2UserShardProjectionDelivering
-    /// 创建 PostgreSQL 会话能力存储。
-    ///
-    /// - Parameters:
-    ///   - database: 控制面数据库连接。
-    ///   - projectionDelivery: 提交后投递控制面投影到当前用户分片的实现。
-    public init(database: any Database, projectionDelivery: any V2UserShardProjectionDelivering) { self.database = database; self.projectionDelivery = projectionDelivery }
-
-    /// 设置会话状态，并把结果投影到发送者的用户同步日志。
-    ///
-    /// 先锁定操作台账身份再读取，使并发重试可以观察到刚提交的操作。
-    /// 免打扰时间在 PostgreSQL 内比较，避免 Swift 侧二次量化引入的微秒差异被误判为载荷冲突。
-    ///
-    /// - Parameters:
-    ///   - actorUserID: 发起变更的用户。
-    ///   - command: 会话状态命令。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 变更结果。
-    /// - Throws: 时间戳非法、非成员或持久化失败时抛出。
-    public func setConversationState(actorUserID: UserID, command: V2ConversationStateCommand, now: Date) async throws -> V2ConversationCapabilitiesOutcome<V2ConversationState> {
+    private let activationScope: V2RoomActivationWriteScope?
+    public init(database: any Database, activationScope: V2RoomActivationWriteScope? = nil) {
+        self.database = database
+        self.activationScope = activationScope
+    }
+    public func setConversationState(actorUserID: UserID, command: V2ConversationStateCommand, now: Date) async throws
+        -> V2PersonalPreferenceReceipt
+    {
         if let muteUntil = command.muteUntil, !v2PostgresTimestampCanEncode(muteUntil) {
             throw V2ConversationCapabilitiesStoreError.invalidTimestamp
         }
-        let result: V2ConversationCapabilitiesOutcome<V2ConversationState> = try await database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }
-            let actor = try capabilityUUID(actorUserID), room = try capabilityUUID(command.roomID), operation = try capabilityUUID(command.operationID)
-            try await lockOperation(actor: actor, operation: operation, kind: "conversation", sql: sql)
-            if let prior = try await sql.raw("SELECT room_id, pinned_at, archived_at, mute_until, updated_at, mute_until IS NOT DISTINCT FROM \(bind: command.muteUntil) AS mute_matches FROM im_v2.user_room_preference_operations WHERE actor_user_id = \(bind: actor) AND operation_id = \(bind: operation)").first(decoding: ConversationStateRow.self) {
-                guard prior.roomID == room, (prior.pinnedAt != nil) == command.isPinned, (prior.archivedAt != nil) == command.isArchived else { return .idempotencyConflict }
-                guard v2PostgresTimestampCanEncode(prior.updatedAt), prior.muteUntil.map(v2PostgresTimestampCanEncode) ?? true else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }
-                // 在 PostgreSQL 中比较，使重试采用与原始绑定参数
-                // 相同的微秒量化方式。
-                guard prior.muteMatches else { return .idempotencyConflict }
-                return .idempotent(try prior.value())
+        let identity = try command.identity(actorUserID: actorUserID)
+        let fingerprint = try command.fingerprint(actorUserID: actorUserID)
+        let receipt = try await submit(
+            identity: identity, fingerprint: fingerprint, deadline: command.firstSubmissionDeadlineMilliseconds,
+            expected: command.expectedRevision, now: now
+        ) { sql, actor, room, current, time in
+            guard current < Int64.max else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }
+            let revision = current + 1
+            let pinned = command.isPinned ? time : nil
+            let archived = command.isArchived ? time : nil
+            try await sql.raw(
+                "INSERT INTO im_v2.user_room_preferences(user_id,room_id,pinned_at,archived_at,mute_until,updated_at,revision) VALUES(\(bind:actor),\(bind:room),\(bind:pinned),\(bind:archived),\(bind:command.muteUntil),\(bind:time),\(bind:revision)) ON CONFLICT(user_id,room_id) DO UPDATE SET pinned_at=EXCLUDED.pinned_at,archived_at=EXCLUDED.archived_at,mute_until=EXCLUDED.mute_until,updated_at=EXCLUDED.updated_at,revision=EXCLUDED.revision"
+            ).run()
+            let value = V2ConversationState(
+                roomID: command.roomID, isPinned: command.isPinned, isArchived: command.isArchived,
+                muteUntil: command.muteUntil, updatedAt: time, revision: .init(rawValue: UInt64(revision))!)
+            try await appendStateProjection(
+                actor: actor, source: capabilityUUID(command.operationID), value: value, now: time, sql: sql)
+            return .conversationState(value)
+        }
+        return receipt
+    }
+    public func setMessageFavorite(actorUserID: UserID, command: V2MessageFavoriteCommand, now: Date) async throws
+        -> V2PersonalPreferenceReceipt
+    {
+        let identity = try command.identity(actorUserID: actorUserID)
+        let fingerprint = try command.fingerprint(actorUserID: actorUserID)
+        let receipt = try await submit(
+            identity: identity, fingerprint: fingerprint, deadline: command.firstSubmissionDeadlineMilliseconds,
+            expected: command.expectedRevision, now: now
+        ) { sql, actor, room, current, time in
+            guard current < Int64.max else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }
+            let message = try capabilityUUID(command.messageID)
+            let revision = current + 1
+            try await sql.raw(
+                "INSERT INTO im_v2.user_message_favorites(user_id,message_id,room_id,is_favorited,created_at,revision) VALUES(\(bind:actor),\(bind:message),\(bind:room),\(bind:command.isFavorited),\(bind:time),\(bind:revision)) ON CONFLICT(user_id,message_id) DO UPDATE SET is_favorited=EXCLUDED.is_favorited,created_at=EXCLUDED.created_at,revision=EXCLUDED.revision"
+            ).run()
+            let value = V2MessageFavorite(
+                roomID: command.roomID, messageID: command.messageID, isFavorited: command.isFavorited, updatedAt: time,
+                revision: .init(rawValue: UInt64(revision))!)
+            try await appendFavoriteProjection(
+                actor: actor, source: capabilityUUID(command.operationID), value: value, now: time, sql: sql)
+            return .messageFavorite(value)
+        }
+        return receipt
+    }
+    private func submit(
+        identity: V2OperationIdentity, fingerprint: V2OperationFingerprint, deadline: UInt64,
+        expected: V2PersonalPreferenceRevision, now: Date,
+        apply: @escaping @Sendable (any SQLDatabase, UUID, UUID, Int64, Date) async throws -> V2PersonalPreferenceValue
+    ) async throws -> V2PersonalPreferenceReceipt {
+        try await v2WithPostgresTransactionRetry(
+            database: database, maximumRetryCount: 0, classifyCommitFailure: activationScope != nil,
+            useRoomDeadline: activationScope != nil
+        ) { tx in
+            guard let sql = tx as? any SQLDatabase else {
+                throw V2ConversationCapabilitiesStoreError.corruptPersistenceState
             }
-            guard v2PostgresTimestampCanEncode(now) else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }
-            try await assertActiveMember(actor: actor, room: room, sql: sql)
-            let pinnedAt = command.isPinned ? now : nil, archivedAt = command.isArchived ? now : nil
-            try await sql.raw("INSERT INTO im_v2.user_room_preferences (user_id, room_id, pinned_at, archived_at, mute_until, updated_at) VALUES (\(bind: actor), \(bind: room), \(bind: pinnedAt), \(bind: archivedAt), \(bind: command.muteUntil), \(bind: now)) ON CONFLICT (user_id, room_id) DO UPDATE SET pinned_at = EXCLUDED.pinned_at, archived_at = EXCLUDED.archived_at, mute_until = EXCLUDED.mute_until, updated_at = EXCLUDED.updated_at").run()
-            guard let persisted = try await sql.raw("INSERT INTO im_v2.user_room_preference_operations (actor_user_id, operation_id, room_id, pinned_at, archived_at, mute_until, updated_at) VALUES (\(bind: actor), \(bind: operation), \(bind: room), \(bind: pinnedAt), \(bind: archivedAt), \(bind: command.muteUntil), \(bind: now)) RETURNING room_id, pinned_at, archived_at, mute_until, updated_at, TRUE AS mute_matches").first(decoding: ConversationStateRow.self) else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }
-            let value = try persisted.value()
-            try await appendStateProjection(actor: actor, source: operation, value: value, now: now, sql: sql)
-            return .applied(value)
-        }
-        switch result {
-        case .applied, .idempotent:
-            try await deliverProjection(actor: actorUserID, operation: command.operationID.rawValue, kinds: ["conversation_state"])
-        case .idempotencyConflict:
-            break
-        }
-        return result
-    }
-
-    /// 设置或取消消息收藏，并把结果投影到发送者的用户同步日志。
-    ///
-    /// 与设置会话状态相同，操作台账加锁先于读取；消息必须属于目标房间才会被接受。
-    ///
-    /// - Parameters:
-    ///   - actorUserID: 发起变更的用户。
-    ///   - command: 收藏命令。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 变更结果。
-    /// - Throws: 非成员、消息不存在或持久化失败时抛出。
-    public func setMessageFavorite(actorUserID: UserID, command: V2MessageFavoriteCommand, now: Date) async throws -> V2ConversationCapabilitiesOutcome<V2MessageFavorite> {
-        let result: V2ConversationCapabilitiesOutcome<V2MessageFavorite> = try await database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }
-            let actor = try capabilityUUID(actorUserID), room = try capabilityUUID(command.roomID), message = try capabilityUUID(command.messageID), operation = try capabilityUUID(command.operationID)
-            try await lockOperation(actor: actor, operation: operation, kind: "favorite", sql: sql)
-            if let prior = try await sql.raw("SELECT room_id, message_id, is_favorited, updated_at FROM im_v2.user_message_favorite_operations WHERE actor_user_id = \(bind: actor) AND operation_id = \(bind: operation)").first(decoding: FavoriteRow.self) {
-                guard prior.roomID == room, prior.messageID == message, prior.isFavorited == command.isFavorited else { return .idempotencyConflict }
-                guard v2PostgresTimestampCanEncode(prior.updatedAt) else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }
-                return .idempotent(try prior.value())
+            let actor = try capabilityUUID(identity.accountID)
+            let room = try roomUUID(identity)
+            try await prepare(identity: identity, room: room, sql: sql)
+            if let old = try await read(identity: identity, sql: sql) {
+                guard old.fingerprint == fingerprint else {
+                    throw V2ConversationCapabilitiesStoreError.operationPayloadMismatch
+                }
+                return old
             }
-            guard v2PostgresTimestampCanEncode(now) else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }
-            try await assertActiveMember(actor: actor, room: room, sql: sql)
-            let messageInRoom = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.messages WHERE message_id = \(bind: message) AND room_id = \(bind: room)) AS value").first(decoding: CapabilityBooleanRow.self)?.value ?? false
-            guard messageInRoom else { throw V2ConversationCapabilitiesStoreError.messageNotFound }
-            if command.isFavorited { try await sql.raw("INSERT INTO im_v2.user_message_favorites (user_id, message_id, room_id, created_at) VALUES (\(bind: actor), \(bind: message), \(bind: room), \(bind: now)) ON CONFLICT DO NOTHING").run() }
-            else { try await sql.raw("DELETE FROM im_v2.user_message_favorites WHERE user_id = \(bind: actor) AND message_id = \(bind: message)").run() }
-            guard let persisted = try await sql.raw("INSERT INTO im_v2.user_message_favorite_operations (actor_user_id, operation_id, message_id, room_id, is_favorited, updated_at) VALUES (\(bind: actor), \(bind: operation), \(bind: message), \(bind: room), \(bind: command.isFavorited), \(bind: now)) RETURNING room_id, message_id, is_favorited, updated_at").first(decoding: FavoriteRow.self) else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }
-            let value = try persisted.value()
-            try await appendFavoriteProjection(actor: actor, source: operation, value: value, now: now, sql: sql)
-            return .applied(value)
+            // Lock the room before testing membership and the revision fence. Absent facts also serialize.
+            var rejection: V2PersonalPreferenceRejection?
+            do {
+                try await assertActiveMember(actor: actor, room: room, sql: sql)
+            } catch V2ConversationCapabilitiesStoreError.roomNotFound {
+                rejection = .notFound
+            } catch V2ConversationCapabilitiesStoreError.actorNotMember { rejection = .permissionDenied }
+            if rejection == nil, case .message(_, let messageID) = identity.scope {
+                let exists =
+                    try await sql.raw(
+                        "SELECT EXISTS(SELECT 1 FROM im_v2.messages WHERE room_id=\(bind:room) AND message_id=\(bind:capabilityUUID(messageID))) AS value"
+                    ).first(decoding: CapabilityBooleanRow.self)?.value ?? false
+                if !exists { rejection = .notFound }
+            }
+            guard
+                let time = try await sql.raw("SELECT clock_timestamp() AS value").first(
+                    decoding: PreferenceClockRow.self)?.value,
+                let millis = Int64(exactly: (time.timeIntervalSince1970 * 1000).rounded(.towardZero)), millis >= 0
+            else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }
+            if rejection == nil, UInt64(millis) > deadline { rejection = .expiredUnsubmitted }
+            var current: Int64 = 0
+            if rejection == nil {
+                switch identity.scope {
+                case .room:
+                    current =
+                        try await sql.raw(
+                            "SELECT revision AS value FROM im_v2.user_room_preferences WHERE user_id=\(bind:actor) AND room_id=\(bind:room) FOR UPDATE"
+                        ).first(decoding: PreferenceRevisionRow.self)?.value ?? 0
+                case .message(_, let message):
+                    current =
+                        try await sql.raw(
+                            "SELECT revision AS value FROM im_v2.user_message_favorites WHERE user_id=\(bind:actor) AND message_id=\(bind:capabilityUUID(message)) FOR UPDATE"
+                        ).first(decoding: PreferenceRevisionRow.self)?.value ?? 0
+                default: throw V2ConversationCapabilitiesStoreError.corruptPersistenceState
+                }
+                if current != expected.signedValue || current == Int64.max {
+                    rejection = .revisionConflict(current: .init(rawValue: UInt64(current))!)
+                }
+            }
+            let outcome: V2PersonalPreferenceTerminalOutcome
+            if let rejection {
+                outcome = .rejected(rejection)
+            } else {
+                outcome = .committed(try await apply(sql, actor, room, current, time))
+            }
+            return try await record(
+                identity: identity, fingerprint: fingerprint, outcome: outcome, time: time, sql: sql)
         }
-        switch result {
-        case .applied, .idempotent:
-            try await deliverProjection(actor: actorUserID, operation: command.operationID.rawValue, kinds: ["message_favorite"])
-        case .idempotencyConflict:
-            break
+    }
+    public func recover(actorUserID: UserID, request: V2PersonalPreferenceRecoveryRequest, now: Date) async throws
+        -> V2PersonalPreferenceRecoveryResult
+    {
+        guard request.identity.accountID == actorUserID else {
+            throw V2ConversationCapabilitiesStoreError.actorNotMember
         }
-        return result
+        return try await v2WithPostgresTransactionRetry(
+            database: database, maximumRetryCount: 0, classifyCommitFailure: activationScope != nil,
+            useRoomDeadline: activationScope != nil
+        ) { tx in
+            guard let sql = tx as? any SQLDatabase else {
+                throw V2ConversationCapabilitiesStoreError.corruptPersistenceState
+            }
+            try await prepare(identity: request.identity, room: capabilityUUID(request.roomID), sql: sql)
+            if let receipt = try await read(identity: request.identity, sql: sql) {
+                return receipt.fingerprint == request.fingerprint ? .receipt(receipt) : .fingerprintConflict
+            }
+            guard request.action == .closeIfAbsent else { return .unresolved }
+            guard
+                let time = try await sql.raw("SELECT clock_timestamp() AS value").first(
+                    decoding: PreferenceClockRow.self)?.value
+            else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }
+            return .receipt(
+                try await record(
+                    identity: request.identity, fingerprint: request.fingerprint, outcome: .closed, time: time, sql: sql
+                ))
+        }
     }
-
-    private func lockOperation(actor: UUID, operation: UUID, kind: String, sql: any SQLDatabase) async throws {
-        // 读取前先锁定台账身份。单靠房间锁或状态锁，
-        // 不能保证并发重试看见新提交的操作。
-        let key = "personal-preference:" + kind + ":" + actor.uuidString + ":" + operation.uuidString
-        try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
+    private func prepare(identity: V2OperationIdentity, room: UUID, sql: any SQLDatabase) async throws {
+        if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
+        try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind:identity.storageKey),0))").run()
+        if let activationScope { try await activationScope.require([room], sql: sql) }
     }
-
+    private func read(identity: V2OperationIdentity, sql: any SQLDatabase) async throws -> V2PersonalPreferenceReceipt?
+    {
+        guard
+            let row = try await sql.raw(
+                "SELECT receipt::text AS value,fingerprint_version,request_fingerprint,kind,actor_user_id,operation_id,room_id,outcome_kind FROM im_v2.personal_preference_operation_receipts WHERE identity_key=\(bind:identity.storageKey)"
+            ).first(decoding: PreferenceReceiptRow.self)
+        else { return nil }
+        let receipt = try JSONDecoder().decode(V2PersonalPreferenceReceipt.self, from: Data(row.value.utf8))
+        let expectedOutcome: String
+        switch receipt.outcome {
+        case .committed: expectedOutcome = "committed"
+        case .rejected: expectedOutcome = "rejected"
+        case .closed: expectedOutcome = "closed"
+        }
+        guard row.outcomeKind == expectedOutcome, receipt.identity == identity,
+            Int16(exactly: receipt.fingerprint.version) == row.fingerprintVersion,
+            receipt.fingerprint.digest == row.requestFingerprint,
+            row.kind == identity.kind.rawValue, row.actorUserID == identity.accountID.uuidValue,
+            row.operationID.uuidString.lowercased() == identity.operation.rawOperationID.lowercased(),
+            row.roomID == (try roomUUID(identity))
+        else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }
+        return receipt
+    }
+    private func record(
+        identity: V2OperationIdentity, fingerprint: V2OperationFingerprint,
+        outcome: V2PersonalPreferenceTerminalOutcome, time: Date, sql: any SQLDatabase
+    ) async throws -> V2PersonalPreferenceReceipt {
+        guard let operationUUID = UUID(uuidString: identity.operation.rawOperationID),
+            let millis = UInt64(exactly: (time.timeIntervalSince1970 * 1000).rounded(.towardZero))
+        else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }
+        let receipt = try V2PersonalPreferenceReceipt(
+            identity: identity, fingerprint: fingerprint, outcome: outcome, resolvedAtMilliseconds: millis)
+        let json = String(decoding: try JSONEncoder().encode(receipt), as: UTF8.self)
+        let outcomeKind: String
+        switch outcome {
+        case .committed: outcomeKind = "committed"
+        case .rejected: outcomeKind = "rejected"
+        case .closed: outcomeKind = "closed"
+        }
+        try await sql.raw(
+            "INSERT INTO im_v2.personal_preference_operation_receipts(identity_key,actor_user_id,operation_id,room_id,kind,fingerprint_version,request_fingerprint,outcome_kind,receipt,created_at) VALUES(\(bind:identity.storageKey),\(bind:capabilityUUID(identity.accountID)),\(bind:operationUUID),\(bind:roomUUID(identity)),\(bind:identity.kind.rawValue),\(bind:Int16(fingerprint.version)),\(bind:fingerprint.digest),\(bind:outcomeKind),\(bind:json)::jsonb,\(bind:time))"
+        ).run()
+        return receipt
+    }
+    private func roomUUID(_ identity: V2OperationIdentity) throws -> UUID {
+        switch identity.scope {
+        case .room(let room), .message(let room, _): return try capabilityUUID(room)
+        default: throw V2ConversationCapabilitiesStoreError.corruptPersistenceState
+        }
+    }
     private func assertActiveMember(actor: UUID, room: UUID, sql: any SQLDatabase) async throws {
-        guard let revision = try await sql.raw("SELECT membership_revision FROM im_v2.rooms WHERE room_id = \(bind: room) FOR UPDATE").first(decoding: CapabilityRoomRow.self)?.membershipRevision else { throw V2ConversationCapabilitiesStoreError.roomNotFound }
-        let member = try await sql.raw("SELECT EXISTS (SELECT 1 FROM im_v2.room_memberships WHERE room_id = \(bind: room) AND user_id = \(bind: actor) AND joined_revision <= \(bind: revision) AND (left_revision IS NULL OR left_revision > \(bind: revision))) AS value").first(decoding: CapabilityBooleanRow.self)?.value ?? false
+        guard
+            let revision = try await sql.raw(
+                "SELECT membership_revision FROM im_v2.rooms WHERE room_id = \(bind: room) FOR UPDATE"
+            ).first(decoding: CapabilityRoomRow.self)?.membershipRevision
+        else { throw V2ConversationCapabilitiesStoreError.roomNotFound }
+        let member =
+            try await sql.raw(
+                "SELECT EXISTS (SELECT 1 FROM im_v2.room_memberships WHERE room_id = \(bind: room) AND user_id = \(bind: actor) AND joined_revision <= \(bind: revision) AND (left_revision IS NULL OR left_revision > \(bind: revision))) AS value"
+            ).first(decoding: CapabilityBooleanRow.self)?.value ?? false
         guard member else { throw V2ConversationCapabilitiesStoreError.actorNotMember }
     }
     // 向存储绑定原始时钟值；响应日期解码后若重新编码，可能再损失一微秒。
     // 载荷时间戳使用已提交值。
-    private func appendStateProjection(actor: UUID, source: UUID, value: V2ConversationState, now: Date, sql: any SQLDatabase) async throws { let sequence = try await nextSequence(actor: actor, sql: sql); try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: actor), \(bind: sequence), \(bind: source), 'conversation_state', jsonb_build_object('room_id', \(bind: value.roomID.rawValue), 'is_pinned', \(bind: value.isPinned), 'is_archived', \(bind: value.isArchived), 'mute_until_ms', \(bind: value.muteUntil.map { Int64($0.timeIntervalSince1970 * 1_000) } ?? 0), 'updated_at_ms', \(bind: Int64(value.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: now))").run() }
-    private func appendFavoriteProjection(actor: UUID, source: UUID, value: V2MessageFavorite, now: Date, sql: any SQLDatabase) async throws { let sequence = try await nextSequence(actor: actor, sql: sql); try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: actor), \(bind: sequence), \(bind: source), 'message_favorite', jsonb_build_object('room_id', \(bind: value.roomID.rawValue), 'message_id', \(bind: value.messageID.rawValue), 'is_favorited', \(bind: value.isFavorited), 'updated_at_ms', \(bind: Int64(value.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: now))").run() }
-    private func nextSequence(actor: UUID, sql: any SQLDatabase) async throws -> Int64 { guard let result = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: actor), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 WHERE im_v2.user_sync_sequences.next_sequence < \(bind: Int64.max) RETURNING next_sequence").first(decoding: CapabilitySyncRow.self)?.sequence else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }; return result }
-    private func deliverProjection(actor: UserID, operation: String, kinds: Set<String>) async throws { _ = try await projectionDelivery.deliverToCurrentShard(userID: actor, sourceEventID: .init(operation), projectionKinds: kinds) }
+    private func appendStateProjection(
+        actor: UUID, source: UUID, value: V2ConversationState, now: Date, sql: any SQLDatabase
+    ) async throws {
+        try await sql.raw(
+            "INSERT INTO im_v2.user_state_event_outbox (user_id, source_event_id, projection_kind, payload, created_at, next_attempt_at, source_room_id) VALUES (\(bind: actor), \(bind: source), 'conversation_state', jsonb_build_object('room_id', \(bind: value.roomID.rawValue), 'is_pinned', \(bind: value.isPinned), 'is_archived', \(bind: value.isArchived), 'mute_until_ms', \(bind: value.muteUntil.map { Int64($0.timeIntervalSince1970 * 1_000) } ?? 0), 'revision', \(bind: value.revision.signedValue), 'updated_at_ms', \(bind: Int64(value.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: now), \(bind: now), \(bind: capabilityUUID(value.roomID)))"
+        ).run()
+    }
+    private func appendFavoriteProjection(
+        actor: UUID, source: UUID, value: V2MessageFavorite, now: Date, sql: any SQLDatabase
+    ) async throws {
+        try await sql.raw(
+            "INSERT INTO im_v2.user_state_event_outbox (user_id, source_event_id, projection_kind, payload, created_at, next_attempt_at, source_room_id) VALUES (\(bind: actor), \(bind: source), 'message_favorite', jsonb_build_object('room_id', \(bind: value.roomID.rawValue), 'message_id', \(bind: value.messageID.rawValue), 'is_favorited', \(bind: value.isFavorited), 'revision', \(bind: value.revision.signedValue), 'updated_at_ms', \(bind: Int64(value.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: now), \(bind: now), \(bind: capabilityUUID(value.roomID)))"
+        ).run()
+    }
+
 }
-private struct ConversationStateRow: Decodable { let muteMatches: Bool; let roomID: UUID; let pinnedAt: Date?; let archivedAt: Date?; let muteUntil: Date?; let updatedAt: Date; enum CodingKeys: String, CodingKey { case muteMatches = "mute_matches", roomID = "room_id", pinnedAt = "pinned_at", archivedAt = "archived_at", muteUntil = "mute_until", updatedAt = "updated_at" }; func value() throws -> V2ConversationState { try .init(roomID: .init(roomID.uuidString), isPinned: pinnedAt != nil, isArchived: archivedAt != nil, muteUntil: muteUntil, updatedAt: updatedAt) } }
-private struct FavoriteRow: Decodable { let roomID: UUID; let messageID: UUID; let isFavorited: Bool; let updatedAt: Date; enum CodingKeys: String, CodingKey { case roomID = "room_id", messageID = "message_id", isFavorited = "is_favorited", updatedAt = "updated_at" }; func value() throws -> V2MessageFavorite { try .init(roomID: .init(roomID.uuidString), messageID: .init(messageID.uuidString), isFavorited: isFavorited, updatedAt: updatedAt) } }
-private struct CapabilityRoomRow: Decodable { let membershipRevision: Int64; enum CodingKeys: String, CodingKey { case membershipRevision = "membership_revision" } }
+private struct PreferenceReceiptRow: Decodable {
+    let value: String
+    let fingerprintVersion: Int16
+    let requestFingerprint: Data
+    let kind: String
+    let actorUserID: UUID
+    let operationID: UUID
+    let roomID: UUID
+    let outcomeKind: String
+    enum CodingKeys: String, CodingKey {
+        case value, kind
+        case fingerprintVersion = "fingerprint_version"
+        case requestFingerprint = "request_fingerprint"
+        case actorUserID = "actor_user_id"
+        case operationID = "operation_id"
+        case roomID = "room_id"
+        case outcomeKind = "outcome_kind"
+    }
+}
+private struct PreferenceClockRow: Decodable { let value: Date }
+private struct PreferenceRevisionRow: Decodable { let value: Int64 }
+private struct CapabilityRoomRow: Decodable {
+    let membershipRevision: Int64
+    enum CodingKeys: String, CodingKey { case membershipRevision = "membership_revision" }
+}
 private struct CapabilityBooleanRow: Decodable { let value: Bool }
-private struct CapabilitySyncRow: Decodable { let sequence: Int64; enum CodingKeys: String, CodingKey { case sequence = "next_sequence" } }
-private func capabilityUUID<Tag>(_ id: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let uuid = UUID(uuidString: id.rawValue) else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }; return uuid }
+private struct CapabilitySyncRow: Decodable {
+    let sequence: Int64
+    enum CodingKeys: String, CodingKey { case sequence = "next_sequence" }
+}
+private func capabilityUUID<Tag>(_ id: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
+    guard let uuid = UUID(uuidString: id.rawValue) else {
+        throw V2ConversationCapabilitiesStoreError.corruptPersistenceState
+    }
+    return uuid
+}

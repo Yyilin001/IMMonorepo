@@ -49,98 +49,13 @@ struct V2GatewayRoomActorCompositionTests {
         #expect(await calls.values() == ["pull", "subscribe", "pull"])
     }
 
-    @Test("pre-room creation uses coordinator while preferences remain control-owned")
-    func creationBoundary() async throws {
-        let actor = UserID(uuid: UUID()), target = UserID(uuid: UUID())
-        let room = RoomID(uuid: UUID()), directOperation = try DirectRoomOperationID(UUID().uuidString)
-        let groupOperation = try GroupRoomOperationID(UUID().uuidString)
-        let permissions = GatewayDirectPreferences()
-        let calls = GatewayRoomCalls()
-        let now = Date()
-        let services = V2GatewayRoomCreationServices(directPreferences: permissions,
-            callTimeout: try .init(5_000)) { command, deadline in
-            #expect(deadline > .now)
-            switch command {
-            case .openDirect(let request):
-                #expect(request.actorUserID == actor && request.targetUserID == target)
-                await calls.add("open")
-                return .direct(.opened(.init(roomID: room, actorUserID: actor,
-                    targetUserID: target, createdAt: now)))
-            case .beginStaged(let request):
-                #expect(request.operationID == groupOperation)
-                await calls.add("begin")
-                return .draft(.init(operationID: groupOperation, title: request.title,
-                    stagedMemberCount: 0))
-            case .appendStaged(let request):
-                #expect(request.memberUserIDs == [target])
-                await calls.add("append")
-                return .draft(.init(operationID: groupOperation, title: "Group",
-                    stagedMemberCount: 1))
-            case .finalizeStaged:
-                await calls.add("finalize")
-                return .group(.idempotencyConflict)
-            case .cancelStaged:
-                await calls.add("cancel")
-                return .cancelled
-            case .createGroup:
-                Issue.record("unexpected direct group create"); throw V2RoomCallFailure.outcomeUnknown
-            }
-        }
-        let opened = try await services.direct.open(actorUserID: actor,
-            operationID: directOperation, targetUserID: target)
-        #expect(opened == .opened(.init(roomID: room, actorUserID: actor,
-            targetUserID: target, createdAt: now)))
-        let preferenceID = try StrangerMessagePreferenceOperationID(UUID().uuidString)
-        _ = try await services.direct.setStrangerMessagePermission(actorUserID: actor,
-            operationID: preferenceID, permission: .allow)
-        #expect(await permissions.calls() == 1)
-        #expect(try await services.staged.begin(actorUserID: actor,
-            operationID: groupOperation, title: "Group").stagedMemberCount == 0)
-        #expect(try await services.staged.append(actorUserID: actor,
-            operationID: groupOperation, memberUserIDs: [target]).stagedMemberCount == 1)
-        #expect(try await services.staged.finalize(actorUserID: actor,
-            operationID: groupOperation) == .idempotencyConflict)
-        try await services.staged.cancel(actorUserID: actor, operationID: groupOperation)
-        #expect(await calls.values() == ["open", "begin", "append", "finalize", "cancel"])
-    }
 
-    @Test("a mismatched creation result is unknown, never accepted")
-    func creationResponseIdentity() async throws {
-        let actor = UserID(uuid: UUID()), target = UserID(uuid: UUID())
-        let operation = try DirectRoomOperationID(UUID().uuidString)
-        let services = V2GatewayRoomCreationServices(directPreferences: GatewayDirectPreferences(),
-            callTimeout: try .init(5_000)) { _, _ in
-            .direct(.opened(.init(roomID: .init(uuid: UUID()), actorUserID: target,
-                targetUserID: actor, createdAt: Date())))
-        }
-        await #expect(throws: V2RoomCallFailure.outcomeUnknown) {
-            _ = try await services.direct.open(actorUserID: actor,
-                operationID: operation, targetUserID: target)
-        }
-    }
+
+
 }
 
 private actor GatewayRoomCalls {
     private var recorded: [String] = []
     func add(_ value: String) { recorded.append(value) }
     func values() -> [String] { recorded }
-}
-
-private actor GatewayDirectPreferences: V2DirectMessagePreferenceManaging {
-    private var count = 0
-    func calls() -> Int { count }
-
-    func setStrangerMessagePermission(actorUserID: UserID,
-        operationID: StrangerMessagePreferenceOperationID,
-        permission: V2StrangerMessagePermission) -> V2SetStrangerMessagePermissionOutcome {
-        count += 1
-        return .updated(permission: permission, updatedAt: Date())
-    }
-
-    func setUserAddPermission(actorUserID: UserID,
-        operationID: UserAddPreferenceOperationID,
-        permission: V2UserAddPermission) -> V2SetUserAddPermissionOutcome {
-        count += 1
-        return .updated(permission: permission, updatedAt: Date())
-    }
 }

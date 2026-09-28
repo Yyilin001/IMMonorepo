@@ -76,13 +76,15 @@ struct V2GatewaySlowTLSTests {
             }
             // Authentication is a local fixture; notification bytes traverse the
             // actual production NIO handler, TLS encryption and loopback sockets.
+            let handshakeDeviceID = UUID().uuidString
             var hello = IMV2Envelope(); hello.requestID = 1
             hello.clientHello.supportedProtocolVersions = [UInt32(version)]
             hello.clientHello.supportedCapabilityProfiles = ["base"]
+            hello.clientHello.deviceID = handshakeDeviceID
             _ = try await stream.receive(V2FrameCodec.encode(
                 V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0), limits: limits))
             var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(version)
-            auth.authenticate.accessToken = "fixture"; auth.authenticate.deviceID = "slow-tls-device"
+            auth.authenticate.accessToken = "fixture"; auth.authenticate.deviceID = handshakeDeviceID
             _ = try await stream.receive(V2FrameCodec.encode(
                 V2ServerProtobufFrameCodec.encode(auth, frameVersion: version), limits: limits))
             let room = RoomID(uuid: UUID()), epoch = UUID()

@@ -44,6 +44,7 @@ struct V2ConversationMessageDependencies {
     let readReceiptReporter: (any V2ConversationReadReporting)?
     let stateChanger: (any V2ConversationStateChanging)?
     let favoriter: (any V2MessageFavoriting)?
+    let moderator: V2MessageModerationOperationService?
     let groupPinner: (any V2GroupMessagePinning)?
     let forwarder: (any V2MessageForwarding)?
 
@@ -55,6 +56,7 @@ struct V2ConversationMessageDependencies {
         readReceiptReporter: (any V2ConversationReadReporting)? = nil,
         stateChanger: (any V2ConversationStateChanging)? = nil,
         favoriter: (any V2MessageFavoriting)? = nil,
+        moderator: V2MessageModerationOperationService? = nil,
         groupPinner: (any V2GroupMessagePinning)? = nil,
         forwarder: (any V2MessageForwarding)? = nil
     ) {
@@ -65,6 +67,7 @@ struct V2ConversationMessageDependencies {
         self.readReceiptReporter = readReceiptReporter
         self.stateChanger = stateChanger
         self.favoriter = favoriter
+        self.moderator = moderator
         self.groupPinner = groupPinner
         self.forwarder = forwarder
     }
@@ -82,6 +85,7 @@ struct V2ConversationGroupDependencies {
     let memberMuter: (any V2GroupMemberMuting)?
     let moderatedMemberRemover: (any V2ModeratedGroupMemberRemoving)?
     let avatarManager: (any V2GroupAvatarManaging)?
+    let nameOperations: V2NameOperationService?
 
     init(
         announcementManager: (any V2GroupAnnouncementManaging)? = nil,
@@ -93,7 +97,8 @@ struct V2ConversationGroupDependencies {
         membershipChanger: (any V2GroupMembershipChanging)? = nil,
         memberMuter: (any V2GroupMemberMuting)? = nil,
         moderatedMemberRemover: (any V2ModeratedGroupMemberRemoving)? = nil,
-        avatarManager: (any V2GroupAvatarManaging)? = nil
+        avatarManager: (any V2GroupAvatarManaging)? = nil,
+        nameOperations: V2NameOperationService? = nil
     ) {
         self.announcementManager = announcementManager
         self.memberRoleChanger = memberRoleChanger
@@ -105,6 +110,7 @@ struct V2ConversationGroupDependencies {
         self.memberMuter = memberMuter
         self.moderatedMemberRemover = moderatedMemberRemover
         self.avatarManager = avatarManager
+        self.nameOperations = nameOperations
     }
 }
 

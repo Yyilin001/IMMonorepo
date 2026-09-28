@@ -46,9 +46,6 @@ struct GatewayBackgroundWorkers {
         let readReceiptPreferencePropagationWorker: V2ReadReceiptPreferencePropagationWorker
         let deviceRevocationWorker: V2DeviceRevocationWorker
         let moderationAuditRetentionWorker: V2ModerationAuditRetentionWorker
-        let maintenanceGroupAudienceStore: PostgresV2GroupAudienceImportStore
-        let roomCreation: V2ActorRoomCreationCoordinator
-        let callTimeout: V2ActorMilliseconds
         let mediaRetentionWorker: V2MediaRetentionWorker
     }
 
@@ -113,9 +110,6 @@ struct GatewayBackgroundWorkers {
                 readReceiptPreferencePropagationWorker: maintenance.readReceiptPreferencePropagationWorker,
                 deviceRevocationWorker: maintenance.deviceRevocationWorker,
                 moderationAuditRetentionWorker: maintenance.moderationAuditRetentionWorker,
-                maintenanceGroupAudienceStore: roomServices.maintenanceGroupAudienceStore,
-                roomCreation: roomServices.roomCreation,
-                callTimeout: roomServices.callTimeout,
                 mediaRetentionWorker: maintenance.mediaRetentionWorker
             )
         )

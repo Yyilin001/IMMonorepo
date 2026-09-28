@@ -24,6 +24,17 @@ public struct V2RoomRefQueryClient: Sendable,
         self.maximumConcurrentRooms = maximumConcurrentRooms
     }
 
+    public func recoverReadReceipt(_ request:V2ReadReceiptRecoveryRequest) async throws -> V2ReadReceiptRecoveryResult {
+        guard case .receipt(let result) = try await caller.call(.receiptQuery(.recover(request)),actor:request.command.actorUserID),
+              case .recovery(let value) = result else { throw V2RoomCallFailure.outcomeUnknown }
+        switch value {
+        case .originalReceipt(let receipt):guard receipt.validates(request.command) else { throw V2RoomCallFailure.outcomeUnknown }
+        case .watermarkProof(let proof):guard proof.validates(request.command) else { throw V2RoomCallFailure.outcomeUnknown }
+        default:break
+        }
+        return value
+    }
+
     public func record(_ request: V2AuthenticatedReadReceipt) async throws -> V2ReadReceiptOutcome {
         let wire = try V2ActorRecordReadReceiptWire(request)
         guard case .receipt(let result) = try await caller.call(.receipt(.record(wire)), actor: request.actorUserID) else {
@@ -203,7 +214,6 @@ public struct V2RoomRefQueryClient: Sendable,
 /// 房间回执与用户偏好分别由不同物理节点负责。
 public struct V2RoomRefReadReceiptClient: V2GatewayReadReceiptHandling {
     private let rooms: V2RoomRefQueryClient
-    private let preferences: V2ReadReceiptService
     private let control: any V2ReadReceiptControlStore
     private let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
 
@@ -213,7 +223,6 @@ public struct V2RoomRefReadReceiptClient: V2GatewayReadReceiptHandling {
         self.rooms = rooms
         self.control = control
         self.databaseWorkAdmission = databaseWorkAdmission
-        self.preferences = .init(store: control, now: now)
     }
 
     public func record(_ request: V2AuthenticatedReadReceipt) async throws -> V2ReadReceiptOutcome {
@@ -258,9 +267,5 @@ public struct V2RoomRefReadReceiptClient: V2GatewayReadReceiptHandling {
         return try .init(roomID: roomID, messageID: messageID,
             readers: readers, nextCursor: scanCursor)
     }
-    public func setPreferences(actorUserID: UserID, operationID: ReadReceiptPreferenceOperationID,
-                        allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2SetReadReceiptPreferencesOutcome {
-        try await preferences.setPreferences(actorUserID: actorUserID, operationID: operationID,
-            allowsDirectReadReceipts: allowsDirectReadReceipts, allowsGroupReadReceipts: allowsGroupReadReceipts)
-    }
+
 }

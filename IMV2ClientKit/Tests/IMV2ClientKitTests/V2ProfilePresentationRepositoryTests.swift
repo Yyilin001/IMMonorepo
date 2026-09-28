@@ -5,6 +5,21 @@ import Testing
 
 @Suite("Profile presentation activation and context")
 struct V2ProfilePresentationRepositoryTests {
+    @Test func committedNameInvalidationRequiresFreshDisplayAuthorization() async throws {
+        let actorID = UserID(uuid: UUID()), device = DeviceID(uuid: UUID()), user = UserID(uuid: UUID())
+        let key = V2ProfileViewLookupKey(userID: user, context: .relationship)
+        let reader = PresentationReader(actorID: actorID, device: device, allowed: key)
+        let repository = V2ProfilePresentationRepository(actorUserID: actorID, deviceID: device, reader: reader)
+        let activation = await repository.activate()
+        #expect(try await repository.presentation(for: key, activation: activation) != nil)
+        await repository.invalidateEditedName(.group(.init(uuid: UUID())))
+        #expect(await repository.cachedPresentation(for: key, activation: activation) != nil)
+        await repository.invalidateEditedName(.contact(user))
+        #expect(await repository.cachedPresentation(for: key, activation: activation) == nil)
+        #expect(try await repository.presentation(for: key, activation: activation) != nil)
+        #expect(await reader.batches == 2)
+        await repository.endAllActivations()
+    }
     @Test func unavailableContextDoesNotRevokeAnotherContextAndPageReentryReauthorizes() async throws {
         let actorID = try UserID(UUID().uuidString), device = try DeviceID(UUID().uuidString), user = try UserID(UUID().uuidString)
         let allowed = V2ProfileViewLookupKey(userID: user, context: .relationship)

@@ -60,19 +60,43 @@ chmod 600 "${output_path}"
 refresh_one() {
   local record="$1"
   local destination="$2"
-  local operation_id payload issued
+  local operation_id payload issued http_status curl_exit response_path
   operation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-  payload="$(printf '%s' "${record}" | jq -ce --arg operationID "${operation_id}" '{userID,deviceID,refreshCredential,operationID:$operationID}')"
-  issued="$(printf '%s' "${payload}" | curl_request --silent --show-error --fail \
+  if ! payload="$(printf '%s' "${record}" | jq -ce --arg operationID "${operation_id}" '{userID,deviceID,refreshCredential,revocationCredential,operationID:$operationID}' 2>/dev/null)"; then
+    printf 'refresh failure stage=request_parse category=invalid_input\n' >&2
+    return 1
+  fi
+  response_path="${temporary_directory}/response.$(basename "${destination}")"
+  curl_exit=0
+  http_status="$(printf '%s' "${payload}" | curl_request --silent --fail \
     --cacert "${ca_path}" \
     --request POST \
     --header 'Content-Type: application/json' \
     --data-binary @- \
-    "${account_base_url}/v2/device-credentials/refresh")"
-  printf '%s\n' "$(printf '%s' "${issued}" | jq -ce '{userID,deviceID,accessToken,accessTokenExpiresAtMilliseconds,refreshCredential}')" > "${destination}"
+    --output "${response_path}" --write-out '%{http_code}' \
+    "${account_base_url}/v2/device-credentials/refresh")" || curl_exit=$?
+  if (( curl_exit != 0 )); then
+    printf 'refresh failure stage=http curl_exit=%d http_status=%s\n' "${curl_exit}" "${http_status:-000}" >&2
+    return 1
+  fi
+  if ! issued="$(jq -ce '
+      select(.userID | type == "string")
+      | select(.deviceID | type == "string")
+      | select(.accessToken | type == "string" and length > 0)
+      | select(.accessTokenExpiresAtMilliseconds | type == "number")
+      | select(.refreshCredential | type == "string" and length > 0)
+      | select(.revocationCredential | type == "string" and length > 0)
+      | select(.revocationCredentialExpiresAtMilliseconds | type == "number")
+      | {userID,deviceID,accessToken,accessTokenExpiresAtMilliseconds,refreshCredential,revocationCredential,revocationCredentialExpiresAtMilliseconds}
+    ' "${response_path}" 2>/dev/null)" || [[ -z "${issued}" ]]; then
+    printf 'refresh failure stage=response_parse category=invalid_shape http_status=%s\n' "${http_status:-000}" >&2
+    return 1
+  fi
+  printf '%s\n' "${issued}" > "${destination}"
 }
 
 declare -a pids=()
+failed=0
 line_number=0
 while IFS= read -r record || [[ -n "${record}" ]]; do
   [[ -n "${record}" ]] || continue
@@ -80,12 +104,23 @@ while IFS= read -r record || [[ -n "${record}" ]]; do
   pids+=("$!")
   line_number=$((line_number + 1))
   if (( ${#pids[@]} >= parallelism )); then
-    for pid in "${pids[@]}"; do wait "${pid}"; done
+    for pid in "${pids[@]}"; do
+      if ! wait "${pid}"; then failed=$((failed + 1)); fi
+    done
     pids=()
+    # Drain the current batch, then stop issuing further credential rotations
+    # once this invocation can no longer produce a complete output corpus.
+    if (( failed > 0 )); then break; fi
   fi
 done < "${input_path}"
 if [[ -n "${pids[*]-}" ]]; then
-  for pid in "${pids[@]}"; do wait "${pid}"; done
+  for pid in "${pids[@]}"; do
+    if ! wait "${pid}"; then failed=$((failed + 1)); fi
+  done
+fi
+if (( failed > 0 )); then
+  printf 'credential refresh failed: records=%d failed=%d; all launched requests drained\n' "${line_number}" "${failed}" >&2
+  exit 1
 fi
 
 for ((index = 0; index < line_number; index += 1)); do

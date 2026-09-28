@@ -5,6 +5,27 @@ import Testing
 
 @Suite("Push intent reconciler")
 struct V2PushIntentReconcilerTests {
+    @Test("structured service cooldown persists across restart without publishing early")
+    func structuredCooldownPersists() async throws {
+        let f = try Fixture(); let store = try f.open(); let remote = PushReconcileRemote()
+        let now = Date(timeIntervalSince1970: 100)
+        let engine = try await V2PushIntentReconciler.activate(store: store, transport: remote, scope: f.scope,
+            initialPreference: false, now: { now })
+        _ = try await engine.flushOnce()
+        _ = try await engine.flushOnce()
+        await remote.failHTTP(.init(kind: .httpStatus, service: "pushEndpoints", statusCode: 503,
+            retryAfter: now.addingTimeInterval(10000), certainty: .responseReceived))
+        #expect(try await engine.flushOnce() == .retryScheduled)
+        #expect(try await engine.state().nextAttemptAt.timeIntervalSince1970 == 10100)
+        await engine.stop(); try await store.close()
+        let reopened = try f.open()
+        let resumed = try await V2PushIntentReconciler.activate(store: reopened, transport: remote, scope: f.scope,
+            initialPreference: false, now: { Date(timeIntervalSince1970: 200) })
+        #expect(try await resumed.flushOnce() == .idle)
+        #expect(try await resumed.state().nextAttemptAt.timeIntervalSince1970 == 10100)
+        await resumed.stop(); try await reopened.close()
+    }
+
     @Test("automatic observation discovers disable, waits for token and applies newer token changes")
     func automaticDiscovery() async throws {
         let fixture = try Fixture(); let store = try fixture.open(); let remote = PushReconcileRemote()
@@ -51,6 +72,35 @@ struct V2PushIntentReconcilerTests {
         #expect(try await engine.state().pending == false)
         #expect(await remote.maximumInFlight == 1)
         await engine.stop(); try await store.close()
+    }
+
+    @Test("late throttling preserves a newer disable and its cooldown through restart")
+    func throttleWhileReplacingIntent() async throws {
+        let f = try Fixture(); let store = try f.open(); let remote = PushReconcileRemote()
+        let now = Date(timeIntervalSince1970: 100)
+        let engine = try await V2PushIntentReconciler.activate(store: store, transport: remote, scope: f.scope,
+            initialPreference: true, now: { now })
+        try await engine.receiveToken(provider: .apns, environment: .development, value: "old-token")
+        _ = try await engine.flushOnce(); _ = try await engine.flushOnce()
+        await remote.holdNextPublication()
+        await remote.failHTTP(.init(kind: .httpStatus, service: "pushEndpoints", statusCode: 503,
+            retryAfter: now.addingTimeInterval(10000), certainty: .responseReceived))
+        let send = Task { try await engine.flushOnce() }
+        try await wait { await remote.waiting }
+        try await engine.setEnabled(false)
+        let newer = try await engine.state()
+        await remote.releasePublication()
+        #expect(try await send.value == .superseded)
+        let cooled = try await engine.state()
+        #expect(!cooled.desiredEnabled && cooled.pending && cooled.revision == newer.revision)
+        #expect(cooled.nextAttemptAt.timeIntervalSince1970 == 10100)
+        await engine.stop(); try await store.close()
+        let reopened = try f.open()
+        let resumed = try await V2PushIntentReconciler.activate(store: reopened, transport: remote, scope: f.scope,
+            initialPreference: false, now: { Date(timeIntervalSince1970: 200) })
+        #expect(try await resumed.flushOnce() == .idle)
+        #expect(try await resumed.state().nextAttemptAt.timeIntervalSince1970 == 10100)
+        await resumed.stop(); try await reopened.close()
     }
 
     @Test("lost claim response retries exact identity after reopening and honors a long server delay")
@@ -161,11 +211,12 @@ private actor PushReconcileRemote: V2ClientPushIntentPublishing {
     var maximumInFlight = 0
     private var inFlight = 0
     private var dropClaim = false
-    private var publishFailure: V2ClientPushEndpointError?
+    private var publishFailure: (any Error)?
     private var hold = false
     private var continuation: CheckedContinuation<Void, Never>?
     var waiting: Bool { continuation != nil }
     func failClaimAfterCommit() { dropClaim = true }
+    func failHTTP(_ error: V2HTTPFailure) { publishFailure = error }
     func failPublish(_ error: V2ClientPushEndpointError) { publishFailure = error }
     func holdNextPublication() { hold = true }
     func releasePublication() { continuation?.resume(); continuation = nil }

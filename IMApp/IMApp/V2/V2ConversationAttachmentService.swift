@@ -73,12 +73,14 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
     private let fileManager: FileManager
     private let policy: V2ConversationAttachmentStagingPolicy
     private let makeUUID: @Sendable () -> UUID
+    private let protectionWriter:any V2ResourceFileProtectionWriting
 
     init(
         directory: URL,
         fileManager: FileManager = .default,
         policy: V2ConversationAttachmentStagingPolicy = .standard,
-        makeUUID: @escaping @Sendable () -> UUID = UUID.init
+        makeUUID: @escaping @Sendable () -> UUID = UUID.init,
+        protectionWriter:any V2ResourceFileProtectionWriting = V2SystemResourceFileProtectionWriter()
     ) throws {
         self.directory = try V2DeviceLocalStoragePolicy.prepareManagedDirectory(
             directory,
@@ -87,6 +89,8 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
         self.fileManager = fileManager
         self.policy = policy
         self.makeUUID = makeUUID
+        self.protectionWriter=protectionWriter
+        try V2ResourceStagingBudget.register(directory:self.directory)
     }
 
     /// 把用户选择的文件复制到受保护的账号暂存目录。
@@ -122,14 +126,17 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
         let partial = directory.appendingPathComponent(".partial-" + id.uuidString, isDirectory: false)
         var copiedByteCount: Int64 = 0
         do {
-            copiedByteCount = try copyWithinLimits(
+            copiedByteCount = try V2ResourceStagingBudget.withCopy(directory:directory,additionalBytes:Int64(fileSize)) {
+                try copyWithinLimits(
                 sourceURL: sourceURL,
                 destination: partial,
-                maximumDirectoryAddition: policy.maximumDirectoryBytes - usage.byteCount
-            )
+                maximumDirectoryAddition: min(policy.maximumDirectoryBytes - usage.byteCount, Int64(fileSize))
+                )
+            }
             try Task.checkCancellation()
             try fileManager.moveItem(at: partial, to: destination)
             try V2DeviceLocalStoragePolicy.applyToManagedFile(destination, fileManager: fileManager)
+            try protectionWriter.apply(.complete,to:destination)
         } catch is CancellationError {
             try? fileManager.removeItem(at: partial)
             try? fileManager.removeItem(at: destination)
@@ -263,6 +270,27 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
         try? fileManager.removeItem(at: candidate)
     }
 
+    /// Startup only, after draining the previous account owner and before any
+    /// foreground activity starts. These incomplete copies never have durable tokens.
+    func discardInterruptedCopies() throws {
+        guard !isClosed else { throw CancellationError() }
+        guard let entries = fileManager.enumerator(at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsSubdirectoryDescendants]) else { throw V2ConversationAttachmentStagingError.fileSystemFailure }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        for case let entry as URL in entries {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else { throw V2ConversationAttachmentStagingError.fileSystemFailure }
+            let name = entry.lastPathComponent
+            let prefix = name.hasPrefix(".part-") ? ".part-" : (name.hasPrefix(".partial-") ? ".partial-" : nil)
+            guard let prefix, UUID(uuidString: String(name.dropFirst(prefix.count))) != nil,
+                entry.standardizedFileURL.deletingLastPathComponent() == directory else { continue }
+            let values = try entry.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard values.isRegularFile == true, values.isSymbolicLink != true else { continue }
+            try fileManager.removeItem(at: entry)
+        }
+    }
+
     /// 清理残留的暂存文件。
     ///
     /// 调用方从账号 journal 提供仍受引用的文件 token；只清理超过宽限期的孤儿。
@@ -288,7 +316,7 @@ actor V2FileConversationAttachmentStager: V2ConversationAttachmentStaging {
 
 /// 账号范围的前台上传任务所有者。
 ///
-/// 为上传生成独立操作与媒体 ID，把调用者取消传递给该次任务。
+/// 上传意图先持久化；调用者取消只结束观察，账号活动继续执行。
 /// 关闭时停止新上传，取消并等待已接收任务，随后 App 才能清理暂存。
 actor V2ForegroundConversationAttachmentUploader: V2ConversationAttachmentUploading {
     private var isClosed = false
@@ -309,8 +337,8 @@ actor V2ForegroundConversationAttachmentUploader: V2ConversationAttachmentUpload
         try Task.checkCancellation()
         guard !isClosed else { throw CancellationError() }
         let id = UUID()
-        // Account ownership allows logout to drain uploads before removing
-        // staging. A cancelling caller also cancels its own transfer.
+        // Cancelling the task ends its database observation. Durable transfer
+        // work is independently owned and drained by the account runtime.
         let task = Task { try await self.performUpload(attachment) }
         transfers[id] = task
         defer { transfers.removeValue(forKey: id) }
@@ -337,5 +365,17 @@ actor V2ForegroundConversationAttachmentUploader: V2ConversationAttachmentUpload
         try Task.checkCancellation()
         guard !isClosed else { throw CancellationError() }
         return try await durable.upload(attachment, usage: .userAvatar)
+    }
+}
+
+
+/// Bridges the account-owned durable uploader to profile intent preparation.
+/// The staged UUID is also the upload/job/media identity across restarts.
+struct V2ProfileAvatarUploadAdapter: V2ProfileAvatarPreparing {
+    let uploader: any V2ConversationAttachmentUploading
+    func ensureReady(_ source: V2ProfileAvatarUpload) async throws -> V2AvatarReference {
+        let media = try await uploader.upload(.init(id: source.id, fileURL: source.fileURL,
+            displayName: source.displayName, contentType: source.contentType, byteCount: source.byteCount))
+        return .init(mediaID: media.mediaID)
     }
 }

@@ -12,22 +12,27 @@ message Envelope {
   uint64 request_id = 1;
   uint32 protocol_version = 2;
 
+  reserved 22, 45, 47, 49, 53, 55, 58, 67, 68, 69, 70, 71, 72, 73, 74, 76, 80, 97, 99, 101, 103;
+  reserved "begin_group_room_creation", "append_group_room_creation_members", "finalize_group_room_creation", "cancel_group_room_creation", "group_room_created", "group_room_creation_prepared", "group_room_creation_members_appended", "group_room_creation_cancelled", "set_stranger_message_permission", "change_relationship", "change_user_block", "set_user_add_permission", "set_read_receipt_preferences", "set_live_activity_preferences", "change_room_membership", "mute_member", "moderate_member_removal", "set_pinned_message", "set_group_announcement", "set_group_role_permissions", "change_group_member_role";
+  reserved 43, 44;
+  reserved "open_direct_room", "direct_room_opened";
+  reserved 51, 52;
+  reserved "moderate_message", "message_redacted";
+  reserved 20, 24, 26, 28, 105, 106;
+  reserved "send_message", "withdraw_message", "change_message_reaction", "edit_message", "forward_messages", "messages_forwarded";
   oneof body {
+    PresencePublicationControl presence_publication_control = 125;
+    PresencePublicationControlled presence_publication_controlled = 126;
     ClientHello client_hello = 10;
     ServerHello server_hello = 11;
     Authenticate authenticate = 12;
     Authenticated authenticated = 13;
     Heartbeat heartbeat = 14;
     HeartbeatAck heartbeat_ack = 15;
-    SendMessage send_message = 20;
     MessageAccepted message_accepted = 21;
-    ChangeRoomMembership change_room_membership = 22;
     MembershipChanged membership_changed = 23;
-    WithdrawMessage withdraw_message = 24;
     MessageWithdrawn message_withdrawn = 25;
-    ChangeMessageReaction change_message_reaction = 26;
     MessageReactionChanged message_reaction_changed = 27;
-    EditMessage edit_message = 28;
     MessageEdited message_edited = 29;
     SyncPull sync_pull = 30;
     SyncBatch sync_batch = 31;
@@ -42,21 +47,11 @@ message Envelope {
     SyncAvailable sync_available = 40;
     RecordReadReceipt record_read_receipt = 41;
     ReadReceiptRecorded read_receipt_recorded = 42;
-    OpenDirectRoom open_direct_room = 43;
-    DirectRoomOpened direct_room_opened = 44;
-    SetStrangerMessagePermission set_stranger_message_permission = 45;
     StrangerMessagePermissionSet stranger_message_permission_set = 46;
-    ChangeRelationship change_relationship = 47;
     RelationshipChanged relationship_changed = 48;
-    ChangeUserBlock change_user_block = 49;
     UserBlockChanged user_block_changed = 50;
-    ModerateMessage moderate_message = 51;
-    MessageRedacted message_redacted = 52;
-    MuteMember mute_member = 53;
     MemberMuted member_muted = 54;
-    ModerateMemberRemoval moderate_member_removal = 55;
     MemberRemovedByModerator member_removed_by_moderator = 56;
-    GroupRoomCreated group_room_created = 58;
     ListRoomMembers list_room_members = 59;
     RoomMembersPage room_members_page = 60;
     GroupEventPull group_event_pull = 61;
@@ -69,20 +64,10 @@ message Envelope {
     // standard group uses this only for an active-view preview; its reliable
     // delivery and ACK still use the personal sync stream.
     GroupEventAvailable group_event_available = 66;
-    BeginGroupRoomCreation begin_group_room_creation = 67;
-    GroupRoomCreationPrepared group_room_creation_prepared = 68;
-    AppendGroupRoomCreationMembers append_group_room_creation_members = 69;
-    GroupRoomCreationMembersAppended group_room_creation_members_appended = 70;
-    FinalizeGroupRoomCreation finalize_group_room_creation = 71;
-    CancelGroupRoomCreation cancel_group_room_creation = 72;
-    GroupRoomCreationCancelled group_room_creation_cancelled = 73;
-    SetUserAddPermission set_user_add_permission = 74;
     UserAddPermissionSet user_add_permission_set = 75;
-    SetReadReceiptPreferences set_read_receipt_preferences = 76;
     ReadReceiptPreferencesSet read_receipt_preferences_set = 77;
     ListReadReceiptReaders list_read_receipt_readers = 78;
     ReadReceiptReadersPage read_receipt_readers_page = 79;
-    SetLiveActivityPreferences set_live_activity_preferences = 80;
     LiveActivityPreferencesSet live_activity_preferences_set = 81;
     SubscribePresence subscribe_presence = 82;
     PresenceSubscribed presence_subscribed = 83;
@@ -99,16 +84,10 @@ message Envelope {
     ConversationStateSet conversation_state_set = 94;
     SetMessageFavorite set_message_favorite = 95;
     MessageFavoriteChanged message_favorite_changed = 96;
-    SetPinnedMessage set_pinned_message = 97;
     PinnedMessageChanged pinned_message_changed = 98;
-    SetGroupAnnouncement set_group_announcement = 99;
     GroupAnnouncementChanged group_announcement_changed = 100;
-    SetGroupRolePermissions set_group_role_permissions = 101;
     GroupRolePermissionsChanged group_role_permissions_changed = 102;
-    ChangeGroupMemberRole change_group_member_role = 103;
     GroupMemberRoleChanged group_member_role_changed = 104;
-    ForwardMessages forward_messages = 105;
-    MessagesForwarded messages_forwarded = 106;
     GetGroupRolePolicyBaseline get_group_role_policy_baseline = 107;
     GroupRolePolicyBaseline group_role_policy_baseline = 108;
     UserRoomDirectoryList user_room_directory_list = 111;
@@ -125,6 +104,7 @@ message Envelope {
     AuthorPresentationDelta author_presentation_delta = 121;
     AuthorPresentationEnd author_presentation_end = 122;
     AuthorPresentationEnded author_presentation_ended = 123;
+    PersonalPreferenceReceipt personal_preference_receipt = 124;
   }
 }
 
@@ -136,6 +116,8 @@ message SetConversationState {
   bool is_pinned = 3;
   bool is_archived = 4;
   int64 mute_until_ms = 5; // zero means not muted
+  uint64 expected_revision = 6;
+  uint64 first_submission_deadline_ms = 7;
 }
 message ConversationStateSet {
   string room_id = 1;
@@ -143,15 +125,40 @@ message ConversationStateSet {
   bool is_archived = 3;
   int64 mute_until_ms = 4;
   int64 updated_at_ms = 5;
+  uint64 revision = 6;
 }
-message SetMessageFavorite { string operation_id = 1; string room_id = 2; string message_id = 3; bool is_favorited = 4; }
-message MessageFavoriteChanged { string room_id = 1; string message_id = 2; bool is_favorited = 3; int64 updated_at_ms = 4; }
+message SetMessageFavorite { string operation_id = 1; string room_id = 2; string message_id = 3; bool is_favorited = 4; uint64 expected_revision = 5; uint64 first_submission_deadline_ms = 6; }
+message MessageFavoriteChanged { string room_id = 1; string message_id = 2; bool is_favorited = 3; int64 updated_at_ms = 4; uint64 revision = 5; }
+
+// The immutable outcome of the original command, never a later current snapshot.
+message PersonalPreferenceReceipt {
+  enum Kind { KIND_UNSPECIFIED = 0; CONVERSATION_STATE = 1; MESSAGE_FAVORITE = 2; }
+  string actor_user_id = 1;
+  string operation_id = 2;
+  string room_id = 3;
+  string message_id = 4;
+  Kind kind = 5;
+  uint32 fingerprint_version = 6;
+  bytes fingerprint = 7;
+  uint64 resolved_at_ms = 8;
+  oneof outcome {
+    ConversationStateSet conversation_state = 9;
+    MessageFavoriteChanged message_favorite = 10;
+    PersonalPreferenceRejection rejected = 11;
+    bool closed = 12; // must be true
+  }
+}
+message PersonalPreferenceRejection {
+  enum Reason { REASON_UNSPECIFIED = 0; REVISION_CONFLICT = 1; PERMISSION_DENIED = 2; NOT_FOUND = 3; EXPIRED_UNSUBMITTED = 4; }
+  Reason reason = 1;
+  optional uint64 current_revision = 2; // required only for REVISION_CONFLICT
+}
 
 // Group state is a room event. All changes are sequenced and delivered using
 // the room's existing fan-out mode; the gateway never trusts a client role.
-message SetPinnedMessage { string operation_id = 1; string room_id = 2; string message_id = 3; bool is_pinned = 4; }
+
 message PinnedMessageChanged { string room_id = 1; string message_id = 2; bool is_pinned = 3; uint64 room_sequence = 4; int64 updated_at_ms = 5; }
-message SetGroupAnnouncement { string operation_id = 1; string room_id = 2; string body = 3; uint64 expected_revision = 4; }
+
 message GroupAnnouncementChanged { string room_id = 1; string body = 2; uint64 revision = 3; uint64 room_sequence = 4; int64 updated_at_ms = 5; }
 message GroupRolePermission { string permission = 1; }
 // A complete current observation, not two fabricated role-change events.
@@ -164,24 +171,18 @@ message GroupRolePolicyBaseline {
   uint64 room_sequence = 4;
   repeated GroupRolePolicy policies = 5; // exactly admin and member, even when empty
 }
-message SetGroupRolePermissions { string operation_id = 1; string room_id = 2; string role = 3; repeated GroupRolePermission permissions = 4; uint64 expected_revision = 5; }
+
 message GroupRolePermissionsChanged { string room_id = 1; string role = 2; repeated GroupRolePermission permissions = 3; uint64 revision = 4; uint64 room_sequence = 5; }
-message ChangeGroupMemberRole { string operation_id = 1; string room_id = 2; string user_id = 3; string role = 4; uint64 expected_membership_revision = 5; }
+
 message GroupMemberRoleChanged { string room_id = 1; string user_id = 2; string role = 3; uint64 membership_revision = 4; uint64 room_sequence = 5; }
 
 // A forward creates a distinct message for each source/target pair. Results
 // are per pair so callers can report partial target failures without retrying
 // successful output. Source message order is preserved inside each target.
-message ForwardMessageReference { string room_id = 1; string message_id = 2; uint64 revision = 3; }
-message ForwardMessages {
-  reserved 2;
-  reserved "source_message_ids";
-  string operation_id = 1;
-  repeated string target_room_ids = 3;
-  repeated ForwardMessageReference sources = 4;
-}
-message ForwardMessageResult { string source_message_id = 1; string target_room_id = 2; string message_id = 3; uint64 room_sequence = 4; string error_code = 5; }
-message MessagesForwarded { repeated ForwardMessageResult results = 1; }
+
+
+
+
 
 message Acknowledged {}
 
@@ -196,9 +197,7 @@ enum FrameCompression {
 message ClientHello {
   repeated uint32 supported_protocol_versions = 1;
   repeated string supported_capability_profiles = 2;
-  // When present, Authenticate must repeat this exact device ID. Current
-  // clients always send it; accepting an empty value remains a bounded bridge
-  // for pre-binding protocol fixtures.
+  // Required installation identity; Authenticate must repeat this exact ID.
   string device_id = 3;
   repeated FrameCompression supported_frame_compressions = 4;
   bool supports_author_presentation_delta = 5;
@@ -214,6 +213,7 @@ message ServerHello {
 }
 
 message Authenticate {
+  bool presence_publication_suppressed = 3;
   string access_token = 1;
   string device_id = 2;
 }
@@ -240,11 +240,7 @@ message HeartbeatAck {
 // Live activity is intentionally ephemeral. It is never appended to a room
 // log, user sync stream, or notification payload. A client must explicitly
 // subscribe while the relevant conversation is visible.
-message SetLiveActivityPreferences {
-  string operation_id = 1;
-  bool allows_online_presence = 2;
-  bool allows_typing_indicators = 3;
-}
+
 
 message LiveActivityPreferencesSet {
   bool allows_online_presence = 1;
@@ -290,11 +286,7 @@ message PresenceChanged {
   int64 expires_at_ms = 4;
 }
 
-message SendMessage {
-  string room_id = 1;
-  string client_message_id = 2;
-  MessageContent content = 3;
-}
+
 
 message MessageContent {
   oneof body {
@@ -366,30 +358,11 @@ message MessageAccepted {
 // The initial gateway-exposed moderation action is explicit message redaction.
 // It is separate from author withdrawal and carries only a bounded policy code,
 // never report text or message content.
-message ModerateMessage {
-  string room_id = 1;
-  string operation_id = 2;
-  string message_id = 3;
-  string reason_code = 4;
-}
 
-message MessageRedacted {
-  string room_id = 1;
-  string message_id = 2;
-  uint64 room_sequence = 3;
-  uint64 message_revision = 4;
-  int64 server_created_at_ms = 5;
-}
 
 // Owner/admin moderation command. The authenticated gateway identity is the
 // actor; reason_code is an opaque bounded policy label, not report text.
-message MuteMember {
-  string room_id = 1;
-  string operation_id = 2;
-  string target_user_id = 3;
-  int64 mute_until_ms = 4;
-  string reason_code = 5;
-}
+
 
 message MemberMuted {
   string room_id = 1;
@@ -402,12 +375,7 @@ message MemberMuted {
 // This is deliberately not ChangeRoomMembership(action=REMOVE). It records a
 // bounded moderation reason and is replayed from the moderation operation
 // ledger, while still producing the canonical membership_changed room event.
-message ModerateMemberRemoval {
-  string room_id = 1;
-  string operation_id = 2;
-  string target_user_id = 3;
-  string reason_code = 4;
-}
+
 
 message MemberRemovedByModerator {
   string room_id = 1;
@@ -425,13 +393,7 @@ enum MembershipChangeAction {
 
 // `operation_id` is durable client intent and remains stable across reconnects.
 // `expected_membership_revision` fences stale administrative actions.
-message ChangeRoomMembership {
-  string room_id = 1;
-  string operation_id = 2;
-  string target_user_id = 3;
-  MembershipChangeAction action = 4;
-  uint64 expected_membership_revision = 5;
-}
+
 
 message MembershipChanged {
   string room_id = 1;
@@ -444,12 +406,7 @@ message MembershipChanged {
 
 // A withdrawal preserves the immutable message identity and room ordering,
 // while turning its visible state into a revision-fenced tombstone.
-message WithdrawMessage {
-  string room_id = 1;
-  string operation_id = 2;
-  string message_id = 3;
-  uint64 expected_message_revision = 4;
-}
+
 
 message MessageWithdrawn {
   string room_id = 1;
@@ -467,13 +424,7 @@ enum MessageReactionAction {
 
 // Reaction operations are stable client intent.  Reactions are a set keyed by
 // message, actor, and normalized reaction value; they do not mutate text.
-message ChangeMessageReaction {
-  string room_id = 1;
-  string operation_id = 2;
-  string message_id = 3;
-  string reaction = 4;
-  MessageReactionAction action = 5;
-}
+
 
 message MessageReactionChanged {
   string room_id = 1;
@@ -487,13 +438,7 @@ message MessageReactionChanged {
 
 // Edits are author-only, revision-fenced mutations. `operation_id` is stable
 // across retries and a concurrent withdrawal rejects the edit.
-message EditMessage {
-  string room_id = 1;
-  string operation_id = 2;
-  string message_id = 3;
-  uint64 expected_message_revision = 4;
-  MessageContent content = 5;
-}
+
 
 message MessageEdited {
   string room_id = 1;
@@ -522,66 +467,31 @@ message ReadReceiptRecorded {
 // Opens the unique two-user room. Opening a room does not bypass the
 // recipient's stranger-message setting; that policy is enforced when a new
 // message is accepted.
-message OpenDirectRoom {
-  string operation_id = 1;
-  string target_user_id = 2;
-}
 
-message DirectRoomOpened {
-  string room_id = 1;
-  string target_user_id = 2;
-  int64 created_at_ms = 3;
-}
 
-message GroupRoomCreated {
-  string room_id = 1;
-  string title = 2;
-  repeated string member_user_ids = 3;
-  int64 created_at_ms = 4;
-  GroupCapacityClass capacity_class = 5;
-  uint32 member_count = 6;
-}
+
 
 // Group membership is collected in bounded pages, then frozen and committed
 // under one durable operation ID. The room's immutable delivery mode is
 // derived only from that frozen audience by the server. No roster is ever
 // returned by this protocol path; use ListRoomMembers after creation.
-message BeginGroupRoomCreation {
-  string operation_id = 1;
-  string title = 2;
-}
 
-message GroupRoomCreationPrepared {
-  string operation_id = 1;
-  string title = 2;
-  uint32 staged_member_count = 3;
-}
 
-message AppendGroupRoomCreationMembers {
-  string operation_id = 1;
-  repeated string member_user_ids = 2;
-}
 
-message GroupRoomCreationMembersAppended {
-  string operation_id = 1;
-  uint32 staged_member_count = 2;
-}
 
-message FinalizeGroupRoomCreation {
-  string operation_id = 1;
-}
+
+
+
+
+
 
 // Cancels only a mutable staging draft. The operation is idempotent if the
 // draft was already removed by expiry or an earlier cancellation; a frozen
 // draft must continue through finalize so its room idempotency boundary stays
 // unambiguous.
-message CancelGroupRoomCreation {
-  string operation_id = 1;
-}
 
-message GroupRoomCreationCancelled {
-  string operation_id = 1;
-}
+
+
 
 enum GroupCapacityClass {
   GROUP_CAPACITY_CLASS_UNSPECIFIED = 0;
@@ -816,10 +726,7 @@ enum StrangerMessagePermission {
 // Device-independent recipient privacy preference. It controls only new
 // messages from non-friends before the recipient has replied in the direct
 // room; block policy always takes precedence.
-message SetStrangerMessagePermission {
-  string operation_id = 1;
-  StrangerMessagePermission permission = 2;
-}
+
 
 message StrangerMessagePermissionSet {
   StrangerMessagePermission permission = 1;
@@ -835,10 +742,7 @@ enum UserAddPermission {
 // Device-independent privacy preference for incoming relationship requests.
 // Rejections intentionally use the generic forbidden response so callers do
 // not learn whether this setting, a block, or another policy caused it.
-message SetUserAddPermission {
-  string operation_id = 1;
-  UserAddPermission permission = 2;
-}
+
 
 message UserAddPermissionSet {
   UserAddPermission permission = 1;
@@ -848,11 +752,7 @@ message UserAddPermissionSet {
 // Receipt sharing affects disclosure only; the server still accepts a
 // member's local viewing watermark while sharing is disabled. For direct
 // rooms, visibility is reciprocal and requires both peers to allow it.
-message SetReadReceiptPreferences {
-  string operation_id = 1;
-  bool allows_direct_read_receipts = 2;
-  bool allows_group_read_receipts = 3;
-}
+
 
 message ReadReceiptPreferencesSet {
   bool allows_direct_read_receipts = 1;
@@ -903,11 +803,7 @@ enum RelationshipState {
 
 // The authenticated user is the actor. While a request is pending only its
 // recipient may accept or reject it; either participant may remove it.
-message ChangeRelationship {
-  string operation_id = 1;
-  string target_user_id = 2;
-  RelationshipAction action = 3;
-}
+
 
 message RelationshipChanged {
   string target_user_id = 1;
@@ -925,11 +821,7 @@ enum UserBlockAction {
 // Block state is private to the authenticated user. The server does not send
 // a target-side block event or reveal whether a relationship failure is due to
 // a block held by either user.
-message ChangeUserBlock {
-  string operation_id = 1;
-  string target_user_id = 2;
-  UserBlockAction action = 3;
-}
+
 
 message UserBlockChanged {
   string target_user_id = 1;
@@ -1081,3 +973,10 @@ message RoomLatestVisibleBatchResult {
   // Every requested ID has an explicit result, including deferred budget items.
   repeated RoomLatestVisibleResult rooms = 1;
 }
+
+// Connection-local privacy ceiling, reapplied before authenticated registration.
+message PresencePublicationControl {
+  enum Mode { UNSPECIFIED = 0; SUPPRESSED = 1; ALLOW_WHEN_AUTHORIZED = 2; }
+  Mode mode = 1;
+}
+message PresencePublicationControlled { PresencePublicationControl.Mode mode = 1; }

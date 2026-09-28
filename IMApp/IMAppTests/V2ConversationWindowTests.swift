@@ -33,7 +33,7 @@ struct V2ConversationWindowTests {
         #expect(store.items[50].id == anchor.id)
         consumeRestoration(in: store)
         let removal = try V2ClientSyncRecord(sequence: 4_001, sourceEventID: .init(UUID().uuidString), projectionKind: "conversation_state", payload: JSONSerialization.data(withJSONObject: [
-            "room_id": anchor.id, "is_pinned": false, "is_archived": true, "mute_until_ms": 0, "updated_at_ms": 1_750_010_000_000
+            "room_id": anchor.id, "is_pinned": false, "is_archived": true, "mute_until_ms": 0, "updated_at_ms": 1_750_010_000_000, "revision": 1
         ]))
         _ = try await local.apply(.init(generation: 1, records: [removal], nextSyncToken: .init("removed"), receipt: .init("removed-receipt"), hasMore: false, capabilityProfile: "base"))
         await store.refresh()

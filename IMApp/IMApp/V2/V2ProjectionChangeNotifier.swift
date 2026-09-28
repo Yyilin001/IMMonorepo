@@ -12,6 +12,13 @@ actor V2ProjectionChangeNotifier {
         let generation: UInt64
         /// 是否要求立即刷新。
         let requiresImmediateRefresh: Bool
+        let conversationCommit: V2ConversationCommitMeasurement?
+        init(generation: UInt64, requiresImmediateRefresh: Bool, conversationCommit: V2ConversationCommitMeasurement? = nil) {
+            self.generation = generation; self.requiresImmediateRefresh = requiresImmediateRefresh; self.conversationCommit = conversationCommit
+        }
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.generation == rhs.generation && lhs.requiresImmediateRefresh == rhs.requiresImmediateRefresh
+        }
     }
     /// 单个订阅者的失效请求流。
     struct Subscription: AsyncSequence, Sendable {
@@ -43,6 +50,7 @@ actor V2ProjectionChangeNotifier {
     private var generation: UInt64 = 0
     private var subscribers: [UUID: Subscriber] = [:]
     private var pending: V2ProjectionScopes = []
+    private var pendingConversationCommit: V2ConversationCommitMeasurement?
     private var timer: (id: UUID, task: Task<Void, Never>)?
     private var observer: (id: UUID, task: Task<Void, Never>)?
     private var closed = false
@@ -85,6 +93,7 @@ actor V2ProjectionChangeNotifier {
     func publish(_ change: V2ProjectionChange = .all) {
         guard !closed, !change.scopes.isEmpty else { return }
         pending.formUnion(change.scopes)
+        pendingConversationCommit = V2ConversationCommitMeasurement.earliest(pendingConversationCommit, change.conversationCommit)
         if change.requiresImmediateRefresh {
             cancelTimer()
             flush(requiresImmediateRefresh: true)
@@ -101,7 +110,7 @@ actor V2ProjectionChangeNotifier {
     func finish() {
         closed = true
         observer?.task.cancel(); observer = nil
-        cancelTimer(); pending = []
+        cancelTimer(); pending = []; pendingConversationCommit = nil
         let continuations = subscribers.values.map(\.continuation)
         subscribers.removeAll()
         for continuation in continuations { continuation.finish() }
@@ -138,13 +147,16 @@ actor V2ProjectionChangeNotifier {
     private func flush(requiresImmediateRefresh: Bool) {
         guard !pending.isEmpty else { return }
         let scopes = pending
+        let conversationCommit = pendingConversationCommit
+        pendingConversationCommit = nil
         pending = []
         generation &+= 1
         for (id, subscriber) in subscribers where !subscriber.scopes.intersection(scopes).isEmpty {
             // A busy consumer may receive an ordinary update after an urgent
             // one. Replacing its wake must not downgrade pending urgency.
             subscribers[id]?.pending = .init(generation: generation,
-                requiresImmediateRefresh: requiresImmediateRefresh || subscriber.pending?.requiresImmediateRefresh == true)
+                requiresImmediateRefresh: requiresImmediateRefresh || subscriber.pending?.requiresImmediateRefresh == true,
+                conversationCommit: V2ConversationCommitMeasurement.earliest(conversationCommit, subscriber.pending?.conversationCommit))
             subscriber.continuation.yield(())
         }
     }
@@ -155,6 +167,6 @@ actor V2ProjectionChangeNotifier {
         subscribers[id] = nil
         guard subscribers.isEmpty else { return }
         observer?.task.cancel(); observer = nil
-        cancelTimer(); pending = []
+        cancelTimer(); pending = []; pendingConversationCommit = nil
     }
 }

@@ -37,12 +37,17 @@ public struct V2HTTPResourceImportClient: V2ResourceImportControlling {
         request.httpMethod = "POST"; request.httpBody = try JSONEncoder().encode(body)
         request.setValue("Bearer \(credential.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue(credential.deviceID.rawValue, forHTTPHeaderField: "X-IM-Device-ID")
+        V2HTTPRequestDeadline.attach(credential.requestDeadline, to: &request)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         let (data, response) = try await transport.data(for: request)
         try Task.checkCancellation()
-        guard response.statusCode == 200, V2HTTPContract.isJSON(response), data.count <= 64 * 1_024 else { throw V2ClientMediaTransferError.invalidMediaEdgeResponse }
+        guard response.statusCode == 200 else {
+            if response.statusCode == 401 { throw V2ClientMediaTransferError.authorizationUnavailable }
+            throw V2HTTPFailure.status(response, service: "resources")
+        }
+        guard V2HTTPContract.isJSON(response), data.count <= 64 * 1_024 else { throw V2ClientMediaTransferError.invalidMediaEdgeResponse }
         return try JSONDecoder().decode(V2ResourceImportStatus.self, from: data)
     }
 }
@@ -50,10 +55,7 @@ public struct V2HTTPResourceImportClient: V2ResourceImportControlling {
 extension GRDBV2LocalSyncStore {
     public func prepareResourceImport(id: UUID, request: V2ResourceImportRequest) throws {
         try databasePool.write { db in
-            if let existing = try Self.readResourceImport(id, db: db) {
-                guard existing.request == request else { throw V2ResourceJournalError.conflict }; return
-            }
-            try db.execute(sql: "INSERT INTO v2_resource_import_jobs(job_id,request,stage,created_at) VALUES(?,?,'pending',?)", arguments: [id.uuidString, try JSONEncoder().encode(request), Date().timeIntervalSince1970])
+            try Self.prepareResourceImport(id: id, request: request, now: Date(), db: db)
         }
     }
     public func resourceImport(id: UUID) throws -> V2ResourceImportJob? { try databasePool.read { try Self.readResourceImport(id, db: $0) } }
@@ -65,11 +67,16 @@ extension GRDBV2LocalSyncStore {
             if case .messageAttachment(let room) = job.request.targetUsage {
                 guard status.locator.home == .room(room) else { throw V2ResourceJournalError.conflict }
             }
-            try db.execute(sql: "UPDATE v2_resource_import_jobs SET status=?,stage=?,retry_at=? WHERE job_id=?", arguments: [try JSONEncoder().encode(status), status.state.rawValue, Date().addingTimeInterval(5).timeIntervalSince1970, id.uuidString])
+            guard job.status?.state != .ready || [.ready, .cancelled, .failed].contains(status.state) else { throw V2ResourceJournalError.conflict }
+            let polls = (try Int.fetchOne(db, sql: "SELECT poll_attempts FROM v2_resource_import_jobs WHERE job_id=?", arguments: [id.uuidString]) ?? 0) + 1
+            let delay: Double = polls < 3 ? 2 : polls < 6 ? 5 : polls < 12 ? 10 : 30
+            let terminal = [.ready,.cancelled,.failed].contains(status.state)
+            let exhausted = !terminal && polls >= 60
+            try db.execute(sql: "UPDATE v2_resource_import_jobs SET status=?,stage=?,retry_at=MAX(server_retry_not_before,?),attempts=?,round_deadline=NULL,poll_attempts=? WHERE job_id=?", arguments: [try JSONEncoder().encode(status), status.state.rawValue, Date().addingTimeInterval(delay).timeIntervalSince1970, exhausted ? 5 : 0, polls, id.uuidString])
         }
     }
     public func requestImportCancellation(id: UUID) throws {
-        try databasePool.write { try $0.execute(sql: "UPDATE v2_resource_import_jobs SET cancellation_requested=1 WHERE job_id=?", arguments: [id.uuidString]) }
+        try databasePool.write { try $0.execute(sql: "UPDATE v2_resource_import_jobs SET cancellation_requested=1,retry_at=server_retry_not_before,attempts=0,round_deadline=NULL WHERE job_id=? AND cancellation_requested=0", arguments: [id.uuidString]) }
     }
     public func pendingImportCancellations() throws -> [UUID] {
         try databasePool.read { db in
@@ -77,10 +84,14 @@ extension GRDBV2LocalSyncStore {
         }
     }
     public func retryResourceImport(id: UUID) throws {
-        try databasePool.write { try $0.execute(sql: "UPDATE v2_resource_import_jobs SET attempts=0,retry_at=0 WHERE job_id=? AND cancellation_requested=0 AND stage NOT IN ('ready','cancelled','failed')", arguments: [id.uuidString]) }
+        try databasePool.write { try $0.execute(sql: "UPDATE v2_resource_import_jobs SET attempts=0,retry_at=server_retry_not_before,poll_attempts=0,round_deadline=NULL WHERE job_id=? AND cancellation_requested=0 AND stage NOT IN ('ready','cancelled','failed')", arguments: [id.uuidString]) }
     }
-    public func pauseResourceImport(id: UUID) throws {
-        try databasePool.write { try $0.execute(sql: "UPDATE v2_resource_import_jobs SET attempts=attempts+1,retry_at=? WHERE job_id=?", arguments: [Date().addingTimeInterval(5).timeIntervalSince1970, id.uuidString]) }
+    public func pauseResourceImport(id: UUID, retryNotBefore: Date? = nil, needsAttention: Bool = false) throws {
+        try databasePool.write { db in
+            let deadline = try Double.fetchOne(db, sql: "SELECT round_deadline FROM v2_resource_import_jobs WHERE job_id=?", arguments: [id.uuidString])
+            let beyondBudget = retryNotBefore.map { $0.timeIntervalSince1970 >= (deadline ?? .infinity) } ?? false
+            try db.execute(sql: "UPDATE v2_resource_import_jobs SET attempts=CASE WHEN ? THEN 5 ELSE attempts END,retry_at=MAX(retry_at,?),server_retry_not_before=MAX(server_retry_not_before,?) WHERE job_id=?", arguments: [needsAttention || beyondBudget,retryNotBefore?.timeIntervalSince1970 ?? 0,retryNotBefore?.timeIntervalSince1970 ?? 0,id.uuidString])
+        }
     }
     static func readResourceImport(_ id: UUID, db: Database) throws -> V2ResourceImportJob? {
         guard let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_resource_import_jobs WHERE job_id=?", arguments: [id.uuidString]) else { return nil }

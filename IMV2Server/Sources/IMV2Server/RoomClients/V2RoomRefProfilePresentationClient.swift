@@ -25,12 +25,14 @@ public struct V2RoomRefProfilePresentationClient: V2ProfilePresentationManaging 
             afterTargetUserID: afterTargetUserID, limit: limit)
     }
 
-    public func updateContactAlias(ownerUserID: UserID, targetUserID: UserID,
-                                   operationID: ContactAliasOperationID,
-                                   expectedRevision: V2ProfileRevision?,
-                                   remarkName: String?) async throws -> V2ContactAlias {
-        try await aliases.updateContactAlias(ownerUserID: ownerUserID, targetUserID: targetUserID,
-            operationID: operationID, expectedRevision: expectedRevision, remarkName: remarkName)
+    public func contactAliasSnapshot(ownerUserID:UserID,targetUserID:UserID) async throws -> V2ContactAliasSnapshot {
+        try await aliases.contactAliasSnapshot(ownerUserID:ownerUserID,targetUserID:targetUserID)
+    }
+    public func updateContactAlias(_ command:V2ContactAliasUpdateCommand) async throws -> V2ContactAliasUpdateReceipt {
+        try await aliases.updateContactAlias(command)
+    }
+    public func recoverContactAlias(_ request:V2ContactAliasRecoveryRequest) async throws -> V2ContactAliasRecoveryResult {
+        try await aliases.recoverContactAlias(request)
     }
 
     public func groupNicknames(actorUserID: UserID, roomID: RoomID,
@@ -54,26 +56,22 @@ public struct V2RoomRefProfilePresentationClient: V2ProfilePresentationManaging 
         }
     }
 
-    public func updateOwnGroupNickname(actorUserID: UserID, roomID: RoomID,
-                                       operationID: GroupNicknameOperationID,
-                                       expectedRevision: V2ProfileRevision?,
-                                       nickname: String?) async throws -> V2GroupMemberPresentation {
-        let command = V2ActorGroupNicknameUpdateWire(roomID: roomID, actorUserID: actorUserID,
-            operationID: operationID, expectedRevision: expectedRevision, nickname: nickname)
-        try command.validateForDomain()
-        guard case .administration(let result) = try await caller.call(
-            .administration(.groupNickname(command)), actor: actorUserID) else {
-            throw V2RoomCallFailure.outcomeUnknown
-        }
-        switch result {
-        case .groupNickname(let value):
-            let presentation = try value.domain()
-            guard presentation.roomID == roomID, presentation.userID == actorUserID else {
-                throw V2ProfilePresentationError.corruptPersistenceState
-            }
-            return presentation
-        case .failure(let failure): throw try failure.domainError()
-        default: throw V2RoomCallFailure.outcomeUnknown
-        }
+    public func ownGroupNicknameSnapshot(actorUserID:UserID,roomID:RoomID) async throws -> V2GroupNicknameSnapshot {
+        let result=try await invoke(.administrationQuery(.ownGroupNickname(.init(roomID:roomID,actorUserID:actorUserID))),actor:actorUserID)
+        guard case .ownGroupNickname(let value)=result,value.actorUserID==actorUserID,value.roomID==roomID else { throw V2RoomCallFailure.outcomeUnknown };return value
+    }
+    public func updateOwnGroupNickname(_ command:V2GroupNicknameUpdateCommand) async throws -> V2GroupNicknameUpdateReceipt {
+        let result=try await invoke(.administration(.groupNickname(.init(command:command))),actor:command.actorUserID)
+        guard case .groupNickname(let receipt)=result,receipt.validates(command) else { throw V2RoomCallFailure.outcomeUnknown };return receipt
+    }
+    public func recoverGroupNickname(_ request:V2GroupNicknameRecoveryRequest) async throws -> V2GroupNicknameRecoveryResult {
+        let result=try await invoke(.administration(.groupNicknameRecovery(request)),actor:request.actorUserID)
+        guard case .groupNicknameRecovery(let recovery)=result else { throw V2RoomCallFailure.outcomeUnknown }
+        if case .receipt(let receipt)=recovery { guard receipt.identity==request.identity,receipt.fingerprint==request.fingerprint else { throw V2RoomCallFailure.outcomeUnknown } }
+        guard request.action != .closeIfAbsent || recovery != .unresolved else { throw V2RoomCallFailure.outcomeUnknown };return recovery
+    }
+    private func invoke(_ request:V2RoomRequest,actor:UserID) async throws -> V2RoomAdministrationResult {
+        guard case .administration(let result)=try await caller.call(request,actor:actor) else { throw V2RoomCallFailure.outcomeUnknown }
+        if case .failure(let failure)=result { throw try failure.domainError() };return result
     }
 }

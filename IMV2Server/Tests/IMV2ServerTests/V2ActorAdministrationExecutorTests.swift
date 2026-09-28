@@ -24,7 +24,7 @@ struct V2ActorAdministrationExecutorTests {
             host: .init(hostID: try .init("host"), incarnationID: UUID()))
         let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 10,
             maxCommandsPerWindow: 10, retryAfterSeconds: 3))
-        let executor = try V2RoomAdministrationDomainExecutor(database: resources.database(.psql),
+        let executor = try V2RoomAdministrationDomainExecutor(database: resources.database(.psql), invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)), invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: resources.database(.psql)),
             token: token, capacityProfile: profile, membershipIdentities: IdentityReader())
         let foreign = V2RoomAdministrationCommand.groupNickname(.init(roomID: otherRoom,
             actorUserID: actor, operationID: .init(uuid: UUID()), expectedRevision: nil, nickname: "Alice"))

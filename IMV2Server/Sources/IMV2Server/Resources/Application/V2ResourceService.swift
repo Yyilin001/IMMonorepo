@@ -34,7 +34,7 @@ public struct V2ResourceService: Sendable {
         let supported = transport.capabilities
         return try .init(version: 1, uploadModes: Self.sessionModes(transport), maximumBytes: min(maximumBytes,supported.maximumBytes),
             allowedUsages: supportsAvatars ? [.messageAttachment,.userAvatar] : [.messageAttachment],
-            maximumParts: 0, backgroundTransfer: false)
+            maximumParts: (transport as? any V2MultipartUploadTransport)?.maximumParts ?? 0, backgroundTransfer: transport is any V2BackgroundUploadTransport)
     }
     public func create(_ request: V2ResourceUploadRequest, actor: UserID, device: DeviceID) async throws -> V2ResourceUploadSession {
         let home = request.usage.home(actorUserID: actor)
@@ -66,41 +66,76 @@ public struct V2ResourceService: Sendable {
         return try session(row, home: home)
     }
     public func status(_ locator: V2ResourceUploadLocator, actor: UserID, device: DeviceID) async throws -> V2ResourceUploadSession {
-        let (_, row, _) = try await context(locator, actor: actor, device: device)
-        return try session(row, home: locator.home)
+        let (_, row, request) = try await context(locator, actor: actor, device: device)
+        let parts: [V2ResourceUploadPart]
+        if ["created","uploading","finalizing"].contains(row.state), let transport = transports[row.placement.binding] as? any V2MultipartUploadTransport,
+           Self.sessionModes(transport).first(where: request.clientModes.contains) == .httpPartPut {
+            parts = try await transport.confirmedParts(mediaID: request.mediaID, byteCount: request.byteCount, checksum: request.checksum)
+        } else { parts = [] }
+        return try session(row, home: locator.home, parts: parts)
     }
     public func targets(_ input: V2ResourceUploadTargetsRequest, actor: UserID, device: DeviceID) async throws -> [V2ResourceTransferPlan] {
         try Task.checkCancellation()
         let locator = input.locator
-        guard input.partNumbers.isEmpty else { throw V2ResourceProviderError.unsupportedCapability }
         let (store, row, request) = try await context(locator, actor: actor, device: device)
         try Task.checkCancellation()
         guard row.generation == input.generation else { throw V2ResourceProviderError.preconditionFailed }
         guard ["created","uploading"].contains(row.state), row.expiresAt > Date(),
               let transport = transports[row.placement.binding] else { throw V2ResourceProviderError.preconditionFailed }
         guard let mode = Self.sessionModes(transport).first(where: request.clientModes.contains) else { throw V2ResourceProviderError.unsupportedCapability }
-        let deadline = min(row.expiresAt, store.authorizationExpiresAt ?? row.expiresAt, Date().addingTimeInterval(120))
-        let plan = try await transport.plan(mode: mode, mediaID: request.mediaID, contentType: request.contentType, byteCount: request.byteCount,
-            checksum: request.checksum, expiresAt: deadline)
-        try Task.checkCancellation()
-        guard plan.mode == mode, plan.expectedByteCount == request.byteCount,
-              plan.checksum == request.checksum, plan.expiresAt <= deadline,
-              plan.byteRange == nil, plan.partNumber == nil
-        else { throw V2ResourceProviderError.integrityMismatch }
+        let instant = Date()
+        let deadline: Date
+        if input.background {
+            guard case .messageAttachment = request.usage, mode == .httpPartPut,
+                  transport is any V2BackgroundUploadTransport,
+                  let deviceExpiry = store.backgroundDelegationExpiresAt, deviceExpiry>instant
+            else { throw V2ResourceProviderError.unsupportedCapability }
+            // New exact-object delegation, not an extension of activation/presentation authority.
+            deadline = min(row.expiresAt,deviceExpiry,instant.addingTimeInterval(900))
+        } else { deadline = min(row.expiresAt,store.authorizationExpiresAt ?? row.expiresAt,instant.addingTimeInterval(120)) }
+        let plans: [V2ResourceTransferPlan]
+        if input.background, let background = transport as? any V2BackgroundUploadTransport {
+            plans = try await background.backgroundPartPlans(mediaID:request.mediaID,contentType:request.contentType,
+                byteCount:request.byteCount,checksum:request.checksum,requestedParts:input.partNumbers,
+                sessionID:locator.sessionID,generation:row.generation,issuedAt:instant,expiresAt:deadline)
+            guard plans.allSatisfy({ plan in
+                guard let grant=plan.backgroundAuthorization else { return false }
+                return plan.mode == .httpPartPut && grant.sessionID == locator.sessionID && grant.generation == row.generation && grant.mediaID == request.mediaID && grant.expiresAt<=deadline
+            }) else { throw V2ResourceProviderError.integrityMismatch }
+        } else if mode == .httpPartPut, let multipart = transport as? any V2MultipartUploadTransport {
+            plans = try await multipart.partPlans(mediaID: request.mediaID, contentType: request.contentType, byteCount: request.byteCount, checksum: request.checksum, requestedParts: input.partNumbers, expiresAt: deadline)
+            guard plans.allSatisfy({ $0.mode == .httpPartPut && $0.byteRange != nil && $0.partNumber != nil && $0.expiresAt <= deadline }) else { throw V2ResourceProviderError.integrityMismatch }
+        } else {
+            guard input.partNumbers.isEmpty else { throw V2ResourceProviderError.unsupportedCapability }
+            let plan = try await transport.plan(mode: mode, mediaID: request.mediaID, contentType: request.contentType, byteCount: request.byteCount, checksum: request.checksum, expiresAt: deadline)
+            guard plan.mode == mode, plan.expectedByteCount == request.byteCount, plan.checksum == request.checksum,
+                  plan.expiresAt <= deadline, plan.byteRange == nil, plan.partNumber == nil else { throw V2ResourceProviderError.integrityMismatch }
+            plans = [plan]
+        }
         // Recheck after signing, including device/owner changes that occurred during adapter I/O.
         let current = try await store.status(session: row.sessionID, actor: uuid(actor), device: uuid(device))
         try Task.checkCancellation()
         guard current.generation == row.generation, ["created","uploading"].contains(current.state),
-              current.expiresAt > Date(), plan.expiresAt <= current.expiresAt, plan.expiresAt > Date()
+              current.expiresAt > Date(), plans.allSatisfy({ $0.expiresAt <= current.expiresAt && $0.expiresAt > Date() })
         else { throw V2ResourceProviderError.preconditionFailed }
-        return [plan]
+        return plans
     }
     public func finalize(_ input: V2ResourceUploadFinalizeRequest, actor: UserID, device: DeviceID) async throws -> V2ResourceUploadSession {
         let locator = input.locator
-        guard input.parts.isEmpty else { throw V2ResourceProviderError.unsupportedCapability }
-        let (store, _, request) = try await context(locator, actor: actor, device: device)
+        let (store, before, request) = try await context(locator, actor: actor, device: device)
+        guard let selectedTransport = transports[before.placement.binding] else { throw V2ResourceProviderError.configurationInvalid }
+        let multipart = Self.sessionModes(selectedTransport).first(where: request.clientModes.contains) == .httpPartPut ? selectedTransport as? any V2MultipartUploadTransport : nil
+        if before.state != "completed" {
+            if let multipart {
+                let confirmed = try await multipart.confirmedParts(mediaID: request.mediaID, byteCount: request.byteCount, checksum: request.checksum)
+                guard confirmed == input.parts, confirmed.reduce(Int64(0), { $0 + $1.byteCount }) == request.byteCount else { throw V2ResourceProviderError.preconditionFailed }
+            } else { guard input.parts.isEmpty else { throw V2ResourceProviderError.unsupportedCapability } }
+        }
         let claim = try await store.claimFinalize(session: uuid(locator.sessionID), generation: input.generation, actor: uuid(actor), device: uuid(device), now: Date())
-        if claim.state == "completed" { return try session(claim, home: locator.home) }
+        if claim.state == "completed" {
+            if let multipart { try await multipart.abortParts(mediaID: request.mediaID, byteCount: request.byteCount, checksum: request.checksum) }
+            return try session(claim, home: locator.home)
+        }
         guard let transport = transports[claim.placement.binding] else { throw V2ResourceProviderError.configurationInvalid }
         let storage = try registry.storage(for: claim.placement.binding)
         let digest = Data(stride(from: 0, to: request.checksum.value.count, by: 2).map {
@@ -112,7 +147,9 @@ public struct V2ResourceService: Sendable {
         do {
             facts = try await storage.inspect(claim.placement)
         } catch V2ResourceProviderError.notFound {
-            let stream = try await transport.completedBytes(mediaID: request.mediaID, byteCount: request.byteCount)
+            let stream: V2ResourceByteStream
+            if let multipart { stream = try await multipart.completedParts(mediaID: request.mediaID, byteCount: request.byteCount, checksum: request.checksum, parts: input.parts) }
+            else { stream = try await transport.completedBytes(mediaID: request.mediaID, byteCount: request.byteCount) }
             facts = try await storage.write(claim.placement, byteCount: request.byteCount, sha256: digest, bytes: stream)
         }
         // Both reconciliation and a fresh write must honor the same provider-independent contract.
@@ -121,19 +158,24 @@ public struct V2ResourceService: Sendable {
         else { throw V2ResourceProviderError.integrityMismatch }
         let publisher = try await resolve(locator.home, request.usage, actor, device)
         try await publisher.publish(claim, facts: facts, actor: uuid(actor), device: uuid(device), now: Date())
+        if let multipart { try await multipart.abortParts(mediaID: request.mediaID, byteCount: request.byteCount, checksum: request.checksum) }
         return try await status(locator, actor: actor, device: device)
     }
     public func cancel(_ input: V2ResourceUploadCancelRequest, actor: UserID, device: DeviceID) async throws -> V2ResourceUploadSession {
         let locator = input.locator
-        let (store, _, _) = try await context(locator, actor: actor, device: device)
+        let (store, _, request) = try await context(locator, actor: actor, device: device)
         let row = try await store.cancel(session: uuid(locator.sessionID), generation: input.generation, actor: uuid(actor), device: uuid(device), now: Date())
         // Exact destination delete leaves a persistent fence against a late finalize copy.
         try await registry.storage(for: row.placement.binding).delete(row.placement)
+        if let multipart = transports[row.placement.binding] as? any V2MultipartUploadTransport,
+           Self.sessionModes(multipart).first(where: request.clientModes.contains) == .httpPartPut {
+            try await multipart.abortParts(mediaID: request.mediaID,byteCount: request.byteCount,checksum: request.checksum)
+        }
         return try session(row, home: locator.home)
     }
     private static func sessionModes(_ transport: any V2UploadTransport) -> [V2ResourceTransferMode] {
         // Multipart needs durable part state and finalize receipts before it can be advertised.
-        transport.capabilities.modes.filter { $0 == .httpPut || $0 == .httpFormPost }
+        transport.capabilities.modes.filter { $0 == .httpPut || $0 == .httpFormPost || ($0 == .httpPartPut && transport is any V2MultipartUploadTransport) }
     }
     private func context(_ locator: V2ResourceUploadLocator, actor: UserID, device: DeviceID) async throws -> (PostgresV2ResourceLifecycleStore,V2PersistedResourceUpload,V2ResourceUploadRequest) {
         let lookup = try await resolve(locator.home, nil, actor, device)
@@ -144,7 +186,7 @@ public struct V2ResourceService: Sendable {
         let current = try await store.status(session: row.sessionID, actor: uuid(actor), device: uuid(device))
         return (store,current,request)
     }
-    private func session(_ row: V2PersistedResourceUpload, home: V2ResourceHome) throws -> V2ResourceUploadSession {
+    private func session(_ row: V2PersistedResourceUpload, home: V2ResourceHome, parts: [V2ResourceUploadPart] = []) throws -> V2ResourceUploadSession {
         let state = V2ResourceUploadSessionState(rawValue: row.state) ?? .failed
         let resourceState: V2ResourceState
         switch row.mediaState {
@@ -156,7 +198,7 @@ public struct V2ResourceService: Sendable {
         }
         return try .init(locator: .init(home: home, sessionID: .init(uuid: row.sessionID)), mediaID: .init(uuid: row.mediaID),
                          generation: row.generation, state: state, resourceState: resourceState,
-                         expiresAt: row.expiresAt, bindableUntil: resourceState == .ready ? row.expiresAt : nil)
+                         expiresAt: row.expiresAt, bindableUntil: resourceState == .ready ? row.expiresAt : nil, confirmedParts: parts)
     }
     private func homeCoordinates(_ home: V2ResourceHome) throws -> (String,UUID) {
         switch home {

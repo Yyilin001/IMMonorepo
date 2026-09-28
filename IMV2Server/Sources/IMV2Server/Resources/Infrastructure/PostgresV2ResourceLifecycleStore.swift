@@ -22,8 +22,9 @@ public struct PostgresV2ResourceLifecycleStore: Sendable {
     package let database: any Database
     package let authorize: V2ResourceTransactionAuthorization
     public let authorizationExpiresAt: Date?
-    public init(database: any Database, authorizationExpiresAt: Date? = nil, authorize: @escaping V2ResourceTransactionAuthorization) {
-        self.database = database; self.authorize = authorize; self.authorizationExpiresAt = authorizationExpiresAt
+    public let backgroundDelegationExpiresAt: Date?
+    public init(database: any Database, authorizationExpiresAt: Date? = nil, backgroundDelegationExpiresAt: Date? = nil, authorize: @escaping V2ResourceTransactionAuthorization) {
+        self.database = database; self.authorize = authorize; self.authorizationExpiresAt = authorizationExpiresAt; self.backgroundDelegationExpiresAt = backgroundDelegationExpiresAt
     }
     public func create(homeKind: String, homeID: UUID, usageKind: String, actor: UUID, device: UUID, operation: UUID,
                        mediaID: UUID, contentType: String, byteCount: Int64, requestJSON: String,

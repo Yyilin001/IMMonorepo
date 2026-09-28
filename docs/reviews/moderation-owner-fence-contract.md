@@ -1,5 +1,23 @@
 # Moderation 的 owner 事务栅栏
 
+## 2026-09-27 成员管理短期准入与永久原回执
+
+当前合同为 protocol 38、PostgreSQL current60。禁言/审核移除不再接受原 TCP `MuteMember` / `ModerateMemberRemoval` 请求；Envelope 的 53/55 编号与名称 reserved，事件事实响应保留。账户 HTTP 只经 `V2RoomRefAdministrationClient` 进入当前房间 activation，不能直接选择控制库执行房间写入。
+
+三个 POST 路径为 `/v2/rooms/{room}/member-administration/admissions`、`/submit`、`/operations/recover`，body 各限 4 KiB。身份必须匹配认证 actor 与路径 room；响应 `no-store`。准入当前不可用以 HTTP 200 的 typed `currentUnavailable` 表达，只影响准备阶段；提交/恢复的 `deferred` 为 429 或 503，有限服务端提示携带 `Retry-After`，不能作为终态拒绝。
+
+`V2MemberAdministrationIntent` 冻结用户确认时的绝对 `confirmedUntilMilliseconds`、原 ModerationOperationID、目标、原因、action 和观察到的 whole membership revision。首次签发必须在确认截止之前且原截止距离服务端当前时间不超过 120 秒；同原 ID 的准入 context 不可续期。context 额外绑定目标 joined revision；合法初始 revision / joined revision 可以为 0。提交在原 ID advisory lock 与精确 activation fence 内优先读取最小原回执，然后比较不可变 context、短期截止、当前权限、whole membership revision 和目标加入代次。目标退群重入后不能执行离线旧意图。
+
+禁言/移除领域写、room sequence、事件/wake、审计和 `member_administration_receipts` 必须同一事务提交。原 `moderation_operations` 已移除这两类读写与 action，保留屏蔽及可信冻结/解冻；审计不再依赖旧 ledger 的外键。新 admission/receipt 无用户或房间级联删除外键，UPDATE/DELETE 由不可变触发器拒绝，不进入 housekeeping。两类 receipt 是本人操作的最小永久证明，不含成员列表或消息内容。
+
+`query` 在原 ID 锁内返回已有原回执，退群或当前权限变化不否定历史证明；无记录保持 unresolved。`closeIfAbsent` 与首次提交共锁，只有无原回执时建立永久 closed，之后提交不得产生效果。重复提交返回原回执，不重复事件。已有更强禁言的 no-op 使用 `alreadySatisfied` 原回执，证明该操作观察到的权威状态，不伪造新的禁言事件。
+
+真实一次性 PostgreSQL 检查覆盖 HTTP→RoomRef→存储、固定截止、context 不续期、原回执优先、指纹冲突、目标加入代次、关闭、不可变记录、无事件 no-op，以及强制外层 receipt INSERT 失败时禁言/移除的领域、事件、审计和 wake 全回滚。当前旧业务夹具迁移及更广联合验收仍在进行；这些检查不表示全部弱网领域已完成或已经部署。
+
+## 历史 B27 owner 栅栏记录
+
+以下描述是 B27 当时的实现与验证记录；成员禁言/审核移除的现行入口和回执合同以上节为准。
+
 2026-09-06，B27 房间迁移前置修复。本批覆盖普通消息屏蔽、禁言和移除成员，以及可信安全服务的消息屏蔽、冻结和解冻。
 
 ## 缺口与实现

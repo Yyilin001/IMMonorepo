@@ -24,8 +24,10 @@ public struct V2ProjectionScopes: OptionSet, Equatable, Sendable {
     public static let presentations = Self(rawValue: 1 << 4)
     /// 群昵称版本变化；仅核对当前关注的作者，不撤销整个账户的展示。
     public static let groupNicknames = Self(rawValue: 1 << 5)
+    /// 联系人备注版本变化；核对当前关注对象的独立备注版本。
+    public static let contactAliases = Self(rawValue: 1 << 6)
     /// 全部作用域。
-    public static let all: Self = [.conversations, .conversationDetails, .contacts, .privacy, .presentations, .groupNicknames]
+    public static let all: Self = [.conversations, .conversationDetails, .contacts, .privacy, .presentations, .groupNicknames, .contactAliases]
 }
 
 /// 一次投影变更摘要。
@@ -34,15 +36,20 @@ public struct V2ProjectionChange: Equatable, Sendable {
     public let scopes: V2ProjectionScopes
     /// 是否要求立即刷新（相对可延迟的常规刷新）。
     public let requiresImmediateRefresh: Bool
+    public let conversationCommit: V2ConversationCommitMeasurement?
 
     /// 保存变更摘要。
     ///
     /// - Parameters:
     ///   - scopes: 受影响的作用域。
     ///   - requiresImmediateRefresh: 是否要求立即刷新。
-    public init(scopes: V2ProjectionScopes, requiresImmediateRefresh: Bool) {
+    public init(scopes: V2ProjectionScopes, requiresImmediateRefresh: Bool, conversationCommit: V2ConversationCommitMeasurement? = nil) {
+        self.conversationCommit = conversationCommit
         self.scopes = scopes
         self.requiresImmediateRefresh = requiresImmediateRefresh
+    }
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.scopes == rhs.scopes && lhs.requiresImmediateRefresh == rhs.requiresImmediateRefresh
     }
     /// 表示全部作用域且要求立即刷新的变更。
     public static let all = Self(scopes: .all, requiresImmediateRefresh: true)
@@ -55,7 +62,8 @@ public struct V2ProjectionChange: Equatable, Sendable {
     /// - Returns: 合并后的摘要。
     public func merging(_ other: Self) -> Self {
         .init(scopes: scopes.union(other.scopes),
-              requiresImmediateRefresh: requiresImmediateRefresh || other.requiresImmediateRefresh)
+              requiresImmediateRefresh: requiresImmediateRefresh || other.requiresImmediateRefresh,
+              conversationCommit: V2ConversationCommitMeasurement.earliest(conversationCommit, other.conversationCommit))
     }
 }
 
@@ -105,9 +113,12 @@ final class V2ProjectionChangeHub: Sendable {
     private struct State {
         var closed = false
         var slots: [UUID: Slot] = [:]
+        var diagnostics: V2NetworkDiagnostics?
     }
     private let state = Mutex(State())
 
+    func installDiagnostics(_ diagnostics: V2NetworkDiagnostics) { state.withLock { $0.diagnostics = diagnostics } }
+    func diagnosticSink() -> V2NetworkDiagnostics? { state.withLock { $0.diagnostics } }
     /// 创建并登记一个新订阅。
     ///
     /// 新订阅会立即收到一次全量失效，避免依赖订阅之前已经提交的事务。

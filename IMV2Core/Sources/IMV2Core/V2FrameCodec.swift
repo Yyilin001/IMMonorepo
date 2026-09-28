@@ -11,6 +11,8 @@ public struct V2FrameCommand: RawRepresentable, Equatable, Hashable, Sendable {
     /// 保留给定命令码，包括当前实现尚未定义的值。
     public init(rawValue: UInt16) { self.rawValue = rawValue }
 
+    public static let presencePublicationControl = Self(rawValue:125)
+    public static let presencePublicationControlled = Self(rawValue:126)
     /// 客户端声明可用版本与能力的启动请求。
     public static let clientHello = Self(rawValue: 1)
     /// 服务端版本与能力协商响应。
@@ -24,23 +26,18 @@ public struct V2FrameCommand: RawRepresentable, Equatable, Hashable, Sendable {
     /// 心跳确认。
     public static let heartbeatAck = Self(rawValue: 6)
     /// 消息发送请求。
-    public static let sendMessage = Self(rawValue: 20)
     /// 消息接受响应。
     public static let messageAccepted = Self(rawValue: 21)
     /// 成员资格变更请求。
-    public static let changeRoomMembership = Self(rawValue: 22)
     /// 成员资格变更结果。
     public static let membershipChanged = Self(rawValue: 23)
     /// 消息撤回请求。
-    public static let withdrawMessage = Self(rawValue: 24)
     /// 消息撤回结果。
     public static let messageWithdrawn = Self(rawValue: 25)
     /// 消息回应变更请求。
-    public static let changeMessageReaction = Self(rawValue: 26)
     /// 消息回应变更结果。
     public static let messageReactionChanged = Self(rawValue: 27)
     /// 消息编辑请求。
-    public static let editMessage = Self(rawValue: 28)
     /// 消息编辑结果。
     public static let messageEdited = Self(rawValue: 29)
     /// 已读水位记录请求。
@@ -48,35 +45,25 @@ public struct V2FrameCommand: RawRepresentable, Equatable, Hashable, Sendable {
     /// 已读水位记录结果。
     public static let readReceiptRecorded = Self(rawValue: 42)
     /// 打开私聊请求。
-    public static let openDirectRoom = Self(rawValue: 43)
     /// 私聊打开结果。
-    public static let directRoomOpened = Self(rawValue: 44)
     /// 陌生人消息接收策略设置。
-    public static let setStrangerMessagePermission = Self(rawValue: 45)
     /// 陌生人消息接收策略设置结果。
     public static let strangerMessagePermissionSet = Self(rawValue: 46)
     /// 联系人关系变更请求。
-    public static let changeRelationship = Self(rawValue: 47)
     /// 联系人关系变更结果。
     public static let relationshipChanged = Self(rawValue: 48)
     /// 用户屏蔽变更请求。
-    public static let changeUserBlock = Self(rawValue: 49)
     /// 用户屏蔽变更结果。
     public static let userBlockChanged = Self(rawValue: 50)
     /// 消息治理请求。
-    public static let moderateMessage = Self(rawValue: 51)
     /// 消息治理后的内容移除结果。
-    public static let messageRedacted = Self(rawValue: 52)
     /// 成员禁言请求。
-    public static let muteMember = Self(rawValue: 53)
     /// 成员禁言结果。
     public static let memberMuted = Self(rawValue: 54)
     /// 治理角色移除成员请求。
-    public static let moderateMemberRemoval = Self(rawValue: 55)
     /// 治理移除成员结果。
     public static let memberRemovedByModerator = Self(rawValue: 56)
     /// 群房间创建完成结果。
-    public static let groupRoomCreated = Self(rawValue: 58)
     /// 成员目录分页请求。
     public static let listRoomMembers = Self(rawValue: 59)
     /// 成员目录分页响应。
@@ -94,25 +81,16 @@ public struct V2FrameCommand: RawRepresentable, Equatable, Hashable, Sendable {
     /// 房间新事件可用提示，不作为可靠投递确认。
     public static let groupEventAvailable = Self(rawValue: 66)
     /// 开始分阶段群创建。
-    public static let beginGroupRoomCreation = Self(rawValue: 67)
     /// 群创建准备结果。
-    public static let groupRoomCreationPrepared = Self(rawValue: 68)
     /// 追加群创建初始成员批次。
-    public static let appendGroupRoomCreationMembers = Self(rawValue: 69)
     /// 初始成员批次追加结果。
-    public static let groupRoomCreationMembersAppended = Self(rawValue: 70)
     /// 提交群创建最终确认。
-    public static let finalizeGroupRoomCreation = Self(rawValue: 71)
     /// 取消尚可取消的群创建。
-    public static let cancelGroupRoomCreation = Self(rawValue: 72)
     /// 群创建取消结果。
-    public static let groupRoomCreationCancelled = Self(rawValue: 73)
     /// 设置允许被添加的策略。
-    public static let setUserAddPermission = Self(rawValue: 74)
     /// 被添加策略设置结果。
     public static let userAddPermissionSet = Self(rawValue: 75)
     /// 设置已读回执偏好。
-    public static let setReadReceiptPreferences = Self(rawValue: 76)
     /// 已读回执偏好设置结果。
     public static let readReceiptPreferencesSet = Self(rawValue: 77)
     /// 查询已读者分页。
@@ -120,7 +98,6 @@ public struct V2FrameCommand: RawRepresentable, Equatable, Hashable, Sendable {
     /// 已读者分页响应。
     public static let readReceiptReadersPage = Self(rawValue: 79)
     /// 设置实时活动偏好。
-    public static let setLiveActivityPreferences = Self(rawValue: 80)
     /// 实时活动偏好设置结果。
     public static let liveActivityPreferencesSet = Self(rawValue: 81)
     /// 订阅在线状态。
@@ -170,31 +147,26 @@ public struct V2FrameCommand: RawRepresentable, Equatable, Hashable, Sendable {
     /// 设置会话本地同步偏好。
     public static let setConversationState = Self(rawValue: 93)
     /// 会话偏好设置结果。
+    public static let personalPreferenceReceipt = Self(rawValue: 124)
     public static let conversationStateSet = Self(rawValue: 94)
     /// 设置消息收藏状态。
     public static let setMessageFavorite = Self(rawValue: 95)
     /// 消息收藏变更结果。
     public static let messageFavoriteChanged = Self(rawValue: 96)
     /// 设置群消息置顶状态。
-    public static let setPinnedMessage = Self(rawValue: 97)
     /// 群消息置顶变更结果。
     public static let pinnedMessageChanged = Self(rawValue: 98)
     /// 设置群公告。
-    public static let setGroupAnnouncement = Self(rawValue: 99)
     /// 群公告变更结果。
     public static let groupAnnouncementChanged = Self(rawValue: 100)
     /// 设置群角色权限策略。
-    public static let setGroupRolePermissions = Self(rawValue: 101)
     /// 群角色权限策略变更结果。
     public static let groupRolePermissionsChanged = Self(rawValue: 102)
     /// 变更群成员角色。
-    public static let changeGroupMemberRole = Self(rawValue: 103)
     /// 群成员角色变更结果。
     public static let groupMemberRoleChanged = Self(rawValue: 104)
     /// 分块转发消息请求。
-    public static let forwardMessages = Self(rawValue: 105)
     /// 分块转发结果。
-    public static let messagesForwarded = Self(rawValue: 106)
     /// 请求群角色权限基线。
     public static let getGroupRolePolicyBaseline = Self(rawValue: 107)
     /// 群角色权限基线响应。

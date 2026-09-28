@@ -52,5 +52,10 @@ public actor V2ResourceCapabilitiesCache {
         guard value.uploadModes.contains(where: request.clientModes.contains) else { throw V2ResourceCapabilityError.uploadModeUnavailable }
     }
 
+    public func allowsBackground() -> Bool {
+        guard !closed, let validUntil, validUntil > ContinuousClock.now else { return false }
+        return value?.backgroundTransfer == true
+    }
+
     public func close() { closed = true; value = nil; validUntil = nil }
 }

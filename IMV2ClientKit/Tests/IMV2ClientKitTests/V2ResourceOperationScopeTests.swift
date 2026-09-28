@@ -67,7 +67,11 @@ struct V2ResourceOperationScopeTests {
         _ = try await engine.prepare(id: id, request: request)
         let work = Task {
             if capability { try await engine.refreshCapabilitiesIfNeeded() }
-            else { try await engine.cancel(id: id) }
+            else {
+                try await engine.cancel(id: id)
+                #expect(try await store.resourceTransfer(id: id)?.cancellationRequested == true)
+                _ = try await engine.resume(id: id)
+            }
         }
         await gate.entered()
         let finished = Mutex(false)
@@ -119,7 +123,7 @@ private actor ScopeResourceControl: V2ResourceUploadControlling, V2ResourceCapab
             mediaID: request.mediaID, generation: 1, state: .created, resourceState: .pending, expiresAt: Date().addingTimeInterval(60))
     }
     func status(_ locator: V2ResourceUploadLocator) throws -> V2ResourceUploadSession { throw CancellationError() }
-    func target(_ session: V2ResourceUploadSession) throws -> V2ResourceTransferPlan { throw CancellationError() }
+    func target(_ session: V2ResourceUploadSession) throws -> V2ResourceTransferPlan? { throw CancellationError() }
     func finalize(_ session: V2ResourceUploadSession) throws -> V2ResourceUploadSession { throw CancellationError() }
     func cancel(_ session: V2ResourceUploadSession) -> V2ResourceUploadSession { cancelCalls += 1; return session }
 }

@@ -1,137 +1,96 @@
 import Foundation
-@testable import IMV2ClientKit
-import IMV2Core
 import Testing
+import IMV2Core
+@testable import IMV2ClientKit
 
-@Suite("V2 durable membership command outbox")
-struct V2MembershipCommandOutboxTests {
+@Suite("Membership original operation recovery",.serialized)
+struct V2MembershipOperationTests {
     @Test("network retry survives restart and reuses the original membership operation ID")
     func retrySurvivesRestart() async throws {
-        let url = temporaryMembershipOutboxDatabaseURL()
-        let started = Date(timeIntervalSince1970: 1_750_000_000)
-        let roomID = try RoomID("00000000-0000-0000-0000-000000000601")
-        let targetUserID = try UserID("00000000-0000-0000-0000-000000000602")
-        let operationUUID = UUID(uuidString: "00000000-0000-0000-0000-000000000603")!
-        let transport = ScriptedMembershipTransport(results: [.retryableFailure, .acknowledged])
-        let firstStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: membershipOutboxBinding)
-        let firstEngine = V2MembershipCommandOutboxEngine(store: firstStore, transport: transport, makeUUID: { operationUUID }, now: { started })
-
-        let command = try await firstEngine.enqueueMembershipChange(
-            roomID: roomID,
-            targetUserID: targetUserID,
-            action: .add,
-            expectedMembershipRevision: 4
-        )
-        #expect(command.operationID.rawValue == operationUUID.uuidString)
-        #expect(try await firstEngine.flushOnce() == .retryScheduled(command.operationID))
-        let retry = try #require(await firstStore.pendingMembershipCommands().first)
-        #expect(retry.state == .pending)
-        #expect(retry.attemptCount == 1)
-
-        let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: membershipOutboxBinding)
-        let restartedEngine = V2MembershipCommandOutboxEngine(store: restartedStore, transport: transport, now: { started.addingTimeInterval(1) })
-        #expect(try await restartedEngine.flushOnce() == .acknowledged(command.operationID))
-        let completed = try #require(await restartedStore.pendingMembershipCommands().first)
-        #expect(completed.operationID == command.operationID)
-        #expect(completed.state == .acknowledged)
-        #expect(completed.resultingMembershipRevision == 5)
-        #expect(completed.resultingRoomSequence == 8)
-        #expect(await transport.operationIDs() == [command.operationID, command.operationID])
+        let f=try MembershipWorkFixture();defer { f.remove() }
+        let confirmation=try f.service.confirmationWindow(roomID:f.room,action:.add,expectedMembershipRevision:7)
+        let id=try await f.service.enqueue(targetUserID:f.target,confirmation:confirmation)
+        #expect(try await f.service.prepareNextIntent())
+        let original=try #require(try await f.store.membershipPending(id:id).command)
+        let work=try #require(try await f.store.membershipPending(id:id).work)
+        try await f.service.execute(f.claim(work.id))
+        #expect(try await f.store.operationWork(id:work.id)?.execution == .awaitingConfirmation)
+        try await f.store.close()
+        let reopened=try GRDBV2LocalSyncStore(databaseURL:f.url,installationBinding:f.binding,userID:f.account)
+        let service=V2MembershipOperationService(accountID:f.account,activationID:UUID(),store:reopened,client:f.remote)
+        let pending=try #require(try await reopened.operationWork(id:work.id))
+        guard case .claimed(let claim)=try await reopened.claimOperationWork(id:work.id,ownerID:UUID(),action:.reconcile,now:pending.nextActionAt) else { Issue.record("missing original reconciliation");return }
+        try await service.execute(claim)
+        #expect(try await reopened.operationWork(id:work.id)?.execution == .committed)
+        #expect(try await reopened.membershipCommand(workID:work.id)==original)
+        #expect(await f.remote.received==[confirmation.operationID,confirmation.operationID])
+        #expect(await f.remote.admissions==1)
+        try await reopened.close()
     }
-
-    @Test("revision conflict is terminal and is not retried")
+    @Test("original revision conflict receipt is terminal and is not retried")
     func revisionConflictIsNotRetried() async throws {
-        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryMembershipOutboxDatabaseURL(), installationBinding: membershipOutboxBinding)
-        let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let engine = V2MembershipCommandOutboxEngine(
-            store: store,
-            transport: ScriptedMembershipTransport(results: [.revisionConflict]),
-            makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000604")! },
-            now: { now }
-        )
-        let command = try await engine.enqueueMembershipChange(
-            roomID: .init("00000000-0000-0000-0000-000000000605"),
-            targetUserID: .init("00000000-0000-0000-0000-000000000606"),
-            action: .remove,
-            expectedMembershipRevision: 4
-        )
-
-        #expect(try await engine.flushOnce() == .rejected(command.operationID, code: "REVISION_CONFLICT"))
-        let rejected = try #require(await store.pendingMembershipCommands().first)
-        #expect(rejected.state == .rejected)
-        #expect(rejected.terminalCode == "REVISION_CONFLICT")
-        #expect(rejected.terminalCurrentRevision == 9)
-        #expect(try await engine.flushOnce() == .idle)
+        let f=try MembershipWorkFixture(conflict:true);defer { f.remove() }
+        let confirmation=try f.service.confirmationWindow(roomID:f.room,action:.remove,expectedMembershipRevision:7)
+        let id=try await f.service.enqueue(targetUserID:f.target,confirmation:confirmation)
+        #expect(try await f.service.prepareNextIntent())
+        let work=try #require(try await f.store.membershipPending(id:id).work)
+        try await f.service.execute(f.claim(work.id))
+        #expect(try await f.store.operationWork(id:work.id)?.execution == .conflicted)
+        #expect(try await f.store.dueOperationWork(now:.distantFuture,kinds:[.membership]).isEmpty)
+        #expect(await f.remote.received==[confirmation.operationID])
+        try await f.store.close()
     }
-
-    @Test("重启后重复提交相同待成员变更会复用原操作")
+    @Test("restart keeps an existing frozen membership identity and cannot authorize a replacement")
     func duplicatePendingMembershipChangeReusesTheOriginalOperationAfterRestart() async throws {
-        let url = temporaryMembershipOutboxDatabaseURL()
-        let roomID = try RoomID("00000000-0000-0000-0000-000000000608")
-        let targetUserID = try UserID("00000000-0000-0000-0000-000000000609")
-        let firstStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: membershipOutboxBinding)
-        let firstOperation = UUID(uuidString: "00000000-0000-0000-0000-000000000610")!
-        let firstEngine = V2MembershipCommandOutboxEngine(
-            store: firstStore,
-            transport: ScriptedMembershipTransport(results: []),
-            makeUUID: { firstOperation }
-        )
-
-        let original = try await firstEngine.enqueueMembershipChange(
-            roomID: roomID,
-            targetUserID: targetUserID,
-            action: .add,
-            expectedMembershipRevision: 4
-        )
-        let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: membershipOutboxBinding)
-        let restartedEngine = V2MembershipCommandOutboxEngine(
-            store: restartedStore,
-            transport: ScriptedMembershipTransport(results: [])
-        )
-        let reused = try await restartedEngine.enqueueMembershipChange(
-            roomID: roomID,
-            targetUserID: targetUserID,
-            action: .add,
-            expectedMembershipRevision: 4
-        )
-
-        #expect(reused.operationID == original.operationID)
-        let pending = try await restartedStore.pendingMembershipCommands()
-        #expect(pending.count == 1)
+        let f=try MembershipWorkFixture();defer { f.remove() }
+        let confirmation=try f.service.confirmationWindow(roomID:f.room,action:.add,expectedMembershipRevision:7)
+        let id=try await f.service.enqueue(targetUserID:f.target,confirmation:confirmation)
+        #expect(try await f.service.prepareNextIntent())
+        let original=try await f.store.membershipPending(id:id)
+        try await f.store.close()
+        let reopened=try GRDBV2LocalSyncStore(databaseURL:f.url,installationBinding:f.binding,userID:f.account)
+        let service=V2MembershipOperationService(accountID:f.account,activationID:UUID(),store:reopened,client:f.remote)
+        let next=try service.confirmationWindow(roomID:f.room,action:.add,expectedMembershipRevision:7)
+        await #expect(throws:V2MembershipAdmissionError.confirmationRequired) { _ = try await service.enqueue(targetUserID:f.target,confirmation:next) }
+        #expect(try await reopened.membershipPending(id:id).intent.operationID==confirmation.operationID)
+        #expect(try await reopened.membershipPending(id:id).command==original.command)
+        #expect(await f.remote.admissions==1)
+        try await reopened.close()
     }
 }
-
-private actor ScriptedMembershipTransport: V2ClientMembershipTransport {
-    enum Result: Sendable { case retryableFailure, revisionConflict, acknowledged }
-
-    private var results: [Result]
-    private var receivedOperationIDs: [MembershipOperationID] = []
-
-    init(results: [Result]) { self.results = results }
-
-    func changeMembership(
-        roomID: RoomID,
-        operationID: MembershipOperationID,
-        targetUserID: UserID,
-        action: V2RoomMembershipAction,
-        expectedMembershipRevision _: UInt64
-    ) throws -> V2ClientMembershipChange {
-        receivedOperationIDs.append(operationID)
-        switch results.removeFirst() {
-        case .retryableFailure:
-            throw V2RealtimeTransportError.unexpectedResponse
-        case .revisionConflict:
-            throw V2RealtimeTransportError.server(code: "REVISION_CONFLICT", retryable: false, retryAfterSeconds: 0, currentRevision: 9)
-        case .acknowledged:
-            return try .init(roomID: roomID, targetUserID: targetUserID, action: action, membershipRevision: 5, roomSequence: 8, createdAt: .distantPast)
-        }
+struct MembershipWorkFixture {
+    let url=FileManager.default.temporaryDirectory.appending(path:"membership-work-"+UUID().uuidString).appending(path:"state.sqlite")
+    let binding=V2LocalInstallationBinding(value:UUID()),account=UserID(uuid:UUID()),room=RoomID(uuid:UUID()),target=UserID(uuid:UUID())
+    let store:GRDBV2LocalSyncStore,remote:MembershipWorkRemote,service:V2MembershipOperationService
+    init(conflict:Bool=false) throws {
+        store=try .init(databaseURL:url,installationBinding:binding,userID:account)
+        remote=MembershipWorkRemote(conflict:conflict)
+        service = .init(accountID:account,activationID:UUID(),store:store,client:remote)
     }
-
-    func operationIDs() -> [MembershipOperationID] { receivedOperationIDs }
+    func claim(_ id:UUID) async throws -> V2OperationWorkClaim {
+        let work=try #require(try await store.operationWork(id:id))
+        guard case .claimed(let claim)=try await store.claimOperationWork(id:id,ownerID:UUID(),action:work.nextAction,now:work.nextActionAt) else { throw V2OperationWorkError.invalidTransition };return claim
+    }
+    func remove() { try? FileManager.default.removeItem(at:url.deletingLastPathComponent()) }
 }
-
-private func temporaryMembershipOutboxDatabaseURL() -> URL {
-    FileManager.default.temporaryDirectory.appending(path: "im-v2-membership-outbox-\(UUID().uuidString).sqlite")
+actor MembershipWorkRemote:V2MembershipOperationClient {
+    let conflict:Bool
+    var admissions=0,received:[MembershipOperationID]=[]
+    var saved:V2MembershipReceipt?
+    init(conflict:Bool) { self.conflict=conflict }
+    func admit(_ intent:V2MembershipIntent) async throws -> V2MembershipAdmissionResult {
+        admissions += 1
+        return .admitted(try .init(id:.init(uuid:UUID()),identity:intent.identity,intentFingerprint:intent.fingerprint,action:intent.action,membershipRevision:intent.expectedMembershipRevision,targetJoinedRevision:intent.action == .add ? nil:0,issuedAtMilliseconds:UInt64(Date().timeIntervalSince1970*1000),expiresAtMilliseconds:intent.confirmedUntilMilliseconds))
+    }
+    func submit(_ command:V2MembershipOperationCommand) async throws -> V2MembershipRecoveryResult {
+        received.append(command.intent.operationID)
+        let outcome:V2MembershipTerminalOutcome = conflict ? .rejected(.membershipChanged(currentRevision:8)) : .changed(try .init(membershipRevision:8,roomSequence:1,eventID:.init(uuid:UUID())))
+        saved=try .init(identity:command.identity,fingerprint:command.fingerprint,outcome:outcome,resolvedAtMilliseconds:UInt64(Date().timeIntervalSince1970*1000))
+        if conflict { return .receipt(saved!) }
+        throw URLError(.networkConnectionLost)
+    }
+    func recover(_ command:V2MembershipOperationCommand,action:V2OperationRecoveryRequest.Action) async throws -> V2MembershipRecoveryResult {
+        received.append(command.intent.operationID)
+        guard let saved else { return .unresolved };return .receipt(saved)
+    }
 }
-
-private let membershipOutboxBinding = V2LocalInstallationBinding(value: UUID(uuidString: "00000000-0000-0000-0000-000000000007")!)

@@ -89,6 +89,7 @@ enum DatabaseEdgeProbe {
                     sendBatcher: batcher,
                     membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
                     invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: control),
+                    invitationSecretIssuer: try .init(base64EncodedKey: required("IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64")),
                     receiptProjectionDelivery: Shadow(),
                     capacityProfile: .init(id: "standard", limits: .init(
                         maxEligibleMembers: 10, maxCommandsPerWindow: 1000, retryAfterSeconds: 3)),
@@ -136,21 +137,29 @@ enum DatabaseEdgeProbe {
         }
     }
 
-    private static func send(_ slot: Int, operation: Int) -> V2RoomRequest {
-        .messaging(.send(.init(roomID: room(slot), actorUserID: user,
+    // One immutable admission timestamp for this probe process, including replays.
+    private static let operationDeadline = UInt64(Date().timeIntervalSince1970 * 1_000) + 600_000
+    private static func send(_ slot: Int, operation: Int) throws -> V2RoomRequest {
+        .messaging(.sendOperation(try .init(command: try .init(roomID: room(slot), senderUserID: user,
             clientMessageID: .init(uuid: id(operation)), text: "database edge probe",
-            media: [], mentions: [], entities: [], replyTo: nil)))
+            limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: operationDeadline)))
     }
     private static func edit(_ slot: Int, message: MessageID, operation: Int,
-                             expected: UInt64) -> V2RoomRequest {
-        .messaging(.edit(.init(roomID: room(slot), actorUserID: user,
+                             expected: UInt64) throws -> V2RoomRequest {
+        .messaging(.editOperation(try .init(command: try .init(roomID: room(slot), actorUserID: user,
             operationID: .init(uuid: id(operation)), messageID: message,
-            expectedMessageRevision: expected, text: "edit \(operation)")))
+            expectedMessageRevision: expected, text: "edit \(operation)", maximumUTF8Bytes: 64), firstSubmissionDeadlineMilliseconds: operationDeadline)))
     }
     private static func call(_ application: V2RoomActorApplication, _ request: V2RoomRequest,
                              seconds: Int = 10) async throws -> V2RoomResponse {
-        try await application.directory.room(request.roomID).call(request,
+        let response = try await application.directory.room(request.roomID).call(request,
             principal: .user(user), deadline: .now + .seconds(seconds))
+        switch response {
+        case .messaging(.sendOperation(.receipt)), .messaging(.mutation(.receipt)):
+            try validateProof(response, request: request)
+        default: break
+        }
+        return response
     }
     private static func eventually(_ application: V2RoomActorApplication,
                                    _ request: V2RoomRequest) async throws -> V2RoomResponse {
@@ -160,27 +169,44 @@ enum DatabaseEdgeProbe {
             do {
                 let response = try await call(application, request)
                 switch response {
-                case .messaging(.send(.unavailable)), .messaging(.edit(.unavailable)):
+                case .messaging(.sendOperation(.unresolved)), .messaging(.mutation(.unresolved)),
+                     .messaging(.sendOperation(.deferred)), .messaging(.mutation(.deferred)):
                     failure = Failure.invalid("temporarily unavailable")
                     try await Task.sleep(for: .milliseconds(250))
-                default: return response
+                default:
+                    try validateProof(response, request: request)
+                    return response
                 }
             }
             catch { failure = error; try await Task.sleep(for: .milliseconds(250)) }
         }
         throw failure
     }
+    private static func validateProof(_ response: V2RoomResponse, request: V2RoomRequest) throws {
+        switch (request, response) {
+        case (.messaging(.sendOperation(let command)), .messaging(.sendOperation(.receipt(let proof)))):
+            guard proof.identity == (try command.identity), proof.fingerprint == (try command.fingerprint) else {
+                throw Failure.invalid("send proof binding")
+            }
+        case (.messaging(.editOperation(let command)), .messaging(.mutation(.receipt(let proof)))):
+            guard proof.identity == (try command.identity), proof.fingerprint == (try command.fingerprint) else {
+                throw Failure.invalid("edit proof binding")
+            }
+        default: throw Failure.invalid("missing original operation proof")
+        }
+    }
     private static func message(_ response: V2RoomResponse) throws -> MessageID {
         switch response {
-        case .messaging(.send(.accepted(let value))): return value.messageID
-        case .messaging(.send(.idempotent(let value))): return value.messageID
+        case .messaging(.sendOperation(.receipt(let proof))):
+            guard case .accepted(let value) = proof.outcome else { throw Failure.invalid("send was not accepted") }
+            return value.messageID
         default: throw Failure.invalid("send was not accepted")
         }
     }
     private static func edited(_ response: V2RoomResponse, revision: UInt64) throws {
         switch response {
-        case .messaging(.edit(.edited(let value))), .messaging(.edit(.idempotent(let value))):
-            guard value.messageRevision == revision else { throw Failure.invalid("edit revision") }
+        case .messaging(.mutation(.receipt(let proof))):
+            guard case .committed(let value) = proof.outcome, value.messageRevision == revision else { throw Failure.invalid("edit revision") }
         default: throw Failure.invalid("edit was not accepted")
         }
     }
@@ -189,7 +215,7 @@ enum DatabaseEdgeProbe {
             let response = try await call(application, request, seconds: 8)
             // An ordinary business denial is not proof of a DB-edge failure.
             switch response {
-            case .messaging(.send(.unavailable)), .messaging(.edit(.unavailable)): return "businessUnavailable"
+            case .messaging(.sendOperation(.unresolved)), .messaging(.mutation(.unresolved)): return "originalOperationUnresolved"
             default: throw Failure.invalid("fault call returned a non-unavailable business result")
             }
         } catch let failure as V2RoomCallFailure {
@@ -213,7 +239,7 @@ enum DatabaseEdgeProbe {
         try marker("initial-token.json", token)
         try marker("warm.json", ["a": firstA.rawValue, "b": firstB.rawValue])
 
-        let faultEdit = edit(1, message: firstA, operation: 301, expected: 2)
+        let faultEdit = try edit(1, message: firstA, operation: 301, expected: 2)
         try await wait("control-cut-start")
         let controlFailure = try await rejected(application, faultEdit)
         try edited(await call(application, edit(2, message: firstB, operation: 302, expected: 2)), revision: 3)
@@ -229,7 +255,7 @@ enum DatabaseEdgeProbe {
         try marker("control-recovered-token.json", controlRecovered)
         try marker("control-recovered.json", true)
 
-        let faultSend = send(1, operation: 401)
+        let faultSend = try send(1, operation: 401)
         try await wait("owner-cut-expired")
         let ownerFailure = try await rejected(application, faultSend)
         _ = try message(await call(application, send(2, operation: 402)))
@@ -248,7 +274,7 @@ enum DatabaseEdgeProbe {
         let restartDatabase = ProcessInfo.processInfo.environment["VA_DB_EDGE_RESTART"] == "1"
         if restartDatabase {
             try await wait("owner-restart-down")
-            let restartSend = send(1, operation: 501)
+            let restartSend = try send(1, operation: 501)
             let restartFailure = try await rejected(application, restartSend)
             _ = try message(await call(application, send(2, operation: 502)))
             try marker("owner-restart-down-result.json", [

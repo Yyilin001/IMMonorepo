@@ -21,44 +21,7 @@ struct V2ActorAdministrationWireTests {
 
     @Test("every command and query preserves its business identity and fields")
     func commandsAndQueries() throws {
-        let membership = V2ActorMembershipChangeWire(
-            try V2AuthenticatedMembershipChange(roomID: room, actorUserID: actor,
-                operationID: MembershipOperationID("membership-op"), targetUserID: target,
-                action: .add, expectedMembershipRevision: 2))
-        #expect(try membership.domainCommand().expectedMembershipRevision == 2)
-        #expect(try membership.authenticatedRequest().targetUserID == target)
-
-        let pinned = V2ActorPinnedMessageWire(actorUserID: actor,
-            command: V2PinnedMessageCommand(operationID: try PinnedMessageOperationID("pin-op"),
-                roomID: room, messageID: message, isPinned: true))
-        #expect(pinned.domainCommand().messageID == message)
-        let announcement = V2ActorGroupAnnouncementWire(actorUserID: actor,
-            command: try V2GroupAnnouncementCommand(operationID: GroupAnnouncementOperationID("announcement-op"),
-                roomID: room, body: "policy update", expectedRevision: 3))
-        #expect(try announcement.domainCommand().body == "policy update")
-        let rolePermissions = V2ActorRolePermissionsWire(actorUserID: actor,
-            command: try V2GroupRolePermissionsCommand(operationID: GroupPermissionOperationID("permission-op"),
-                roomID: room, role: .admin, permissions: [.muteMembers, .sendMessages], expectedRevision: 4))
-        #expect(rolePermissions.permissions.map(\.rawValue) == ["mute_members", "send_messages"])
-        #expect(try rolePermissions.domainCommand().permissions == [.muteMembers, .sendMessages])
-        let memberRole = V2ActorMemberRoleWire(actorUserID: actor,
-            command: try V2GroupMemberRoleCommand(operationID: GroupRoleOperationID("role-op"),
-                roomID: room, targetUserID: target, role: .member, expectedMembershipRevision: 5))
-        #expect(try memberRole.domainCommand().expectedMembershipRevision == 5)
         let reason = try V2ModerationReasonCode("review_1")
-        let moderation = V2ActorModerationWire(try V2ModerationCommand(
-            roomID: room, actorUserID: actor, operationID: ModerationOperationID("moderation-op"),
-            action: .redactMessage, messageID: message, expectedMessageRevision: 6,
-            reasonCode: reason))
-        #expect(try moderation.domainCommand().expectedMessageRevision == 6)
-        #expect(throws: V2ActorAdministrationWireError.unsupportedAuthenticatedRevision) {
-            try moderation.authenticatedRequest()
-        }
-        let authenticatedModeration = V2ActorModerationWire(V2AuthenticatedModeration(
-            roomID: room, actorUserID: actor, operationID: try ModerationOperationID("user-review-op"),
-            action: .muteMember, targetUserID: target, muteUntil: now, reasonCode: reason))
-        #expect(try authenticatedModeration.authenticatedRequest().muteUntil == now)
-        #expect(try roundTrip(authenticatedModeration) == authenticatedModeration)
         let trusted = V2ActorTrustedSafetyWire(try V2TrustedSafetyModeration(
             roomID: room, operationID: ModerationOperationID("trusted-op"), action: .redactMessage,
             messageID: message, expectedMessageRevision: 7, reasonCode: reason))
@@ -67,16 +30,9 @@ struct V2ActorAdministrationWireTests {
             roomID: room, operationID: ModerationOperationID("freeze-op"),
             action: .freezeRoom, reasonCode: reason))
         #expect(try control.trustedRoomControl().action == .freezeRoom)
-        let nickname = V2ActorGroupNicknameUpdateWire(roomID: room, actorUserID: actor,
-            operationID: try GroupNicknameOperationID("nickname-op"),
-            expectedRevision: V2ProfileRevision(rawValue: 8), nickname: "Name")
-        try nickname.validateForDomain()
-
-        let commands: [V2RoomAdministrationCommand] = [
-            .membership(membership), .pinned(pinned), .announcement(announcement),
-            .rolePermissions(rolePermissions), .memberRole(memberRole), .moderation(moderation),
-            .trustedSafety(trusted), .trustedSafety(control), .groupNickname(nickname)
-        ]
+        let nickname = V2ActorGroupNicknameUpdateWire(command: try .init(actorUserID: actor, roomID: room,
+            operationID: .init("nickname-op"), expectedRevision: .init(rawValue: 8), nickname: "Name", firstSubmissionDeadlineMilliseconds: 1_700_000_120_000))
+        let commands: [V2RoomAdministrationCommand] = [.trustedSafety(trusted), .trustedSafety(control), .groupNickname(nickname)]
         for command in commands {
             #expect(try roundTrip(command) == command)
             #expect(command.roomID == room)
@@ -84,8 +40,7 @@ struct V2ActorAdministrationWireTests {
             if case .trustedSafety = command { #expect(command.actorUserID == nil) }
             else { #expect(command.actorUserID == actor) }
         }
-        #expect(commands[0].stableOperationIdentity == .membership(membership.operationID))
-        #expect(commands[8].stableOperationIdentity == .groupNickname(nickname.operationID))
+        #expect(commands[2].stableOperationIdentity == .groupNickname(nickname.operationID))
 
         let query = V2RoomAdministrationQuery.groupNicknames(
             .init(roomID: room, actorUserID: actor, afterUserID: target, limit: 100))
@@ -138,8 +93,15 @@ struct V2ActorAdministrationWireTests {
 
         let results: [V2RoomAdministrationResult] = [
             .membership(membership), .pinned(pinned), .announcement(announcement),
-            .rolePermissions(permission), .memberRole(memberRole), .moderation(moderation),
-            .trustedSafety(moderation), .groupNickname(.init(presentation)), .groupNicknames(page)
+            .rolePermissions(permission), .memberRole(memberRole),
+            .trustedSafety(moderation), .groupNickname(try .init(
+                identity: V2GroupNicknameUpdateCommand(actorUserID: target, roomID: room,
+                    operationID: GroupNicknameOperationID("result-nickname"), expectedRevision: nil,
+                    nickname: "Member", firstSubmissionDeadlineMilliseconds: 1000).identity,
+                fingerprint: V2GroupNicknameUpdateCommand(actorUserID: target, roomID: room,
+                    operationID: GroupNicknameOperationID("result-nickname"), expectedRevision: nil,
+                    nickname: "Member", firstSubmissionDeadlineMilliseconds: 1000).fingerprint,
+                outcome: .committed(presentation), resolvedAtMilliseconds: 1)), .groupNicknames(page)
         ]
         for result in results { #expect(try roundTrip(result) == result) }
         let failureCases: [V2RoomAdministrationResult] = [
@@ -147,7 +109,7 @@ struct V2ActorAdministrationWireTests {
             .membership(.unavailable(.expiredShardLease)),
             .pinned(.alreadyInDesiredState), .announcement(.revisionConflict),
             .rolePermissions(.idempotencyConflict), .memberRole(.unavailable(.missingShardLease)),
-            .moderation(.targetNotMember), .trustedSafety(.messageAlreadyRedacted)
+            .trustedSafety(.messageAlreadyRedacted)
         ]
         for result in failureCases { #expect(try roundTrip(result) == result) }
 
@@ -183,46 +145,15 @@ struct V2ActorAdministrationWireTests {
 
     @Test("malformed wire fails decoding or throwing domain mapping")
     func invalidWire() throws {
-        let badID = #"{"roomID":{"rawValue":"bad/room"},"actorUserID":{"rawValue":"actor"},"operationID":{"rawValue":"op"},"targetUserID":{"rawValue":"target"},"action":"add","expectedMembershipRevision":1}"#
-        #expect(throws: (any Error).self) {
-            try JSONDecoder().decode(V2ActorMembershipChangeWire.self, from: Data(badID.utf8))
-        }
-        let membership = V2ActorMembershipChangeWire(roomID: room, actorUserID: actor,
-            operationID: try MembershipOperationID("bad-membership"), targetUserID: actor,
-            action: .add, expectedMembershipRevision: UInt64.max)
-        #expect(throws: (any Error).self) { try membership.domainCommand() }
-        let hugeRevision = V2ActorMembershipChangeWire(roomID: room, actorUserID: actor,
-            operationID: try MembershipOperationID("huge-revision"), targetUserID: target,
-            action: .remove, expectedMembershipRevision: UInt64.max)
-        #expect(throws: V2RevisionValidationError.outOfRange) { try hugeRevision.domainCommand() }
-        let permissions = V2ActorRolePermissionsWire(roomID: room, actorUserID: actor,
-            operationID: try GroupPermissionOperationID("bad-permission"), role: .owner,
-            permissions: [.sendMessages, .sendMessages], expectedRevision: 1)
-        #expect(throws: V2ActorAdministrationWireError.invalidPermissionList) {
-            try permissions.domainCommand()
-        }
-        let moderation = V2ActorModerationWire(roomID: room, actorUserID: actor,
-            operationID: try ModerationOperationID("bad-moderation"), action: .freezeRoom,
-            targetUserID: nil, messageID: nil, expectedMessageRevision: nil,
-            muteUntil: nil, reasonCode: "bad reason!")
-        #expect(throws: V2ActorAdministrationWireError.trustedActionOnUserLane) {
-            try moderation.domainCommand()
-        }
-        let badReason = V2ActorModerationWire(roomID: room, actorUserID: actor,
-            operationID: try ModerationOperationID("bad-reason"), action: .redactMessage,
-            targetUserID: nil, messageID: message, expectedMessageRevision: 1,
-            muteUntil: nil, reasonCode: "bad reason!")
-        #expect(throws: V2ModerationValidationError.invalidReasonCode) {
-            try badReason.domainCommand()
-        }
         let trusted = V2ActorTrustedSafetyWire(roomID: room,
             operationID: try ModerationOperationID("bad-trusted"), action: .redactMessage,
             messageID: message, expectedMessageRevision: UInt64.max, reasonCode: "safety")
         #expect(throws: (any Error).self) { try trusted.trustedModeration() }
-        let nickname = V2ActorGroupNicknameUpdateWire(roomID: room, actorUserID: actor,
-            operationID: try GroupNicknameOperationID("bad-nickname"), expectedRevision: nil,
-            nickname: String(repeating: "x", count: 81))
-        #expect(throws: (any Error).self) { try nickname.validateForDomain() }
+        #expect(throws: (any Error).self) {
+            try V2GroupNicknameUpdateCommand(actorUserID: actor, roomID: room,
+                operationID: GroupNicknameOperationID("bad-nickname"), expectedRevision: nil,
+                nickname: String(repeating: "x", count: 81), firstSubmissionDeadlineMilliseconds: 1000)
+        }
         let invalidPresentation = V2ActorGroupMemberPresentationWire(roomID: room, userID: target,
             groupNickname: "\u{0001}", revision: V2ProfileRevision(rawValue: 1)!)
         #expect(throws: (any Error).self) { try invalidPresentation.domain() }

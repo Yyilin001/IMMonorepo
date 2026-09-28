@@ -19,6 +19,9 @@ final class V2ConversationSearchStore {
         case failed
     }
 
+    enum PaginationFailure: Equatable { case unavailable, invalidContinuation }
+    private(set) var paginationFailure: PaginationFailure?
+
     private let searcher: any V2ConversationMessageSearching
     private let progressReader: (any V2ConversationMessageSearchProgressReading)?
     private let scope: V2MessageSearchScope
@@ -51,6 +54,7 @@ final class V2ConversationSearchStore {
         generation &+= 1
         let requestGeneration = generation
         paginationOperation = nil
+        paginationFailure = nil
         loadedRequest = nil
         cursor = nil
         canLoadMore = false
@@ -101,6 +105,7 @@ final class V2ConversationSearchStore {
               isCurrent(loadedRequest, generation: generation) else { return }
         let operation = UUID()
         paginationOperation = operation
+        paginationFailure = nil
         defer { if paginationOperation == operation { paginationOperation = nil } }
         let requestGeneration = generation
         let request = V2MessageSearchRequest(query: query, scope: scope, contentFilter: contentFilter, senderUserID: senderFilter, cursor: cursor)
@@ -113,7 +118,7 @@ final class V2ConversationSearchStore {
                 // progress. Stop before committing this inconsistent page.
                 self.cursor = nil
                 canLoadMore = false
-                state = .failed
+                paginationFailure = .invalidContinuation
                 return
             }
             var catchingUp = false
@@ -134,10 +139,20 @@ final class V2ConversationSearchStore {
             guard isCurrent(request, generation: requestGeneration) else { return }
             canLoadMore = false
             state = .indexing
-        } catch {
-            guard isCurrent(request, generation: requestGeneration) else { return }
+        } catch V2MessageSearchError.indexUnavailable {
+            guard !Task.isCancelled, isCurrent(request, generation: requestGeneration) else { return }
             canLoadMore = false
             state = .failed
+        } catch V2MessageSearchError.cursorDoesNotMatchScope {
+            guard !Task.isCancelled, isCurrent(request, generation: requestGeneration) else { return }
+            self.cursor = nil
+            canLoadMore = false
+            paginationFailure = .invalidContinuation
+        } catch {
+            guard !Task.isCancelled, isCurrent(request, generation: requestGeneration) else { return }
+            // Keep the confirmed page and its cursor. Retrying pagination must
+            // not replace useful local results with a full-screen error.
+            paginationFailure = .unavailable
         }
     }
 

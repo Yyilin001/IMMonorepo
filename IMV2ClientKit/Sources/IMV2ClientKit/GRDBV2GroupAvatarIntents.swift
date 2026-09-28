@@ -11,7 +11,7 @@ extension GRDBV2LocalSyncStore {
             stage TEXT NOT NULL CHECK(stage IN ('preparing','submitted','needsAttention','committed','cancelled','closed')),
             submission_started INTEGER NOT NULL DEFAULT 0 CHECK(submission_started IN (0,1)),
             attempts INTEGER NOT NULL DEFAULT 0 CHECK(typeof(attempts)='integer' AND attempts>=0),
-            retry_at REAL NOT NULL DEFAULT 0, issue TEXT,
+            retry_at REAL NOT NULL DEFAULT 0, server_retry_not_before REAL NOT NULL DEFAULT 0, issue TEXT,
             claim_id TEXT, claim_until REAL, receipt BLOB, created_at REAL NOT NULL,
             recovery_action TEXT CHECK(recovery_action IN ('query','closeIfAbsent')),
             closure_proof BLOB,
@@ -164,8 +164,9 @@ extension GRDBV2LocalSyncStore {
                 WHERE stage='submitted' AND attempts>=5 AND (claim_until IS NULL OR claim_until<=?)
                 """, arguments: [time])
             return try String.fetchAll(db, sql: """
-                SELECT operation_id FROM v2_group_avatar_intents
+                SELECT operation_id FROM v2_group_avatar_intents g
                 WHERE stage IN ('preparing','submitted') AND retry_at<=? AND (claim_until IS NULL OR claim_until<=?)
+                AND (submission_started=1 OR upload_job_id IS NULL OR EXISTS (SELECT 1 FROM v2_resource_transfer_jobs r WHERE r.job_id=g.upload_job_id AND (r.stage IN ('ready','cancelled','rejected','expired') OR r.needs_attention=1)))
                 ORDER BY retry_at,created_at,operation_id LIMIT ?
                 """, arguments: [time, time, limit]).map(GroupAvatarOperationID.init)
         }
@@ -222,6 +223,9 @@ extension GRDBV2LocalSyncStore {
                                    retryAt: Date, attention: Bool) throws {
         try databasePool.write { db in
             _ = try Self.requireGroupAvatarIntent(claim.intent.id, db: db)
+            if issue == .throttled {
+                try db.execute(sql: "UPDATE v2_group_avatar_intents SET server_retry_not_before=MAX(server_retry_not_before,?) WHERE operation_id=? AND claim_id=?", arguments: [try Self.commandRetryTimestamp(retryAt),claim.intent.id.rawValue,claim.id.uuidString])
+            }
             try Self.failGroupAvatarClaim(claim, issue: issue, retryAt: retryAt, attention: attention || claim.intent.attempts >= 5, db: db)
         }
     }
@@ -239,7 +243,7 @@ extension GRDBV2LocalSyncStore {
             _ = try Self.requireGroupAvatarIntent(id, db: db)
             try db.execute(sql: """
                 UPDATE v2_group_avatar_intents SET stage=CASE WHEN submission_started=1 THEN 'submitted' ELSE 'preparing' END,
-                    attempts=0,retry_at=0,issue=NULL WHERE operation_id=? AND stage='needsAttention' AND claim_id IS NULL
+                    attempts=0,retry_at=server_retry_not_before,issue=NULL WHERE operation_id=? AND stage='needsAttention' AND claim_id IS NULL
                 """, arguments: [id.rawValue])
         }
     }
@@ -280,7 +284,7 @@ extension GRDBV2LocalSyncStore {
         if action != claim.intent.recoveryAction?.rawValue {
             // A requested query/closure supersedes an older failure or denial.
             try db.execute(sql: """
-                UPDATE v2_group_avatar_intents SET attempts=0,retry_at=0,issue=NULL,claim_id=NULL,claim_until=NULL
+                UPDATE v2_group_avatar_intents SET attempts=0,retry_at=server_retry_not_before,issue=NULL,claim_id=NULL,claim_until=NULL
                 WHERE operation_id=? AND claim_id=?
                 """, arguments: [claim.intent.id.rawValue, claim.id.uuidString])
             return false

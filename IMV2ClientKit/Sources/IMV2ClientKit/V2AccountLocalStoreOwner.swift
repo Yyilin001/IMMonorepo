@@ -16,7 +16,7 @@ public actor V2AccountLocalStoreOwner {
     private let root: URL
     private let bootstrapper: V2LocalStoreBootstrapper
     private var catalogs: [UserID: V2AccountStorageDirectory] = [:]
-    private var current: (scope: V2AccountStorageScope, store: GRDBV2LocalSyncStore)?
+    private var current: (scope: V2AccountStorageScope, store: GRDBV2LocalSyncStore, readOnly: Bool)?
     private var tail: (id: UUID, task: Task<Void, Never>)?
     private var rootPrepared = false
 
@@ -42,6 +42,27 @@ public actor V2AccountLocalStoreOwner {
     /// - Throws: 原 store 关闭、目录或数据库 bootstrap 错误。
     public func open(accountID: UserID) async throws -> GRDBV2LocalSyncStore {
         try await serialize { try await self.performOpen(accountID: accountID) }
+    }
+
+    /// 只定位既有目录，保留所有打开／关闭和清理责任。
+    public func existingScopeForLocalRead(accountID: UserID) async throws -> V2AccountStorageScope {
+        try await serialize { try await self.catalog(for: accountID).existingScopeForLocalRead(accountID: accountID) }
+    }
+
+    func openLocalReadOnly(_ permit: V2OfflineReadBootstrap) async throws -> GRDBV2LocalSyncStore {
+        try await serialize { try await self.performOpenLocalReadOnly(permit) }
+    }
+    private func performOpenLocalReadOnly(_ permit: V2OfflineReadBootstrap) async throws -> GRDBV2LocalSyncStore {
+        guard let scope = permit.storageScope,
+              try await catalog(for: permit.identity.userID).existingScopeForLocalRead(accountID: permit.identity.userID) == scope else {
+            throw V2OfflineReadBootstrapError.localStoreUnavailable
+        }
+        if let current, current.scope == scope, current.readOnly { return current.store }
+        if let current { try await current.store.close(); self.current = nil }
+        let store = try GRDBV2LocalSyncStore(localReadOnlyDatabaseURL: permit.databaseURL,
+            installationBinding: permit.installationBinding, userID: permit.identity.userID)
+        current = (scope, store, true)
+        return store
     }
 
     /// 查询当前 store 对象的目录实例。
@@ -96,12 +117,12 @@ public actor V2AccountLocalStoreOwner {
     }
 
     private func performOpen(accountID: UserID) async throws -> GRDBV2LocalSyncStore {
-        if let current, current.scope.accountID == accountID { return current.store }
+        if let current, current.scope.accountID == accountID, !current.readOnly { return current.store }
         if let current { try await current.store.close(); self.current = nil }
         try prepareRootIfNeeded()
         let scope = try await catalog(for: accountID).openScope(accountID: accountID)
         let store = try await bootstrapper.open(databaseURL: scope.database.primary, userID: accountID)
-        current = (scope, store)
+        current = (scope, store, false)
         return store
     }
 

@@ -49,7 +49,7 @@ struct V2HTTPGroupAvatarPresentationClientTests {
         await #expect(throws: V2GroupAvatarReadError.unavailable) {
             _ = try await client(GroupAvatarHTTPTransport(body: Data(), status: 503)).readGroupAvatar(roomID: room)
         }
-        await #expect(throws: V2GroupAvatarReadError.throttled(retryAfter: 60)) {
+        await #expect(throws: V2GroupAvatarReadError.throttled(retryAfter: 100000)) {
             _ = try await client(GroupAvatarHTTPTransport(body: Data(), status: 429, retryAfter: "100000")).readGroupAvatar(roomID: room)
         }
     }

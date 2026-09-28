@@ -80,7 +80,7 @@ let forwardSourceCommandUnexpected: @Sendable (V2RoomForwardCommand, ContinuousC
 }
 
 /// Room port for V2ActorInvitationCoordinator tests. Like RoomRef, each
-/// command or query runs the production room invitation executor under an
+/// query runs the production room invitation executor under an
 /// activation of that room on its owner database.
 func invitationRoomPort(
     control: any Database,
@@ -100,8 +100,7 @@ func invitationRoomPort(
                 identities: identities, capacityProfile: capacityProfile, now: now))
         }
     }
-    return .init(command: { command, _ in try await run(command.roomID) { try await $0.execute(command) } },
-                 query: { query, _ in try await run(query.roomID) { try await $0.execute(query) } })
+    return .init(query: { query, _ in try await run(query.roomID) { try await $0.execute(query) } })
 }
 
 /// Single-owner form of ``invitationRoomPort(control:owner:capacityProfile:now:)``.
@@ -115,6 +114,57 @@ func invitationRoomPort(
 ) -> V2ActorInvitationRoomPort {
     invitationRoomPort(control: control, owner: { _ in (owner, shardID, epoch) },
                        capacityProfile: capacityProfile, now: now)
+}
+
+/// Typed owner operations use the same activation-fenced store as production;
+/// no retired command execution or local control-table mirror is involved.
+func invitationOperationPort(
+    control: any Database,
+    owner: @escaping @Sendable (RoomID) throws -> (database: any Database, shardID: String, epoch: Int64),
+    issuer: V2GroupInviteSecretIssuer,
+    policy: V2GroupInvitationPolicy = .standard,
+    capacityProfile: V2CapacityProfile,
+    now: @escaping @Sendable () -> Date
+) -> V2GroupInvitationOperationRoomPort {
+    let identities = PostgresV2GroupInvitationIdentityReader(database: control)
+    @Sendable func run<Value: Sendable>(roomID: RoomID, inviteID: GroupInviteID?, deadline: ContinuousClock.Instant,
+        _ body: @Sendable (PostgresV2GroupInvitationOperationStore) async throws -> Value) async throws -> Value {
+        try Task.checkCancellation()
+        guard ContinuousClock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+        let location = try owner(roomID)
+        return try await withRoomActivation(database: location.database, roomID: roomID,
+            shardID: location.shardID, epoch: location.epoch) { token in
+            guard ContinuousClock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+            return try await body(PostgresV2GroupInvitationOperationStore(database: location.database, activationToken: token,
+                identities: identities, issuer: issuer, policy: policy, capacity: capacityProfile, inviteID: inviteID))
+        }
+    }
+    @Sendable func invite(_ intent: V2GroupInvitationOperationIntent) -> GroupInviteID? {
+        switch intent.action { case .submit(let id, _, _), .revoke(let id, _): id; default: nil }
+    }
+    return .init(baseline: { query, deadline in
+        try await run(roomID: query.roomID, inviteID: nil, deadline: deadline) { try await $0.baseline(roomID: query.roomID, actorUserID: query.actorUserID) }
+    }, admit: { intent, deadline in
+        try await run(roomID: intent.roomID, inviteID: invite(intent), deadline: deadline) { try await $0.admit(intent, now: now()) }
+    }, submit: { request, deadline in
+        try await run(roomID: request.command.intent.roomID, inviteID: invite(request.command.intent), deadline: deadline) { try await $0.submit(request, now: now()) }
+    }, recover: { request, deadline in
+        try await run(roomID: request.intent.roomID, inviteID: invite(request.intent), deadline: deadline) { try await $0.recover(request, now: now()) }
+    })
+}
+
+func invitationOperationPort(
+    control: any Database,
+    owner: any Database,
+    shardID: String = "room-a",
+    epoch: Int64 = 0,
+    issuer: V2GroupInviteSecretIssuer,
+    policy: V2GroupInvitationPolicy = .standard,
+    capacityProfile: V2CapacityProfile,
+    now: @escaping @Sendable () -> Date
+) -> V2GroupInvitationOperationRoomPort {
+    invitationOperationPort(control: control, owner: { _ in (owner, shardID, epoch) }, issuer: issuer,
+        policy: policy, capacityProfile: capacityProfile, now: now)
 }
 
 /// A generous deadline for coordinator calls whose timing is not under test.

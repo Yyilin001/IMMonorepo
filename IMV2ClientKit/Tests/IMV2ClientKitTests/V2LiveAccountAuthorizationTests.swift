@@ -24,7 +24,7 @@ struct V2LiveAccountAuthorizationTests {
         let session = try fixture.session(store)
         _ = try await session.restoreState()
         let client = try await fixture.devices(session)
-        await #expect(throws: V2ClientDeviceSessionError.authorizationDenied) { try await client.list(cursor: nil, pageSize: 10) }
+        await #expect(throws: V2ClientDeviceSessionError.authorizationUnavailable) { try await client.list(cursor: nil, pageSize: 10) }
         let record = try #require(await store.load())
         let rotated = record.credentials.refreshCredential != rejected.refreshCredential
         #expect(rotated)
@@ -56,7 +56,15 @@ struct V2LiveAccountAuthorizationTests {
         let otherSession = try fixture.session(LiveAccountCredentialStore(other))
         _ = try await otherSession.restoreState()
         let otherClient = try await fixture.devices(otherSession)
-        try await otherClient.revoke(deviceID: account.credentials.deviceID, operationID: UUID())
+        let revocations = try await fixture.remoteRevocations(otherSession)
+        let baseline = try await revocations.baseline()
+        let command = try V2RemoteDeviceRevocationCommand(operationID: UUID(), baseline: baseline,
+            selection: .device(account.credentials.deviceID), firstSubmissionDeadlineMilliseconds: baseline.expiresAtMilliseconds)
+        guard case .receipt(let proof) = try await revocations.submit(command), proof.validates(command), case .revoked = proof.outcome else { Issue.record("Expected original revocation proof"); return }
+        guard case .receipt(let recovered) = try await revocations.recover(command, action: .query) else {
+            Issue.record("Expected original remote revocation recovery proof"); return
+        }
+        #expect(recovered == proof && recovered.validates(command))
         await #expect(throws: (any Error).self) { try await client.list(cursor: nil, pageSize: 10) }
         #expect(await terminal.value == .authenticationRequired)
         #expect(await store.load() == nil)
@@ -79,7 +87,7 @@ struct V2LiveAccountAuthorizationTests {
         let session = try fixture.session(store)
         _ = try await session.restoreState()
         let client = try await fixture.devices(session)
-        await #expect(throws: V2ClientDeviceSessionError.authorizationUnavailable) { try await client.list(cursor: nil, pageSize: 10) }
+        await #expect(throws: V2AuthSessionError.unauthenticated) { try await client.list(cursor: nil, pageSize: 10) }
         #expect(await store.load() == nil)
         #expect(await session.currentState() == .unauthenticated)
     }
@@ -97,7 +105,12 @@ struct V2LiveAccountAuthorizationTests {
         let boundary = V2SessionHTTPAuthorization(session: session, epoch: await session.currentEpoch(),
             transport: V2URLSessionAuthHTTPTransport(session: untrusted))
         let client = try V2HTTPDeviceSessionClient(endpoint: fixture.url("v2/devices"), credentials: boundary, transport: boundary)
-        await #expect(throws: V2ClientDeviceSessionError.networkFailure) { try await client.list(cursor: nil, pageSize: 10) }
+        do {
+            _ = try await client.list(cursor: nil, pageSize: 10)
+            Issue.record("Untrusted TLS unexpectedly succeeded")
+        } catch let failure as V2HTTPFailure {
+            #expect(failure.kind == .transport)
+        }
         let unchanged = await store.load()?.credentials == account.credentials
         #expect(unchanged)
         #expect(await session.currentState() != .unauthenticated)
@@ -281,6 +294,10 @@ struct LiveAccountFixture {
     func devices(_ session: V2AuthSession) async throws -> V2HTTPDeviceSessionClient {
         let boundary = V2SessionHTTPAuthorization(session: session, epoch: await session.currentEpoch(), transport: transport)
         return try .init(endpoint: url("v2/devices"), credentials: boundary, transport: boundary)
+    }
+    func remoteRevocations(_ session: V2AuthSession) async throws -> V2HTTPRemoteDeviceRevocationClient {
+        let boundary = V2SessionHTTPAuthorization(session: session, epoch: await session.currentEpoch(), transport: transport)
+        return try .init(baseURL: base, credentials: boundary, transport: boundary)
     }
     func authenticator() throws -> V2HTTPPasswordAccountAuthenticator {
         try .init(registrationEndpoint: url("v2/account-auth/password/register"),

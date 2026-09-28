@@ -63,7 +63,19 @@ flowchart LR
 - 服务端检查返回计划与已授权事实完全一致，并在签发后复核会话/授权；适配器不能把上层的 120 秒截止扩大到 1 小时。
 - 客户端从内存读取计划，不写入 journal。旧附件 envelope 携带新计划时，外层 URL、headers、大小与期限必须一致，避免两套字段选择不同内容。
 - 下载落盘前校验大小和 SHA-256；失败只清理本次临时文件，不能覆盖已有缓存。
-- 当前 lifecycle 只开放 PUT / form POST 中双方共同支持的模式，实际 App executor 为前台 PUT。multipart、Range 和平台后台恢复尚未开放，不能仅靠适配器自报能力启用。
+- 当前本地参考上传适配器声明 `.httpPut` 与 `.httpPartPut`，总对象上限 256 MiB；分片为 8 MiB、最多 32 片。前台分片与账户资源恢复已装配。带逐片 `backgroundAuthorization` 的计划才可交给 iOS 后台上传；普通前台计划、form POST 或只自报 capability 的适配器不能获得后台资格。客户端已实现有界 Range 下载，服务端是否兑现 Range/验证器仍须按具体字节入口核对。
+
+## Range 验证器与本地参考实现成本
+
+客户端的 [Range journal](../../IMV2ClientKit/Sources/IMV2ClientKit/V2RangeDownloadJournal.swift) 与[下载执行器](../../IMV2ClientKit/Sources/IMV2ClientKit/V2MediaTransfer.swift)保存资源事实、偏移及强 ETag，不保存临时 URL。续传携 `Range` 和已有强 ETag 的 `If-Range`。`206` 必须匹配请求起点、原总长和连续偏移；已保存的 ETag 变化则废弃进度。`200` 表示服务端返回完整对象，客户端先清空旧进度再写入；`416` 只有 `Content-Range: bytes */原总长` 且本地已到完整长度才可进入最终校验。最终大小与全文 SHA-256 校验通过前不发布缓存。
+
+[本地文件下载路由](../../IMV2Server/Sources/IMV2ServerHTTP/V2VaporLocalFilesystemMediaRoutes.swift)现使用全文 SHA-256 的强 ETag。在 FileIO 解析 Range 前比较 `If-Range`；不匹配（含弱验证器或日期形式）时移除 Range，返回完整 `200`，避免旧偏移超出新对象长度而误报 `416`。该路由禁用 FileIO 的 `If-None-Match` 捷径，鉴权后的响应仍为 `no-store`。这是 `/v2/local-media/download/:mediaID` 的明确行为；新资源事实入口的实现和顺序读取成本见下文，外部 CDN 仍须独立兑现合同。
+
+当前 [strongETag](../../IMV2Server/Sources/IMV2Server/V2LocalFilesystemMediaProvider.swift)每次请求都扫描全文，使用 128 KiB 块及可取消的独立 utility 任务；取消后等待该任务结束。内存有界，但一次小 Range 请求也承担 O(对象大小) 的磁盘读取和 SHA-256 成本，多个分片请求会重复扫描。尚无持久摘要缓存，也没有吞吐或延迟测量。真实部署应在不可变对象写入校验时保存可信内容摘要，按精确对象版本返回验证器，并单独验证代理/CDN 的 Range、撤权和缓存行为；不能以文件时间或原生 multipart ETag 替代全文内容事实。
+
+[资源事实字节入口](../../IMV2Server/Sources/IMV2ServerHTTP/V2VaporResourceByteRoutes.swift) `/v2/resource-bytes/:placementID` 是当前头像和附件 delivery plan 实际签发的 URL。它先验证能力期限，并将签名声明与不可变对象的 `inspect` 大小及 SHA-256 事实核对，再返回该全文摘要的强 ETag 和 `Accept-Ranges: bytes`。支持单个闭区间、起点到末尾及后缀 Range；有效范围返回 `206` 与精确 `Content-Range`/长度，无可选字节的范围返回 `416` 与 `bytes */总长`。不支持的单位、多段及格式错误 Range 按完整 `200` 处理；`If-Range` 必须精确匹配强 ETag，弱验证器、日期或其他不匹配值返回完整 `200`，不触发偏移越界 `416`。该入口不走 `304` 或公开缓存捷径，仍为 `private, no-store`。
+
+此入口沿 [顺序 storage read 端口](../../IMV2Server/Sources/IMV2Server/Resources/Adapters/Local/V2LocalResourceDelivery.swift)读取，没有高效 seek：每次 Range 都丢弃前缀，输出交集，并继续排空尾部到 EOF，通过现有全文 SHA-256/大小校验后才正常结束。大对象每块最多 64 KiB；16 个物理流许可在 EOF、错误、取消或响应放弃时释放，显式关闭等待正在进行的读取结束，`416` 返回前关闭已打开但未读取的流。每次读取前后检查能力期限，超期中止响应；失败或取消的部分响应不代表完整校验通过，客户端仍须最终校验全文才发布缓存。小对象缓存仅保存先前完整校验过的最多 512 KiB 内容，按相同期限与范围输出。一次小范围请求仍可能读取并校验整个源对象，具体 `inspect` 也可能扫描全文；不能据此宣称 Range 降低本地磁盘或 hash 成本。此实现尚待统一回归，未声称真实 CDN 或平台测量已完成。
 
 ## 默认后端切换与存量解析
 
@@ -157,6 +169,44 @@ App 私聊页面也使用统一的资料与字节管线：对端私聊权限、�
 | `configurationInvalid` | 缺失或矛盾的部署配置；不能回退到另一运营商 |
 
 原生异常需在适配器边界映射。日志记录 operation、generation、placement 和规范错误，不记录签名 URL、opaque handle 的完整内容或对象凭据。
+
+## App 后台装配与验证边界
+
+[AppStore](../../IMApp/IMApp/V2/V2AppStore.swift)在启动任何前台资源活动之前建立账户后台 coordinator，执行 `attachBackground` 的系统 task 对账与物理槽接管；失败则停止该次账户激活，不能继续创建第二个前台所有者。账户活动分别拥有后台字节循环和资源准备循环。页面取消只结束本地观察；持久资源任务、冻结消息身份及 Ready 依赖仍由账户拥有。会话待处理发送视图完整覆盖每房间最多 200 条活跃准备/提交记录；终态拒绝、关闭及过期历史不占这 200 条的执行准入，按 200 条一页另行浏览。页面与数据库观察使用同一有界 SQL 选集和页号，单条重试/取消按原 intent ID 精确查状态，不由当前页是否包含它推断可操作性。
+
+后台 journal 保存 job、session、系统 task、账户 activation、源文件 token 和摘要，临时签名计划不入库。上传从受保护文件交给系统 URLSession；锁屏只能记录系统结果 inbox，解锁后才应用业务库事实。账号退出或切换必须取消并排空旧实际 I/O，随后关闭映射和文件所有者；同账号重新激活先采用系统任务再恢复前台步骤。暂存分片、未完成复制和孤儿文件的清理有扫描与时间上限，零进展容量错误进入可见账户暂停及明确恢复入口。
+
+上述是源码装配合同，不是系统行为验证结论。真实设备的挂起、锁屏、强退、重启、后台晚完成、账户切换和 OS 调度窗口仍需独立验收；不承诺没有执行窗口时完成上传。外部对象存储/CDN 的后台授权、分片幂等、finalize 丢响应、撤权、期限和容量也尚无部署证据。本地参考 provider 或模拟器结果不能替代这些项目。
+
+## F20 真机执行清单（待执行）
+
+此清单复用上述 App 后台装配，补充[弱网验收范围](application-weak-network-regression-scope.md)中的 F20。当前没有本清单的真机执行证据；组件和模拟器通过不能填写为真机通过。
+
+### 环境和安装前置
+
+- 用户指定可清理测试数据的专用 iPhone/iPad、系统版本、测试时间窗口及两个测试账户；不得使用日常账户或在未指定设备上安装。记录设备标识的脱敏值、源码 baseline revision、工作区 dirty 状态和本次签名产物摘要。
+- 使用项目现有 `IMApp` scheme 和 `Config/IMApp.entitlements`，配置有该设备权限的开发团队、设备 provisioning、Developer Mode 和所需 capabilities。真机使用正常开发签名，不能沿用模拟器的 ad-hoc `CODE_SIGN_IDENTITY=-` 或关闭签名。通过 Xcode 选择指定设备安装、运行；本项目现有本地联调脚本的 simulator 参数不是设备运行入口，不能直接改 UDID 冒充真机脚本。
+- 按 [App 配置说明](../../IMApp/README.md)设置 `IM_V2_ACCOUNT_BASE_URL`、Gateway host/port 和 push environment。设备须实际可达 HTTPS Account、TLS Gateway、计划签发的上传/下载域名；Mac 的 `127.0.0.1` 对设备不可达。证书主机名、链及系统信任必须正确，不关闭 TLS 校验。真实 Push 冷启动另需该签名和环境匹配的 APNs，不能用前台通知替代。
+- 指定参考 provider 或实际部署 provider，以及可控制的丢响应/延迟位置。先核对真实计划含逐片 `backgroundAuthorization`，有对应 PUT 能力、期限、大小/摘要和 Range/强 ETag；不具备后台资格时只能验前台恢复，记该后台场景不可执行。外部 provider 地址、签名规则、网络及故障控制权限由用户提供；本地参考 provider 可在设备可达且可信 HTTPS 环境中验参考合同，不能据此验收外部部署。
+- 每组选择足以跨越操作窗口的附件，先记录原 send intent/clientMessageID、resource job/mediaID、上传 session/generation、系统 session/task/mapping 的关联证据。只保存脱敏关联表，禁止记录 access/refresh token、签名 URL、bearer capability 或源文件正文。系统 session 名为 `imv2.background.<UUID>`，taskDescription 对应持久 mapping UUID；仅 task 数量不能证明原身份恢复。
+
+### 操作与成功条件
+
+| 操作（各组独立记录，不假定系统一定给执行窗口） | 应观察的生产结果 |
+| --- | --- |
+| 前台开始附件发送，确认 DB 意图和系统 task 已建立后回到桌面、锁屏；在锁屏期间让 provider 完成一片，再解锁打开 App | 锁屏结果只进入受保护 inbox；解锁后同 job/session/generation 对账，不新建第二次逻辑上传。Ready 依赖满足才交付原冻结消息；accepted 只显示“服务器已受理，等待消息同步”，真实投影到达才移除本地等待行，不能当作已送达。 |
+| 后台有 task 时等待系统挂起，再恢复前台 | 先采用系统已有 task 和物理槽，再恢复前台；无两个 owner 同时传同片。记录系统是否实际挂起及是否完成；没有执行窗口允许任务保持待恢复，不要求按固定秒数送达。 |
+| task 建立后从多任务界面强退 App；等待后手动重新打开 | 不承诺强退后系统继续执行或重新唤醒。下次允许运行时，以原身份查询/采用已有结果，不换 clientMessageID、mediaID 或 session 来补发；没有原结果才沿原恢复合同继续。 |
+| 有未完成任务时重启设备，分别观察首次解锁前和解锁后 | 首次解锁前不能把 Keychain/业务库不可读视为空队列或新账号。解锁后先对账，再恢复；原冻结操作和源文件仍关联原账号。无执行窗口期间保持待恢复不算失败或成功。 |
+| provider 已接受片/最终提交但丢弃响应，之后恢复网络或重开 App | inspect/status/query 按原身份收敛；重复片依协议幂等，不能把未知变失败后重建资源。最终大小/全文 SHA-256 通过才发布文件；HTTP accepted 不伪造 timeline。 |
+| 取消资源任务或退出/换号后，让旧系统 completion 晚到；随后以另一账户使用 App，再回原账户 | 旧 completion 只能进入原 session/mapping 的核对路径，不改新账户 UI、文件或任务。取消须等待实际 I/O 排空后释放槽；未知原操作仍保留可核对身份，晚完成不复活已取消页面。 |
+| 下载/上传中借用文件进行分享或播放，再触发取消/替换/撤权，结束借用 | 借用期间文件不提前删除且继续计额；最后一个使用者释放后才能清理。新账号不能访问旧账号路径；源、part、系统副本和 inbox 按各自生命周期清理，不能删仍被 work/payload 引用的文件。 |
+
+### 证据和结论
+
+以 App 当前账户 activity 状态/暂停与明确恢复入口、既有 OSLog 诊断和只读 journal 关联记录对照 provider 原操作记录。受保护数据可读后，核对原 job、mapping、task、receipt 与消息投影的关联；跨进程无法获知的计时/字节值记 `unknown`，不得补零。暂存诊断的已观察/准入加权峰值不是实测磁盘峰值，系统副本占用另记录实际可取得的证据。
+
+每组记录设备/OS、产物、provider/capability、操作时间、系统是否给窗口、原身份是否保持、最终状态、文件借用/清理结果和脱敏日志位置。无法造成系统挂起、无 APNs、provider 不支持后台计划或设备未指定时，写明未执行原因；不把“重开后能恢复”写成“锁屏已后台完成”。验收结束仅按约定清理专用账户/产物/临时环境，不删除未知原操作来凑空队列。
 
 ## 实际验收与仍需完成的迁移
 

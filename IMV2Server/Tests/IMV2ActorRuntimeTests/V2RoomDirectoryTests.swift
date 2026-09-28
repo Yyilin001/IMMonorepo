@@ -116,11 +116,11 @@ struct V2RoomDirectoryTests {
     func stableRetry() async throws {
         let fixture = try Fixture(existingLease: true, invokeFailures: [.outcomeUnknown])
         let user = UserID(uuid: UUID())
-        let command = V2RoomRequest.messaging(.send(.init(
-            roomID: fixture.room, actorUserID: user,
+        let command = V2RoomRequest.messaging(.sendOperation(try .init(command: .init(
+            roomID: fixture.room, senderUserID: user,
             clientMessageID: ClientMessageID(uuid: UUID()), text: "same operation",
-            media: [], mentions: [], entities: [], replyTo: nil
-        )))
+            limits: .init(maxUTF8Bytes: 64)
+        ), firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)))
         let result = try await fixture.directory.room(fixture.room).call(
             command, principal: .user(user), deadline: .now + .seconds(2)
         )
@@ -134,7 +134,7 @@ struct V2RoomDirectoryTests {
     func localHintOnlyForRepeatableCall() async throws {
         let fixture = try Fixture(existingLease: true, localHintAvailable: true)
         let user = UserID(uuid: UUID())
-        let command = fixture.send(user: user)
+        let command = try fixture.send(user: user)
         #expect(try await fixture.directory.resolve(fixture.room, deadline: .now + .seconds(2)) == fixture.token)
         let initialLookups = await fixture.transport.lookups.count
         #expect(initialLookups == 1)
@@ -211,7 +211,7 @@ struct V2RoomDirectoryTests {
             databaseObservedAt: Date(timeIntervalSince1970: 1_001),
             expiresAt: Date(timeIntervalSince1970: 1_031)))
         let user = UserID(uuid: UUID())
-        let command = fixture.send(user: user)
+        let command = try fixture.send(user: user)
         _ = try await fixture.directory.room(fixture.room).call(command,
             principal: .user(user), deadline: .now + .seconds(3))
         #expect(await fixture.transport.localInvocations == 1)
@@ -226,7 +226,7 @@ struct V2RoomDirectoryTests {
             localFailures: [.outcomeUnknown])
         await fixture.directory.remember(fixture.token)
         let user = UserID(uuid: UUID())
-        let command = fixture.send(user: user)
+        let command = try fixture.send(user: user)
         _ = try await fixture.directory.room(fixture.room).call(command,
             principal: .user(user), deadline: .now + .seconds(3))
         #expect(await fixture.transport.localInvocations == 1)
@@ -289,10 +289,10 @@ struct V2RoomDirectoryTests {
         let transport: Transport
         let directory: V2RoomDirectory
 
-        func send(user: UserID) -> V2RoomRequest {
-            .messaging(.send(.init(roomID: room, actorUserID: user,
-                clientMessageID: .init(uuid: UUID()), text: "local hint", media: [],
-                mentions: [], entities: [], replyTo: nil)))
+        func send(user: UserID) throws -> V2RoomRequest {
+            .messaging(.sendOperation(try .init(command: .init(roomID: room, senderUserID: user,
+                clientMessageID: .init(uuid: UUID()), text: "local hint", limits: .init(maxUTF8Bytes: 64)),
+                firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)))
         }
 
         init(ownerGate: Gate? = nil, existingLease: Bool = false,

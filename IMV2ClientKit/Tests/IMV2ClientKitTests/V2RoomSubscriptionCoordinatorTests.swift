@@ -271,7 +271,7 @@ private actor SubscriptionWire: V2ClientGroupEventSubscriptionTransport, V2Clien
     }
     func unsubscribePresence(roomID: RoomID) { record("unsubscribe-presence") }
     func liveActivityPreferences() throws -> V2LiveActivityPreferences { throw CancellationError() }
-    func setLiveActivityPreferences(operationID: LiveActivityPreferenceOperationID, allowsOnlinePresence: Bool, allowsTypingIndicators: Bool) throws -> V2LiveActivityPreferences { throw CancellationError() }
+
     func nextGroupEventAvailabilityHint() async throws -> V2GroupEventAvailabilityHint {
         try Task.checkCancellation()
         if !pendingGroups.isEmpty { return pendingGroups.removeFirst() }

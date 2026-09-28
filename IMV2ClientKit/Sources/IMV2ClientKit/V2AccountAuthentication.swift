@@ -231,7 +231,9 @@ public struct V2HTTPPasswordAccountAuthenticator: V2PasswordAccountAuthenticatin
             (data, response) = try await transport.data(for: request)
         } catch is CancellationError {
             throw CancellationError()
-        } catch {
+        } catch let failure as V2HTTPFailure { throw failure }
+        catch let error as V2AuthSessionError { throw error }
+        catch {
             throw V2AccountAuthenticationError.networkFailure
         }
         switch response.statusCode {

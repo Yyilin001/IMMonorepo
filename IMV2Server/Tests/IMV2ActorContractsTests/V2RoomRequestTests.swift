@@ -28,10 +28,10 @@ struct V2RoomRequestTests {
         let room = RoomID(uuid: UUID())
         let user = UserID(uuid: UUID())
         let message = ClientMessageID(uuid: UUID())
-        let send = V2RoomRequest.messaging(.send(.init(
-            roomID: room, actorUserID: user, clientMessageID: message, text: "message",
-            media: [], mentions: [], entities: [], replyTo: nil
-        )))
+        let send = V2RoomRequest.messaging(.sendOperation(try .init(command: .init(
+            roomID: room, senderUserID: user, clientMessageID: message, text: "message",
+            limits: .init(maxUTF8Bytes: 64)
+        ), firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)))
         let encoded = try JSONEncoder().encode(send)
         let decoded = try JSONDecoder().decode(V2RoomRequest.self, from: encoded)
         #expect(decoded == send)
@@ -39,7 +39,7 @@ struct V2RoomRequestTests {
         #expect(decoded.actorUserID == user)
         #expect(decoded.replayPolicy == .durableIdempotent)
         #expect(decoded.hasStableOperationID)
-        #expect(decoded.canShareSendTurn)
+        #expect(!decoded.canShareSendTurn)
 
         let query = V2RoomRequest.recovery(.init(roomID: room, actorUserID: user, kind: .state))
         #expect(query.roomID == room)

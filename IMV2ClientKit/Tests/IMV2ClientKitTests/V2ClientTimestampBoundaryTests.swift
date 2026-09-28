@@ -4,29 +4,14 @@ import IMV2Core
 import Testing
 
 struct V2ClientTimestampBoundaryTests {
-    @Test("invalid mute dates are rejected before persistence or a network request", arguments: [
-        Double.nan, Double.infinity, -Double.infinity, Double(Int64.max) / 1_000,
-        Double(Int64.min).nextDown / 1_000
-    ])
-    func invalidMuteDateHasNoSideEffects(seconds: Double) async throws {
-        let directory = FileManager.default.temporaryDirectory.appending(path: "im-timestamp-\(UUID())")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "client.sqlite"), installationBinding: .init(value: UUID()))
-        let wire = TimestampWire()
-        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: UInt8(IMV2ProtocolVersion.current))
-        let engine = V2MemberMuteOutboxEngine(store: store, transport: transport)
-        let room = RoomID(uuid: UUID()), target = UserID(uuid: UUID())
-        let expiry = Date(timeIntervalSince1970: seconds)
-        await #expect(throws: V2ModerationValidationError.invalidMuteExpiry) {
-            try await engine.enqueueMute(roomID: room, targetUserID: target, muteUntil: expiry, reasonCode: .init("policy_violation"))
+    @Test("member administration rejects out-of-domain millisecond timestamps", arguments: [UInt64(0), UInt64(Int64.max) + 1, UInt64.max])
+    func invalidMuteTimestamp(milliseconds: UInt64) throws {
+        #expect(throws: V2MemberAdministrationValidationError.invalidIntent) {
+            try V2MemberAdministrationIntent(roomID: .init(uuid: UUID()), actorUserID: .init(uuid: UUID()),
+                operationID: .init(uuid: UUID()), targetUserID: .init(uuid: UUID()),
+                action: .mute(untilMilliseconds: milliseconds), reasonCode: .init("policy_violation"),
+                expectedMembershipRevision: 0, confirmedUntilMilliseconds: 1_750_000_120_000)
         }
-        await #expect(throws: V2RealtimeTransportError.unexpectedResponse) {
-            try await transport.muteMember(roomID: room, operationID: .init(UUID().uuidString), targetUserID: target, muteUntil: expiry, reasonCode: .init("policy_violation"))
-        }
-        #expect(try await store.pendingMemberMutes().isEmpty)
-        #expect(await wire.times().isEmpty)
-        try await store.close()
     }
 
     @Test("heartbeat rejects nonfinite and UInt64-overflow timestamps before writing", arguments: [

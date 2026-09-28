@@ -76,7 +76,7 @@ struct V2GroupAvatarIntentTests {
         try await reopened.finishGroupAvatarSubmission(retry, response: f.response(command), now: f.now)
         #expect(try await reopened.groupAvatarIntent(command.operationID)?.stage == .committed)
         #expect(try await reopened.releasableResourceFileToken(id: job.id) == job.localFileToken)
-        #expect(try await reopened.pendingMessageCommands().isEmpty)
+        #expect(try await reopened.resourceSendPayloads().isEmpty)
         try await reopened.close(); try f.removeFiles()
     }
 
@@ -158,7 +158,7 @@ struct V2GroupAvatarIntentTests {
         let claim = try await f.store.claimGroupAvatarSubmission(command.operationID, now: f.now)
         try await f.store.finishGroupAvatarSubmission(claim, response: f.response(command), now: f.now)
         #expect(try await f.store.claimReleasableResourceFileToken(id: groupJob.id) == nil)
-        try await f.store.markMessageAccepted(clientMessageID: message.clientMessageID, messageID: .init(uuid: UUID()), roomSequence: 1)
+        try await f.store.completeResourceSendFixture(message.clientMessageID,result:.accepted(.init(messageID:.init(uuid:UUID()),roomSequence:1)))
         #expect(try await f.store.claimReleasableResourceFileToken(id: groupJob.id) == groupJob.localFileToken)
         await #expect(throws: V2GroupAvatarIntentError.conflict) {
             _ = try await f.store.freezeGroupAvatarIntent(actorUserID: f.actor, command: f.command(media: groupJob.request.mediaID, revision: 1), uploadJobID: groupJob.id)
@@ -212,6 +212,21 @@ struct V2GroupAvatarIntentTests {
         #expect(try await second.value.stage == .committed)
         #expect(await client.count == 1)
         await engine.close(); await transfers.close(); try await f.store.close(); try f.removeFiles()
+    }
+
+    @Test func coldStartUserRetryAndClosureDoNotEraseServerCooldown() async throws {
+        let f = try IntentFixture(), command = try f.command(media: nil)
+        let cooldown = Date(timeIntervalSince1970: floor(f.now.timeIntervalSince1970)+10000)
+        _ = try await f.store.freezeGroupAvatarIntent(actorUserID: f.actor, command: command, uploadJobID: nil)
+        let claim = try await f.store.claimGroupAvatarSubmission(command.operationID, now: f.now)
+        try await f.store.failGroupAvatarSubmission(claim, issue: .throttled, retryAt: cooldown, attention: true)
+        let reopened = try f.reopen()
+        try await reopened.retryGroupAvatarIntent(command.operationID)
+        #expect(try await reopened.groupAvatarIntent(command.operationID)?.retryAt == cooldown)
+        try await reopened.requestGroupAvatarRecovery(command.operationID, action: .closeIfAbsent)
+        #expect(try await reopened.groupAvatarIntent(command.operationID)?.retryAt == cooldown)
+        #expect(try await reopened.dueGroupAvatarIntents(now: f.now.addingTimeInterval(100)).isEmpty)
+        try await reopened.close(); try await f.store.close(); try f.removeFiles()
     }
 
     @Test("snapshot replacement preserves unresolved management commands even when the room disappears")
@@ -277,7 +292,7 @@ struct IntentFixture {
 private struct IntentForbiddenTransfer: V2ResourceUploadControlling, V2ResourcePlanExecuting {
     func create(_ request: V2ResourceUploadRequest) async throws -> V2ResourceUploadSession { throw V2ResourceJournalError.invalidRecord }
     func status(_ locator: V2ResourceUploadLocator) async throws -> V2ResourceUploadSession { throw V2ResourceJournalError.invalidRecord }
-    func target(_ session: V2ResourceUploadSession) async throws -> V2ResourceTransferPlan { throw V2ResourceJournalError.invalidRecord }
+    func target(_ session: V2ResourceUploadSession) async throws -> V2ResourceTransferPlan? { throw V2ResourceJournalError.invalidRecord }
     func finalize(_ session: V2ResourceUploadSession) async throws -> V2ResourceUploadSession { throw V2ResourceJournalError.invalidRecord }
     func cancel(_ session: V2ResourceUploadSession) async throws -> V2ResourceUploadSession { throw V2ResourceJournalError.invalidRecord }
     func upload(fileURL: URL, plan: V2ResourceTransferPlan) async throws { throw V2ResourceJournalError.invalidRecord }

@@ -126,7 +126,8 @@ struct V2ConversationSearchConcurrencyTests {
         let original = V2MessageSearchCursor(storage: .global(createdAt: first.createdAt, messageID: first.messageID), filterFingerprint: "query")
         await client.finishPage(.init(hits: [inconsistent], nextCursor: original))
         await loading.value
-        #expect(store.state == .failed)
+        #expect(store.state == .loaded)
+        #expect(store.paginationFailure == .invalidContinuation)
         #expect(!store.canLoadMore && !store.isLoadingMore)
         #expect(store.hits == [first])
         await store.loadMore()
@@ -166,7 +167,8 @@ struct V2ConversationSearchConcurrencyTests {
         await client.waitForPage()
         await client.failPage(indexRebuilding ? V2MessageSearchError.indexUnavailable(.building) : V2MessageSearchError.cursorDoesNotMatchScope)
         await loading.value
-        #expect(store.state == (indexRebuilding ? .indexing : .failed))
+        #expect(store.state == (indexRebuilding ? .indexing : .loaded))
+        #expect(store.paginationFailure == (indexRebuilding ? nil : .invalidContinuation))
         #expect(!store.isLoadingMore && !store.canLoadMore)
         #expect(store.hits == [first])
         await store.search()
@@ -176,6 +178,29 @@ struct V2ConversationSearchConcurrencyTests {
         await client.finishPage(.init(hits: [], nextCursor: nil))
         await retry.value
         #expect(!store.isLoadingMore && !store.canLoadMore)
+    }
+
+    @Test("临时分页失败保留已显示结果，直接重试原游标")
+    func transientPageFailureKeepsContent() async {
+        let first = hit("first"), second = hit("second")
+        let client = SearchPageBarrier(first: first)
+        let store = V2ConversationSearchStore(searcher: client)
+        store.query = "query"
+        await store.search()
+        let loading = Task { await store.loadMore() }
+        await client.waitForPage()
+        await client.failPage(URLError(.timedOut))
+        await loading.value
+        #expect(store.state == .loaded && store.hits == [first])
+        #expect(store.canLoadMore && !store.isLoadingMore)
+        #expect(store.paginationFailure == .unavailable)
+        let retry = Task { await store.loadMore() }
+        await client.waitForPage()
+        await client.finishPage(.init(hits: [second], nextCursor: nil))
+        await retry.value
+        #expect(store.hits == [first, second])
+        #expect(store.paginationFailure == nil && !store.canLoadMore)
+        #expect(await client.pageCalls == 2)
     }
 
     @Test("旧查询的索引进度迟到不能改变新查询", arguments: [false, true])

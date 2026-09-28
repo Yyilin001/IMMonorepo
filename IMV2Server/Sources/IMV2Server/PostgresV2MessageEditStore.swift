@@ -8,6 +8,8 @@ import SQLKit
 /// 受修订约束的正文替换、权威房间事件与持久化操作重放记录会在同一个事务内提交。
 public struct PostgresV2MessageEditStore: V2MessageEditStore, V2OwnerValidatedMessageEditStore {
     private let database: any Database
+    private var existingOperationTransaction = false
+    func usingOperationTransaction() -> Self { var copy=self;copy.existingOperationTransaction=true;return copy }
     private var activationScope: V2RoomActivationWriteScope?
 
     public func usingActivationScope(_ scope: V2RoomActivationWriteScope) -> Self {
@@ -81,7 +83,7 @@ public struct PostgresV2MessageEditStore: V2MessageEditStore, V2OwnerValidatedMe
               identity.targetUserID == command.actorUserID
         else { throw V2MessageEditStoreError.corruptPersistenceState }
         return try await v2WithPostgresTransactionRetry(database: database,
-            maximumRetryCount: 0, classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil) { transaction in
+            maximumRetryCount: 0, classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil,existingTransaction:existingOperationTransaction) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2MessageEditStoreError.corruptPersistenceState }
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             let roomID = try editUUID(command.roomID), actorID = try editUUID(command.actorUserID)
@@ -89,11 +91,6 @@ public struct PostgresV2MessageEditStore: V2MessageEditStore, V2OwnerValidatedMe
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: actorID.uuidString + ":" + operationID.uuidString), 0))").run()
             if let ownerRoute { try await v2RequireRoomOwner(roomID: roomID, route: ownerRoute, sql: sql) }
             try await activationScope?.require([roomID], sql: sql)
-            if let prior = try await sql.raw("SELECT room_id, message_id, expected_message_revision, text_body, resulting_message_revision, room_sequence, event_id, created_at FROM im_v2.message_edit_operations WHERE actor_user_id = \(bind: actorID) AND operation_id = \(bind: operationID)").first(decoding: EditOperationRow.self) {
-                guard prior.matches(command, roomID: roomID, messageID: messageID) else { return .idempotencyConflict }
-                guard v2PostgresTimestampCanEncode(prior.createdAt) else { throw V2MessageEditStoreError.corruptPersistenceState }
-                return .idempotent(try prior.result())
-            }
             guard v2PostgresTimestampCanEncode(now) else { throw V2MessageEditStoreError.corruptPersistenceState }
             guard let room = try await sql.raw("SELECT room_kind, frozen_at, room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: EditRoomRow.self) else { throw V2MessageEditStoreError.roomNotFound }
             guard room.capacityProfileID == capacityProfile.id else { throw V2MessageEditStoreError.corruptPersistenceState }
@@ -176,7 +173,6 @@ public struct PostgresV2MessageEditStore: V2MessageEditStore, V2OwnerValidatedMe
                 ),
                 sql: sql
             )
-            try await sql.raw("INSERT INTO im_v2.message_edit_operations (actor_user_id, operation_id, room_id, message_id, expected_message_revision, text_body, resulting_message_revision, room_sequence, event_id, created_at) VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), \(bind: messageID), \(bind: try editSigned(command.expectedMessageRevision)), \(bind: command.text), \(bind: nextRevision), \(bind: nextSequence), \(bind: eventUUID), \(bind: now))").run()
             return .edited(try .init(roomID: command.roomID, messageID: command.messageID, text: command.text, messageRevision: editUnsigned(nextRevision), roomSequence: editUnsigned(nextSequence), eventID: eventID, createdAt: timestamp.createdAt))
         }
     }
@@ -189,7 +185,6 @@ private struct EditCommittedTimestampRow: Decodable {
     let createdAt: Date
     enum CodingKeys: String, CodingKey { case createdAt = "created_at" }
 }
-private struct EditOperationRow: Decodable { let roomID: UUID; let messageID: UUID; let expectedMessageRevision: Int64; let text: String; let resultingMessageRevision: Int64; let roomSequence: Int64; let eventID: UUID; let createdAt: Date; enum CodingKeys: String, CodingKey { case roomID = "room_id", messageID = "message_id", expectedMessageRevision = "expected_message_revision", text = "text_body", resultingMessageRevision = "resulting_message_revision", roomSequence = "room_sequence", eventID = "event_id", createdAt = "created_at" }; func matches(_ command: V2EditMessageCommand, roomID: UUID, messageID: UUID) -> Bool { self.roomID == roomID && self.messageID == messageID && expectedMessageRevision == command.expectedRevision.signedValue && text == command.text }; func result() throws -> V2MessageEdit { try .init(roomID: .init(roomID.uuidString), messageID: .init(messageID.uuidString), text: text, messageRevision: editUnsigned(resultingMessageRevision), roomSequence: editUnsigned(roomSequence), eventID: .init(eventID.uuidString), createdAt: createdAt) } }
 private struct EditAdmissionRow { let eligibleMemberCount: Int; let commandWindowLimit: Int; let commandWindowUsed: Int; let shardLeaseID: UUID; let shardLeaseGeneration: Int64 }
 extension EditAdmissionRow: Decodable { enum CodingKeys: String, CodingKey { case eligibleMemberCount = "eligible_member_count", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", shardLeaseID = "shard_lease_id", shardLeaseGeneration = "shard_lease_generation" }; func state() throws -> RoomAdmissionState { try .init(eligibleMemberCount: eligibleMemberCount, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed)) } }
 private struct EditShardRow { let leaseID: UUID; let generation: Int64; let validUntil: Date; let commandWindowLimit: Int; let commandWindowUsed: Int; }

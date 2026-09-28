@@ -67,7 +67,9 @@ extension GRDBV2LocalSyncStore: V2LocalPushIntentStoring {
                 state.ownerID = ownerID
                 state.desiredEnabled = state.preferenceEnabled
                 state.tokenReference = nil
+                let previousAttempts = state.attemptCount
                 try Self.advancePushRevision(&state)
+                state.attemptCount = previousAttempts
             } else {
                 state = .init(scope: scope, ownerID: ownerID, preferenceEnabled: initialPreference, desiredEnabled: initialPreference,
                               revision: 1, acknowledgedRevision: 0, tokenReference: nil, claim: nil, epoch: nil,
@@ -225,6 +227,21 @@ extension GRDBV2LocalSyncStore: V2LocalPushIntentStoring {
         }
     }
 
+    /// A delayed throttle can constrain a newer input owned by the same account
+    /// activity, while never completing it or allowing an old owner to mutate it.
+    func preserveSupersededPushServiceCooldown(until date: Date, expected: V2LocalPushIntent) throws {
+        guard date.timeIntervalSince1970.isFinite, date.timeIntervalSince1970 >= 0,
+              date.timeIntervalSince1970 < 1e300 else { throw V2LocalPushIntentError.invalidState }
+        try databasePool.write { db in
+            try Self.checkPushScope(expected.scope, db: db)
+            guard var current = try Self.readPushIntent(scope: expected.scope, db: db),
+                  current.ownerID == expected.ownerID, current.scope == expected.scope,
+                  current != expected, date > current.nextAttemptAt else { return }
+            current.nextAttemptAt = date
+            try Self.writePushIntent(current, db: db)
+        }
+    }
+
     /// 暂停推送意图并记录原因。
     ///
     /// - Parameters:
@@ -257,7 +274,8 @@ extension GRDBV2LocalSyncStore: V2LocalPushIntentStoring {
 
     private static func advancePushRevision(_ state: inout V2LocalPushIntent) throws {
         guard state.revision < UInt64(Int64.max) else { throw V2LocalPushIntentError.versionExhausted }
-        state.revision += 1; state.attemptCount = 0; state.nextAttemptAt = .init(timeIntervalSince1970: 0)
+        state.revision += 1; state.attemptCount = 0
+        // A new input revision cannot bypass a persisted service cooldown.
         // Do not silently resume a server conflict or authentication failure.
     }
 

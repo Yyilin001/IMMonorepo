@@ -37,6 +37,31 @@ public struct PostgresV2ForwardExportStore: Sendable {
         return scoped
     }
 
+    /// Original source-side proof precedes current membership. A closure shares the export lock;
+    /// an existing export must be reconciled through target authority instead of erased.
+    public func recover(_ pair: V2ActorForwardPairWire, action: V2OperationRecoveryRequest.Action) async throws -> V2ForwardImportOutcome? {
+        guard let actor=pair.actorUserID.uuidValue, let operation=pair.operationID.uuidValue,
+              let message=pair.source.messageID.uuidValue, let target=pair.targetRoomID.uuidValue,
+              let sourceRoom=pair.source.roomID.uuidValue else { throw V2ForwardExportError.invalidRequest }
+        return try await v2WithPostgresTransactionRetry(database:database,maximumRetryCount:0) { transaction in
+            guard let sql=transaction as? any SQLDatabase else { throw V2ForwardExportError.corruptPersistenceState }
+            let key="v2-forward-export:\(actor):\(operation):\(message):\(target)"
+            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind:key),0))").run()
+            try await activationScope?.require([sourceRoom],sql:sql)
+            if let prior=try await PostgresV2ForwardReceiptStore(database:transaction).terminalStatus(actor:pair.actorUserID,operation:pair.operationID,source:pair.source,target:pair.targetRoomID) { return prior }
+            if let existing=try await sql.raw("SELECT source_room_id,source_content_revision FROM im_v2.message_forward_exports WHERE actor_user_id=\(bind:actor) AND operation_id=\(bind:operation) AND source_message_id=\(bind:message) AND target_room_id=\(bind:target)").first(decoding:ForwardRecoverOriginal.self) {
+                guard existing.source_room_id==sourceRoom,existing.source_content_revision==pair.source.revision.signedValue else { throw V2ForwardExportError.idempotencyConflict }
+                return nil
+            }
+            guard action == .closeIfAbsent else { return nil }
+            try await sql.raw("""
+                INSERT INTO im_v2.forward_preparation_rejections(actor_user_id,operation_id,source_message_id,target_room_id,source_room_id,source_content_revision,error_code)
+                VALUES(\(bind:actor),\(bind:operation),\(bind:message),\(bind:target),\(bind:sourceRoom),\(bind:pair.source.revision.signedValue),'CLOSED_BEFORE_EXECUTION')
+                """).run()
+            return .rejected(code:"CLOSED_BEFORE_EXECUTION")
+        }
+    }
+
     /// 准备一次转发导出，或在重试时返回既有导出。
     ///
     /// 加锁顺序为一个用户对互斥锁加一个源房间锁，绝不锁定远端目标房间。
@@ -113,6 +138,10 @@ public struct PostgresV2ForwardExportStore: Sendable {
             let key = "v2-forward-export:\(actor):\(operation):\(message):\(target)"
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
             try await activationScope?.require([sourceRoom], sql: sql)
+            if let prior = try await forwardPreparationRejection(actor: actor, operation: operation, source: source, target: targetRoomID, sql: sql) {
+                if replayTerminal { return .terminal(.rejected(code: prior)) }
+                throw V2ForwardExportError.sourceUnavailable
+            }
             if let prior = try await sql.raw("""
                 SELECT export.source_room_id, export.source_content_revision,
                        CASE WHEN \(bind: replayTerminal) AND receipt.export_id IS NOT NULL
@@ -148,6 +177,7 @@ public struct PostgresV2ForwardExportStore: Sendable {
                 // 重新授权，也不能改写此信封。
                 return .export(export)
             }
+            do {
             guard let room = try await sql.raw("""
                 SELECT room_shard_id, owner_epoch FROM im_v2.rooms
                 WHERE room_id = \(bind: sourceRoom) FOR UPDATE
@@ -242,9 +272,27 @@ public struct PostgresV2ForwardExportStore: Sendable {
                 VALUES (\(bind: export.intent.exportID), 'pending', \(bind: now), \(bind: now))
                 """).run()
             return .export(export)
+            } catch {
+                guard replayTerminal else { throw error }
+                let code: String
+                switch error {
+                case V2ForwardExportError.sourceUnavailable: code = "NOT_FOUND"
+                case V2ForwardExportError.sourceChanged: code = "SOURCE_CHANGED"
+                case V2ForwardExportError.mediaUnavailable: code = "MEDIA_UNAVAILABLE"
+                case V2ForwardExportError.invalidRequest: code = "INVALID_ARGUMENT"
+                default: throw error
+                }
+                try await sql.raw("""
+                    INSERT INTO im_v2.forward_preparation_rejections(actor_user_id,operation_id,source_message_id,target_room_id,source_room_id,source_content_revision,error_code)
+                    VALUES(\(bind:actor),\(bind:operation),\(bind:message),\(bind:target),\(bind:sourceRoom),\(bind:source.revision.signedValue),\(bind:code))
+                    """).run()
+                return .terminal(.rejected(code: code))
+            }
         }
     }
 }
+
+private struct ForwardRecoverOriginal:Decodable { let source_room_id:UUID;let source_content_revision:Int64 }
 
 enum V2ForwardExportPreparation: Sendable {
     case export(V2ForwardExport)

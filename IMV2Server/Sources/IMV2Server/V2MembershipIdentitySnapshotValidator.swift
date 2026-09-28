@@ -52,30 +52,6 @@ public protocol V2MembershipIdentitySnapshotValidating: Sendable {
     ) async throws -> V2MembershipIdentitySnapshot
 }
 
-/// 支持控制面校验的成员变更存储。
-public protocol V2ControlValidatedRoomMembershipStore:
-    V2RoomMembershipStore {
-    /// 以控制面身份快照与房间归属执行成员变更。
-    ///
-    /// - Parameters:
-    ///   - command: 成员变更命令。
-    ///   - ownerRoute: 已选定的房间归属。
-    ///   - identitySnapshot: 控制面提供的身份快照。
-    ///   - capacityProfile: 本次命令使用的容量档位。
-    ///   - eventID: 命令幂等标识。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 变更结果。
-    /// - Throws: 归属不符、身份失效、无权限或持久化失败时抛出。
-    func changeControlValidated(
-        command: V2ChangeRoomMembershipCommand,
-        ownerRoute: V2RoomShardRoute,
-        identitySnapshot: V2MembershipIdentitySnapshot,
-        capacityProfile: V2CapacityProfile,
-        eventID: EventID,
-        now: Date
-    ) async throws -> V2RoomMembershipChangeOutcome
-}
-
 /// 在单次控制面快照中读取两个全局身份事实。
 ///
 /// 账号停用仍作为认证与会话栅栏；该检查只是防止新增成员时引用不存在或已停用的身份。

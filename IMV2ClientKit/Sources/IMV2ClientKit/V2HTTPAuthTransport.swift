@@ -17,44 +17,17 @@ public protocol V2AuthHTTPTransport: Sendable {
 
 /// 使用注入 URLSession 执行认证 HTTP 请求的适配器，不在此解释业务状态码或解析响应体。
 public actor V2URLSessionAuthHTTPTransport: V2AuthHTTPTransport {
-    /// 执行请求的会话，默认使用账户服务共享的隔离会话。
-    private let session: URLSession
-
-    #if canImport(OSLog)
-    /// 认证传输诊断日志，仅记录 URL 错误数字码，不记录 URL 或请求内容。
-    private static let logger = Logger(subsystem: "com.stskcxfz.imapp", category: "v2.http-auth")
-    #endif
-
-    /// 注入 HTTP 会话；默认使用 V2SecureURLSession.account，自定义会话的配置由注入方负责。
+    private let executor: V2HTTPExecutor
+    private let workContext: V2NetworkWorkContext?
     public init(session: URLSession = V2SecureURLSession.account) {
-        self.session = session
+        executor = V2HTTPExecutor(session: session)
+        workContext = nil
     }
-
-    /// 开始前检查取消，执行 URLSession 请求并要求响应为 HTTPURLResponse。
-    ///
-    /// - Parameter request: 调用方构造的完整 HTTP 请求。
-    /// - Returns: 原始数据与 HTTP 响应，包含非成功状态码。
-    /// - Throws: 取消、原始 URLSession 错误，或非 HTTP 响应对应的 invalidResponse。
-    ///
-    /// URL 错误只记录数字码后原样抛出；不记录端点、请求体或响应体。
+    public init(executor: V2HTTPExecutor, workContext: V2NetworkWorkContext? = nil) {
+        self.executor = executor; self.workContext = workContext
+    }
     public func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        try Task.checkCancellation()
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch let error as URLError {
-            #if canImport(OSLog)
-            // URLSession's numeric code is enough to distinguish trust,
-            // connection and timeout failures without logging a URL or payload.
-            Self.logger.error("Auth HTTP transport failed with URL error code \(error.code.rawValue, privacy: .public)")
-            #endif
-            throw error
-        }
-        guard let response = response as? HTTPURLResponse else {
-            throw V2HTTPAuthTransportError.invalidResponse
-        }
-        return (data, response)
+        try await executor.execute(request, budget: .init(timeout: min(15, max(0.001, request.timeoutInterval)), maximumResponseBytes: 1_048_576), service: workContext?.service ?? "authentication", workContext: workContext)
     }
 }
 
@@ -121,6 +94,8 @@ public struct V2HTTPDeviceCredentialAuthTransport: V2AuthTransport, Sendable {
         } catch let error as URLError where error.code == .cancelled {
             throw CancellationError()
         } catch let error as V2HTTPAuthTransportError {
+            throw error
+        } catch let error as V2HTTPFailure {
             throw error
         } catch {
             throw V2HTTPAuthTransportError.networkFailure

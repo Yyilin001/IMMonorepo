@@ -7,36 +7,24 @@ import Testing
 
 @Suite("V2 gateway domain command handler")
 struct V2GatewayDomainCommandHandlerTests {
-    @Test("durable authorization errors remain request-scoped", arguments:
-        ["owner", "drain", "aborted", "conflict", "corrupt"])
-    func directAuthorizationErrorMapping(kind: String) async throws {
+    @Test("retired domain wire fields cannot invoke a Gateway mutation", arguments: [20, 22, 24, 26, 28, 51, 53, 55, 57, 58, 67, 69, 71, 72, 97, 99, 101, 103, 105, 106])
+    func retiredMutationWireIsNotExecutable(field: Int) async throws {
         let fixture = try GatewayDomainFixture()
-        let store = GatewayAcceptedMessageStore(outcome: .rateLimited(retryAfterSeconds: 1), beforeReturn: {
-            switch kind {
-            case "owner": throw V2DirectAuthorizationCoordinationError.ownerUnavailable
-            case "drain": throw V2DirectAuthorizationCoordinationError.revocationIncomplete
-            case "aborted": throw V2DirectAuthorizationReceiptError.attemptAborted
-            case "conflict": throw V2DirectAuthorizationIntentError.identityConflict
-            default: throw V2DirectAuthorizationIntentError.corruptPersistence
-            }
-        })
-        let handler = makeGatewayDomainCommandHandler(sendMessage: fixture.sendService(store: store), sync: fixture.syncService())
-        var request = IMV2Envelope()
-        request.sendMessage.roomID = fixture.roomID.rawValue
-        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        request.sendMessage.content.text = "authorization"
-        for _ in 0..<2 {
-            let response = try await handler.handle(envelope: request, identity: fixture.identity)
-            #expect(response.error.code == (kind == "conflict" ? "IDEMPOTENCY_CONFLICT" : "UNAVAILABLE"))
-            #expect(response.error.retryable == (kind != "conflict"))
-        }
+        let handler = makeGatewayDomainCommandHandler( sync: fixture.syncService())
+        var tag = UInt64(field << 3 | 2), bytes = Data()
+        repeat { var byte = UInt8(tag & 0x7f); tag >>= 7; if tag != 0 { byte |= 0x80 }; bytes.append(byte) } while tag != 0
+        bytes.append(0)
+        let request = try IMV2Envelope(serializedBytes: bytes)
+        #expect(request.body == nil)
+        let response = try await handler.handle(envelope: request, identity: fixture.identity)
+        #expect(response.error.code == "INVALID_ARGUMENT")
+        #expect(!response.error.retryable)
     }
 
     @Test("Account coverage start uses the authenticated origin connection", arguments: [false, true])
     func accountCoverageStart(hasOrigin: Bool) async throws {
         let fixture = try GatewayDomainFixture(), probe = GatewayAccountStartProbe()
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .rateLimited(retryAfterSeconds: 1))),
             accountChanges: probe, sync: fixture.syncService())
         let connection = UUID()
         var request = IMV2Envelope(); request.accountRoomChangesStart = .init()
@@ -57,7 +45,6 @@ struct V2GatewayDomainCommandHandlerTests {
         let fixture = try GatewayDomainFixture()
         let recovery = GatewayRecoveryProbe()
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .rateLimited(retryAfterSeconds: 1))),
             roomRecovery: recovery, sync: fixture.syncService())
         var request = IMV2Envelope()
         if batch == 2 { request.roomLatestVisibleBatch.roomIds = [fixture.roomID.rawValue] }
@@ -74,49 +61,12 @@ struct V2GatewayDomainCommandHandlerTests {
     func recoveryTopologyReset() async throws {
         let fixture = try GatewayDomainFixture()
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .rateLimited(retryAfterSeconds: 1))),
             roomRecovery: GatewayRecoveryProbe(failure: .topologyChanged), sync: fixture.syncService())
         var request = IMV2Envelope()
         request.userRoomDirectoryList.pageSize = 10
         let response = try await handler.handle(envelope: request, identity: fixture.identity)
         #expect(response.error.code == "ROOM_DIRECTORY_RESET_REQUIRED")
         #expect(response.error.retryable)
-    }
-
-    @Test("Gateway response metrics measure elapsed time despite wall-clock corrections",
-          arguments: [Double(-3_600), 3_600, .nan], ["accepted", "rejected", "failed"])
-    func telemetryElapsedClock(wallShift: Double, outcome: String) async throws {
-        let fixture = try GatewayDomainFixture()
-        let clock = V2TelemetryTestClock()
-        let message = V2AcceptedMessage(messageID: .init(uuid: UUID()), roomID: fixture.roomID,
-            roomSequence: 9, senderUserID: fixture.userID, clientMessageID: fixture.clientMessageID,
-            text: "hello", mediaPresentations: [], createdAt: fixture.now)
-        let telemetry = V2InMemoryTelemetrySink()
-        let store = GatewayAcceptedMessageStore(
-            outcome: outcome == "rejected" ? .rateLimited(retryAfterSeconds: 1) : .idempotent(message.receipt),
-            beforeReturn: {
-                clock.advance(by: .milliseconds(25), wallShift: wallShift)
-                if outcome == "failed" { throw CancellationError() }
-            })
-        let handler = makeGatewayDomainCommandHandler(sendMessage: fixture.sendService(store: store),
-            sync: fixture.syncService(), telemetry: telemetry, now: { clock.now() },
-            monotonicNow: { clock.monotonicNow() })
-        var request = IMV2Envelope()
-        request.sendMessage.roomID = fixture.roomID.rawValue
-        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        request.sendMessage.content.text = "hello"
-        do {
-            let response = try await handler.handle(envelope: request, identity: fixture.identity)
-            #expect(outcome != "failed")
-            if outcome == "rejected" { #expect(response.error.code == "RATE_LIMITED") }
-            else { #expect(response.messageAccepted.messageID == message.messageID.rawValue) }
-        } catch is CancellationError { #expect(outcome == "failed") }
-        guard case .gatewayCommand(_, .sendMessage, let recordedOutcome, _, let elapsed) = await telemetry.events().first else {
-            Issue.record("Missing Gateway command metric")
-            return
-        }
-        #expect(elapsed == 25)
-        #expect(recordedOutcome.rawValue == outcome)
     }
 
     @Test("Snapshot preparation preserves bounded retry intervals and recovers from invalid intervals")
@@ -133,7 +83,6 @@ struct V2GatewayDomainCommandHandlerTests {
         for (interval, expected) in cases {
             let store = GatewaySnapshotClockStore(retryAfter: interval)
             let handler = makeGatewayDomainCommandHandler(
-                sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .rateLimited(retryAfterSeconds: 1))),
                 sync: .init(store: store, now: { fixture.now }))
             var request = IMV2Envelope()
             request.syncPull.requireSnapshot = true
@@ -159,7 +108,6 @@ struct V2GatewayDomainCommandHandlerTests {
         let fixture = try GatewayDomainFixture()
         let store = GatewaySnapshotClockStore(expiresAt: Date(timeIntervalSince1970: seconds))
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .rateLimited(retryAfterSeconds: 1))),
             sync: .init(store: store, now: { fixture.now }))
         var request = IMV2Envelope()
         if manifest {
@@ -197,7 +145,6 @@ struct V2GatewayDomainCommandHandlerTests {
         let fixture = try GatewayDomainFixture()
         let store = GatewayReadReceiptSequenceStore()
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .rateLimited(retryAfterSeconds: 1))),
             readReceipt: .init(store: store, now: { fixture.now }), sync: fixture.syncService())
         var request = IMV2Envelope()
         request.recordReadReceipt.roomID = fixture.roomID.rawValue
@@ -216,9 +163,7 @@ struct V2GatewayDomainCommandHandlerTests {
     }
 
     @Test("Domain timestamp responses reject unencodable dates and recover on retry",
-          arguments: [false, true], ["edit", "withdraw", "reaction", "membership", "redact", "mute", "mute-expiry", "remove", "relationship", "block",
-                                    "receipt", "receipt-preferences", "direct", "stranger", "user-add", "live-set", "live-get", "presence",
-                                    "conversation", "conversation-mute", "favorite", "pinned", "announcement", "group"])
+          arguments: [false, true], ["receipt", "live-get", "presence", "conversation", "conversation-mute", "favorite"])
     func remainingResponseTimestampBoundaries(replay: Bool, path: String) async throws {
         let fixture = try GatewayDomainFixture()
         let profile = try V2CapacityProfile(id: "standard", limits: fixture.profile)
@@ -228,81 +173,26 @@ struct V2GatewayDomainCommandHandlerTests {
         switch path {
         case "conversation", "conversation-mute":
             request.setConversationState.roomID = fixture.roomID.rawValue
+            request.setConversationState.firstSubmissionDeadlineMs=UInt64(Int64.max)
             request.setConversationState.operationID = operation
         case "favorite":
             request.setMessageFavorite.roomID = fixture.roomID.rawValue
+            request.setMessageFavorite.firstSubmissionDeadlineMs=UInt64(Int64.max)
             request.setMessageFavorite.operationID = operation
             request.setMessageFavorite.messageID = message
             request.setMessageFavorite.isFavorited = true
-        case "pinned":
-            request.setPinnedMessage.roomID = fixture.roomID.rawValue
-            request.setPinnedMessage.operationID = operation
-            request.setPinnedMessage.messageID = message
-            request.setPinnedMessage.isPinned = true
-        case "announcement":
-            request.setGroupAnnouncement.roomID = fixture.roomID.rawValue
-            request.setGroupAnnouncement.operationID = operation
-            request.setGroupAnnouncement.body = "updated announcement"
-            request.setGroupAnnouncement.expectedRevision = 1
-        case "group": request.finalizeGroupRoomCreation.operationID = operation
-        case "edit":
-            request.editMessage.roomID = fixture.roomID.rawValue; request.editMessage.operationID = operation
-            request.editMessage.messageID = message; request.editMessage.expectedMessageRevision = 1; request.editMessage.content.text = "updated"
-        case "withdraw":
-            request.withdrawMessage.roomID = fixture.roomID.rawValue; request.withdrawMessage.operationID = operation
-            request.withdrawMessage.messageID = message; request.withdrawMessage.expectedMessageRevision = 1
-        case "reaction":
-            request.changeMessageReaction.roomID = fixture.roomID.rawValue; request.changeMessageReaction.operationID = operation
-            request.changeMessageReaction.messageID = message; request.changeMessageReaction.reaction = "👍"; request.changeMessageReaction.action = .add
-        case "membership":
-            request.changeRoomMembership.roomID = fixture.roomID.rawValue; request.changeRoomMembership.operationID = operation
-            request.changeRoomMembership.targetUserID = target; request.changeRoomMembership.action = .add; request.changeRoomMembership.expectedMembershipRevision = 1
-        case "redact":
-            request.moderateMessage.roomID = fixture.roomID.rawValue; request.moderateMessage.operationID = operation
-            request.moderateMessage.messageID = message; request.moderateMessage.reasonCode = "abuse_spam"
-        case "mute", "mute-expiry":
-            request.muteMember.roomID = fixture.roomID.rawValue; request.muteMember.operationID = operation
-            request.muteMember.targetUserID = target; request.muteMember.reasonCode = "abuse_spam"; request.muteMember.muteUntilMs = 1_750_000_010_000
-        case "remove":
-            request.moderateMemberRemoval.roomID = fixture.roomID.rawValue; request.moderateMemberRemoval.operationID = operation
-            request.moderateMemberRemoval.targetUserID = target; request.moderateMemberRemoval.reasonCode = "abuse_spam"
-        case "relationship":
-            request.changeRelationship.operationID = operation; request.changeRelationship.targetUserID = target; request.changeRelationship.action = .request
-        case "block":
-            request.changeUserBlock.operationID = operation; request.changeUserBlock.targetUserID = target; request.changeUserBlock.action = .block
         case "receipt":
             request.recordReadReceipt.operationID = operation; request.recordReadReceipt.roomID = fixture.roomID.rawValue; request.recordReadReceipt.readThroughRoomSequence = 3
-        case "receipt-preferences": request.setReadReceiptPreferences.operationID = operation
-        case "direct": request.openDirectRoom.operationID = operation; request.openDirectRoom.targetUserID = target
-        case "stranger": request.setStrangerMessagePermission.operationID = operation; request.setStrangerMessagePermission.permission = .allow
-        case "user-add": request.setUserAddPermission.operationID = operation; request.setUserAddPermission.permission = .allow
-        case "live-set": request.setLiveActivityPreferences.operationID = operation
         case "live-get": request.getLiveActivityPreferences = .init()
         default: request.subscribePresence.roomID = fixture.roomID.rawValue
         }
         for seconds in [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, Double(Int64.max) / 1_000, -Double(Int64.max) / 500] {
             let store = GatewayResponseClockStore(date: Date(timeIntervalSince1970: seconds), replay: replay,
-                muteExpiryOnly: path == "mute-expiry" || path == "conversation-mute")
-            let imports = V2GroupAudienceImportService(store: GatewayAudienceImportStore(),
-                groupMessaging: try .init(store: store, capacityProfile: profile, roomShardID: "room-a", now: { fixture.now }),
-                now: { fixture.now })
-            if path == "group" {
-                _ = try await imports.begin(actorUserID: fixture.userID, operationID: .init(operation), title: "clock")
-                _ = try await imports.append(actorUserID: fixture.userID, operationID: .init(operation), memberUserIDs: [.init(target)])
-            }
+                muteExpiryOnly: path == "conversation-mute")
             let handler = makeGatewayDomainCommandHandler(
-                sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .rateLimited(retryAfterSeconds: 1))),
-                membership: .init(store: store, capacityProfile: profile, now: { fixture.now }),
-                withdrawal: .init(store: store, capacityProfile: profile, now: { fixture.now }),
-                reaction: .init(store: store, capacityProfile: profile, now: { fixture.now }),
-                edit: .init(store: store, capacityProfile: profile, maximumTextUTF8Bytes: 64, now: { fixture.now }),
                 readReceipt: .init(store: store, now: { fixture.now }), liveActivity: .init(store: store),
-                directMessaging: try .init(store: store, capacityProfile: profile, roomShardID: "room-a", now: { fixture.now }),
-                groupAudienceImports: imports,
-                socialRelationships: .init(store: store, now: { fixture.now }),
-                moderation: .init(store: store, capacityProfile: profile, now: { fixture.now }),
                 conversationCapabilities: .init(store: store, now: { fixture.now }),
-                groupCapabilities: .init(store: store, capacityProfile: profile, now: { fixture.now }), sync: fixture.syncService())
+                sync: fixture.syncService())
             let failed = try await handler.handle(envelope: request, identity: fixture.identity)
             #expect(failed.error.code == "UNAVAILABLE" && failed.error.retryable && failed.error.retryAfterSeconds == 0)
             for (recoveredDate, expectedMilliseconds) in [(valid, Int64(1_750_000_000_125)), (Date(timeIntervalSince1970: 0), 0), (Date(timeIntervalSince1970: -1.25), -1_250)] {
@@ -310,28 +200,10 @@ struct V2GatewayDomainCommandHandlerTests {
                 let response = try await handler.handle(envelope: request, identity: fixture.identity)
                 let milliseconds: Int64
                 switch path {
-                case "conversation": milliseconds = response.conversationStateSet.updatedAtMs
-                case "conversation-mute": milliseconds = response.conversationStateSet.muteUntilMs
-                case "favorite": milliseconds = response.messageFavoriteChanged.updatedAtMs
-                case "pinned": milliseconds = response.pinnedMessageChanged.updatedAtMs
-                case "announcement": milliseconds = response.groupAnnouncementChanged.updatedAtMs
-                case "group": milliseconds = response.groupRoomCreated.createdAtMs
-                case "edit": milliseconds = response.messageEdited.serverCreatedAtMs
-                case "withdraw": milliseconds = response.messageWithdrawn.serverCreatedAtMs
-                case "reaction": milliseconds = response.messageReactionChanged.serverCreatedAtMs
-                case "membership": milliseconds = response.membershipChanged.serverCreatedAtMs
-                case "redact": milliseconds = response.messageRedacted.serverCreatedAtMs
-                case "mute": milliseconds = response.memberMuted.serverCreatedAtMs
-                case "mute-expiry": milliseconds = response.memberMuted.muteUntilMs
-                case "remove": milliseconds = response.memberRemovedByModerator.serverCreatedAtMs
-                case "relationship": milliseconds = response.relationshipChanged.updatedAtMs
-                case "block": milliseconds = response.userBlockChanged.updatedAtMs
+                case "conversation": milliseconds = response.personalPreferenceReceipt.conversationState.updatedAtMs
+                case "conversation-mute": milliseconds = response.personalPreferenceReceipt.conversationState.muteUntilMs
+                case "favorite": milliseconds = response.personalPreferenceReceipt.messageFavorite.updatedAtMs
                 case "receipt": milliseconds = response.readReceiptRecorded.recordedAtMs
-                case "receipt-preferences": milliseconds = response.readReceiptPreferencesSet.updatedAtMs
-                case "direct": milliseconds = response.directRoomOpened.createdAtMs
-                case "stranger": milliseconds = response.strangerMessagePermissionSet.updatedAtMs
-                case "user-add": milliseconds = response.userAddPermissionSet.updatedAtMs
-                case "live-set": milliseconds = response.liveActivityPreferencesSet.updatedAtMs
                 case "live-get": milliseconds = response.liveActivityPreferences.updatedAtMs
                 default: milliseconds = response.presenceSubscribed.expiresAtMs
                 }
@@ -341,65 +213,6 @@ struct V2GatewayDomainCommandHandlerTests {
         }
     }
 
-    @Test("group revision boundaries produce correlated terminal argument errors before storage",
-          arguments: [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max])
-    func groupRevisionBoundary(revision: UInt64) async throws {
-        let fixture = try GatewayDomainFixture()
-        let store = GatewayOwnerChangedGroupCapabilityStore()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: GatewayOwnerChangedSendStore()),
-            groupCapabilities: .init(store: store, capacityProfile: try .init(id: "standard", limits: fixture.profile)),
-            sync: fixture.syncService())
-        let version = UInt8(IMV2ProtocolVersion.current)
-        let session = V2GatewaySession(limits: try .init(maximumInFlightRequests: 1),
-            authenticator: GatewayResponseAuthenticator(userID: fixture.userID), capabilityProfile: "base",
-            commandAdmission: V2AllowingGatewayCommandAdmission(), now: { fixture.now })
-        var hello = IMV2Envelope(); hello.requestID = 1
-        hello.clientHello.supportedProtocolVersions = [UInt32(version)]
-        hello.clientHello.supportedCapabilityProfiles = ["base"]
-        _ = try await session.receiveBootstrap(V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0))
-        var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(version)
-        auth.authenticate.accessToken = "local-revision-fixture"; auth.authenticate.deviceID = fixture.deviceID.rawValue
-        _ = try await session.receiveBootstrap(V2ServerProtobufFrameCodec.encode(auth, frameVersion: version))
-        var expectedCalls: [String] = []
-        for kind in ["announcement", "permissions", "role"] {
-            var request = IMV2Envelope(); request.requestID = 3; request.protocolVersion = UInt32(version)
-            let operation = UUID().uuidString
-            switch kind {
-            case "announcement":
-                request.setGroupAnnouncement.roomID = fixture.roomID.rawValue
-                request.setGroupAnnouncement.operationID = operation
-                request.setGroupAnnouncement.body = "Announcement"
-                request.setGroupAnnouncement.expectedRevision = revision
-            case "permissions":
-                request.setGroupRolePermissions.roomID = fixture.roomID.rawValue
-                request.setGroupRolePermissions.operationID = operation
-                request.setGroupRolePermissions.role = "member"
-                request.setGroupRolePermissions.expectedRevision = revision
-            default:
-                request.changeGroupMemberRole.roomID = fixture.roomID.rawValue
-                request.changeGroupMemberRole.operationID = operation
-                request.changeGroupMemberRole.userID = UserID(uuid: UUID()).rawValue
-                request.changeGroupMemberRole.role = "admin"
-                request.changeGroupMemberRole.expectedMembershipRevision = revision
-            }
-            let invalid = revision > UInt64(Int64.max) || (revision == 0 && kind != "announcement")
-            // Repeating the same operation and request IDs verifies rejection
-            // precedes both new/replay lookup and releases request correlation.
-            for _ in 0..<2 {
-                let frame = try V2ServerProtobufFrameCodec.encode(request, frameVersion: version)
-                let response = try V2ServerProtobufFrameCodec.decode(await session.receiveAuthenticated(frame, handler: handler))
-                #expect(response.requestID == 3 && response.protocolVersion == UInt32(version))
-                #expect(response.error.code == (invalid ? "INVALID_ARGUMENT" : "UNAVAILABLE"))
-                #expect(response.error.retryable == !invalid)
-                if !invalid { expectedCalls.append(kind) }
-                #expect(await store.calls() == expectedCalls)
-            }
-        }
-        #expect(await session.authenticatedIdentity() != nil)
-        await session.close()
-    }
-
     @Test("invalid unsubscribe room IDs return argument errors without closing or removing subscriptions",
           arguments: ["group", "presence", "typing"])
     func unsubscribeRoomValidation(kind: String) async throws {
@@ -407,8 +220,7 @@ struct V2GatewayDomainCommandHandlerTests {
         let registry = V2DeviceConnectionRegistry(), connectionID = UUID()
         let version = UInt8(IMV2ProtocolVersion.current)
         let limits = try V2FrameLimits(maximumPayloadBytes: 4_096, acceptedVersions: [0, version])
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: GatewayOwnerChangedSendStore()), sync: fixture.syncService())
+        let handler = makeGatewayDomainCommandHandler( sync: fixture.syncService())
         let stream = V2GatewayByteStream(frameLimits: limits,
             session: .init(limits: try .init(maximumInFlightRequests: 1),
                 authenticator: GatewayResponseAuthenticator(userID: fixture.userID),
@@ -423,6 +235,7 @@ struct V2GatewayDomainCommandHandlerTests {
         var hello = IMV2Envelope(); hello.requestID = 1
         hello.clientHello.supportedProtocolVersions = [UInt32(version)]
         hello.clientHello.supportedCapabilityProfiles = ["base"]
+        hello.clientHello.deviceID = fixture.deviceID.rawValue
         _ = try await exchange(hello, version: 0)
         var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(version)
         auth.authenticate.accessToken = "local-fixture"; auth.authenticate.deviceID = fixture.deviceID.rawValue
@@ -477,218 +290,24 @@ struct V2GatewayDomainCommandHandlerTests {
         try await stream.finish()
     }
 
-    @Test("UUIDv7 clock failures return retryable Gateway responses before message writes")
-    func sendIdentifierClockFailureIsRetryable() async throws {
-        let fixture = try GatewayDomainFixture()
-        let clock = Mutex(fixture.now)
-        let accepted = V2AcceptedMessage(messageID: .init(uuid: UUID()), roomID: fixture.roomID, roomSequence: 9,
-            senderUserID: fixture.userID, clientMessageID: fixture.clientMessageID,
-            text: "hello", mediaPresentations: [],
-            sourceEventID: .init(uuid: UUID()), acceptedMembershipRevision: 3,
-            directRecipientUserID: .init(uuid: UUID()), createdAt: fixture.now)
-        let store = GatewayTimestampSequenceStore(outcomes: [.accepted(accepted)])
-        let hints = GatewayForegroundHintRecorder()
-        let service = V2SendMessageService(store: store, capacityProfile: try .init(id: "standard", limits: fixture.profile),
-            limits: try .init(maxUTF8Bytes: 16), now: { clock.withLock { $0 } })
-        let handler = makeGatewayDomainCommandHandler(sendMessage: service, foregroundGroupEventHints: hints, sync: fixture.syncService())
-        var request = IMV2Envelope()
-        request.sendMessage.roomID = fixture.roomID.rawValue
-        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        request.sendMessage.content.text = "hello"
-        let invalidSeconds: [Double] = [.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, -1, 1e14, -1e14, -1e12, 281_474_976_710.656, 946_684_800 - 211_813_488_000, 946_684_800 + 9_223_371_331_200 - 10]
-        for seconds in invalidSeconds {
-            clock.withLock { $0 = Date(timeIntervalSince1970: seconds) }
-            let rejected = try await handler.handle(envelope: request, identity: fixture.identity)
-            #expect(rejected.error.code == "UNAVAILABLE")
-            #expect(rejected.error.retryable)
-            #expect(await store.outcomes.count == 1)
-            #expect(hints.values().isEmpty)
-        }
-        clock.withLock { $0 = fixture.now }
-        let recovered = try await handler.handle(envelope: request, identity: fixture.identity)
-        #expect(recovered.messageAccepted.messageID == accepted.messageID.rawValue)
-        #expect(recovered.messageAccepted.serverCreatedAtMs == 1_750_000_000_000)
-        #expect(await store.outcomes.isEmpty)
-    }
-
-    @Test("Group intent persistence failures return a retryable Gateway response")
-    func groupIntentClockFailureIsRetryable() async throws {
-        let fixture = try GatewayDomainFixture()
-        let imports = V2GroupAudienceImportService(store: GatewayAudienceImportStore(),
-            groupMessaging: try .init(store: GatewayGroupIntentClockFailure(),
-                capacityProfile: .init(id: "standard", limits: fixture.profile),
-                roomShardID: "rooms-primary", now: { fixture.now }), now: { fixture.now })
-        let operation = GroupRoomOperationID(uuid: UUID())
-        _ = try await imports.begin(actorUserID: fixture.userID, operationID: operation, title: "clock")
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: GatewayOwnerChangedSendStore()),
-            groupAudienceImports: imports, sync: fixture.syncService())
-        var request = IMV2Envelope()
-        request.finalizeGroupRoomCreation.operationID = operation.rawValue
-        for _ in 0..<2 {
-            let response = try await handler.handle(envelope: request, identity: fixture.identity)
-            #expect(response.error.code == "UNAVAILABLE" && response.error.retryable)
-        }
-    }
-
     @Test("Personal timestamp validation distinguishes unsupported input from an unavailable server clock",
           arguments: [V2ConversationCapabilitiesStoreError.invalidTimestamp, .corruptPersistenceState])
     func personalTimestampErrorMapping(error: V2ConversationCapabilitiesStoreError) async throws {
         let fixture = try GatewayDomainFixture()
-        let handler = makeGatewayDomainCommandHandler(sendMessage: fixture.sendService(store: GatewayOwnerChangedSendStore()),
+        let handler = makeGatewayDomainCommandHandler(
             conversationCapabilities: .init(store: GatewayPersonalTimestampFailure(error: error)), sync: fixture.syncService())
         var request = IMV2Envelope()
         request.setConversationState.roomID = fixture.roomID.rawValue
-        request.setConversationState.operationID = UUID().uuidString
+        request.setConversationState.firstSubmissionDeadlineMs=UInt64(Int64.max)
+            request.setConversationState.operationID = UUID().uuidString
         let response = try await handler.handle(envelope: request, identity: fixture.identity)
         #expect(response.error.code == (error == .invalidTimestamp ? "INVALID_ARGUMENT" : "UNAVAILABLE"))
         #expect(response.error.retryable == (error == .corruptPersistenceState))
     }
 
-    @Test("Both draft responses reject counts outside the unsigned wire range",
-          arguments: [-1, 0, 7, Int(UInt32.max), Int(UInt32.max) + 1, Int.max])
-    func draftCountBoundary(count: Int) async throws {
-        let fixture = try GatewayDomainFixture()
-        let imports = V2GroupAudienceImportService(store: GatewayAudienceImportStore(returnedMemberCount: count),
-            groupMessaging: try .init(store: GatewayGroupStore(), capacityProfile: .init(id: "standard", limits: fixture.profile),
-                                     roomShardID: "rooms-primary", now: { fixture.now }), now: { fixture.now })
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: GatewayOwnerChangedSendStore()),
-            groupAudienceImports: imports, sync: fixture.syncService())
-        let operation = UUID().uuidString
-        var begin = IMV2Envelope()
-        begin.beginGroupRoomCreation.operationID = operation
-        begin.beginGroupRoomCreation.title = "boundary"
-        var append = IMV2Envelope()
-        append.appendGroupRoomCreationMembers.operationID = operation
-        append.appendGroupRoomCreationMembers.memberUserIds = [UUID().uuidString]
-        let prepared = try await handler.handle(envelope: begin, identity: fixture.identity)
-        let appended = try await handler.handle(envelope: append, identity: fixture.identity)
-        if let expected = UInt32(exactly: count) {
-            #expect(prepared.groupRoomCreationPrepared.stagedMemberCount == expected)
-            #expect(appended.groupRoomCreationMembersAppended.stagedMemberCount == expected)
-            #expect(prepared.error.code.isEmpty && appended.error.code.isEmpty)
-        } else {
-            #expect(prepared.error.code == "UNAVAILABLE" && prepared.error.retryable)
-            #expect(appended.error.code == "UNAVAILABLE" && appended.error.retryable)
-        }
-    }
 
-    @Test("Created and replayed group results check member counts before wire conversion",
-          arguments: [false, true], [Int.min, -1, 0, 1, 2, Int(UInt32.max), Int(UInt32.max) + 1, Int.max])
-    func createdGroupCountBoundary(replay: Bool, count: Int) async throws {
-        let fixture = try GatewayDomainFixture()
-        let audience = GatewayAudienceImportStore()
-        let imports = V2GroupAudienceImportService(store: audience,
-            groupMessaging: try .init(store: GatewayGroupStore(returnedMemberCount: count, replay: replay),
-                capacityProfile: .init(id: "standard", limits: fixture.profile), roomShardID: "rooms-primary", now: { fixture.now }),
-            now: { fixture.now })
-        let operation = GroupRoomOperationID(uuid: UUID())
-        _ = try await imports.begin(actorUserID: fixture.userID, operationID: operation, title: "boundary")
-        _ = try await imports.append(actorUserID: fixture.userID, operationID: operation, memberUserIDs: [.init(uuid: UUID())])
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: GatewayOwnerChangedSendStore()),
-            groupAudienceImports: imports, sync: fixture.syncService())
-        var request = IMV2Envelope()
-        request.finalizeGroupRoomCreation.operationID = operation.rawValue
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-        if count >= 2, let expected = UInt32(exactly: count) {
-            #expect(response.groupRoomCreated.memberCount == expected)
-            #expect(response.error.code.isEmpty)
-        } else {
-            #expect(response.error.code == "UNAVAILABLE" && response.error.retryable)
-        }
-    }
 
-    @Test("Gateway rate-limit responses reject invalid intervals without truncation",
-          arguments: [-1, 0, 7, Int(UInt32.max), Int(UInt32.max) + 1, Int.max])
-    func retryIntervalBoundary(seconds: Int) async throws {
-        let fixture = try GatewayDomainFixture()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .rateLimited(retryAfterSeconds: seconds))),
-            sync: fixture.syncService())
-        var request = IMV2Envelope()
-        request.sendMessage.roomID = fixture.roomID.rawValue
-        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        request.sendMessage.content.text = "hello"
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-        if let expected = UInt32(exactly: seconds) {
-            #expect(response.error.code == "RATE_LIMITED")
-            #expect(response.error.retryAfterSeconds == expected)
-        } else {
-            #expect(response.error.code == "UNAVAILABLE")
-            #expect(response.error.retryAfterSeconds == 0)
-        }
-        #expect(response.error.retryable)
-    }
 
-    @Test("A broken telemetry clock does not turn a successful replay into a failure",
-          arguments: [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude])
-    func telemetryClockBoundary(seconds: Double) async throws {
-        let fixture = try GatewayDomainFixture()
-        let metricInstant = ContinuousClock.now
-        let message = V2AcceptedMessage(messageID: .init(uuid: UUID()), roomID: fixture.roomID,
-            roomSequence: 9, senderUserID: fixture.userID, clientMessageID: fixture.clientMessageID,
-            text: "hello", mediaPresentations: [], createdAt: fixture.now)
-        let telemetry = V2InMemoryTelemetrySink()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .idempotent(message.receipt))),
-            sync: fixture.syncService(), telemetry: telemetry, now: { Date(timeIntervalSince1970: seconds) },
-            monotonicNow: { metricInstant })
-        var request = IMV2Envelope()
-        request.sendMessage.roomID = fixture.roomID.rawValue
-        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        request.sendMessage.content.text = "hello"
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-        #expect(response.messageAccepted.messageID == message.messageID.rawValue)
-        guard case .gatewayCommand(_, .sendMessage, .accepted, nil, 0) = await telemetry.events().first else {
-            Issue.record("Expected a successful replay metric with zero elapsed monotonic time")
-            return
-        }
-    }
-
-    @Test("Invalid committed and replay timestamps return unavailable and allow a valid retry",
-          arguments: [false, true], [Double.nan, .infinity, -.infinity, Double(Int64.max) / 1_000, -.greatestFiniteMagnitude])
-    func responseTimestampBoundary(replay: Bool, seconds: Double) async throws {
-        let fixture = try GatewayDomainFixture()
-        func message(at date: Date) -> V2AcceptedMessage {
-            .init(messageID: .init(uuid: UUID()), roomID: fixture.roomID, roomSequence: 9,
-                  senderUserID: fixture.userID, clientMessageID: fixture.clientMessageID,
-                  text: "hello", mediaPresentations: [],
-                  sourceEventID: .init(uuid: UUID()), acceptedMembershipRevision: 3,
-                  directRecipientUserID: .init(uuid: UUID()), createdAt: date)
-        }
-        let invalid = message(at: Date(timeIntervalSince1970: seconds))
-        let valid = message(at: Date(timeIntervalSince1970: 1_750_000_000.125))
-        let store = GatewayTimestampSequenceStore(outcomes: [
-            replay ? .idempotent(invalid.receipt) : .accepted(invalid), .idempotent(valid.receipt)
-        ])
-        let hints = GatewayForegroundHintRecorder()
-        let handler = makeGatewayDomainCommandHandler(sendMessage: fixture.sendService(store: store),
-            foregroundGroupEventHints: hints, sync: fixture.syncService())
-        var request = IMV2Envelope()
-        request.sendMessage.roomID = fixture.roomID.rawValue
-        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        request.sendMessage.content.text = "hello"
-        let rejected = try await handler.handle(envelope: request, identity: fixture.identity)
-        #expect(rejected.error.code == "UNAVAILABLE" && rejected.error.retryable)
-        #expect(hints.values().isEmpty)
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-        #expect(response.messageAccepted.serverCreatedAtMs == 1_750_000_000_125)
-        #expect(response.messageAccepted.messageID == valid.messageID.rawValue)
-    }
-
-    @Test("send owner changes map to retryable unavailable")
-    func sendOwnerChangeIsRetryable() async throws {
-        let fixture = try GatewayDomainFixture()
-        let handler = makeGatewayDomainCommandHandler(sendMessage: fixture.sendService(store: GatewayOwnerChangedSendStore()), sync: fixture.syncService())
-        var request = IMV2Envelope()
-        request.sendMessage.roomID = fixture.roomID.rawValue
-        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        request.sendMessage.content.text = "hello"
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-        #expect(response.error.code == "UNAVAILABLE" && response.error.retryable)
-    }
 
     @Test("database admission rejects overload with a stable retryable protocol error")
     func databaseAdmissionReturnsServerBusy() async throws {
@@ -706,20 +325,12 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(await admission.acquire(.interactiveRead) == .admitted)
         let telemetry = V2InMemoryTelemetrySink()
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(
-                seed: [(fixture.roomState, fixture.shardState)],
-                authorizedActors: [fixture.userID]
-            )),
             sync: fixture.syncService(),
             telemetry: telemetry,
             databaseWorkAdmission: admission
         )
         var request = IMV2Envelope()
-        request.sendMessage = .init()
-        request.sendMessage.roomID = fixture.roomID.rawValue
-        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        request.sendMessage.content = .init()
-        request.sendMessage.content.text = "hello"
+        request.getGroupRolePolicyBaseline.roomID = fixture.roomID.rawValue
 
         let response = try await handler.handle(envelope: request, identity: fixture.identity)
         #expect(response.error.code == "SERVER_BUSY")
@@ -729,7 +340,7 @@ struct V2GatewayDomainCommandHandlerTests {
         var latest = IMV2Envelope(); latest.roomLatestVisibleBatch.roomIds = [fixture.roomID.rawValue]
         let latestBusy = try await handler.handle(envelope: latest, identity: fixture.identity)
         #expect(latestBusy.error.code == "SERVER_BUSY" && latestBusy.error.retryable)
-        guard case .gatewayCommand(_, .sendMessage, .rejected, .serverBusy, _) =
+        guard case .gatewayCommand(_, .getGroupRolePolicyBaseline, .rejected, .serverBusy, _) =
             await telemetry.events().first
         else {
             Issue.record("expected a privacy-safe server-busy metric")
@@ -739,56 +350,6 @@ struct V2GatewayDomainCommandHandlerTests {
         }
         await admission.release(.foregroundWrite)
         await admission.release(.interactiveRead)
-    }
-
-    @Test("a batch-owned send skips per-request gateway admission and maps overload to server busy")
-    func batchOwnedSendUsesItsOwnDatabaseAdmissionBoundary() async throws {
-        let fixture = try GatewayDomainFixture()
-        let admission = V2DatabaseWorkAdmissionController(policy: .init(
-            maximumForegroundWriteInFlight: 2,
-            maximumInteractiveReadInFlight: 1,
-            maximumSyncInFlight: 1,
-            maximumForegroundWriteQueued: 1,
-            maximumInteractiveReadQueued: 1,
-            maximumSyncQueued: 1,
-            timeout: .milliseconds(5)
-        ))
-        // One of two write permits is occupied. A correct handler leaves the
-        // remaining permit for the batcher; a handler that admits once here
-        // and once in the batcher would return SERVER_BUSY instead.
-        #expect(await admission.acquire(.foregroundWrite) == .admitted)
-        let store = GatewayAtomicBatchStore()
-        let batcher = V2SendMessageAdmissionBatcher(
-            store: store,
-            configuration: .init(maximumBatchSize: 2, maximumDelay: .milliseconds(1)),
-            databaseWorkAdmission: admission
-        )
-        let sendMessage = V2SendMessageService(
-            store: store,
-            capacityProfile: try .init(id: "standard", limits: fixture.profile),
-            limits: try .init(maxUTF8Bytes: 16),
-            batcher: batcher,
-            now: { fixture.now }
-        )
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: sendMessage,
-            sync: fixture.syncService(),
-            databaseWorkAdmission: admission
-        )
-        var request = IMV2Envelope()
-        request.sendMessage = .init()
-        request.sendMessage.roomID = fixture.roomID.rawValue
-        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        request.sendMessage.content = .init()
-        request.sendMessage.content.text = "hello"
-
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-        #expect(response.error.code == "RATE_LIMITED")
-        #expect(response.error.retryable)
-        let snapshot = await admission.snapshot()
-        #expect(snapshot.foregroundWrite.admittedRequests == 2)
-        #expect(snapshot.foregroundWrite.inFlight == 1)
-        await admission.release(.foregroundWrite)
     }
 
     @Test("room-log pulls use the interactive-read reservation instead of send capacity")
@@ -813,10 +374,6 @@ struct V2GatewayDomainCommandHandlerTests {
         }
         let telemetry = V2InMemoryTelemetrySink()
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(
-                seed: [(fixture.roomState, fixture.shardState)],
-                authorizedActors: [fixture.userID]
-            )),
             sync: fixture.syncService(),
             telemetry: telemetry,
             databaseWorkAdmission: admission
@@ -866,31 +423,23 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(await admission.acquire(.foregroundWrite) == .admitted)
         #expect(await admission.acquire(.interactiveRead) == .admitted)
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(
-                seed: [(fixture.roomState, fixture.shardState)],
-                authorizedActors: [fixture.userID]
-            )),
             sync: fixture.syncService(),
             databaseWorkAdmission: admission
         )
         var request = IMV2Envelope()
-        request.sendMessage = .init()
-        request.sendMessage.roomID = fixture.roomID.rawValue
-        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        request.sendMessage.content = .init()
-        request.sendMessage.content.text = "hello"
+        request.getGroupRolePolicyBaseline.roomID = fixture.roomID.rawValue
 
         let waiting = Task {
             try await handler.handle(envelope: request, identity: fixture.identity)
         }
-        while await admission.snapshot().foregroundWriteQueued == 0 {
+        while await admission.snapshot().interactiveReadQueued == 0 {
             await Task.yield()
         }
         waiting.cancel()
         await #expect(throws: CancellationError.self) {
             try await waiting.value
         }
-        #expect(await admission.snapshot().foregroundWrite.cancelledRequests == 1)
+        #expect(await admission.snapshot().interactiveRead.cancelledRequests == 1)
         await admission.release(.foregroundWrite)
         await admission.release(.interactiveRead)
     }
@@ -909,10 +458,6 @@ struct V2GatewayDomainCommandHandlerTests {
         ))
         #expect(await admission.acquire(.foregroundWrite) == .admitted)
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(
-                seed: [(fixture.roomState, fixture.shardState)],
-                authorizedActors: [fixture.userID]
-            )),
             sync: fixture.syncService(),
             databaseWorkAdmission: admission
         )
@@ -936,281 +481,6 @@ struct V2GatewayDomainCommandHandlerTests {
         await admission.release(.foregroundWrite)
     }
 
-    @Test("a database pool timeout returns unavailable without escaping the command boundary")
-    func databasePoolTimeoutKeepsCommandBoundaryAlive() async throws {
-        let fixture = try GatewayDomainFixture()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: GatewayPoolTimeoutMessageStore()),
-            sync: fixture.syncService()
-        )
-        var request = IMV2Envelope()
-        request.sendMessage = .init()
-        request.sendMessage.roomID = fixture.roomID.rawValue
-        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        request.sendMessage.content = .init()
-        request.sendMessage.content.text = "hello"
-
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-
-        #expect(response.error.code == "UNAVAILABLE")
-        #expect(response.error.retryable)
-    }
-
-    @Test("a room capacity profile mismatch is retryable and does not escape the command boundary")
-    func capacityProfileMismatchKeepsCommandBoundaryAlive() async throws {
-        let fixture = try GatewayDomainFixture()
-        let telemetry = V2InMemoryTelemetrySink()
-        let store = InMemoryV2RoomWriteStore(
-            seed: [(fixture.roomState, fixture.shardState)],
-            authorizedActors: [fixture.userID],
-            capacityProfileID: "legacy"
-        )
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: store),
-            sync: fixture.syncService(),
-            telemetry: telemetry
-        )
-        var request = IMV2Envelope()
-        request.sendMessage = .init()
-        request.sendMessage.roomID = fixture.roomID.rawValue
-        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        request.sendMessage.content = .init()
-        request.sendMessage.content.text = "hello"
-
-        let first = try await handler.handle(envelope: request, identity: fixture.identity)
-        request.sendMessage.clientMessageID = UUID().uuidString
-        let second = try await handler.handle(envelope: request, identity: fixture.identity)
-
-        #expect(first.error.code == "UNAVAILABLE")
-        #expect(first.error.retryable)
-        #expect(second.error.code == "UNAVAILABLE")
-        let events = await telemetry.events()
-        #expect(events.count == 2)
-        for event in events {
-            guard case .gatewayCommand(_, .sendMessage, .rejected, .unavailable, _) = event else {
-                Issue.record("expected a bounded unavailable rejection")
-                return
-            }
-        }
-    }
-
-    @Test("send validates client data and takes the actor exclusively from the session")
-    func sendValidationAndAuthenticatedActor() async throws {
-        let fixture = try GatewayDomainFixture()
-        let store = InMemoryV2RoomWriteStore(
-            seed: [(fixture.roomState, fixture.shardState)],
-            authorizedActors: [fixture.userID],
-            mediaPresentationResolver: { media in
-                try media.map {
-                    try .init(mediaID: $0.mediaID, kind: .file, contentType: "application/octet-stream", byteCount: 1)
-                }
-            }
-        )
-        let telemetry = V2InMemoryTelemetrySink()
-        let metricInstant = ContinuousClock.now
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: store),
-            sync: fixture.syncService(),
-            telemetry: telemetry,
-            now: { fixture.now }, monotonicNow: { metricInstant }
-        )
-
-        var malformed = IMV2Envelope()
-        malformed.sendMessage = .init()
-        malformed.sendMessage.roomID = "not-a-uuid"
-        malformed.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        malformed.sendMessage.content = .init()
-        malformed.sendMessage.content.text = "hello"
-        #expect(try await handler.handle(envelope: malformed, identity: fixture.identity).error.code == "INVALID_ARGUMENT")
-
-        var blank = IMV2Envelope()
-        blank.sendMessage = .init()
-        blank.sendMessage.roomID = fixture.roomID.rawValue
-        blank.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        blank.sendMessage.content = .init()
-        blank.sendMessage.content.text = ""
-        #expect(try await handler.handle(envelope: blank, identity: fixture.identity).error.code == "INVALID_ARGUMENT")
-
-        var valid = IMV2Envelope()
-        valid.sendMessage = .init()
-        valid.sendMessage.roomID = fixture.roomID.rawValue
-        valid.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        valid.sendMessage.content = .init()
-        valid.sendMessage.content.text = "hello"
-        let response = try await handler.handle(envelope: valid, identity: fixture.identity)
-        #expect(response.messageAccepted.roomID == fixture.roomID.rawValue)
-        let mediaID = "00000000-0000-0000-0000-000000000025"
-        var attachmentOnly = IMV2Envelope()
-        attachmentOnly.sendMessage = .init()
-        attachmentOnly.sendMessage.roomID = fixture.roomID.rawValue
-        attachmentOnly.sendMessage.clientMessageID = "00000000-0000-0000-0000-000000000026"
-        attachmentOnly.sendMessage.content = .init()
-        attachmentOnly.sendMessage.content.mediaIds = [mediaID]
-        let attachmentResponse = try await handler.handle(envelope: attachmentOnly, identity: fixture.identity)
-        #expect(!attachmentResponse.messageAccepted.messageID.isEmpty)
-        #expect(attachmentResponse.messageAccepted.roomSequence > 0)
-        let state = try #require(await store.state(for: fixture.roomID))
-        let accepted = try #require(state.0.acceptedCommands.values.first)
-        #expect(accepted.acceptedMessage.senderUserID == fixture.identity.userID)
-
-        let events = await telemetry.events()
-        #expect(events.count == 4)
-        guard case .gatewayCommand(_, .sendMessage, .rejected, .invalidArgument, 0) = events[0] else {
-            Issue.record("expected a privacy-safe invalid-argument metric")
-            return
-        }
-        guard case .gatewayCommand(_, .sendMessage, .accepted, nil, 0) = events[2] else {
-            Issue.record("expected an accepted command metric")
-            return
-        }
-    }
-
-    @Test("an accepted group message emits only a best-effort foreground watermark hint")
-    func acceptedGroupMessagePublishesForegroundHint() async throws {
-        let fixture = try GatewayDomainFixture()
-        let accepted = V2AcceptedMessage(
-            messageID: try .init("00000000-0000-0000-0000-000000000040"),
-            roomID: fixture.roomID,
-            roomSequence: 9,
-            senderUserID: fixture.userID,
-            clientMessageID: fixture.clientMessageID,
-            text: "hello",
-            mediaPresentations: [],
-            groupCapacityClass: .standard,
-            createdAt: fixture.now
-        )
-        let hints = GatewayForegroundHintRecorder()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .accepted(accepted))),
-            foregroundGroupEventHints: hints,
-            sync: fixture.syncService()
-        )
-        var request = IMV2Envelope(); request.sendMessage = .init()
-        request.sendMessage.roomID = fixture.roomID.rawValue
-        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        request.sendMessage.content = .init()
-        request.sendMessage.content.text = "hello"
-
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-
-        #expect(response.messageAccepted.roomSequence == 9)
-        #expect(hints.values() == [.init(roomID: fixture.roomID, highWatermark: 9)])
-    }
-
-    @Test("an accepted direct room-log message emits only a best-effort foreground watermark hint")
-    func acceptedDirectRoomLogMessagePublishesForegroundHint() async throws {
-        let fixture = try GatewayDomainFixture()
-        let accepted = V2AcceptedMessage(
-            messageID: try .init("00000000-0000-0000-0000-000000000041"),
-            roomID: fixture.roomID,
-            roomSequence: 10,
-            senderUserID: fixture.userID,
-            clientMessageID: fixture.clientMessageID,
-            text: "private-log",
-            mediaPresentations: [],
-
-            createdAt: fixture.now
-        )
-        let hints = GatewayForegroundHintRecorder()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .accepted(accepted))),
-            foregroundGroupEventHints: hints,
-            sync: fixture.syncService()
-        )
-        var request = IMV2Envelope(); request.sendMessage = .init()
-        request.sendMessage.roomID = fixture.roomID.rawValue
-        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        request.sendMessage.content = .init()
-        request.sendMessage.content.text = "private-log"
-
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-
-        #expect(response.messageAccepted.roomSequence == 10)
-        #expect(hints.values() == [.init(roomID: fixture.roomID, highWatermark: 10)])
-    }
-
-    @Test("an accepted direct event excludes only the originating connection")
-    func acceptedDirectEventCarriesOriginExclusion() async throws {
-        let fixture = try GatewayDomainFixture()
-        let recipientID = try UserID("00000000-0000-0000-0000-000000000042")
-        let accepted = V2AcceptedMessage(
-            messageID: try .init("00000000-0000-0000-0000-000000000043"),
-            roomID: fixture.roomID,
-            roomSequence: 11,
-            senderUserID: fixture.userID,
-            clientMessageID: fixture.clientMessageID,
-            text: "private-live",
-            mediaPresentations: [],
-
-            sourceEventID: try .init("00000000-0000-0000-0000-000000000044"),
-            acceptedMembershipRevision: 3,
-            directRecipientUserID: recipientID,
-            createdAt: fixture.now
-        )
-        let hints = GatewayForegroundHintRecorder()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(
-                store: GatewayAcceptedMessageStore(outcome: .accepted(accepted))
-            ),
-            foregroundGroupEventHints: hints,
-            sync: fixture.syncService()
-        )
-        var request = IMV2Envelope()
-        request.sendMessage = .init()
-        request.sendMessage.roomID = fixture.roomID.rawValue
-        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        request.sendMessage.content = .init()
-        request.sendMessage.content.text = "private-live"
-        let connectionID = UUID()
-
-        let response = try await handler.handle(
-            envelope: request,
-            identity: fixture.identity,
-            originatingConnectionID: connectionID
-        )
-
-        #expect(response.messageAccepted.roomSequence == 11)
-        #expect(hints.values() == [.init(roomID: fixture.roomID, highWatermark: 11)])
-        #expect(hints.directExclusions() == [connectionID])
-    }
-
-    @Test("an accepted plain Hybrid group handler emits a fenced live event")
-    func acceptedHybridGroupHandlerEmitsFencedLiveEvent() async throws {
-        let fixture = try GatewayDomainFixture()
-        let accepted = V2AcceptedMessage(
-            messageID: try .init("00000000-0000-0000-0000-000000000053"),
-            roomID: fixture.roomID,
-            roomSequence: 12,
-            senderUserID: fixture.userID,
-            clientMessageID: fixture.clientMessageID,
-            text: "group-live",
-            mediaPresentations: [],
-            groupCapacityClass: .large,
-
-            sourceEventID: try .init("00000000-0000-0000-0000-000000000054"),
-            acceptedMembershipRevision: 7,
-            createdAt: fixture.now
-        )
-        let hints = GatewayForegroundHintRecorder()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(
-                store: GatewayAcceptedMessageStore(outcome: .accepted(accepted))
-            ),
-            foregroundGroupEventHints: hints,
-            sync: fixture.syncService()
-        )
-        var request = IMV2Envelope(); request.sendMessage = .init()
-        request.sendMessage.roomID = fixture.roomID.rawValue
-        request.sendMessage.clientMessageID = fixture.clientMessageID.rawValue
-        request.sendMessage.content = .init(); request.sendMessage.content.text = "group-live"
-
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-
-        #expect(response.messageAccepted.roomSequence == 12)
-        #expect(hints.groupMembershipRevisions() == [7])
-        #expect(hints.values() == [.init(roomID: fixture.roomID, highWatermark: 12)])
-    }
-
     @Test("snapshot rebuild reaches the sync store with the authenticated device")
     func forwardsSnapshotRebuild() async throws {
         let fixture = try GatewayDomainFixture()
@@ -1219,9 +489,6 @@ struct V2GatewayDomainCommandHandlerTests {
             received.withLock { $0 = (userID, deviceID, requireSnapshot) }
         })
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(
-                seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID]
-            )),
             sync: .init(store: store)
         )
         var pull = IMV2Envelope()
@@ -1238,7 +505,6 @@ struct V2GatewayDomainCommandHandlerTests {
     func syncStateErrors() async throws {
         let fixture = try GatewayDomainFixture()
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             sync: .init(store: GatewayRejectingSyncStore())
         )
         var pull = IMV2Envelope()
@@ -1260,7 +526,6 @@ struct V2GatewayDomainCommandHandlerTests {
         let fixture = try GatewayDomainFixture()
         let store = GatewaySyncBoundaryStore()
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .rateLimited(retryAfterSeconds: 1))),
             sync: .init(store: store, now: { fixture.now }))
         let sequencePath = path.hasSuffix("sequence")
         func request(_ value: UInt64) -> IMV2Envelope {
@@ -1313,7 +578,6 @@ struct V2GatewayDomainCommandHandlerTests {
         let fixture = try GatewayDomainFixture()
         let store = GatewayRecoveringSyncStore(failure: error)
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: GatewayAcceptedMessageStore(outcome: .rateLimited(retryAfterSeconds: 1))),
             sync: .init(store: store, now: { fixture.now }))
         var request = IMV2Envelope()
         request.syncPull.maxRecords = 10
@@ -1339,402 +603,6 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(await store.calls == 3)
     }
 
-    @Test("durable forward pending is retryable and never a terminal pair response", arguments: [false, true])
-    func forwardPending(paused: Bool) async throws {
-        let fixture = try GatewayDomainFixture()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            forwardMessages: GatewayPendingForward(paused: paused), sync: fixture.syncService())
-        var request = IMV2Envelope()
-        request.forwardMessages.operationID = UUID().uuidString
-        request.forwardMessages.targetRoomIds = [fixture.roomID.rawValue]
-        var source = IMV2ForwardMessageReference()
-        source.messageID = UUID().uuidString; source.roomID = fixture.roomID.rawValue; source.revision = 1
-        request.forwardMessages.sources = [source]
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-        #expect(response.error.code == (paused ? "FORWARD_PAUSED" : "FORWARD_PENDING"))
-        #expect(response.error.retryable)
-        #expect(response.messagesForwarded.results.isEmpty)
-    }
-
-    @Test("forward response rejects unpersistable success sequences and preserves failed pairs", arguments: [false, true], [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max])
-    func forwardResponseSequenceBounds(failed: Bool, sequence: UInt64) async throws {
-        let fixture = try GatewayDomainFixture()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            forwardMessages: GatewayForwardSequence(sequence: sequence, failed: failed), sync: fixture.syncService())
-        var request = IMV2Envelope()
-        request.forwardMessages.operationID = UUID().uuidString
-        request.forwardMessages.targetRoomIds = [fixture.roomID.rawValue]
-        var source = IMV2ForwardMessageReference()
-        source.messageID = UUID().uuidString; source.roomID = fixture.roomID.rawValue; source.revision = 1
-        request.forwardMessages.sources = [source]
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-        if !failed && (sequence == 0 || sequence > UInt64(Int64.max)) {
-            #expect(response.error.code == "UNAVAILABLE")
-            #expect(response.error.retryable)
-            #expect(response.messagesForwarded.results.isEmpty)
-        } else {
-            let value = try #require(response.messagesForwarded.results.first)
-            #expect(value.roomSequence == (failed ? 0 : sequence))
-            #expect(value.errorCode == (failed ? "FORBIDDEN" : ""))
-        }
-    }
-
-    @Test("forward requires bounded source room and selected revision before calling its handler")
-    func malformedForwardSource() async throws {
-        let fixture = try GatewayDomainFixture()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            sync: fixture.syncService()
-        )
-        for scenario in 0..<6 {
-            var request = IMV2Envelope()
-            request.forwardMessages.operationID = UUID().uuidString + (scenario == 5 ? "-f0" : "")
-            request.forwardMessages.targetRoomIds = [fixture.roomID.rawValue]
-            var source = IMV2ForwardMessageReference()
-            source.messageID = UUID().uuidString
-            source.roomID = scenario == 1 ? "" : fixture.roomID.rawValue
-            source.revision = scenario == 2 ? 0 : (scenario == 3 ? UInt64.max : 1)
-            request.forwardMessages.sources = scenario == 0 ? [] : (scenario == 4 ? [source, source] : [source])
-            let response = try await handler.handle(envelope: request, identity: fixture.identity)
-            #expect(response.error.code == "INVALID_ARGUMENT")
-            #expect(!response.error.retryable)
-        }
-    }
-
-    @Test("overflowing revision commands return INVALID_ARGUMENT without reaching storage", arguments: [UInt64(Int64.max) + 1, UInt64.max])
-    func overflowingRevisionsAreProtocolErrors(_ revision: UInt64) async throws {
-        let fixture = try GatewayDomainFixture()
-        let store = GatewayRevisionBoundaryStore()
-        let profile = try V2CapacityProfile(id: "standard", limits: fixture.profile)
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            membership: .init(store: store, capacityProfile: profile),
-            withdrawal: .init(store: store, capacityProfile: profile),
-            edit: .init(store: store, capacityProfile: profile, maximumTextUTF8Bytes: 64),
-            sync: fixture.syncService()
-        )
-        let operation = "00000000-0000-0000-0000-000000000016"
-        let target = "00000000-0000-0000-0000-000000000017"
-        var membership = IMV2Envelope()
-        membership.changeRoomMembership.roomID = fixture.roomID.rawValue
-        membership.changeRoomMembership.operationID = operation
-        membership.changeRoomMembership.targetUserID = target
-        membership.changeRoomMembership.action = .add
-        membership.changeRoomMembership.expectedMembershipRevision = revision
-        var edit = IMV2Envelope()
-        edit.editMessage.roomID = fixture.roomID.rawValue
-        edit.editMessage.operationID = operation
-        edit.editMessage.messageID = target
-        edit.editMessage.expectedMessageRevision = revision
-        edit.editMessage.content.text = "replacement"
-        var withdrawal = IMV2Envelope()
-        withdrawal.withdrawMessage.roomID = fixture.roomID.rawValue
-        withdrawal.withdrawMessage.operationID = operation
-        withdrawal.withdrawMessage.messageID = target
-        withdrawal.withdrawMessage.expectedMessageRevision = revision
-        // Repeat the same operation IDs: invalid input is rejected before
-        // either a new-operation or durable replay lookup can run.
-        for envelope in [membership, edit, withdrawal, membership, edit, withdrawal] {
-            let response = try await handler.handle(envelope: envelope, identity: fixture.identity)
-            #expect(response.error.code == "INVALID_ARGUMENT")
-            #expect(!response.error.retryable)
-        }
-        #expect(await store.calls() == 0)
-    }
-
-    @Test("conflict responses preserve bounded revisions and reject storage overflow", arguments: [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max])
-    func conflictResponseRevisionBounds(_ revision: UInt64) async throws {
-        let fixture = try GatewayDomainFixture()
-        let store = GatewayRevisionBoundaryStore(conflictRevision: revision)
-        let profile = try V2CapacityProfile(id: "standard", limits: fixture.profile)
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            membership: .init(store: store, capacityProfile: profile),
-            withdrawal: .init(store: store, capacityProfile: profile),
-            edit: .init(store: store, capacityProfile: profile, maximumTextUTF8Bytes: 64),
-            sync: fixture.syncService()
-        )
-        let operation = "00000000-0000-0000-0000-000000000016"
-        let target = "00000000-0000-0000-0000-000000000017"
-        var membership = IMV2Envelope()
-        membership.changeRoomMembership.roomID = fixture.roomID.rawValue
-        membership.changeRoomMembership.operationID = operation
-        membership.changeRoomMembership.targetUserID = target
-        membership.changeRoomMembership.action = .add
-        membership.changeRoomMembership.expectedMembershipRevision = 1
-        var edit = IMV2Envelope()
-        edit.editMessage.roomID = fixture.roomID.rawValue
-        edit.editMessage.operationID = operation
-        edit.editMessage.messageID = target
-        edit.editMessage.expectedMessageRevision = 1
-        edit.editMessage.content.text = "replacement"
-        var withdrawal = IMV2Envelope()
-        withdrawal.withdrawMessage.roomID = fixture.roomID.rawValue
-        withdrawal.withdrawMessage.operationID = operation
-        withdrawal.withdrawMessage.messageID = target
-        withdrawal.withdrawMessage.expectedMessageRevision = 1
-        for envelope in [membership, edit, withdrawal] {
-            let response = try await handler.handle(envelope: envelope, identity: fixture.identity)
-            #expect(response.error.code == (revision > UInt64(Int64.max) ? "UNAVAILABLE" : "REVISION_CONFLICT"))
-            #expect(response.error.retryable == (revision > UInt64(Int64.max)))
-            #expect(response.error.currentRevision == (revision > UInt64(Int64.max) ? 0 : revision))
-        }
-        #expect(await store.calls() == 3)
-    }
-
-    @Test("message mutation owner changes return retryable unavailability", arguments: ["edit", "withdraw", "reaction"])
-    func messageMutationOwnerChangeIsRetryable(_ kind: String) async throws {
-        let fixture = try GatewayDomainFixture()
-        let store = GatewayOwnerChangedMutationStore()
-        let profile = try V2CapacityProfile(id: "standard", limits: fixture.profile)
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            withdrawal: .init(store: store, capacityProfile: profile),
-            reaction: .init(store: store, capacityProfile: profile),
-            edit: .init(store: store, capacityProfile: profile, maximumTextUTF8Bytes: 64),
-            sync: fixture.syncService()
-        )
-        let operation = "00000000-0000-0000-0000-000000000016"
-        let message = "00000000-0000-0000-0000-000000000017"
-        var request = IMV2Envelope()
-        switch kind {
-        case "edit":
-            request.editMessage.roomID = fixture.roomID.rawValue
-            request.editMessage.operationID = operation
-            request.editMessage.messageID = message
-            request.editMessage.expectedMessageRevision = 1
-            request.editMessage.content.text = "replacement"
-        case "withdraw":
-            request.withdrawMessage.roomID = fixture.roomID.rawValue
-            request.withdrawMessage.operationID = operation
-            request.withdrawMessage.messageID = message
-            request.withdrawMessage.expectedMessageRevision = 1
-        default:
-            request.changeMessageReaction.roomID = fixture.roomID.rawValue
-            request.changeMessageReaction.operationID = operation
-            request.changeMessageReaction.messageID = message
-            request.changeMessageReaction.reaction = "👍"
-            request.changeMessageReaction.action = .add
-        }
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-        #expect(response.error.code == "UNAVAILABLE" && response.error.retryable)
-        #expect(await store.calls() == [kind])
-    }
-
-    @Test("group capability owner changes return retryable unavailability", arguments: ["pin", "announcement", "permissions", "role"])
-    func groupCapabilityOwnerChangeIsRetryable(_ kind: String) async throws {
-        let fixture = try GatewayDomainFixture()
-        let store = GatewayOwnerChangedGroupCapabilityStore()
-        let profile = try V2CapacityProfile(id: "standard", limits: fixture.profile)
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            groupCapabilities: .init(store: store, capacityProfile: profile),
-            sync: fixture.syncService()
-        )
-        let operation = "00000000-0000-0000-0000-000000000016"
-        let target = "00000000-0000-0000-0000-000000000017"
-        var request = IMV2Envelope()
-        switch kind {
-        case "pin":
-            request.setPinnedMessage.roomID = fixture.roomID.rawValue
-            request.setPinnedMessage.operationID = operation
-            request.setPinnedMessage.messageID = target
-            request.setPinnedMessage.isPinned = true
-        case "announcement":
-            request.setGroupAnnouncement.roomID = fixture.roomID.rawValue
-            request.setGroupAnnouncement.operationID = operation
-            request.setGroupAnnouncement.body = "announcement"
-            request.setGroupAnnouncement.expectedRevision = 0
-        case "permissions":
-            request.setGroupRolePermissions.roomID = fixture.roomID.rawValue
-            request.setGroupRolePermissions.operationID = operation
-            request.setGroupRolePermissions.role = "member"
-            request.setGroupRolePermissions.expectedRevision = 1
-        default:
-            request.changeGroupMemberRole.roomID = fixture.roomID.rawValue
-            request.changeGroupMemberRole.operationID = operation
-            request.changeGroupMemberRole.userID = target
-            request.changeGroupMemberRole.role = "admin"
-            request.changeGroupMemberRole.expectedMembershipRevision = 1
-        }
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-        #expect(response.error.code == "UNAVAILABLE" && response.error.retryable)
-        #expect(await store.calls() == [kind])
-    }
-
-    @Test("membership owner change returns retryable unavailability")
-    func membershipOwnerChangeIsRetryable() async throws {
-        let fixture = try GatewayDomainFixture()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            membership: .init(store: GatewayMembershipStore(failure: .ownerChanged), capacityProfile: try .init(id: "standard", limits: fixture.profile), now: { fixture.now }),
-            sync: fixture.syncService()
-        )
-        var request = IMV2Envelope()
-        request.changeRoomMembership = .init()
-        request.changeRoomMembership.roomID = fixture.roomID.rawValue
-        request.changeRoomMembership.operationID = "00000000-0000-0000-0000-000000000016"
-        request.changeRoomMembership.targetUserID = "00000000-0000-0000-0000-000000000017"
-        request.changeRoomMembership.action = .add
-        request.changeRoomMembership.expectedMembershipRevision = 4
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-        #expect(response.error.code == "UNAVAILABLE" && response.error.retryable)
-    }
-
-    @Test("membership change takes the actor exclusively from the authenticated session")
-    func membershipChangeUsesAuthenticatedActor() async throws {
-        let fixture = try GatewayDomainFixture()
-        let membershipStore = GatewayMembershipStore()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            membership: .init(store: membershipStore, capacityProfile: try .init(id: "standard", limits: fixture.profile), now: { fixture.now }),
-            sync: fixture.syncService()
-        )
-        var request = IMV2Envelope()
-        request.changeRoomMembership = .init()
-        request.changeRoomMembership.roomID = fixture.roomID.rawValue
-        request.changeRoomMembership.operationID = "00000000-0000-0000-0000-000000000016"
-        request.changeRoomMembership.targetUserID = "00000000-0000-0000-0000-000000000017"
-        request.changeRoomMembership.action = .add
-        request.changeRoomMembership.expectedMembershipRevision = 4
-
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-
-        #expect(response.membershipChanged.roomID == fixture.roomID.rawValue)
-        #expect(response.membershipChanged.action == .add)
-        #expect(await membershipStore.actor() == fixture.userID)
-    }
-
-    @Test("staged group creation binds every page and finalization to the authenticated owner")
-    func stagedGroupCreationUsesAuthenticatedActor() async throws {
-        let fixture = try GatewayDomainFixture()
-        let groupStore = GatewayGroupStore()
-        let audienceStore = GatewayAudienceImportStore()
-        let groupMessaging = try V2GroupMessagingService(
-            store: groupStore,
-            capacityProfile: .init(id: "standard", limits: fixture.profile),
-            roomShardID: "rooms-primary",
-            now: { fixture.now }
-        )
-        let audienceImports = V2GroupAudienceImportService(
-            store: audienceStore,
-            groupMessaging: groupMessaging,
-            now: { fixture.now }
-        )
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            groupAudienceImports: audienceImports,
-            sync: fixture.syncService()
-        )
-        let operationID = "00000000-0000-0000-0000-000000000036"
-        let memberID = "00000000-0000-0000-0000-000000000037"
-
-        var begin = IMV2Envelope(); begin.beginGroupRoomCreation = .init()
-        begin.beginGroupRoomCreation.operationID = operationID
-        begin.beginGroupRoomCreation.title = " 分页项目群 "
-        let prepared = try await handler.handle(envelope: begin, identity: fixture.identity)
-        #expect(prepared.groupRoomCreationPrepared.title == "分页项目群")
-        #expect(prepared.groupRoomCreationPrepared.stagedMemberCount == 0)
-
-        var append = IMV2Envelope(); append.appendGroupRoomCreationMembers = .init()
-        append.appendGroupRoomCreationMembers.operationID = operationID
-        append.appendGroupRoomCreationMembers.memberUserIds = [memberID]
-        let appended = try await handler.handle(envelope: append, identity: fixture.identity)
-        #expect(appended.groupRoomCreationMembersAppended.stagedMemberCount == 1)
-
-        var finalize = IMV2Envelope(); finalize.finalizeGroupRoomCreation = .init()
-        finalize.finalizeGroupRoomCreation.operationID = operationID
-        let created = try await handler.handle(envelope: finalize, identity: fixture.identity)
-        #expect(created.groupRoomCreated.memberCount == 2)
-        #expect(created.groupRoomCreated.memberUserIds.isEmpty)
-        #expect(await groupStore.actor() == fixture.userID)
-        #expect(await groupStore.members() == [fixture.userID, try UserID(memberID)])
-        #expect(await audienceStore.actor() == fixture.userID)
-    }
-
-    @Test("stalled finalizing draft is replayed with its original operation identity")
-    func finalizingDraftRecoveryReplaysTheOriginalOperation() async throws {
-        let fixture = try GatewayDomainFixture()
-        let groupStore = GatewayGroupStore()
-        let audienceStore = GatewayAudienceImportStore()
-        let groupMessaging = try V2GroupMessagingService(
-            store: groupStore,
-            capacityProfile: .init(id: "standard", limits: fixture.profile),
-            roomShardID: "rooms-primary",
-            now: { fixture.now }
-        )
-        let imports = V2GroupAudienceImportService(
-            store: audienceStore,
-            groupMessaging: groupMessaging,
-            policy: .init(maximumStagedMembersPerActor: fixture.profile.maxEligibleMembers, finalizingRecoveryInterval: 30),
-            now: { fixture.now }
-        )
-        let operationID = try GroupRoomOperationID("00000000-0000-0000-0000-000000000038")
-        let member = try UserID("00000000-0000-0000-0000-000000000039")
-        _ = try await imports.begin(actorUserID: fixture.userID, operationID: operationID, title: "恢复群")
-        _ = try await imports.append(actorUserID: fixture.userID, operationID: operationID, memberUserIDs: [member])
-        await audienceStore.setRecoveryCandidates([.init(actorUserID: fixture.userID, operationID: operationID)])
-
-        #expect(try await imports.recoverFinalizing(limit: 1) == .init(claimedCount: 1, recoveredCount: 1, failedCount: 0))
-        #expect(await groupStore.actor() == fixture.userID)
-        #expect(await groupStore.members() == [fixture.userID, member])
-        #expect(await audienceStore.completedOperationIDs() == [operationID])
-    }
-
-    @Test("one corrupt recovery candidate does not strand later claimed candidates")
-    func recoveryContinuesAfterAnIndividualCandidateFails() async throws {
-        let fixture = try GatewayDomainFixture()
-        let groupStore = GatewayGroupStore()
-        let audienceStore = GatewayAudienceImportStore()
-        let groupMessaging = try V2GroupMessagingService(
-            store: groupStore,
-            capacityProfile: .init(id: "standard", limits: fixture.profile),
-            roomShardID: "rooms-primary",
-            now: { fixture.now }
-        )
-        let imports = V2GroupAudienceImportService(
-            store: audienceStore,
-            groupMessaging: groupMessaging,
-            policy: .init(maximumStagedMembersPerActor: fixture.profile.maxEligibleMembers, finalizingRecoveryInterval: 30),
-            now: { fixture.now }
-        )
-        let goodOperation = try GroupRoomOperationID("00000000-0000-0000-0000-000000000040")
-        let badOperation = try GroupRoomOperationID("00000000-0000-0000-0000-000000000041")
-        _ = try await imports.begin(actorUserID: fixture.userID, operationID: goodOperation, title: "可恢复群")
-        await audienceStore.setRecoveryCandidates([
-            .init(actorUserID: fixture.userID, operationID: badOperation),
-            .init(actorUserID: fixture.userID, operationID: goodOperation)
-        ])
-        await audienceStore.setFailingRecoveryOperationIDs([badOperation])
-
-        #expect(try await imports.recoverFinalizing(limit: 2) == .init(claimedCount: 2, recoveredCount: 1, failedCount: 1))
-        #expect(await audienceStore.completedOperationIDs() == [goodOperation])
-    }
-
-    @Test("frozen group creation cancellation has a distinct stable protocol code")
-    func frozenGroupCreationCancellationUsesDedicatedProtocolCode() async throws {
-        let fixture = try GatewayDomainFixture()
-        let audienceStore = GatewayAudienceImportStore()
-        await audienceStore.setCancellationFrozen(true)
-        let groupMessaging = try V2GroupMessagingService(
-            store: GatewayGroupStore(),
-            capacityProfile: .init(id: "standard", limits: fixture.profile),
-            roomShardID: "rooms-primary",
-            now: { fixture.now }
-        )
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            groupAudienceImports: .init(store: audienceStore, groupMessaging: groupMessaging, now: { fixture.now }),
-            sync: fixture.syncService()
-        )
-        var request = IMV2Envelope(); request.cancelGroupRoomCreation = .init()
-        request.cancelGroupRoomCreation.operationID = "00000000-0000-0000-0000-000000000042"
-
-        #expect(try await handler.handle(envelope: request, identity: fixture.identity).error.code == "GROUP_CREATION_FROZEN")
-    }
-
     @Test("room-log pulls trim a valid page to the exact gateway payload budget")
     func groupEventPullRespectsGatewayPayloadBudget() async throws {
         let fixture = try GatewayDomainFixture()
@@ -1748,7 +616,6 @@ struct V2GatewayDomainCommandHandlerTests {
             )
         }
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             groupEventLog: .init(store: GatewaySizedGroupEventLogStore(
                 page: try .init(roomID: roomID, events: entries, nextRoomSequence: 8, hasMore: false)
             )),
@@ -1785,7 +652,6 @@ struct V2GatewayDomainCommandHandlerTests {
             payload: Data(repeating: 0x78, count: 2_500)
         )
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             groupEventLog: .init(store: GatewaySizedGroupEventLogStore(
                 page: try .init(roomID: fixture.roomID, events: [oversizedEvent], nextRoomSequence: 1, hasMore: false)
             )),
@@ -1807,7 +673,6 @@ struct V2GatewayDomainCommandHandlerTests {
         let fixture = try GatewayDomainFixture()
         let store = GatewayGroupEventLogStore()
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             groupEventLog: .init(store: store),
             sync: fixture.syncService()
         )
@@ -1826,7 +691,6 @@ struct V2GatewayDomainCommandHandlerTests {
     func membershipDirectoryOwnerChangeRestartsPagination() async throws {
         let fixture = try GatewayDomainFixture()
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             membershipDirectory: .init(store: GatewayMovedMembershipDirectory()), sync: fixture.syncService())
         var request = IMV2Envelope(); request.listRoomMembers = .init()
         request.listRoomMembers.roomID = fixture.roomID.rawValue
@@ -1841,7 +705,6 @@ struct V2GatewayDomainCommandHandlerTests {
         let fixture = try GatewayDomainFixture()
         let store = GatewayMembershipDirectoryStore()
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             membershipDirectory: .init(store: store),
             sync: fixture.syncService()
         )
@@ -1865,37 +728,13 @@ struct V2GatewayDomainCommandHandlerTests {
 
 
 
-    @Test("relationship and block commands use only the authenticated actor")
-    func socialCommandsUseAuthenticatedActor() async throws {
-        let fixture = try GatewayDomainFixture()
-        let store = GatewaySocialRelationshipStore()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            socialRelationships: .init(store: store, now: { fixture.now }),
-            sync: fixture.syncService()
-        )
-        var relationship = IMV2Envelope(); relationship.changeRelationship = .init()
-        relationship.changeRelationship.operationID = "00000000-0000-0000-0000-000000000018"
-        relationship.changeRelationship.targetUserID = "00000000-0000-0000-0000-000000000019"
-        relationship.changeRelationship.action = .request
-        let relationshipResponse = try await handler.handle(envelope: relationship, identity: fixture.identity)
-        #expect(relationshipResponse.relationshipChanged.resultingState == .pending)
 
-        var block = IMV2Envelope(); block.changeUserBlock = .init()
-        block.changeUserBlock.operationID = "00000000-0000-0000-0000-000000000020"
-        block.changeUserBlock.targetUserID = "00000000-0000-0000-0000-000000000019"
-        block.changeUserBlock.action = .block
-        let blockResponse = try await handler.handle(envelope: block, identity: fixture.identity)
-        #expect(blockResponse.userBlockChanged.isBlocked)
-        #expect(await store.actors() == [fixture.userID, fixture.userID])
-    }
 
     @Test("receipt owner change returns retryable unavailability", arguments: ["record", "readers"])
     func readReceiptOwnerChangeIsRetryable(_ kind: String) async throws {
         let fixture = try GatewayDomainFixture()
         let store = GatewayOwnerChangedReadReceiptStore()
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             readReceipt: .init(store: store), sync: fixture.syncService())
         var request = IMV2Envelope()
         if kind == "record" {
@@ -1912,101 +751,12 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(await store.calls() == [kind])
     }
 
-    @Test("moderation owner changes return retryable unavailability", arguments: ["redact", "mute", "remove"])
-    func moderationOwnerChangeIsRetryable(_ kind: String) async throws {
-        let fixture = try GatewayDomainFixture()
-        let store = GatewayModerationStore(failure: .ownerChanged)
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            moderation: .init(store: store, capacityProfile: try .init(id: "standard", limits: fixture.profile), now: { fixture.now }),
-            sync: fixture.syncService()
-        )
-        let operation = "00000000-0000-0000-0000-000000000027"
-        let target = "00000000-0000-0000-0000-000000000028"
-        var request = IMV2Envelope()
-        switch kind {
-        case "redact":
-            request.moderateMessage.roomID = fixture.roomID.rawValue
-            request.moderateMessage.operationID = operation
-            request.moderateMessage.messageID = target
-            request.moderateMessage.reasonCode = "abuse_spam"
-        case "mute":
-            request.muteMember.roomID = fixture.roomID.rawValue
-            request.muteMember.operationID = operation
-            request.muteMember.targetUserID = target
-            request.muteMember.muteUntilMs = Int64(fixture.now.addingTimeInterval(300).timeIntervalSince1970 * 1_000)
-            request.muteMember.reasonCode = "abuse_spam"
-        default:
-            request.moderateMemberRemoval.roomID = fixture.roomID.rawValue
-            request.moderateMemberRemoval.operationID = operation
-            request.moderateMemberRemoval.targetUserID = target
-            request.moderateMemberRemoval.reasonCode = "abuse_spam"
-        }
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-        #expect(response.error.code == "UNAVAILABLE" && response.error.retryable)
-        #expect(await store.actor() == fixture.userID)
-    }
 
-    @Test("moderation redaction takes its actor exclusively from the session")
-    func moderationUsesAuthenticatedActor() async throws {
-        let fixture = try GatewayDomainFixture()
-        let store = GatewayModerationStore()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            moderation: .init(store: store, capacityProfile: try .init(id: "standard", limits: fixture.profile), now: { fixture.now }),
-            sync: fixture.syncService()
-        )
-        var request = IMV2Envelope(); request.moderateMessage = .init()
-        request.moderateMessage.roomID = fixture.roomID.rawValue
-        request.moderateMessage.operationID = "00000000-0000-0000-0000-000000000027"
-        request.moderateMessage.messageID = "00000000-0000-0000-0000-000000000028"
-        request.moderateMessage.reasonCode = "abuse_spam"
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-        #expect(response.messageRedacted.roomID == fixture.roomID.rawValue)
-        #expect(response.messageRedacted.messageRevision == 2)
-        #expect(await store.actor() == fixture.userID)
-    }
 
-    @Test("member mute takes its actor exclusively from the session")
-    func memberMuteUsesAuthenticatedActor() async throws {
-        let fixture = try GatewayDomainFixture()
-        let store = GatewayModerationStore()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            moderation: .init(store: store, capacityProfile: try .init(id: "standard", limits: fixture.profile), now: { fixture.now }),
-            sync: fixture.syncService()
-        )
-        var request = IMV2Envelope(); request.muteMember = .init()
-        request.muteMember.roomID = fixture.roomID.rawValue
-        request.muteMember.operationID = "00000000-0000-0000-0000-000000000029"
-        request.muteMember.targetUserID = "00000000-0000-0000-0000-000000000030"
-        request.muteMember.muteUntilMs = Int64(fixture.now.addingTimeInterval(300).timeIntervalSince1970 * 1_000)
-        request.muteMember.reasonCode = "abuse_spam"
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-        #expect(response.memberMuted.targetUserID == request.muteMember.targetUserID)
-        #expect(response.memberMuted.muteUntilMs == request.muteMember.muteUntilMs)
-        #expect(await store.actor() == fixture.userID)
-    }
 
-    @Test("audit member removal takes its actor exclusively from the session")
-    func moderatedMemberRemovalUsesAuthenticatedActor() async throws {
-        let fixture = try GatewayDomainFixture()
-        let store = GatewayModerationStore()
-        let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
-            moderation: .init(store: store, capacityProfile: try .init(id: "standard", limits: fixture.profile), now: { fixture.now }),
-            sync: fixture.syncService()
-        )
-        var request = IMV2Envelope(); request.moderateMemberRemoval = .init()
-        request.moderateMemberRemoval.roomID = fixture.roomID.rawValue
-        request.moderateMemberRemoval.operationID = "00000000-0000-0000-0000-000000000031"
-        request.moderateMemberRemoval.targetUserID = "00000000-0000-0000-0000-000000000032"
-        request.moderateMemberRemoval.reasonCode = "abuse_spam"
-        let response = try await handler.handle(envelope: request, identity: fixture.identity)
-        #expect(response.memberRemovedByModerator.targetUserID == request.moderateMemberRemoval.targetUserID)
-        #expect(response.memberRemovedByModerator.membershipRevision == 4)
-        #expect(await store.actor() == fixture.userID)
-    }
+
+
+
 }
 
 extension V2GatewayDomainCommandHandlerTests {
@@ -2014,7 +764,6 @@ extension V2GatewayDomainCommandHandlerTests {
     func receiptDirectoryContainsNoProfileContent() async throws {
         let fixture = try GatewayDomainFixture(), source = GatewayReceiptIDStore()
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             readReceipt: .init(store: source), sync: fixture.syncService())
         var request = IMV2Envelope(); request.listReadReceiptReaders = .init()
         request.listReadReceiptReaders.roomID = fixture.roomID.rawValue
@@ -2240,124 +989,11 @@ private actor GatewayRecoveringSyncStore: V2SyncStore {
     }
 }
 
-private actor GatewayTimestampSequenceStore: V2RoomWriteStore {
-    var outcomes: [V2SendMessageOutcome]
-    init(outcomes: [V2SendMessageOutcome]) { self.outcomes = outcomes }
-    func accept(command: V2SendMessageCommand, capacityProfile: V2CapacityProfile,
-                identifiers: V2AcceptanceIdentifiers, now: Date) async throws -> V2SendMessageOutcome {
-        guard !outcomes.isEmpty else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        return outcomes.removeFirst()
-    }
-}
-
 private struct GatewayPersonalTimestampFailure: V2ConversationCapabilitiesStore {
     let error: V2ConversationCapabilitiesStoreError
-    func setConversationState(actorUserID: UserID, command: V2ConversationStateCommand, now: Date) async throws -> V2ConversationCapabilitiesOutcome<V2ConversationState> { throw error }
-    func setMessageFavorite(actorUserID: UserID, command: V2MessageFavoriteCommand, now: Date) async throws -> V2ConversationCapabilitiesOutcome<V2MessageFavorite> { throw error }
-}
-
-private struct GatewayAcceptedMessageStore: V2RoomWriteStore {
-    let outcome: V2SendMessageOutcome
-    var beforeReturn: (@Sendable () throws -> Void)? = nil
-
-    func accept(
-        command _: V2SendMessageCommand,
-        capacityProfile _: V2CapacityProfile,
-        identifiers _: V2AcceptanceIdentifiers,
-        now _: Date
-    ) async throws -> V2SendMessageOutcome {
-        try beforeReturn?()
-        return outcome
-    }
-}
-
-private struct GatewayAtomicBatchStore: V2AtomicRoomWriteBatchStore {
-    func accept(
-        command _: V2SendMessageCommand,
-        capacityProfile _: V2CapacityProfile,
-        identifiers _: V2AcceptanceIdentifiers,
-        now _: Date
-    ) async throws -> V2SendMessageOutcome {
-        .rateLimited(retryAfterSeconds: 1)
-    }
-
-    func acceptAtomically(
-        requests: [V2RoomWriteRequest]
-    ) async throws -> [V2SendMessageOutcome] {
-        requests.map { _ in .rateLimited(retryAfterSeconds: 1) }
-    }
-}
-
-private struct GatewayPoolTimeoutMessageStore: V2RoomWriteStore {
-    func accept(
-        command _: V2SendMessageCommand,
-        capacityProfile _: V2CapacityProfile,
-        identifiers _: V2AcceptanceIdentifiers,
-        now _: Date
-    ) async throws -> V2SendMessageOutcome {
-        throw ConnectionPoolTimeoutError.connectionRequestTimeout
-    }
-}
-
-private final class GatewayForegroundHintRecorder:
-    V2ForegroundGroupEventHintSubmitting,
-    Sendable
-{
-    private let hints = Mutex<[V2GroupEventWake]>([])
-    private let exclusions = Mutex<[UUID?]>([])
-    private let membershipRevisions = Mutex<[UInt64?]>([])
-
-    func submitForegroundHint(_ hint: V2GroupEventWake) {
-        hints.withLock { $0.append(hint) }
-    }
-
-    func submitForegroundDirectMessage(_ message: V2AcceptedMessage) {
-        exclusions.withLock { $0.append(nil) }
-        submitForegroundHint(.init(
-            roomID: message.roomID,
-            highWatermark: message.roomSequence
-        ))
-    }
-
-    func submitForegroundDirectEvent(_ event: V2DirectRoomLiveEvent) {
-        exclusions.withLock { $0.append(event.excludedConnectionID) }
-        membershipRevisions.withLock { $0.append(event.groupMembershipRevision) }
-        submitForegroundHint(.init(
-            roomID: event.roomID,
-            highWatermark: event.highWatermark
-        ))
-    }
-
-    func submitForegroundDirectMessage(
-        _ message: V2AcceptedMessage,
-        excludingConnectionID: UUID?
-    ) {
-        exclusions.withLock { $0.append(excludingConnectionID) }
-        submitForegroundHint(.init(
-            roomID: message.roomID,
-            highWatermark: message.roomSequence
-        ))
-    }
-
-    func values() -> [V2GroupEventWake] { hints.withLock { $0 } }
-    func groupMembershipRevisions() -> [UInt64] {
-        membershipRevisions.withLock { $0.compactMap { $0 } }
-    }
-    func directExclusions() -> [UUID?] { exclusions.withLock { $0 } }
-}
-
-private actor GatewayMembershipStore: V2RoomMembershipStore {
-    private var capturedActor: UserID?
-    private let failure: V2RoomMembershipStoreError?
-    init(failure: V2RoomMembershipStoreError? = nil) { self.failure = failure }
-
-    func change(command: V2ChangeRoomMembershipCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2RoomMembershipChangeOutcome {
-        capturedActor = command.actorUserID
-        if let failure { throw failure }
-        return .changed(try .init(roomID: command.roomID, targetUserID: command.targetUserID, action: command.action, membershipRevision: command.expectedMembershipRevision + 1, roomSequence: 1, eventID: eventID, createdAt: now))
-    }
-
-    func actor() -> UserID? { capturedActor }
+    func recover(actorUserID:UserID,request:V2PersonalPreferenceRecoveryRequest,now:Date) async throws -> V2PersonalPreferenceRecoveryResult { throw error }
+    func setConversationState(actorUserID: UserID, command: V2ConversationStateCommand, now: Date) async throws -> V2PersonalPreferenceReceipt { throw error }
+    func setMessageFavorite(actorUserID: UserID, command: V2MessageFavoriteCommand, now: Date) async throws -> V2PersonalPreferenceReceipt { throw error }
 }
 
 /// 会话摘要假存储：记录调用者与游标，按构造时给定的单行摘要回答。
@@ -2388,96 +1024,9 @@ private actor GatewayMembershipDirectoryStore: V2RoomMembershipDirectoryStore {
     func actor() -> UserID? { capturedActor }
 }
 
-private actor GatewayGroupStore: V2GroupMessagingStore {
-    private let returnedMemberCount: Int?
-    private let replay: Bool
-    private var capturedActor: UserID?
-    private var capturedMembers: [UserID] = []
 
-    init(returnedMemberCount: Int? = nil, replay: Bool = false) {
-        self.returnedMemberCount = returnedMemberCount
-        self.replay = replay
-    }
 
-    func create(command: V2CreateGroupRoomCommand, capacityProfile _: V2CapacityProfile, roomShardID _: String, roomID: RoomID, eventID _: EventID, now: Date) throws -> V2CreateGroupRoomOutcome {
-        capturedActor = command.actorUserID
-        capturedMembers = command.allMemberUserIDs
-        let room = try V2GroupRoom(roomID: roomID, ownerUserID: command.actorUserID, title: command.title,
-            capacityClass: command.capacityClass, memberUserIDs: command.allMemberUserIDs,
-            memberCount: returnedMemberCount, createdAt: now)
-        return replay ? .idempotent(room) : .created(room)
-    }
 
-    func actor() -> UserID? { capturedActor }
-    func members() -> [UserID] { capturedMembers }
-}
-
-private actor GatewayAudienceImportStore: V2GroupAudienceImportStore {
-    private let returnedMemberCount: Int?
-    private var capturedActor: UserID?
-    private var title: String?
-    private var members: [UserID] = []
-    private var recoveryCandidates: [V2GroupAudienceRecoveryCandidate] = []
-    private var completedOperationIDsValue: [GroupRoomOperationID] = []
-    private var failingRecoveryOperationIDs: Set<GroupRoomOperationID> = []
-    private var cancellationFrozen = false
-
-    init(returnedMemberCount: Int? = nil) { self.returnedMemberCount = returnedMemberCount }
-
-    func begin(actorUserID: UserID, operationID: GroupRoomOperationID, title: String, policy _: V2GroupAudienceImportPolicy, now _: Date) throws -> V2GroupAudienceDraft {
-        capturedActor = actorUserID
-        if let existingTitle = self.title {
-            guard existingTitle == title else { throw V2GroupAudienceImportError.idempotencyConflict }
-        } else {
-            self.title = title
-        }
-        return .init(operationID: operationID, title: title, stagedMemberCount: returnedMemberCount ?? members.count)
-    }
-
-    func append(actorUserID: UserID, operationID: GroupRoomOperationID, memberUserIDs: [UserID], maximumMembers: Int, policy _: V2GroupAudienceImportPolicy, now _: Date) throws -> V2GroupAudienceDraft {
-        capturedActor = actorUserID
-        guard let title else { throw V2GroupAudienceImportError.missingDraft }
-        members = Array(Set(members).union(memberUserIDs)).sorted()
-        guard members.count <= maximumMembers else { throw V2GroupAudienceImportError.memberLimitReached }
-        return .init(operationID: operationID, title: title, stagedMemberCount: returnedMemberCount ?? members.count)
-    }
-
-    func freeze(actorUserID: UserID, operationID: GroupRoomOperationID, policy _: V2GroupAudienceImportPolicy, now _: Date) throws -> V2GroupAudienceImport {
-        capturedActor = actorUserID
-        if failingRecoveryOperationIDs.contains(operationID) {
-            throw V2GroupAudienceImportError.corruptPersistenceState
-        }
-        guard let title else { throw V2GroupAudienceImportError.missingDraft }
-        return try .init(actorUserID: actorUserID, operationID: operationID, title: title, memberUserIDs: members)
-    }
-
-    func complete(actorUserID: UserID, operationID: GroupRoomOperationID, roomID _: RoomID, policy _: V2GroupAudienceImportPolicy, now _: Date) {
-        capturedActor = actorUserID
-        completedOperationIDsValue.append(operationID)
-    }
-
-    func discardFrozen(actorUserID: UserID, operationID _: GroupRoomOperationID, now _: Date) {
-        capturedActor = actorUserID
-        title = nil
-        members = []
-    }
-
-    func cancel(actorUserID: UserID, operationID _: GroupRoomOperationID, now _: Date) throws {
-        capturedActor = actorUserID
-        if cancellationFrozen { throw V2GroupAudienceImportError.draftFrozen }
-        title = nil
-        members = []
-    }
-
-    func purgeExpired(now _: Date, limit _: Int) -> Int { 0 }
-    func recoverableFinalizing(now _: Date, staleAfter _: TimeInterval, limit: Int) -> [V2GroupAudienceRecoveryCandidate] { Array(recoveryCandidates.prefix(limit)) }
-
-    func actor() -> UserID? { capturedActor }
-    func setRecoveryCandidates(_ candidates: [V2GroupAudienceRecoveryCandidate]) { recoveryCandidates = candidates }
-    func setFailingRecoveryOperationIDs(_ operationIDs: Set<GroupRoomOperationID>) { failingRecoveryOperationIDs = operationIDs }
-    func setCancellationFrozen(_ frozen: Bool) { cancellationFrozen = frozen }
-    func completedOperationIDs() -> [GroupRoomOperationID] { completedOperationIDsValue }
-}
 
 private actor GatewayGroupEventLogStore: V2GroupEventLogStore {
     private var capturedActor: UserID?
@@ -2506,76 +1055,9 @@ private struct GatewaySizedGroupEventLogStore: V2GroupEventLogStore {
     }
 }
 
-private actor GatewayModerationStore: V2ModerationStore {
-    private var capturedActor: UserID?
-    private let failure: V2RoomOwnerFenceError?
-    init(failure: V2RoomOwnerFenceError? = nil) { self.failure = failure }
-    func actor() -> UserID? { capturedActor }
-    func apply(command: V2ModerationCommand, capacityProfile _: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2ModerationOutcome {
-        capturedActor = command.actorUserID
-        if let failure { throw failure }
-        return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: command.action, targetUserID: command.targetUserID, messageID: command.messageID, messageRevision: command.action == .redactMessage ? 2 : nil, membershipRevision: command.action == .removeMember ? 4 : nil, muteUntil: command.muteUntil, roomSequence: 3, eventID: eventID, createdAt: now))
-    }
-}
 
-private actor GatewaySocialRelationshipStore: V2SocialRelationshipStore {
-    private var capturedActors: [UserID] = []
-    func changeRelationship(_ command: V2ChangeRelationshipCommand, now: Date) throws -> V2RelationshipOutcome {
-        capturedActors.append(command.actorUserID)
-        return .changed(.init(actorUserID: command.actorUserID, targetUserID: command.targetUserID, action: command.action, resultingState: .pending, updatedAt: now))
-    }
-    func changeUserBlock(_ command: V2ChangeUserBlockCommand, now: Date) throws -> V2UserBlockOutcome {
-        capturedActors.append(command.actorUserID)
-        return .changed(.init(actorUserID: command.actorUserID, targetUserID: command.targetUserID, action: command.action, isBlocked: command.action == .block, updatedAt: now))
-    }
-    func actors() -> [UserID] { capturedActors }
-}
 
-private actor GatewayOwnerChangedMutationStore: V2MessageEditStore, V2MessageWithdrawalStore, V2MessageReactionStore {
-    private var received: [String] = []
-    func edit(command: V2EditMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2MessageEditOutcome {
-        received.append("edit")
-        throw V2RoomOwnerFenceError.ownerChanged
-    }
-    func withdraw(command: V2WithdrawMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2MessageWithdrawalOutcome {
-        received.append("withdraw")
-        throw V2RoomOwnerFenceError.ownerChanged
-    }
-    func change(command: V2ChangeMessageReactionCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2MessageReactionOutcome {
-        received.append("reaction")
-        throw V2RoomOwnerFenceError.ownerChanged
-    }
-    func calls() -> [String] { received }
-}
 
-private actor GatewayRevisionBoundaryStore: V2RoomMembershipStore, V2MessageEditStore, V2MessageWithdrawalStore {
-    private var count = 0
-    private let conflictRevision: UInt64?
-    init(conflictRevision: UInt64? = nil) { self.conflictRevision = conflictRevision }
-    func change(command: V2ChangeRoomMembershipCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2RoomMembershipChangeOutcome {
-        count += 1
-        if let conflictRevision { return .revisionConflict(current: conflictRevision) }
-        return .targetAlreadyMember
-    }
-    func edit(command: V2EditMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) -> V2MessageEditOutcome {
-        count += 1
-        if let conflictRevision { return .revisionConflict(current: conflictRevision) }
-        return .alreadyWithdrawn
-    }
-    func withdraw(command: V2WithdrawMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) -> V2MessageWithdrawalOutcome {
-        count += 1
-        if let conflictRevision { return .revisionConflict(current: conflictRevision) }
-        return .alreadyWithdrawn
-    }
-    func calls() -> Int { count }
-}
-
-private struct GatewayPendingForward: V2ForwardMessagesHandling {
-    let paused: Bool
-    func forward(actorUserID: UserID, command: V2ForwardMessagesCommand) async throws -> [V2ForwardMessageResult] {
-        throw paused ? V2ForwardPendingError.paused : V2ForwardPendingError.pending
-    }
-}
 
 extension V2GatewayDomainCommandHandlerTests {
     @Test("RoomRef Gateway call leaves the sole read permit for Host SQL")
@@ -2594,8 +1076,6 @@ extension V2GatewayDomainCommandHandlerTests {
         #expect(await admission.acquire(.foregroundWrite) == .admitted)
         let reader = GatewayHostAdmittedPolicyReader(admission: admission)
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(
-                seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             groupRolePolicyBaseline: reader, sync: fixture.syncService(),
             databaseWorkAdmission: admission, roomCommandsHostAdmitted: true)
         var request = IMV2Envelope()
@@ -2620,8 +1100,6 @@ extension V2GatewayDomainCommandHandlerTests {
         #expect(await admission.acquire(.foregroundWrite) == .admitted)
         #expect(await admission.acquire(.interactiveRead) == .admitted)
         let handler = makeGatewayDomainCommandHandler(
-            sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(
-                seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])),
             sync: fixture.syncService(), databaseWorkAdmission: admission,
             roomCommandsHostAdmitted: true)
         var request = IMV2Envelope()
@@ -2636,7 +1114,7 @@ extension V2GatewayDomainCommandHandlerTests {
     func groupRolePolicyBaselineWire() async throws {
         let fixture = try GatewayDomainFixture()
         let reader = GatewayPolicyBaselineReader(scenario: "valid")
-        let handler = makeGatewayDomainCommandHandler(sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])), groupRolePolicyBaseline: reader, sync: fixture.syncService())
+        let handler = makeGatewayDomainCommandHandler( groupRolePolicyBaseline: reader, sync: fixture.syncService())
         var request = IMV2Envelope(); request.requestID = 10; request.protocolVersion = IMV2ProtocolVersion.current
         request.getGroupRolePolicyBaseline.roomID = fixture.roomID.rawValue
         let decoded = try V2ServerProtobufFrameCodec.decode(V2ServerProtobufFrameCodec.encode(request, frameVersion: UInt8(IMV2ProtocolVersion.current)))
@@ -2654,7 +1132,7 @@ extension V2GatewayDomainCommandHandlerTests {
     func groupRolePolicyBaselineErrors(scenario: String) async throws {
         let fixture = try GatewayDomainFixture()
         let reader = GatewayPolicyBaselineReader(scenario: scenario)
-        let handler = makeGatewayDomainCommandHandler(sendMessage: fixture.sendService(store: InMemoryV2RoomWriteStore(seed: [(fixture.roomState, fixture.shardState)], authorizedActors: [fixture.userID])), groupRolePolicyBaseline: reader, sync: fixture.syncService())
+        let handler = makeGatewayDomainCommandHandler( groupRolePolicyBaseline: reader, sync: fixture.syncService())
         var request = IMV2Envelope(); request.getGroupRolePolicyBaseline.roomID = scenario == "invalid" ? "invalid" : fixture.roomID.rawValue
         let response = try await handler.handle(envelope: request, identity: fixture.identity)
         let code = switch scenario { case "forbidden": "FORBIDDEN"; case "notFound": "NOT_FOUND"; case "ownerChanged": "ROOM_OWNER_CHANGED"; case "invalid": "INVALID_ARGUMENT"; default: "UNAVAILABLE" }
@@ -2701,27 +1179,6 @@ private actor GatewayPolicyBaselineReader: V2GroupRolePolicyBaselineReading {
     }
 }
 
-private actor GatewayOwnerChangedGroupCapabilityStore: V2GroupCapabilitiesStore {
-    private var received: [String] = []
-    func setPinnedMessage(actorUserID: UserID, command: V2PinnedMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage> {
-        received.append("pin")
-        throw V2RoomOwnerFenceError.ownerChanged
-    }
-    func setAnnouncement(actorUserID: UserID, command: V2GroupAnnouncementCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement> {
-        received.append("announcement")
-        throw V2RoomOwnerFenceError.ownerChanged
-    }
-    func setRolePermissions(actorUserID: UserID, command: V2GroupRolePermissionsCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange> {
-        received.append("permissions")
-        throw V2RoomOwnerFenceError.ownerChanged
-    }
-    func changeMemberRole(actorUserID: UserID, command: V2GroupMemberRoleCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> {
-        received.append("role")
-        throw V2RoomOwnerFenceError.ownerChanged
-    }
-    func calls() -> [String] { received }
-}
-
 private actor GatewayOwnerChangedReadReceiptStore: V2ReadReceiptStore {
     private var received: [String] = []
     func record(command: V2RecordReadReceiptCommand, now: Date) throws -> V2ReadReceiptOutcome { received.append("record"); throw V2ReadReceiptStoreError.ownerChanged }
@@ -2730,40 +1187,26 @@ private actor GatewayOwnerChangedReadReceiptStore: V2ReadReceiptStore {
     func calls() -> [String] { received }
 }
 
-private struct GatewayOwnerChangedSendStore: V2RoomWriteStore {
-    func accept(command: V2SendMessageCommand, capacityProfile: V2CapacityProfile, identifiers: V2AcceptanceIdentifiers, now: Date) async throws -> V2SendMessageOutcome {
-        throw V2RoomOwnerFenceError.ownerChanged
-    }
-}
-
-private struct GatewayGroupIntentClockFailure: V2GroupMessagingStore {
-    func create(command: V2CreateGroupRoomCommand, capacityProfile: V2CapacityProfile,
-                roomShardID: String, roomID: RoomID, eventID: EventID, now: Date) async throws -> V2CreateGroupRoomOutcome {
-        throw V2GroupRoomCreationIntentStoreError.corruptPersistenceState
-    }
-}
-
 // Returns domain outputs directly so response encoding is exercised independently of storage validation.
-private actor GatewayResponseClockStore: V2RoomMembershipStore, V2ModerationStore, V2SocialRelationshipStore,
-    V2ReadReceiptStore, V2DirectMessagingStore, V2LiveActivityStore, V2MessageEditStore, V2MessageWithdrawalStore, V2MessageReactionStore,
-    V2ConversationCapabilitiesStore, V2GroupCapabilitiesStore, V2GroupMessagingStore {
+private actor GatewayResponseClockStore: V2ReadReceiptStore, V2LiveActivityStore, V2MessageEditStore, V2MessageWithdrawalStore, V2MessageReactionStore,
+    V2ConversationCapabilitiesStore, V2GroupCapabilitiesStore {
     private var date: Date
     private var replay: Bool
     private let muteExpiryOnly: Bool
     private(set) var calls = 0
     init(date: Date, replay: Bool, muteExpiryOnly: Bool) { self.date = date; self.replay = replay; self.muteExpiryOnly = muteExpiryOnly }
     func recover(at date: Date) { self.date = date; replay = true }
-    func setConversationState(actorUserID: UserID, command: V2ConversationStateCommand, now: Date) -> V2ConversationCapabilitiesOutcome<V2ConversationState> {
+    func setConversationState(actorUserID:UserID,command:V2ConversationStateCommand,now:Date) throws -> V2PersonalPreferenceReceipt {
         calls += 1
-        let value = V2ConversationState(roomID: command.roomID, isPinned: command.isPinned, isArchived: command.isArchived,
-            muteUntil: muteExpiryOnly ? date : nil, updatedAt: muteExpiryOnly ? now : date)
-        return replay ? .idempotent(value) : .applied(value)
+        let value=V2ConversationState(roomID:command.roomID,isPinned:command.isPinned,isArchived:command.isArchived,muteUntil:muteExpiryOnly ? date:nil,updatedAt:muteExpiryOnly ? now:date,revision:.init(rawValue:1)!)
+        return try .init(identity:command.identity(actorUserID:actorUserID),fingerprint:command.fingerprint(actorUserID:actorUserID),outcome:.committed(.conversationState(value)),resolvedAtMilliseconds:1)
     }
-    func setMessageFavorite(actorUserID: UserID, command: V2MessageFavoriteCommand, now: Date) -> V2ConversationCapabilitiesOutcome<V2MessageFavorite> {
+    func setMessageFavorite(actorUserID:UserID,command:V2MessageFavoriteCommand,now:Date) throws -> V2PersonalPreferenceReceipt {
         calls += 1
-        let value = V2MessageFavorite(roomID: command.roomID, messageID: command.messageID, isFavorited: command.isFavorited, updatedAt: date)
-        return replay ? .idempotent(value) : .applied(value)
+        let value=V2MessageFavorite(roomID:command.roomID,messageID:command.messageID,isFavorited:command.isFavorited,updatedAt:date,revision:.init(rawValue:1)!)
+        return try .init(identity:command.identity(actorUserID:actorUserID),fingerprint:command.fingerprint(actorUserID:actorUserID),outcome:.committed(.messageFavorite(value)),resolvedAtMilliseconds:1)
     }
+    func recover(actorUserID:UserID,request:V2PersonalPreferenceRecoveryRequest,now:Date) -> V2PersonalPreferenceRecoveryResult { .unresolved }
     func setPinnedMessage(actorUserID: UserID, command: V2PinnedMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage> {
         calls += 1
         let value = try V2PinnedMessage(roomID: command.roomID, messageID: command.messageID, isPinned: command.isPinned, roomSequence: 3, updatedAt: date)
@@ -2776,12 +1219,7 @@ private actor GatewayResponseClockStore: V2RoomMembershipStore, V2ModerationStor
     }
     func setRolePermissions(actorUserID: UserID, command: V2GroupRolePermissionsCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange> { throw CancellationError() }
     func changeMemberRole(actorUserID: UserID, command: V2GroupMemberRoleCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> { throw CancellationError() }
-    func create(command: V2CreateGroupRoomCommand, capacityProfile: V2CapacityProfile, roomShardID: String, roomID: RoomID, eventID: EventID, now: Date) throws -> V2CreateGroupRoomOutcome {
-        calls += 1
-        let value = try V2GroupRoom(roomID: roomID, ownerUserID: command.actorUserID, title: command.title,
-            capacityClass: command.capacityClass, memberUserIDs: command.allMemberUserIDs, createdAt: date)
-        return replay ? .idempotent(value) : .created(value)
-    }
+
     func edit(command: V2EditMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) throws -> V2MessageEditOutcome {
         calls += 1
         let value = try V2MessageEdit(roomID: command.roomID, messageID: command.messageID, text: command.text,
@@ -2814,16 +1252,8 @@ private actor GatewayResponseClockStore: V2RoomMembershipStore, V2ModerationStor
             roomSequence: 3, eventID: eventID, createdAt: muteExpiryOnly ? now : date)
         return replay ? .idempotent(value) : .applied(value)
     }
-    func changeRelationship(_ command: V2ChangeRelationshipCommand, now: Date) -> V2RelationshipOutcome {
-        calls += 1
-        let value = V2RelationshipChange(actorUserID: command.actorUserID, targetUserID: command.targetUserID, action: command.action, resultingState: .pending, updatedAt: date)
-        return replay ? .idempotent(value) : .changed(value)
-    }
-    func changeUserBlock(_ command: V2ChangeUserBlockCommand, now: Date) -> V2UserBlockOutcome {
-        calls += 1
-        let value = V2UserBlockChange(actorUserID: command.actorUserID, targetUserID: command.targetUserID, action: command.action, isBlocked: true, updatedAt: date)
-        return replay ? .idempotent(value) : .changed(value)
-    }
+
+
     func record(command: V2RecordReadReceiptCommand, now: Date) throws -> V2ReadReceiptOutcome {
         calls += 1
         let value = try V2ReadReceipt(roomID: command.roomID, userID: command.actorUserID, readThroughRoomSequence: command.readThroughRoomSequence, recordedAt: date)
@@ -2835,19 +1265,9 @@ private actor GatewayResponseClockStore: V2RoomMembershipStore, V2ModerationStor
         return replay ? .idempotent(value) : .updated(value)
     }
     func readers(roomID: RoomID, messageID: MessageID, actorUserID: UserID, cursor: String?, pageSize: Int) throws -> V2ReadReceiptReadersPage { throw CancellationError() }
-    func open(command: V2OpenDirectRoomCommand, capacityProfile: V2CapacityProfile, roomShardID: String, roomID: RoomID, now: Date) -> V2OpenDirectRoomOutcome {
-        calls += 1
-        let value = V2DirectRoom(roomID: roomID, actorUserID: command.actorUserID, targetUserID: command.targetUserID, createdAt: date)
-        return replay ? .idempotent(value) : .opened(value)
-    }
-    func setStrangerMessagePermission(command: V2SetStrangerMessagePermissionCommand, now: Date) -> V2SetStrangerMessagePermissionOutcome {
-        calls += 1
-        return replay ? .idempotent(permission: command.permission, updatedAt: date) : .updated(permission: command.permission, updatedAt: date)
-    }
-    func setUserAddPermission(command: V2SetUserAddPermissionCommand, now: Date) -> V2SetUserAddPermissionOutcome {
-        calls += 1
-        return replay ? .idempotent(permission: command.permission, updatedAt: date) : .updated(permission: command.permission, updatedAt: date)
-    }
+
+
+
     func setPreferences(command: V2SetLiveActivityPreferencesCommand, now: Date) -> V2SetLiveActivityPreferencesOutcome {
         calls += 1
         let value = V2LiveActivityPreferences(allowsOnlinePresence: command.allowsOnlinePresence, allowsTypingIndicators: command.allowsTypingIndicators, updatedAt: date)
@@ -2881,16 +1301,6 @@ private actor GatewayReadReceiptSequenceStore: V2ReadReceiptStore {
     }
     func setPreferences(command: V2SetReadReceiptPreferencesCommand, now: Date) throws -> V2SetReadReceiptPreferencesOutcome { throw CancellationError() }
     func readers(roomID: RoomID, messageID: MessageID, actorUserID: UserID, cursor: String?, pageSize: Int) throws -> V2ReadReceiptReadersPage { throw CancellationError() }
-}
-
-private struct GatewayForwardSequence: V2ForwardMessagesHandling {
-    let sequence: UInt64
-    let failed: Bool
-    func forward(actorUserID: UserID, command: V2ForwardMessagesCommand) async throws -> [V2ForwardMessageResult] {
-        [try .init(sourceMessageID: command.sources[0].messageID, targetRoomID: command.targetRoomIDs[0],
-               messageID: failed ? nil : command.sources[0].messageID,
-               roomSequence: failed ? nil : sequence, errorCode: failed ? "FORBIDDEN" : nil)]
-    }
 }
 
 private struct GatewayMovedMembershipDirectory: V2RoomMembershipDirectoryStore {

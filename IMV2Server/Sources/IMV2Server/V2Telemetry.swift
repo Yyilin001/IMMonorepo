@@ -498,17 +498,10 @@ public func v2RenderPrometheusGatewayTransportMetrics(_ snapshot: V2GatewayTrans
 
 public enum V2GatewayTelemetryCommand: String, CaseIterable, Hashable, Sendable {
     case sendMessage = "send_message"
-    case changeRoomMembership = "change_room_membership"
     case withdrawMessage = "withdraw_message"
     case changeMessageReaction = "change_message_reaction"
     case editMessage = "edit_message"
     case recordReadReceipt = "record_read_receipt"
-    case openDirectRoom = "open_direct_room"
-    case setStrangerMessagePermission = "set_stranger_message_permission"
-    case setUserAddPermission = "set_user_add_permission"
-    case changeRelationship = "change_relationship"
-    case changeUserBlock = "change_user_block"
-    case moderateMemberRemoval = "moderate_member_removal"
     case syncPull = "sync_pull"
     case syncAck = "sync_ack"
     case syncSnapshot = "sync_snapshot"
@@ -740,18 +733,11 @@ private func v2SaturatingAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
 
 func v2TelemetryCommand(for envelope: IMV2Envelope) -> V2GatewayTelemetryCommand {
     switch envelope.body {
-    case .sendMessage: .sendMessage
-    case .changeRoomMembership: .changeRoomMembership
-    case .withdrawMessage: .withdrawMessage
-    case .changeMessageReaction: .changeMessageReaction
-    case .editMessage: .editMessage
+
+
+
+
     case .recordReadReceipt: .recordReadReceipt
-    case .openDirectRoom: .openDirectRoom
-    case .setStrangerMessagePermission: .setStrangerMessagePermission
-    case .setUserAddPermission: .setUserAddPermission
-    case .changeRelationship: .changeRelationship
-    case .changeUserBlock: .changeUserBlock
-    case .moderateMemberRemoval: .moderateMemberRemoval
     case .syncPull: .syncPull
     case .syncAck: .syncAck
     case .syncSnapshot: .syncSnapshot

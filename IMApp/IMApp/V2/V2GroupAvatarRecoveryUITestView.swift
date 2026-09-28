@@ -123,7 +123,7 @@ private struct RecoveryUIBoundary: V2GroupAvatarPresentationReading, V2ResourceC
     }
     func create(_ request: V2ResourceUploadRequest) throws -> V2ResourceUploadSession { throw V2GroupAvatarManagementError.unavailable }
     func status(_ locator: V2ResourceUploadLocator) throws -> V2ResourceUploadSession { throw V2GroupAvatarManagementError.unavailable }
-    func target(_ session: V2ResourceUploadSession) throws -> V2ResourceTransferPlan { throw V2GroupAvatarManagementError.unavailable }
+    func target(_ session: V2ResourceUploadSession) throws -> V2ResourceTransferPlan? { throw V2GroupAvatarManagementError.unavailable }
     func finalize(_ session: V2ResourceUploadSession) throws -> V2ResourceUploadSession { throw V2GroupAvatarManagementError.unavailable }
     func cancel(_ session: V2ResourceUploadSession) throws -> V2ResourceUploadSession { throw V2GroupAvatarManagementError.unavailable }
     func upload(fileURL: URL, plan: V2ResourceTransferPlan) throws { throw V2GroupAvatarManagementError.unavailable }

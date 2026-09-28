@@ -11,15 +11,15 @@ struct V2OutboxCancelledSocialTests {
         let directory = FileManager.default.temporaryDirectory.appending(path: "im-app-cancelled-social-\(UUID())")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()))
+        let account=UserID(uuid:UUID())
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "state.sqlite"), installationBinding: .init(value: UUID()),userID:account)
         do {
-            let transport = UnexpectedSocialTransport()
-            let outbox = V2SocialCommandOutboxEngine(store: store, socialTransport: transport, directTransport: transport, readReceiptTransport: transport)
-            let relationship = V2OutboxRelationshipChanger(outbox: outbox)
-            let block = V2OutboxUserBlockChanger(outbox: outbox)
-            let stranger = V2OutboxStrangerMessagePreferenceUpdater(outbox: outbox)
-            let userAdd = V2OutboxUserAddPreferenceUpdater(outbox: outbox)
-            let receipts = V2RealtimeReadReceiptPreferenceUpdater(outbox: outbox)
+            let service=V2SocialOperationService(accountID:account,store:store,client:UnexpectedSocialOperationClient())
+            let preferences=V2AccountPreferenceService(accountID:account,store:store,client:UnexpectedAccountPreferenceClient())
+            let relationship=V2OperationRelationshipChanger(service:service),block=V2OperationUserBlockChanger(service:service)
+            let stranger=V2OperationStrangerMessagePreferenceUpdater(service:preferences)
+            let userAdd=V2OperationUserAddPreferenceUpdater(service:preferences)
+            let receipts=V2OperationReadReceiptPreferenceUpdater(service:preferences)
             let target = UserID(uuid: UUID())
             let task = Task {
                 withUnsafeCurrentTask { $0?.cancel() }
@@ -32,7 +32,7 @@ struct V2OutboxCancelledSocialTests {
                 }
             }
             await #expect(throws: CancellationError.self) { try await task.value }
-            #expect(try await store.pendingSocialCommands().isEmpty)
+            #expect(try await store.dueOperationWork(now:Date(),limit:32).isEmpty)
             try await store.close()
         } catch {
             try? await store.close()
@@ -41,17 +41,14 @@ struct V2OutboxCancelledSocialTests {
     }
 }
 
-private struct UnexpectedSocialTransport: V2ClientSocialRelationshipTransport, V2ClientDirectMessagingTransport, V2ClientReadReceiptTransport {
-    private func unexpected<T>() throws -> T {
-        Issue.record("cancelled social action must not reach transport")
-        throw CancellationError()
-    }
-    func changeRelationship(operationID: RelationshipOperationID, targetUserID: UserID, action: V2RelationshipAction) async throws -> V2ClientRelationshipChange { try unexpected() }
-    func changeUserBlock(operationID: UserBlockOperationID, targetUserID: UserID, action: V2UserBlockAction) async throws -> V2ClientUserBlockChange { try unexpected() }
-    func openDirectRoom(operationID: DirectRoomOperationID, targetUserID: UserID) async throws -> V2ClientDirectRoom { try unexpected() }
-    func setStrangerMessagePermission(operationID: StrangerMessagePreferenceOperationID, permission: V2StrangerMessagePermission) async throws -> Date { try unexpected() }
-    func setUserAddPermission(operationID: UserAddPreferenceOperationID, permission: V2UserAddPermission) async throws -> Date { try unexpected() }
-    func recordReadReceipt(roomID: RoomID, operationID: ReadReceiptOperationID, readThroughRoomSequence: UInt64) async throws -> V2ClientReadReceipt { try unexpected() }
-    func setReadReceiptPreferences(operationID: ReadReceiptPreferenceOperationID, allowsDirectReadReceipts: Bool, allowsGroupReadReceipts: Bool) async throws -> V2ReadReceiptPreferences { try unexpected() }
-    func listReadReceiptReaders(roomID: RoomID, messageID: MessageID, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage { try unexpected() }
+private struct UnexpectedSocialOperationClient:V2SocialOperationClient {
+    func baseline(targetUserID:UserID) async throws -> V2SocialOperationSnapshot { Issue.record("cancelled action read baseline");throw CancellationError() }
+    func submit(_ command:V2SocialOperationCommand) async throws -> V2SocialOperationRecoveryResult { Issue.record("cancelled action submitted");throw CancellationError() }
+    func recover(_ command:V2SocialOperationCommand,action:V2OperationRecoveryRequest.Action) async throws -> V2SocialOperationRecoveryResult { throw CancellationError() }
+}
+
+private struct UnexpectedAccountPreferenceClient:V2AccountPreferenceClient {
+    func baseline(kind:V2OperationKind) async throws -> V2AccountPreferenceSnapshot { Issue.record("cancelled setting read baseline");throw CancellationError() }
+    func submit(_ command:V2AccountPreferenceCommand) async throws -> V2AccountPreferenceRecoveryResult { Issue.record("cancelled setting submitted");throw CancellationError() }
+    func recover(_ command:V2AccountPreferenceCommand,action:V2OperationRecoveryRequest.Action) async throws -> V2AccountPreferenceRecoveryResult { throw CancellationError() }
 }

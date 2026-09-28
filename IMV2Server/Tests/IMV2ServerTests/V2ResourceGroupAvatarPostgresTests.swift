@@ -396,7 +396,7 @@ struct V2ResourceGroupAvatarPostgresTests {
                 } else { control = f.database }
                 let controlSQL = try #require(control as? any SQLDatabase)
                 let device = try await f.account(on: control)
-                let executor = try V2RoomAdministrationDomainExecutor(database: f.database, token: f.token,
+                let executor = try V2RoomAdministrationDomainExecutor(database: f.database, invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)), invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: f.database), token: f.token,
                     capacityProfile: f.profile, membershipIdentities: AvatarUnusedIdentityReader())
                 let loss = AvatarCommandLostReply()
                 let administration = V2RoomRefAdministrationClient(caller: .init(timeout: .seconds(30)) { request, actor, deadline in

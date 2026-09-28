@@ -7,18 +7,19 @@ import SQLKit
 public struct V2BoundMediaProvider: V2MediaObjectProvider, V2MediaPurgeProvider {
     private let database: any Database
     private let registry: V2ResourceStorageRegistry
+    private let now: @Sendable () -> Date
     private let delivery: any V2ResourceDelivery
     private let transports: [V2StorageBinding: any V2UploadTransport]
 
     public init(database: any Database, registry: V2ResourceStorageRegistry,
-                delivery: any V2ResourceDelivery, transports: [any V2UploadTransport]) throws {
+                delivery: any V2ResourceDelivery, transports: [any V2UploadTransport], now: @escaping @Sendable () -> Date = Date.init) throws {
         var indexed: [V2StorageBinding: any V2UploadTransport] = [:]
         for transport in transports {
             guard indexed.updateValue(transport, forKey: transport.binding) == nil
             else { throw V2ResourceProviderError.configurationInvalid }
         }
         self.database = database; self.registry = registry; self.delivery = delivery
-        self.transports = indexed
+        self.transports = indexed; self.now = now
     }
 
     public func issueDownloadTarget(mediaID: MediaID, expiresAt: Date) async throws -> V2ResourceTransferPlan {
@@ -35,9 +36,9 @@ public struct V2BoundMediaProvider: V2MediaObjectProvider, V2MediaPurgeProvider 
         let reference = try JSONDecoder().decode(V2StoredObjectReference.self, from: Data(row.reference.utf8))
         _ = try registry.storage(for: reference.binding)
         let facts = try V2StoredObjectFacts(reference: reference, byteCount: row.byteCount, sha256: row.sha256)
-        let deadline = min(expiresAt, Date().addingTimeInterval(120))
+        let deadline = min(expiresAt, now().addingTimeInterval(120))
         let plan = try await delivery.issue(.init(facts: facts, expiresAt: deadline))
-        try plan.validateDownload(facts: facts, expiresAt: deadline)
+        try plan.validateDownload(facts: facts, expiresAt: deadline, now: now())
         return plan
     }
 
@@ -46,6 +47,13 @@ public struct V2BoundMediaProvider: V2MediaObjectProvider, V2MediaPurgeProvider 
     public func purge(mediaID: MediaID) async throws {
         guard let binding = try await binding(mediaID) else { return }
         guard let transport = transports[binding] else { throw V2ResourceProviderError.configurationInvalid }
+        if let multipart = transport as? any V2MultipartUploadTransport, let id = mediaID.uuidValue,
+           let row = try await sqlDatabase().raw("SELECT request_json::text AS request FROM im_v2.resource_upload_sessions WHERE media_id=\(bind: id)").first(decoding: MultipartPurgeRequest.self) {
+            let request = try JSONDecoder().decode(V2ResourceUploadRequest.self, from: Data(row.request.utf8))
+            if request.clientModes.contains(.httpPartPut) {
+                try await multipart.abortParts(mediaID: mediaID, byteCount: request.byteCount, checksum: request.checksum)
+            }
+        }
         try await transport.abort(mediaID: mediaID)
     }
 
@@ -80,3 +88,5 @@ private struct BoundPlacementRow: Decodable {
     let reference: String; let byteCount: Int64; let sha256: Data
     enum CodingKeys: String, CodingKey { case reference,byteCount="byte_count",sha256 }
 }
+
+private struct MultipartPurgeRequest: Decodable { let request: String }

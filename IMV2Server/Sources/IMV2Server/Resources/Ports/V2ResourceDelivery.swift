@@ -13,10 +13,10 @@ public protocol V2ResourceDelivery: Sendable {
 
 extension V2ResourceTransferPlan {
     /// An adapter cannot widen authorization or substitute different bytes.
-    package func validateDownload(facts: V2StoredObjectFacts, expiresAt: Date) throws {
+    package func validateDownload(facts: V2StoredObjectFacts, expiresAt: Date, now: Date = Date()) throws {
         let digest = facts.sha256.map { String(format: "%02x", $0) }.joined()
         guard mode == .httpGet, expectedByteCount == facts.byteCount,
-              checksum?.value == digest, self.expiresAt <= expiresAt, self.expiresAt > Date()
+              checksum?.value == digest, self.expiresAt <= expiresAt, self.expiresAt > now
         else { throw V2ResourceProviderError.integrityMismatch }
     }
 }

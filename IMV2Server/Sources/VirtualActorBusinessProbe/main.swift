@@ -221,6 +221,7 @@ enum VirtualActorBusinessProbe {
             sendBatcher: sends,
             membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
             invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
+            invitationSecretIssuer: try .init(base64EncodedKey: required("IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64")),
             receiptProjectionDelivery: NoopProjectionShadow(), capacityProfile: capacity,
             messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
             contentReviewMode: .disabled, queryBatchConfiguration: .init())
@@ -251,13 +252,13 @@ enum VirtualActorBusinessProbe {
             roomDatabases: ["room-a": database])
         do {
             let ref = application.directory.room(roomID)
-            let request = V2RoomRequest.messaging(.send(.init(roomID: roomID,
-                actorUserID: senderID, clientMessageID: clientID, text: "G4 real room send",
-                media: [], mentions: [], entities: [], replyTo: nil)))
+            let request = try V2RoomRequest.messaging(.sendOperation(try .init(command: try .init(roomID: roomID,
+                senderUserID: senderID, clientMessageID: clientID, text: "G4 real room send",
+                media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: frozenSendDeadline())))
             try marker("client-started")
             let first = try await callUntilAvailable(ref, request: request, seconds: 35)
-            guard case .messaging(.send(.accepted(let accepted))) = first,
-                  accepted.clientMessageID == clientID else {
+            guard case .messaging(.sendOperation(.receipt(let acceptedProof))) = first, case .accepted(let accepted) = acceptedProof.outcome,
+                  acceptedProof.identity.operation == .sendMessage(clientID) else {
                 throw ProbeError.unexpectedResponse("first send was not accepted")
             }
             let firstToken = try await application.directory.resolve(roomID,
@@ -283,7 +284,7 @@ enum VirtualActorBusinessProbe {
 
             try await waitFor("continue-after-restart", seconds: 90)
             let replay = try await callUntilAvailable(ref, request: request, seconds: 45)
-            guard case .messaging(.send(.idempotent(let recovered))) = replay,
+            guard case .messaging(.sendOperation(.receipt(let recoveredProof))) = replay, case .accepted(let recovered) = recoveredProof.outcome,
                   recovered.messageID == accepted.messageID else {
                 throw ProbeError.unexpectedResponse("same client ID did not recover original message")
             }
@@ -367,6 +368,7 @@ enum VirtualActorBusinessProbe {
             sendBatcher: sends,
             membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
             invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
+            invitationSecretIssuer: try .init(base64EncodedKey: required("IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64")),
             receiptProjectionDelivery: NoopProjectionShadow(), capacityProfile: capacity,
             messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
             contentReviewMode: .disabled, queryBatchConfiguration: .init())
@@ -479,20 +481,17 @@ enum VirtualActorBusinessProbe {
             roomDatabases: ["room-a": database])
         do {
             let ref = application.directory.room(roomID)
-            let request = multiSendRequest()
+            let request = try multiSendRequest()
             try multiMarker("race-\(slot)-ready")
             try await multiWaitFor("race-start", seconds: 60)
             let response = try await callUntilAvailable(ref, request: request, seconds: 55)
             let messageID: String
             let outcome: String
-            switch response {
-            case .messaging(.send(.accepted(let accepted))):
-                messageID = accepted.messageID.rawValue; outcome = "accepted"
-            case .messaging(.send(.idempotent(let replay))):
-                messageID = replay.messageID.rawValue; outcome = "idempotent"
-            default:
+            guard case .messaging(.sendOperation(.receipt(let proof))) = response,
+                  case .accepted(let accepted) = proof.outcome else {
                 throw ProbeError.unexpectedResponse("multi-race send result")
             }
+            messageID = accepted.messageID.rawValue; outcome = "originalReceipt"
             let token = try await application.directory.resolve(roomID,
                 deadline: .now + .seconds(10))
             try multiMarker("race-\(slot)-result.json", data: JSONEncoder().encode(
@@ -518,7 +517,7 @@ enum VirtualActorBusinessProbe {
         do {
             let ref = application.directory.room(roomID)
             let response = try await callUntilAvailable(ref, request: multiSendRequest(), seconds: 55)
-            guard case .messaging(.send(.idempotent(let recovered))) = response else {
+            guard case .messaging(.sendOperation(.receipt(let recoveredProof))) = response, case .accepted(let recovered) = recoveredProof.outcome else {
                 throw ProbeError.unexpectedResponse("takeover replay was not idempotent")
             }
             let token = try await application.directory.resolve(roomID,
@@ -542,10 +541,30 @@ enum VirtualActorBusinessProbe {
         }
     }
 
-    private static func multiSendRequest() -> V2RoomRequest {
-        .messaging(.send(.init(roomID: roomID, actorUserID: senderID,
+    private static func frozenSendDeadline() throws -> UInt64 {
+        let environment = ProcessInfo.processInfo.environment
+        let directory = try environment["VA_G6_EVIDENCE_DIR"] ?? required("VA_G4_EVIDENCE_DIR")
+        let path = URL(fileURLWithPath: directory).appendingPathComponent("send-admission-deadline-ms")
+        if !FileManager.default.fileExists(atPath: path.path) {
+            let temporary = path.appendingPathExtension(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: temporary) }
+            let value = UInt64(Date().timeIntervalSince1970 * 1_000) + 600_000
+            try Data(String(value).utf8).write(to: temporary, options: .atomic)
+            // Publish a complete frozen value once across concurrent probe processes.
+            guard link(temporary.path, path.path) == 0 || errno == EEXIST else {
+                throw ProbeError.unexpectedResponse("cannot persist send admission")
+            }
+        }
+        guard let value = UInt64(try String(contentsOf: path, encoding: .utf8)), value > 0 else {
+            throw ProbeError.unexpectedResponse("invalid persisted send admission")
+        }
+        return value
+    }
+
+    private static func multiSendRequest() throws -> V2RoomRequest {
+        .messaging(.sendOperation(try .init(command: try .init(roomID: roomID, senderUserID: senderID,
             clientMessageID: clientID, text: "G6 multi-host send",
-            media: [], mentions: [], entities: [], replyTo: nil)))
+            media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: frozenSendDeadline())))
     }
 
     private static func multiPartitionClient() async throws {
@@ -555,13 +574,13 @@ enum VirtualActorBusinessProbe {
             ownerRouter: V2PostgresRoomShardRouter(database: database),
             roomDatabases: ["room-a": database])
         do {
-            let healthyRequest = V2RoomRequest.messaging(.send(.init(
-                roomID: healthyRoomID, actorUserID: senderID,
+            let healthyRequest = try V2RoomRequest.messaging(.sendOperation(try .init(command: try .init(
+                roomID: healthyRoomID, senderUserID: senderID,
                 clientMessageID: healthyClientID, text: "G6 healthy peer room",
-                media: [], mentions: [], entities: [], replyTo: nil)))
+                media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: frozenSendDeadline())))
             let response = try await callUntilAvailable(
                 application.directory.room(healthyRoomID), request: healthyRequest, seconds: 30)
-            guard case .messaging(.send(.accepted(let accepted))) = response else {
+            guard case .messaging(.sendOperation(.receipt(let acceptedProof))) = response, case .accepted(let accepted) = acceptedProof.outcome else {
                 throw ProbeError.unexpectedResponse("survivor did not serve healthy room")
             }
             let healthyToken = try await application.directory.resolve(healthyRoomID,
@@ -604,7 +623,7 @@ enum VirtualActorBusinessProbe {
         do {
             let response = try await callUntilAvailable(
                 application.directory.room(roomID), request: multiSendRequest(), seconds: 45)
-            guard case .messaging(.send(.idempotent(let replay))) = response else {
+            guard case .messaging(.sendOperation(.receipt(let replayProof))) = response, case .accepted(let replay) = replayProof.outcome else {
                 throw ProbeError.unexpectedResponse("network rejoin lost idempotent result")
             }
             let token = try await application.directory.resolve(roomID,
@@ -633,8 +652,14 @@ enum VirtualActorBusinessProbe {
         var lastError: any Error = V2RoomCallFailure.notAccepted(.unavailable)
         while ContinuousClock.now < deadline {
             do {
-                return try await ref.call(request, principal: .user(senderID),
+                let response = try await ref.call(request, principal: .user(senderID),
                                           deadline: min(deadline, .now + .seconds(12)))
+                guard case .messaging(.sendOperation(let command)) = request,
+                      case .messaging(.sendOperation(.receipt(let proof))) = response,
+                      proof.identity == (try command.identity), proof.fingerprint == (try command.fingerprint) else {
+                    throw ProbeError.unexpectedResponse("missing bound original send proof")
+                }
+                return response
             } catch {
                 lastError = error
                 try await Task.sleep(for: .milliseconds(250))

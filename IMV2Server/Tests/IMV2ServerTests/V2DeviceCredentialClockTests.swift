@@ -387,7 +387,7 @@ struct V2LivePresenceLeaseDurationTests {
             } else {
                 await #expect(throws: V2LiveActivityStoreError.corruptPersistenceState) {
                     if path == "admit" {
-                        _ = try await tiny.admitConnection(identity: identity, connectionID: connection, policy: policy, now: now)
+                        _ = try await tiny.admitConnection(identity: identity, connectionID: connection, publicationSuppressed: false, policy: policy, now: now)
                     } else { _ = try await tiny.renewConnection(identity: identity, connectionID: connection, now: now) }
                 }
             }
@@ -397,7 +397,7 @@ struct V2LivePresenceLeaseDurationTests {
             let valid = try PostgresV2LiveActivityStore(database: database, onlineLease: 0.5)
             await #expect(throws: ClockDatabaseStop.boundary) {
                 if path == "admit" {
-                    _ = try await valid.admitConnection(identity: identity, connectionID: connection, policy: policy, now: now)
+                    _ = try await valid.admitConnection(identity: identity, connectionID: connection, publicationSuppressed: false, policy: policy, now: now)
                 } else if path == "renew" {
                     _ = try await valid.renewConnection(identity: identity, connectionID: connection, now: now)
                 } else { _ = try await valid.renewConnections([request]) }

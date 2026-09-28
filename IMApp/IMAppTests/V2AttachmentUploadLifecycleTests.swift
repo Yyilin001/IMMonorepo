@@ -69,9 +69,12 @@ private actor LateAttachmentUpload: V2DurableConversationSending {
                     attachments: [V2StagedConversationAttachment]) throws { throw CancellationError() }
     func copyAttachments(sources: [V2ResourceImportSource], to room: RoomID) throws { throw CancellationError() }
     func pending(in roomID: RoomID) -> [V2DurableConversationSendService.Pending] { [] }
+    nonisolated func pendingPageUpdates(in roomID:RoomID,page:Int) -> AsyncThrowingStream<V2DurableConversationSendService.PendingPage,any Error> {
+        AsyncThrowingStream { $0.yield(.init(items:[],hasNext:false));$0.finish() }
+    }
     func retry(intentID: UUID) throws { throw CancellationError() }
     func cancel(intentID: UUID) throws { throw CancellationError() }
-    func startRecovery() {}
+    func runRecovery() async throws {}
     func close() {}
     func release() { continuation?.resume(); continuation = nil }
 }

@@ -1,6 +1,7 @@
 import FluentKit
 import Foundation
 import IMV2Core
+import IMV2ActorContracts
 import Synchronization
 @testable import IMV2Server
 
@@ -63,33 +64,19 @@ struct V2DiscardingForegroundGroupEventHintPublisher: V2ForegroundGroupEventHint
 }
 
 private struct V2UnsupportedGatewayTestDependency: Error,
-    V2GatewayRoomMembershipHandling,
-    V2GatewayMessageWithdrawalHandling,
-    V2GatewayMessageReactionHandling,
-    V2GatewayMessageEditHandling,
     V2GatewayReadReceiptHandling,
     V2GatewayLiveActivityHandling,
-    V2GatewayDirectMessagingHandling,
-    V2GatewayGroupAudienceImportHandling,
     V2GatewayGroupEventLogHandling,
     V2GatewayRoomMembershipDirectoryHandling,
     V2RoomRecoveryCommandHandling,
     V2AccountRoomChangesStarting,
-    V2GatewaySocialRelationshipHandling,
-    V2GatewayModerationHandling,
     V2GatewayConversationCapabilitiesHandling,
-    V2GatewayGroupCapabilitiesHandling,
-    V2GroupRolePolicyBaselineReading,
-    V2GatewayForwardMessagesHandling
+    V2GroupRolePolicyBaselineReading
 {
     func startAccountRoomChanges(connectionID _: UUID, userID _: UserID) async throws -> String { throw self }
     func list(_: IMV2UserRoomDirectoryList, actorUserID _: UserID) async throws -> IMV2Envelope { throw self }
     func batch(_: IMV2RoomLatestVisibleBatch, actorUserID _: UserID) async throws -> IMV2Envelope { throw self }
     func batch(_: IMV2RoomSyncStateBatch, actorUserID _: UserID) async throws -> IMV2Envelope { throw self }
-    func change(_: V2AuthenticatedMembershipChange) async throws -> V2RoomMembershipChangeOutcome { throw self }
-    func withdraw(_: V2AuthenticatedMessageWithdrawal) async throws -> V2MessageWithdrawalOutcome { throw self }
-    func change(_: V2AuthenticatedMessageReaction) async throws -> V2MessageReactionOutcome { throw self }
-    func edit(_: V2AuthenticatedMessageEdit) async throws -> V2MessageEditOutcome { throw self }
     func record(_: V2AuthenticatedReadReceipt) async throws -> V2ReadReceiptOutcome { throw self }
     func setPreferences(actorUserID _: UserID, operationID _: ReadReceiptPreferenceOperationID, allowsDirectReadReceipts _: Bool, allowsGroupReadReceipts _: Bool) async throws -> V2SetReadReceiptPreferencesOutcome { throw self }
     func readers(roomID _: RoomID, messageID _: MessageID, actorUserID _: UserID, cursor _: String?, pageSize _: Int) async throws -> V2ReadReceiptReadersPage { throw self }
@@ -97,50 +84,24 @@ private struct V2UnsupportedGatewayTestDependency: Error,
     func preferences(userID _: UserID, now _: Date) async throws -> V2LiveActivityPreferences { throw self }
     func presence(roomID _: RoomID, viewerUserID _: UserID, now _: Date) async throws -> V2PresenceState { throw self }
     func authorizeTyping(roomID _: RoomID, actorUserID _: UserID, now _: Date) async throws { throw self }
-    func open(actorUserID _: UserID, operationID _: DirectRoomOperationID, targetUserID _: UserID) async throws -> V2OpenDirectRoomOutcome { throw self }
-    func setStrangerMessagePermission(actorUserID _: UserID, operationID _: StrangerMessagePreferenceOperationID, permission _: V2StrangerMessagePermission) async throws -> V2SetStrangerMessagePermissionOutcome { throw self }
-    func setUserAddPermission(actorUserID _: UserID, operationID _: UserAddPreferenceOperationID, permission _: V2UserAddPermission) async throws -> V2SetUserAddPermissionOutcome { throw self }
-    func begin(actorUserID _: UserID, operationID _: GroupRoomOperationID, title _: String) async throws -> V2GroupAudienceDraft { throw self }
-    func append(actorUserID _: UserID, operationID _: GroupRoomOperationID, memberUserIDs _: [UserID]) async throws -> V2GroupAudienceDraft { throw self }
-    func finalize(actorUserID _: UserID, operationID _: GroupRoomOperationID) async throws -> V2CreateGroupRoomOutcome { throw self }
-    func cancel(actorUserID _: UserID, operationID _: GroupRoomOperationID) async throws { throw self }
     func pull(roomID _: RoomID, actorUserID _: UserID, afterRoomSequence _: UInt64, pageSize _: Int) async throws -> V2GroupEventLogPage { throw self }
     func subscribe(roomID _: RoomID, actorUserID _: UserID) async throws -> V2GroupEventSubscription { throw self }
     func list(_: V2RoomMembershipDirectoryRequest) async throws -> V2RoomMembershipDirectoryPage { throw self }
-    func changeRelationship(actorUserID _: UserID, operationID _: RelationshipOperationID, targetUserID _: UserID, action _: V2RelationshipAction) async throws -> V2RelationshipOutcome { throw self }
-    func changeUserBlock(actorUserID _: UserID, operationID _: UserBlockOperationID, targetUserID _: UserID, action _: V2UserBlockAction) async throws -> V2UserBlockOutcome { throw self }
-    func apply(_: V2AuthenticatedModeration) async throws -> V2ModerationOutcome { throw self }
-    func setConversationState(actorUserID _: UserID, command _: V2ConversationStateCommand) async throws -> V2ConversationCapabilitiesOutcome<V2ConversationState> { throw self }
-    func setMessageFavorite(actorUserID _: UserID, command _: V2MessageFavoriteCommand) async throws -> V2ConversationCapabilitiesOutcome<V2MessageFavorite> { throw self }
-    func setPinnedMessage(actorUserID _: UserID, command _: V2PinnedMessageCommand) async throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage> { throw self }
-    func setAnnouncement(actorUserID _: UserID, command _: V2GroupAnnouncementCommand) async throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement> { throw self }
-    func setRolePermissions(actorUserID _: UserID, command _: V2GroupRolePermissionsCommand) async throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange> { throw self }
-    func changeMemberRole(actorUserID _: UserID, command _: V2GroupMemberRoleCommand) async throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> { throw self }
+    func setConversationState(actorUserID _: UserID, command _: V2ConversationStateCommand) async throws -> V2PersonalPreferenceReceipt { throw self }
+    func setMessageFavorite(actorUserID _: UserID, command _: V2MessageFavoriteCommand) async throws -> V2PersonalPreferenceReceipt { throw self }
     func readRolePolicyBaseline(roomID _: RoomID, actorUserID _: UserID) async throws -> V2GroupRolePolicyBaseline { throw self }
-    func forward(actorUserID _: UserID, command _: V2ForwardMessagesCommand) async throws -> [V2ForwardMessageResult] { throw self }
 }
 
 func makeGatewayDomainCommandHandler(
-    sendMessage: V2SendMessageService,
-    membership: V2RoomMembershipService? = nil,
-    withdrawal: V2MessageWithdrawalService? = nil,
-    reaction: V2MessageReactionService? = nil,
-    edit: V2MessageEditService? = nil,
     readReceipt: V2ReadReceiptService? = nil,
     liveActivity: V2LiveActivityService? = nil,
-    directMessaging: V2DirectMessagingService? = nil,
-    groupAudienceImports: V2GroupAudienceImportService? = nil,
     groupEventLog: V2GroupEventLogService? = nil,
     foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting = V2DiscardingForegroundGroupEventHintPublisher(),
     membershipDirectory: V2RoomMembershipDirectoryService? = nil,
     roomRecovery: (any V2RoomRecoveryCommandHandling)? = nil,
     accountChanges: (any V2AccountRoomChangesStarting)? = nil,
-    socialRelationships: V2SocialRelationshipService? = nil,
-    moderation: V2ModerationService? = nil,
     conversationCapabilities: V2ConversationCapabilitiesService? = nil,
-    groupCapabilities: V2GroupCapabilitiesService? = nil,
     groupRolePolicyBaseline: (any V2GroupRolePolicyBaselineReading)? = nil,
-    forwardMessages: (any V2ForwardMessagesHandling)? = nil,
     sync: V2SyncService,
     telemetry: any V2TelemetrySink = V2DiscardingTelemetrySink(),
     databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
@@ -151,26 +112,15 @@ func makeGatewayDomainCommandHandler(
 ) -> V2GatewayDomainCommandHandler {
     let unsupported = V2UnsupportedGatewayTestDependency()
     return V2GatewayDomainCommandHandler(
-        sendMessage: sendMessage,
-        membershipHandler: membership.map { $0 as any V2GatewayRoomMembershipHandling } ?? unsupported,
-        withdrawalHandler: withdrawal.map { $0 as any V2GatewayMessageWithdrawalHandling } ?? unsupported,
-        reactionHandler: reaction.map { $0 as any V2GatewayMessageReactionHandling } ?? unsupported,
-        editHandler: edit.map { $0 as any V2GatewayMessageEditHandling } ?? unsupported,
         readReceiptHandler: readReceipt.map { $0 as any V2GatewayReadReceiptHandling } ?? unsupported,
         liveActivityHandler: liveActivity.map { $0 as any V2GatewayLiveActivityHandling } ?? unsupported,
-        directMessagingHandler: directMessaging.map { $0 as any V2GatewayDirectMessagingHandling } ?? unsupported,
-        groupAudienceImportHandler: groupAudienceImports.map { $0 as any V2GatewayGroupAudienceImportHandling } ?? unsupported,
         groupEventLogHandler: groupEventLog.map { $0 as any V2GatewayGroupEventLogHandling } ?? unsupported,
         foregroundGroupEventHints: foregroundGroupEventHints,
         membershipDirectoryHandler: membershipDirectory.map { $0 as any V2GatewayRoomMembershipDirectoryHandling } ?? unsupported,
         roomRecovery: roomRecovery ?? unsupported,
         accountChanges: accountChanges ?? unsupported,
-        socialRelationshipHandler: socialRelationships.map { $0 as any V2GatewaySocialRelationshipHandling } ?? unsupported,
-        moderationHandler: moderation.map { $0 as any V2GatewayModerationHandling } ?? unsupported,
         conversationCapabilitiesHandler: conversationCapabilities.map { $0 as any V2GatewayConversationCapabilitiesHandling } ?? unsupported,
-        groupCapabilitiesHandler: groupCapabilities.map { $0 as any V2GatewayGroupCapabilitiesHandling } ?? unsupported,
         groupRolePolicyBaseline: groupRolePolicyBaseline ?? unsupported,
-        forwardMessagesHandler: forwardMessages.map { $0 as any V2GatewayForwardMessagesHandling } ?? unsupported,
         sync: sync,
         telemetry: telemetry,
         databaseWorkAdmission: databaseWorkAdmission,
@@ -199,7 +149,7 @@ struct V2FixedUserShardRouteFence: V2UserShardRouteFencing {
     }
 }
 
-private struct V2DiscardingUserShardProjectionDelivery: V2UserShardProjectionDelivering {
+struct V2DiscardingUserShardProjectionDelivery: V2UserShardProjectionDelivering {
     func deliverToCurrentShard(
         userID _: UserID,
         sourceEventID _: EventID,
@@ -246,8 +196,16 @@ extension PostgresV2ReadReceiptStore {
 }
 
 extension PostgresV2DirectMessagingStore {
+    /// Explicitly co-located fixture only. Split fixtures supply their control
+    /// identity reader through the production initializer instead.
     init(database: any Database) {
-        self.init(database: database, projectionDelivery: V2DiscardingUserShardProjectionDelivery())
+        self.init(database: database, identityReader: PostgresV2DirectRoomIdentityReader(database: database),
+            projectionDelivery: V2DiscardingUserShardProjectionDelivery())
+    }
+    init(database: any Database, projectionDelivery: any V2UserShardProjectionDelivering,
+         authorizationCoordinator: V2DirectAuthorizationCoordinator? = nil) {
+        self.init(database: database, identityReader: PostgresV2DirectRoomIdentityReader(database: database),
+            projectionDelivery: projectionDelivery, authorizationCoordinator: authorizationCoordinator)
     }
 }
 
@@ -257,8 +215,26 @@ extension PostgresV2SocialRelationshipStore {
     }
 }
 
-extension PostgresV2ConversationCapabilitiesStore {
-    init(database: any Database) {
-        self.init(database: database, projectionDelivery: V2DiscardingUserShardProjectionDelivery())
+// Existing presentation tests assert domain values; this accessor explicitly checks
+// the new immutable terminal receipt before exposing its committed payload.
+extension V2ContactAliasUpdateReceipt {
+    var committedValue:V2ContactAlias { get throws { switch outcome {
+        case .committed(let value):return value
+        case .rejected(.revisionConflict(let current)):throw V2ProfilePresentationError.revisionConflict(current)
+        case .rejected(.permissionDenied):throw V2ProfilePresentationError.forbidden
+        default:throw V2ProfilePresentationError.corruptPersistenceState
+    } } }
+}
+extension V2GroupNicknameUpdateReceipt {
+    var committedValue:V2GroupMemberPresentation { get throws { switch outcome {
+        case .committed(let value):return value
+        case .rejected(.revisionConflict(let current)):throw V2ProfilePresentationError.revisionConflict(current)
+        case .rejected(.permissionDenied):throw V2ProfilePresentationError.forbidden
+        default:throw V2ProfilePresentationError.corruptPersistenceState
+    } } }
+}
+extension V2ActorGroupNicknameUpdateWire {
+    init(roomID:RoomID,actorUserID:UserID,operationID:GroupNicknameOperationID,expectedRevision:V2ProfileRevision?,nickname:String?) {
+        self.init(command:try! .init(actorUserID:actorUserID,roomID:roomID,operationID:operationID,expectedRevision:expectedRevision,nickname:nickname,firstSubmissionDeadlineMilliseconds:UInt64(Int64.max)))
     }
 }

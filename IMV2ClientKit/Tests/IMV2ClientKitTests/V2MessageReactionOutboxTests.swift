@@ -1,81 +1,39 @@
 import Foundation
-@testable import IMV2ClientKit
-import IMV2Core
 import Testing
+import IMV2Core
+@testable import IMV2ClientKit
 
-@Suite("V2 message reaction outbox")
-struct V2MessageReactionOutboxTests {
-    @Test("retry after restart preserves one reaction operation ID")
-    func retrySurvivesRestart() async throws {
-        let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-reaction-\(UUID().uuidString).sqlite")
-        let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let operation = UUID(uuidString: "00000000-0000-0000-0000-000000000951")!
-        let transport = ReactionTransport(results: [.retry, .accepted])
-        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        let first = V2MessageReactionOutboxEngine(store: store, transport: transport, makeUUID: { operation }, now: { now })
-        let command = try await first.enqueueReaction(roomID: .init("00000000-0000-0000-0000-000000000952"), messageID: .init("00000000-0000-0000-0000-000000000953"), reaction: "👍", action: .add)
-        #expect(try await first.flushOnce() == .retryScheduled(command.operationID))
-        let restarted = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        let second = V2MessageReactionOutboxEngine(store: restarted, transport: transport, now: { now.addingTimeInterval(1) })
-        #expect(try await second.flushOnce() == .acknowledged(command.operationID))
-        let saved = try #require(await restarted.pendingMessageReactions().first)
-        #expect(saved.operationID == command.operationID)
-        #expect(saved.state == .acknowledged)
-        #expect(saved.resultingRoomSequence == 8)
+@Suite("Reaction durable admission and recovery")
+struct V2MessageReactionAdmissionTests {
+    @Test("expired unfrozen draft never performs baseline or submission I/O")
+    func expiredDraft() async throws {
+        let f=try ReactionWorkFixture();defer { f.remove() }
+        _ = try await f.store.enqueueReactionIntent(accountID:f.account,roomID:f.room,messageID:f.message,reaction:"👍",targetState:.present,now:Date().addingTimeInterval(-90_000))
+        #expect(try await f.service.prepareNextIntent())
+        #expect(await f.remote.calls==0)
+        #expect(try await f.store.dueOperationWork(now:.distantFuture,kinds:[.reaction]).isEmpty)
+        try await f.store.close()
     }
-
-    @Test("duplicate pending reaction after restart reuses its original operation ID")
-    func duplicatePendingReactionReusesTheOriginalOperationAfterRestart() async throws {
-        let url = FileManager.default.temporaryDirectory.appending(path: "im-v2-reaction-\(UUID().uuidString).sqlite")
-        let roomID = try RoomID("00000000-0000-0000-0000-000000000956")
-        let messageID = try MessageID("00000000-0000-0000-0000-000000000957")
-        let originalStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        let originalEngine = V2MessageReactionOutboxEngine(
-            store: originalStore,
-            transport: ReactionTransport(results: []),
-            makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000958")! }
-        )
-        let original = try await originalEngine.enqueueReaction(
-            roomID: roomID,
-            messageID: messageID,
-            reaction: "👍",
-            action: .add
-        )
-
-        let restartedStore = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding)
-        let restartedEngine = V2MessageReactionOutboxEngine(
-            store: restartedStore,
-            transport: ReactionTransport(results: [])
-        )
-        let reused = try await restartedEngine.enqueueReaction(
-            roomID: roomID,
-            messageID: messageID,
-            reaction: "👍",
-            action: .add
-        )
-
-        #expect(reused.operationID == original.operationID)
-        let removal = try await restartedEngine.enqueueReaction(
-            roomID: roomID,
-            messageID: messageID,
-            reaction: "👍",
-            action: .remove
-        )
-        #expect(removal.operationID != original.operationID)
-        #expect(try await restartedStore.pendingMessageReactions().count == 2)
-    }
-}
-
-private let binding = V2LocalInstallationBinding(value: UUID(uuidString: "00000000-0000-0000-0000-000000000954")!)
-
-private actor ReactionTransport: V2ClientMessageReactionTransport {
-    enum Result { case retry, accepted }
-    private var results: [Result]
-    init(results: [Result]) { self.results = results }
-    func changeMessageReaction(roomID: RoomID, operationID _: MessageReactionOperationID, messageID: MessageID, reaction: String, action: V2MessageReactionAction) throws -> V2ClientMessageReactionChange {
-        switch results.removeFirst() {
-        case .retry: throw V2RealtimeTransportError.unexpectedResponse
-        case .accepted: return try .init(roomID: roomID, messageID: messageID, actorUserID: try .init("00000000-0000-0000-0000-000000000955"), reaction: reaction, action: action, roomSequence: 8, createdAt: .distantPast)
+    @Test("a full shared reservation transfers into frozen work without a second admission")
+    func fullCapacity() async throws {
+        let f=try ReactionWorkFixture();defer { f.remove() }
+        _ = try await f.store.enqueueReactionIntent(accountID:f.account,roomID:f.room,messageID:f.message,reaction:"👍",targetState:.present,limits:.init(maximumActiveCount:1))
+        await #expect(throws:V2OperationWorkError.capacityExceeded) {
+            try await f.store.enqueueReactionIntent(accountID:f.account,roomID:f.room,messageID:.init(uuid:UUID()),reaction:"👍",targetState:.present,limits:.init(maximumActiveCount:1))
         }
+        #expect(try await f.service.prepareNextIntent())
+        #expect(try await f.store.dueOperationWork(now:.now,kinds:[.reaction]).count==1)
+        try await f.store.close()
+    }
+    @Test("cancelling a page before saving never enters the durable journal")
+    func cancelled() async throws {
+        let f=try ReactionWorkFixture();defer { f.remove() }
+        let task=Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await f.service.enqueue(roomID:f.room,messageID:f.message,reaction:"👍",targetState:.present)
+        }
+        await #expect(throws:CancellationError.self) { _ = try await task.value }
+        #expect(try await f.store.nextReactionDraft(now:.distantFuture)==nil)
+        try await f.store.close()
     }
 }

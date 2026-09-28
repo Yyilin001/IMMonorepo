@@ -32,8 +32,12 @@ struct V2MediaTransferTests {
             }
             #expect(try Data(contentsOf: destination) == Data("abc".utf8))
         } else {
-            await #expect(throws: mode == "partial" ? V2ClientMediaTransferError.serverStatus(206) : mode == "digest" ? .checksumMismatch : .byteCountMismatch) {
-                try await transfer.download(target: target, destinationURL: destination)
+            if mode == "partial" {
+                await #expect(throws: V2RangeDownloadError.invalidRange) { try await transfer.download(target: target,destinationURL: destination) }
+            } else {
+                await #expect(throws: mode == "digest" ? V2ClientMediaTransferError.checksumMismatch : .byteCountMismatch) {
+                    try await transfer.download(target: target, destinationURL: destination)
+                }
             }
             #expect(!FileManager.default.fileExists(atPath: destination.path))
         }

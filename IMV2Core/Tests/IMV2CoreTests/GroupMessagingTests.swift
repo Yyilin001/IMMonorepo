@@ -25,7 +25,7 @@ struct GroupMessagingTests {
         let actor = try UserID("00000000-0000-0000-0000-000000000901")
         let later = try UserID("00000000-0000-0000-0000-000000000903")
         let earlier = try UserID("00000000-0000-0000-0000-000000000902")
-        let command = try V2CreateGroupRoomCommand(
+        let command = try makeIntent(
             actorUserID: actor,
             operationID: .init("00000000-0000-0000-0000-000000000904"),
             title: "  项目群  ",
@@ -34,8 +34,10 @@ struct GroupMessagingTests {
         )
 
         #expect(command.title == "项目群")
-        #expect(command.initialMemberUserIDs == [earlier, later])
-        #expect(command.allMemberUserIDs == [actor, earlier, later])
+        #expect(command.initialMemberCount == 2)
+        let canonical = try V2GroupCreationAudience.canonical([later, earlier], actorUserID: actor)
+        #expect(canonical == [earlier, later])
+        #expect(command.audienceDigest == (try V2GroupCreationAudience.digest(canonical)))
     }
 
     @Test("rejects blank, oversized, duplicate, and owner initial members")
@@ -44,17 +46,28 @@ struct GroupMessagingTests {
         let other = try UserID("00000000-0000-0000-0000-000000000906")
         let operation = try GroupRoomOperationID("00000000-0000-0000-0000-000000000907")
 
-        #expect(throws: V2GroupMessagingValidationError.invalidTitle) {
-            try V2CreateGroupRoomCommand(actorUserID: actor, operationID: operation, title: " \n", capacityClass: .standard, initialMemberUserIDs: [])
+        #expect(throws: V2GroupCreationValidationError.invalidIntent) {
+            try makeIntent(actorUserID: actor, operationID: operation, title: " \n", capacityClass: .standard, initialMemberUserIDs: [])
         }
-        #expect(throws: V2GroupMessagingValidationError.invalidTitle) {
-            try V2CreateGroupRoomCommand(actorUserID: actor, operationID: operation, title: String(repeating: "a", count: 121), capacityClass: .standard, initialMemberUserIDs: [])
+        #expect(throws: V2GroupCreationValidationError.invalidIntent) {
+            try makeIntent(actorUserID: actor, operationID: operation, title: String(repeating: "a", count: 121), capacityClass: .standard, initialMemberUserIDs: [])
         }
-        #expect(throws: V2GroupMessagingValidationError.invalidInitialMembers) {
-            try V2CreateGroupRoomCommand(actorUserID: actor, operationID: operation, title: "群", capacityClass: .standard, initialMemberUserIDs: [other, other])
+        #expect(throws: V2GroupCreationValidationError.invalidIntent) {
+            try makeIntent(actorUserID: actor, operationID: operation, title: "群", capacityClass: .standard, initialMemberUserIDs: [other, other])
         }
-        #expect(throws: V2GroupMessagingValidationError.invalidInitialMembers) {
-            try V2CreateGroupRoomCommand(actorUserID: actor, operationID: operation, title: "群", capacityClass: .standard, initialMemberUserIDs: [actor])
+        #expect(throws: V2GroupCreationValidationError.invalidIntent) {
+            try makeIntent(actorUserID: actor, operationID: operation, title: "群", capacityClass: .standard, initialMemberUserIDs: [actor])
         }
     }
+    private func makeIntent(actorUserID: UserID, operationID: GroupRoomOperationID,
+                            title: String, capacityClass: V2GroupCapacityClass,
+                            initialMemberUserIDs: [UserID]) throws -> V2GroupCreationIntent {
+        let members = try V2GroupCreationAudience.canonical(initialMemberUserIDs, actorUserID: actorUserID)
+        return try V2GroupCreationIntent(
+            identity: .init(accountID: actorUserID, scope: .account(actorUserID), operation: .groupRoom(operationID)),
+            title: title, capacityClass: capacityClass, initialMemberCount: members.count,
+            audienceDigest: V2GroupCreationAudience.digest(members), firstSubmissionDeadlineMilliseconds: 600_000
+        )
+    }
+
 }

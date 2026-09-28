@@ -156,7 +156,7 @@ python3 scripts/verify_v2_live_resource_authors.py --output /tmp/im-resource-liv
 
 一个 SQL 批次最多 100 个目标项和 64 KiB 编码输入；等待合并 3 ms，排队超过 5 ms 或待处理达到 400 项 / 256 KiB 时明确拒绝，最多 4 个实际在途查询。单次查询结果另限 256 KiB。HTTP 原有 64 个总请求、每设备 2 个请求的准入继续生效；上述限制不能当作吞吐承诺。排队取消会移除需求；在途取消或调用期限到达先结束调用者等待，但 SQL 真正结束前继续占用查询名额。服务停机先停止新准入，取消并排空查询，再等待已经进入房间授权或签名的资料读取全部离开，之后才关闭依赖。
 
-客户端资料 HTTP reader 单独解析 429 和有界 `Retry-After`。资料 repository 将冷却期限保留在该账户/设备实例的单调时钟中，在服务端要求的 1～60 秒基础上附加 0.1～0.5 秒随机延迟；页面重入和前后台切换不会清除该期限。取消后迟到的同账户 429 仍能限制新的前台需求。冷却期间结束尚未分发的等待，其他已发出的请求仍可返回有效资料；冷却本身不会启动后台重试，也不会被记为“作者不可见”。不同账户实例独立。
+客户端资料、群昵称与群头像 HTTP reader 使用公共 `Retry-After` 解析器，处理 429 及带等待头的 503，支持秒数和 HTTP 日期。合法长冷却不截短到 60 秒。资料 repository 将冷却期限保留在该账户/设备实例的单调时钟中，在服务端要求的等待时间基础上附加 0.1～0.5 秒随机延迟；页面重入和前后台切换不会清除该期限。取消后迟到的同账户 429 仍能限制新的前台需求。冷却期间结束尚未分发的等待，其他已发出的请求仍可返回有效资料；冷却本身不会启动后台重试，也不会被记为“作者不可见”。不同账户实例独立。
 
 房间成员权限仍通过各自的 RoomRef 用户信封逐请求准入；[房间通道](../../IMV2Server/Sources/IMV2ActorRuntime/Scheduling/V2RoomTurnLane.swift) 将已经排队、形状合法的相邻资料读取组成同一个轮次。单轮最多 100 个目标项、默认最多 64 个信封；合并后的请求字节受 64 KiB 与通道配置的较小值限制。发送、其他查询/写入和 reservation 都是屏障，两类批次不能混合。这里不新增收集等待，不保证低负载下的单独请求也能合并；排队和实际执行仍占用原有房间/宿主预算。
 
@@ -185,6 +185,17 @@ App 订阅独立 `.groupNicknames` 投影变化。仓库只集合读取当前有
 ### 群昵称分页授权迁移
 
 `GET /v2/profile-presentations/groups/:room/nicknames` 已复用统一资料授权服务，响应改为 [`V2GroupNicknamePresentationPageResponse`](../../IMV2Core/Sources/IMV2Core/GroupNicknamePresentationPage.swift)：`roomID`、`batch` 和 `nextCursor`。每项是绑定当前 viewer/device/room 的限期展示、不可见或临时失败，已取消直接返回裸 `nicknames` 数组的路径。未装配授权服务时返回 503，不回退旧读取；App 内没有旧分页调用，聊天可见作者继续走显式 key 的批量接口。这是当前未提交版本的协调升级，不承诺旧响应格式兼容。
+
+#### 联系人备注与本人群昵称编辑恢复
+
+本轮 W3 采用 [联系人备注合同](../../IMV2Core/Sources/IMV2Core/ContactAliasOperation.swift) 和 [本人群昵称合同](../../IMV2Core/Sources/IMV2Core/GroupNicknameOperation.swift)。`V2ContactAliasUpdateCommand` 绑定 owner/target/operationID、可选 expectedRevision、remarkName 与首次提交期限；`V2GroupNicknameUpdateCommand` 绑定 actor/room/operationID、可选 expectedRevision、nickname 与首次提交期限。指纹由这些规范化字段确定编码，禁止 self alias。nil revision 表示从未有字段记录，nil name 表示清空；每个新 committed 操作递增版本，包括首次清空与值不变，重放返回原版本。
+
+`GET`、`PUT /v2/profile-presentations/contact-aliases/:target` 分别返回 `V2ContactAliasSnapshot` 和 `V2ContactAliasUpdateReceipt`；`GET`、`PUT /v2/profile-presentations/groups/:room/nickname` 分别返回 `V2GroupNicknameSnapshot` 和 `V2GroupNicknameUpdateReceipt`。GET 只给当前关系/群成员授权下的单字段编辑基线，明确 nil 未设置，不授予目标公开资料展示 lease。PUT 请求与响应采用对应 Core Codable 合同，owner/actor 来自认证并必须匹配请求。客户端先读取基线、编辑、冻结意图，再提交；冲突由用户重新应用，不自动更换基线。
+
+两个 PUT 路径追加 `/operations/recover` 后使用 POST，接受各自 RecoveryRequest 的 `.query` 或 `.closeIfAbsent`。恢复响应区分 original receipt、unresolved 和 fingerprintConflict。新提交和关闭共用 actor/domain/operation 锁；永久终态为 committed、rejected 或 closed，拒绝区分版本冲突、权限/实体失败与首次期限已过。`contact_alias_operation_receipts` 与 `group_nickname_operation_receipts` 通过不可变触发器禁止 UPDATE/DELETE，旧操作 ledger 及 housekeeping 清理路径已删除。群昵称提交、恢复和基线读继续经过 RoomRef owner activation 围栏，没有全局写入旁路。HTTP 限制请求体为 4 KiB、响应 no-store；恢复沿用账号持久限流。
+
+群昵称沿用内容为空的 `group.nickname_changed` 房间事件。联系人备注首次 committed 同事务写入 `contact_alias` 用户状态事件，载荷只包含 `target_user_id` 与 `revision`；原回执重放不重复写事件。用户快照按目标保留最高 revision，支持倒序投递和重建；客户端由该失效版本撤回旧展示并重新授权读取，事件和编辑 snapshot 都不包含公开资料 lease。本轮仅为这两个领域的实现范围，不代表所有应用级弱网写领域完成。当前统一新建库合同为 `im-v2-current-56`，协调协议版本为 34。授权展示新增 recipient-bound `contactAlias: V2ContactAlias?`，owner 必须等于 lease.actor、target 必须等于 view.user；清空行仍携带正 revision。HTTP batch 与 TCP 作者增量复用同一授权组装，现有 `AuthorPresentationDelta.payload` 直接编码强类型 Core JSON，因此该字段自然随该 recipient 的增量交付，不另建重复 protobuf sidecar。
+
 
 房间 Actor 的旧查询只提供分页候选，候选昵称正文不会复制到 HTTP 响应。服务随后复用控制域的设备/账户/双向拉黑检查与房间当前成员、昵称版本证明，并在返回前复核。每页默认和最大值均为 100；扫描、授权与最终校验共用一次节点/设备准入和原 10 秒截止，非协作式扫描取消后仍占用名额，关闭等待实际退出。空页也复核设备。分页不签发头像下载能力，不提前为整页图片占用供应商或边缘资源。
 
@@ -244,7 +255,7 @@ App 的实际房间订阅由 `V2RoomSubscriptionCoordinator` 和页面内的 `V2
 
 正常订阅、作者 nonce 订阅和接收均绑定相同连接代次。每个房间另有本地订阅/权限代次；成员变化、服务端拒绝、重新订阅或权限重审会改变它。快照缓冲只保留最新项时，即使中间的 revoked 状态已被覆盖，同连接恢复后的 subscribed 也不等于此前的授权。页面替换/重连/权限代次改变先取消并等待旧实际任务，再启动新任务；每次 await 后和资料 ingest 前检查当前作用域，仓库也拒绝已取消任务的入仓。作者专用代次与提前失效通知只发给显式作者消费者，普通聊天同步保持原有快照和恢复顺序。
 
-正常情况下在 30 秒 view 截止前 4～6 秒随机续订，只保留一个实际作者任务、一个接收者和一个续期计时器。正常续期保留仍有效的页面 grant，由替代 binding 重新关联，不主动重拉 HTTP 或头像。接收队列继续沿用 8 帧/64 KiB 预算。未协商能力的连接只尝试一次，等待新连接后再判断；普通可重试错误退避，服务端 `Retry-After` 形成最多 60 秒加小幅抖动的账户冷却。即使原请求取消后才返回限流，后来的页面和重连仍遵守冷却。
+正常情况下在 30 秒 view 截止前 4～6 秒随机续订，只保留一个实际作者任务、一个接收者和一个续期计时器。正常续期保留仍有效的页面 grant，由替代 binding 重新关联，不主动重拉 HTTP 或头像。接收队列继续沿用 8 帧/64 KiB 预算。未协商能力的连接只尝试一次，等待新连接后再判断；普通可重试错误退避，服务端 `Retry-After` 形成不短于其要求、附加小幅抖动的账户冷却。即使原请求取消后才返回限流，后来的页面和重连仍遵守冷却。
 
 离页、后台、换页或权限代次变化先撤销当前 binding 的展示 grant 和暂存补充，再等待实际任务。非协作式订阅或接收真正结束前，下一页面不能取得名额；可重复的 `suspend()`、永久 `close()` 及并发重复关闭等待实际排空。服务端明确拒绝作者订阅时，房间协调器撤销该房间的共享订阅状态，等待后续权限重审。普通资料失败不关闭健康的实时连接。
 
@@ -340,11 +351,25 @@ HTTP 申请响应和内部 Actor profile proof 的 `permissionRevision` 字段�
 
 验收过程保留限制：服务端首次运行因新 fixture 复用全局唯一邀请摘要失败，改为每次独立摘要后通过，未调整业务约束。第一次原生运行在原有实时作者补充断言处取得非 presentation 结果，之后新增阶段诊断；第二次原生运行在新增裸 HTTP 审批读取遇到 429，补上有界 `Retry-After` 处理后第三次通过。首次实时补充失败尚无足够日志定位根因，不能以随后通过代替抖动/过载稳定性或万人容量验收。
 
-## 个人头像绑定与保留
+## 个人资料更新、恢复与头像保留
 
-个人资料更新在账户资料行锁内检查幂等操作与预期 revision，再按固定顺序锁定新旧媒体。对已经进入资源目录的新头像，要求本人 account home、`user_avatar` 用途、available 图片、当前 generation 的 active placement，以及该代完整 ready 的 128/256 头像变体。取得媒体锁后重新读取数据库时间检查绑定期限；不能凭请求开始时仍有效而绑定等待期间已过期的资源。
+当前本人资料合同由 [`V2ProfilePatch`、`V2ProfileUpdateCommand` 和原操作回执](../../IMV2Core/Sources/IMV2Core/ProfileOperation.swift)定义。`displayName` 是 `unchanged | set(String)`；`avatar` 是 `unchanged | remove | set(V2AvatarReference)`。至少修改一个字段，名称沿用 NFC、空白规范化与公开名称校验。改昵称时保留 `avatar.unchanged`，不把表单曾读到的头像作为完整目标重写。
 
-当前已绑定头像可以在初始上传绑定期限之后随改名继续保留。替换或移除时，将旧媒体保留至至少本次持锁观察时间后 120 秒；GC 与绑定使用相同媒体锁，并继续检查资料引用。命令重放先读取操作台账，旧资源已被回收也不重新执行原修改。没有资源目录记录的旧扫描媒体保留既有兼容规则；这条兼容路径不允许绕过已经存在的资源目录。
+`PUT /v2/profile/me` 接收 `operation_id`、`expected_revision`、`patch` 和 `first_submission_deadline_ms`；`patch` 按 Core Codable 合同编码。请求体最多 8 KiB。冻结的命令保留 actor、operation ID、预期版本、规范化字段 patch 和首次提交截止，并据此计算版本化指纹。身份、语义字段或截止改变必须使用新的明确意图；token、attempt 等传输状态不参与指纹。首次截止使用服务端当前观察时间检查；已经存在的原回执不因本次重放时钟或截止而改变。
+
+成功读取 `GET /v2/profile/me` 直接返回 Core `V2ProfileView`；提交返回 `V2ProfileUpdateResult`，其中 `receipt` 与 `currentSnapshot` 分开。原回执绑定 actor、operation ID、fingerprint、终态和解决时间；`committed` 保存本次产生的 profile/visibility revision。后来 B 更新成功后重放 A，A 的原回执保持不变，而当前快照可以是 B 的较新版本。客户端独立保护快照 revision，不从 A 的成功回执回退当前资料。版本冲突、头像不可用和首次未受理过期也保存 `.rejected` 原回执，通过 HTTP 200 的明确业务结果返回；同 ID 不同指纹是冲突错误，不能据此创建替代。
+
+`POST /v2/profile/me/operations/recover` 接收 `operation_id`、`fingerprint`、`action = query | closeIfAbsent`，请求体最多 2 KiB，响应按 Core `V2ProfileOperationRecoveryResult` 编码。查询返回原 `receipt` 和可用的独立当前快照、`unresolved` 或 `fingerprintConflict`；无法取得当前 active 快照时可以只返回最小原回执。`unresolved`、404/403 或传输错误都不是未执行证明。关闭和提交在 [`PostgresV2ProfileUpdateStore`](../../IMV2Server/Sources/IMV2Server/PostgresV2ProfileUpdateStore.swift) 内获取相同 actor/operation 咨询锁：已有终态返回原回执；不存在则原子记录 `closed`，迟到提交只能取得该关闭回执，不能修改资料。
+
+上述路由都经当前账户/设备鉴权，响应 `no-store`。生产 AccountServer 将恢复路由装配到已有 PostgreSQL 已认证请求限流 owner，使用独立 `profile-recovery` scope、cost 3；键绑定 user/device/scope，额度跨进程保留。该独立速率预算限制随机 ID 查询与墓碑写入，不另设无界内存计数。当前没有新增永久回执的 lifetime 总量 quota，不将速率保护宣称为总存储容量验收。
+
+当前 canonical PostgreSQL schema 为 `im-v2-current-56`。`public_profile_update_operations` 保存 `fingerprint_version`、32 字节 `request_fingerprint`、`outcome_kind`、可选 `result_revision`、强类型编码的不可变 `receipt` 与 `created_at`。只有 committed 必须具有正 result revision，rejected/closed 不携带成功版本。触发器禁止修改或删除原回执，housekeeping 不再按时间清理这张表；永久关闭栅栏和原结果不会在普通保留窗口后失效。启动 readiness 与 SQL contract 检查当前表形、指纹/回执字段、结果约束与不可变触发器。直接采用全新当前建库合同，不提供旧全量资料 PUT、旧操作记录或历史 schema 兼容。
+
+实际资料修改仍在账户资料行锁内检查预期 revision，再按固定顺序锁定新旧媒体。新头像要求本人 account home、`user_avatar` 用途、available 图片、当前 generation 的 active placement，以及该代完整 ready 的 128/256 头像变体。取得媒体锁后重新读取数据库时间检查绑定期限和首次提交截止；不能凭请求开始时仍有效而绑定等待期间已过期的资源。
+
+当前已绑定头像可以在初始上传绑定期限之后随改名继续保留。替换或移除时，将旧媒体保留至至少本次持锁观察时间后 120 秒；GC 与绑定使用相同媒体锁，并继续检查资料引用。命令重放读取原操作回执，不因旧资源已回收而重新执行修改。没有资源目录记录的扫描媒体不能成为新头像，资源 Ready 与业务 committed 仍是不同事实。
+
+验证范围：Core 字段 patch/规范化/指纹/receipt binding 专项通过；真实一次性 PostgreSQL 覆盖 A/B 原回执重放、提交和关闭两种顺序及 8 次并发竞争、持久拒绝、no-op/版本上限、头像与 GC 锁等待；HTTP 覆盖 Core 读取/提交/恢复格式及 no-store，middleware 覆盖恢复独立限流与 429 阻止 handler。这里登记的是本人资料 Core/Server 合同及组件证据；全部领域公共 work 接入、全 App 弱网体验、真实账户和平台/部署容量验收仍见[应用弱网实施状态](application-weak-network-progress.md)，不由本节宣告完成。
 
 ## 群头像接入边界
 

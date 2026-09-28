@@ -32,7 +32,6 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
     case roomLog(V2RoomLogQuery)
     case directory(V2RoomDirectoryQuery)
     case recovery(V2ActorRoomRecoveryItemQuery)
-    case invitation(V2RoomInvitationCommand)
     case invitationQuery(V2RoomInvitationQuery)
     case specialAccountAudit(V2ActorSpecialAccountAuditWire)
     case maintenance(V2RoomMaintenanceCommand)
@@ -49,7 +48,6 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
         case .roomLog(let value): value.roomID
         case .directory(let value): value.roomID
         case .recovery(let value): value.roomID
-        case .invitation(let value): value.roomID
         case .invitationQuery(let value): value.roomID
         case .specialAccountAudit(let value): value.roomID
         case .maintenance(let value): value.roomID
@@ -70,7 +68,6 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
         case .roomLog(let value): value.actorUserID
         case .directory(let value): value.actorUserID
         case .recovery(let value): value.actorUserID
-        case .invitation(let value): value.actorUserID
         case .invitationQuery(let value): value.actorUserID
         case .specialAccountAudit, .maintenance: nil
         case .forward(let value): value.actorUserID
@@ -82,7 +79,6 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
         switch self {
         case .messaging, .administration, .receipt, .specialAccountAudit: .durableIdempotent
         case .administrationQuery, .receiptQuery, .roomLog, .directory, .recovery: .readOnly
-        case .invitation(let value): value.retryPolicy
         case .invitationQuery, .mediaAuthorization: .readOnly
         case .forward: .durableIdempotent
         case .maintenance: .noAutomaticRetry
@@ -93,14 +89,13 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
         switch self {
         case .messaging, .administration, .receipt, .specialAccountAudit: true
         case .administrationQuery, .receiptQuery, .roomLog, .directory, .recovery: false
-        case .invitation(let value): value.stableOperationIdentity != nil
         case .invitationQuery, .maintenance, .mediaAuthorization: false
         case .forward: true
         }
     }
 
     public var canShareSendTurn: Bool {
-        if case .messaging(.send) = self { return true }
+        // Bound operations retain their own receipt transaction and execute scalar turns.
         return false
     }
 

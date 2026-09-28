@@ -2,11 +2,17 @@
 
 本批修复有限批次之间的 lane 轮转，并补充真实 SQLite、protobuf、Network.framework 与 runtime 生命周期组合验证。B07 保持“已实现待验证”：实际 App scene 进入后台、系统挂起再恢复仍需独立验收。
 
+## 当前执行所有权
+
+下方 B07 lane 与 TCP outbox 验证记录描述历史批次。当前已退休业务写接口不再经这些 lane 重放：App 先保存领域意图，准备阶段冻结 command，账户 `V2OperationWorkDispatcher` 按持久 action/attempt/due 执行 HTTPS submit/reconcile。资源与特殊安全恢复由各自账户活动拥有；页面取消只解除观察。TLS 保留同步、查询、握手及瞬时控制，presence suppression 控制不会进入持久重试。
+
+HTTP leaf 通过共享 scheduler 准入，重试标记、服务 Retry-After 冷却与诊断保持有界；认证刷新不会为业务写自动创建新 ID。当前整批迁移仍待集中验证，下方历史网络测试不证明新领域合同、完整 App scene 或真实后台传输已验收。
+
 ## 本批发现并修复的问题
 
 `V2FairDurableCommandScheduler.flush` 原来每次从首个 lane 开始。三个 lane 持续有工作而每批预算为 1 或 2 时，后面的 lane 永远没有执行机会；预算为 4 时也会反复偏向第一条 lane。旧测试只检查单个批次，未覆盖跨批次位置。
 
-当前 App 注册 13 条 lane，批次预算为 256，因此没有证据表明它当前会触发上述完全饥饿。但公开调度器允许任何正预算；保持跨批次轮转才能兑现它的公平性合同，也避免预算调整引入故障。
+当时 App 注册 13 条 lane，批次预算为 256，因此没有证据表明它当前会触发上述完全饥饿。但公开调度器允许任何正预算；保持跨批次轮转才能兑现它的公平性合同，也避免预算调整引入故障。
 
 修复后 actor 保存下一条 lane 的索引，并在执行 lane 前推进。每批结束时保留进度；空闲 lane 不消耗工作预算；所有 lane 一轮均无进展则退出。单飞和生命周期取消机制保持原有所有权。时间、空间复杂度不增加量级。
 

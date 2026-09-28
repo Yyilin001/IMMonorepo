@@ -436,6 +436,7 @@ final class V2ConversationListStore {
     private let favoritesReader: (any V2ConversationFavoritesReading)?
     private let messageSearcher: (any V2ConversationMessageSearching)?
     private let userID: String
+    let preferenceActivity: V2PreferenceActivityStore?
     private let conversationStateChanger: (any V2ConversationStateChanging)?
     private let directConversationOpener: (any V2DirectConversationOpening)?
     private let publicIdentityResolver: (any V2ConversationPublicIdentityResolving)?
@@ -461,11 +462,15 @@ final class V2ConversationListStore {
     }
     private(set) var state: State = .loading
     private(set) var directConversationFeedback: String?
+    private(set) var directConversationRequests:[V2DirectRoomPending]=[]
     private(set) var groupConversationFeedback: String?
     private(set) var conversationStateFeedback: String?
+    private(set) var conversationRefreshFeedback: String?
+    private var changingPreferenceRooms = Set<String>()
     private(set) var isOpeningDirectConversation = false
     private(set) var isCreatingGroupConversation = false
     private(set) var pendingGroupConversationOperationID: String?
+    private(set) var groupCreationNeedsConfirmation=false
     private var explicitRoomTitles: [String: String] = [:]
     private var explicitRoomKinds: [String: V2ConversationKind] = [:]
     private var explicitDirectPresentationKeys: [String: V2ProfileViewLookupKey] = [:]
@@ -479,6 +484,7 @@ final class V2ConversationListStore {
         messageSearcher = environment.projections.messageSearcher
         userID = environment.userID
         conversationStateChanger = environment.messages.stateChanger
+        preferenceActivity = (environment.messages.stateChanger as? any V2PersonalPreferenceManaging).map { V2PreferenceActivityStore(manager: $0) }
         directConversationOpener = environment.discovery.directConversationOpener
         publicIdentityResolver = environment.discovery.publicIdentityResolver
         groupConversationCreator = environment.groups.conversationCreator
@@ -535,7 +541,7 @@ final class V2ConversationListStore {
                 return roomID
             case .queuedForRetry(let operationID):
                 pendingGroupConversationOperationID = operationID
-                groupConversationFeedback = "建群请求已安全保存；取消可阻止其在恢复连接后继续创建。"
+                groupConversationFeedback = "建群请求已安全保存；取消结果由服务器确认。"
                 return nil
             case .rejected(let code):
                 pendingGroupConversationOperationID = nil
@@ -585,6 +591,20 @@ final class V2ConversationListStore {
         }
     }
 
+    func observeGroupCreation() async {
+        guard let creator=groupConversationCreator as? any V2GroupCreationRecovering else { return }
+        do {
+            for try await _ in await creator.creationUpdates() {
+                try Task.checkCancellation()
+                await restoreDurableGroupCreationStatusIfNeeded()
+            }
+        } catch is CancellationError {} catch { groupConversationFeedback="建群状态暂不可读，已保存的请求仍会保留。" }
+    }
+    func resumePendingGroupCreation() async {
+        guard let operationID=pendingGroupConversationOperationID,let creator=groupConversationCreator as? any V2GroupCreationRecovering else { return }
+        do { try await creator.resumeCreation(operationID:operationID) }
+        catch { groupConversationFeedback="暂时无法继续核对建群结果。" }
+    }
     func cancelPendingGroupConversationCreation() async {
         guard let operationID = pendingGroupConversationOperationID else { return }
         guard let groupConversationCreator else {
@@ -598,7 +618,7 @@ final class V2ConversationListStore {
                 groupConversationFeedback = "建群请求已取消。"
             case .queuedForRetry:
                 pendingGroupConversationOperationID = nil
-                groupConversationFeedback = "建群请求正在取消；恢复连接后会完成取消。"
+                groupConversationFeedback = "正在核对取消结果；若创建已开始，将继续确认原结果。"
             case .finalizationAlreadyStarted:
                 pendingGroupConversationOperationID = nil
                 groupConversationFeedback = "群聊已进入创建阶段，无法取消；完成后会显示在会话列表。"
@@ -611,6 +631,7 @@ final class V2ConversationListStore {
     func refresh(resetWindow: Bool = false) async {
         refreshGeneration &+= 1
         let generation = refreshGeneration
+        conversationRefreshFeedback = nil
         let operation = UUID()
         conversationRefreshOperation = operation
         conversationPageOperation = nil
@@ -662,6 +683,7 @@ final class V2ConversationListStore {
                 else if windowReader != nil { continue }
                 else { restorationID = nil }
                 items = refreshed
+                V2ProjectionVisibilityScope.conversationCommit?.didPublishSnapshot()
                 viewport.reconcile(ids: items.map(\.id))
                 viewport.restore(to: restorationID)
                 hasEarlierConversations = false
@@ -674,7 +696,12 @@ final class V2ConversationListStore {
             return
         } catch {
             guard !Task.isCancelled, generation == refreshGeneration else { return }
-            state = .failed
+            if items.isEmpty {
+                state = .failed
+            } else {
+                state = .loaded
+                conversationRefreshFeedback = "无法刷新会话列表，保留上次读取的内容。"
+            }
         }
     }
 
@@ -752,6 +779,7 @@ final class V2ConversationListStore {
 
     private func publishWindow(_ result: V2ConversationListWindow, restoreTo anchorID: String?) {
         items = result.page.items
+        V2ProjectionVisibilityScope.conversationCommit?.didPublishSnapshot()
         conversationNextCursor = result.page.nextCursor
         hasEarlierConversations = result.hasEarlier
         viewport.reconcile(ids: items.map(\.id))
@@ -801,12 +829,19 @@ final class V2ConversationListStore {
 
     func updateConversationState(_ item: V2ConversationListItem, isPinned: Bool? = nil, isArchived: Bool? = nil, muteUntil: Date?? = nil) async {
         guard let conversationStateChanger else { conversationStateFeedback = "会话设置暂不可用。"; return }
+        guard changingPreferenceRooms.insert(item.id).inserted else { return }
+        defer { changingPreferenceRooms.remove(item.id) }
         do {
+            var pinned = item.isPinned, archived = item.isArchived, mute = item.muteUntil
+            if let manager = conversationStateChanger as? any V2PersonalPreferenceManaging,
+               case .conversation(_, let desiredPinned, let desiredArchived, let desiredMute) = try await manager.desiredPreferenceTarget(.conversation(roomID: .init(item.id), isPinned: pinned, isArchived: archived, muteUntil: mute)) {
+                pinned = desiredPinned; archived = desiredArchived; mute = desiredMute
+            }
             let outcome = try await conversationStateChanger.setState(
                 roomID: item.id,
-                isPinned: isPinned ?? item.isPinned,
-                isArchived: isArchived ?? item.isArchived,
-                muteUntil: muteUntil ?? item.muteUntil
+                isPinned: isPinned ?? pinned,
+                isArchived: isArchived ?? archived,
+                muteUntil: muteUntil ?? mute
             )
             try Task.checkCancellation()
             switch outcome {
@@ -829,13 +864,24 @@ final class V2ConversationListStore {
             let status = try await groupConversationCreator.restoredCreationStatus()
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
+            groupCreationNeedsConfirmation=false
             switch status {
+            case .expired:
+                pendingGroupConversationOperationID=nil
+                groupConversationFeedback="建群请求已过期，未创建群聊。可重新创建。"
+            case .needsConfirmation(let operationID):
+                pendingGroupConversationOperationID=operationID
+                groupCreationNeedsConfirmation=true
+                groupConversationFeedback="建群结果待确认，可继续核对原请求。"
+            case .created:
+                pendingGroupConversationOperationID=nil
+                groupConversationFeedback="群聊已创建，可从会话列表打开。"
             case .queuedForRetry(let operationID):
                 pendingGroupConversationOperationID = operationID
-                groupConversationFeedback = "建群请求已安全保存；取消可阻止其在恢复连接后继续创建。"
+                groupConversationFeedback = "建群请求已安全保存；取消结果由服务器确认。"
             case .cancelling:
                 pendingGroupConversationOperationID = nil
-                groupConversationFeedback = "建群请求正在取消；恢复连接后会完成取消。"
+                groupConversationFeedback = "正在核对取消结果；若创建已开始，将继续确认原结果。"
             case .finalizing:
                 pendingGroupConversationOperationID = nil
                 groupConversationFeedback = "群聊已进入创建阶段，无法取消；完成后会显示在会话列表。"
@@ -898,6 +944,47 @@ final class V2ConversationListStore {
         }
     }
 
+    func observeDirectConversationRequests() async {
+        guard let opener=directConversationOpener as? any V2DirectConversationRecovering else { return }
+        do {
+            for try await requests in await opener.service.updates() {
+                try Task.checkCancellation()
+                directConversationRequests=requests
+            }
+        } catch is CancellationError { return }
+        catch { directConversationFeedback="无法读取已保存的私聊请求。" }
+    }
+
+    func resumeDirectConversationRequest(_ request:V2DirectRoomPending) async {
+        guard let opener=directConversationOpener as? any V2DirectConversationRecovering else { return }
+        do { try await opener.service.resume(id:request.work.id) }
+        catch is CancellationError { return }
+        catch { directConversationFeedback="暂时无法继续核对私聊请求。" }
+    }
+
+    func directConversationRequestStatus(_ request:V2DirectRoomPending) -> String {
+        if let receipt=request.receipt {
+            switch receipt.outcome {
+            case .opened:return "会话已就绪"
+            case .closed:return "请求已关闭，未创建会话"
+            case .rejected(.firstSubmissionExpired):return "请求已过期，可重新发起"
+            case .rejected:return "当前无法创建会话"
+            }
+        }
+        switch request.work.execution {
+        case .expiredUnsubmitted:return "请求已过期，未提交"
+        case .cancelledLocally:return "请求已取消，未提交"
+        default:break
+        }
+        switch request.work.scheduling {
+        case .needsAttention:return "需要继续核对结果"
+        case .waitingForNetwork:return "等待网络恢复"
+        case .waitingForAuthentication:return "等待登录恢复"
+        case .suspended:return "请求已暂停"
+        default:return "请求已保存，正在处理"
+        }
+    }
+
     func openDirectConversation(handle: String) async -> String? {
         let target = handle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !target.isEmpty else {
@@ -929,6 +1016,15 @@ final class V2ConversationListStore {
             explicitDirectPresentationKeys[roomID] = .init(userID: identity.userID, context: .directConversation)
             directConversationFeedback = nil
             return roomID
+        } catch V2DirectConversationOpeningState.queued {
+            directConversationFeedback = "已保存私聊请求，完成后会显示在会话列表中。再次点击可继续核对原请求。"
+            return nil
+        } catch V2DirectConversationOpeningState.expired {
+            directConversationFeedback = "私聊请求已过期，可重新发起。"
+            return nil
+        } catch V2DirectConversationOpeningState.rejected {
+            directConversationFeedback = "当前无法与对方创建私聊。"
+            return nil
         } catch is CancellationError {
             return nil
         } catch {
@@ -967,6 +1063,7 @@ struct V2ConversationListView: View {
     @State private var groupCancellationTask: Task<Void, Never>?
     @State private var messageSearchStore: V2ConversationSearchStore?
     @State private var isPresentingMessageSearch = false
+    @State private var isPresentingPreferenceActivity = false
     @State private var isPresentingFavorites = false
 
     init(
@@ -1004,7 +1101,7 @@ struct V2ConversationListView: View {
                         Button("重试") { Task { await store.refresh() } }
                     }
                 case .loaded:
-                    if store.visibleItems.isEmpty {
+                    if store.visibleItems.isEmpty && store.directConversationRequests.isEmpty {
                         ContentUnavailableView(
                             store.isShowingArchived ? "没有已归档会话" : "暂无会话",
                             systemImage: store.isShowingArchived ? "archivebox" : "bubble.left.and.bubble.right",
@@ -1013,6 +1110,21 @@ struct V2ConversationListView: View {
                     } else {
                     ScrollViewReader { scrollProxy in
                     List {
+                    if !store.directConversationRequests.isEmpty {
+                        Section("私聊请求") {
+                            ForEach(store.directConversationRequests,id:\.work.id) { request in
+                                VStack(alignment:.leading,spacing:8) {
+                                    V2AuthorizedAvatarView(key:.init(userID:request.command.targetUserID,context:.directConversation),showsName:true)
+                                    Text(store.directConversationRequestStatus(request)).font(.subheadline).foregroundStyle(.secondary)
+                                    if case .opened(let roomID,_)?=request.receipt?.outcome {
+                                        NavigationLink("打开会话",value:roomID.rawValue)
+                                    } else if request.work.scheduling == .needsAttention {
+                                        Button("继续核对") { Task { await store.resumeDirectConversationRequest(request) } }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if store.hasEarlierConversations {
                         Button("查看前面的会话") { Task { await store.loadEarlierConversations() } }
                             .disabled(store.isLoadingMoreConversations)
@@ -1063,20 +1175,17 @@ struct V2ConversationListView: View {
                             }
                         }
                         .contextMenu {
-                            Button(item.isPinned ? "取消置顶会话" : "置顶会话", systemImage: item.isPinned ? "pin.slash" : "pin") {
-                                Task { await store.updateConversationState(item, isPinned: !item.isPinned) }
+                            Menu("会话置顶", systemImage: "pin") {
+                                Button("置顶会话") { Task { await store.updateConversationState(item, isPinned: true) } }
+                                Button("取消置顶会话") { Task { await store.updateConversationState(item, isPinned: false) } }
                             }
-                            Button(item.isArchived ? "取消归档" : "归档会话", systemImage: item.isArchived ? "tray.and.arrow.up" : "archivebox") {
-                                Task { await store.updateConversationState(item, isArchived: !item.isArchived) }
+                            Menu("会话归档", systemImage: "archivebox") {
+                                Button("归档会话") { Task { await store.updateConversationState(item, isArchived: true) } }
+                                Button("取消归档") { Task { await store.updateConversationState(item, isArchived: false) } }
                             }
-                            Button(item.muteUntil.map({ $0 > Date() }) == true ? "取消免打扰" : "免打扰 1 小时", systemImage: item.muteUntil.map({ $0 > Date() }) == true ? "bell" : "bell.slash") {
-                                Task {
-                                    if item.muteUntil.map({ $0 > Date() }) == true {
-                                        await store.updateConversationState(item, muteUntil: .some(nil))
-                                    } else {
-                                        await store.updateConversationState(item, muteUntil: .some(Date().addingTimeInterval(60 * 60)))
-                                    }
-                                }
+                            Menu("消息提醒", systemImage: "bell") {
+                                Button("免打扰 1 小时") { Task { await store.updateConversationState(item, muteUntil: .some(Date().addingTimeInterval(60 * 60))) } }
+                                Button("取消免打扰") { Task { await store.updateConversationState(item, muteUntil: .some(nil)) } }
                             }
                         }
                         .accessibilityIdentifier("v2.conversation.\(item.kind.accessibilityIdentifierComponent).\(item.id)")
@@ -1114,8 +1223,13 @@ struct V2ConversationListView: View {
             }
             .navigationTitle(store.isShowingArchived ? "已归档" : "消息")
             .safeAreaInset(edge: .bottom) {
+                VStack(spacing: 4) {
+                if let feedback = store.conversationRefreshFeedback {
+                    Text(feedback).font(.footnote).foregroundStyle(.secondary).padding(.horizontal).padding(.vertical, 6).accessibilityIdentifier("v2.conversation.refresh-feedback")
+                }
                 if let feedback = store.conversationStateFeedback {
                     Text(feedback).font(.footnote).foregroundStyle(.secondary).padding(.horizontal).padding(.vertical, 6).accessibilityIdentifier("v2.conversation.state-feedback")
+                }
                 }
             }
             .toolbar {
@@ -1131,6 +1245,9 @@ struct V2ConversationListView: View {
                             isPresentingMessageSearch = true
                         }
                         .accessibilityIdentifier("v2.message.search")
+                        if store.preferenceActivity != nil {
+                            Button("待同步设置", systemImage: "arrow.triangle.2.circlepath") { isPresentingPreferenceActivity = true }
+                        }
                         Button("收藏", systemImage: "star") {
                             isPresentingFavorites = true
                         }
@@ -1185,13 +1302,24 @@ struct V2ConversationListView: View {
                     groupInvitationStore: groupInvitationStore
                 )
             }
+            .sheet(isPresented: $isPresentingPreferenceActivity) {
+                if let activity = store.preferenceActivity {
+                    V2PreferenceActivityView(store: activity, roomTitles: Dictionary(store.items.map { ($0.id, $0.title) }, uniquingKeysWith: { first, _ in first })) { roomID, messageID in
+                        isPresentingPreferenceActivity = false
+                        if let messageID { navigationPath.append(SearchNavigationDestination(roomID: roomID, messageID: messageID)) }
+                        else { navigationPath.append(roomID) }
+                    }
+                }
+            }
             .sheet(isPresented: $isPresentingFavorites) {
                 V2FavoriteMessagesSheet(store: store) { item in
                     isPresentingFavorites = false
                     navigationPath.append(SearchNavigationDestination(roomID: item.roomID, messageID: item.id))
                 }
             }
-            .task { await store.observeProjectionChanges() }
+            .task { await store.observeGroupCreation() }
+            .task { await store.observeDirectConversationRequests() }
+        .task { await store.observeProjectionChanges() }
             .onAppear { consumeRequestedConversationIfNeeded() }
             .onChange(of: rootNavigation?.conversationRequest) { _, _ in
                 consumeRequestedConversationIfNeeded()
@@ -1279,6 +1407,9 @@ struct V2ConversationListView: View {
                             Text("用逗号或换行分隔公开 ID，例如 @alice。")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
+                        }
+                        if store.groupCreationNeedsConfirmation {
+                            Button("继续核对建群结果") { Task { await store.resumePendingGroupCreation() } }
                         }
                         if let feedback = store.groupConversationFeedback {
                             Text(feedback)
@@ -1511,6 +1642,18 @@ private struct V2MessageSearchView: View {
                                 }
                             }
                         }
+                        if let failure = store.paginationFailure {
+                            Label(failure == .invalidContinuation
+                                  ? "后续结果暂不可用，请重新搜索。"
+                                  : "未能加载更多，已保留当前结果。", systemImage: "exclamationmark.triangle")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("v2.message.search.pagination-error")
+                            if failure == .invalidContinuation {
+                                Button("重新搜索") { Task { await store.search() } }
+                                    .accessibilityIdentifier("v2.message.search.restart")
+                            }
+                        }
                         if store.canLoadMore {
                             Button("继续加载") { Task { await store.loadMore() } }
                                 .disabled(store.isLoadingMore)
@@ -1607,6 +1750,7 @@ struct V2ConversationDetailView: View {
     private enum PresentedDetailSheet: Identifiable {
         case groupMembers
         case groupAvatar
+        case ownGroupNickname
         case groupReadReceipts(V2ConversationMessageItem)
         case edit(V2ConversationMessageItem)
         case forward
@@ -1621,6 +1765,8 @@ struct V2ConversationDetailView: View {
                 "groupMembers"
             case .groupAvatar:
                 "groupAvatar"
+            case .ownGroupNickname:
+                "ownGroupNickname"
             case .groupReadReceipts(let message):
                 "groupReadReceipts-\(message.id)"
             case .edit(let message):
@@ -1666,6 +1812,141 @@ struct V2ConversationDetailView: View {
                 }
             case .loaded:
                 VStack(spacing: 0) {
+                    if store.readSyncNeedsAttention {
+                        HStack {
+                            Text("已读状态同步已暂停，本地阅读记录仍保留。")
+                                .font(.footnote)
+                            Button("继续同步") { Task { await store.resumeReadSync() } }
+                                .disabled(store.isResumingReadSync)
+                                .accessibilityIdentifier("v2.readSync.resume")
+                        }.padding()
+                    }
+                    if store.readSyncArchiveCandidate != nil {
+                        VStack(alignment: .leading) {
+                            Text("当前无法核对原已读结果。归档仅停止跟踪，不表示成功或失败。")
+                                .font(.footnote)
+                            Button("归档本次核对") { Task { await store.archiveUnavailableReadSync() } }
+                                .disabled(store.isResumingReadSync)
+                        }.padding(.horizontal)
+                    }
+                    if !store.readSyncArchives.isEmpty {
+                        DisclosureGroup("已归档的已读核对（\(store.readSyncArchives.count)）") {
+                            ForEach(store.readSyncArchives) { archive in
+                                VStack(alignment: .leading) {
+                                    Text("结果未知 · 已读位置 \(archive.requestedSequence)")
+                                    Text(archive.id.uuidString).font(.caption2).textSelection(.enabled)
+                                    Button("按原记录继续核对") {
+                                        Task { await store.restoreReadSyncArchive(archive.id) }
+                                    }.disabled(store.isResumingReadSync)
+                                }.font(.footnote)
+                            }
+                        }.padding(.horizontal)
+                    }
+                    if let feedback = store.readSyncFeedback {
+                        Text(feedback).font(.footnote).foregroundStyle(.secondary).padding(.horizontal)
+                    }
+                    ForEach(store.groupCapabilityPending,id:\.id) { pending in
+                        HStack {
+                            Text(groupCapabilityTitle(pending.intent.action))
+                            if pending.work?.execution == .committed { Text("服务器已确认") }
+                            else if pending.work?.execution == .closed { Text("服务器确认未执行") }
+                            else if pending.work?.execution == .rejected || pending.work?.execution == .conflicted { Text("未执行，请刷新后重新操作") }
+                            else if pending.work?.scheduling == .needsAttention {
+                                Text("原操作结果待确认")
+                                Button("继续核对") { Task { await store.continueGroupCapability(pending) } }
+                            } else if pending.confirmationRequired {
+                                Text("需要重新确认")
+                                Button("查看并确认") { Task { await store.prepareGroupCapabilityReconfirmation(pending) } }
+                            }
+                            else { Text(pending.work==nil ? "正在核对短期授权" : "正在核对原操作") }
+                            if pending.work==nil { Button("取消确认") { Task { await store.discardGroupCapability(pending) } } }
+                        }.font(.caption).padding(.horizontal)
+                    }
+                    ForEach(store.membershipPending,id:\.id) { pending in
+                        HStack {
+                            Text(pending.intent.action == .add ? "添加成员确认" : "移除成员确认")
+                            if pending.work?.execution == .committed { Text("原操作已获服务器确认") }
+                            else if pending.work?.execution == .closed { Text("服务器确认未执行") }
+                            else if pending.work?.execution == .rejected || pending.work?.execution == .conflicted { Text("未获准执行，请刷新成员状态") }
+                            else if pending.work?.scheduling == .needsAttention {
+                                Text("原操作结果待确认")
+                                Button("继续核对") { Task { await store.continueMembership(pending) } }
+                            } else if pending.confirmationRequired {
+                                Text("需要重新确认权限与成员版本")
+                                Button("重新确认") { Task { await store.continueMembership(pending) } }
+                            } else { Text(pending.work==nil ? "正在核对短期授权" : "正在核对原操作") }
+                            if pending.work==nil { Button("取消确认") { Task { await store.discardMembership(pending) } } }
+                        }.font(.caption).padding(.horizontal)
+                    }
+                    ForEach(store.memberAdministrationPending,id:\.id) { pending in
+                        HStack {
+                            Text(pending.intent.action == .remove ? "成员移除" : "成员禁言")
+                            if pending.work?.execution == .committed { Text("服务器已确认原操作结果") }
+                            else if pending.work?.execution == .closed { Text("服务器确认未执行") }
+                            else if pending.work?.execution == .rejected || pending.work?.execution == .conflicted { Text("未获准执行，请刷新成员状态") }
+                            else if pending.work?.scheduling == .needsAttention {
+                                Text("原操作结果待确认")
+                                Button("继续核对") { Task { await store.continueMemberAdministration(pending) } }
+                            } else if pending.confirmationRequired {
+                                Text("确认窗口已结束或权限需重新核对")
+                                Button("重新确认") { Task { await store.continueMemberAdministration(pending) } }
+                            } else { Text(pending.work == nil ? "正在核对短期授权" : "正在核对原操作") }
+                            if pending.work==nil { Button("取消确认") { Task { await store.discardMemberAdministration(pending) } } }
+                        }.font(.caption).padding(.horizontal)
+                    }
+                    ForEach(store.messageRemovalPending, id: \.work.id) { pending in
+                        VStack(alignment: .leading) {
+                            Text(store.messageRemovalStatus(pending)).font(.footnote)
+                            if pending.work.scheduling == .needsAttention {
+                                Button("继续核对原移除") { Task { await store.resumeMessageRemoval(pending.work.id) } }
+                            }
+                        }
+                    }
+                    ForEach(store.forwardPlans,id:\.work.id) { plan in
+                        HStack {
+                            Text("转发：\(plan.succeeded) 已接受，\(plan.rejected) 拒绝，\(plan.cancelled) 未启动取消，\(plan.unresolved) 待确认")
+                            if plan.work.scheduling == .needsAttention {
+                                Button("继续确认") { Task { await store.resumeForwardPlan(plan.work.id) } }
+                            }
+                            if !plan.work.execution.isTerminal && !plan.cancellationRequested {
+                                Button("停止剩余") { Task { await store.cancelRemainingForwardPlan(plan.work.id) } }
+                            }
+                        }.font(.caption).padding(.horizontal).disabled(store.changingForwardPlanID != nil)
+                    }
+                    if let feedback=store.forwardSyncFeedback { Text(feedback).font(.caption).padding(.horizontal) }
+                    ForEach(store.pendingReactions,id:\.intent.id) { pending in
+                        HStack {
+                            Text(pending.intent.reaction + (pending.intent.targetState == .present ? " 添加目标已保存" : " 移除目标已保存"))
+                            if pending.expiredUnsubmitted { Text("尚未提交，已过期") }
+                            else if pending.preparationPaused || pending.work?.scheduling == .needsAttention {
+                                Button("继续确认") { Task { await store.resumeReactionIntent(pending.intent.id) } }
+                            } else if pending.work?.execution == .conflicted { Text("反应版本已变化，请明确重新选择目标") }
+                            else if pending.work?.execution == .rejected { Text("服务器拒绝了此目标") }
+                            else if pending.work?.execution == .closed { Text("服务器确认未执行，可重新选择目标") }
+                        }.font(.caption).padding(.horizontal)
+                    }
+                    if let feedback=store.reactionSyncFeedback { Text(feedback).font(.caption).padding(.horizontal) }
+                    ForEach(store.messageMutations, id:\.work.id) { snapshot in
+                        if snapshot.work.scheduling == .needsAttention {
+                            HStack {
+                                Text("消息修改结果仍待确认，原操作已保留。")
+                                    .font(.footnote)
+                                Button("继续确认") { Task { await store.resumeMessageMutation(snapshot.work.id) } }
+                                    .disabled(store.resumingMutationID != nil)
+                                    .accessibilityIdentifier("v2.messageMutation.resume.\(snapshot.work.id.uuidString)")
+                            }.padding()
+                        } else if snapshot.work.execution == .conflicted {
+                            Text("消息已被更新，修改草稿已保留。请刷新当前消息后重新编辑。")
+                                .font(.footnote).padding()
+                        } else if snapshot.work.execution == .expiredUnsubmitted {
+                            Text("消息修改尚未提交且已超过确认期限，请重新检查当前消息。")
+                                .font(.footnote).padding()
+                        }
+                    }
+                    if let feedback=store.mutationSyncFeedback {
+                        Text(feedback).font(.footnote).foregroundStyle(.secondary).padding(.horizontal)
+                    }
+
                     if store.isGroupConversation, let announcement = store.groupAnnouncement {
                         V2GroupAnnouncementBanner(announcement: announcement) {
                             presentedDetailSheet = .groupAnnouncement
@@ -1854,18 +2135,40 @@ struct V2ConversationDetailView: View {
                             .padding(.bottom, 8)
                             .accessibilityIdentifier("v2.message.sending-restricted")
                     }
-                    ForEach(store.pendingResourceSends) { pending in
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(pending.status).font(.caption)
-                                if pending.total > 0 {
-                                    ProgressView(value: Double(pending.completed), total: Double(pending.total))
-                                        .accessibilityLabel("附件已准备 \(pending.completed)/\(pending.total)")
+                    if !store.pendingResourceSends.isEmpty || store.pendingResourceSendPage > 0 || store.hasNextPendingResourceSendPage {
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 8) {
+                                ForEach(store.pendingResourceSends) { pending in
+                                    HStack {
+                                        VStack(alignment: .leading) {
+                                            if !pending.text.isEmpty {
+                                                Text(pending.text).font(.caption).lineLimit(2)
+                                            }
+                                            Text(pending.status).font(.caption)
+                                            if pending.total > 0 {
+                                                ProgressView(value: Double(pending.completed), total: Double(pending.total))
+                                                    .accessibilityLabel("附件已准备 \(pending.completed)/\(pending.total)")
+                                            }
+                                        }
+                                        if pending.canRetry { Button(pending.retryTitle) { Task { await store.retryResourceSend(pending.id) } } }
+                                        if pending.canCancel { Button("取消") { Task { await store.cancelResourceSend(pending.id) } } }
+                                    }.padding(.horizontal)
+                                }
+                                if store.pendingResourceSendPage > 0 || store.hasNextPendingResourceSendPage {
+                                    HStack {
+                                        if store.pendingResourceSendPage > 0 {
+                                            Button("较新的待处理发送") { store.previousPendingResourceSendPage() }
+                                        }
+                                        if store.hasNextPendingResourceSendPage {
+                                            Button("查看更多待处理发送") { store.nextPendingResourceSendPage() }
+                                        }
+                                    }.font(.caption).padding(.horizontal)
                                 }
                             }
-                            if pending.canRetry { Button("重试") { Task { await store.retryResourceSend(pending.id) } } }
-                            if pending.canCancel { Button("取消") { Task { await store.cancelResourceSend(pending.id) } } }
-                        }.padding(.horizontal)
+                        }
+                        .frame(maxHeight: 200)
+                        .accessibilityLabel("待处理发送")
+                        .accessibilityIdentifier("v2.message.pending-sends")
                     }
                     if let sendFeedback = store.sendFeedback {
                         Text(sendFeedback)
@@ -1915,6 +2218,8 @@ struct V2ConversationDetailView: View {
                 V2GroupMembersSheet(store: store)
             case .groupAvatar:
                 if let manager = store.groupAvatarManagementStore() { V2GroupAvatarManagementView(store: manager) }
+            case .ownGroupNickname:
+                if let editor = store.ownGroupNicknameEditor() { V2NameEditorView(store: editor) }
             case .groupReadReceipts(let message):
                 V2GroupReadReceiptsSheet(store: store, message: message)
             case .edit(let message):
@@ -1954,11 +2259,74 @@ struct V2ConversationDetailView: View {
         .task { await store.observeProjectionChanges() }
         .task { await store.pollVisibleHybridGroupEvents() }
         .authorPresentationPage(context: store.authorPresentationContext)
-        .task { await store.observeResourceSends() }
+        .task(id: store.pendingResourceSendPage) { await store.observeResourceSends() }
+        .task { await store.observeReadSync() }
+        .task { await store.observeMessageMutations() }
+        .task { await store.observeReactionIntents() }
+        .task { await store.observeMessageRemoval() }
+        .task {
+            await store.loadGroupMembers()
+            guard !Task.isCancelled else { return }
+            await store.loadGroupRolePolicies()
+        }
+        .onDisappear { store.endMessageRemovalPage() }
+        .task(id: store.messageRemovalProposal?.expires) {
+            guard let expires = store.messageRemovalProposal?.expires else { return }
+            do { try await Task.sleep(until: expires, clock: .continuous) }
+            catch { return }
+            if store.messageRemovalProposal?.expires == expires { store.messageRemovalProposal = nil }
+        }
+        .confirmationDialog("管理移除这条消息？", isPresented: Binding(
+            get: { store.messageRemovalProposal != nil },
+            set: { if !$0 { store.messageRemovalProposal = nil } }), titleVisibility: .visible, presenting: store.messageRemovalProposal) { proposal in
+            Button("移除消息", role: .destructive) {
+                Task { await store.confirmMessageRemoval(proposal) }
+            }
+            Button("取消", role: .cancel) { store.messageRemovalProposal = nil }
+        } message: { _ in Text("此操作将对所有成员移除消息。状态或权限变化时，服务器会拒绝原确认。") }
+
+        .confirmationDialog(store.pendingPinBaseline?.isPinned == true ? "取消置顶这条消息？" : "置顶这条消息？", isPresented:Binding(get:{store.pendingPinBaseline != nil},set:{if !$0 {store.pendingPinBaseline=nil}}),titleVisibility:.visible) {
+            Button(store.pendingPinBaseline?.isPinned == true ? "取消置顶" : "置顶") { if let baseline=store.pendingPinBaseline { Task { await store.confirmPinInGroup(baseline) } } }
+            Button("取消",role:.cancel) { store.pendingPinBaseline=nil }
+        }
+        .sheet(item:$store.groupCapabilityReconfirmation) { proposal in
+            NavigationStack {
+                Form {
+                    Section("重新确认群操作") {
+                        Text(groupCapabilityTitle(proposal.action))
+                        switch proposal.action {
+                        case .pin(_,let desired,_): Text(desired ? "将这条消息置顶" : "取消这条消息的置顶")
+                        case .announcement(let body,_): Text(body)
+                        case .rolePermissions(let role,let permissions,_):
+                            Text(role == .admin ? "角色：管理员" : "角色：普通成员")
+                            Text(permissions.isEmpty ? "不授予上述群权限" : permissions.map(\.title).sorted().joined(separator:"、"))
+                        case .memberRole(_,let role,_): Text(role == .admin ? "将原目标成员设为管理员" : "将原目标成员设为普通成员")
+                        }
+                        Text("确认后将在两分钟内核对权限与版本；不会修改已经提交的原操作。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    Button("确认提交") { Task { await store.confirmGroupCapability(proposal) } }
+                    Button("返回",role:.cancel) { store.groupCapabilityReconfirmation=nil }
+                }.navigationTitle("确认群操作")
+            }
+        }
+        .task { await store.observeGroupCapabilities() }
+        .task { await store.observeMembership() }
+        .task { await store.observeMemberAdministration() }
+        .task { await store.observeForwardPlans() }
         .task { await store.observeLiveActivity() }
         .task(id: focusedMessageID) {
             guard let focusedMessageID else { return }
             await store.loadTimeline(containing: focusedMessageID)
+        }
+    }
+
+    private func groupCapabilityTitle(_ action:V2GroupCapabilityAction) -> String {
+        switch action {
+        case .pin: "消息置顶"
+        case .announcement: "群公告"
+        case .rolePermissions: "群权限"
+        case .memberRole: "成员角色"
         }
     }
 
@@ -2005,6 +2373,12 @@ struct V2ConversationDetailView: View {
             }
         }
         if store.isGroupConversation {
+            if store.canEditOwnGroupNickname {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("我的群昵称", systemImage: "pencil") { presentedDetailSheet = .ownGroupNickname }
+                        .accessibilityIdentifier("v2.group.nickname.edit")
+                }
+            }
             if store.hasGroupAvatarManagement {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("群头像", systemImage: "person.crop.circle") { presentedDetailSheet = .groupAvatar }
@@ -2365,10 +2739,17 @@ private struct V2ConversationMessageBubble: View {
                 .accessibilityIdentifier("v2.message.withdraw.\(message.id)")
             }
             if !message.isWithdrawn {
-                Button(message.isFavorited ? "取消收藏" : "收藏", systemImage: message.isFavorited ? "star.slash" : "star") {
-                    Task { await store.setFavorite(message) }
+                Menu("收藏设置", systemImage: "star") {
+                    Button("设为收藏") { Task { await store.setFavorite(message, desired: true) } }
+                    Button("取消收藏") { Task { await store.setFavorite(message, desired: false) } }
                 }
                 .accessibilityIdentifier("v2.message.favorite.\(message.id)")
+                if store.canManageMessages && !message.isWithdrawn {
+                    Button("管理移除消息", systemImage: "trash", role: .destructive) {
+                        Task { await store.prepareMessageRemoval(message) }
+                    }
+                    .accessibilityIdentifier("v2.group.message.remove.\(message.id)")
+                }
                 if store.isGroupConversation {
                     Button(message.isPinnedInGroup ? "取消置顶消息" : "置顶消息", systemImage: message.isPinnedInGroup ? "pin.slash" : "pin") { Task { await store.pinInGroup(message) } }
                         .accessibilityIdentifier("v2.group.message.pin.\(message.id)")
@@ -2654,8 +3035,9 @@ private struct V2ConversationReactionControls: View {
     var body: some View {
         HStack(spacing: 4) {
             ForEach(message.reactions) { reaction in
-                Button {
-                    Task { await store.changeReaction(reaction.reaction, on: message) }
+                Menu {
+                    Button("添加我的反应") { Task { await store.changeReaction(reaction.reaction,on:message,action:.add) } }
+                    Button("移除我的反应") { Task { await store.changeReaction(reaction.reaction,on:message,action:.remove) } }
                 } label: {
                     Text("\(reaction.reaction) \(reaction.count)")
                 }
@@ -2665,13 +3047,14 @@ private struct V2ConversationReactionControls: View {
                 .disabled(!store.canReactToMessage(message))
                 .accessibilityLabel(reaction.reaction + " 表情反应")
                 .accessibilityValue(reactionAccessibilityValue(reaction))
-                .accessibilityHint(reaction.includesCurrentUser ? "双击移除反应" : "双击添加反应")
+                .accessibilityHint("选择添加或移除自己的反应")
                 .accessibilityIdentifier("v2.message.reaction.\(message.id).\(reaction.reaction)")
             }
             Menu {
                 ForEach(store.reactionPresets, id: \.self) { reaction in
-                    Button(reaction) {
-                        Task { await store.changeReaction(reaction, on: message) }
+                    Menu(reaction) {
+                        Button("添加") { Task { await store.changeReaction(reaction,on:message,action:.add) } }
+                        Button("移除") { Task { await store.changeReaction(reaction,on:message,action:.remove) } }
                     }
                     .accessibilityIdentifier("v2.message.reaction-picker.\(message.id).\(reaction)")
                 }

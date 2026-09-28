@@ -19,13 +19,23 @@ struct V2LocalSchemaContractTests {
         #expect(try migrationIdentifiers(in: primary) == ["createCurrentV2Schema"])
         #expect(try migrationIdentifiers(in: search) == ["createCurrentV2MessageSearchSchema"])
         let primaryObjectCount = try schemaObjectCount(in: primary)
-        #expect(primaryObjectCount == 231)
+        #expect(primaryObjectCount == 209)
         #expect(try schemaObjectExists(named: "v2_room_unread_directory", in: primary) == false)
         #expect(try schemaObjectExists(named: "v2_room_unread_rotation", in: primary) == false)
         #expect(try schemaObjectExists(named: "v2_hybrid_group_background_state", in: primary) == false)
         #expect(try schemaObjectExists(named: "v2_pending_forward_messages", in: primary) == false)
+        // The current schema adds the common work/dependency journal and the
+        // durable domain intents, message payloads and native background mappings.
+        for table in ["v2_operation_work", "v2_member_administration_intents", "v2_member_administration_ready", "v2_member_administration_order", "v2_operation_dependencies", "v2_profile_intents", "v2_own_profile_snapshot", "v2_personal_preference_intents", "v2_personal_preference_confirmed", "v2_name_operations", "v2_name_confirmed", "v2_contact_alias_invalidations", "v2_message_send_operations", "v2_message_mutation_operations", "v2_message_reaction_intents", "v2_forward_plan_operations", "v2_resource_import_active_admission", "v2_resource_transfer_active_admission", "v2_background_transfer_session", "v2_background_transfer_tasks"] {
+            #expect(try schemaObjectExists(named: table, in: primary))
+        }
+        #expect(try schemaObjectExists(named: "v2_pending_conversation_states", in: primary) == false)
+        #expect(try schemaObjectExists(named: "v2_pending_message_favorites", in: primary) == false)
+        for table in ["v2_pending_member_mutes", "v2_pending_moderated_member_removals", "v2_forward_message_plans", "v2_forward_message_chunks", "v2_pending_message_commands", "v2_pending_message_edits", "v2_pending_message_withdrawals", "v2_pending_read_receipts", "v2_pending_message_reactions"] {
+            #expect(try schemaObjectExists(named: table, in: primary) == false)
+        }
         let primaryFingerprint = try schemaFingerprint(in: primary)
-        #expect(primaryFingerprint == 0x44c060399651df65)
+        #expect(primaryFingerprint == 0xd64604e42567c696)
         #expect(try schemaObjectCount(in: search) == 5)
         #expect(try schemaFingerprint(in: search) == 0x39f4_35c6_3f7a_01b5)
 

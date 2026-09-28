@@ -30,6 +30,19 @@ struct V2PostgresTimestamp: Codable, Equatable, Sendable, PostgresNonThrowingEnc
         microseconds = value
     }
 
+    /// Preserve a protocol timestamp without a floating-point Date round trip.
+    init(unixMilliseconds: UInt64) throws {
+        guard let value = Int64(exactly: unixMilliseconds) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        let offset = value - 946_684_800_000
+        let (micros, overflow) = offset.multipliedReportingOverflow(by: 1_000)
+        guard !overflow, v2PostgresTimestampMicrosecondsCanEncode(micros) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        microseconds = micros
+    }
+
     /// 转换为供业务层使用的近似绝对日期。
     ///
     /// 大幅偏离纪元的微秒值可能在 `Double` 转换中失去精度。需要精确保留持久化值时，

@@ -99,7 +99,8 @@ struct V2DeviceRevocationWorkerTests {
         try await registry.register(
             stream,
             connectionID: UUID(uuidString: "00000000-0000-0000-0000-000000000713")!,
-            identity: .init(userID: user, deviceID: device, capabilityProfile: "base")
+            identity: .init(userID: user, deviceID: device, capabilityProfile: "base"),
+            publicationSuppressed: true
         )
         #expect(await registry.connectionCount(for: device) == 1)
 

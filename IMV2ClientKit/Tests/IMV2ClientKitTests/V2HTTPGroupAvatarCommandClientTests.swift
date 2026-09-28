@@ -48,10 +48,10 @@ struct V2HTTPGroupAvatarCommandClientTests {
             let value = try V2GroupAvatarCommandResponse(actorUserID: actor, deviceID: device, command: command, outcome: outcome)
             #expect(try await client(AvatarCommandTransport(bytes: JSONEncoder().encode(value), status: status)).submitGroupAvatar(command) == value)
         }
-        await #expect(throws: V2GroupAvatarSubmissionError.authorizationUnavailable) {
+        await #expect(throws: V2GroupAvatarSubmissionError.authorizationDenied) {
             _ = try await client(AvatarCommandTransport(bytes: Data("{}".utf8), status: 403)).submitGroupAvatar(command)
         }
-        await #expect(throws: V2GroupAvatarSubmissionError.throttled(retryAfter: 60)) {
+        await #expect(throws: V2GroupAvatarSubmissionError.throttled(retryAfter: 10000)) {
             _ = try await client(AvatarCommandTransport(bytes: Data(), status: 429)).submitGroupAvatar(command)
         }
         await #expect(throws: V2GroupAvatarSubmissionError.outcomeUnknown) {
@@ -97,8 +97,8 @@ struct V2HTTPGroupAvatarCommandClientTests {
     @Test("recovery HTTP status alone never becomes a closure proof", arguments: [401, 403, 410, 429, 503])
     func recoveryStatuses(status: Int) async throws {
         let request = try V2GroupAvatarRecoveryRequest(command: command(), action: .closeIfAbsent)
-        let error: V2GroupAvatarSubmissionError = status == 401 || status == 403 ? .authorizationUnavailable
-            : status == 429 ? .throttled(retryAfter: 60) : .outcomeUnknown
+        let error: V2GroupAvatarSubmissionError = status == 401 ? .authorizationUnavailable : status == 403 ? .authorizationDenied
+            : status == 429 ? .throttled(retryAfter: 10000) : .outcomeUnknown
         await #expect(throws: error) {
             _ = try await client(AvatarCommandTransport(bytes: Data(), status: status)).recoverGroupAvatar(request)
         }

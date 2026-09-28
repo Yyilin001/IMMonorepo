@@ -21,14 +21,15 @@ public struct V2HTTPProfilePresentationClient: V2ProfilePresentationReading {
         request.httpBody = try JSONEncoder().encode(V2ProfilePresentationBatchRequest(keys: keys))
         request.setValue("Bearer \(credential.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue(credential.deviceID.rawValue, forHTTPHeaderField: "X-IM-Device-ID")
+        V2HTTPRequestDeadline.attach(credential.requestDeadline, to: &request)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         let (bytes, response) = try await transport.data(for: request)
         try Task.checkCancellation()
-        if response.statusCode == 429 {
-            let raw = response.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init) ?? 1
-            throw V2ProfilePresentationError.throttled(retryAfter: raw.isFinite ? min(60, max(1, raw)) : 1)
+        if response.statusCode == 429 || (response.statusCode == 503 && response.value(forHTTPHeaderField: "Retry-After") != nil) {
+            let delay = V2RetryAfter.delay(from: response.value(forHTTPHeaderField: "Retry-After"))
+            throw V2ProfilePresentationError.throttled(retryAfter: delay)
         }
         if response.statusCode == 401 || response.statusCode == 403 {
             throw V2ClientMediaTransferError.authorizationUnavailable

@@ -5,6 +5,22 @@ import SwiftProtobuf
 import Testing
 
 struct V2ProtobufFrameCodecTests {
+    @Test("recipient-specific author TCP payload retains private alias and its original revision")
+    func authorContactAliasRoundTrip() throws {
+        let actor = UserID(uuid:UUID()),target = UserID(uuid:UUID()),device = DeviceID(uuid:UUID()),room = RoomID(uuid:UUID()),now = Date()
+        let revision = try #require(V2ProfileRevision(rawValue:1))
+        let view = try V2ProfileView(userID:target,publicIdentity:.init(userID:target,handle:.init("aliaswire"),displayName:"Public",accountKind:.regular),avatar:nil,state:.active,revision:revision,visibilityRevision:revision)
+        let lease = try V2PresentationAccessLease(actorUserID:actor,deviceID:device,key:.init(userID:target,context:.room(room)),profileRevision:revision,visibilityRevision:revision,contextRevision:1,observedAt:now,validUntil:now.addingTimeInterval(120))
+        let alias = try V2ContactAlias(ownerUserID:actor,targetUserID:target,remarkName:"Private name",revision:#require(.init(rawValue:9)))
+        let presentation = try V2AuthorizedProfilePresentation(view:view,lease:lease,contactAlias:alias)
+        let batch = try V2ProfilePresentationBatchResponse(serverNowUnixMilliseconds:lease.observedAtUnixMilliseconds,results:[.presentation(presentation,avatar:nil)])
+        let delta = try V2AuthorPresentationDelta(streamID:UUID(),viewID:UUID(),sequence:1,actorUserID:actor,deviceID:device,roomID:room,batch:batch)
+        var envelope = IMV2Envelope();envelope.protocolVersion = IMV2ProtocolVersion.current
+        envelope.authorPresentationDelta = .init();envelope.authorPresentationDelta.payload = try delta.encoded()
+        let decoded = try V2ServerProtobufFrameCodec.decode(V2ServerProtobufFrameCodec.encode(envelope,frameVersion:UInt8(IMV2ProtocolVersion.current)))
+        #expect(try V2AuthorPresentationDelta.decode(decoded.authorPresentationDelta.payload) == delta)
+    }
+
     @Test("sync record byte budgeting matches the protobuf repeated field")
     func sizesSyncBatchRecordExactly() throws {
         let record = try V2SyncRecord(

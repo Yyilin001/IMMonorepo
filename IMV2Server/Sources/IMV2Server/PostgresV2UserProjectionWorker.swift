@@ -273,7 +273,19 @@ public struct PostgresV2UserProjectionWorker: Sendable {
             return
         case "relationship": key = try projectionKey("relationship", string("target_user_id", object))
         case "user_block": key = try projectionKey("user_block", string("target_user_id", object))
-        case "stranger_message_permission", "user_add_permission": key = try projectionKey(record.projectionKind, "singleton")
+        case "stranger_message_permission", "user_add_permission", "live_activity_preferences":
+            key = try projectionKey(record.projectionKind, "singleton")
+            let incoming = try personalPreferenceRevision(record.payload)
+            if let prior = try await currentObjectIfPresent(key: key, userID: userID, sql: sql) {
+                let current = try personalPreferenceRevision(jsonData(prior.object))
+                if incoming < current { return }
+                if incoming == current {
+                    guard NSDictionary(dictionary: object).isEqual(to: prior.object) else {
+                        throw V2UserProjectionWorkerError.invalidPayload
+                    }
+                    return
+                }
+            }
         case "read_receipt_preferences":
             key = try projectionKey(record.projectionKind, "singleton")
             let incoming = try receiptPreferences(record.payload)
@@ -342,8 +354,18 @@ public struct PostgresV2UserProjectionWorker: Sendable {
                        incoming.recordedAtMilliseconds <= current.recordedAtMilliseconds { return }
                 }
             }
-        case "conversation_state": key = try projectionKey(record.projectionKind, string("room_id", object))
-        case "message_favorite": key = try projectionKey(record.projectionKind, string("message_id", object))
+        case "conversation_state", "message_favorite", "contact_alias":
+            let entity = record.projectionKind == "contact_alias" ? "target_user_id" : (record.projectionKind == "conversation_state" ? "room_id" : "message_id")
+            key = try projectionKey(record.projectionKind, string(entity, object))
+            let incoming = try personalPreferenceRevision(record.payload)
+            if let prior = try await currentObjectIfPresent(key:key,userID:userID,sql:sql) {
+                let current = try personalPreferenceRevision(jsonData(prior.object))
+                if incoming < current { return }
+                if incoming == current {
+                    guard try jsonData(object) == jsonData(prior.object) else { throw V2UserProjectionWorkerError.invalidPayload }
+                    return
+                }
+            }
         case "timeline_activity": key = try projectionKey(record.projectionKind, record.sourceEventID.rawValue)
         case "profile_invalidation": key = try projectionKey(record.projectionKind, string("user_id", object))
         default: throw V2UserProjectionWorkerError.invalidPayload
@@ -353,6 +375,13 @@ public struct PostgresV2UserProjectionWorker: Sendable {
             return
         }
         try await replace(key: key, record: record, payload: record.payload, userID: userID, createdAt: createdAt, sql: sql)
+    }
+
+    private struct PersonalPreferenceRevisionPayload:Decodable { let revision:UInt64 }
+    private func personalPreferenceRevision(_ data:Data) throws -> UInt64 {
+        guard let value=try? JSONDecoder().decode(PersonalPreferenceRevisionPayload.self,from:data),
+              value.revision>0,value.revision<=UInt64(Int64.max) else { throw V2UserProjectionWorkerError.invalidPayload }
+        return value.revision
     }
 
     private struct ReceiptPreferencesPayload: Decodable, Equatable {
@@ -536,12 +565,7 @@ public struct PostgresV2UserProjectionWorker: Sendable {
         switch record.projectionKind {
         case "relationship": return try string("state", object) == "none"
         case "user_block": return try boolean("is_blocked", object) == false
-        case "message_favorite": return try boolean("is_favorited", object) == false
-        case "conversation_state":
-            let mute = object["mute_until_ms"] as? NSNumber
-            return try boolean("is_pinned", object) == false
-                && boolean("is_archived", object) == false
-                && (mute?.int64Value ?? 0) == 0
+        case "message_favorite", "conversation_state": return false // Keep the revision even for cleared state.
         default: return false
         }
     }

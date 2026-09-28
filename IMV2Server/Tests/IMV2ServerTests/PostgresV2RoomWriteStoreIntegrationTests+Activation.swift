@@ -24,6 +24,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let wire = try V2ActorSpecialAccountAuditWire(
                 request: .init(stableAccountKey: "actor_notice", servicePrincipal: "test-service",
                     operationID: request.command.clientMessageID, requestFingerprint: "0123456789abcdef",
+                    firstSubmissionDeadlineMilliseconds: UInt64(now.timeIntervalSince1970 * 1000) + 600_000,
                     customerUserID: .init(uuid: memberTwoUUID), text: "notice"),
                 account: .init(userID: senderID, stableKey: "actor_notice", kind: .system),
                 roomID: roomID, outcome: outcome)
@@ -74,21 +75,22 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     capacityProfile: request.capacityProfile, limits: .init(maxUTF8Bytes: 64),
                     maximumEditBytes: 64, editIdentifiers: .init(makeUUID: { event.uuidValue! }),
                     withdrawalIdentifiers: .init(makeUUID: { event.uuidValue! }),
-                    reactionIdentifiers: .init(makeUUID: { event.uuidValue! }), now: { now })
+                    reactionIdentifiers: .init(makeUUID: { event.uuidValue! }), now: { now },
+                    mutations:.init(database:database,contentReviewMode:.disabled,clock:{now}),reactionOperations:.init(database:database,clock:{now}))
                 let result: V2RoomMessagingResult
                 switch kind {
                 case "edit":
-                    result = try await executor.execute(.edit(.init(roomID: roomID, actorUserID: senderID,
+                    result = try await executor.execute(.editOperation(.init(command:.init(roomID: roomID, actorUserID: senderID,
                             operationID: .init(uuid: operation), messageID: message.messageID,
-                            expectedMessageRevision: 1, text: "after")))
+                            expectedMessageRevision: 1, text: "after",maximumUTF8Bytes:64),firstSubmissionDeadlineMilliseconds:UInt64(now.timeIntervalSince1970*1000)+60_000)))
                 case "withdraw":
-                    result = try await executor.execute(.withdraw(.init(roomID: roomID, actorUserID: senderID,
+                    result = try await executor.execute(.withdrawOperation(.init(command:.init(roomID: roomID, actorUserID: senderID,
                             operationID: .init(uuid: operation), messageID: message.messageID,
-                            expectedMessageRevision: 1)))
+                            expectedMessageRevision: 1),firstSubmissionDeadlineMilliseconds:UInt64(now.timeIntervalSince1970*1000)+60_000)))
                 default:
-                    result = try await executor.execute(.reaction(.init(roomID: roomID, actorUserID: senderID,
+                    result = try await executor.execute(.reactionOperation(.init(command:.init(roomID: roomID, actorUserID: senderID,
                             operationID: .init(uuid: operation), messageID: message.messageID,
-                            reaction: "👍", action: .add)))
+                            reaction: "👍", action: .add),expectedReactionRevision:0,firstSubmissionDeadlineMilliseconds:UInt64(now.timeIntervalSince1970*1000)+60_000)))
                 }
                 if case .failure(let failure) = result { Issue.record("unexpected domain failure: \(failure)") }
             }
@@ -99,8 +101,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 owner: owner, host: host, duration: .init(30_000)) else { Issue.record("successor"); return }
             await #expect(throws: V2RoomActivationLeaseError.activationChanged) { try await execute(firstScope) }
             try await execute(.init(tokens: [next.token]))
-            let table = kind == "edit" ? "message_edit_operations"
-                : kind == "withdraw" ? "message_withdrawal_operations" : "message_reaction_operations"
+            let table = kind == "reaction" ? "message_reaction_receipts" : "message_mutation_receipts"
             #expect(try await count("im_v2." + table, on: sql) == 1)
             #expect(try await leases.release(token: next.token))
         }

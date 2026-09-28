@@ -1,5 +1,5 @@
 import Foundation
-import IMV2ClientKit
+@testable import IMV2ClientKit
 import IMV2Core
 import Testing
 import SwiftUI
@@ -8,6 +8,54 @@ import UIKit
 
 @MainActor
 struct V2ConversationStoreTests {
+    @Test func conversationSnapshotMetricRequiresAnActualAppliedListRead() async {
+        let source = V2ConversationDataSourceFake(summaries: [
+            .init(id: "metric-room", title: "Room", preview: "Message", lastActivity: .now, isOutgoing: false, kind: .unknown)
+        ], messages: [])
+        let store = makeConversationListStore(dataSource: source, userID: "current-user")
+        let diagnostics = V2NetworkDiagnostics()
+        await store.refresh()
+        #expect(diagnostics.snapshot().projections.isEmpty)
+        let stamp = V2ConversationCommitMeasurement(committedAt: .now, diagnostics: diagnostics)
+        await V2ProjectionVisibilityScope.$conversationCommit.withValue(stamp) { await store.refresh() }
+        #expect(store.items.map(\.id) == ["metric-room"])
+        #expect(diagnostics.snapshot().projections.count == 1)
+        #expect(diagnostics.snapshot().projections.first?.phase == .didCommitToConversationSnapshot)
+        await V2ProjectionVisibilityScope.$conversationCommit.withValue(stamp) { await store.refresh() }
+        #expect(diagnostics.snapshot().projections.count == 1)
+    }
+
+    @Test func conversationRefreshFailureKeepsLoadedContent() async {
+        let source = V2ConversationDataSourceFake(summaries: [
+            .init(id: "retained-room", title: "Room", preview: "Message", lastActivity: .now, isOutgoing: false, kind: .unknown)
+        ], messages: [])
+        let store = makeConversationListStore(dataSource: source, userID: "current-user")
+        await store.refresh()
+        let original = store.items
+        await source.failNextSummaryRead()
+        await store.refresh()
+        #expect(store.state == .loaded)
+        #expect(store.items == original)
+        #expect(store.conversationRefreshFeedback != nil)
+    }
+
+    @Test func privacyRefreshFailureKeepsLoadedForm() async {
+        let reader = V2SequencedStrangerMessagePreferenceReader()
+        let store = V2PrivacySettingsStore(reader: reader, updater: V2StrangerMessagePreferenceUpdaterFake(result: .accepted))
+        let first = Task { await store.refresh() }
+        await reader.waitUntilRequestCount(1)
+        await reader.completeRequest(at: 0, with: false)
+        await first.value
+        let refresh = Task { await store.refresh() }
+        await reader.waitUntilRequestCount(2)
+        #expect(store.state == .loaded)
+        await reader.failRequest(at: 1)
+        await refresh.value
+        #expect(store.state == .loaded)
+        #expect(!store.allowsStrangerMessages)
+        #expect(store.feedback != nil)
+    }
+
     @Test func conversationListShowsAnEmptyDirectRoomWithItsAuthorizedIdentity() throws {
         let roomID: RoomID = try .init("00000000-0000-0000-0000-000000000e02")
         let identity = try V2PublicIdentity(
@@ -43,7 +91,8 @@ struct V2ConversationStoreTests {
             isPinned: true,
             isArchived: true,
             muteUntil: muteUntil,
-            updatedAt: updatedAt
+            updatedAt: updatedAt,
+            revision: .init(rawValue: 1)!
         )
 
         let items = V2GRDBConversationDataSource.mergingEmptyProjectionItems(
@@ -940,7 +989,10 @@ struct V2ConversationStoreTests {
         let downloaded = try await downloader.download(reference)
 
         #expect(await resolver.requests() == [reference.mediaID])
-        #expect(await transfer.downloadDestinations() == [downloaded.fileURL.deletingLastPathComponent().appendingPathComponent(".00000000-0000-0000-0000-000000000711.partial")])
+        let stableTemporary = try #require(await transfer.downloadDestinations().first)
+        #expect(stableTemporary.pathExtension == "download")
+        #expect(stableTemporary.lastPathComponent.contains(target.checksum.value))
+        #expect(!stableTemporary.lastPathComponent.contains(reference.mediaID.rawValue))
         #expect(try Data(contentsOf: downloaded.fileURL) == Data([1, 2, 3, 4]))
         #expect(!downloaded.fileURL.lastPathComponent.contains(reference.mediaID.rawValue))
         #expect(downloaded.fileURL.pathExtension == "media")
@@ -950,7 +1002,8 @@ struct V2ConversationStoreTests {
         #expect(replaced.fileURL != downloaded.fileURL)
         #expect(!fileManager.fileExists(atPath: downloaded.fileURL.path))
         #expect(try Data(contentsOf: replaced.fileURL) == Data([1, 2, 3, 4]))
-        #expect(!fileManager.fileExists(atPath: replaced.fileURL.deletingLastPathComponent().appendingPathComponent(".00000000-0000-0000-0000-000000000711.partial").path))
+        #expect(await transfer.downloadDestinations() == [stableTemporary,stableTemporary])
+        #expect(!fileManager.fileExists(atPath: stableTemporary.path))
     }
 
     @Test func foregroundMediaDownloaderPurgesOnlyIncompleteCacheTransfers() async throws {
@@ -1110,8 +1163,8 @@ struct V2ConversationStoreTests {
             roomID: "room-a"
         )
 
-        await store.changeReaction("👍", on: message)
-        await store.changeReaction("❤️", on: message)
+        await store.changeReaction("👍", on: message,action:.remove)
+        await store.changeReaction("❤️", on: message,action:.add)
 
         #expect(await changer.requests() == [
             .init(messageID: "message-a", roomID: "room-a", reaction: "👍", action: .remove),
@@ -1164,6 +1217,93 @@ struct V2ConversationStoreTests {
         #expect(!shouldDismissEditor)
         #expect(await editor.requests().count == 1)
         #expect(store.messageActionFeedback == "编辑被拒绝（REVISION_CONFLICT），请刷新后重试。")
+    }
+
+    @Test func reactionExplicitOfflineTargetSurvivesPageAndUnknownNeedsUserContinuation() async throws {
+        let f=try V2AppMessageWorkFixture();defer { f.remove() }
+        let messageID=MessageID(uuid:UUID()),remote=V2AppReactionClient(account:f.account)
+        let service=V2MessageReactionOperationService(accountID:f.account,store:f.store,client:remote)
+        let message=V2ConversationMessageItem(id:messageID.rawValue,revision:1,text:"消息",createdAt:.now,isOutgoing:false,isWithdrawn:false)
+        let detail=makeConversationDetailStore(dataSource:V2ConversationDataSourceFake(summaries:[],messages:[]),sender:nil,messageReactionChanger:V2OperationMessageReactionChanger(service:service),userID:f.account.rawValue,roomID:f.room.rawValue)
+        let page=Task { await detail.observeReactionIntents() }
+        await detail.changeReaction("👍",on:message,action:.remove)
+        let intent=try #require(try await f.store.nextReactionDraft(now:Date()))
+        #expect(intent.targetState == .absent)
+        #expect(await remote.calls==0)
+        page.cancel();await page.value
+        #expect(try await f.store.nextReactionDraft(now:Date())==intent)
+        #expect(try await service.prepareNextIntent())
+        let work=try #require(try await f.store.operationWork(id:intent.id))
+        let claim=try await f.claim(work)
+        try await f.store.deferOperationWork(claim,until:Date(),code:"RESPONSE_LOST",scheduling:.needsAttention)
+        let secondPage=Task { await detail.observeReactionIntents() }
+        let deadline=ContinuousClock.now + .seconds(3)
+        while detail.pendingReactions.first?.work?.scheduling != .needsAttention { try #require(ContinuousClock.now<deadline);await Task.yield() }
+        await detail.refresh()
+        #expect(try await f.store.operationWork(id:intent.id)?.scheduling == .needsAttention)
+        await detail.resumeReactionIntent(intent.id)
+        #expect(try await f.store.operationWork(id:intent.id)?.nextAction == .reconcile)
+        #expect(try await f.store.reactionCommand(workID:intent.id).targetState == .absent)
+        secondPage.cancel();await secondPage.value
+        try await f.store.close()
+    }
+
+    @Test func messageMutationUnknownKeepsSavedDraftAndRequiresExplicitContinuation() async throws {
+        let f=try V2AppMessageWorkFixture();defer { f.remove() }
+        let messageID=MessageID(uuid:UUID())
+        let id=try await f.mutation.enqueueEdit(roomID:f.room,messageID:messageID,expectedRevision:1,text:"已保存草稿")
+        let work=try #require(try await f.store.operationWork(id:id))
+        let claim=try await f.claim(work)
+        try await f.store.deferOperationWork(claim,until:Date(),code:"RESPONSE_LOST",scheduling:.needsAttention)
+        let message=V2ConversationMessageItem(id:messageID.rawValue,revision:1,text:"原文",createdAt:.now,isOutgoing:true,isWithdrawn:false)
+        let detail=makeConversationDetailStore(dataSource:V2ConversationDataSourceFake(summaries:[],messages:[]),sender:nil,messageEditor:V2OperationMessageEditor(service:f.mutation),userID:f.account.rawValue,roomID:f.room.rawValue)
+        let observer=Task { await detail.observeMessageMutations() }
+        let deadline=ContinuousClock.now + .seconds(3)
+        while detail.messageMutations.isEmpty { try #require(ContinuousClock.now<deadline);await Task.yield() }
+        #expect(!(await detail.editMessage(message,text:"修改后的草稿")))
+        #expect(detail.messageActionFeedback?.contains("尚未确认") == true)
+        #expect(try await f.store.operationWork(id:id)?.scheduling == .needsAttention)
+        guard case .edit(let frozen)=try await f.store.messageMutationPayload(workID:id) else { Issue.record("missing draft");return }
+        #expect(frozen.text == "已保存草稿")
+        observer.cancel();await observer.value
+        #expect(try await f.store.operationWork(id:id)?.scheduling == .needsAttention)
+        let secondObserver=Task { await detail.observeMessageMutations() }
+        await detail.resumeMessageMutation(id)
+        #expect(try await f.store.operationWork(id:id)?.nextAction == .reconcile)
+        #expect(try await f.store.messageMutationPayload(workID:id) == .edit(frozen))
+        #expect(await f.remote.calls == 0)
+        secondObserver.cancel();await secondObserver.value
+        try await f.store.close()
+    }
+
+    @Test func readSyncRequiresExplicitUserContinuation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path:"read-sync-ui-"+UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at:directory) }
+        let user = UserID(uuid:UUID()), room = RoomID(uuid:UUID())
+        let local = try GRDBV2LocalSyncStore(databaseURL:directory.appending(path:"state.sqlite"),installationBinding:.init(value:UUID()),userID:user)
+        let service = V2ReadReceiptOperationService(accountID:user,store:local,client:ReadSyncAttentionClient())
+        _ = try await service.enqueue(roomID:room,readThrough:3)
+        _ = try await local.prepareNextReadReceiptIntent(accountID:user)
+        let first = try #require(try await local.dueOperationWork(now:.now,kinds:[.readReceipt]).first)
+        for _ in 0..<2 {
+            let work = try #require(try await local.operationWork(id:first.id))
+            guard case .claimed(let claim) = try await local.claimOperationWork(id:work.id,ownerID:UUID(),action:work.nextAction,now:work.nextActionAt) else { Issue.record("expected claim"); return }
+            try await service.execute(claim)
+        }
+        let reporter = V2OperationConversationReadReporter(service:service)
+        let detail = makeConversationDetailStore(dataSource:V2ConversationDataSourceFake(summaries:[],messages:[]),sender:nil,readReceiptReporter:reporter,userID:user.rawValue,roomID:room.rawValue)
+        let observation = Task { await detail.observeReadSync() }
+        let deadline = ContinuousClock.now + .seconds(3)
+        while !detail.readSyncNeedsAttention { try #require(ContinuousClock.now < deadline); await Task.yield() }
+        _ = try await reporter.recordReadThrough(roomID:room.rawValue,roomSequence:8)
+        await detail.refresh()
+        #expect(try await local.operationWork(id:first.id)?.scheduling == .needsAttention)
+        #expect(try await local.roomReadWatermark(roomID:room) == 8)
+        await detail.resumeReadSync()
+        while detail.readSyncNeedsAttention { try #require(ContinuousClock.now < deadline); await Task.yield() }
+        #expect(try await local.operationWork(id:first.id)?.nextAction == .reconcile)
+        observation.cancel(); await observation.value
+        try await local.close()
     }
 
     @Test func visibleMessageReportsTheNewestVisibleRoomSequence() async throws {
@@ -1442,14 +1582,14 @@ struct V2ConversationStoreTests {
         let roomID = await store.createGroupConversation(title: "项目群", memberHandlesText: "")
 
         #expect(roomID == nil)
-        #expect(store.groupConversationFeedback == "建群请求已安全保存；取消可阻止其在恢复连接后继续创建。")
+        #expect(store.groupConversationFeedback == "建群请求已安全保存；取消结果由服务器确认。")
         #expect(store.pendingGroupConversationOperationID == "group-operation-1")
 
         await store.cancelPendingGroupConversationCreation()
 
         #expect(await creator.cancelledOperationIDs() == ["group-operation-1"])
         #expect(store.pendingGroupConversationOperationID == nil)
-        #expect(store.groupConversationFeedback == "建群请求正在取消；恢复连接后会完成取消。")
+        #expect(store.groupConversationFeedback == "正在核对取消结果；若创建已开始，将继续确认原结果。")
     }
 
     @Test func groupConversationRestoresDurableFinalizingStatusAfterUIRecreation() async {
@@ -1487,6 +1627,31 @@ struct V2ConversationStoreTests {
         await creator.complete()
         #expect(await firstCreation.value == "room-group")
         #expect(!store.isCreatingGroupConversation)
+    }
+
+    @Test(arguments: [false, true])
+    func ordinaryMemberRefreshKeepsDisplayWithoutGrantingManagement(authorityChanged: Bool) async {
+        let page = V2GroupMemberPage(membershipRevision: 3, actorRole: "管理员",
+            members: [.init(id: "member-a", role: "成员")], nextCursor: nil)
+        let reader = V2ScriptedGroupMemberDirectory(results: [.success(page),
+            .failure(.server(code: "UNAVAILABLE", retryable: true, retryAfterSeconds: 0, currentRevision: nil)), .success(page)])
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            sender: nil, userID: "current-user", roomID: "room-group", kind: .group, groupMemberDirectory: reader)
+        await store.loadGroupMembers(reset: true)
+        #expect(store.canAddGroupMembers)
+        await store.loadGroupMembers(reset: true, reason: authorityChanged ? .authorizationChanged : .userInitiated)
+        #expect(store.groupMembers.count == (authorityChanged ? 0 : 1))
+        #expect(store.groupMemberDirectoryIsStale)
+        #expect(store.groupActorRole == nil)
+        #expect(!store.canAddGroupMembers)
+        #expect(!store.canRemoveGroupMember(page.members[0]))
+        #expect(store.groupMemberFeedback != nil)
+        await store.loadGroupMembers(reset: true)
+        #expect(store.groupMembers.map(\.id) == ["member-a"])
+        #expect(!store.groupMemberDirectoryIsStale)
+        #expect(store.canAddGroupMembers)
+        #expect(store.groupMemberFeedback == nil)
+        #expect(await reader.requestedCursors() == [nil, nil, nil])
     }
 
     @Test func groupMemberDirectoryPaginatesThroughAnInjectableReader() async {
@@ -1615,7 +1780,7 @@ struct V2ConversationStoreTests {
             sender: nil, userID: "current-user", roomID: "room-group", kind: .group, groupMemberDirectory: reader)
         await store.loadGroupMembers(reset: true)
         #expect(store.canAddGroupMembers)
-        await store.loadGroupMembers(reset: scenario == "reset")
+        await store.loadGroupMembers(reset: scenario == "reset", reason: .authorizationChanged)
         if scenario == "network" {
             #expect(store.groupMembers.map(\.id) == ["member-a"])
             #expect(store.groupMemberRevision == 3)
@@ -1753,7 +1918,7 @@ struct V2ConversationStoreTests {
         await firstChange.value
 
         #expect(!store.isChangingGroupMembership)
-        #expect(store.groupMemberFeedback == "成员变更已安全保存，连接恢复后会继续。")
+        #expect(store.groupMemberFeedback == "成员确认已保存；两分钟窗口内核对权限，超时需重新确认。")
     }
 
     @Test func groupMembershipChangeIgnoresLateSuccessAfterCancellation() async {
@@ -1955,7 +2120,8 @@ struct V2ConversationStoreTests {
         await store.setAllowsStrangerMessages(true)
 
         #expect(store.state == .loaded)
-        #expect(store.allowsStrangerMessages)
+        // A queued allow intent does not widen the authoritative privacy setting.
+        #expect(!store.allowsStrangerMessages)
         #expect(store.feedback == "设置已安全保存，连接恢复后会同步。")
         #expect(await updater.requestedValues() == [true])
     }
@@ -2805,6 +2971,7 @@ private func makeConversationDetailStore(
     messageWithdrawer: (any V2MessageWithdrawing)? = nil,
     messageReactionChanger: (any V2MessageReactionChanging)? = nil,
     messageEditor: (any V2MessageEditing)? = nil,
+    messageModerator: V2MessageModerationOperationService? = nil,
     readReceiptReporter: (any V2ConversationReadReporting)? = nil,
     messageFavoriter: (any V2MessageFavoriting)? = nil,
     groupMessagePinner: (any V2GroupMessagePinning)? = nil,
@@ -2850,6 +3017,7 @@ private func makeConversationDetailStore(
             editor: messageEditor,
             readReceiptReporter: readReceiptReporter,
             favoriter: messageFavoriter,
+            moderator: messageModerator,
             groupPinner: groupMessagePinner,
             forwarder: messageForwarder
         ),
@@ -3094,6 +3262,8 @@ private actor V2ConversationDataSourceFake: V2ConversationDataSource {
     private let messages: [V2ConversationMessageItem]
     private var readCheckpoint: V2ConversationRoomReadCheckpoint = .unknown
     private var requestedMessageCount = 0
+    private var failsSummaryRead = false
+    func failNextSummaryRead() { failsSummaryRead = true }
     private var pausesSummaryRead = false
     private var pausedSummaryReadCount = 0
     private var summaryReads: [Int: CheckedContinuation<Void, Never>] = [:]
@@ -3123,6 +3293,7 @@ private actor V2ConversationDataSourceFake: V2ConversationDataSource {
         before cursor: V2ClientConversationListCursor?,
         limit: Int
     ) async throws -> V2ConversationListPage {
+        if failsSummaryRead { failsSummaryRead = false; throw V2SequencedStrangerMessagePreferenceReaderFailure.failed }
         if pausesSummaryRead {
             pausesSummaryRead = false
             let index = pausedSummaryReadCount
@@ -3435,9 +3606,12 @@ private actor V2ConversationResourceSenderFake: V2DurableConversationSending {
     }
     func copyAttachments(sources: [V2ResourceImportSource], to room: RoomID) throws { throw V2AttachmentUploadFailure.failed }
     func pending(in roomID: RoomID) -> [V2DurableConversationSendService.Pending] { [] }
+    nonisolated func pendingPageUpdates(in roomID:RoomID,page:Int) -> AsyncThrowingStream<V2DurableConversationSendService.PendingPage,any Error> {
+        AsyncThrowingStream { $0.yield(.init(items:[],hasNext:false));$0.finish() }
+    }
     func retry(intentID: UUID) throws { throw V2AttachmentUploadFailure.failed }
     func cancel(intentID: UUID) throws { throw V2AttachmentUploadFailure.failed }
-    func startRecovery() {}
+    func runRecovery() async throws {}
     func close() {}
 }
 
@@ -3886,7 +4060,14 @@ private actor V2GroupMembershipChangerFake: V2GroupMembershipChanging {
 
     init(result: V2GroupMembershipChangeOutcome) { self.result = result }
 
-    func changeMembership(roomID: String, targetUserID: String, action: V2RoomMembershipAction, expectedMembershipRevision: UInt64) async throws -> V2GroupMembershipChangeOutcome {
+    nonisolated func membershipConfirmation(roomID:String,action:V2RoomMembershipAction,expectedMembershipRevision:UInt64) throws -> V2MembershipConfirmationWindow {
+        // The UI fixture uses a named room; its transport boundary carries a real typed ID.
+        let room = roomID == "room-group" ? RoomID(uuid:UUID(uuidString:"00000000-0000-0000-0000-000000000701")!) : try RoomID(roomID)
+        return try .init(roomID:room,action:action,expectedMembershipRevision:expectedMembershipRevision,activationID:UUID())
+    }
+    func changeMembership(targetUserID:String,confirmation:V2MembershipConfirmationWindow) async throws -> V2GroupMembershipChangeOutcome {
+        let roomID=confirmation.roomID.rawValue == "00000000-0000-0000-0000-000000000701" ? "room-group":confirmation.roomID.rawValue
+        let action=confirmation.action,expectedMembershipRevision=confirmation.expectedMembershipRevision
         requestsValue.append(.init(roomID: roomID, targetUserID: targetUserID, action: action, expectedMembershipRevision: expectedMembershipRevision))
         return result
     }
@@ -3907,7 +4088,7 @@ private actor V2GroupMemberMuterFake: V2GroupMemberMuting {
 
     init(result: V2GroupModerationOutcome) { self.result = result }
 
-    func muteMember(roomID: String, targetUserID: String, muteUntil: Date, reasonCode: V2ModerationReasonCode) async throws -> V2GroupModerationOutcome {
+    func muteMember(roomID: String, targetUserID: String, muteUntil: Date, reasonCode: V2ModerationReasonCode, expectedMembershipRevision: UInt64) async throws -> V2GroupModerationOutcome {
         requestsValue.append(.init(roomID: roomID, targetUserID: targetUserID, muteUntil: muteUntil, reasonCode: reasonCode.rawValue))
         return result
     }
@@ -3927,7 +4108,7 @@ private actor V2ModeratedGroupMemberRemoverFake: V2ModeratedGroupMemberRemoving 
 
     init(result: V2GroupModerationOutcome) { self.result = result }
 
-    func removeMemberByModerator(roomID: String, targetUserID: String, reasonCode: V2ModerationReasonCode) async throws -> V2GroupModerationOutcome {
+    func removeMemberByModerator(roomID: String, targetUserID: String, reasonCode: V2ModerationReasonCode, expectedMembershipRevision: UInt64) async throws -> V2GroupModerationOutcome {
         requestsValue.append(.init(roomID: roomID, targetUserID: targetUserID, reasonCode: reasonCode.rawValue))
         return result
     }
@@ -3948,7 +4129,8 @@ private actor V2SuspendingModeratedGroupMemberRemover: V2ModeratedGroupMemberRem
     func removeMemberByModerator(
         roomID _: String,
         targetUserID _: String,
-        reasonCode _: V2ModerationReasonCode
+        reasonCode _: V2ModerationReasonCode,
+        expectedMembershipRevision _: UInt64
     ) async throws -> V2GroupModerationOutcome {
         didReceiveRequest = true
         requestWaiter?.resume()
@@ -3985,7 +4167,14 @@ private actor V2SuspendingGroupMembershipChanger: V2GroupMembershipChanging {
         self.result = result
     }
 
-    func changeMembership(roomID: String, targetUserID: String, action: V2RoomMembershipAction, expectedMembershipRevision: UInt64) async throws -> V2GroupMembershipChangeOutcome {
+    nonisolated func membershipConfirmation(roomID:String,action:V2RoomMembershipAction,expectedMembershipRevision:UInt64) throws -> V2MembershipConfirmationWindow {
+        // The UI fixture uses a named room; its transport boundary carries a real typed ID.
+        let room = roomID == "room-group" ? RoomID(uuid:UUID(uuidString:"00000000-0000-0000-0000-000000000701")!) : try RoomID(roomID)
+        return try .init(roomID:room,action:action,expectedMembershipRevision:expectedMembershipRevision,activationID:UUID())
+    }
+    func changeMembership(targetUserID:String,confirmation:V2MembershipConfirmationWindow) async throws -> V2GroupMembershipChangeOutcome {
+        let roomID=confirmation.roomID.rawValue == "00000000-0000-0000-0000-000000000701" ? "room-group":confirmation.roomID.rawValue
+        let action=confirmation.action,expectedMembershipRevision=confirmation.expectedMembershipRevision
         requestsValue.append(.init(roomID: roomID, targetUserID: targetUserID, action: action, expectedMembershipRevision: expectedMembershipRevision))
         requestWaiter?.resume()
         requestWaiter = nil
@@ -4470,5 +4659,106 @@ private struct V2GatedTimelineLocations: V2ConversationDataSource {
         let result = try await source.timelineWindow(in: roomID, for: userID, around: messageID, before: before, after: after)
         await gate.holdResult()
         return result
+    }
+}
+
+private struct ReadSyncAttentionClient: V2ReadReceiptOperationClient {
+    func submit(_ command:V2RecordReadReceiptCommand) throws -> V2ReadReceiptOperationReceipt { throw URLError(.networkConnectionLost) }
+    func recover(_ request:V2ReadReceiptRecoveryRequest) -> V2ReadReceiptRecoveryResult { .currentUnavailable(.permissionDenied) }
+}
+
+extension V2ConversationStoreTests {
+    @Test func administrationReconfirmationRequiresFreshManagementBaseline() async throws {
+        let url=FileManager.default.temporaryDirectory.appending(path:"administration-ui-"+UUID().uuidString).appending(path:"state.sqlite")
+        defer { try? FileManager.default.removeItem(at:url.deletingLastPathComponent()) }
+        let account=UserID(uuid:UUID()),room=RoomID(uuid:UUID()),target=UserID(uuid:UUID())
+        let local=try GRDBV2LocalSyncStore(databaseURL:url,installationBinding:.init(value:UUID()),userID:account)
+        let remote=AdministrationUIRemote()
+        let original=V2MemberAdministrationOperationService(accountID:account,activationID:UUID(),store:local,client:remote)
+        let id=try await original.enqueue(roomID:room,targetUserID:target,action:.remove,reasonCode:.init("ADMIN_ACTION"),expectedMembershipRevision:7)
+        let restored=V2MemberAdministrationOperationService(accountID:account,activationID:UUID(),store:local,client:remote)
+        #expect(try await restored.prepareNextIntent())
+        let pending=try await local.memberAdministrationPending(id:id)
+        let page=V2GroupMemberPage(membershipRevision:8,actorRole:"管理员",members:[.init(id:target.rawValue,role:"成员")],nextCursor:nil)
+        let reader=V2ScriptedGroupMemberDirectory(results:[.success(page),.failure(.server(code:"UNAVAILABLE",retryable:true,retryAfterSeconds:0,currentRevision:nil)),.success(page)])
+        let adapter=V2OperationGroupMemberAdministrator(service:restored)
+        let detail=makeConversationDetailStore(dataSource:V2ConversationDataSourceFake(summaries:[],messages:[]),sender:nil,userID:account.rawValue,roomID:room.rawValue,kind:.group,groupMemberDirectory:reader,groupMemberMuter:adapter,moderatedGroupMemberRemover:adapter)
+        await detail.loadGroupMembers(reset:true)
+        await detail.loadGroupMembers(reset:true)
+        await detail.continueMemberAdministration(pending)
+        #expect(try await local.memberAdministrationPending(id:id).preparationState == .paused)
+        #expect(detail.groupMemberFeedback == "请先刷新成员与管理权限，再重新确认。")
+        await detail.loadGroupMembers(reset:true)
+        await detail.continueMemberAdministration(pending)
+        #expect(try await local.memberAdministrationPending(id:id).preparationState == .cancelled)
+        var iterator=(await restored.updates(roomID:room)).makeAsyncIterator()
+        let replacement=try #require(try await iterator.next()?.first)
+        #expect(replacement.intent.expectedMembershipRevision==8)
+        #expect(replacement.intent.operationID != pending.intent.operationID)
+        #expect(await remote.admissions==0)
+        try await local.close()
+    }
+    @Test func administrationUnknownContinuesOriginalProofWithoutFreshAdmission() async throws {
+        let url=FileManager.default.temporaryDirectory.appending(path:"administration-unknown-ui-"+UUID().uuidString).appending(path:"state.sqlite")
+        defer { try? FileManager.default.removeItem(at:url.deletingLastPathComponent()) }
+        let account=UserID(uuid:UUID()),room=RoomID(uuid:UUID()),target=UserID(uuid:UUID())
+        let local=try GRDBV2LocalSyncStore(databaseURL:url,installationBinding:.init(value:UUID()),userID:account)
+        let remote=AdministrationUIRemote(),service=V2MemberAdministrationOperationService(accountID:account,activationID:UUID(),store:local,client:AdministrationUIRemote())
+        let id=try await service.enqueue(roomID:room,targetUserID:target,action:.remove,reasonCode:.init("ADMIN_ACTION"),expectedMembershipRevision:0)
+        #expect(try await service.prepareNextIntent())
+        let work=try #require(try await local.memberAdministrationPending(id:id).work)
+        guard case .claimed(let claim)=try await local.claimOperationWork(id:work.id,ownerID:UUID(),action:.submit,now:work.nextActionAt) else { Issue.record("missing claim");return }
+        try await local.deferOperationWork(claim,until:Date(),code:"UNAVAILABLE",scheduling:.needsAttention)
+        let original=try await local.memberAdministrationCommand(workID:work.id)
+        let restored=V2MemberAdministrationOperationService(accountID:account,activationID:UUID(),store:local,client:remote)
+        let adapter=V2OperationGroupMemberAdministrator(service:restored)
+        let detail=makeConversationDetailStore(dataSource:V2ConversationDataSourceFake(summaries:[],messages:[]),sender:nil,userID:account.rawValue,roomID:room.rawValue,kind:.group,groupMemberMuter:adapter,moderatedGroupMemberRemover:adapter)
+        await detail.continueMemberAdministration(try await local.memberAdministrationPending(id:id))
+        #expect(try await local.operationWork(id:work.id)?.scheduling == .ready)
+        #expect(try await local.memberAdministrationCommand(workID:work.id)==original)
+        #expect(await remote.admissions==0)
+        try await local.close()
+    }
+}
+private actor AdministrationUIRemote:V2MemberAdministrationOperationClient {
+    var admissions=0
+    func admit(_ intent:V2MemberAdministrationIntent) async throws -> V2MemberAdministrationAdmissionResult {
+        admissions += 1
+        return .admitted(try .init(id:.init(uuid:UUID()),identity:intent.identity,intentFingerprint:intent.fingerprint,membershipRevision:intent.expectedMembershipRevision,targetJoinedRevision:0,issuedAtMilliseconds:UInt64(Date().timeIntervalSince1970*1000),expiresAtMilliseconds:intent.confirmedUntilMilliseconds))
+    }
+    func submit(_ command:V2MemberAdministrationCommand) async throws -> V2MemberAdministrationRecoveryResult { .unresolved }
+    func recover(_ command:V2MemberAdministrationCommand,action:V2OperationRecoveryRequest.Action) async throws -> V2MemberAdministrationRecoveryResult { .unresolved }
+}
+
+private actor V2PageModerationClient: V2MessageModerationOperationClient {
+    var calls = 0
+    func baseline(roomID: RoomID, messageID: MessageID) throws -> V2MessageModerationBaseline { calls += 1; throw URLError(.notConnectedToInternet) }
+    func admit(_ intent: V2MessageModerationIntent) throws -> V2MessageModerationAdmissionResult { calls += 1; throw URLError(.notConnectedToInternet) }
+    func submit(_ command: V2MessageModerationCommand) throws -> V2MessageModerationRecoveryResult { calls += 1; throw URLError(.notConnectedToInternet) }
+    func recover(_ intent: V2MessageModerationIntent, action: V2OperationRecoveryRequest.Action) throws -> V2MessageModerationRecoveryResult { calls += 1; throw URLError(.notConnectedToInternet) }
+}
+
+extension V2ConversationStoreTests {
+    @Test func managementRemovalLoadsSavedWorkWithoutOnlineAuthorityAndClosePreservesIt() async throws {
+        let f = try V2AppMessageWorkFixture(); defer { f.remove() }
+        let remote = V2PageModerationClient()
+        let service = V2MessageModerationOperationService(accountID: f.account, activationID: UUID(), store: f.store, client: remote)
+        let baseline = try V2MessageModerationBaseline(roomID: f.room, messageID: .init(uuid: UUID()), messageRevision: 1, membershipRevision: 1, isRedacted: false)
+        let id = try await service.enqueue(baseline: baseline, reason: .init("moderation_removal"))
+        let detail = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil, messageModerator: service, userID: f.account.rawValue, roomID: f.room.rawValue, kind: .group)
+        let observer = Task { await detail.observeMessageRemoval() }
+        let deadline = ContinuousClock.now + .seconds(3)
+        while detail.messageRemovalPending.isEmpty { try #require(ContinuousClock.now < deadline); await Task.yield() }
+        #expect(detail.messageRemovalPending.first?.work.id == id)
+        #expect(!detail.canManageMessages)
+        detail.endMessageRemovalPage()
+        let proposal = V2ConversationDetailStore.MessageRemovalProposal(id: UUID(), baseline: baseline, generation: UUID(), expires: .now + .seconds(120), confirmedUntil: Date().addingTimeInterval(120), policies: [], membershipRevision: 1)
+        await detail.confirmMessageRemoval(proposal)
+        await detail.confirmMessageRemoval(proposal)
+        #expect(detail.messageActionFeedback == nil)
+        observer.cancel(); await observer.value
+        #expect(try await f.store.messageModerationPending(id: id).intent.messageID == baseline.messageID)
+        #expect(await remote.calls == 0)
+        try await f.store.close()
     }
 }

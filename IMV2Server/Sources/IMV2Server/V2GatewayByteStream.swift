@@ -317,7 +317,7 @@ public actor V2GatewayByteStream {
         self.decoder = .init(limits: frameLimits)
         self.frameLimits = frameLimits
         self.session = session
-        self.handler = handler
+        self.handler = V2PresencePublicationGatewayHandler(delegate:handler,registry:registry,connectionID:connectionID)
         self.connectionID = connectionID
         self.registry = registry
         self.authorPresentationDispatcher = authorPresentationDispatcher
@@ -694,7 +694,7 @@ public actor V2GatewayByteStream {
     private func registerAuthenticatedDeviceIfNeeded() async throws {
         guard registeredIdentity == nil, let identity = await session.authenticatedIdentity() else { return }
         registeredIdentity = identity
-        let accepted = try await registry.register(self, connectionID: connectionID, identity: identity)
+        let accepted = try await registry.register(self, connectionID: connectionID, identity: identity,publicationSuppressed:await session.initialPresencePublicationSuppressed())
         guard accepted, registeredIdentity == identity, !transportClosed else {
             if registeredIdentity == identity { registeredIdentity = nil }
             foregroundTransport.deactivate()
@@ -836,13 +836,6 @@ public actor V2GatewayByteStream {
         case .userRoomDirectoryList:
             guard case .userRoomDirectoryPage(let page)? = response.body else { return }
             try await registry.installAccountRoomDirectory(connectionID: connectionID, page: page)
-        case .setLiveActivityPreferences:
-            guard case .liveActivityPreferencesSet(let updated)? = response.body
-            else { return }
-            guard await registry.applyLiveActivityPreferences(
-                connectionID: connectionID,
-                allowsOnlinePresence: updated.allowsOnlinePresence
-            ) else { throw V2GatewaySessionError.authenticatedConnectionLimit }
         case .groupEventSubscribe(let request):
             guard case .groupEventSubscribed(let subscribed)? = response.body,
                   let roomID = try? RoomID(request.roomID),

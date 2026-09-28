@@ -42,7 +42,7 @@ struct V2HTTPPushIntentClientTests {
 
     @Test("stale, conflict and version-required replies never cause an automatic claim or retry")
     func conditionalFailures() async throws {
-        for (status, body, error) in [(409, "{\"code\":\"stale_intent\"}", V2ClientPushEndpointError.staleIntent), (409, "{\"code\":\"intent_conflict\"}", .intentConflict), (409, "{\"code\":\"unknown\"}", .invalidResponse), (428, "", .intentVersionRequired), (401, "", .authorizationDenied), (403, "", .authorizationDenied), (503, "", .serverStatus(503))] {
+        for (status, body, error) in [(409, "{\"code\":\"stale_intent\"}", V2ClientPushEndpointError.staleIntent), (409, "{\"code\":\"intent_conflict\"}", .intentConflict), (409, "{\"code\":\"unknown\"}", .invalidResponse), (428, "", .intentVersionRequired), (401, "", .authorizationUnavailable), (403, "", .authorizationDenied)] {
             let transport = IntentHTTPTransport(replies: [(status, body)])
             let client = try V2HTTPPushEndpointClient(endpoint: endpoint, credentials: IntentCredentials(device: device), transport: transport)
             await #expect(throws: error) { try await client.publishIntent(deviceID: device, version: .init(epoch: 1, revision: 1), intent: .disabled) }
@@ -60,6 +60,16 @@ struct V2HTTPPushIntentClientTests {
         await #expect(throws: V2ClientPushEndpointError.invalidResponse) {
             try await client.claimIntentSession(deviceID: device, claim: .init(requestID: UUID(), expectedEpoch: 0))
         }
+    }
+
+    @Test("503 retains response certainty without replaying a push intent")
+    func serviceUnavailable() async throws {
+        let transport = IntentHTTPTransport(replies: [(503, "")])
+        let client = try V2HTTPPushEndpointClient(endpoint: endpoint, credentials: IntentCredentials(device: device), transport: transport)
+        await #expect(throws: V2HTTPFailure(kind: .httpStatus, service: "pushEndpoints", statusCode: 503, certainty: .responseReceived)) {
+            try await client.publishIntent(deviceID: device, version: .init(epoch: 1, revision: 1), intent: .disabled)
+        }
+        #expect(await transport.requests.count == 1)
     }
 
     @Test("429 retains the server's retry minimum")

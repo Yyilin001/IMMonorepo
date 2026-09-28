@@ -161,41 +161,19 @@ public enum V2ActorSendMessageResultWire: Codable, Equatable, Sendable {
     case denied(V2ActorDirectMessageDeniedWire)
 }
 
-public enum V2ActorMessageEditResultWire: Codable, Equatable, Sendable {
-    case edited(V2ActorMessageEditWire)
-    case idempotent(V2ActorMessageEditWire)
-    case idempotencyConflict
-    case revisionConflict(current: UInt64)
-    case alreadyWithdrawn
-    case rateLimited(retryAfterSeconds: Int)
-    case unavailable(V2ActorAdmissionUnavailableWire)
-}
 
-public enum V2ActorMessageWithdrawalResultWire: Codable, Equatable, Sendable {
-    case withdrawn(V2ActorMessageWithdrawalWire)
-    case idempotent(V2ActorMessageWithdrawalWire)
-    case idempotencyConflict
-    case revisionConflict(current: UInt64)
-    case alreadyWithdrawn
-    case rateLimited(retryAfterSeconds: Int)
-    case unavailable(V2ActorAdmissionUnavailableWire)
-}
 
-public enum V2ActorMessageReactionResultWire: Codable, Equatable, Sendable {
-    case changed(V2ActorMessageReactionChangeWire)
-    case idempotent(V2ActorMessageReactionChangeWire)
-    case idempotencyConflict
-    case alreadyInDesiredState
-    case rateLimited(retryAfterSeconds: Int)
-    case unavailable(V2ActorAdmissionUnavailableWire)
-}
+
+
+
 
 /// 结果判别项与命令类型集合对应，同时保留业务字段。
 public enum V2RoomMessagingResult: Codable, Equatable, Sendable {
-    case failure(V2ActorMessagingErrorWire)
+    // Internal granted batch outcome; no unbound command envelope exposes it.
     case send(V2ActorSendMessageResultWire)
-    case edit(V2ActorMessageEditResultWire)
-    case withdraw(V2ActorMessageWithdrawalResultWire)
-    case reaction(V2ActorMessageReactionResultWire)
-    case recovery(V2MessageOperationRecoveryResult)
+    case failure(V2ActorMessagingErrorWire)
+    case mutation(V2MessageMutationRecoveryResult)
+    case reactionOperation(V2MessageReactionRecoveryResult)
+    case reactionSnapshot(V2MessageReactionSnapshot)
+    case sendOperation(V2MessageSendOperationRecoveryResult)
 }

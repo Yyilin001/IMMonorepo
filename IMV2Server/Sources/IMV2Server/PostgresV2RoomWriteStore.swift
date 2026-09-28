@@ -32,8 +32,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     private let roomWriteBatchRouteCache: V2RoomWriteBatchRouteCache
     private let hybridGroupShardCreditSnapshotCache:
         V2HybridGroupShardCreditSnapshotCache
-    private let shardAdmissionCommandCreditPool: V2ShardAdmissionCommandCreditPool?
-    let roomAdmissionCommandCreditPool: V2RoomAdmissionCommandCreditPool?
+    private var shardAdmissionCommandCreditPool: V2ShardAdmissionCommandCreditPool?
+    private(set) var roomAdmissionCommandCreditPool: V2RoomAdmissionCommandCreditPool?
     private let appendStageMetrics: V2DirectRoomLogAppendStageMetrics?
 
     /// 组合数据库与写入策略。
@@ -84,6 +84,10 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
 
     /// 绑定已经获准的确切激活权限。每条 SQL 路径仍在自身事务内校验该权限；
     /// 此值拷贝本身不授予权限，并保留共享缓存及额度池的身份。
+    var strangerQuotaWindowSeconds:TimeInterval { strangerMessagePolicy.window }
+    private var existingOperationTransaction = false
+    func usingOperationTransaction() -> Self { var copy=self;copy.existingOperationTransaction=true;copy.shardAdmissionCommandCreditPool=nil;copy.roomAdmissionCommandCreditPool=nil;return copy }
+
     public func usingActivationScope(_ scope: V2RoomActivationWriteScope) -> Self {
         var copy = self
         copy.activationScope = scope
@@ -154,7 +158,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     ) async throws -> Result {
         try await v2WithPostgresTransactionRetry(database: database,
             classifyCommitFailure: activationScope != nil,
-            useRoomDeadline: activationScope != nil) { transaction in
+            useRoomDeadline: activationScope != nil,existingTransaction:existingOperationTransaction) { transaction in
             // 房间期限事务在此代码块开始前已设置相同的 LOCAL 限制。
             // 下方激活栅栏仍会在加锁前重新应用；中间再次设置不会增加保护。
             let result = try await operation(transaction)
@@ -177,7 +181,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     ) async throws -> Result {
         try await v2WithPostgresTransactionRetryWithRoomContext(database: database,
             classifyCommitFailure: activationScope != nil,
-            useRoomDeadline: activationScope != nil) { transaction, context in
+            useRoomDeadline: activationScope != nil,existingTransaction:existingOperationTransaction) { transaction, context in
             let result = try await operation(transaction, context)
             if let grants = authorizationGrants {
                 guard let recordedAt = authorizationRecordedAt else {
@@ -257,6 +261,9 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         let scoped = try base.usingAuthorizationGrants(grants, now: now)
         // 进入任何归属方事务前，预留操作已经提交。
         let result = try await operation(scoped)
+        // The enclosing execution receipt transaction has not committed yet.
+        // Its durable control intent is resolved by the existing owner-proof worker after commit.
+        if existingOperationTransaction { return result }
         // 在可能失败的 ACK 前，先完成缓存与已消耗准入额度的收尾。
         // 此处传输失败不会解除义务；重试和恢复读取不可变的归属方证明，
         // 也不会返还已消耗的额度。
@@ -482,7 +489,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             identifiers: identifiers,
             now: now
         )
-        if let fastCommit = try await acceptFastPlainDirectRoomLogIfEligible(
+        if !existingOperationTransaction, let fastCommit = try await acceptFastPlainDirectRoomLogIfEligible(
             request: request,
             roomID: roomID,
             senderID: senderID,
@@ -2201,6 +2208,11 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         cacheKey: V2DirectSendPolicyCache.Key,
         commit: RoomWriteCommit
     ) async throws -> V2SendMessageOutcome {
+        // The bound operation still owns the surrounding transaction. Its receipt
+        // insert can fail, so no process cache may observe this provisional write.
+        if existingOperationTransaction {
+            return try roomWritePersistedAcceptanceOutcome(commit.outcome)
+        }
         let cacheStartedAt = ContinuousClock.now
         if let entry = commit.directPolicyCacheUpdate {
             await directSendPolicyCache.insert(entry, for: cacheKey)

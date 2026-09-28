@@ -25,7 +25,7 @@ public struct V2MessageCommandLimits: Equatable, Sendable {
 ///
 /// 正文可为空，但必须有媒体；附件和 mentions 有数量与去重约束，富文本实体单独验证。
 /// 类型不查询当前成员或媒体授权；事务存储负责最终授权和 owner 栅栏。
-public struct V2SendMessageCommand: Equatable, Sendable {
+public struct V2SendMessageCommand: Equatable, Codable, Sendable {
     public let roomID: RoomID
     public let senderUserID: UserID
     public let clientMessageID: ClientMessageID
@@ -93,6 +93,12 @@ public struct V2SendMessageCommand: Equatable, Sendable {
             forwardedFrom: forwardedFrom
         )
     }
+    private enum CodingKeys:String,CodingKey { case roomID,senderUserID,clientMessageID,text,media,mentions,entities,replyTo,forwardedFrom }
+    public init(from decoder:any Decoder) throws {
+        let v=try decoder.container(keyedBy:CodingKeys.self)
+        try self.init(roomID:v.decode(RoomID.self,forKey:.roomID),senderUserID:v.decode(UserID.self,forKey:.senderUserID),clientMessageID:v.decode(ClientMessageID.self,forKey:.clientMessageID),text:v.decode(String.self,forKey:.text),media:v.decode([V2MediaReference].self,forKey:.media),mentions:v.decode([V2MentionTarget].self,forKey:.mentions),entities:v.decode([V2MessageEntity].self,forKey:.entities),replyTo:v.decodeIfPresent(V2MessageReplyReference.self,forKey:.replyTo),forwardedFrom:v.decodeIfPresent(V2ForwardMessageSource.self,forKey:.forwardedFrom),limits:.init(maxUTF8Bytes:1_048_576))
+    }
+
 }
 
 /// 历史消息的转发来源展示元数据。
@@ -110,7 +116,7 @@ public struct V2ForwardedMessageAttribution: Equatable, Sendable {
 }
 
 /// 新转发所使用的服务端来源快照，包含接受时选定的精确源版本。
-public struct V2ForwardMessageSource: Equatable, Sendable {
+public struct V2ForwardMessageSource: Equatable, Codable, Sendable {
     public let messageID: MessageID
     public let senderUserID: UserID
     /// 被复制源消息的有效内容版本，参与新转发指纹，避免内容变化后仍重放为同一意图。
@@ -122,6 +128,16 @@ public struct V2ForwardMessageSource: Equatable, Sendable {
         self.senderUserID = senderUserID
         self.sourceRevision = sourceRevision
     }
+    private enum CodingKeys:String,CodingKey { case messageID,senderUserID,sourceRevision }
+    public init(from decoder:any Decoder) throws {
+        let v=try decoder.container(keyedBy:CodingKeys.self)
+        self.init(messageID:try v.decode(MessageID.self,forKey:.messageID),senderUserID:try v.decode(UserID.self,forKey:.senderUserID),sourceRevision:try .init(v.decode(UInt64.self,forKey:.sourceRevision)))
+    }
+    public func encode(to encoder:any Encoder) throws {
+        var v=encoder.container(keyedBy:CodingKeys.self)
+        try v.encode(messageID,forKey:.messageID);try v.encode(senderUserID,forKey:.senderUserID);try v.encode(sourceRevision.rawValue,forKey:.sourceRevision)
+    }
+
 }
 
 /// 发送命令的内容或集合基础约束不满足时的错误。

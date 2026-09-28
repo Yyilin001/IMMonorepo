@@ -21,6 +21,21 @@ struct PostgresV2GroupJoinQuotaStore: Sendable {
 
     /// 只有用户发起的新提交才会重试已明确拒绝的尝试。
     /// 恢复流程重放已存代次，绝不调用 reserve 为其续期。
+    func releaseVerifiedDecision(_ receipt: V2GroupInvitationOperationReceipt, intent: V2GroupInvitationOperationIntent, now: Date) async throws {
+        guard receipt.validates(intent:intent) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
+        let value: V2GroupInvitationOperationValue
+        switch receipt.outcome { case .applied(let v),.alreadySatisfied(let v): value=v; default:return }
+        let target:GroupJoinRequestID
+        let outcome:String
+        switch value {
+        case .requestCancelled(let id):target=id;outcome="cancelled"
+        case .requestDecided(let id,let decision,_):target=id;outcome=decision == .approve ? "approved":"rejected"
+        default:return
+        }
+        let sql = try quotaSQL(database)
+        try await sql.raw("UPDATE \(unsafeRaw: schema).group_join_quota_intents SET phase = 'terminal',outcome = \(bind: outcome),updated_at = \(bind: now),lease_token = NULL,lease_until = NULL WHERE room_id = \(bind: intent.roomID.uuidValue!) AND target_request_id = \(bind: target.uuidValue!) AND phase IN ('held','tracking')").run()
+    }
+
     func reserve(_ request: V2GroupJoinSubmissionPersistenceRequest, roomID: RoomID, inviteID: GroupInviteID,
                  now: Date) async throws -> V2GroupJoinQuotaReservation {
         guard let applicant = request.applicantUserID.uuidValue, let operation = request.operationID.uuidValue,
@@ -55,7 +70,10 @@ struct PostgresV2GroupJoinQuotaStore: Sendable {
                       canonical != operation || prior.note == request.note else { throw V2GroupInvitationServiceError.conflict }
                 // 服务重试会生成新的请求 ID 和时间，
                 // 不能重写身份，也不能重启结果不明的所有者操作。
-                if prior.phase != .denied { return .reserved(prior) }
+                // The immutable operation proof seals the original attempt. A denied
+                // canonical identity can never mint a new quota generation or deadline.
+                if prior.phase == .denied { return .limited }
+                return .reserved(prior)
             }
             if let active = try await sql.raw("""
                 SELECT * FROM \(unsafeRaw: schema).group_join_quota_intents
@@ -90,16 +108,6 @@ struct PostgresV2GroupJoinQuotaStore: Sendable {
                 WHERE applicant_user_id = \(bind: applicant) AND phase IN ('held', 'tracking')
                 """).first(decoding: QuotaCount.self) else { throw V2GroupInvitationServiceError.corruptPersistenceState }
             guard count.value < request.maximumPendingRequestsPerApplicant else { return .limited }
-            if let prior {
-                guard prior.generation < Int64.max else { throw V2GroupInvitationServiceError.conflict }
-                try await sql.raw("""
-                    UPDATE \(unsafeRaw: schema).group_join_quota_intents
-                    SET phase = 'held', generation = generation + 1, outcome = NULL, target_request_id = NULL,
-                        attempt_created_at = \(bind: now), updated_at = \(bind: now),
-                        next_check_at = \(bind: now), lease_token = NULL, lease_until = NULL, attempt_count = 0
-                    WHERE applicant_user_id = \(bind: applicant) AND operation_id = \(bind: canonical) AND phase = 'denied'
-                    """).run()
-            } else {
                 try await sql.raw("""
                     INSERT INTO \(unsafeRaw: schema).group_join_quota_intents
                         (applicant_user_id, operation_id, request_id, room_id, invite_id, token_digest, note,
@@ -108,7 +116,6 @@ struct PostgresV2GroupJoinQuotaStore: Sendable {
                             \(bind: request.tokenDigest), \(bind: request.note), \(bind: request.maximumPendingRequestsPerInvite),
                             1, 'held', \(bind: request.createdAt), \(bind: now), \(bind: now), \(bind: now)) ON CONFLICT DO NOTHING
                     """).run()
-            }
             guard let result = try await lookup(applicant: applicant, operation: canonical, sql: sql) else {
                 throw V2GroupInvitationServiceError.conflict
             }
@@ -133,6 +140,18 @@ struct PostgresV2GroupJoinQuotaStore: Sendable {
                   current.roomID == intent.roomID, current.tokenDigest == intent.tokenDigest, current.note == intent.note
             else { throw V2GroupInvitationServiceError.conflict }
             guard current.generation == intent.generation else { return false }
+            if outcome == .rateLimited {
+                // A deferred response retains its original uncertain reservation and
+                // authorization clock. It cannot release a slot or resurrect a sealed ID.
+                guard current.phase == .held else { return false }
+                try await sql.raw("""
+                    UPDATE \(unsafeRaw: schema).group_join_quota_intents
+                    SET next_check_at = \(bind: nextCheck), lease_token = NULL, lease_until = NULL
+                    WHERE applicant_user_id = \(bind: intent.applicantUserID) AND operation_id = \(bind: intent.operationID)
+                      AND generation = \(bind: intent.generation) AND phase = 'held'
+                    """).run()
+                return true
+            }
             if current.phase == .terminal || current.phase == .denied {
                 return current.outcome == outcome && current.targetRequestID == targetRequestID
             }

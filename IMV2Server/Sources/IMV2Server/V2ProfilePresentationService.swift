@@ -24,7 +24,9 @@ public protocol V2ProfilePresentationManaging: Sendable {
     ///   - remarkName: 新的备注名；传 `nil` 表示清除。
     /// - Returns: 写入后的备注记录。
     /// - Throws: 修订冲突、载荷不匹配或存储失败时抛出。
-    func updateContactAlias(ownerUserID: UserID, targetUserID: UserID, operationID: ContactAliasOperationID, expectedRevision: V2ProfileRevision?, remarkName: String?) async throws -> V2ContactAlias
+    func updateContactAlias(_ command:V2ContactAliasUpdateCommand) async throws -> V2ContactAliasUpdateReceipt
+    func recoverContactAlias(_ request:V2ContactAliasRecoveryRequest) async throws -> V2ContactAliasRecoveryResult
+    func contactAliasSnapshot(ownerUserID:UserID,targetUserID:UserID) async throws -> V2ContactAliasSnapshot
     /// 按成员游标分页读取群昵称展示。
     ///
     /// - Parameters:
@@ -45,7 +47,9 @@ public protocol V2ProfilePresentationManaging: Sendable {
     ///   - nickname: 新的群昵称；传 `nil` 表示清除。
     /// - Returns: 更新后的群成员展示。
     /// - Throws: 修订冲突、载荷不匹配或存储失败时抛出。
-    func updateOwnGroupNickname(actorUserID: UserID, roomID: RoomID, operationID: GroupNicknameOperationID, expectedRevision: V2ProfileRevision?, nickname: String?) async throws -> V2GroupMemberPresentation
+    func updateOwnGroupNickname(_ command:V2GroupNicknameUpdateCommand) async throws -> V2GroupNicknameUpdateReceipt
+    func recoverGroupNickname(_ request:V2GroupNicknameRecoveryRequest) async throws -> V2GroupNicknameRecoveryResult
+    func ownGroupNicknameSnapshot(actorUserID:UserID,roomID:RoomID) async throws -> V2GroupNicknameSnapshot
 }
 
 /// 联系人备注的一页结果。

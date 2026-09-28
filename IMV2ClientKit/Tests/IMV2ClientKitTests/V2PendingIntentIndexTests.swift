@@ -17,19 +17,12 @@ struct V2PendingIntentIndexTests {
         let actual = try database.read { db in
             try String.fetchAll(
                 db,
-                sql: "SELECT name FROM sqlite_master WHERE type = 'index' AND (name LIKE 'v2_pending%intent_idx' OR name LIKE 'v2_pending%intent_with_capacity_class_idx')"
+                sql: "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('v2_operation_work_intent','v2_operation_work_order')"
             )
         }
         #expect(Set(actual) == [
-            "v2_pending_membership_intent_idx",
-            "v2_pending_message_withdrawals_intent_idx",
-            "v2_pending_message_redactions_intent_idx",
-            "v2_pending_member_mutes_intent_idx",
-            "v2_pending_moderated_member_removals_intent_idx",
-            "v2_pending_message_edits_intent_idx",
-            "v2_pending_message_reactions_intent_idx",
-            "v2_pending_social_commands_intent_idx",
-            "v2_pending_group_room_creations_intent_with_capacity_class_idx"
+            "v2_operation_work_intent",
+            "v2_operation_work_order"
         ])
     }
 
@@ -45,25 +38,11 @@ struct V2PendingIntentIndexTests {
         let actual = try database.read { db in
             try String.fetchAll(
                 db,
-                sql: "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'v2_%terminal_cleanup_idx'"
+                sql: "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'v2_operation_work_retention'"
             )
         }
         #expect(Set(actual) == [
-            "v2_pending_message_commands_terminal_cleanup_idx",
-            "v2_pending_membership_commands_terminal_cleanup_idx",
-            "v2_pending_message_withdrawals_terminal_cleanup_idx",
-            "v2_pending_message_redactions_terminal_cleanup_idx",
-            "v2_pending_member_mutes_terminal_cleanup_idx",
-            "v2_pending_moderated_member_removals_terminal_cleanup_idx",
-            "v2_pending_message_edits_terminal_cleanup_idx",
-            "v2_pending_read_receipts_terminal_cleanup_idx",
-            "v2_pending_message_reactions_terminal_cleanup_idx",
-            "v2_pending_conversation_states_terminal_cleanup_idx",
-            "v2_pending_message_favorites_terminal_cleanup_idx",
-            "v2_pending_group_capabilities_terminal_cleanup_idx",
-            "v2_pending_social_commands_terminal_cleanup_idx",
-            "v2_pending_group_room_creations_terminal_cleanup_idx",
-            "v2_forward_message_plans_terminal_cleanup_idx",
+            "v2_operation_work_retention",
         ])
     }
 }

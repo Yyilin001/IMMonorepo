@@ -90,9 +90,11 @@ func v2WithPostgresTransactionRetry<Result: Sendable>(
     maximumRetryCount: Int = 2,
     classifyCommitFailure: Bool = false,
     useRoomDeadline: Bool = false,
+    existingTransaction: Bool = false,
     _ operation: @escaping @Sendable (any Database) async throws -> Result
 ) async throws -> Result {
-    try await v2WithPostgresTransactionRetryCore(
+    if existingTransaction { return try await operation(database) }
+    return try await v2WithPostgresTransactionRetryCore(
         database: database, maximumRetryCount: maximumRetryCount,
         classifyCommitFailure: classifyCommitFailure, useRoomDeadline: useRoomDeadline,
         needsFenceContext: false
@@ -108,9 +110,11 @@ func v2WithPostgresTransactionRetryWithRoomContext<Result: Sendable>(
     maximumRetryCount: Int = 2,
     classifyCommitFailure: Bool = false,
     useRoomDeadline: Bool = false,
+    existingTransaction: Bool = false,
     _ operation: @escaping @Sendable (any Database, V2ConfiguredRoomFenceContext?) async throws -> Result
 ) async throws -> Result {
-    try await v2WithPostgresTransactionRetryCore(
+    if existingTransaction { return try await operation(database,nil) }
+    return try await v2WithPostgresTransactionRetryCore(
         database: database, maximumRetryCount: maximumRetryCount,
         classifyCommitFailure: classifyCommitFailure, useRoomDeadline: useRoomDeadline,
         needsFenceContext: true, operation
