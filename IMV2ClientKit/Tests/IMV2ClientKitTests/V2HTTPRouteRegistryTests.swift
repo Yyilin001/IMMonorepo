@@ -33,7 +33,7 @@ struct V2HTTPRouteRegistryTests {
         var discovered = Set<String>()
         for case let file as URL in enumerator where file.pathExtension == "swift" {
             let source = try String(contentsOf: file, encoding: .utf8)
-            if ["URLRequest(", "URLSession(", "transport.data(for:", "executor.execute(", ".dataTask(", ".uploadTask(", ".downloadTask("].contains(where: source.contains) {
+            if ["URLRequest(", "URLSession(", "transport.data(for:", "transport.requestEnvelope(", "executor.execute(", ".dataTask(", ".uploadTask(", ".downloadTask("].contains(where: source.contains) {
                 discovered.insert(file.lastPathComponent)
             }
             #expect(!source.contains("session.data(for:") && !source.contains("URLSession.shared"), "Unbounded HTTP bypass: \(file.lastPathComponent)")

@@ -6,6 +6,23 @@ import Testing
 
 @Suite("Message send public work", .serialized)
 struct V2MessageSendWorkTests {
+    @Test(arguments: [V2MessageSendTransportError.unavailableBeforeSubmission, .outcomeUnknown])
+    func transportCertaintyPersistsNextAction(_ failure: V2MessageSendTransportError) async throws {
+        let fixture = try SendWorkFixture(); defer { fixture.remove() }
+        let intent = try fixture.intent("same frozen payload")
+        try await fixture.store.freezeSendIntent(intent)
+        try await fixture.store.handOffSendIntent(intent.id)
+        let work = try await fixture.head()
+        let claim = try await fixture.claim(work)
+        let remote = FailingSendWorkRemote(failure: failure)
+        try await V2MessageSendOperationService(accountID: fixture.account, store: fixture.store, client: remote).execute(claim)
+        let current = try #require(try await fixture.store.operationWork(id: work.id))
+        #expect(current.nextAction == (failure == .unavailableBeforeSubmission ? .submit : .reconcile))
+        #expect(current.identity == work.identity)
+        #expect(current.fingerprint == work.fingerprint)
+        #expect(await remote.submissions == 1)
+        try await fixture.store.close()
+    }
     @Test(arguments: ["negative", "expired", "unknown"])
     func provenUnsentDispositionPreservesUnknownIdentity(_ scenario: String) async throws {
         let f = try SendWorkFixture(); defer { f.remove() }
@@ -198,6 +215,17 @@ struct V2MessageSendWorkTests {
         #expect(try await f.store.preparingSendIntents(limit:256).count == 201)
         try await f.store.close()
     }
+}
+
+private actor FailingSendWorkRemote: V2MessageSendOperationClient {
+    let failure: V2MessageSendTransportError
+    var submissions = 0
+    init(failure: V2MessageSendTransportError) { self.failure = failure }
+    func submit(_: V2MessageSendOperationCommand) throws -> V2MessageSendOperationRecoveryResult {
+        submissions += 1
+        throw failure
+    }
+    func recover(_: V2MessageSendOperationRecoveryRequest) throws -> V2MessageSendOperationRecoveryResult { throw failure }
 }
 struct SendWorkFixture {
     let url:URL,binding=V2LocalInstallationBinding(value:UUID()),account=UserID(uuid:UUID()),room=RoomID(uuid:UUID())

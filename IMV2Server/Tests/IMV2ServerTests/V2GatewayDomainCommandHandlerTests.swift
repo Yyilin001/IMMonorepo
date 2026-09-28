@@ -1,12 +1,96 @@
 import AsyncKit
 import Foundation
+import HTTPTypes
+import IMV2ActorContracts
 import IMV2Core
+import IMV2ServerHTTP
 @testable import IMV2Server
 import Synchronization
 import Testing
+import Vapor
+import VaporTesting
 
 @Suite("V2 gateway domain command handler")
 struct V2GatewayDomainCommandHandlerTests {
+    @Test("HTTP submission and Gateway recovery use one room operation receipt")
+    func dualTransportSharedRoomOperation() async throws {
+        let fixture = try GatewayDomainFixture()
+        let store = GatewaySharedSendOperationStore()
+        let client = V2RoomRefMessagingClient(callTimeout: try .init(1_000)) { request, actor, _ in
+            try await store.invoke(request, actor: actor)
+        }
+        let handler = makeGatewayDomainCommandHandler(
+            messageSendOperations: client, sync: fixture.syncService())
+        let operation = try V2MessageSendOperationCommand(
+            command: .init(roomID: fixture.roomID, senderUserID: fixture.userID,
+                           clientMessageID: fixture.clientMessageID, text: "one",
+                           limits: .init(maxUTF8Bytes: 64)),
+            firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
+        let app = try await Application(.testing)
+        V2VaporMessageSendOperationRoutes(
+            authenticator: GatewayDualTransportRouteAuth(actor: fixture.userID), messages: client)
+            .register(on: app)
+        do {
+            try await app.testing { http in
+                let sent = try await http.send(.post,
+                    to: URI(string: "v2/rooms/\(fixture.roomID.rawValue)/message-operations/send"),
+                    beforeSend: { request in
+                        request.headers.bearerAuthorization = .init(token: "token")
+                        request.headers[HTTPField.Name("X-IM-Device-ID")!] = fixture.deviceID.rawValue
+                        try request.content.encode(operation, using: JSONEncoder())
+                    })
+                #expect(sent.status == .ok)
+                let receipt = try await sent.content.decode(V2MessageSendOperationRecoveryResult.self)
+                var recover = IMV2Envelope()
+                recover.messageSendOperationRecover = V2MessageSendOperationWireCodec.encode(recovery:
+                    try .init(identity: operation.identity, fingerprint: operation.fingerprint,
+                              domainFingerprint: operation.command.fingerprint, action: .query))
+                let recovered = try await handler.handle(envelope: recover, identity: fixture.identity)
+                #expect(try V2MessageSendOperationWireCodec.decode(result: recovered.messageSendOperationResult) == receipt)
+                var repeatSend = IMV2Envelope()
+                repeatSend.messageSendOperation = try V2MessageSendOperationWireCodec.encode(command: operation)
+                let repeated = try await handler.handle(envelope: repeatSend, identity: fixture.identity)
+                #expect(try V2MessageSendOperationWireCodec.decode(result: repeated.messageSendOperationResult) == receipt)
+                #expect(await store.executions == 1)
+            }
+            try await app.shutdown()
+        } catch {
+            try? await app.shutdown()
+            throw error
+        }
+    }
+    @Test("Gateway send and recover share the authenticated room operation identity")
+    func messageSendOperationIdentity() async throws {
+        let fixture = try GatewayDomainFixture()
+        let messages = GatewayMessageSendOperationProbe()
+        let handler = makeGatewayDomainCommandHandler(
+            messageSendOperations: messages, sync: fixture.syncService())
+        let operation = try V2MessageSendOperationCommand(
+            command: .init(roomID: fixture.roomID, senderUserID: fixture.userID,
+                           clientMessageID: fixture.clientMessageID, text: "hello",
+                           limits: .init(maxUTF8Bytes: 64)),
+            firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
+        var submission = IMV2Envelope()
+        submission.messageSendOperation = try V2MessageSendOperationWireCodec.encode(command: operation)
+        let submitted = try await handler.handle(envelope: submission, identity: fixture.identity)
+        #expect(try V2MessageSendOperationWireCodec.decode(result: submitted.messageSendOperationResult) == .unresolved)
+        #expect(await messages.submitted == operation)
+
+        let recovery = try V2MessageSendOperationRecoveryRequest(
+            identity: operation.identity, fingerprint: operation.fingerprint,
+            domainFingerprint: operation.command.fingerprint, action: .query)
+        var query = IMV2Envelope()
+        query.messageSendOperationRecover = V2MessageSendOperationWireCodec.encode(recovery: recovery)
+        let recovered = try await handler.handle(envelope: query, identity: fixture.identity)
+        #expect(try V2MessageSendOperationWireCodec.decode(result: recovered.messageSendOperationResult) == .unresolved)
+        #expect(await messages.recovered == recovery)
+
+        let other = V2AuthenticatedConnection(userID: UserID(uuid: UUID()),
+                                               deviceID: fixture.deviceID, capabilityProfile: "base")
+        let denied = try await handler.handle(envelope: submission, identity: other)
+        #expect(denied.error.code == "FORBIDDEN")
+        #expect(await messages.submissionCount == 1)
+    }
     @Test("retired domain wire fields cannot invoke a Gateway mutation", arguments: [20, 22, 24, 26, 28, 51, 53, 55, 57, 58, 67, 69, 71, 72, 97, 99, 101, 103, 105, 106])
     func retiredMutationWireIsNotExecutable(field: Int) async throws {
         let fixture = try GatewayDomainFixture()
@@ -757,6 +841,56 @@ struct V2GatewayDomainCommandHandlerTests {
 
 
 
+}
+
+private actor GatewayMessageSendOperationProbe: V2GatewayMessageSendOperationHandling {
+    let managesForegroundWriteAdmission = true
+    private(set) var submitted: V2MessageSendOperationCommand?
+    private(set) var recovered: V2MessageSendOperationRecoveryRequest?
+    private(set) var submissionCount = 0
+
+    func sendOperation(_ command: V2MessageSendOperationCommand) async throws -> V2MessageSendOperationRecoveryResult {
+        submitted = command
+        submissionCount += 1
+        return .unresolved
+    }
+
+    func recoverSendOperation(_ request: V2MessageSendOperationRecoveryRequest) async throws -> V2MessageSendOperationRecoveryResult {
+        recovered = request
+        return .unresolved
+    }
+}
+
+private actor GatewaySharedSendOperationStore {
+    private var receipt: V2MessageSendOperationReceipt?
+    private(set) var executions = 0
+
+    func invoke(_ request: V2RoomRequest, actor: UserID) throws -> V2RoomResponse {
+        guard case .messaging(let command) = request else { throw V2RoomCallFailure.outcomeUnknown }
+        switch command {
+        case .sendOperation(let operation):
+            guard try operation.identity.accountID == actor else { throw V2RoomCallFailure.outcomeUnknown }
+            if receipt == nil {
+                executions += 1
+                receipt = try .init(identity: operation.identity, fingerprint: operation.fingerprint,
+                    outcome: .accepted(.init(messageID: .init(uuid: UUID()), roomSequence: 1)),
+                    resolvedAtMilliseconds: 1_750_000_000_000)
+            }
+            return .messaging(.sendOperation(.receipt(receipt!)))
+        case .recoverSendOperation(let recovery):
+            guard recovery.identity.accountID == actor else { throw V2RoomCallFailure.outcomeUnknown }
+            return .messaging(.sendOperation(receipt.map { .receipt($0) } ?? .unresolved))
+        default:
+            throw V2RoomCallFailure.outcomeUnknown
+        }
+    }
+}
+
+private struct GatewayDualTransportRouteAuth: V2GatewayAuthenticator {
+    let actor: UserID
+    func authenticateSession(accessToken _: String, deviceID _: DeviceID) async throws -> V2GatewayAuthentication {
+        .init(userID: actor, expiresAt: nil)
+    }
 }
 
 extension V2GatewayDomainCommandHandlerTests {

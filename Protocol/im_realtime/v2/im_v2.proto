@@ -21,6 +21,9 @@ message Envelope {
   reserved 20, 24, 26, 28, 105, 106;
   reserved "send_message", "withdraw_message", "change_message_reaction", "edit_message", "forward_messages", "messages_forwarded";
   oneof body {
+    MessageSendOperation message_send_operation = 127;
+    MessageSendOperationRecover message_send_operation_recover = 128;
+    MessageSendOperationResult message_send_operation_result = 129;
     PresencePublicationControl presence_publication_control = 125;
     PresencePublicationControlled presence_publication_controlled = 126;
     ClientHello client_hello = 10;
@@ -201,6 +204,7 @@ message ClientHello {
   string device_id = 3;
   repeated FrameCompression supported_frame_compressions = 4;
   bool supports_author_presentation_delta = 5;
+  bool supports_message_send_operations = 6;
 }
 
 message ServerHello {
@@ -210,6 +214,8 @@ message ServerHello {
   FrameCompression selected_frame_compression = 4;
   // Empty unless explicitly negotiated; repeated exactly by Authenticated.
   string author_presentation_stream_id = 5;
+  bool supports_message_send_operations = 6;
+  uint32 maximum_message_send_payload_bytes = 7;
 }
 
 message Authenticate {
@@ -225,6 +231,94 @@ message Authenticated {
   FrameCompression selected_frame_compression = 4;
   // Empty unless explicitly negotiated; repeated exactly by Authenticated.
   string author_presentation_stream_id = 5;
+  bool supports_message_send_operations = 6;
+  uint32 maximum_message_send_payload_bytes = 7;
+}
+
+// v45 full send operation. Identity and both fingerprints are derived from
+// these exact typed fields, never from protobuf serialization bytes.
+message MessageSendOperation {
+  string room_id = 1;
+  string sender_user_id = 2;
+  string client_message_id = 3;
+  string text = 4;
+  repeated string media_ids = 5;
+  repeated MessageSendMention mentions = 6;
+  repeated MessageSendEntity entities = 7;
+  optional string reply_to_message_id = 8;
+  uint64 first_submission_deadline_ms = 9;
+  uint32 domain_fingerprint_version = 10;
+  bytes domain_fingerprint = 11;
+  uint32 fingerprint_version = 12;
+  bytes fingerprint = 13;
+}
+message MessageSendMention {
+  oneof target {
+    string user_id = 1;
+    bool everyone = 2; // must be true
+  }
+}
+message MessageSendEntity {
+  uint32 offset_utf16 = 1;
+  uint32 length_utf16 = 2;
+  string kind = 3;
+  optional string link_url = 4;
+}
+message MessageSendOperationIdentity {
+  string account_id = 1;
+  string room_id = 2;
+  string operation_id = 3;
+}
+message MessageSendOperationFingerprint {
+  uint32 version = 1;
+  bytes digest = 2;
+}
+message MessageSendOperationRecover {
+  MessageSendOperationIdentity identity = 1;
+  MessageSendOperationFingerprint fingerprint = 2;
+  MessageSendOperationFingerprint domain_fingerprint = 3;
+  enum Action { ACTION_UNSPECIFIED = 0; QUERY = 1; CLOSE_IF_ABSENT = 2; }
+  Action action = 4;
+}
+message MessageSendOperationAcceptance {
+  string message_id = 1;
+  uint64 room_sequence = 2;
+}
+message MessageSendOperationRejection {
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    EXPIRED_UNSUBMITTED = 1;
+    PERMISSION_DENIED = 2;
+    ROOM_NOT_FOUND = 3;
+    INVALID_CONTENT = 4;
+    DIRECT_POLICY_DENIED = 5;
+  }
+  Reason reason = 1;
+}
+message MessageSendOperationReceipt {
+  MessageSendOperationIdentity identity = 1;
+  MessageSendOperationFingerprint fingerprint = 2;
+  uint64 resolved_at_ms = 3;
+  oneof outcome {
+    MessageSendOperationAcceptance accepted = 4;
+    MessageSendOperationRejection rejected = 5;
+    bool closed = 6; // must be true
+  }
+}
+message MessageSendOperationRetryHint {
+  MessageSendOperationIdentity identity = 1;
+  MessageSendOperationFingerprint fingerprint = 2;
+  enum Reason { REASON_UNSPECIFIED = 0; RATE_LIMITED = 1; ADMISSION_UNAVAILABLE = 2; }
+  Reason reason = 3;
+  optional uint64 retry_after_ms = 4;
+}
+message MessageSendOperationResult {
+  oneof result {
+    MessageSendOperationRetryHint deferred = 1;
+    MessageSendOperationReceipt receipt = 2;
+    bool unresolved = 3; // must be true
+    bool fingerprint_conflict = 4; // must be true
+  }
 }
 
 // Heartbeats carry no delivery or cursor semantics. They only keep a live

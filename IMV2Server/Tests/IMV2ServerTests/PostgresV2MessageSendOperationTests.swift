@@ -32,6 +32,18 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try first.fingerprint.version==1 && first.command.fingerprint.version==3)
             guard case .receipt(let original)=try await store.send(first,token:lease.token,capacityProfile:profile,identifiers:.init(messageID:.init(uuid:UUID()),eventID:.init(uuid:UUID()))) else { throw CancellationError() }
             guard case .accepted(let accepted)=original.outcome else { throw CancellationError() }
+            // The protobuf Gateway command and JSON HTTP command must reach the
+            // same durable operation key and return the original receipt.
+            let gatewayCommand = try V2MessageSendOperationWireCodec.decode(
+                command: V2MessageSendOperationWireCodec.encode(command: first))
+            let httpCommand = try JSONDecoder().decode(V2MessageSendOperationCommand.self,
+                from: JSONEncoder().encode(first))
+            #expect(gatewayCommand == httpCommand)
+            #expect(try await store.send(gatewayCommand,token:lease.token,capacityProfile:profile,
+                identifiers:.init(messageID:.init(uuid:UUID()),eventID:.init(uuid:UUID()))) == .receipt(original))
+            let gatewayRecovery = try V2MessageSendOperationWireCodec.decode(recovery:
+                V2MessageSendOperationWireCodec.encode(recovery: recovery(first,.query)))
+            #expect(try await store.recover(gatewayRecovery,token:lease.token) == .receipt(original))
             #expect(try await store.send(first,token:lease.token,capacityProfile:profile,identifiers:.init(messageID:.init(uuid:UUID()),eventID:.init(uuid:UUID()))) == .receipt(original))
             #expect(try await store.recover(recovery(first,.query),token:lease.token) == .receipt(original))
             let changed=try command("Changed",operation:first.command.clientMessageID)

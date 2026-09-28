@@ -7,6 +7,10 @@ import Security
 import Synchronization
 #endif
 
+enum V2MessageSendConnectionScope {
+    @TaskLocal static var generation: UUID?
+}
+
 /// 实时连接的主机与端口配置；不包含凭证或自定义信任策略。
 public struct V2RealtimeEndpoint: Equatable, Sendable {
     /// 原样保存的主机字符串，初始化只检查去除首尾空白后非空。
@@ -384,6 +388,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     private var connectionID: UUID?
     /// 认证成功后才设置的协商版本。
     private var authenticatedVersion: UInt8?
+    private var messageSendReadiness: V2MessageSendRealtimeReadiness?
     /// 握手选定的压缩方式，关闭时清空。
     private var negotiatedFrameCompression: V2NegotiatedFrameCompression?
     private let supportsAuthorPresentationDelta: Bool
@@ -518,15 +523,16 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
             var hello = IMV2Envelope()
             hello.requestID = 1
             hello.clientHello = .init()
-            hello.clientHello.supportedProtocolVersions = [UInt32(IMV2ProtocolVersion.current)]
+            hello.clientHello.supportedProtocolVersions = IMV2ProtocolVersion.supportedVersions.sorted().map(UInt32.init)
             hello.clientHello.supportedCapabilityProfiles = Array(supportedCapabilityProfiles).sorted()
             hello.clientHello.deviceID = deviceID.rawValue
             hello.clientHello.supportedFrameCompressions = [.zlib]
             hello.clientHello.supportsAuthorPresentationDelta = supportsAuthorPresentationDelta
+            hello.clientHello.supportsMessageSendOperations = true
             let helloResponse = try await sendBootstrap(hello, version: 0, generation: generation)
             guard case .serverHello(let serverHello)? = helloResponse.body,
                   let version = UInt8(exactly: serverHello.selectedProtocolVersion),
-                  version == UInt8(IMV2ProtocolVersion.current),
+                  IMV2ProtocolVersion.supportedVersions.contains(version),
                   supportedCapabilityProfiles.contains(serverHello.selectedCapabilityProfile)
             else { throw V2TLSFrameConnectionError.unsupportedVersion }
             try requireGeneration(generation)
@@ -576,6 +582,13 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
             guard case .presencePublicationControlled(let echo)?=publicationReply.body,echo.mode==publication.presencePublicationControl.mode else {throw V2TLSFrameConnectionError.authenticationFailed}
             try requireGeneration(generation)
             authenticatedVersion = version
+            if version >= 45, serverHello.supportsMessageSendOperations,
+               response.supportsMessageSendOperations,
+               serverHello.maximumMessageSendPayloadBytes == response.maximumMessageSendPayloadBytes,
+               let payloadLimit = Int(exactly: response.maximumMessageSendPayloadBytes), payloadLimit > 0 {
+                messageSendReadiness = .init(generation: generation, accountID: userID, deviceID: deviceID,
+                    protocolVersion: version, maximumPayloadBytes: min(payloadLimit, limits.maximumMessageSendPayloadBytes))
+            }
             if let authorStreamID {
                 guard userID.uuidValue != nil, deviceID.uuidValue != nil else { throw V2TLSFrameConnectionError.invalidHandshake }
                 authorPresentationInbox = .init(streamID: authorStreamID, actorUserID: userID, deviceID: deviceID)
@@ -599,6 +612,10 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
 
     /// 要求已认证且帧版本匹配后发送关联请求；请求预算、取消及超时由内部关联流程处理，失败通过错误报告。
     public func request(_ frame: V2Frame) async throws -> V2Frame {
+        if let requiredGeneration = V2MessageSendConnectionScope.generation,
+           connectionID != requiredGeneration {
+            throw V2MessageSendTransportError.unavailableBeforeSubmission
+        }
         guard let version = authenticatedVersion, frame.version == version else { throw V2TLSFrameConnectionError.notConnected }
         let envelope = try V2ProtobufFrameCodec.decode(frame, maximumMessageDepth: maximumProtobufMessageDepth,
             compression: negotiatedFrameCompression)
@@ -608,7 +625,12 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         let generation = connectionID
         let permit = try await workScheduler.acquire(context, deadline: .now.advanced(by: requestTimeout))
         do {
-            guard connectionID == generation else { throw V2TLSFrameConnectionError.connectionClosed }
+            guard connectionID == generation else {
+                if V2MessageSendConnectionScope.generation != nil {
+                    throw V2MessageSendTransportError.unavailableBeforeSubmission
+                }
+                throw V2TLSFrameConnectionError.connectionClosed
+            }
             let response = try await sendAndAwaitResponse(frame, holdsAdmission: true)
             _ = await workScheduler.release(permit)
             try Task.checkCancellation()
@@ -617,6 +639,20 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
             _ = await workScheduler.release(permit)
             if Task.isCancelled { throw CancellationError() }
             throw error
+        }
+    }
+
+    public func negotiatedProtocolVersion() -> UInt8? { authenticatedVersion }
+
+    public func messageSendSession() -> V2MessageSendRealtimeReadiness? {
+        guard connection != nil, authenticatedVersion != nil else { return nil }
+        return messageSendReadiness
+    }
+
+    public func requireMessageSendSession(_ witness: V2MessageSendRealtimeReadiness) throws {
+        guard messageSendReadiness == witness, connectionID == witness.generation,
+              authenticatedVersion == witness.protocolVersion, connection != nil else {
+            throw V2MessageSendTransportError.unavailableBeforeSubmission
         }
     }
 
@@ -1248,6 +1284,7 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
         connection?.cancel()
         connection = nil
         authenticatedVersion = nil
+        messageSendReadiness = nil
         negotiatedFrameCompression = nil
         inboundState = nil
         let waiters = responseWaiters.values
@@ -1376,6 +1413,12 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
     /// 占位实现不发送帧，始终抛出 notConnected。
     public func request(_: V2Frame) async throws -> V2Frame {
         throw V2TLSFrameConnectionError.notConnected
+    }
+
+    public func negotiatedProtocolVersion() -> UInt8? { nil }
+    public func messageSendSession() -> V2MessageSendRealtimeReadiness? { nil }
+    public func requireMessageSendSession(_: V2MessageSendRealtimeReadiness) throws {
+        throw V2MessageSendTransportError.unavailableBeforeSubmission
     }
 
     /// 占位实现没有用户同步提示来源，始终抛出 notConnected。

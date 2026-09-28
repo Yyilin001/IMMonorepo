@@ -11,6 +11,14 @@ public struct V2FrameCommand: RawRepresentable, Equatable, Hashable, Sendable {
     /// 保留给定命令码，包括当前实现尚未定义的值。
     public init(rawValue: UInt16) { self.rawValue = rawValue }
 
+    public static let messageSendOperation = Self(rawValue: 127)
+    public static let messageSendOperationRecover = Self(rawValue: 128)
+    public static let messageSendOperationResult = Self(rawValue: 129)
+
+    public var isMessageSendOperation: Bool {
+        self == .messageSendOperation || self == .messageSendOperationRecover || self == .messageSendOperationResult
+    }
+
     public static let presencePublicationControl = Self(rawValue:125)
     public static let presencePublicationControlled = Self(rawValue:126)
     /// 客户端声明可用版本与能力的启动请求。
@@ -246,6 +254,8 @@ public struct V2Frame: Equatable, Sendable {
 public struct V2FrameLimits: Equatable, Sendable {
     /// 允许的包体字节上限，不包含 18 字节帧头；构造时限定为线格式 UInt32 可表达范围。
     public let maximumPayloadBytes: Int
+    /// v45 send operation frame ceiling; ordinary commands retain maximumPayloadBytes.
+    public let maximumMessageSendPayloadBytes: Int
     /// 一次 append 最多返回的完整帧数，范围为 1...4096。
     ///
     /// TCP 合并读中的超额完整帧留在缓冲区，后续以空 Data 继续 drain，而不是将有效数据误判为非法。
@@ -255,11 +265,15 @@ public struct V2FrameLimits: Equatable, Sendable {
 
     public init(
         maximumPayloadBytes: Int,
+        maximumMessageSendPayloadBytes: Int = V2MessageSendWireLimits.maximumPayloadBytes,
         maximumFramesPerAppend: Int = 256,
         acceptedVersions: Set<UInt8>
     ) throws {
         guard maximumPayloadBytes >= 0,
               UInt32(exactly: maximumPayloadBytes) != nil,
+              maximumMessageSendPayloadBytes >= 0,
+              UInt32(exactly: maximumMessageSendPayloadBytes) != nil,
+              maximumMessageSendPayloadBytes <= Int.max - V2Frame.headerLength,
               maximumPayloadBytes <= Int.max - V2Frame.headerLength,
               maximumFramesPerAppend > 0,
               maximumFramesPerAppend <= 4_096,
@@ -268,9 +282,18 @@ public struct V2FrameLimits: Equatable, Sendable {
             throw V2FrameCodecError.invalidLimits
         }
         self.maximumPayloadBytes = maximumPayloadBytes
+        self.maximumMessageSendPayloadBytes = maximumMessageSendPayloadBytes
         self.maximumFramesPerAppend = maximumFramesPerAppend
         self.acceptedVersions = acceptedVersions
     }
+
+    public func maximumPayloadBytes(for command: V2FrameCommand, version: UInt8) -> Int {
+        command.isMessageSendOperation && version >= 45 ? maximumMessageSendPayloadBytes : maximumPayloadBytes
+    }
+}
+
+public enum V2MessageSendWireLimits {
+    public static let maximumPayloadBytes = 1_052_672 // 1 MiB + 4 KiB
 }
 
 /// 帧配置、固定头、长度或单帧输入结构不符合要求时的错误。
@@ -291,10 +314,20 @@ public enum V2FrameCodecError: Error, Equatable, Sendable {
 /// 调用者负责限制传输读取与排空节奏。此值不负责解压、protobuf 解码或身份验证。
 public struct V2FrameDecoder: Sendable {
     private let limits: V2FrameLimits
+    private var allowsLargeMessageSendFrames: Bool
     private var buffered = Data()
 
     /// 创建空缓冲解码器；同一连接的后续字节应交给同一实例。
-    public init(limits: V2FrameLimits) { self.limits = limits }
+    public init(limits: V2FrameLimits, allowsLargeMessageSendFrames: Bool = false) {
+        self.limits = limits
+        self.allowsLargeMessageSendFrames = allowsLargeMessageSendFrames
+    }
+
+    /// Enable only after the authenticated connection negotiated v45 send support.
+    /// Buffered bytes remain intact and are checked under the new bound when drained.
+    public mutating func setAllowsLargeMessageSendFrames(_ allowed: Bool) {
+        allowsLargeMessageSendFrames = allowed
+    }
 
     /// 是否还保留尚未完成或尚未排空的字节。
     ///
@@ -322,8 +355,14 @@ public struct V2FrameDecoder: Sendable {
             guard limits.acceptedVersions.contains(version) else {
                 throw V2FrameCodecError.unsupportedVersion(version)
             }
+            let command = V2FrameCommand(rawValue: readUInt16(buffered, at: consumedBytes + 4))
+            if command.isMessageSendOperation && version < 45 {
+                throw V2FrameCodecError.unsupportedVersion(version)
+            }
             let declaredLength = Int(readUInt32(buffered, at: consumedBytes + 14))
-            guard declaredLength <= limits.maximumPayloadBytes else {
+            let maximumLength = allowsLargeMessageSendFrames
+                ? limits.maximumPayloadBytes(for: command, version: version) : limits.maximumPayloadBytes
+            guard declaredLength <= maximumLength else {
                 throw V2FrameCodecError.declaredPayloadTooLarge(declaredLength)
             }
             let fullLength = V2Frame.headerLength + declaredLength
@@ -332,7 +371,7 @@ public struct V2FrameDecoder: Sendable {
             let frame = V2Frame(
                 version: version,
                 flags: .init(rawValue: readUInt8(buffered, at: frameStart + 3)),
-                command: .init(rawValue: readUInt16(buffered, at: frameStart + 4)),
+                command: command,
                 requestID: readUInt64(buffered, at: frameStart + 6),
                 payload: dataSlice(
                     buffered,
@@ -375,7 +414,10 @@ public enum V2FrameCodec {
         guard limits.acceptedVersions.contains(frame.version) else {
             throw V2FrameCodecError.unsupportedVersion(frame.version)
         }
-        guard frame.payload.count <= limits.maximumPayloadBytes else {
+        if frame.command.isMessageSendOperation && frame.version < 45 {
+            throw V2FrameCodecError.unsupportedVersion(frame.version)
+        }
+        guard frame.payload.count <= limits.maximumPayloadBytes(for: frame.command, version: frame.version) else {
             throw V2FrameCodecError.payloadTooLarge(frame.payload.count)
         }
     }
@@ -411,7 +453,7 @@ public enum V2FrameCodec {
     /// - Returns: 唯一解码帧。
     /// - Throws: 帧头／长度错误、trailingPartialFrame 或 expectedSingleFrame。
     public static func decodeExactlyOne(_ bytes: Data, limits: V2FrameLimits) throws -> V2Frame {
-        var decoder = V2FrameDecoder(limits: limits)
+        var decoder = V2FrameDecoder(limits: limits, allowsLargeMessageSendFrames: true)
         let frames = try decoder.append(bytes)
         try decoder.finish()
         guard frames.count == 1 else { throw V2FrameCodecError.expectedSingleFrame }

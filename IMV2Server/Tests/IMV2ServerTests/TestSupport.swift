@@ -64,6 +64,7 @@ struct V2DiscardingForegroundGroupEventHintPublisher: V2ForegroundGroupEventHint
 }
 
 private struct V2UnsupportedGatewayTestDependency: Error,
+    V2GatewayMessageSendOperationHandling,
     V2GatewayReadReceiptHandling,
     V2GatewayLiveActivityHandling,
     V2GatewayGroupEventLogHandling,
@@ -73,6 +74,9 @@ private struct V2UnsupportedGatewayTestDependency: Error,
     V2GatewayConversationCapabilitiesHandling,
     V2GroupRolePolicyBaselineReading
 {
+    var managesForegroundWriteAdmission: Bool { false }
+    func sendOperation(_: V2MessageSendOperationCommand) async throws -> V2MessageSendOperationRecoveryResult { throw self }
+    func recoverSendOperation(_: V2MessageSendOperationRecoveryRequest) async throws -> V2MessageSendOperationRecoveryResult { throw self }
     func startAccountRoomChanges(connectionID _: UUID, userID _: UserID) async throws -> String { throw self }
     func list(_: IMV2UserRoomDirectoryList, actorUserID _: UserID) async throws -> IMV2Envelope { throw self }
     func batch(_: IMV2RoomLatestVisibleBatch, actorUserID _: UserID) async throws -> IMV2Envelope { throw self }
@@ -93,6 +97,7 @@ private struct V2UnsupportedGatewayTestDependency: Error,
 }
 
 func makeGatewayDomainCommandHandler(
+    messageSendOperations: (any V2GatewayMessageSendOperationHandling)? = nil,
     readReceipt: V2ReadReceiptService? = nil,
     liveActivity: V2LiveActivityService? = nil,
     groupEventLog: V2GroupEventLogService? = nil,
@@ -113,6 +118,7 @@ func makeGatewayDomainCommandHandler(
     let unsupported = V2UnsupportedGatewayTestDependency()
     return V2GatewayDomainCommandHandler(
         readReceiptHandler: readReceipt.map { $0 as any V2GatewayReadReceiptHandling } ?? unsupported,
+        messageSendOperations: messageSendOperations ?? unsupported,
         liveActivityHandler: liveActivity.map { $0 as any V2GatewayLiveActivityHandling } ?? unsupported,
         groupEventLogHandler: groupEventLog.map { $0 as any V2GatewayGroupEventLogHandling } ?? unsupported,
         foregroundGroupEventHints: foregroundGroupEventHints,

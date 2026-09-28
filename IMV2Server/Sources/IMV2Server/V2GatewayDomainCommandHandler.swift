@@ -99,6 +99,14 @@ protocol V2GatewayReadReceiptHandling: Sendable {
     func readers(roomID: RoomID, messageID: MessageID, actorUserID: UserID, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage
 }
 
+protocol V2GatewayMessageSendOperationHandling: Sendable {
+    var managesForegroundWriteAdmission: Bool { get }
+    func sendOperation(_ command: V2MessageSendOperationCommand) async throws -> V2MessageSendOperationRecoveryResult
+    func recoverSendOperation(_ request: V2MessageSendOperationRecoveryRequest) async throws -> V2MessageSendOperationRecoveryResult
+}
+
+extension V2RoomRefMessagingClient: V2GatewayMessageSendOperationHandling {}
+
 extension V2GatewayReadReceiptHandling {
     var managesForegroundWriteAdmission: Bool { false }
 }
@@ -166,6 +174,8 @@ public struct V2GatewayDomainCommandHandler:
     V2GatewayCommandHandler,
     V2PreparedGroupEventCommandHandling {
     private let readReceipt: any V2GatewayReadReceiptHandling
+    private let messageSendOperations: any V2GatewayMessageSendOperationHandling
+    private let messageLimits: V2MessageCommandLimits
     private let liveActivity: any V2GatewayLiveActivityHandling
     private let groupEventLog: any V2GatewayGroupEventLogHandling
     private let foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting
@@ -190,6 +200,7 @@ public struct V2GatewayDomainCommandHandler:
     /// 生产环境中现有房间调用和创建房间前操作的组合入口。
     /// 用户服务与控制服务保持显式依赖，避免房间能力意外成为用户自有操作的授权依据。
     public init(roomActors: V2GatewayRoomActorServices,
+                messageLimits: V2MessageCommandLimits = try! .init(maxUTF8Bytes: 65_536),
                 liveActivity: V2LiveActivityService,
                 foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting,
                 roomRecovery: any V2RoomRecoveryCommandHandling,
@@ -203,6 +214,8 @@ public struct V2GatewayDomainCommandHandler:
                 now: @escaping @Sendable () -> Date = Date.init,
                 monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
         self.init(readReceiptHandler: roomActors.receipts,
+                  messageSendOperations: roomActors.messaging,
+                  messageLimits: messageLimits,
                   liveActivityHandler: liveActivity,
                   groupEventLogHandler: roomActors.eventLog,
                   foregroundGroupEventHints: foregroundGroupEventHints,
@@ -221,6 +234,8 @@ public struct V2GatewayDomainCommandHandler:
 
     init(
         readReceiptHandler: any V2GatewayReadReceiptHandling,
+        messageSendOperations: any V2GatewayMessageSendOperationHandling,
+        messageLimits: V2MessageCommandLimits = try! .init(maxUTF8Bytes: 65_536),
         liveActivityHandler: any V2GatewayLiveActivityHandling,
         groupEventLogHandler: any V2GatewayGroupEventLogHandling,
         foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting,
@@ -240,6 +255,8 @@ public struct V2GatewayDomainCommandHandler:
     ) {
         precondition(maximumGroupEventPagePayloadBytes > 0)
         readReceipt = readReceiptHandler
+        self.messageSendOperations = messageSendOperations
+        self.messageLimits = messageLimits
         liveActivity = liveActivityHandler
         groupEventLog = groupEventLogHandler
         self.foregroundGroupEventHints = foregroundGroupEventHints
@@ -542,6 +559,7 @@ public struct V2GatewayDomainCommandHandler:
         if roomCommandsHostAdmitted {
             switch envelope.body {
             case .recordReadReceipt,
+                 .messageSendOperation, .messageSendOperationRecover,
                  .getGroupRolePolicyBaseline, .listRoomMembers,
                  .roomSyncStateBatch, .roomLatestVisibleBatch,
                  .groupEventPull, .groupEventSubscribe, .listReadReceiptReaders:
@@ -552,6 +570,8 @@ public struct V2GatewayDomainCommandHandler:
         switch envelope.body {
         case .recordReadReceipt:
             return readReceipt.managesForegroundWriteAdmission
+        case .messageSendOperation, .messageSendOperationRecover:
+            return messageSendOperations.managesForegroundWriteAdmission
         default:
             return false
         }
@@ -564,6 +584,25 @@ public struct V2GatewayDomainCommandHandler:
     ) async throws -> IMV2Envelope {
         do {
             switch envelope.body {
+            case .messageSendOperation(let wire):
+                let command = try V2MessageSendOperationWireCodec.decode(command: wire, limits: messageLimits)
+                let operationIdentity = try command.identity
+                guard operationIdentity.accountID == identity.userID,
+                      command.command.senderUserID == identity.userID,
+                      case .room(let roomID) = operationIdentity.scope,
+                      roomID == command.command.roomID else { return errorEnvelope(code: "FORBIDDEN", retryable: false) }
+                let result = try await messageSendOperations.sendOperation(command)
+                var response = IMV2Envelope()
+                response.messageSendOperationResult = V2MessageSendOperationWireCodec.encode(result: result)
+                return response
+            case .messageSendOperationRecover(let wire):
+                let request = try V2MessageSendOperationWireCodec.decode(recovery: wire)
+                guard request.identity.accountID == identity.userID,
+                      case .room = request.identity.scope else { return errorEnvelope(code: "FORBIDDEN", retryable: false) }
+                let result = try await messageSendOperations.recoverSendOperation(request)
+                var response = IMV2Envelope()
+                response.messageSendOperationResult = V2MessageSendOperationWireCodec.encode(result: result)
+                return response
             case .recordReadReceipt(let request): return try await handleReadReceipt(request, identity: identity)
             case .getGroupRolePolicyBaseline(let request): return try await handleGroupRolePolicyBaseline(request, identity: identity)
             case .listRoomMembers(let request): return try await handleListRoomMembers(request, identity: identity)
@@ -622,6 +661,9 @@ public struct V2GatewayDomainCommandHandler:
             return errorEnvelope(code: "FORWARD_PENDING", retryable: true, retryAfter: 1)
         } catch V2ForwardPendingError.paused {
             return errorEnvelope(code: "FORWARD_PAUSED", retryable: true, retryAfter: 30)
+        } catch is V2MessageSendOperationWireCodecError,
+                is V2MessageOperationValidationError {
+            return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
         } catch let failure as V2RoomCallFailure {
             switch failure {
             case .outcomeUnknown:

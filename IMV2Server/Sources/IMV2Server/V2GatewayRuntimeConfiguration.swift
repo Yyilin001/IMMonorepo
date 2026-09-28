@@ -209,6 +209,10 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let capacityProfile: V2CapacityProfile
     public let messageLimits: V2MessageCommandLimits
     public let frameLimits: V2FrameLimits
+    public let messageSendOperationsEnabled: Bool
+    public let messageSendMaximumInFlightPerConnection: Int
+    public let messageSendMaximumInFlightBytesPerConnection: Int
+    public let messageSendMaximumInFlightBytesProcess: Int
     public let maximumProtobufMessageDepth: Int
     /// Optional author supplements require the complete configured resource
     /// reader/delivery runtime. Disabled by default for deployment rollout.
@@ -458,6 +462,20 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         capabilityProfile = try Self.required("IM_V2_CAPABILITY_PROFILE", environment: environment)
         messageLimits = try .init(maxUTF8Bytes: try Self.integer("IM_V2_MAX_MESSAGE_UTF8_BYTES", environment: environment))
         frameLimits = try .init(maximumPayloadBytes: try Self.integer("IM_V2_MAX_FRAME_BYTES", environment: environment), acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)])
+        messageSendOperationsEnabled = try Self.optional("IM_V2_MESSAGE_SEND_OPERATIONS_ENABLED", environment: environment)
+            .map { _ in try Self.explicitBoolean("IM_V2_MESSAGE_SEND_OPERATIONS_ENABLED", environment: environment) } ?? true
+        messageSendMaximumInFlightPerConnection = try Self.positiveWithDefault(
+            "IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_PER_CONNECTION", defaultValue: 4, maximum: 64, environment: environment)
+        messageSendMaximumInFlightBytesPerConnection = try Self.positiveWithDefault(
+            "IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_BYTES_PER_CONNECTION", defaultValue: 4_194_304,
+            maximum: 67_108_864, environment: environment)
+        messageSendMaximumInFlightBytesProcess = try Self.positiveWithDefault(
+            "IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_BYTES_PROCESS", defaultValue: 67_108_864,
+            maximum: 1_073_741_824, environment: environment)
+        guard messageSendMaximumInFlightBytesPerConnection >= frameLimits.maximumMessageSendPayloadBytes,
+              messageSendMaximumInFlightBytesProcess >= messageSendMaximumInFlightBytesPerConnection else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_BYTES_PER_CONNECTION")
+        }
         maximumProtobufMessageDepth = try Self.positive("IM_V2_MAX_PROTOBUF_MESSAGE_DEPTH", environment: environment)
         if Self.optional("IM_V2_AUTHOR_PRESENTATIONS_ENABLED", environment: environment) != nil {
             authorPresentationsEnabled = try Self.explicitBoolean("IM_V2_AUTHOR_PRESENTATIONS_ENABLED", environment: environment)

@@ -8,6 +8,71 @@ import Synchronization
 import Testing
 
 struct V2GatewayByteStreamTests {
+    @Test("a slow send leaves heartbeat capacity and connection close drains it")
+    func concurrentMessageSendDoesNotBlockHeartbeat() async throws {
+        let version = UInt8(IMV2ProtocolVersion.current)
+        let limits = try V2FrameLimits(maximumPayloadBytes: 4_096, acceptedVersions: [0, version])
+        let slow = SlowMessageSendCommandHandler()
+        let budget = V2GatewayMessageSendBudget(maximumBytes: 4_194_304)
+        let stream = V2GatewayByteStream(
+            frameLimits: limits,
+            session: .init(limits: try .init(maximumInFlightRequests: 4),
+                           authenticator: ByteStreamAuthFake(), capabilityProfile: "base",
+                           commandAdmission: V2AllowingGatewayCommandAdmission()),
+            handler: slow, registry: V2DeviceConnectionRegistry(),
+            messageSendBudget: budget, maximumConcurrentMessageSends: 1)
+        let recorder = ConcurrentGatewayResponseRecorder()
+        var hello = IMV2Envelope()
+        hello.requestID = 1
+        hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"
+        hello.clientHello.supportedProtocolVersions = [UInt32(version)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        hello.clientHello.supportsMessageSendOperations = true
+        _ = try await stream.receive(encoded(hello, version: 0))
+        var auth = IMV2Envelope()
+        auth.requestID = 2
+        auth.protocolVersion = UInt32(version)
+        auth.authenticate.accessToken = "opaque"
+        auth.authenticate.deviceID = hello.clientHello.deviceID
+        _ = try await stream.receive(encoded(auth, version: version))
+        let room = try RoomID("00000000-0000-0000-0000-000000000A03")
+        let user = try UserID("user-a")
+        let operation = try V2MessageSendOperationCommand(
+            command: .init(roomID: room, senderUserID: user,
+                           clientMessageID: .init(uuid: UUID()), text: "slow",
+                           limits: .init(maxUTF8Bytes: 64)),
+            firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1_000) + 60_000)
+        var send = IMV2Envelope()
+        send.requestID = 3
+        send.protocolVersion = UInt32(version)
+        send.messageSendOperation = try V2MessageSendOperationWireCodec.encode(command: operation)
+        let write: @Sendable (V2Frame) async throws -> Void = { frame in await recorder.append(frame) }
+        _ = try await stream.receiveFrames(encoded(send, version: version),
+                                           concurrentMessageSendRespond: write, respond: write)
+        for _ in 0..<10_000 {
+            if await slow.started { break }
+            await Task.yield()
+        }
+        #expect(await slow.started)
+        var second = send
+        second.requestID = 5
+        _ = try await stream.receiveFrames(encoded(second, version: version),
+                                           concurrentMessageSendRespond: write, respond: write)
+        let rejected = try #require(await recorder.all().first)
+        let busy = try V2ServerProtobufFrameCodec.decode(rejected)
+        #expect(busy.requestID == 5 && busy.error.code == "SERVER_BUSY")
+        #expect(busy.error.retryable && busy.error.retryAfterSeconds == 1)
+        var heartbeat = IMV2Envelope()
+        heartbeat.requestID = 4
+        heartbeat.protocolVersion = UInt32(version)
+        heartbeat.heartbeat = .init()
+        let heartbeatResponse = try await stream.receive(encoded(heartbeat, version: version))
+        #expect(try decode(#require(heartbeatResponse.first)).body != nil)
+        try await stream.finish()
+        #expect(await slow.cancelled)
+        #expect(await recorder.count == 1)
+        #expect(await budget.inFlightBytes() == 0)
+    }
     @Test("NIO required notifications confirm writes or close failed channels", arguments: [0, 1, 2, 3])
     func nioRequiredNotificationWrite(mode: Int) async throws {
         let stream = V2GatewayByteStream(
@@ -1173,6 +1238,31 @@ struct V2GatewayByteStreamTests {
 
     private func decode(_ bytes: Data) throws -> IMV2Envelope {
         try V2ServerProtobufFrameCodec.decode(V2FrameCodec.decodeExactlyOne(bytes, limits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion])))
+    }
+}
+
+private actor ConcurrentGatewayResponseRecorder {
+    private var frames: [V2Frame] = []
+    var count: Int { frames.count }
+    func all() -> [V2Frame] { frames }
+    func append(_ frame: V2Frame) { frames.append(frame) }
+}
+
+private actor SlowMessageSendCommandHandler: V2GatewayCommandHandler {
+    private(set) var started = false
+    private(set) var cancelled = false
+
+    func handle(envelope: IMV2Envelope, identity _: V2AuthenticatedConnection) async throws -> IMV2Envelope {
+        guard case .messageSendOperation = envelope.body else { return IMV2Envelope() }
+        started = true
+        do { try await Task.sleep(for: .seconds(60)) }
+        catch is CancellationError {
+            cancelled = true
+            throw CancellationError()
+        }
+        var response = IMV2Envelope()
+        response.messageSendOperationResult.unresolved = true
+        return response
     }
 }
 

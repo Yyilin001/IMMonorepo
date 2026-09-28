@@ -56,6 +56,7 @@ for version_file in "$CLIENT_VERSION" "$SERVER_VERSION"; do
 public enum IMV2ProtocolVersion {
     public static let current: UInt32 = $VERSION
     public static let currentInt: Int = $VERSION
+    public static let supportedVersions: Set<UInt8> = [$VERSION]
 }
 SWIFT
 done

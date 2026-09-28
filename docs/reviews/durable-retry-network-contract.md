@@ -4,7 +4,7 @@
 
 ## 当前执行所有权
 
-下方 B07 lane 与 TCP outbox 验证记录描述历史批次。当前已退休业务写接口不再经这些 lane 重放：App 先保存领域意图，准备阶段冻结 command，账户 `V2OperationWorkDispatcher` 按持久 action/attempt/due 执行 HTTPS submit/reconcile。资源与特殊安全恢复由各自账户活动拥有；页面取消只解除观察。TLS 保留同步、查询、握手及瞬时控制，presence suppression 控制不会进入持久重试。
+下方 B07 lane 与 TCP outbox 验证记录描述历史批次。当前已退休业务写接口不再经这些 lane 重放：App 先保存领域意图，准备阶段冻结 command，账户 `V2OperationWorkDispatcher` 按持久 action/attempt/due 执行领域操作。消息发送新增 TCP 优先、HTTPS 可独立提交及恢复的路由，仍由同一个 dispatcher 管理原身份；见[双通道实施记录](message-send-dual-transport.md)。其余 HTTP 领域操作继续按原合同提交和恢复。资源与特殊安全恢复由各自账户活动拥有；页面取消只解除观察。TLS 承载同步、查询、握手、瞬时控制及新协商的消息发送/恢复操作，presence suppression 控制不会进入持久重试。
 
 HTTP leaf 通过共享 scheduler 准入，重试标记、服务 Retry-After 冷却与诊断保持有界；认证刷新不会为业务写自动创建新 ID。当前整批迁移仍待集中验证，下方历史网络测试不证明新领域合同、完整 App scene 或真实后台传输已验收。
 

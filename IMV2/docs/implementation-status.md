@@ -1,6 +1,6 @@
 # V2 当前实现与发布证据
 
-最后审阅：2026-09-28（同步应用级弱网生产接线、protocol44/current63与远程撤销生命周期；运行证据按各自检查点标注）
+最后审阅：2026-09-28（同步应用级弱网生产接线、protocol45/current63与远程撤销生命周期；运行证据按各自检查点标注）
 适用范围：当前 `IMV2Core`、`IMV2ClientKit`、`IMV2Server`、`IMApp` 与 `IMV2` 工具链。
 
 本文件只登记当前合同和可重复证据，不保留开发时间线。仓库内实现与本机测试通过不等于
@@ -22,17 +22,17 @@
 
 ## 当前账户网络收口边界
 
-账户 HTTP 生产注入复用账户 executor/scheduler 与认证 epoch，按可执行端点登记限制服务、请求/响应大小和绝对期限；同步、握手及 presence 瞬时控制仍走 TLS。领域 submit/recover 使用冻结身份和持久 work，特殊认证、Push 条件意图、本机退出和远程设备撤销各有专属恢复所有权，不能混为通用自动重放。
+账户 HTTP 生产注入复用账户 executor/scheduler 与认证 epoch，按可执行端点登记限制服务、请求/响应大小和绝对期限；同步、握手及 presence 瞬时控制仍走 TLS。消息发送由同一持久 work 在 TCP 与 HTTPS 间选择，默认优先已认证并支持该能力的长连接；结果未知时恢复原身份。其他领域 submit/recover 使用冻结身份和持久 work，特殊认证、Push 条件意图、本机退出和远程设备撤销各有专属恢复所有权，不能混为通用自动重放。
 
 远程设备撤销已接完整目标 baseline、固定原 ID 的 Keychain metadata、账户 activity、页面原操作观察及账号关闭围栏。原 proof 永久保留，baseline 有界并由 housekeeping 清理；本机 self-revoke 仍使用独立 capability 队列。在线发布 suppression 已接前后台连接和服务端 lease，长期偏好保持独立权威。最新业务与夹具正在集中收口；最新远程关闭围栏未运行验证，不将历史套件通过记录作为本批完整验收。
 
 ## 当前兼容与 Schema 政策
 
-- 项目尚未上线；服务端仅以当前协议、当前 schema 和全新数据库为基线，不提供历史兼容或在线数据迁移。
-- protocol 44 已退役旧成员管理、群能力、社交、建群、私聊、消息审核以及 send/edit/withdraw/reaction/forward 写请求，原字段编号保留为 reserved，禁止复用；20/24/26/28/105 与无消费方的旧转发响应106已保留为 reserved；21/25/27/29 事实响应保留。该批源码和生成物收口后统一验证。新增在线状态发布抑制控制，后台连接默认抑制发布。当前 schema 为 current63，包含新领域 admission/永久回执与远程设备撤销专属恢复表。生产装配已有阶段编译记录；目前按用户要求先集中收口实现，最新组合构建及回归后置，不提供旧协议回退，也不以源码接线代替故障验收。
-- wire contract 为 protobuf protocol 44；生成物必须与
+- 按用户要求不考虑历史兼容；客户端和服务端仅支持当前协议，并显式协商 TCP 消息发送能力。HTTPS 发送保留为独立通道。数据库仍以当前 schema 和全新数据库为基线，不提供在线数据迁移。
+- protocol 45 已退役旧成员管理、群能力、社交、建群、私聊、消息审核以及 send/edit/withdraw/reaction/forward 写请求，原字段编号保留为 reserved，禁止复用；20/24/26/28/105 与无消费方的旧转发响应106已保留为 reserved；21/25/27/29 事实响应保留。该批源码和生成物收口后统一验证。新增在线状态发布抑制控制，后台连接默认抑制发布。当前 schema 为 current63，包含新领域 admission/永久回执与远程设备撤销专属恢复表。生产装配已有阶段编译记录；目前按用户要求先集中收口实现，本次消息发送升级新增完整操作合同而不复用退休字段；验证证据见[双通道实施记录](../../docs/reviews/message-send-dual-transport.md)，不以源码接线代替故障验收。
+- wire contract 为 protobuf protocol 45；生成物必须与
   [`Protocol/im_realtime/v2/im_v2.proto`](../../Protocol/im_realtime/v2/im_v2.proto) 一致。
-  protocol 44 包含显式协商的临时作者资料补充通道及按精确 nonce 结束补充的控制命令；资源读取、传输与页面消费已装配。服务端开关默认关闭，App 前台声明支持、后台不订阅；真实端到端及负载验收仍待完成，见[资源实施记录](../../docs/proposals/resource-system-implementation.md)。
+  protocol 45 包含显式协商的临时作者资料补充通道及按精确 nonce 结束补充的控制命令；资源读取、传输与页面消费已装配。服务端开关默认关闭，App 前台声明支持、后台不订阅；真实端到端及负载验收仍待完成，见[资源实施记录](../../docs/proposals/resource-system-implementation.md)。
   房间 continuation 表示已认证扫描到的序号，可越过不可见尾部；旧客户端严格相等校验不兼容，见[读取与游标合同](../../docs/reviews/message-mutation-read-contract.md)。
   私聊与群聊的公共内容统一以房间日志为权威副本，不再提供 fanout 兼容模式；个人事件流保存个人状态与单侧提示。
   新编辑携带接受身份与显式完整状态以跨越合法版本缺口，见[完整编辑合同](../../docs/reviews/message-edit-replacement-contract.md)。
@@ -52,7 +52,7 @@
   当前 schema 包含 Push 会话与意图版本存储；Account HTTP 与 ClientKit 版本传输已接通，持久意图存储已加入 SQLite；自动执行器及 App 开关/退出接线已验证，真实网络和账号生命周期组合仍开放，见[Push 意图合同](../../docs/reviews/push-intent-contract.md)及[HTTP 合同](../../docs/reviews/push-intent-http-contract.md)、[本地持久状态合同](../../docs/reviews/push-intent-local-contract.md)、[自动执行器合同](../../docs/reviews/push-intent-reconciler-contract.md)、[App 合同](../../docs/reviews/push-intent-app-contract.md)及[认证隔离合同](../../docs/reviews/push-intent-auth-contract.md)。
 - ClientKit 主 SQLite 与派生搜索库分别有当前建库入口，当前批次不承诺历史 schema 兼容。
   消息、reaction、公告、角色权限、置顶效果及恢复调度迁移见修复记录；当前对象指纹由仓库 schema contract 检查维护；旧 173/5 计数不代表本批结构。
-  protocol 44 包含显式个人快照重建和当前角色权限基线读取；SQLite 持久保存个人重建意图，
+  protocol 45 包含显式个人快照重建和当前角色权限基线读取；SQLite 持久保存个人重建意图，
   角色权限已迁移为独立版本和显式空集合，恢复请求、完整观察点及本地栅栏已持久化；自动 runner 和 App 生命周期已接通，暂停反馈及显式重试入口已接通，真实链路及人工交互验收仍待完成，详见[状态与重试合同](../../docs/reviews/role-policy-recovery-ui-contract.md)、[执行器合同](../../docs/reviews/role-policy-recovery-runner-contract.md)、[恢复存储合同](../../docs/reviews/role-policy-recovery-store-contract.md)、[角色效果合同](../../docs/reviews/role-policy-effect-contract.md)、[个人基线恢复合同](../../docs/reviews/personal-snapshot-rebuild.md)及[权限基线合同](../../docs/reviews/group-policy-baseline-contract.md)。
 - 服务端置顶快照已按已知源序号排序并保留取消状态；客户端快照键已兼容等价 UUID 拼写。客户端置顶四路 reducer、持久摘要与受控迁移已实现，缺序号旧历史权威恢复和统一发布切换仍待完成，见[置顶快照合同](../../docs/reviews/pin-snapshot-contract.md)及[客户端效果合同](../../docs/reviews/pin-effect-contract.md)。
 - 服务端成员角色快照已按目标成员版本比较并通过真实逆序分发/快照回归；逐成员离开/重入的持久状态和客户端统一消费仍待完成，见[成员角色快照合同](../../docs/reviews/member-role-snapshot-contract.md)。
@@ -66,7 +66,7 @@
 
 | 能力 | 当前实现 | 证据等级 | 仍需外部闭环 |
 | --- | --- | --- | --- |
-| TLS gateway 与协议 | TLS 1.3、protocol 44 协商、帧/深度/队列/请求上限、原子设备会话认证、心跳与关闭 | 仓库内已实现；package 和本地 gateway 回归 | 生产证书轮换、入口拓扑与故障演练 |
+| TLS gateway 与协议 | TLS 1.3、protocol 45 协商、显式消息发送操作能力、帧/深度/队列/请求上限、原子设备会话认证、心跳与关闭 | 仓库内已实现；package 和本地 gateway 回归 | 生产证书轮换、入口拓扑与故障演练 |
 | 账户与设备凭据 | 独立 account service、固定参数 Argon2id 密码验证、跨副本限流、设备绑定 assertion、刷新/撤销/账号禁用 | 本机集成已验证 | WebAuthn RP verifier、challenge/counter store、生产 trusted-proxy 与审计审批 |
 | 公开身份与联系人 | required account kind、绑定账户/设备且最长 60 秒的精确 handle 发现、本人资料字段 patch/不可变原回执与 query/close、关系/屏蔽、按上下文限期资料读取；成员/已读目录只返回标识和角色，资料另行授权 | 仓库内实现与分层证据见[资源实施记录](../../docs/proposals/resource-system-implementation.md)；旧目录资料字段与裸精确查询响应已退休，需协调升级 | 其余资料入口、真机离线、多语言与人工无障碍验收 |
 | 房间 Virtual Actor | RoomID 逻辑引用、持久 lease/activation fence、恢复与有界 FIFO/回收；前台和房间后台写入接入 | 本轮功能收口完成；真 PG、双 Host 分区/接管、单 owner 批查询与当前源码完整 Linux 回归（1529 tests / 264 suites）见[验证状态](../../docs/reviews/virtual-actor/README.md) | 相对性能按用户要求暂缓；首次未复现的测试进程停滞及诊断保留，不代表生产容量批准 |

@@ -314,6 +314,15 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             let outcome: V2GatewayProcessingOutcome
             do {
                 try Task.checkCancellation()
+                let writeResponse: @Sendable (V2Frame) async throws -> Void = { response in
+                    try Task.checkCancellation()
+                    try await eventLoop.flatSubmit {
+                        boundHandler.value.writeFrameWhenWritable(
+                            response,
+                            context: boundContext.value
+                        )
+                    }.get()
+                }
                 let needsFrameDrain = try await stream.receiveFrames(inbound, authenticationCompleted: {
                     await withCheckedContinuation { continuation in
                         eventLoop.execute {
@@ -323,15 +332,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                             continuation.resume()
                         }
                     }
-                }) { response in
-                    try Task.checkCancellation()
-                    try await eventLoop.flatSubmit {
-                        boundHandler.value.writeFrameWhenWritable(
-                            response,
-                            context: boundContext.value
-                        )
-                    }.get()
-                }
+                }, concurrentMessageSendRespond: writeResponse, respond: writeResponse)
                 try Task.checkCancellation()
                 outcome = .success(
                     authenticated: await stream.isAuthenticated(),

@@ -1,4 +1,5 @@
 import Foundation
+import IMV2Core
 import IMV2Server
 
 /// 集中构造客户端会话、连接工厂与 TLS 服务对象。
@@ -17,6 +18,8 @@ enum GatewayTransportAssembly {
         let connectionRegistry = prepared.frontdoor.connectionRegistry
         let transportMetrics = prepared.frontdoor.transportMetrics
         let gatewayEventLoopLagMetrics = prepared.frontdoor.gatewayEventLoopLagMetrics
+        let messageSendBudget = V2GatewayMessageSendBudget(
+            maximumBytes: configuration.messageSendMaximumInFlightBytesProcess)
         let factory = V2GatewayConnectionFactory {
             let session = V2GatewaySession(
                 limits: configuration.connectionLimits,
@@ -29,10 +32,15 @@ enum GatewayTransportAssembly {
                 maximumCompressionExpansionRatio: configuration.frameCompressionMaximumExpansionRatio,
                 preparedGroupEventPageCache: preparedGroupEventPageCache,
                 supportsAuthorPresentationDelta: authors != nil,
+                messageSendOperationsEnabled: configuration.messageSendOperationsEnabled,
+                maximumMessageSendPayloadBytes: configuration.frameLimits.maximumMessageSendPayloadBytes,
                 commandAdmission: commandRateLimiter
             )
             return .init(frameLimits: configuration.frameLimits, session: session, handler: handler, registry: connectionRegistry,
-                         authorPresentationDispatcher: authors?.dispatcher, authorPresentationIngress: authors?.ingress)
+                         authorPresentationDispatcher: authors?.dispatcher, authorPresentationIngress: authors?.ingress,
+                         messageSendBudget: messageSendBudget,
+                         maximumConcurrentMessageSends: configuration.messageSendMaximumInFlightPerConnection,
+                         maximumConcurrentMessageSendBytes: configuration.messageSendMaximumInFlightBytesPerConnection)
         }
         return try V2TLSGatewayServer(
             configuration: configuration.tls,

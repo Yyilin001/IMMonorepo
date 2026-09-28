@@ -497,6 +497,8 @@ public func v2RenderPrometheusGatewayTransportMetrics(_ snapshot: V2GatewayTrans
 }
 
 public enum V2GatewayTelemetryCommand: String, CaseIterable, Hashable, Sendable {
+    case messageSendOperation = "message_send_operation"
+    case messageSendOperationRecover = "message_send_operation_recover"
     case sendMessage = "send_message"
     case withdrawMessage = "withdraw_message"
     case changeMessageReaction = "change_message_reaction"
@@ -733,10 +735,8 @@ private func v2SaturatingAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
 
 func v2TelemetryCommand(for envelope: IMV2Envelope) -> V2GatewayTelemetryCommand {
     switch envelope.body {
-
-
-
-
+    case .messageSendOperation: .messageSendOperation
+    case .messageSendOperationRecover: .messageSendOperationRecover
     case .recordReadReceipt: .recordReadReceipt
     case .syncPull: .syncPull
     case .syncAck: .syncAck

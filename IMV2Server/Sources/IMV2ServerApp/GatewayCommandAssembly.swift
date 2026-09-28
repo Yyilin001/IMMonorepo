@@ -63,6 +63,7 @@ struct GatewayCommandAssembly {
         await frontdoor.connectionRegistry.configureLiveActivityObservationAuthorizer(liveActivity)
         let handler = V2GatewayDomainCommandHandler(
             roomActors: roomServices.roomActorServices,
+            messageLimits: configuration.messageLimits,
             liveActivity: liveActivity,
             foregroundGroupEventHints: realtime.foregroundGroupEventHints,
             roomRecovery: roomRecovery,

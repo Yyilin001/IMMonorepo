@@ -8,6 +8,11 @@ import IMV2Core
 public protocol V2AuthenticatedFrameTransport: Sendable {
     /// 发送完整请求帧并等待对应响应；关联管理、取消和连接错误由具体传输实现负责。
     func request(_ frame: V2Frame) async throws -> V2Frame
+    func negotiatedProtocolVersion() async -> UInt8?
+}
+
+public extension V2AuthenticatedFrameTransport {
+    func negotiatedProtocolVersion() async -> UInt8? { nil }
 }
 
 /// 映射媒体展示类型与元数据；拒绝未指定或未知类型，再由领域初始化验证其余约束。
@@ -1132,16 +1137,20 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
     ///
     /// 编码与解码使用适配器默认预算，未在此传入压缩协商；响应必须匹配本次请求号和协议版本。
     /// 计数器回绕跳过零，但不在此扫描仍在途的历史编号。返回的业务错误 envelope 由各命令方法另行映射。
-    func requestEnvelope(_ envelope: IMV2Envelope) async throws -> IMV2Envelope {
+    func requestEnvelope(_ envelope: IMV2Envelope,
+                         maximumMessageSendPayloadBytes: Int = V2MessageSendWireLimits.maximumPayloadBytes) async throws -> IMV2Envelope {
         var outbound = envelope
         let requestID = nextRequestID
         nextRequestID &+= 1
         if nextRequestID == 0 { nextRequestID = 1 }
         outbound.requestID = requestID
-        outbound.protocolVersion = UInt32(protocolVersion)
-        let response = try await wire.request(try V2ProtobufFrameCodec.encode(outbound, frameVersion: protocolVersion))
-        let decoded = try V2ProtobufFrameCodec.decode(response)
-        guard decoded.requestID == requestID, decoded.protocolVersion == UInt32(protocolVersion), response.version == protocolVersion else { throw V2RealtimeTransportError.unexpectedResponse }
+        let activeVersion = await wire.negotiatedProtocolVersion() ?? protocolVersion
+        outbound.protocolVersion = UInt32(activeVersion)
+        let response = try await wire.request(try V2ProtobufFrameCodec.encode(outbound, frameVersion: activeVersion,
+            maximumMessageSendUncompressedPayloadBytes: maximumMessageSendPayloadBytes))
+        let decoded = try V2ProtobufFrameCodec.decode(response,
+            maximumMessageSendUncompressedPayloadBytes: maximumMessageSendPayloadBytes)
+        guard decoded.requestID == requestID, decoded.protocolVersion == UInt32(activeVersion), response.version == activeVersion else { throw V2RealtimeTransportError.unexpectedResponse }
         return decoded
     }
 

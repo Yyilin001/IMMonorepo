@@ -914,7 +914,7 @@ struct V2AppRealtimeRuntime {
     ) throws {
         let frameLimits = try V2FrameLimits(
             maximumPayloadBytes: 65_536,
-            acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]
+            acceptedVersions: IMV2ProtocolVersion.supportedVersions.union([0])
         )
         let accountRuntime = V2AccountRuntime()
         self.accountRuntime = accountRuntime
@@ -930,8 +930,11 @@ struct V2AppRealtimeRuntime {
             transport: try V2RegisteredAccountHTTPTransport(executor: accountRuntime.httpExecutor,
                 allowedBases: [configuration.accountBaseURL, configuration.mediaEdgeEndpoint.deletingLastPathComponent().deletingLastPathComponent()],
                 scope: accountRuntime.queryScope(accountID: actorUserID.rawValue, authorizationDomain: "accountHTTP")), scheduler: accountRuntime.scheduler)
-        let messageSendOperations=V2MessageSendOperationService(accountID:actorUserID,store:localStore,
-            client:try V2HTTPMessageSendOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))
+        let messageHTTP = try V2HTTPMessageSendOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP)
+        let messageClient = V2RoutedMessageSendOperationClient(accountID: actorUserID,
+            realtime: V2ProtobufMessageSendOperationClient(transport: transport, connection: connection),
+            http: messageHTTP, mode: configuration.messageSendTransportMode)
+        let messageSendOperations=V2MessageSendOperationService(accountID:actorUserID,store:localStore,client:messageClient)
         self.messageSendOperations=messageSendOperations
         let socialOperations=V2SocialOperationService(accountID:actorUserID,store:localStore,
             client:try V2HTTPSocialOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP))

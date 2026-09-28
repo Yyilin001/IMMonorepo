@@ -175,8 +175,9 @@ public actor V2MessageSendOperationService {
                 guard hint.validates(identity:claim.work.identity,fingerprint:claim.work.fingerprint) else { throw V2OperationWorkError.identityConflict }
                 let now=Date(),policy=V2NetworkWorkPolicy.commandRecovery
                 let floor=now.addingTimeInterval(Double(hint.retryAfterMilliseconds ?? 0)/1_000)
-                let deadline=claim.work.reconciliationRoundDeadline ?? now.addingTimeInterval(policy.totalBudget)
-                let retry=policy.nextAttempt(now:now,startedAt:deadline.addingTimeInterval(-policy.totalBudget),attemptsCompleted:claim.work.reconciliationRoundAttempts,randomUnit:Double.random(in:0...1),serverRetryNotBefore:floor)
+                let deadline=(claim.action == .submit ? claim.work.submissionRoundDeadline : claim.work.reconciliationRoundDeadline) ?? now.addingTimeInterval(policy.totalBudget)
+                let attempts=claim.action == .submit ? claim.work.submissionRoundAttempts : claim.work.reconciliationRoundAttempts
+                let retry=policy.nextAttempt(now:now,startedAt:deadline.addingTimeInterval(-policy.totalBudget),attemptsCompleted:attempts,randomUnit:Double.random(in:0...1),serverRetryNotBefore:floor)
                 try await store.deferOperationWork(claim,until:max(retry ?? now,floor),code:hint.reason == .rateLimited ? "RATE_LIMITED" : "ADMISSION_UNAVAILABLE",scheduling:retry == nil ? .needsAttention : .backingOff)
             case .unresolved:
                 let next:V2OperationWorkAction=Date().timeIntervalSince1970*1_000<Double(command.firstSubmissionDeadlineMilliseconds) ? .submit : .reconcile
@@ -186,12 +187,38 @@ public actor V2MessageSendOperationService {
             try await store.deferOperationWork(claim,until:Date(),code:"MESSAGE_SEND_INTERRUPTED")
             throw CancellationError()
         } catch {
-            let now=Date(),failure=error as? V2HTTPFailure,policy=V2NetworkWorkPolicy.commandRecovery
-            let deadline=claim.work.reconciliationRoundDeadline ?? now.addingTimeInterval(policy.totalBudget)
-            let retry=policy.nextAttempt(now:now,startedAt:deadline.addingTimeInterval(-policy.totalBudget),attemptsCompleted:claim.work.reconciliationRoundAttempts,randomUnit:Double.random(in:0...1),serverRetryNotBefore:failure?.retryAfter)
+            let now=Date(),failure=error as? V2HTTPFailure,transportFailure=error as? V2MessageSendTransportError,policy=V2NetworkWorkPolicy.commandRecovery
+            let deadline=(claim.action == .submit ? claim.work.submissionRoundDeadline : claim.work.reconciliationRoundDeadline) ?? now.addingTimeInterval(policy.totalBudget)
+            let retryAfter: Date?
+            if case .retryAfter(let date) = transportFailure { retryAfter = date }
+            else { retryAfter = failure?.retryAfter }
+            let attempts = claim.action == .submit ? claim.work.submissionRoundAttempts : claim.work.reconciliationRoundAttempts
+            let retry=policy.nextAttempt(now:now,startedAt:deadline.addingTimeInterval(-policy.totalBudget),attemptsCompleted:attempts,randomUnit:Double.random(in:0...1),serverRetryNotBefore:retryAfter)
             let malformed=error is V2OperationWorkError || error is V2MessageOperationValidationError ||
-                (failure.map{[.invalidEndpoint,.invalidResponse,.responseTooLarge].contains($0.kind)} ?? false)
-            try await store.deferOperationWork(claim,until:max(retry ?? now,failure?.retryAfter ?? now),code:"MESSAGE_SEND_CONFIRMATION_REQUIRED",scheduling:malformed || retry == nil ? .needsAttention : .backingOff)
+                (failure.map{[.invalidEndpoint,.invalidResponse,.responseTooLarge].contains($0.kind)} ?? false) ||
+                transportFailure == .invalidResponse || transportFailure == .unsupportedCapability
+            let nextAction: V2OperationWorkAction
+            let scheduling: V2OperationSchedulingState
+            let code: String
+            switch transportFailure {
+            case .unavailableBeforeSubmission:
+                nextAction = claim.action == .submit ? .submit : .reconcile
+                scheduling = retry == nil ? .needsAttention : .backingOff
+                code = "MESSAGE_SEND_TRANSPORT_UNAVAILABLE"
+            case .authenticationRequired:
+                nextAction = claim.action
+                scheduling = .waitingForAuthentication
+                code = "MESSAGE_SEND_AUTHENTICATION_REQUIRED"
+            case .outcomeUnknown:
+                nextAction = .reconcile
+                scheduling = retry == nil ? .needsAttention : .backingOff
+                code = "MESSAGE_SEND_OUTCOME_UNKNOWN"
+            default:
+                nextAction = .reconcile
+                scheduling = malformed || retry == nil ? .needsAttention : .backingOff
+                code = "MESSAGE_SEND_CONFIRMATION_REQUIRED"
+            }
+            try await store.deferOperationWork(claim,until:max(retry ?? now,retryAfter ?? now),code:code,scheduling:scheduling,nextAction:nextAction)
             if error is DatabaseError { throw error }
         }
     }

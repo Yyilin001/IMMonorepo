@@ -334,6 +334,11 @@ public actor V2GatewayByteStream {
     ///
     /// 它同时为 handlerAdded/channelInactive 之间的竞态建立围栏。
     private var transportClosed = false
+    private let messageSendBudget: V2GatewayMessageSendBudget
+    private let maximumConcurrentMessageSends: Int
+    private let maximumConcurrentMessageSendBytes: Int
+    private var messageSendTasks: [UInt64: Task<Void, Never>] = [:]
+    private var messageSendReservedBytes = 0
 
     /// Registry/device shutdown can invalidate every selected connection before
     /// awaiting any actor or database cleanup.
@@ -349,8 +354,12 @@ public actor V2GatewayByteStream {
         connectionID: UUID = V2GatewayByteStream.makeConnectionID(),
         registry: V2DeviceConnectionRegistry,
         authorPresentationDispatcher: V2AuthorPresentationDispatcher? = nil,
-        authorPresentationIngress: V2AuthorPresentationIngress? = nil
+        authorPresentationIngress: V2AuthorPresentationIngress? = nil,
+        messageSendBudget: V2GatewayMessageSendBudget = .init(maximumBytes: 67_108_864),
+        maximumConcurrentMessageSends: Int = 4,
+        maximumConcurrentMessageSendBytes: Int = 4_194_304
     ) {
+        precondition(maximumConcurrentMessageSends > 0 && maximumConcurrentMessageSendBytes > 0)
         self.decoder = .init(limits: frameLimits)
         self.frameLimits = frameLimits
         self.session = session
@@ -359,6 +368,9 @@ public actor V2GatewayByteStream {
         self.registry = registry
         self.authorPresentationDispatcher = authorPresentationDispatcher
         self.authorPresentationIngress = authorPresentationIngress
+        self.messageSendBudget = messageSendBudget
+        self.maximumConcurrentMessageSends = maximumConcurrentMessageSends
+        self.maximumConcurrentMessageSendBytes = maximumConcurrentMessageSendBytes
     }
 
     /// 接收 TLS 流产生的任意分片。
@@ -412,6 +424,7 @@ public actor V2GatewayByteStream {
     func receiveFrames(
         _ bytes: Data,
         authenticationCompleted: (@Sendable () async -> Void)? = nil,
+        concurrentMessageSendRespond: (@Sendable (V2Frame) async throws -> Void)? = nil,
         respond: (V2Frame) async throws -> Void
     ) async throws -> Bool {
         do {
@@ -419,6 +432,52 @@ public actor V2GatewayByteStream {
             let inbound = try decoder.append(bytes)
             for frame in inbound {
                 guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
+                if let concurrentMessageSendRespond,
+                   frame.command == .messageSendOperation || frame.command == .messageSendOperationRecover {
+                    guard registeredIdentity != nil,
+                          await session.authenticatedIdentity() == registeredIdentity else {
+                        throw V2GatewaySessionError.unsupportedCommand
+                    }
+                    try await session.validateMessageSendDispatch(frame)
+                    guard messageSendTasks[frame.requestID] == nil else {
+                        throw V2GatewaySessionError.unsupportedCommand
+                    }
+                    let bytes = frame.flags.contains(.compressed)
+                        ? frameLimits.maximumMessageSendPayloadBytes : frame.payload.count
+                    let hasConnectionCapacity = messageSendTasks.count < maximumConcurrentMessageSends &&
+                        bytes <= maximumConcurrentMessageSendBytes - messageSendReservedBytes
+                    var hasProcessCapacity = false
+                    if hasConnectionCapacity { hasProcessCapacity = await messageSendBudget.reserve(bytes) }
+                    if !hasProcessCapacity {
+                        var busy = IMV2Envelope()
+                        busy.requestID = frame.requestID
+                        busy.protocolVersion = UInt32(frame.version)
+                        busy.error.code = "SERVER_BUSY"
+                        busy.error.retryable = true
+                        busy.error.retryAfterSeconds = 1
+                        try await respond(V2ServerProtobufFrameCodec.encode(busy, frameVersion: frame.version))
+                        continue
+                    }
+                    guard !transportClosed, registeredIdentity != nil,
+                          await session.authenticatedIdentity() == registeredIdentity else {
+                        await messageSendBudget.release(bytes)
+                        throw V2GatewaySessionError.unsupportedCommand
+                    }
+                    messageSendReservedBytes += bytes
+                    messageSendTasks[frame.requestID] = Task { [self] in
+                        do {
+                            let exchange = try await session.receive(
+                                frame, handler: handler, originatingConnectionID: connectionID)
+                            guard canRespondToMessageSend() else { throw CancellationError() }
+                            try V2FrameCodec.validateForEncoding(exchange.response, limits: frameLimits)
+                            try await concurrentMessageSendRespond(exchange.response)
+                        } catch {
+                            closeAfterMessageSendFailure()
+                        }
+                        await finishMessageSend(requestID: frame.requestID, bytes: bytes, budget: messageSendBudget)
+                    }
+                    continue
+                }
                 // Capture before the handler suspends. A late page must not
                 // become optional work for a replacement view of the same room.
                 let authorView = authorPresentationIngress == nil ? nil : authorPresentationView
@@ -430,7 +489,11 @@ public actor V2GatewayByteStream {
                 )
                 guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
                 let newlyAuthenticated = try await registerAuthenticatedDeviceIfNeeded()
-                if newlyAuthenticated { await authenticationCompleted?() }
+                if newlyAuthenticated {
+                    decoder.setAllowsLargeMessageSendFrames(
+                        await session.authenticatedMessageSendOperationsEnabled())
+                    await authenticationCompleted?()
+                }
                 guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
                 try await updateHybridGroupSubscription(
                     inbound: exchange.request,
@@ -460,6 +523,7 @@ public actor V2GatewayByteStream {
             // 重置解析器还可防止之后的接收再次抛出过期的分帧数据。
             decoder = .init(limits: frameLimits)
             beginClosing()
+            await drainMessageSends()
             await session.close()
             await unregisterAuthenticatedDevice()
             throw error
@@ -473,6 +537,7 @@ public actor V2GatewayByteStream {
     /// - Throws: 末尾存在不完整帧时抛出。
     public func finish() async throws {
         beginClosing()
+        await drainMessageSends()
         do {
             try decoder.finish()
             await session.close()
@@ -495,6 +560,7 @@ public actor V2GatewayByteStream {
         beginClosing()
         let task = Task {
             await session.revokeDevice()
+            await drainMessageSends()
             if let revocationHandler { await revocationHandler() }
             await unregisterAuthenticatedDevice()
         }
@@ -730,6 +796,7 @@ public actor V2GatewayByteStream {
         let close = requiredNotificationClose
         beginClosing()
         if let close { await close() }
+        await drainMessageSends()
         await session.close()
         await unregisterAuthenticatedDevice()
     }
@@ -737,6 +804,30 @@ public actor V2GatewayByteStream {
     private func beginClosing() {
         invalidateForegroundAuthorization()
         detachTransport()
+        for task in messageSendTasks.values { task.cancel() }
+    }
+
+    private func canRespondToMessageSend() -> Bool {
+        !transportClosed && registeredIdentity != nil && !Task.isCancelled
+    }
+
+    private func closeAfterMessageSendFailure() {
+        guard !transportClosed else { return }
+        let close = requiredNotificationClose
+        beginClosing()
+        if let close { Task { await close() } }
+    }
+
+    private func finishMessageSend(requestID: UInt64, bytes: Int, budget: V2GatewayMessageSendBudget) async {
+        messageSendTasks.removeValue(forKey: requestID)
+        messageSendReservedBytes -= bytes
+        await budget.release(bytes)
+    }
+
+    private func drainMessageSends() async {
+        let tasks = Array(messageSendTasks.values)
+        for task in tasks { task.cancel() }
+        for task in tasks { await task.value }
     }
 
     private func detachTransport() {

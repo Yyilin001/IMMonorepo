@@ -227,6 +227,9 @@ public actor V2GatewaySession {
     /// 握手中可选绑定的设备，认证时若存在则必须匹配。
     private var helloDeviceID: DeviceID?
     private let supportsAuthorPresentationDelta: Bool
+    private let messageSendOperationsEnabled: Bool
+    private let maximumMessageSendPayloadBytes: Int
+    private var negotiatedMessageSendOperations = false
     private var authorPresentationStreamID: UUID?
 
     /// 创建尚未握手的 Gateway 会话，不在初始化时执行认证或网络操作。
@@ -259,6 +262,8 @@ public actor V2GatewaySession {
         maximumCompressionExpansionRatio: Int = V2ZlibFrameCompression.defaultMaximumExpansionRatio,
         preparedGroupEventPageCache: V2PreparedGroupEventPageCache? = nil,
         supportsAuthorPresentationDelta: Bool = false,
+        messageSendOperationsEnabled: Bool = true,
+        maximumMessageSendPayloadBytes: Int = V2MessageSendWireLimits.maximumPayloadBytes,
         commandAdmission: any V2AuthenticatedGatewayCommandAdmitting,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
@@ -278,6 +283,9 @@ public actor V2GatewaySession {
         self.preparedGroupEventPageCache = preparedGroupEventPageCache
         self.commandAdmission = commandAdmission
         self.supportsAuthorPresentationDelta = supportsAuthorPresentationDelta
+        precondition(maximumMessageSendPayloadBytes > 0 && maximumMessageSendPayloadBytes <= Int(UInt32.max))
+        self.messageSendOperationsEnabled = messageSendOperationsEnabled
+        self.maximumMessageSendPayloadBytes = maximumMessageSendPayloadBytes
         self.now = now
     }
 
@@ -353,6 +361,7 @@ public actor V2GatewaySession {
             }
             helloDeviceID = deviceID
             let selected = try state.receiveClientHello(frame, clientSupportedVersions: versions, serverSupportedVersions: supportedVersions)
+            negotiatedMessageSendOperations = selected >= 45 && messageSendOperationsEnabled && hello.supportsMessageSendOperations
             if supportedFrameCompression == .zlib,
                hello.supportedFrameCompressions.contains(.zlib) {
                 negotiatedFrameCompression = .zlib
@@ -367,6 +376,8 @@ public actor V2GatewaySession {
             response.serverHello.selectedCapabilityProfile = capabilityProfile
             response.serverHello.serverTimeMs = clock.milliseconds
             response.serverHello.selectedFrameCompression = negotiatedFrameCompression == .zlib ? .zlib : .unspecified
+            response.serverHello.supportsMessageSendOperations = negotiatedMessageSendOperations
+            response.serverHello.maximumMessageSendPayloadBytes = negotiatedMessageSendOperations ? UInt32(maximumMessageSendPayloadBytes) : 0
             if selected >= 31, supportsAuthorPresentationDelta, hello.supportsAuthorPresentationDelta,
                helloDeviceID?.uuidValue != nil {
                 authorPresentationStreamID = UUID()
@@ -426,6 +437,8 @@ public actor V2GatewaySession {
             response.authenticated.deviceID = deviceID.rawValue
             response.authenticated.selectedCapabilityProfile = capabilityProfile
             response.authenticated.selectedFrameCompression = negotiatedFrameCompression == .zlib ? .zlib : .unspecified
+            response.authenticated.supportsMessageSendOperations = negotiatedMessageSendOperations
+            response.authenticated.maximumMessageSendPayloadBytes = negotiatedMessageSendOperations ? UInt32(maximumMessageSendPayloadBytes) : 0
             response.authenticated.authorPresentationStreamID = authorPresentationStreamID?.uuidString ?? ""
             return try .init(
                 envelope: response,
@@ -440,6 +453,34 @@ public actor V2GatewaySession {
     /// 当前状态允许时返回已认证连接身份；尚未认证或连接终止时为 nil。
     public func authenticatedIdentity() -> V2AuthenticatedConnection? {
         currentAuthenticatedConnection()?.identity
+    }
+
+    func authenticatedMessageSendOperationsEnabled() -> Bool {
+        negotiatedMessageSendOperations && currentAuthenticatedConnection() != nil
+    }
+
+    /// Validate a send before the connection owner reserves a concurrent slot.
+    /// Over-capacity requests still have to satisfy authentication and wire shape.
+    func validateMessageSendDispatch(_ frame: V2Frame) throws {
+        guard terminalGate.isActive(),
+              case .authenticated(let version, _) = state.phase,
+              version >= 45, frame.version == version,
+              negotiatedMessageSendOperations,
+              frame.requestID != 0,
+              frame.payload.count <= maximumMessageSendPayloadBytes,
+              authenticatedSessionExpiresAt.map({ $0 > now() }) ?? true else {
+            throw V2GatewaySessionError.unsupportedCommand
+        }
+        let envelope = try decode(frame)
+        guard envelope.requestID == frame.requestID,
+              envelope.protocolVersion == UInt32(version) else {
+            throw V2GatewaySessionError.unsupportedCommand
+        }
+        switch (frame.command, envelope.body) {
+        case (.messageSendOperation, .messageSendOperation),
+             (.messageSendOperationRecover, .messageSendOperationRecover): break
+        default: throw V2GatewaySessionError.unsupportedCommand
+        }
     }
 
     /// 返回当前有效认证连接的协议版本；未认证、到期、终止或服务器时钟无效时返回 `nil`。
@@ -552,6 +593,12 @@ public actor V2GatewaySession {
         }
         guard frame.command != .authorPresentationDelta, frame.command != .authorPresentationEnded else {
             throw V2GatewaySessionError.unsupportedCommand
+        }
+        if frame.command == .messageSendOperation || frame.command == .messageSendOperationRecover {
+            guard version >= 45, negotiatedMessageSendOperations,
+                  frame.payload.count <= maximumMessageSendPayloadBytes else {
+                throw V2GatewaySessionError.unsupportedCommand
+            }
         }
         if case .authorPresentationEnd(let request) = envelope.body {
             guard let streamID = authorPresentationStreamID, UUID(uuidString: request.streamID) == streamID,
@@ -721,11 +768,12 @@ public actor V2GatewaySession {
 
     /// 使用当前协商压缩、protobuf 深度与解压预算解码完整帧；传播载荷或资源限制错误。
     private func decode(_ frame: V2Frame) throws -> IMV2Envelope {
-        try V2ServerProtobufFrameCodec.decode(
+        return try V2ServerProtobufFrameCodec.decode(
             frame,
             maximumMessageDepth: maximumProtobufMessageDepth,
             compression: negotiatedFrameCompression,
             maximumUncompressedPayloadBytes: maximumUncompressedPayloadBytes,
+            maximumMessageSendUncompressedPayloadBytes: maximumMessageSendPayloadBytes,
             maximumExpansionRatio: maximumCompressionExpansionRatio
         )
     }

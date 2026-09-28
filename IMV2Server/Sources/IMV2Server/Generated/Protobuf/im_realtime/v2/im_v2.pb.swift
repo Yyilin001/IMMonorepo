@@ -548,6 +548,30 @@ public nonisolated struct IMV2Envelope: Sendable {
 
   public var body: IMV2Envelope.OneOf_Body? = nil
 
+  public var messageSendOperation: IMV2MessageSendOperation {
+    get {
+      if case .messageSendOperation(let v)? = body {return v}
+      return IMV2MessageSendOperation()
+    }
+    set {body = .messageSendOperation(newValue)}
+  }
+
+  public var messageSendOperationRecover: IMV2MessageSendOperationRecover {
+    get {
+      if case .messageSendOperationRecover(let v)? = body {return v}
+      return IMV2MessageSendOperationRecover()
+    }
+    set {body = .messageSendOperationRecover(newValue)}
+  }
+
+  public var messageSendOperationResult: IMV2MessageSendOperationResult {
+    get {
+      if case .messageSendOperationResult(let v)? = body {return v}
+      return IMV2MessageSendOperationResult()
+    }
+    set {body = .messageSendOperationResult(newValue)}
+  }
+
   public var presencePublicationControl: IMV2PresencePublicationControl {
     get {
       if case .presencePublicationControl(let v)? = body {return v}
@@ -1188,6 +1212,9 @@ public nonisolated struct IMV2Envelope: Sendable {
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public nonisolated enum OneOf_Body: Equatable, Sendable {
+    case messageSendOperation(IMV2MessageSendOperation)
+    case messageSendOperationRecover(IMV2MessageSendOperationRecover)
+    case messageSendOperationResult(IMV2MessageSendOperationResult)
     case presencePublicationControl(IMV2PresencePublicationControl)
     case presencePublicationControlled(IMV2PresencePublicationControlled)
     case clientHello(IMV2ClientHello)
@@ -1715,6 +1742,8 @@ public nonisolated struct IMV2ClientHello: Sendable {
 
   public var supportsAuthorPresentationDelta: Bool = false
 
+  public var supportsMessageSendOperations: Bool = false
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1735,6 +1764,10 @@ public nonisolated struct IMV2ServerHello: Sendable {
 
   /// Empty unless explicitly negotiated; repeated exactly by Authenticated.
   public var authorPresentationStreamID: String = String()
+
+  public var supportsMessageSendOperations: Bool = false
+
+  public var maximumMessageSendPayloadBytes: UInt32 = 0
 
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
@@ -1773,7 +1806,513 @@ public nonisolated struct IMV2Authenticated: Sendable {
   /// Empty unless explicitly negotiated; repeated exactly by Authenticated.
   public var authorPresentationStreamID: String = String()
 
+  public var supportsMessageSendOperations: Bool = false
+
+  public var maximumMessageSendPayloadBytes: UInt32 = 0
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+/// v45 full send operation. Identity and both fingerprints are derived from
+/// these exact typed fields, never from protobuf serialization bytes.
+public nonisolated struct IMV2MessageSendOperation: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var roomID: String = String()
+
+  public var senderUserID: String = String()
+
+  public var clientMessageID: String = String()
+
+  public var text: String = String()
+
+  public var mediaIds: [String] = []
+
+  public var mentions: [IMV2MessageSendMention] = []
+
+  public var entities: [IMV2MessageSendEntity] = []
+
+  public var replyToMessageID: String {
+    get {_replyToMessageID ?? String()}
+    set {_replyToMessageID = newValue}
+  }
+  /// Returns true if `replyToMessageID` has been explicitly set.
+  public var hasReplyToMessageID: Bool {self._replyToMessageID != nil}
+  /// Clears the value of `replyToMessageID`. Subsequent reads from it will return its default value.
+  public mutating func clearReplyToMessageID() {self._replyToMessageID = nil}
+
+  public var firstSubmissionDeadlineMs: UInt64 = 0
+
+  public var domainFingerprintVersion: UInt32 = 0
+
+  public var domainFingerprint: Data = Data()
+
+  public var fingerprintVersion: UInt32 = 0
+
+  public var fingerprint: Data = Data()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _replyToMessageID: String? = nil
+}
+
+public nonisolated struct IMV2MessageSendMention: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var target: IMV2MessageSendMention.OneOf_Target? = nil
+
+  public var userID: String {
+    get {
+      if case .userID(let v)? = target {return v}
+      return String()
+    }
+    set {target = .userID(newValue)}
+  }
+
+  /// must be true
+  public var everyone: Bool {
+    get {
+      if case .everyone(let v)? = target {return v}
+      return false
+    }
+    set {target = .everyone(newValue)}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public nonisolated enum OneOf_Target: Equatable, Sendable {
+    case userID(String)
+    /// must be true
+    case everyone(Bool)
+
+  }
+
+  public init() {}
+}
+
+public nonisolated struct IMV2MessageSendEntity: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var offsetUtf16: UInt32 = 0
+
+  public var lengthUtf16: UInt32 = 0
+
+  public var kind: String = String()
+
+  public var linkURL: String {
+    get {_linkURL ?? String()}
+    set {_linkURL = newValue}
+  }
+  /// Returns true if `linkURL` has been explicitly set.
+  public var hasLinkURL: Bool {self._linkURL != nil}
+  /// Clears the value of `linkURL`. Subsequent reads from it will return its default value.
+  public mutating func clearLinkURL() {self._linkURL = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+
+  fileprivate var _linkURL: String? = nil
+}
+
+public nonisolated struct IMV2MessageSendOperationIdentity: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var accountID: String = String()
+
+  public var roomID: String = String()
+
+  public var operationID: String = String()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct IMV2MessageSendOperationFingerprint: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var version: UInt32 = 0
+
+  public var digest: Data = Data()
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct IMV2MessageSendOperationRecover: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var identity: IMV2MessageSendOperationIdentity {
+    get {_identity ?? IMV2MessageSendOperationIdentity()}
+    set {_identity = newValue}
+  }
+  /// Returns true if `identity` has been explicitly set.
+  public var hasIdentity: Bool {self._identity != nil}
+  /// Clears the value of `identity`. Subsequent reads from it will return its default value.
+  public mutating func clearIdentity() {self._identity = nil}
+
+  public var fingerprint: IMV2MessageSendOperationFingerprint {
+    get {_fingerprint ?? IMV2MessageSendOperationFingerprint()}
+    set {_fingerprint = newValue}
+  }
+  /// Returns true if `fingerprint` has been explicitly set.
+  public var hasFingerprint: Bool {self._fingerprint != nil}
+  /// Clears the value of `fingerprint`. Subsequent reads from it will return its default value.
+  public mutating func clearFingerprint() {self._fingerprint = nil}
+
+  public var domainFingerprint: IMV2MessageSendOperationFingerprint {
+    get {_domainFingerprint ?? IMV2MessageSendOperationFingerprint()}
+    set {_domainFingerprint = newValue}
+  }
+  /// Returns true if `domainFingerprint` has been explicitly set.
+  public var hasDomainFingerprint: Bool {self._domainFingerprint != nil}
+  /// Clears the value of `domainFingerprint`. Subsequent reads from it will return its default value.
+  public mutating func clearDomainFingerprint() {self._domainFingerprint = nil}
+
+  public var action: IMV2MessageSendOperationRecover.Action = .unspecified
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public nonisolated enum Action: SwiftProtobuf.Enum, Swift.CaseIterable {
+    public typealias RawValue = Int
+    case unspecified // = 0
+    case query // = 1
+    case closeIfAbsent // = 2
+    case UNRECOGNIZED(Int)
+
+    public init() {
+      self = .unspecified
+    }
+
+    public init?(rawValue: Int) {
+      switch rawValue {
+      case 0: self = .unspecified
+      case 1: self = .query
+      case 2: self = .closeIfAbsent
+      default: self = .UNRECOGNIZED(rawValue)
+      }
+    }
+
+    public var rawValue: Int {
+      switch self {
+      case .unspecified: return 0
+      case .query: return 1
+      case .closeIfAbsent: return 2
+      case .UNRECOGNIZED(let i): return i
+      }
+    }
+
+    // The compiler won't synthesize support with the UNRECOGNIZED case.
+    public static let allCases: [IMV2MessageSendOperationRecover.Action] = [
+      .unspecified,
+      .query,
+      .closeIfAbsent,
+    ]
+
+  }
+
+  public init() {}
+
+  fileprivate var _identity: IMV2MessageSendOperationIdentity? = nil
+  fileprivate var _fingerprint: IMV2MessageSendOperationFingerprint? = nil
+  fileprivate var _domainFingerprint: IMV2MessageSendOperationFingerprint? = nil
+}
+
+public nonisolated struct IMV2MessageSendOperationAcceptance: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var messageID: String = String()
+
+  public var roomSequence: UInt64 = 0
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public init() {}
+}
+
+public nonisolated struct IMV2MessageSendOperationRejection: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var reason: IMV2MessageSendOperationRejection.Reason = .unspecified
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public nonisolated enum Reason: SwiftProtobuf.Enum, Swift.CaseIterable {
+    public typealias RawValue = Int
+    case unspecified // = 0
+    case expiredUnsubmitted // = 1
+    case permissionDenied // = 2
+    case roomNotFound // = 3
+    case invalidContent // = 4
+    case directPolicyDenied // = 5
+    case UNRECOGNIZED(Int)
+
+    public init() {
+      self = .unspecified
+    }
+
+    public init?(rawValue: Int) {
+      switch rawValue {
+      case 0: self = .unspecified
+      case 1: self = .expiredUnsubmitted
+      case 2: self = .permissionDenied
+      case 3: self = .roomNotFound
+      case 4: self = .invalidContent
+      case 5: self = .directPolicyDenied
+      default: self = .UNRECOGNIZED(rawValue)
+      }
+    }
+
+    public var rawValue: Int {
+      switch self {
+      case .unspecified: return 0
+      case .expiredUnsubmitted: return 1
+      case .permissionDenied: return 2
+      case .roomNotFound: return 3
+      case .invalidContent: return 4
+      case .directPolicyDenied: return 5
+      case .UNRECOGNIZED(let i): return i
+      }
+    }
+
+    // The compiler won't synthesize support with the UNRECOGNIZED case.
+    public static let allCases: [IMV2MessageSendOperationRejection.Reason] = [
+      .unspecified,
+      .expiredUnsubmitted,
+      .permissionDenied,
+      .roomNotFound,
+      .invalidContent,
+      .directPolicyDenied,
+    ]
+
+  }
+
+  public init() {}
+}
+
+public nonisolated struct IMV2MessageSendOperationReceipt: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var identity: IMV2MessageSendOperationIdentity {
+    get {_identity ?? IMV2MessageSendOperationIdentity()}
+    set {_identity = newValue}
+  }
+  /// Returns true if `identity` has been explicitly set.
+  public var hasIdentity: Bool {self._identity != nil}
+  /// Clears the value of `identity`. Subsequent reads from it will return its default value.
+  public mutating func clearIdentity() {self._identity = nil}
+
+  public var fingerprint: IMV2MessageSendOperationFingerprint {
+    get {_fingerprint ?? IMV2MessageSendOperationFingerprint()}
+    set {_fingerprint = newValue}
+  }
+  /// Returns true if `fingerprint` has been explicitly set.
+  public var hasFingerprint: Bool {self._fingerprint != nil}
+  /// Clears the value of `fingerprint`. Subsequent reads from it will return its default value.
+  public mutating func clearFingerprint() {self._fingerprint = nil}
+
+  public var resolvedAtMs: UInt64 = 0
+
+  public var outcome: IMV2MessageSendOperationReceipt.OneOf_Outcome? = nil
+
+  public var accepted: IMV2MessageSendOperationAcceptance {
+    get {
+      if case .accepted(let v)? = outcome {return v}
+      return IMV2MessageSendOperationAcceptance()
+    }
+    set {outcome = .accepted(newValue)}
+  }
+
+  public var rejected: IMV2MessageSendOperationRejection {
+    get {
+      if case .rejected(let v)? = outcome {return v}
+      return IMV2MessageSendOperationRejection()
+    }
+    set {outcome = .rejected(newValue)}
+  }
+
+  /// must be true
+  public var closed: Bool {
+    get {
+      if case .closed(let v)? = outcome {return v}
+      return false
+    }
+    set {outcome = .closed(newValue)}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public nonisolated enum OneOf_Outcome: Equatable, Sendable {
+    case accepted(IMV2MessageSendOperationAcceptance)
+    case rejected(IMV2MessageSendOperationRejection)
+    /// must be true
+    case closed(Bool)
+
+  }
+
+  public init() {}
+
+  fileprivate var _identity: IMV2MessageSendOperationIdentity? = nil
+  fileprivate var _fingerprint: IMV2MessageSendOperationFingerprint? = nil
+}
+
+public nonisolated struct IMV2MessageSendOperationRetryHint: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var identity: IMV2MessageSendOperationIdentity {
+    get {_identity ?? IMV2MessageSendOperationIdentity()}
+    set {_identity = newValue}
+  }
+  /// Returns true if `identity` has been explicitly set.
+  public var hasIdentity: Bool {self._identity != nil}
+  /// Clears the value of `identity`. Subsequent reads from it will return its default value.
+  public mutating func clearIdentity() {self._identity = nil}
+
+  public var fingerprint: IMV2MessageSendOperationFingerprint {
+    get {_fingerprint ?? IMV2MessageSendOperationFingerprint()}
+    set {_fingerprint = newValue}
+  }
+  /// Returns true if `fingerprint` has been explicitly set.
+  public var hasFingerprint: Bool {self._fingerprint != nil}
+  /// Clears the value of `fingerprint`. Subsequent reads from it will return its default value.
+  public mutating func clearFingerprint() {self._fingerprint = nil}
+
+  public var reason: IMV2MessageSendOperationRetryHint.Reason = .unspecified
+
+  public var retryAfterMs: UInt64 {
+    get {_retryAfterMs ?? 0}
+    set {_retryAfterMs = newValue}
+  }
+  /// Returns true if `retryAfterMs` has been explicitly set.
+  public var hasRetryAfterMs: Bool {self._retryAfterMs != nil}
+  /// Clears the value of `retryAfterMs`. Subsequent reads from it will return its default value.
+  public mutating func clearRetryAfterMs() {self._retryAfterMs = nil}
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public nonisolated enum Reason: SwiftProtobuf.Enum, Swift.CaseIterable {
+    public typealias RawValue = Int
+    case unspecified // = 0
+    case rateLimited // = 1
+    case admissionUnavailable // = 2
+    case UNRECOGNIZED(Int)
+
+    public init() {
+      self = .unspecified
+    }
+
+    public init?(rawValue: Int) {
+      switch rawValue {
+      case 0: self = .unspecified
+      case 1: self = .rateLimited
+      case 2: self = .admissionUnavailable
+      default: self = .UNRECOGNIZED(rawValue)
+      }
+    }
+
+    public var rawValue: Int {
+      switch self {
+      case .unspecified: return 0
+      case .rateLimited: return 1
+      case .admissionUnavailable: return 2
+      case .UNRECOGNIZED(let i): return i
+      }
+    }
+
+    // The compiler won't synthesize support with the UNRECOGNIZED case.
+    public static let allCases: [IMV2MessageSendOperationRetryHint.Reason] = [
+      .unspecified,
+      .rateLimited,
+      .admissionUnavailable,
+    ]
+
+  }
+
+  public init() {}
+
+  fileprivate var _identity: IMV2MessageSendOperationIdentity? = nil
+  fileprivate var _fingerprint: IMV2MessageSendOperationFingerprint? = nil
+  fileprivate var _retryAfterMs: UInt64? = nil
+}
+
+public nonisolated struct IMV2MessageSendOperationResult: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  public var result: IMV2MessageSendOperationResult.OneOf_Result? = nil
+
+  public var deferred: IMV2MessageSendOperationRetryHint {
+    get {
+      if case .deferred(let v)? = result {return v}
+      return IMV2MessageSendOperationRetryHint()
+    }
+    set {result = .deferred(newValue)}
+  }
+
+  public var receipt: IMV2MessageSendOperationReceipt {
+    get {
+      if case .receipt(let v)? = result {return v}
+      return IMV2MessageSendOperationReceipt()
+    }
+    set {result = .receipt(newValue)}
+  }
+
+  /// must be true
+  public var unresolved: Bool {
+    get {
+      if case .unresolved(let v)? = result {return v}
+      return false
+    }
+    set {result = .unresolved(newValue)}
+  }
+
+  /// must be true
+  public var fingerprintConflict: Bool {
+    get {
+      if case .fingerprintConflict(let v)? = result {return v}
+      return false
+    }
+    set {result = .fingerprintConflict(newValue)}
+  }
+
+  public var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  public nonisolated enum OneOf_Result: Equatable, Sendable {
+    case deferred(IMV2MessageSendOperationRetryHint)
+    case receipt(IMV2MessageSendOperationReceipt)
+    /// must be true
+    case unresolved(Bool)
+    /// must be true
+    case fingerprintConflict(Bool)
+
+  }
 
   public init() {}
 }
@@ -3343,7 +3882,7 @@ nonisolated extension IMV2UserBlockAction: SwiftProtobuf._ProtoNameProviding {
 
 nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Envelope"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}protocol_version\0\u{4}\u{8}client_hello\0\u{3}server_hello\0\u{1}authenticate\0\u{1}authenticated\0\u{1}heartbeat\0\u{3}heartbeat_ack\0\u{4}\u{6}message_accepted\0\u{4}\u{2}membership_changed\0\u{4}\u{2}message_withdrawn\0\u{4}\u{2}message_reaction_changed\0\u{4}\u{2}message_edited\0\u{3}sync_pull\0\u{3}sync_batch\0\u{3}sync_ack\0\u{3}reset_required\0\u{3}snapshot_ack\0\u{1}acknowledged\0\u{3}sync_snapshot\0\u{3}snapshot_manifest\0\u{3}snapshot_page_pull\0\u{3}snapshot_page\0\u{3}sync_available\0\u{3}record_read_receipt\0\u{3}read_receipt_recorded\0\u{4}\u{4}stranger_message_permission_set\0\u{4}\u{2}relationship_changed\0\u{4}\u{2}user_block_changed\0\u{4}\u{4}member_muted\0\u{4}\u{2}member_removed_by_moderator\0\u{4}\u{3}list_room_members\0\u{3}room_members_page\0\u{3}group_event_pull\0\u{3}group_event_page\0\u{3}group_event_subscribe\0\u{3}group_event_subscribed\0\u{3}group_event_unsubscribe\0\u{3}group_event_available\0\u{4}\u{9}user_add_permission_set\0\u{4}\u{2}read_receipt_preferences_set\0\u{3}list_read_receipt_readers\0\u{3}read_receipt_readers_page\0\u{4}\u{2}live_activity_preferences_set\0\u{3}subscribe_presence\0\u{3}presence_subscribed\0\u{3}unsubscribe_presence\0\u{3}subscribe_typing\0\u{3}unsubscribe_typing\0\u{3}set_typing_state\0\u{3}typing_state_changed\0\u{3}presence_changed\0\u{1}error\0\u{3}get_live_activity_preferences\0\u{3}live_activity_preferences\0\u{3}set_conversation_state\0\u{3}conversation_state_set\0\u{3}set_message_favorite\0\u{3}message_favorite_changed\0\u{4}\u{2}pinned_message_changed\0\u{4}\u{2}group_announcement_changed\0\u{4}\u{2}group_role_permissions_changed\0\u{4}\u{2}group_member_role_changed\0\u{4}\u{3}get_group_role_policy_baseline\0\u{3}group_role_policy_baseline\0\u{4}\u{3}user_room_directory_list\0\u{3}user_room_directory_page\0\u{3}room_sync_state_batch\0\u{3}room_sync_state_batch_result\0\u{3}account_room_changes_start\0\u{3}account_room_changes_ready\0\u{3}account_room_changed\0\u{3}account_room_resync_required\0\u{3}room_latest_visible_batch\0\u{3}room_latest_visible_batch_result\0\u{3}author_presentation_delta\0\u{3}author_presentation_end\0\u{3}author_presentation_ended\0\u{3}personal_preference_receipt\0\u{3}presence_publication_control\0\u{3}presence_publication_controlled\0\u{b}begin_group_room_creation\0\u{b}append_group_room_creation_members\0\u{b}finalize_group_room_creation\0\u{b}cancel_group_room_creation\0\u{b}group_room_created\0\u{b}group_room_creation_prepared\0\u{b}group_room_creation_members_appended\0\u{b}group_room_creation_cancelled\0\u{b}set_stranger_message_permission\0\u{b}change_relationship\0\u{b}change_user_block\0\u{b}set_user_add_permission\0\u{b}set_read_receipt_preferences\0\u{b}set_live_activity_preferences\0\u{b}change_room_membership\0\u{b}mute_member\0\u{b}moderate_member_removal\0\u{b}set_pinned_message\0\u{b}set_group_announcement\0\u{b}set_group_role_permissions\0\u{b}change_group_member_role\0\u{b}open_direct_room\0\u{b}direct_room_opened\0\u{b}moderate_message\0\u{b}message_redacted\0\u{b}send_message\0\u{b}withdraw_message\0\u{b}change_message_reaction\0\u{b}edit_message\0\u{b}forward_messages\0\u{b}messages_forwarded\0\u{c}\u{16}\u{1}\u{c}-\u{1}\u{c}/\u{1}\u{c}1\u{1}\u{c}5\u{1}\u{c}7\u{1}\u{c}:\u{1}\u{c}C\u{1}\u{1}\u{c}D\u{1}\u{1}\u{c}E\u{1}\u{1}\u{c}F\u{1}\u{1}\u{c}G\u{1}\u{1}\u{c}H\u{1}\u{1}\u{c}I\u{1}\u{1}\u{c}J\u{1}\u{1}\u{c}L\u{1}\u{1}\u{c}P\u{1}\u{1}\u{c}a\u{1}\u{1}\u{c}c\u{1}\u{1}\u{c}e\u{1}\u{1}\u{c}g\u{1}\u{1}\u{c}+\u{1}\u{c},\u{1}\u{c}3\u{1}\u{c}4\u{1}\u{c}\u{14}\u{1}\u{c}\u{18}\u{1}\u{c}\u{1a}\u{1}\u{c}\u{1c}\u{1}\u{c}i\u{1}\u{1}\u{c}j\u{1}\u{1}")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{3}protocol_version\0\u{4}\u{8}client_hello\0\u{3}server_hello\0\u{1}authenticate\0\u{1}authenticated\0\u{1}heartbeat\0\u{3}heartbeat_ack\0\u{4}\u{6}message_accepted\0\u{4}\u{2}membership_changed\0\u{4}\u{2}message_withdrawn\0\u{4}\u{2}message_reaction_changed\0\u{4}\u{2}message_edited\0\u{3}sync_pull\0\u{3}sync_batch\0\u{3}sync_ack\0\u{3}reset_required\0\u{3}snapshot_ack\0\u{1}acknowledged\0\u{3}sync_snapshot\0\u{3}snapshot_manifest\0\u{3}snapshot_page_pull\0\u{3}snapshot_page\0\u{3}sync_available\0\u{3}record_read_receipt\0\u{3}read_receipt_recorded\0\u{4}\u{4}stranger_message_permission_set\0\u{4}\u{2}relationship_changed\0\u{4}\u{2}user_block_changed\0\u{4}\u{4}member_muted\0\u{4}\u{2}member_removed_by_moderator\0\u{4}\u{3}list_room_members\0\u{3}room_members_page\0\u{3}group_event_pull\0\u{3}group_event_page\0\u{3}group_event_subscribe\0\u{3}group_event_subscribed\0\u{3}group_event_unsubscribe\0\u{3}group_event_available\0\u{4}\u{9}user_add_permission_set\0\u{4}\u{2}read_receipt_preferences_set\0\u{3}list_read_receipt_readers\0\u{3}read_receipt_readers_page\0\u{4}\u{2}live_activity_preferences_set\0\u{3}subscribe_presence\0\u{3}presence_subscribed\0\u{3}unsubscribe_presence\0\u{3}subscribe_typing\0\u{3}unsubscribe_typing\0\u{3}set_typing_state\0\u{3}typing_state_changed\0\u{3}presence_changed\0\u{1}error\0\u{3}get_live_activity_preferences\0\u{3}live_activity_preferences\0\u{3}set_conversation_state\0\u{3}conversation_state_set\0\u{3}set_message_favorite\0\u{3}message_favorite_changed\0\u{4}\u{2}pinned_message_changed\0\u{4}\u{2}group_announcement_changed\0\u{4}\u{2}group_role_permissions_changed\0\u{4}\u{2}group_member_role_changed\0\u{4}\u{3}get_group_role_policy_baseline\0\u{3}group_role_policy_baseline\0\u{4}\u{3}user_room_directory_list\0\u{3}user_room_directory_page\0\u{3}room_sync_state_batch\0\u{3}room_sync_state_batch_result\0\u{3}account_room_changes_start\0\u{3}account_room_changes_ready\0\u{3}account_room_changed\0\u{3}account_room_resync_required\0\u{3}room_latest_visible_batch\0\u{3}room_latest_visible_batch_result\0\u{3}author_presentation_delta\0\u{3}author_presentation_end\0\u{3}author_presentation_ended\0\u{3}personal_preference_receipt\0\u{3}presence_publication_control\0\u{3}presence_publication_controlled\0\u{3}message_send_operation\0\u{3}message_send_operation_recover\0\u{3}message_send_operation_result\0\u{b}begin_group_room_creation\0\u{b}append_group_room_creation_members\0\u{b}finalize_group_room_creation\0\u{b}cancel_group_room_creation\0\u{b}group_room_created\0\u{b}group_room_creation_prepared\0\u{b}group_room_creation_members_appended\0\u{b}group_room_creation_cancelled\0\u{b}set_stranger_message_permission\0\u{b}change_relationship\0\u{b}change_user_block\0\u{b}set_user_add_permission\0\u{b}set_read_receipt_preferences\0\u{b}set_live_activity_preferences\0\u{b}change_room_membership\0\u{b}mute_member\0\u{b}moderate_member_removal\0\u{b}set_pinned_message\0\u{b}set_group_announcement\0\u{b}set_group_role_permissions\0\u{b}change_group_member_role\0\u{b}open_direct_room\0\u{b}direct_room_opened\0\u{b}moderate_message\0\u{b}message_redacted\0\u{b}send_message\0\u{b}withdraw_message\0\u{b}change_message_reaction\0\u{b}edit_message\0\u{b}forward_messages\0\u{b}messages_forwarded\0\u{c}\u{16}\u{1}\u{c}-\u{1}\u{c}/\u{1}\u{c}1\u{1}\u{c}5\u{1}\u{c}7\u{1}\u{c}:\u{1}\u{c}C\u{1}\u{1}\u{c}D\u{1}\u{1}\u{c}E\u{1}\u{1}\u{c}F\u{1}\u{1}\u{c}G\u{1}\u{1}\u{c}H\u{1}\u{1}\u{c}I\u{1}\u{1}\u{c}J\u{1}\u{1}\u{c}L\u{1}\u{1}\u{c}P\u{1}\u{1}\u{c}a\u{1}\u{1}\u{c}c\u{1}\u{1}\u{c}e\u{1}\u{1}\u{c}g\u{1}\u{1}\u{c}+\u{1}\u{c},\u{1}\u{c}3\u{1}\u{c}4\u{1}\u{c}\u{14}\u{1}\u{c}\u{18}\u{1}\u{c}\u{1a}\u{1}\u{c}\u{1c}\u{1}\u{c}i\u{1}\u{1}\u{c}j\u{1}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -4380,6 +4919,45 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
           self.body = .presencePublicationControlled(v)
         }
       }()
+      case 127: try {
+        var v: IMV2MessageSendOperation?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .messageSendOperation(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .messageSendOperation(v)
+        }
+      }()
+      case 128: try {
+        var v: IMV2MessageSendOperationRecover?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .messageSendOperationRecover(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .messageSendOperationRecover(v)
+        }
+      }()
+      case 129: try {
+        var v: IMV2MessageSendOperationResult?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .messageSendOperationResult(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .messageSendOperationResult(v)
+        }
+      }()
       default: break
       }
     }
@@ -4712,6 +5290,18 @@ nonisolated extension IMV2Envelope: SwiftProtobuf.Message, SwiftProtobuf._Messag
     case .presencePublicationControlled?: try {
       guard case .presencePublicationControlled(let v)? = self.body else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 126)
+    }()
+    case .messageSendOperation?: try {
+      guard case .messageSendOperation(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 127)
+    }()
+    case .messageSendOperationRecover?: try {
+      guard case .messageSendOperationRecover(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 128)
+    }()
+    case .messageSendOperationResult?: try {
+      guard case .messageSendOperationResult(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 129)
     }()
     case nil: break
     }
@@ -5496,7 +6086,7 @@ nonisolated extension IMV2Acknowledged: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 nonisolated extension IMV2ClientHello: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ClientHello"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}supported_protocol_versions\0\u{3}supported_capability_profiles\0\u{3}device_id\0\u{3}supported_frame_compressions\0\u{3}supports_author_presentation_delta\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}supported_protocol_versions\0\u{3}supported_capability_profiles\0\u{3}device_id\0\u{3}supported_frame_compressions\0\u{3}supports_author_presentation_delta\0\u{3}supports_message_send_operations\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5509,6 +6099,7 @@ nonisolated extension IMV2ClientHello: SwiftProtobuf.Message, SwiftProtobuf._Mes
       case 3: try { try decoder.decodeSingularStringField(value: &self.deviceID) }()
       case 4: try { try decoder.decodeRepeatedEnumField(value: &self.supportedFrameCompressions) }()
       case 5: try { try decoder.decodeSingularBoolField(value: &self.supportsAuthorPresentationDelta) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.supportsMessageSendOperations) }()
       default: break
       }
     }
@@ -5530,6 +6121,9 @@ nonisolated extension IMV2ClientHello: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if self.supportsAuthorPresentationDelta != false {
       try visitor.visitSingularBoolField(value: self.supportsAuthorPresentationDelta, fieldNumber: 5)
     }
+    if self.supportsMessageSendOperations != false {
+      try visitor.visitSingularBoolField(value: self.supportsMessageSendOperations, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -5539,6 +6133,7 @@ nonisolated extension IMV2ClientHello: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if lhs.deviceID != rhs.deviceID {return false}
     if lhs.supportedFrameCompressions != rhs.supportedFrameCompressions {return false}
     if lhs.supportsAuthorPresentationDelta != rhs.supportsAuthorPresentationDelta {return false}
+    if lhs.supportsMessageSendOperations != rhs.supportsMessageSendOperations {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -5546,7 +6141,7 @@ nonisolated extension IMV2ClientHello: SwiftProtobuf.Message, SwiftProtobuf._Mes
 
 nonisolated extension IMV2ServerHello: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ServerHello"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}selected_protocol_version\0\u{3}selected_capability_profile\0\u{3}server_time_ms\0\u{3}selected_frame_compression\0\u{3}author_presentation_stream_id\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}selected_protocol_version\0\u{3}selected_capability_profile\0\u{3}server_time_ms\0\u{3}selected_frame_compression\0\u{3}author_presentation_stream_id\0\u{3}supports_message_send_operations\0\u{3}maximum_message_send_payload_bytes\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5559,6 +6154,8 @@ nonisolated extension IMV2ServerHello: SwiftProtobuf.Message, SwiftProtobuf._Mes
       case 3: try { try decoder.decodeSingularInt64Field(value: &self.serverTimeMs) }()
       case 4: try { try decoder.decodeSingularEnumField(value: &self.selectedFrameCompression) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self.authorPresentationStreamID) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.supportsMessageSendOperations) }()
+      case 7: try { try decoder.decodeSingularUInt32Field(value: &self.maximumMessageSendPayloadBytes) }()
       default: break
       }
     }
@@ -5580,6 +6177,12 @@ nonisolated extension IMV2ServerHello: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if !self.authorPresentationStreamID.isEmpty {
       try visitor.visitSingularStringField(value: self.authorPresentationStreamID, fieldNumber: 5)
     }
+    if self.supportsMessageSendOperations != false {
+      try visitor.visitSingularBoolField(value: self.supportsMessageSendOperations, fieldNumber: 6)
+    }
+    if self.maximumMessageSendPayloadBytes != 0 {
+      try visitor.visitSingularUInt32Field(value: self.maximumMessageSendPayloadBytes, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -5589,6 +6192,8 @@ nonisolated extension IMV2ServerHello: SwiftProtobuf.Message, SwiftProtobuf._Mes
     if lhs.serverTimeMs != rhs.serverTimeMs {return false}
     if lhs.selectedFrameCompression != rhs.selectedFrameCompression {return false}
     if lhs.authorPresentationStreamID != rhs.authorPresentationStreamID {return false}
+    if lhs.supportsMessageSendOperations != rhs.supportsMessageSendOperations {return false}
+    if lhs.maximumMessageSendPayloadBytes != rhs.maximumMessageSendPayloadBytes {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
@@ -5636,7 +6241,7 @@ nonisolated extension IMV2Authenticate: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 nonisolated extension IMV2Authenticated: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".Authenticated"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{3}device_id\0\u{3}selected_capability_profile\0\u{3}selected_frame_compression\0\u{3}author_presentation_stream_id\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{3}device_id\0\u{3}selected_capability_profile\0\u{3}selected_frame_compression\0\u{3}author_presentation_stream_id\0\u{3}supports_message_send_operations\0\u{3}maximum_message_send_payload_bytes\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -5649,6 +6254,8 @@ nonisolated extension IMV2Authenticated: SwiftProtobuf.Message, SwiftProtobuf._M
       case 3: try { try decoder.decodeSingularStringField(value: &self.selectedCapabilityProfile) }()
       case 4: try { try decoder.decodeSingularEnumField(value: &self.selectedFrameCompression) }()
       case 5: try { try decoder.decodeSingularStringField(value: &self.authorPresentationStreamID) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.supportsMessageSendOperations) }()
+      case 7: try { try decoder.decodeSingularUInt32Field(value: &self.maximumMessageSendPayloadBytes) }()
       default: break
       }
     }
@@ -5670,6 +6277,12 @@ nonisolated extension IMV2Authenticated: SwiftProtobuf.Message, SwiftProtobuf._M
     if !self.authorPresentationStreamID.isEmpty {
       try visitor.visitSingularStringField(value: self.authorPresentationStreamID, fieldNumber: 5)
     }
+    if self.supportsMessageSendOperations != false {
+      try visitor.visitSingularBoolField(value: self.supportsMessageSendOperations, fieldNumber: 6)
+    }
+    if self.maximumMessageSendPayloadBytes != 0 {
+      try visitor.visitSingularUInt32Field(value: self.maximumMessageSendPayloadBytes, fieldNumber: 7)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -5679,6 +6292,643 @@ nonisolated extension IMV2Authenticated: SwiftProtobuf.Message, SwiftProtobuf._M
     if lhs.selectedCapabilityProfile != rhs.selectedCapabilityProfile {return false}
     if lhs.selectedFrameCompression != rhs.selectedFrameCompression {return false}
     if lhs.authorPresentationStreamID != rhs.authorPresentationStreamID {return false}
+    if lhs.supportsMessageSendOperations != rhs.supportsMessageSendOperations {return false}
+    if lhs.maximumMessageSendPayloadBytes != rhs.maximumMessageSendPayloadBytes {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2MessageSendOperation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".MessageSendOperation"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}sender_user_id\0\u{3}client_message_id\0\u{1}text\0\u{3}media_ids\0\u{1}mentions\0\u{1}entities\0\u{3}reply_to_message_id\0\u{3}first_submission_deadline_ms\0\u{3}domain_fingerprint_version\0\u{3}domain_fingerprint\0\u{3}fingerprint_version\0\u{1}fingerprint\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.senderUserID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.clientMessageID) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.text) }()
+      case 5: try { try decoder.decodeRepeatedStringField(value: &self.mediaIds) }()
+      case 6: try { try decoder.decodeRepeatedMessageField(value: &self.mentions) }()
+      case 7: try { try decoder.decodeRepeatedMessageField(value: &self.entities) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self._replyToMessageID) }()
+      case 9: try { try decoder.decodeSingularUInt64Field(value: &self.firstSubmissionDeadlineMs) }()
+      case 10: try { try decoder.decodeSingularUInt32Field(value: &self.domainFingerprintVersion) }()
+      case 11: try { try decoder.decodeSingularBytesField(value: &self.domainFingerprint) }()
+      case 12: try { try decoder.decodeSingularUInt32Field(value: &self.fingerprintVersion) }()
+      case 13: try { try decoder.decodeSingularBytesField(value: &self.fingerprint) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.roomID.isEmpty {
+      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 1)
+    }
+    if !self.senderUserID.isEmpty {
+      try visitor.visitSingularStringField(value: self.senderUserID, fieldNumber: 2)
+    }
+    if !self.clientMessageID.isEmpty {
+      try visitor.visitSingularStringField(value: self.clientMessageID, fieldNumber: 3)
+    }
+    if !self.text.isEmpty {
+      try visitor.visitSingularStringField(value: self.text, fieldNumber: 4)
+    }
+    if !self.mediaIds.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.mediaIds, fieldNumber: 5)
+    }
+    if !self.mentions.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.mentions, fieldNumber: 6)
+    }
+    if !self.entities.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.entities, fieldNumber: 7)
+    }
+    try { if let v = self._replyToMessageID {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 8)
+    } }()
+    if self.firstSubmissionDeadlineMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.firstSubmissionDeadlineMs, fieldNumber: 9)
+    }
+    if self.domainFingerprintVersion != 0 {
+      try visitor.visitSingularUInt32Field(value: self.domainFingerprintVersion, fieldNumber: 10)
+    }
+    if !self.domainFingerprint.isEmpty {
+      try visitor.visitSingularBytesField(value: self.domainFingerprint, fieldNumber: 11)
+    }
+    if self.fingerprintVersion != 0 {
+      try visitor.visitSingularUInt32Field(value: self.fingerprintVersion, fieldNumber: 12)
+    }
+    if !self.fingerprint.isEmpty {
+      try visitor.visitSingularBytesField(value: self.fingerprint, fieldNumber: 13)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2MessageSendOperation, rhs: IMV2MessageSendOperation) -> Bool {
+    if lhs.roomID != rhs.roomID {return false}
+    if lhs.senderUserID != rhs.senderUserID {return false}
+    if lhs.clientMessageID != rhs.clientMessageID {return false}
+    if lhs.text != rhs.text {return false}
+    if lhs.mediaIds != rhs.mediaIds {return false}
+    if lhs.mentions != rhs.mentions {return false}
+    if lhs.entities != rhs.entities {return false}
+    if lhs._replyToMessageID != rhs._replyToMessageID {return false}
+    if lhs.firstSubmissionDeadlineMs != rhs.firstSubmissionDeadlineMs {return false}
+    if lhs.domainFingerprintVersion != rhs.domainFingerprintVersion {return false}
+    if lhs.domainFingerprint != rhs.domainFingerprint {return false}
+    if lhs.fingerprintVersion != rhs.fingerprintVersion {return false}
+    if lhs.fingerprint != rhs.fingerprint {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2MessageSendMention: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".MessageSendMention"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{1}everyone\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try {
+        var v: String?
+        try decoder.decodeSingularStringField(value: &v)
+        if let v = v {
+          if self.target != nil {try decoder.handleConflictingOneOf()}
+          self.target = .userID(v)
+        }
+      }()
+      case 2: try {
+        var v: Bool?
+        try decoder.decodeSingularBoolField(value: &v)
+        if let v = v {
+          if self.target != nil {try decoder.handleConflictingOneOf()}
+          self.target = .everyone(v)
+        }
+      }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    switch self.target {
+    case .userID?: try {
+      guard case .userID(let v)? = self.target else { preconditionFailure() }
+      try visitor.visitSingularStringField(value: v, fieldNumber: 1)
+    }()
+    case .everyone?: try {
+      guard case .everyone(let v)? = self.target else { preconditionFailure() }
+      try visitor.visitSingularBoolField(value: v, fieldNumber: 2)
+    }()
+    case nil: break
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2MessageSendMention, rhs: IMV2MessageSendMention) -> Bool {
+    if lhs.target != rhs.target {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2MessageSendEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".MessageSendEntity"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}offset_utf16\0\u{3}length_utf16\0\u{1}kind\0\u{3}link_url\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.offsetUtf16) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.lengthUtf16) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.kind) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self._linkURL) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if self.offsetUtf16 != 0 {
+      try visitor.visitSingularUInt32Field(value: self.offsetUtf16, fieldNumber: 1)
+    }
+    if self.lengthUtf16 != 0 {
+      try visitor.visitSingularUInt32Field(value: self.lengthUtf16, fieldNumber: 2)
+    }
+    if !self.kind.isEmpty {
+      try visitor.visitSingularStringField(value: self.kind, fieldNumber: 3)
+    }
+    try { if let v = self._linkURL {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 4)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2MessageSendEntity, rhs: IMV2MessageSendEntity) -> Bool {
+    if lhs.offsetUtf16 != rhs.offsetUtf16 {return false}
+    if lhs.lengthUtf16 != rhs.lengthUtf16 {return false}
+    if lhs.kind != rhs.kind {return false}
+    if lhs._linkURL != rhs._linkURL {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2MessageSendOperationIdentity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".MessageSendOperationIdentity"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}account_id\0\u{3}room_id\0\u{3}operation_id\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.accountID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.roomID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.operationID) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.accountID.isEmpty {
+      try visitor.visitSingularStringField(value: self.accountID, fieldNumber: 1)
+    }
+    if !self.roomID.isEmpty {
+      try visitor.visitSingularStringField(value: self.roomID, fieldNumber: 2)
+    }
+    if !self.operationID.isEmpty {
+      try visitor.visitSingularStringField(value: self.operationID, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2MessageSendOperationIdentity, rhs: IMV2MessageSendOperationIdentity) -> Bool {
+    if lhs.accountID != rhs.accountID {return false}
+    if lhs.roomID != rhs.roomID {return false}
+    if lhs.operationID != rhs.operationID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2MessageSendOperationFingerprint: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".MessageSendOperationFingerprint"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}version\0\u{1}digest\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.version) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.digest) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.version != 0 {
+      try visitor.visitSingularUInt32Field(value: self.version, fieldNumber: 1)
+    }
+    if !self.digest.isEmpty {
+      try visitor.visitSingularBytesField(value: self.digest, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2MessageSendOperationFingerprint, rhs: IMV2MessageSendOperationFingerprint) -> Bool {
+    if lhs.version != rhs.version {return false}
+    if lhs.digest != rhs.digest {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2MessageSendOperationRecover: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".MessageSendOperationRecover"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}identity\0\u{1}fingerprint\0\u{3}domain_fingerprint\0\u{1}action\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._identity) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._fingerprint) }()
+      case 3: try { try decoder.decodeSingularMessageField(value: &self._domainFingerprint) }()
+      case 4: try { try decoder.decodeSingularEnumField(value: &self.action) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._identity {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    try { if let v = self._fingerprint {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try { if let v = self._domainFingerprint {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+    } }()
+    if self.action != .unspecified {
+      try visitor.visitSingularEnumField(value: self.action, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2MessageSendOperationRecover, rhs: IMV2MessageSendOperationRecover) -> Bool {
+    if lhs._identity != rhs._identity {return false}
+    if lhs._fingerprint != rhs._fingerprint {return false}
+    if lhs._domainFingerprint != rhs._domainFingerprint {return false}
+    if lhs.action != rhs.action {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2MessageSendOperationRecover.Action: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ACTION_UNSPECIFIED\0\u{1}QUERY\0\u{1}CLOSE_IF_ABSENT\0")
+}
+
+nonisolated extension IMV2MessageSendOperationAcceptance: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".MessageSendOperationAcceptance"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{3}room_sequence\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.messageID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.roomSequence) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.messageID.isEmpty {
+      try visitor.visitSingularStringField(value: self.messageID, fieldNumber: 1)
+    }
+    if self.roomSequence != 0 {
+      try visitor.visitSingularUInt64Field(value: self.roomSequence, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2MessageSendOperationAcceptance, rhs: IMV2MessageSendOperationAcceptance) -> Bool {
+    if lhs.messageID != rhs.messageID {return false}
+    if lhs.roomSequence != rhs.roomSequence {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2MessageSendOperationRejection: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".MessageSendOperationRejection"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}reason\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.reason) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.reason != .unspecified {
+      try visitor.visitSingularEnumField(value: self.reason, fieldNumber: 1)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2MessageSendOperationRejection, rhs: IMV2MessageSendOperationRejection) -> Bool {
+    if lhs.reason != rhs.reason {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2MessageSendOperationRejection.Reason: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0REASON_UNSPECIFIED\0\u{1}EXPIRED_UNSUBMITTED\0\u{1}PERMISSION_DENIED\0\u{1}ROOM_NOT_FOUND\0\u{1}INVALID_CONTENT\0\u{1}DIRECT_POLICY_DENIED\0")
+}
+
+nonisolated extension IMV2MessageSendOperationReceipt: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".MessageSendOperationReceipt"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}identity\0\u{1}fingerprint\0\u{3}resolved_at_ms\0\u{1}accepted\0\u{1}rejected\0\u{1}closed\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._identity) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._fingerprint) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.resolvedAtMs) }()
+      case 4: try {
+        var v: IMV2MessageSendOperationAcceptance?
+        var hadOneofValue = false
+        if let current = self.outcome {
+          hadOneofValue = true
+          if case .accepted(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.outcome = .accepted(v)
+        }
+      }()
+      case 5: try {
+        var v: IMV2MessageSendOperationRejection?
+        var hadOneofValue = false
+        if let current = self.outcome {
+          hadOneofValue = true
+          if case .rejected(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.outcome = .rejected(v)
+        }
+      }()
+      case 6: try {
+        var v: Bool?
+        try decoder.decodeSingularBoolField(value: &v)
+        if let v = v {
+          if self.outcome != nil {try decoder.handleConflictingOneOf()}
+          self.outcome = .closed(v)
+        }
+      }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._identity {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    try { if let v = self._fingerprint {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    if self.resolvedAtMs != 0 {
+      try visitor.visitSingularUInt64Field(value: self.resolvedAtMs, fieldNumber: 3)
+    }
+    switch self.outcome {
+    case .accepted?: try {
+      guard case .accepted(let v)? = self.outcome else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    }()
+    case .rejected?: try {
+      guard case .rejected(let v)? = self.outcome else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
+    }()
+    case .closed?: try {
+      guard case .closed(let v)? = self.outcome else { preconditionFailure() }
+      try visitor.visitSingularBoolField(value: v, fieldNumber: 6)
+    }()
+    case nil: break
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2MessageSendOperationReceipt, rhs: IMV2MessageSendOperationReceipt) -> Bool {
+    if lhs._identity != rhs._identity {return false}
+    if lhs._fingerprint != rhs._fingerprint {return false}
+    if lhs.resolvedAtMs != rhs.resolvedAtMs {return false}
+    if lhs.outcome != rhs.outcome {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2MessageSendOperationRetryHint: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".MessageSendOperationRetryHint"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}identity\0\u{1}fingerprint\0\u{1}reason\0\u{3}retry_after_ms\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._identity) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._fingerprint) }()
+      case 3: try { try decoder.decodeSingularEnumField(value: &self.reason) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self._retryAfterMs) }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._identity {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    try { if let v = self._fingerprint {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    if self.reason != .unspecified {
+      try visitor.visitSingularEnumField(value: self.reason, fieldNumber: 3)
+    }
+    try { if let v = self._retryAfterMs {
+      try visitor.visitSingularUInt64Field(value: v, fieldNumber: 4)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2MessageSendOperationRetryHint, rhs: IMV2MessageSendOperationRetryHint) -> Bool {
+    if lhs._identity != rhs._identity {return false}
+    if lhs._fingerprint != rhs._fingerprint {return false}
+    if lhs.reason != rhs.reason {return false}
+    if lhs._retryAfterMs != rhs._retryAfterMs {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension IMV2MessageSendOperationRetryHint.Reason: SwiftProtobuf._ProtoNameProviding {
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0REASON_UNSPECIFIED\0\u{1}RATE_LIMITED\0\u{1}ADMISSION_UNAVAILABLE\0")
+}
+
+nonisolated extension IMV2MessageSendOperationResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  public static let protoMessageName: String = _protobuf_package + ".MessageSendOperationResult"
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}deferred\0\u{1}receipt\0\u{1}unresolved\0\u{3}fingerprint_conflict\0")
+
+  public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try {
+        var v: IMV2MessageSendOperationRetryHint?
+        var hadOneofValue = false
+        if let current = self.result {
+          hadOneofValue = true
+          if case .deferred(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.result = .deferred(v)
+        }
+      }()
+      case 2: try {
+        var v: IMV2MessageSendOperationReceipt?
+        var hadOneofValue = false
+        if let current = self.result {
+          hadOneofValue = true
+          if case .receipt(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.result = .receipt(v)
+        }
+      }()
+      case 3: try {
+        var v: Bool?
+        try decoder.decodeSingularBoolField(value: &v)
+        if let v = v {
+          if self.result != nil {try decoder.handleConflictingOneOf()}
+          self.result = .unresolved(v)
+        }
+      }()
+      case 4: try {
+        var v: Bool?
+        try decoder.decodeSingularBoolField(value: &v)
+        if let v = v {
+          if self.result != nil {try decoder.handleConflictingOneOf()}
+          self.result = .fingerprintConflict(v)
+        }
+      }()
+      default: break
+      }
+    }
+  }
+
+  public func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    switch self.result {
+    case .deferred?: try {
+      guard case .deferred(let v)? = self.result else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    }()
+    case .receipt?: try {
+      guard case .receipt(let v)? = self.result else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    }()
+    case .unresolved?: try {
+      guard case .unresolved(let v)? = self.result else { preconditionFailure() }
+      try visitor.visitSingularBoolField(value: v, fieldNumber: 3)
+    }()
+    case .fingerprintConflict?: try {
+      guard case .fingerprintConflict(let v)? = self.result else { preconditionFailure() }
+      try visitor.visitSingularBoolField(value: v, fieldNumber: 4)
+    }()
+    case nil: break
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  public static func ==(lhs: IMV2MessageSendOperationResult, rhs: IMV2MessageSendOperationResult) -> Bool {
+    if lhs.result != rhs.result {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

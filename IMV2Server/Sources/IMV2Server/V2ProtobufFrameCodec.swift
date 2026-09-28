@@ -62,12 +62,15 @@ public enum V2ServerProtobufFrameCodec {
         flags: V2FrameFlags = [],
         compression: V2NegotiatedFrameCompression? = nil,
         maximumUncompressedPayloadBytes: Int = defaultMaximumUncompressedPayloadBytes,
+        maximumMessageSendUncompressedPayloadBytes: Int = V2MessageSendWireLimits.maximumPayloadBytes,
         compressionThresholdBytes: Int = defaultCompressionThresholdBytes,
         maximumExpansionRatio: Int = V2ZlibFrameCompression.defaultMaximumExpansionRatio,
         bindRequestIDToHeader: Bool = false
     ) throws -> V2Frame {
         guard flags.isEmpty else { throw V2ServerProtobufFrameCodecError.unsupportedFrameFlags }
         guard maximumUncompressedPayloadBytes > 0,
+              maximumMessageSendUncompressedPayloadBytes > 0,
+              maximumMessageSendUncompressedPayloadBytes <= V2MessageSendWireLimits.maximumPayloadBytes,
               compressionThresholdBytes >= 0,
               maximumExpansionRatio > 0
         else {
@@ -75,6 +78,7 @@ public enum V2ServerProtobufFrameCodec {
         }
         let command = try command(for: envelope)
         try validate(envelope: envelope, frameVersion: frameVersion)
+        let payloadLimit = command.isMessageSendOperation ? maximumMessageSendUncompressedPayloadBytes : maximumUncompressedPayloadBytes
         if bindRequestIDToHeader {
             guard frameVersion >= 21, command == .groupEventPage else {
                 throw V2ServerProtobufFrameCodecError.unsupportedFrameFlags
@@ -87,7 +91,7 @@ public enum V2ServerProtobufFrameCodec {
             outputFlags.insert(.headerBoundRequestID)
         }
         let uncompressed = try wireEnvelope.serializedData()
-        guard uncompressed.count <= maximumUncompressedPayloadBytes else {
+        guard uncompressed.count <= payloadLimit else {
             throw V2ServerProtobufFrameCodecError.uncompressedPayloadTooLarge
         }
         guard compression != nil, uncompressed.count >= compressionThresholdBytes else {
@@ -97,7 +101,7 @@ public enum V2ServerProtobufFrameCodec {
         do {
             compressed = try V2ZlibFrameCompression.compress(
                 uncompressed,
-                maximumInputBytes: maximumUncompressedPayloadBytes
+                maximumInputBytes: payloadLimit
             )
         } catch {
             throw V2ServerProtobufFrameCodecError.compressionFailed
@@ -135,6 +139,7 @@ public enum V2ServerProtobufFrameCodec {
         maximumMessageDepth: Int = defaultMaximumMessageDepth,
         compression: V2NegotiatedFrameCompression? = nil,
         maximumUncompressedPayloadBytes: Int = defaultMaximumUncompressedPayloadBytes,
+        maximumMessageSendUncompressedPayloadBytes: Int = V2MessageSendWireLimits.maximumPayloadBytes,
         maximumExpansionRatio: Int = V2ZlibFrameCompression.defaultMaximumExpansionRatio
     ) throws -> IMV2Envelope {
         let knownFlags: V2FrameFlags = [.compressed, .headerBoundRequestID]
@@ -147,20 +152,25 @@ public enum V2ServerProtobufFrameCodec {
             }
         }
         guard maximumMessageDepth > 0 else { throw V2ServerProtobufFrameCodecError.invalidMessageDepthLimit }
+        guard maximumUncompressedPayloadBytes > 0, maximumMessageSendUncompressedPayloadBytes > 0,
+              maximumMessageSendUncompressedPayloadBytes <= V2MessageSendWireLimits.maximumPayloadBytes else {
+            throw V2ServerProtobufFrameCodecError.uncompressedPayloadTooLarge
+        }
+        let payloadLimit = frame.command.isMessageSendOperation ? maximumMessageSendUncompressedPayloadBytes : maximumUncompressedPayloadBytes
         let payload: Data
         if frame.flags.contains(.compressed) {
             guard compression != nil else { throw V2ServerProtobufFrameCodecError.unsupportedCompression }
             do {
                 payload = try V2ZlibFrameCompression.decompress(
                     frame.payload,
-                    maximumOutputBytes: maximumUncompressedPayloadBytes,
+                    maximumOutputBytes: payloadLimit,
                     maximumExpansionRatio: maximumExpansionRatio
                 )
             } catch {
                 throw V2ServerProtobufFrameCodecError.decompressionFailed
             }
         } else {
-            guard frame.payload.count <= maximumUncompressedPayloadBytes else {
+            guard frame.payload.count <= payloadLimit else {
                 throw V2ServerProtobufFrameCodecError.uncompressedPayloadTooLarge
             }
             payload = frame.payload
@@ -197,6 +207,13 @@ public enum V2ServerProtobufFrameCodec {
         } else if envelope.protocolVersion != UInt32(frameVersion) {
             throw V2ServerProtobufFrameCodecError.protocolVersionMismatch
         }
+        if frameVersion < 45, let body = envelope.body {
+            switch body {
+            case .messageSendOperation, .messageSendOperationRecover, .messageSendOperationResult:
+                throw V2ServerProtobufFrameCodecError.protocolVersionMismatch
+            default: break
+            }
+        }
     }
 
     /// 按 protobuf 消息体枚举映射唯一帧命令，缺少消息体时抛出错误。
@@ -204,6 +221,9 @@ public enum V2ServerProtobufFrameCodec {
     /// 此映射同时包含请求、响应和通知，不构成客户端可发送命令的白名单。
     private static func command(for envelope: IMV2Envelope) throws -> V2FrameCommand {
         switch envelope.body {
+        case .messageSendOperation?: return .messageSendOperation
+        case .messageSendOperationRecover?: return .messageSendOperationRecover
+        case .messageSendOperationResult?: return .messageSendOperationResult
         case .presencePublicationControl?: return .presencePublicationControl
         case .presencePublicationControlled?: return .presencePublicationControlled
         case .clientHello?: return .clientHello

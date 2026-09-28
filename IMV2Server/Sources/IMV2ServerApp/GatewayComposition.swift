@@ -23,8 +23,8 @@ struct GatewayComposition {
     let directRoomLogEventCache: V2DirectRoomLogEventCache?
     let backgroundWorkers: GatewayBackgroundWorkers
     let natsGroupWakeBroker: V2NATSGroupEventWakeBroker?
-    let sharedGroupWakeInterests: V2SharedGroupEventWakeInterests?
-    let accountRoomChangeService: V2AccountRoomChangeService?
+    let sharedGroupWakeInterests: V2SharedGroupEventWakeInterests
+    let accountRoomChangeService: V2AccountRoomChangeService
     let natsLiveActivityBroker: V2NATSLiveActivityBroker?
     let authorPresentations: V2AuthorPresentationRuntime?
     let authorDrainTimeout: Duration
@@ -186,8 +186,8 @@ struct GatewayComposition {
                 directRoomLogEventCache: prepared.projection.directRoomLogEventCache,
                 backgroundWorkers: backgroundWorkers,
                 natsGroupWakeBroker: natsGroupWakeBroker,
-                sharedGroupWakeInterests: sharedGroupWakeInterests,
-                accountRoomChangeService: accountRoomChangeService,
+                sharedGroupWakeInterests: accountInterests,
+                accountRoomChangeService: accountChanges,
                 natsLiveActivityBroker: natsLiveActivityBroker,
                 authorPresentations: authorPresentations,
                 authorDrainTimeout: .milliseconds(configuration.shutdownGraceMilliseconds)
@@ -211,8 +211,8 @@ struct GatewayComposition {
     /// 在连接注册表解除依赖后，按实时活动、账号变更、兴趣管理、唤醒 Broker 的顺序关闭辅助服务。
     func shutdownAuxiliaryServices() async {
         await natsLiveActivityBroker?.shutdown()
-        await accountRoomChangeService?.shutdown()
-        await sharedGroupWakeInterests?.shutdown()
+        await accountRoomChangeService.shutdown()
+        await sharedGroupWakeInterests.shutdown()
         await natsGroupWakeBroker?.shutdown()
     }
 

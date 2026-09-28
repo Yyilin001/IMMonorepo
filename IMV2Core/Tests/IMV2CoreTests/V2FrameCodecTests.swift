@@ -31,7 +31,7 @@ struct V2FrameCodecTests {
     @Test("a frame round-trips across arbitrary TLS byte boundaries")
     func fragmentedRoundTrip() throws {
         let limits = try V2FrameLimits(maximumPayloadBytes: 32, acceptedVersions: [1])
-        let original = V2Frame(version: 1, flags: [.compressed], command: .sendMessage, requestID: 42, payload: Data("hello".utf8))
+        let original = V2Frame(version: 1, flags: [.compressed], command: .messageAccepted, requestID: 42, payload: Data("hello".utf8))
         let wire = try V2FrameCodec.encode(original, limits: limits)
         var decoder = V2FrameDecoder(limits: limits)
 

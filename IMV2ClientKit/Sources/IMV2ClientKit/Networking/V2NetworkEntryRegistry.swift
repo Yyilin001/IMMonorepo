@@ -32,6 +32,7 @@ public enum V2NetworkEntryRegistry {
         "V2HTTPMessageMutationOperationClient.swift": [.accountHTTP],
         "V2HTTPMessageReactionOperationClient.swift": [.accountHTTP],
         "V2HTTPMessageSendOperationClient.swift": [.accountHTTP],
+        "V2ProtobufSyncTransport+MessageSendOperations.swift": [.tcp],
         "V2HTTPNameOperationClient.swift": [.accountHTTP],
         "V2HTTPOwnProfileClient.swift": [.accountHTTP],
         "V2HTTPPersonalPreferenceRecoveryClient.swift": [.accountHTTP],
@@ -53,10 +54,10 @@ public enum V2NetworkEntryRegistry {
     /// turn a TCP domain command into a generic HTTP replay.
     public static func boundaries(for kind: V2OperationKind) -> Set<V2NetworkEntryBoundary> {
         switch kind {
-        case .sendMessage, .withdrawMessage, .editMessage, .reaction, .forwardMessage,
+        case .withdrawMessage, .editMessage, .reaction, .forwardMessage,
              .profileUpdate, .contactAlias, .groupNickname, .groupInvite, .groupJoinRequest,
              .groupJoinDecision, .mediaUpload, .groupAvatar, .memberMute, .moderatedMemberRemoval, .membership, .pinnedMessage, .groupAnnouncement, .groupPermission, .groupRole, .groupRoom, .relationship, .userBlock, .strangerMessagePreference, .userAddPreference, .readReceiptPreference, .liveActivityPreference, .directRoom, .moderation: [.accountHTTP]
-        case .readReceipt, .conversationPreference, .messageFavorite: [.tcp, .accountHTTP]
+        case .sendMessage, .readReceipt, .conversationPreference, .messageFavorite: [.tcp, .accountHTTP]
         }
     }
 }
