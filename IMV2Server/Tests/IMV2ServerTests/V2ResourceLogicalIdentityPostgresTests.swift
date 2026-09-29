@@ -223,9 +223,15 @@ struct ResourcePlacementTestFixture: Sendable {
             return .visible(.init(roomID: value.roomID, messageID: value.messageID, mediaID: value.mediaID,
                 membershipRevision: 1, contentRevision: 1, mediaUpdatedAt: observed, uploadSessionID: session))
         }
-        return .init(resources: service, resolve: { _,_,_,_ in PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in }) },
-            sources: .init(controlDatabase: database, rooms: IdentityRouter(), ownerDatabases: ["identity": database],
-                authorization: authorization, avatarAuthorization: { _,_,_,_,_ in }), registry: registry, transports: [transport])
+        let sources = V2ResourceImportSourceResolver(controlDatabase: database, rooms: IdentityRouter(),
+            ownerDatabases: ["identity": database], authorization: authorization,
+            avatarAuthorization: { _,_,_,_,_ in })
+        let persistence = PostgresV2ResourceImportStore(resolve: { _,_,_,_ in
+            PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in })
+        }, sources: sources, ownerDatabases: ["identity": database])
+        return .init(resources: service, resolve: { _,_,_,_ in
+            PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in })
+        }, persistence: persistence, registry: registry, transports: [transport])
     }
     func hold(_ request: V2ResourceImportRequest) async throws -> (reference: V2StoredObjectReference, bytes: Int64, sha256: Data, released: Date?) {
         let row = try #require(try await sql.raw("SELECT reference_json::text AS reference,byte_count AS bytes,sha256,released_at AS released FROM im_v2.resource_import_holds WHERE actor_user_id=\(bind: user.uuidValue!) AND operation_id=\(bind: request.operationID.uuidValue!)").first(decoding: IdentityHold.self))

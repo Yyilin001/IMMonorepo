@@ -1,13 +1,13 @@
 {
   "scope": "IMV2Server/Sources/{IMV2Server,IMV2ServerContracts,IMV2ServerApplication,IMV2ServerInfrastructure,IMV2ServerGateway,IMV2ServerHTTP}/**/*.swift",
-  "sourceCount": 576,
+  "sourceCount": 575,
   "classification": {
     "IMV2Server": 15,
     "IMV2ServerApplication": 133,
     "IMV2ServerContracts": 82,
     "IMV2ServerGateway": 27,
     "IMV2ServerHTTP": 49,
-    "IMV2ServerInfrastructure": 270
+    "IMV2ServerInfrastructure": 269
   },
   "files": [
     {
@@ -4657,17 +4657,6 @@
         "IMV2ServerApplication",
         "IMV2ServerContracts",
         "SQLKit"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/Resources/Infrastructure/V2ResourceImportServiceWiring.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "FluentKit",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
       ]
     },
     {

@@ -86,21 +86,13 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
 
 public extension V2RoomMessagingExecutor {
     init(token: V2RoomActivationToken, writes: PostgresV2RoomWriteStore,
-         edits: PostgresV2MessageEditStore, withdrawals: PostgresV2MessageWithdrawalStore,
-         reactions: PostgresV2MessageReactionStore, capacityProfile: V2CapacityProfile,
+         capacityProfile: V2CapacityProfile,
          limits: V2MessageCommandLimits, maximumEditBytes: Int,
          identifiers: V2AcceptanceIDFactory = .init(),
-         editIdentifiers: V2MessageEditIDFactory = .init(),
-         withdrawalIdentifiers: V2MessageWithdrawalIDFactory = .init(),
-         reactionIdentifiers: V2MessageReactionIDFactory = .init(),
          now: @escaping @Sendable () -> Date = Date.init,
          mutations: PostgresV2MessageMutationOperationStore? = nil,
          sendOperations: PostgresV2MessageSendOperationStore? = nil,
          reactionOperations: PostgresV2MessageReactionOperationStore? = nil) throws {
-        // The legacy scalar stores are retained in this initializer for source
-        // compatibility; operation commands use their dedicated receipt stores.
-        _ = edits; _ = withdrawals; _ = reactions
-        _ = editIdentifiers; _ = withdrawalIdentifiers; _ = reactionIdentifiers
         let adapter = try PostgresV2RoomMessagingAdapter(token: token, writes: writes,
             capacityProfile: capacityProfile, identifiers: identifiers,
             maximumEditBytes: maximumEditBytes, now: now, mutations: mutations,

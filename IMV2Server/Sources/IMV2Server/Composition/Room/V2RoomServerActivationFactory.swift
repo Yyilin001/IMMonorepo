@@ -13,9 +13,6 @@ public struct V2RoomServerOwnerResources: Sendable {
     let database: any Database
     let writes: PostgresV2RoomWriteStore
     let mutations: PostgresV2MessageMutationOperationStore
-    let edits: PostgresV2MessageEditStore
-    let withdrawals: PostgresV2MessageWithdrawalStore
-    let reactions: PostgresV2MessageReactionStore
     let identities: any V2MembershipIdentitySnapshotValidating
     let invitationSecretIssuer: V2GroupInviteSecretIssuer
     let invitationIdentities: any V2GroupInvitationIdentityReading
@@ -50,10 +47,6 @@ public struct V2RoomServerOwnerResources: Sendable {
         self.database = database
         self.mutations = .init(database:database,contentReviewMode:contentReviewMode,identities:membershipIdentities,committedMessageObserver:committedMessageObserver)
         self.writes = writes
-        self.edits = .init(database: database, contentReviewMode: contentReviewMode,
-                           identities: membershipIdentities)
-        self.withdrawals = .init(database: database)
-        self.reactions = .init(database: database)
         self.identities = membershipIdentities
         self.invitationSecretIssuer = invitationSecretIssuer
         self.invitationIdentities = invitationIdentities
@@ -291,8 +284,7 @@ private actor V2RoomServerActivation {
             queries = V2BoundRoomQueries(token: token, executor: resources.queries)
             receipts = V2BoundRoomReceiptQueries(token: token, executor: resources.receipts)
             maintenance = .init(database: resources.database, now: now)
-            messages = try V2RoomMessagingExecutor(token: token, writes: resources.writes, edits: resources.edits,
-                withdrawals: resources.withdrawals, reactions: resources.reactions,
+            messages = try V2RoomMessagingExecutor(token: token, writes: resources.writes,
                 capacityProfile: resources.capacity, limits: resources.messageLimits,
                 maximumEditBytes: resources.maximumEditBytes, now: now,
                 mutations:resources.mutations,sendOperations:.init(database:resources.database,writes:resources.writes,clock:now,committedMessageObserver:resources.committedMessageObserver),reactionOperations:.init(database:resources.database,clock:now,committedMessageObserver:resources.committedMessageObserver))

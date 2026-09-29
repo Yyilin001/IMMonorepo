@@ -116,20 +116,19 @@ def main() -> int:
             url = urllib.parse.urlsplit(target["url"])
             # Keep the signed URL's authority and query unchanged; only the TCP
             # destination is remapped to the random host port of this project.
-            checked(url.scheme == "https" and url.hostname == base.hostname)
-            checked(url.username is None and url.password is None and not url.fragment)
-            checked(url.path.startswith(expected_prefix) and url.port == 8443)
+            checked(url.scheme == "https" and url.hostname == base.hostname,
+                    "signed_target_scheme_host")
+            checked(url.username is None and url.password is None and not url.fragment,
+                    "signed_target_authority")
+            checked(url.path.startswith(expected_prefix) and url.port == 8443,
+                    "signed_target_path_port")
             raw_headers = target["headers"]
-            if isinstance(raw_headers, list):
-                checked(all(isinstance(item, dict) and isinstance(item.get("name"), str)
+            checked(isinstance(raw_headers, list)
+                    and all(isinstance(item, dict) and isinstance(item.get("name"), str)
                             and isinstance(item.get("value"), str) for item in raw_headers),
-                        "signed_target_headers")
-                headers = {item["name"]: item["value"] for item in raw_headers}
-                checked(len(headers) == len(raw_headers), "signed_target_unique_headers")
-            else:
-                headers = raw_headers
-            checked(isinstance(headers, dict) and all(isinstance(k, str) and isinstance(v, str)
-                                                      for k, v in headers.items()), "signed_target_headers")
+                    "signed_target_headers")
+            headers = {item["name"]: item["value"] for item in raw_headers}
+            checked(len(headers) == len(raw_headers), "signed_target_unique_headers")
             return (url.path + ("?" + url.query if url.query else ""),
                     url.netloc, headers)
 
@@ -426,10 +425,10 @@ SELECT (SELECT count(*) FROM im_v2.messages
                 and download_plan.get("expectedByteCount") == len(payload)
                 and download_plan.get("checksum") == {"algorithm": "sha256", "value": digest},
                 "media_download_target")
-        download_path, download_authority, download_headers = signed_path(download_plan, "/v2/local-media/download/")
+        download_path, download_authority, download_headers = signed_path(download_plan, "/v2/resource-bytes/")
         downloaded = http_request("GET", download_path, extra_headers=download_headers,
                                   signed_authority=download_authority,
-                                  route_label="/v2/local-media/download/:media")
+                                  route_label="/v2/resource-bytes/:placement")
         checked(downloaded == payload, "media_download_bytes")
         print("ACTOR_HTTP_SMOKE_OK nickname invitation media_send_download")
         return 0

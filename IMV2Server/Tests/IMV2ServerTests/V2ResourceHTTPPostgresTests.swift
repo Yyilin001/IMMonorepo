@@ -121,10 +121,16 @@ struct V2ResourceHTTPPostgresTests {
                 guard case .messageVisibility(let value)=query else { return .notVisible }
                 return .visible(.init(roomID:value.roomID,messageID:value.messageID,mediaID:value.mediaID,membershipRevision:1,contentRevision:1,mediaUpdatedAt:sourceTime,uploadSessionID:session.locator.sessionID.uuidValue!))
             }
-            let imports=V2ResourceImportService(resources:service,resolve:{_,_,_,_ in PostgresV2ResourceLifecycleStore(database:database,authorize:{_ in})},
-                sources:.init(controlDatabase:database,rooms:ResourceHTTPRoomRouter(),ownerDatabases:["test":database],authorization:port,
-                    avatarAuthorization:{_,_,_,_,_ in throw V2ResourceProviderError.unsupportedCapability}),
-                registry:registry,transports:[V2LocalResourceUploadTransport(binding:binding,provider:provider)])
+            let importSources=V2ResourceImportSourceResolver(controlDatabase:database,rooms:ResourceHTTPRoomRouter(),
+                ownerDatabases:["test":database],authorization:port,
+                avatarAuthorization:{_,_,_,_,_ in throw V2ResourceProviderError.unsupportedCapability})
+            let importStore=PostgresV2ResourceImportStore(resolve:{_,_,_,_ in
+                PostgresV2ResourceLifecycleStore(database:database,authorize:{_ in})
+            },sources:importSources,ownerDatabases:["test":database])
+            let imports=V2ResourceImportService(resources:service,resolve:{_,_,_,_ in
+                PostgresV2ResourceLifecycleStore(database:database,authorize:{_ in})
+            },persistence:importStore,registry:registry,
+                transports:[V2LocalResourceUploadTransport(binding:binding,provider:provider)])
             let imported=try V2ResourceImportRequest(operationID:.init(uuid:UUID()),
                 source:.message(location:.init(roomID:room,messageID:.init(uuid:UUID())),mediaID:request.mediaID,variantID:nil),
                 targetUsage:.messageAttachment(.init(uuid:UUID())),targetMediaID:.init(uuid:UUID()))

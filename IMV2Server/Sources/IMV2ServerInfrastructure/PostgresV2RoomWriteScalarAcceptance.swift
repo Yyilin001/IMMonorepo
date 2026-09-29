@@ -8,29 +8,6 @@ import SQLKit
 
 // 仅在 Store 借用的事务中运行。事务仍由 Store 开启；
 // Store 负责完成授权回执，并严格在提交后结算缓存和命令额度。
-extension PostgresV2RoomWriteStore {
-    func acceptInTransaction(
-        command: V2SendMessageCommand,
-        capacityProfile: V2CapacityProfile,
-        identifiers: V2AcceptanceIdentifiers,
-        now: Date,
-        roomID: UUID,
-        senderID: UUID,
-        cachedDirectPolicy: V2DirectSendPolicyCache.Entry?,
-        importedForward: ForwardInboxAuthorization? = nil,
-        fenceContext: V2ConfiguredRoomFenceContext? = nil,
-        transaction: any Database
-    ) async throws -> RoomWriteCommit {
-        guard let sql = transaction as? any SQLDatabase else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-        return try await scalarAcceptancePath.acceptInTransaction(
-            command: command, capacityProfile: capacityProfile, identifiers: identifiers, now: now,
-            roomID: roomID, senderID: senderID, cachedDirectPolicy: cachedDirectPolicy,
-            importedForward: importedForward, fenceContext: fenceContext, sql: sql)
-    }
-}
-
 struct V2RoomWriteScalarAcceptancePath {
     let ownerGuard: V2RoomWriteSelectedOwnerGuard
     let policyContext: V2RoomWriteDirectPolicyContext

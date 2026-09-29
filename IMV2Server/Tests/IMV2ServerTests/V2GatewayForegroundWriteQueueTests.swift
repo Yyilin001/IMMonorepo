@@ -97,9 +97,9 @@ struct V2GatewayForegroundWriteQueueTests {
             maximumDrainBytes: 64,
             maximumDrainFrames: 8
         )
-        writer.submit(Data([1, 2]))
-        writer.submit(Data([3, 4]))
-        writer.submit(Data([5]))
+        writer.submit(ByteBuffer(bytes: [1, 2]))
+        writer.submit(ByteBuffer(bytes: [3, 4]))
+        writer.submit(ByteBuffer(bytes: [5]))
 
         channel.embeddedEventLoop.run()
         let outputCandidate = try channel.readOutbound(as: ByteBuffer.self)
@@ -187,8 +187,8 @@ struct V2GatewayForegroundWriteQueueTests {
             maximumDrainBytes: 64,
             maximumDrainFrames: 8
         )
-        writer.submit(Data([7]))
-        writer.submit(Data([8]))
+        writer.submit(ByteBuffer(bytes: [7]))
+        writer.submit(ByteBuffer(bytes: [8]))
         channel.embeddedEventLoop.run()
         #expect(writer.hasPendingFrames)
         #expect(try channel.readOutbound(as: ByteBuffer.self) == nil)
@@ -216,7 +216,7 @@ struct V2GatewayForegroundWriteQueueTests {
             maximumDrainBytes: 2,
             maximumDrainFrames: 2
         )
-        for value in 1...4 { writer.submit(Data([UInt8(value)])) }
+        for value in 1...4 { writer.submit(ByteBuffer(bytes: [UInt8(value)])) }
         channel.embeddedEventLoop.run()
         #expect(try channel.readOutbound(as: ByteBuffer.self) == nil)
 

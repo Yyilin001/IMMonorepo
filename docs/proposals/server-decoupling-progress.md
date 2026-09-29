@@ -1,6 +1,15 @@
 # 服务端解耦实施状态
 
-目标及完成条件见[实施方案](server-decoupling-plan.md)。代码改造与本轮编译已完成，完整运行与性能验收按用户要求暂缓。
+目标及完成条件见[实施方案](server-decoupling-plan.md)。代码改造和 macOS 编译已完成；完整运行与性能验收尚未完成。当前验证只使用本机隔离环境，不连接已停机的真实远端服务器。
+
+## 本轮收尾与验证（2026-09-30）
+
+- 删除只服务历史调用方式的资源导入构造器、Messaging 中被忽略的参数和 Gateway 的 `Data` 提交重载；生产接线及测试改用现行接口。RoomWrite 的三个事务闭包直接调用标量接受路径，移除仅作转发的 Store 包装。HTTP 冒烟脚本只接受现行资源下载 header 数组结构。
+- macOS/Swift 6.4 下 `swift build --build-tests --disable-automatic-resolution --jobs 4 --package-path IMV2Server` 通过，产品和测试目标均编译成功（日志 `/tmp/imv2-no-legacy-native-build-20260930-r2.log`）。边界检查、Actor 台账与差异空白检查通过。
+- 本机 PostgreSQL 定向回归通过：标量写入 3 项测试、15 组参数场景（`/tmp/imv2-postpush-scalar-targeted-20260930.log`）；资源上传及逻辑身份 2 项测试、4 组参数场景（`/tmp/imv2-current-resource-targeted-20260930.log`）。Gateway 队列 8 项测试通过（`/tmp/imv2-no-legacy-queue-tests-20260930.log`）。资源测试使用新建且结束后删除的独立数据库。
+- 固定 Swift 6.4 Linux 镜像下，Account、Gateway、Operator、LocalGatewayProbe 四个 Release 产品构建通过；最终产物和源码快照 `3af2cbc29aec29806fe11227e393b8f4c8249abd` 的哈希见 `~/.codex/virtual-actor-builds/server-decoupling-20260930-local-release-r3/result.json`。
+- 一次性本机 Docker 应用栈的四种模式均通过：Gateway 内置 Host（`run-2263830457474205a37c587881435f8f`）、Gateway 调用独立 Host（`run-2582c665d3714d719c3ab381449a2f39`）、独立 Host 在阻塞 SQL 写入时收到 SIGTERM（`run-d6669f25fdce4242bb1532754cae9219`）、跨入口停用账号（`run-4259400b5da549de8421ab4c4eb3ce96`）。每次都通过通用冒烟和 Actor HTTP 昵称、邀请、媒体发送及签名下载；证据位于 `~/.codex/virtual-actor-builds/server-decoupling-20260930-local-runs/` 对应目录。实际运行前，冒烟脚本对下载路径的旧假设导致两次失败；服务端签发现行 `/v2/resource-bytes/{placementID}`，脚本修正后重跑通过。
+- 真实远端服务器已停机，不属于本轮验证。性能基线对照与完整故障矩阵仍未执行，因此 P6 整体验收尚未完成。
 
 ## 代码收尾结果（2026-09-29）
 
@@ -11,7 +20,7 @@
 
 最终执行 `swift build --build-tests --disable-automatic-resolution --jobs 4 --package-path IMV2Server`，在当前 macOS/Swift 6.4 工作区退出 0，耗时 81.07 秒，产品及测试目标均编译通过，未执行测试。日志为 `/tmp/imv2-decoupling-code-final-build-v2-20260929.log`。标量迁移首次增量编译发现审核模式参数遗漏，补齐显式参数后取得该通过结果。仍有既有依赖 identity、deprecated 和测试诊断警告，本轮未升级依赖。
 
-架构静态结果：576 个文件、1951 个唯一声明、1958 条符号边，零分类例外、零越层依赖、零跨 target 循环。Actor 台账通过：416 个归属文件、31 个 writer ID、46 条声明、36 个 catalog row、235 个 DTO；相关写入证据已随标量路径迁移更新。文档链接及结构检查通过。
+架构静态结果：删除仅供旧资源导入构造 API 使用的 shim 后，当前清单为 575 个文件、1951 个唯一声明、1941 条符号边，零分类例外、零越层依赖、零跨 target 循环。Actor 台账通过：416 个归属文件、31 个 writer ID、46 条声明、36 个 catalog row、235 个 DTO；相关写入证据已随标量路径迁移更新。文档链接及结构检查通过。
 
 此前 Linux Release 产品对应 `c1944b1a`，不覆盖本轮标量收尾后的源码。本轮未启动 Docker、未执行 PostgreSQL/故障测试、未采集性能样本；如恢复整体验收，应从当前代码重新构建受影响的 Linux 产品。
 

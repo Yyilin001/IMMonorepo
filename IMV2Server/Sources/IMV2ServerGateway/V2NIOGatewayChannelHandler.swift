@@ -765,16 +765,6 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
         ))
     }
 
-    /// 兼容入口，供聚焦的队列测试与未预处理数据的本地调用方使用。
-    ///
-    /// 生产环境的群组发布会提交已准备好的 `ByteBuffer`，
-    /// 从而避免每个连接都做一次这样的转换。
-    ///
-    /// - Parameter bytes: 待提交的已编码字节。
-    func submit(_ bytes: Data) {
-        submit(ByteBuffer(bytes: bytes))
-    }
-
     func submit(_ bytes: ByteBuffer) {
         submit(bytes, isAuthorizedToWrite: { true })
     }

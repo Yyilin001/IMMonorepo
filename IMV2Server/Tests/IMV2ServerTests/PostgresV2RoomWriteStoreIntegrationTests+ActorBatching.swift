@@ -269,7 +269,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let batcher = V2SendMessageAdmissionBatcher(store: writer,
                 configuration: .init(maximumBatchSize: 3, maximumDelay: .seconds(5)),
                 actorGrantedStore: writer)
-            let executor = try actorBatchExecutor(token: token, writer: writer, database: database, now: now)
+            let executor = try actorBatchExecutor(token: token, writer: writer, now: now)
             let wires = actorBatchWires(room: roomID, texts: ["one", "two", "three"])
             let results = try await executor.executeGrantedSendTurn(wires,
                 batchDeadline: ContinuousClock().now - .milliseconds(1),
@@ -308,8 +308,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5)),
                 actorGrantedStore: writer)
             let adapter = V2ActorGrantedSendBatchAdapter(batcher: batcher)
-            let firstExecutor = try actorBatchExecutor(token: firstToken, writer: writer, database: database, now: now)
-            let secondExecutor = try actorBatchExecutor(token: secondToken, writer: writer, database: database, now: now)
+            let firstExecutor = try actorBatchExecutor(token: firstToken, writer: writer, now: now)
+            let secondExecutor = try actorBatchExecutor(token: secondToken, writer: writer, now: now)
             let first = try firstExecutor.prepareSend(actorBatchWires(room: roomID, texts: ["one"])[0])
             let second = try secondExecutor.prepareSend(actorBatchWires(room: secondRoom, texts: ["two"])[0])
             let deadline = ContinuousClock().now + .seconds(2)
@@ -349,9 +349,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                                      maximumInFlightBatches: 2, maximumPendingRequests: 4),
                 laneCount: 2, actorGrantedStore: writer)
             let adapter = V2ActorGrantedSendBatchAdapter(batcher: batcher)
-            let first = try actorBatchExecutor(token: firstToken, writer: writer, database: database,
+            let first = try actorBatchExecutor(token: firstToken, writer: writer,
                 now: now).prepareSend(actorBatchWires(room: roomID, texts: ["first"])[0])
-            let second = try actorBatchExecutor(token: secondToken, writer: writer, database: database,
+            let second = try actorBatchExecutor(token: secondToken, writer: writer,
                 now: now).prepareSend(actorBatchWires(room: secondRoom, texts: ["second"])[0])
             let deadline = ContinuousClock.now + .seconds(2)
             let firstTask = Task { try await adapter.execute([first],
@@ -391,9 +391,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5)),
                 actorGrantedStore: writer)
             let adapter = V2ActorGrantedSendBatchAdapter(batcher: batcher)
-            let first = try actorBatchExecutor(token: stale, writer: writer, database: database, now: now)
+            let first = try actorBatchExecutor(token: stale, writer: writer, now: now)
                 .prepareSend(actorBatchWires(room: roomID, texts: ["stale"])[0])
-            let second = try actorBatchExecutor(token: current, writer: writer, database: database, now: now)
+            let second = try actorBatchExecutor(token: current, writer: writer, now: now)
                 .prepareSend(actorBatchWires(room: secondRoom, texts: ["valid"])[0])
             let deadline = ContinuousClock().now + .seconds(2)
             let staleResult = Task { try await adapter.execute([first], batchDeadline: deadline) }
@@ -421,7 +421,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5)),
                 actorGrantedStore: writer)
             let adapter = V2ActorGrantedSendBatchAdapter(batcher: batcher)
-            let executor = try actorBatchExecutor(token: token, writer: writer, database: database, now: now)
+            let executor = try actorBatchExecutor(token: token, writer: writer, now: now)
             try await sql.raw("""
                 CREATE FUNCTION im_v2.reject_actor_batch_commit() RETURNS trigger LANGUAGE plpgsql AS $$
                 BEGIN RAISE EXCEPTION 'injected deferred message failure'; END; $$
@@ -468,11 +468,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
 
     private func actorBatchExecutor(token: V2RoomActivationToken,
-        writer: PostgresV2RoomWriteStore, database: any Database, now: Date
+        writer: PostgresV2RoomWriteStore, now: Date
     ) throws -> V2RoomMessagingExecutor {
         try .init(token: token, writes: writer,
-            edits: .init(database: database, contentReviewMode: .disabled),
-            withdrawals: .init(database: database), reactions: .init(database: database),
             capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64),
             maximumEditBytes: 64, now: { now })
     }

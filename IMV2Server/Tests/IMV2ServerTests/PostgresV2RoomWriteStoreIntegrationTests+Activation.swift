@@ -69,16 +69,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let host = V2ActorHostIdentity(hostID: try .init("mutation-host"), incarnationID: UUID())
             guard case .acquired(let first) = try await leases.acquire(roomID: roomID,
                 owner: owner, host: host, duration: .init(30_000)) else { Issue.record("lease"); return }
-            let operation = UUID(), event = EventID(uuid: UUID())
+            let operation = UUID()
             let execute: @Sendable (V2RoomActivationWriteScope) async throws -> Void = { scope in
                 let executor = try V2RoomMessagingExecutor(token: scope.token(for: roomUUID),
                     writes: .init(database: database),
-                    edits: .init(database: database, contentReviewMode: .disabled),
-                    withdrawals: .init(database: database), reactions: .init(database: database),
                     capacityProfile: request.capacityProfile, limits: .init(maxUTF8Bytes: 64),
-                    maximumEditBytes: 64, editIdentifiers: .init(makeUUID: { event.uuidValue! }),
-                    withdrawalIdentifiers: .init(makeUUID: { event.uuidValue! }),
-                    reactionIdentifiers: .init(makeUUID: { event.uuidValue! }), now: { now },
+                    maximumEditBytes: 64, now: { now },
                     mutations:.init(database:database,contentReviewMode:.disabled,clock:{now}),reactionOperations:.init(database:database,clock:{now}))
                 let result: V2RoomMessagingResult
                 switch kind {

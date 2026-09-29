@@ -206,7 +206,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         .init(ownerSelection: ownerSelection, controlResolution: controlResolution)
     }
 
-    var scalarAcceptancePath: V2RoomWriteScalarAcceptancePath {
+    private var scalarAcceptancePath: V2RoomWriteScalarAcceptancePath {
         .init(ownerGuard: selectedOwnerGuard, policyContext: directPolicyContext,
               strangerMessagePolicy: strangerMessagePolicy, contentReviewMode: contentReviewMode,
               observesRoomAdmissionHeat: roomAdmissionCommandCreditPool != nil)
@@ -214,14 +214,6 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
 
     private var directPolicyContext: V2RoomWriteDirectPolicyContext {
         .init(controlPolicyScope: controlPolicyScope, controlScopeRoomKinds: controlScopeRoomKinds)
-    }
-
-    private func controlPolicy(roomID: UUID, senderID: UUID, recipientID: UUID? = nil) throws -> V2DirectSendControlPolicy? {
-        try directPolicyContext.controlPolicy(roomID: roomID, senderID: senderID, recipientID: recipientID)
-    }
-
-    func senderIsActive(_ local: Bool?, roomID: UUID, senderID: UUID) throws -> Bool {
-        try directPolicyContext.senderIsActive(local, roomID: roomID, senderID: senderID)
     }
 
     public func acceptOwnerValidated(
@@ -293,9 +285,9 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                     clientMessageID: uuid(request.command.clientMessageID), sql: sql)
                 try await requireSelectedOwners([source, room], sql: sql)
                 try await prepareLedger(transaction)
-                let accepted = try await acceptInTransaction(command: request.command,
+                let accepted = try await scalarAcceptancePath.acceptInTransaction(command: request.command,
                     capacityProfile: request.capacityProfile, identifiers: request.identifiers, now: request.now,
-                    roomID: room, senderID: sender, cachedDirectPolicy: nil, transaction: transaction)
+                    roomID: room, senderID: sender, cachedDirectPolicy: nil, sql: sql)
                 try await recordLedger(accepted.outcome, transaction)
                 return accepted
             }
@@ -511,13 +503,13 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                         },
                         validateCommand: { command in try validateAuthorizationCommand(command) },
                         acceptMessage: { command, authority, transaction in
-                            try await acceptInTransaction(
+                            try await scalarAcceptancePath.acceptInTransaction(
                                 command: command, capacityProfile: capacityProfile,
                                 identifiers: identifiers, now: now,
                                 roomID: export.intent.targetRoomID,
                                 senderID: export.intent.actorUserID,
                                 cachedDirectPolicy: nil, importedForward: authority,
-                                transaction: transaction
+                                sql: try sqlDatabase(from: transaction)
                             )
                         }
                     )
@@ -659,7 +651,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     ) async throws -> RoomWriteCommit {
         do {
             return try await withRoomWriteTransactionWithFenceContext { transaction, fenceContext in
-                try await acceptInTransaction(
+                try await scalarAcceptancePath.acceptInTransaction(
                     command: command,
                     capacityProfile: capacityProfile,
                     identifiers: identifiers,
@@ -668,7 +660,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                     senderID: senderID,
                     cachedDirectPolicy: cachedDirectPolicy,
                     fenceContext: fenceContext,
-                    transaction: transaction
+                    sql: try sqlDatabase(from: transaction)
                 )
             }
         } catch let rejection as LateShardAdmissionRejection {
