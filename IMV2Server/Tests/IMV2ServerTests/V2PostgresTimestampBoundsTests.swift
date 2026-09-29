@@ -1,9 +1,12 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
 
 @Suite("PostgreSQL timestamp bounds")
-struct V2PostgresTimestampBoundsTests {
+struct V2PersistenceTimestampBoundsTests {
     @Test("Raw PostgreSQL timestamp offsets retain exact one-microsecond boundaries")
     func exactMicrosecondBounds() {
         for value: Int64 in [0, -211_813_488_000_000_000, 9_223_371_331_199_999_999] {

@@ -1,5 +1,6 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import IMV2Core
-import IMV2Server
 import Vapor
 import HTTPTypes
 

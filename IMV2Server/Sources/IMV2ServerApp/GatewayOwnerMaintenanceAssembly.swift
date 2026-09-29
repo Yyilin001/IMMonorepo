@@ -1,6 +1,9 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import FluentKit
 import Foundation
 import IMV2Server
+import IMV2ServerInfrastructure
 import Logging
 
 /// 按物理数据库去重后，构造房间归属库的维护依赖与持久工作指标。

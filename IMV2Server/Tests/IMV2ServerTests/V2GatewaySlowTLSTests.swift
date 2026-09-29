@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2Core
 @preconcurrency import NIOCore
@@ -5,7 +7,9 @@ import IMV2Core
 @preconcurrency import NIOSSL
 @preconcurrency import NIOTLS
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
+@testable import IMV2ServerGateway
 
 @Suite("Gateway real TLS backpressure", .serialized, .timeLimit(.minutes(2)))
 struct V2GatewaySlowTLSTests {

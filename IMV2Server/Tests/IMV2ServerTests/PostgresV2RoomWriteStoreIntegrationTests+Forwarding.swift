@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Crypto
 import FluentKit
 import FluentPostgresDriver
@@ -10,6 +12,7 @@ import IMV2Core
 import IMV2ServerHTTP
 import PostgresNIO
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import SQLKit
 import Synchronization
 import Testing
@@ -1564,7 +1567,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await resource.storage.delete(try await resource.facts(mediaID: sourceMediaID.uuidValue!, sql: sourceSQL).reference)
                 #expect(try await endpoint.deliver(export)?.outcome == receipt.outcome)
                 let sourceService = try V2CrossOwnerForwardService(sources: ["room-a": .init(
-                    exports: .init(database: sourceDB), receipts: receipts, jobs: sourceJobs)], now: { callbackAt })
+                    exports: PostgresV2ForwardExportStore(database: sourceDB), receipts: receipts, jobs: sourceJobs)], now: { callbackAt })
                 let result = try await sourceService.forward(actor: actor, operation: .init(uuid: export.intent.operationID),
                     source: .init(roomID: roomID, messageID: sourceMessage.messageID, revision: .init(1)),
                     sourceRoute: .init(shardID: "room-a", epoch: 0), target: targetRoom, targetRoute: .init(shardID: "room-b", epoch: 0))

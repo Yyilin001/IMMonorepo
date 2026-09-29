@@ -1,8 +1,11 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Crypto
 import Foundation
 import Synchronization
 import Testing
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 struct V2ResourceDeliveryContractTests {
     @Test func aSlowOriginCannotReleaseBytesAfterCapabilityExpiry() async throws {

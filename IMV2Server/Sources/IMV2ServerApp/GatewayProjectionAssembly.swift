@@ -1,5 +1,9 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import IMV2Server
+import IMV2ServerInfrastructure
+import IMV2ServerGateway
 
 /// 初始化用户分片路由栅栏、提交后投影投递器和有界读缓存。
 /// 同一用户路由由前台、投递、维护各自的数据库角色访问。

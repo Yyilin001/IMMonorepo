@@ -31,6 +31,7 @@
 
 ## 其他入口
 
+- [服务端解耦优化方案](proposals/server-decoupling-plan.md)：资源、HTTP/Gateway、房间执行器、消息写入及 SwiftPM 模块边界的分阶段方案；当前进度见[实施状态](proposals/server-decoupling-progress.md)。
 - [应用级弱网架构提案](proposals/application-weak-network-design.md)与[实施任务计划](proposals/application-weak-network-implementation-plan.md)：结合当前源码的目标设计；基础组件与个人资料链路已接入，完整差距见[实施状态](proposals/application-weak-network-progress.md)，全量能力尚未验收。
 - [会话偏好与收藏的恢复合同](proposals/personal-preference-operation-contract.md)：RoomRef 权威回执、公共任务 journal、队首冻结与投影版本保护。
 - [ADR 登记册](../IMV2/docs/ADR-REGISTER.md)：设计决定与批准状态。

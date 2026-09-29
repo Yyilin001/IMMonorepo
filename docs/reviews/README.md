@@ -70,6 +70,7 @@
 | 房间读模型：投递、未读与保留窗口（**已实施**：单聊与标准群默认都走读模型、未读、保留窗口与运维重放；列表为本地优先 + 服务端未读；进入房间按 §5.4 推进到已应用序号／房间头） | [房间读模型合同](room-read-model-contract.md) | B03、B04、D07 |
 | 发送请求指纹与幂等 | [发送接受记录保留与清理](send-completion-retention.md)；[旧指纹实施历史](2026-09-05-send-message-fingerprint-contract.md)仅供追溯 | B11、D07 |
 | 房间写入存储的职责拆分与事务边界 | [Room write Store decomposition](room-write-store-decomposition.md) | D07 |
+| 消息发送双通道的当前实施与聚焦验证 | [双通道实施记录](message-send-dual-transport.md)；生产与真机验收仍待执行 | B27、D07 |
 | 静态房间归属与跨库持久发送授权 | [当前归属与发送授权合同](room-owner-migration-contract.md)；在线迁移章节仅供追溯 | B27、B04、B11、D07 |
 | 房间逻辑寻址、激活、事务资格与回收 | [房间 Virtual Actor 合同](room-virtual-actor-contract.md) | B27 |
 | 消息发送的 owner 栅栏 | [消息发送 owner 事务栅栏](send-message-owner-fence-contract.md) | B27 |

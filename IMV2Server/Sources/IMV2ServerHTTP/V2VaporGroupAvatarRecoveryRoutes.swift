@@ -1,7 +1,8 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import HTTPTypes
 import IMV2Core
-import IMV2Server
 import Vapor
 
 public struct V2VaporGroupAvatarRecoveryRoutes: Sendable {

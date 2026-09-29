@@ -1,12 +1,58 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2ActorContracts
 import IMV2Core
+import NIOCore
+import PostgresNIO
 import Synchronization
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
 
 @Suite("Granted actor send batching")
 struct V2ActorGrantedSendBatchTests {
+    @Test("named closed-operation constraint falls back per item without retiring the activation")
+    func closedOperationFallback() async throws {
+        let store = ClosedOperationBatchStore()
+        let batcher = V2SendMessageAdmissionBatcher(
+            store: store,
+            configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(5)),
+            actorGrantedStoreFactory: { _ in store }
+        )
+        let adapter = V2ActorGrantedSendBatchAdapter(batcher: batcher)
+        let token = try makeToken()
+        let results = try await adapter.execute(
+            makeSends(token: token, texts: ["closed", "other"]),
+            batchDeadline: .now
+        )
+        #expect(results == [
+            .failure(.sendStore(.messageOperationClosed)),
+            .send(.rateLimited(retryAfterSeconds: 3)),
+        ])
+        #expect(await store.atomicTexts() == [["closed", "other"]])
+        #expect(await store.scalarTexts() == ["closed", "other"])
+
+        let later = try await adapter.execute(
+            makeSends(token: token, texts: ["later"]), batchDeadline: .now
+        )
+        #expect(later == [.send(.rateLimited(retryAfterSeconds: 3))])
+        #expect(await store.scalarTexts() == ["closed", "other", "later"])
+    }
+
+    @Test("only the exact SQL state and constraint name becomes a closed operation")
+    func closedOperationConstraintIdentity() throws {
+        let named = try messageConstraintError(state: "23514", constraint: "message_operation_permanently_closed")
+        #expect(v2NormalizeMessageOperationClosed(named) as? V2RoomWriteStoreError == .messageOperationClosed)
+        for (state, constraint) in [
+            ("23514", "different_check"),
+            ("23505", "message_operation_permanently_closed"),
+        ] {
+            let other = try messageConstraintError(state: state, constraint: constraint)
+            #expect(v2NormalizeMessageOperationClosed(other) is PostgresError)
+        }
+    }
+
     @Test("selected cross-room SQL batch uses its earliest call deadline")
     func earliestGrantedSQLDeadline() async throws {
         let store = GrantedBatchStore()
@@ -339,6 +385,50 @@ struct V2ActorGrantedSendBatchTests {
             ))
         }
     }
+}
+
+private actor ClosedOperationBatchStore: V2AtomicRoomWriteBatchStore {
+    private var batches: [[String]] = []
+    private var scalars: [String] = []
+
+    func atomicBatchPartitions(requests: [V2RoomWriteRequest]) -> [V2AtomicRoomWriteBatchPartition?] {
+        requests.map { _ in .large }
+    }
+
+    func atomicBatchSupportsRepeatedRooms(in partition: V2AtomicRoomWriteBatchPartition) -> Bool {
+        partition == .large
+    }
+
+    func acceptAtomically(requests: [V2RoomWriteRequest]) throws -> [V2SendMessageOutcome] {
+        batches.append(requests.map(\.command.text))
+        throw try messageConstraintError(state: "23514", constraint: "message_operation_permanently_closed")
+    }
+
+    func accept(command: V2SendMessageCommand, capacityProfile: V2CapacityProfile,
+                identifiers: V2AcceptanceIdentifiers, now: Date) throws -> V2SendMessageOutcome {
+        scalars.append(command.text)
+        if command.text == "closed" {
+            throw try messageConstraintError(state: "23514", constraint: "message_operation_permanently_closed")
+        }
+        return .rateLimited(retryAfterSeconds: 3)
+    }
+
+    func atomicTexts() -> [[String]] { batches }
+    func scalarTexts() -> [String] { scalars }
+}
+
+private func messageConstraintError(state: String, constraint: String) throws -> PostgresError {
+    var bytes = ByteBufferAllocator().buffer(capacity: 128)
+    for (field, value) in [
+        (PostgresMessage.Error.Field.sqlState, state),
+        (.constraintName, constraint),
+    ] {
+        bytes.writeInteger(field.rawValue)
+        bytes.writeString(value)
+        bytes.writeInteger(UInt8(0))
+    }
+    bytes.writeInteger(UInt8(0))
+    return .server(try PostgresMessage.Error.parse(from: &bytes))
 }
 
 actor GrantedBatchStore: V2AtomicRoomWriteBatchStore {

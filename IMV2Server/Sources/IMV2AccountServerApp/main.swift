@@ -1,3 +1,5 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import FluentPostgresDriver
 import Foundation
 import FluentKit
@@ -11,6 +13,7 @@ import IMV2Core
 import IMV2ActorApplication
 import IMV2ActorContracts
 import IMV2Server
+import IMV2ServerInfrastructure
 import IMV2ServerHTTP
 import NIOPosix
 import Vapor
@@ -20,7 +23,7 @@ enum IMV2AccountServerApp {
     static func main() async {
         do { try V2ServiceLogging.bootstrap() }
         catch {
-            fputs("Invalid IM_V2_LOG_LEVEL; expected a swift-log level.\n", stderr)
+            FileHandle.standardError.write(Data("Invalid IM_V2_LOG_LEVEL; expected a swift-log level.\n".utf8))
             exit(EXIT_FAILURE)
         }
         let logger = Logger(label: "imv2.account")
@@ -332,13 +335,18 @@ enum IMV2AccountServerApp {
                     administration: .init(directory: actor.directory))
                 V2VaporGroupAvatarCommandRoutes(authenticator: authenticator, service: groupAvatarCommands).register(on: authenticatedAccountRoutes)
                 V2VaporGroupAvatarRecoveryRoutes(authenticator: authenticator, service: groupAvatarCommands).register(on: authenticatedAccountRoutes)
-                let resourceImports = V2ResourceImportService(resources: resourceService, resolve: { home, usage, user, device in
-                    try await resourceRouter.resolve(home: home, usage: usage, actorUserID: user, deviceID: device)
-                }, sources: .init(controlDatabase: database, rooms: roomRouter, ownerDatabases: roomDatabases,
-                    authorization: .init(directory: actor.directory), avatarAuthorization: { key, media, variant, user, device in
+                let importSources = V2ResourceImportSourceResolver(controlDatabase: database, rooms: roomRouter,
+                    ownerDatabases: roomDatabases, authorization: .init(directory: actor.directory),
+                    avatarAuthorization: { key, media, variant, user, device in
                         _ = try await resourceProfiles.authorizeAvatarImport(key: key, mediaID: media, variantID: variant,
                             actorUserID: user, deviceID: device)
-                    }), registry: resourceRegistry, transports: configuredTransports)
+                    })
+                let importStore = PostgresV2ResourceImportStore(resolve: { home, usage, user, device in
+                    try await resourceRouter.resolve(home: home, usage: usage, actorUserID: user, deviceID: device)
+                }, sources: importSources, ownerDatabases: accountStorageDatabases)
+                let resourceImports = V2ResourceImportService(resources: resourceService, resolve: { home, usage, user, device in
+                    try await resourceRouter.resolve(home: home, usage: usage, actorUserID: user, deviceID: device)
+                }, persistence: importStore, registry: resourceRegistry, transports: configuredTransports)
                 V2VaporResourceImportRoutes(authenticator: authenticator, service: resourceImports).register(on: authenticatedAccountRoutes)
 
                 let mediaDownloads = V2RoomRefMediaDownloadClient(
@@ -360,7 +368,7 @@ enum IMV2AccountServerApp {
                 ).register(on: app)
 
                 // Every distinct physical owner hosts resource sessions and durable jobs.
-                for ownerDatabase in accountStorageDatabases.values {
+                for (ownerID, ownerDatabase) in accountStorageDatabases {
                     let variants = transformer.map { transformer in
                         V2ResourceVariantProcessor(database: ownerDatabase, registry: resourceRegistry, transformer: transformer,
                             allocate: { binding in
@@ -380,7 +388,7 @@ enum IMV2AccountServerApp {
                         while !Task.isCancelled {
                             do {
                                 try await recovery.runOnce(limit: 16)
-                                try await resourceImports.runOnce(database: ownerDatabase, limit: 16)
+                                try await resourceImports.runOnce(ownerID: ownerID, limit: 16)
                                 _ = try await scanner.runOnce(limit: 16)
                                 _ = try await retention.runOnce(limit: 16)
                                 _ = try await purger.runOnce(limit: 16)
@@ -416,15 +424,15 @@ enum IMV2AccountServerApp {
                 )
             ).register(on: authenticatedAccountRoutes)
             let profileUpdateStore = PostgresV2ProfileUpdateStore(database: database)
-            V2VaporPersonalPreferenceRecoveryRoutes(authenticator:authenticator,administration:.init(directory:actor.directory)).register(on:authenticatedAccountRoutes)
-            V2VaporMessageSendOperationRoutes(authenticator:authenticator,messages:.init(directory:actor.directory,callTimeout:try .init(10_000))).register(on:authenticatedAccountRoutes)
-            V2VaporMessageMutationOperationRoutes(authenticator:authenticator,messages:.init(directory:actor.directory,callTimeout:try .init(10_000))).register(on:authenticatedAccountRoutes)
-            V2VaporGroupCapabilityRoutes(authenticator:authenticator,rooms:.init(directory:actor.directory)).register(on:authenticatedAccountRoutes)
-            V2VaporMembershipOperationRoutes(authenticator:authenticator,rooms:.init(directory:actor.directory)).register(on:authenticatedAccountRoutes)
-            V2VaporMemberAdministrationRoutes(authenticator:authenticator,rooms:.init(directory:actor.directory)).register(on:authenticatedAccountRoutes)
-            V2VaporMessageModerationRoutes(authenticator:authenticator,rooms:.init(directory:actor.directory)).register(on:authenticatedAccountRoutes)
-            V2VaporMessageReactionOperationRoutes(authenticator:authenticator,messages:.init(directory:actor.directory,callTimeout:try .init(10_000))).register(on:authenticatedAccountRoutes)
-            V2VaporReadReceiptRecoveryRoutes(authenticator:authenticator,queries:.init(directory:actor.directory)).register(on:authenticatedAccountRoutes)
+            V2VaporPersonalPreferenceRecoveryRoutes(authenticator:authenticator,administration:V2RoomRefAdministrationClient(directory:actor.directory)).register(on:authenticatedAccountRoutes)
+            V2VaporMessageSendOperationRoutes(authenticator:authenticator,messages:V2RoomRefMessagingClient(directory:actor.directory,callTimeout:try .init(10_000))).register(on:authenticatedAccountRoutes)
+            V2VaporMessageMutationOperationRoutes(authenticator:authenticator,messages:V2RoomRefMessagingClient(directory:actor.directory,callTimeout:try .init(10_000))).register(on:authenticatedAccountRoutes)
+            V2VaporGroupCapabilityRoutes(authenticator:authenticator,rooms:V2RoomRefAdministrationClient(directory:actor.directory)).register(on:authenticatedAccountRoutes)
+            V2VaporMembershipOperationRoutes(authenticator:authenticator,rooms:V2RoomRefAdministrationClient(directory:actor.directory)).register(on:authenticatedAccountRoutes)
+            V2VaporMemberAdministrationRoutes(authenticator:authenticator,rooms:V2RoomRefAdministrationClient(directory:actor.directory)).register(on:authenticatedAccountRoutes)
+            V2VaporMessageModerationRoutes(authenticator:authenticator,rooms:V2RoomRefAdministrationClient(directory:actor.directory)).register(on:authenticatedAccountRoutes)
+            V2VaporMessageReactionOperationRoutes(authenticator:authenticator,messages:V2RoomRefMessagingClient(directory:actor.directory,callTimeout:try .init(10_000))).register(on:authenticatedAccountRoutes)
+            V2VaporReadReceiptRecoveryRoutes(authenticator:authenticator,queries:V2RoomRefQueryClient(directory:actor.directory)).register(on:authenticatedAccountRoutes)
             V2VaporProfileUpdateRoutes(
                 authenticator: authenticator,
                 profiles: .init(store: profileUpdateStore, reader: profileUpdateStore)

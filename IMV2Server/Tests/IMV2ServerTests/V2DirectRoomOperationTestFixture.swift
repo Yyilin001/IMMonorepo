@@ -1,7 +1,10 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import FluentKit
 import Foundation
 import IMV2Core
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
 
 /// Executes the production owner transaction with explicit original identity,

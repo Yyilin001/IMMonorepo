@@ -1,5 +1,9 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import IMV2Server
+import IMV2ServerInfrastructure
+import IMV2ServerGateway
 
 /// 前台连接、数据库准入、短期缓存与进程内指标的共享依赖。
 /// 这些对象只在本阶段构造，不打开 TLS 或指标监听端口。

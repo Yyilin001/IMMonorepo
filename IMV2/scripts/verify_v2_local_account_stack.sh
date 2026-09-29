@@ -13,6 +13,7 @@ compose_file="${V2_LOCAL_COMPOSE_FILE:-${v2_dir}/docker-compose.local-account.ym
 env_file="${V2_LOCAL_ENV_FILE:-${v2_dir}/.env.local}"
 compose_project="${V2_LOCAL_COMPOSE_PROJECT:-imv2localaccount}"
 account_base_url="${V2_LOCAL_HTTP_BASE_URL:-https://localhost:8443}"
+gateway_probe_account_base_url="${V2_LOCAL_GATEWAY_PROBE_ACCOUNT_BASE_URL:-${account_base_url}}"
 gateway_tls_address="${V2_LOCAL_GATEWAY_TLS_ADDRESS:-localhost:7443}"
 registration_recovery_directory="${V2_LOCAL_REGISTRATION_RECOVERY_DIRECTORY:-${v2_dir}/local-ca/registration-recovery}"
 busy_term_fixture="${V2_LOCAL_BUSY_TERM_FIXTURE_PATH:-}"
@@ -242,7 +243,7 @@ peer_user_id="$(printf '%s' "${peer_issued_credentials}" | jq -er '.userID')"
 phase="authenticated V2 direct-message send"
 gateway_send_result="$(compose \
   exec -T \
-  --env "IM_V2_GATEWAY_PROBE_ACCOUNT_BASE_URL=${account_base_url}" \
+  --env "IM_V2_GATEWAY_PROBE_ACCOUNT_BASE_URL=${gateway_probe_account_base_url}" \
   --env 'IM_V2_GATEWAY_PROBE_MODE=sendDirectMessage' \
   --env "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN=${access_token}" \
   --env "IM_V2_GATEWAY_PROBE_DEVICE_ID=${device_id}" \
@@ -257,7 +258,7 @@ test -n "${gateway_room_id}" && test -n "${gateway_message_id}" && test -z "${ga
 phase="authenticated V2 recipient room-log delivery"
 gateway_receive_output="$(compose \
   exec -T \
-  --env "IM_V2_GATEWAY_PROBE_ACCOUNT_BASE_URL=${account_base_url}" \
+  --env "IM_V2_GATEWAY_PROBE_ACCOUNT_BASE_URL=${gateway_probe_account_base_url}" \
   --env 'IM_V2_GATEWAY_PROBE_MODE=receiveDirectMessage' \
   --env "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN=${peer_access_token}" \
   --env "IM_V2_GATEWAY_PROBE_DEVICE_ID=${peer_device_id}" \
@@ -303,7 +304,7 @@ if [[ -n "${remote_batch_fixture}" || -n "${remote_batch_release}" ]]; then
 
   remote_batch_warm_send() {
     compose exec -T \
-      --env "IM_V2_GATEWAY_PROBE_ACCOUNT_BASE_URL=${account_base_url}" \
+      --env "IM_V2_GATEWAY_PROBE_ACCOUNT_BASE_URL=${gateway_probe_account_base_url}" \
   --env 'IM_V2_GATEWAY_PROBE_MODE=sendDirectMessage' \
       --env "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN=$1" \
       --env "IM_V2_GATEWAY_PROBE_DEVICE_ID=$2" \

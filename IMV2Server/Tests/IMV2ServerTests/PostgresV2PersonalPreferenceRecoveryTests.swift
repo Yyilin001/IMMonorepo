@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2ActorContracts
 import IMV2Core
@@ -5,6 +7,7 @@ import SQLKit
 import Testing
 
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test(

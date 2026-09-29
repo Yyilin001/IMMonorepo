@@ -15,14 +15,7 @@ public struct V2RoomCommandPermit: Equatable, Sendable {
     fileprivate let permitID: UUID
 }
 
-public struct V2RoomCommandBudgetSnapshot: Equatable, Sendable {
-    public let commandCount: Int
-    public let byteCount: Int
-    public let roomCount: Int
-    public let reservationCount: Int
-    public let peakCommandCount: Int
-    public let peakByteCount: Int
-}
+
 
 /// 房间和宿主准入不等待，避免过载产生另一条无界队列。
 /// 激活实例持有每份许可，直至持久化结果完成。

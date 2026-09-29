@@ -114,7 +114,7 @@ ClientKit 已删除旧上传解析/完成/状态协议、旧 HTTP 上传客户�
 
 ## 同 home 迁移的复制与切读内核
 
-[迁移服务](../../IMV2Server/Sources/IMV2Server/Resources/Application/V2ResourceMigrationService.swift)与[持久存储](../../IMV2Server/Sources/IMV2Server/Resources/Infrastructure/PostgresV2ResourceMigrationStore.swift)已实现以下路径，仍使用纯 storage 协议和身份分配闭包：
+[迁移服务](../../IMV2Server/Sources/IMV2ServerApplication/Resources/Application/V2ResourceMigrationService.swift)与[持久存储](../../IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/PostgresV2ResourceMigrationStore.swift)已实现以下路径，仍使用纯 storage 协议和身份分配闭包：
 
 1. 在资源所属数据库内校验维护权限、当前 generation、available 状态与精确源事实。按 operation ID 幂等，持久保存源引用、预分配目标、大小和 SHA-256；同一资源最多一个待复制任务，目标 binding 由维护请求明确指定。
 2. 取得有期限的 claim 后离开事务执行 I/O。恢复先 inspect 已登记的目标；不存在才读取原输入并复制。回执必须完整匹配目标身份、大小和摘要，响应丢失也不重新分配对象。
@@ -152,7 +152,7 @@ python3 scripts/verify_v2_live_resource_authors.py --output /tmp/im-resource-liv
 
 ## 控制域跨接收者查询与客户端退避
 
-`V2ResourceProfilePresentationService` 的初次读取、房间授权后的复核和签名后的复核共用 [控制域批处理器](../../IMV2Server/Sources/IMV2Server/Resources/Infrastructure/V2ProfileControlBatcher.swift)。它按进程内同一控制数据库收集不同接收者；[SQL reader](../../IMV2Server/Sources/IMV2Server/Resources/Infrastructure/PostgresV2ProfileControlReader.swift) 在一条查询中逐项核对 actor/device、账户启用状态、双向拉黑、资料、关系和私聊 owner 路由。返回值按 request/key ordinal 严格拆分，某个设备被撤销不会让相邻请求获准或一起变成不可见。每次批次重新读取当前事实，不缓存跨接收者的授权决定。
+`V2ResourceProfilePresentationService` 的初次读取、房间授权后的复核和签名后的复核共用 [控制域批处理器](../../IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/V2ProfileControlBatcher.swift)。它按进程内同一控制数据库收集不同接收者；[SQL reader](../../IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/PostgresV2ProfileControlReader.swift) 在一条查询中逐项核对 actor/device、账户启用状态、双向拉黑、资料、关系和私聊 owner 路由。返回值按 request/key ordinal 严格拆分，某个设备被撤销不会让相邻请求获准或一起变成不可见。每次批次重新读取当前事实，不缓存跨接收者的授权决定。
 
 一个 SQL 批次最多 100 个目标项和 64 KiB 编码输入；等待合并 3 ms，排队超过 5 ms 或待处理达到 400 项 / 256 KiB 时明确拒绝，最多 4 个实际在途查询。单次查询结果另限 256 KiB。HTTP 原有 64 个总请求、每设备 2 个请求的准入继续生效；上述限制不能当作吞吐承诺。排队取消会移除需求；在途取消或调用期限到达先结束调用者等待，但 SQL 真正结束前继续占用查询名额。服务停机先停止新准入，取消并排空查询，再等待已经进入房间授权或签名的资料读取全部离开，之后才关闭依赖。
 
@@ -160,7 +160,7 @@ python3 scripts/verify_v2_live_resource_authors.py --output /tmp/im-resource-liv
 
 房间成员权限仍通过各自的 RoomRef 用户信封逐请求准入；[房间通道](../../IMV2Server/Sources/IMV2ActorRuntime/Scheduling/V2RoomTurnLane.swift) 将已经排队、形状合法的相邻资料读取组成同一个轮次。单轮最多 100 个目标项、默认最多 64 个信封；合并后的请求字节受 64 KiB 与通道配置的较小值限制。发送、其他查询/写入和 reservation 都是屏障，两类批次不能混合。这里不新增收集等待，不保证低负载下的单独请求也能合并；排队和实际执行仍占用原有房间/宿主预算。
 
-[真实执行器](../../IMV2Server/Sources/IMV2Server/RoomCoordination/MediaAuthorization/V2RoomMediaAuthorizationDomainExecutor.swift) 在 activation 围栏事务内，使用一条集合查询逐项读取接收者、目标成员、房间类型、当前 membership revision 和获准群目标的昵称行；activation 校验及事务本身仍有数据库开销。各项使用同一语句观察时间，按 request/target ordinal 拆分，各自返回绑定原请求的证明或不可见结果；不会把某个用户的权限转给同批其他用户，也不缓存跨接收者的授权决定。SQL 输入另限 64 KiB，SQL 编码结果和返回证明分别限 256 KiB。整个轮次只申请一次 `interactiveRead` 数据库准入，使用最早调用截止；调用者取消后，实际查询结束前继续持有轮次和额度。
+[真实执行器](../../IMV2Server/Sources/IMV2ServerApplication/Room/V2RoomMediaAuthorizationDomainExecutor.swift) 在 activation 围栏事务内，使用一条集合查询逐项读取接收者、目标成员、房间类型、当前 membership revision 和获准群目标的昵称行；activation 校验及事务本身仍有数据库开销。各项使用同一语句观察时间，按 request/target ordinal 拆分，各自返回绑定原请求的证明或不可见结果；不会把某个用户的权限转给同批其他用户，也不缓存跨接收者的授权决定。SQL 输入另限 64 KiB，SQL 编码结果和返回证明分别限 256 KiB。整个轮次只申请一次 `interactiveRead` 数据库准入，使用最早调用截止；调用者取消后，实际查询结束前继续持有轮次和额度。
 
 上述实现覆盖同一热房间中的不同接收者。本机独立进程间的真实 Actor TLS 资料读取已通过上述验收；不同房间之间的物理 owner 合并、指标导出、跨机器 Actor 网络及 owner 迁移场景和端到端突发负载仍待验收，不能据此声称完成全部多权威查询链路的生产容量验收。
 
@@ -174,7 +174,7 @@ python3 scripts/verify_v2_live_resource_authors.py --output /tmp/im-resource-liv
 
 ### 群昵称持久失效事件
 
-[`PostgresV2ProfilePresentationStore`](../../IMV2Server/Sources/IMV2Server/PostgresV2ProfilePresentationStore.swift) 在同一个 owner activation 围栏事务内写入昵称、幂等回执和 `group.nickname_changed`。事件仅含 `event_type`、`room_id`、`target_user_id`、`revision`、`room_sequence`、`server_created_at_ms`，不含昵称正文、头像或下载能力。当前房间日志允许其成员知道发起者 ID；若后续产品要求隐藏该身份，须改成不泄露主体的范围失效合同。
+[`PostgresV2ProfilePresentationStore`](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ProfilePresentationStore.swift) 在同一个 owner activation 围栏事务内写入昵称、幂等回执和 `group.nickname_changed`。事件仅含 `event_type`、`room_id`、`target_user_id`、`revision`、`room_sequence`、`server_created_at_ms`，不含昵称正文、头像或下载能力。当前房间日志允许其成员知道发起者 ID；若后续产品要求隐藏该身份，须改成不泄露主体的范围失效合同。
 
 事务持有房间序号锁，复用群命令准入和 shard 额度；额度不足或事件失败时全部回滚。变更只追加一条 room event，不写每个成员的 user-sync 事件。相同 operation 重放先取原回执；新 operation 提交相同内容会保留回执但不新增版本、事件或额度扣减。普通群的 Account HTTP 写入同时写合并 wake outbox，大群沿用事件触发器；pending wake 合并，已认领 wake 被新版本替代，worker 读取当前房间水位。这里不保证端到端通知延迟，广播/拉取仍需要在线订阅和实际 worker 部署。
 
@@ -207,9 +207,9 @@ App 订阅独立 `.groupNicknames` 投影变化。仓库只集合读取当前有
 
 实时正文已有共享编码帧，逐接收者的展示许可和头像能力不能混入该共享内容。[`V2AuthorPresentationDelta`](../../IMV2Core/Sources/IMV2Core/AuthorPresentationDelta.swift) 使用独立的连接 stream ID、前台 view nonce、单调 sequence、actor/device/room，以及现有资料证明与临时头像能力。一个载荷最多 16 项、32 KiB 编码 JSON；retryable 必须携带 100～60,000 ms 的退避，不能伪装为不可见。它不进入消息日志、message hash、持久投影或 journal。两端同时执行 33 KiB 完整未压缩帧上限（含 protobuf envelope 与 18 字节帧头），并受连接配置的更小预算限制；分发器每个输出额外预留 1 KiB 封装开销。
 
-[`V2AuthorPresentationDispatcher`](../../IMV2Server/Sources/IMV2Server/Resources/Application/V2AuthorPresentationDispatcher.swift) 提供可独立验证的任务所有权边界。调用方先完成认证、能力协商和正常房间订阅授权，再注册连接、激活 view；只从已向该接收者授权的消息提取作者并调用 `offer`。`offer` 不等待权威查询或网络写出。默认节点待处理 1,024 项 / 256 KiB，每连接 128 项；最多 4 个实际查询、4 个实际写出，每连接同一时刻只有一个资料任务。查询合并等待 2 ms，整个补充任务期限 500 ms；单批只含一个房间的最多 16 个作者。输出及其待提交压缩提示合计限 256 KiB，输出接近上限时停止启动新的可选查询。这些值是组件保护边界，不是实际网络或生产延迟承诺。
+[`V2AuthorPresentationDispatcher`](../../IMV2Server/Sources/IMV2ServerApplication/Resources/Application/V2AuthorPresentationDispatcher.swift) 提供可独立验证的任务所有权边界。调用方先完成认证、能力协商和正常房间订阅授权，再注册连接、激活 view；只从已向该接收者授权的消息提取作者并调用 `offer`。`offer` 不等待权威查询或网络写出。默认节点待处理 1,024 项 / 256 KiB，每连接 128 项；最多 4 个实际查询、4 个实际写出，每连接同一时刻只有一个资料任务。查询合并等待 2 ms，整个补充任务期限 500 ms；单批只含一个房间的最多 16 个作者。输出及其待提交压缩提示合计限 256 KiB，输出接近上限时停止启动新的可选查询。这些值是组件保护边界，不是实际网络或生产延迟承诺。
 
-资料内容版本提示只在传输回调确认入队后保存，按连接/完整 context 保留最多 128 项，节点提示总预算 2 MiB。每次选中的 key 仍重新调用授权 reader，之后才决定是否省略相同版本的字节；权限拒绝仍发送并清除旧提示。去重期限再扣除客户端可能消耗的整个 30 秒 view 计时窗口，短于该窗口的能力不建立去重提示，避免省略客户端已经不能使用的资料。断线、离页、重新进入同房间和超时会取消旧任务；非协作式依赖真正结束前仍占用查询或写出名额，重复关闭共同等待排空。[`V2AuthorPresentationTransport`](../../IMV2Server/Sources/IMV2Server/Resources/Application/V2AuthorPresentationTransport.swift) 在实际 NIO 入队时以同一互斥门复核连接/页面代次、任务及 view 截止、认证期限和单次消费。取消会使尚未使用的写入许可失效；字节超出完整帧上限不能创建许可。NIO writer 在连接不可写、已有命令处理/待写响应时丢弃可选补充，不增加重试队列，也不因为可选资料拥塞关闭健康连接。写入成功仅说明本地入队。
+资料内容版本提示只在传输回调确认入队后保存，按连接/完整 context 保留最多 128 项，节点提示总预算 2 MiB。每次选中的 key 仍重新调用授权 reader，之后才决定是否省略相同版本的字节；权限拒绝仍发送并清除旧提示。去重期限再扣除客户端可能消耗的整个 30 秒 view 计时窗口，短于该窗口的能力不建立去重提示，避免省略客户端已经不能使用的资料。断线、离页、重新进入同房间和超时会取消旧任务；非协作式依赖真正结束前仍占用查询或写出名额，重复关闭共同等待排空。[`V2AuthorPresentationTransport`](../../IMV2Server/Sources/IMV2ServerApplication/Resources/Application/V2AuthorPresentationTransport.swift) 在实际 NIO 入队时以同一互斥门复核连接/页面代次、任务及 view 截止、认证期限和单次消费。取消会使尚未使用的写入许可失效；字节超出完整帧上限不能创建许可。NIO writer 在连接不可写、已有命令处理/待写响应时丢弃可选补充，不增加重试队列，也不因为可选资料拥塞关闭健康连接。写入成功仅说明本地入队。
 
 [`V2AuthorPresentationReceiver`](../../IMV2ClientKit/Sources/IMV2ClientKit/V2AuthorPresentationReceiver.swift) 每个账户/设备独立，当前仅持有一个前台 view。客户端在发出订阅前生成随机 nonce；服务端必须在该 nonce 对应的已授权订阅之后执行资料读取并回传 nonce。接收器从 `validUntil - serverNow` 中保守扣除“订阅开始到接收”的全部单调耗时，包括服务器队列和网络停滞，避免把迟到的推送变成一份新的完整 lease。头像能力与名称展示分别计算期限，过期头像可被丢弃而保留尚有效的名称。view 的接收窗口为 30 秒；实际接线必须在此前有界、带抖动地更新 nonce，或在过期后回退 HTTP 重授权。仅凭一条 unsolicited 消息中的服务器时间，不能推断网络耗时。
 
@@ -223,7 +223,7 @@ App 的实际房间订阅由 `V2RoomSubscriptionCoordinator` 和页面内的 `V2
 
 ## 正文投递与作者提示的有界交接
 
-[`V2AuthorPresentationIngress`](../../IMV2Server/Sources/IMV2Server/Resources/Application/V2AuthorPresentationIngress.swift) 是同步广播路径到资料分发器的独立交接所有者。构造时只创建一个实际消费者 Task，唤醒流最多缓存一个空信号；每个接收者只执行同步有界入队，不建立 Task、不等待资料或数据库。默认最多保留 256 个 offer、1,024 个作者 key、256 KiB 准入计费字节；固定身份每项计 128 字节，每个 UUID 作者计 64 字节，额外分配器/对象开销由项数共同约束，不把计费字节宣称为精确进程内存。正在执行的一个消费者仍占上述名额，真正返回之前不会因为取消而释放。
+[`V2AuthorPresentationIngress`](../../IMV2Server/Sources/IMV2ServerApplication/Resources/Application/V2AuthorPresentationIngress.swift) 是同步广播路径到资料分发器的独立交接所有者。构造时只创建一个实际消费者 Task，唤醒流最多缓存一个空信号；每个接收者只执行同步有界入队，不建立 Task、不等待资料或数据库。默认最多保留 256 个 offer、1,024 个作者 key、256 KiB 准入计费字节；固定身份每项计 128 字节，每个 UUID 作者计 64 字节，额外分配器/对象开销由项数共同约束，不把计费字节宣称为精确进程内存。正在执行的一个消费者仍占上述名额，真正返回之前不会因为取消而释放。
 
 相同 connection/room/view 的排队提示合并去重，单项最多 128 个作者；合并不延长最初 500 ms 截止。分发器接收精确 view 和原截止，旧页提示不能变成新页需求，排队也不能获得新的一整段任务期限。关闭先停止准入、清除排队提示，再取消并等待实际消费者；重复关闭等待同一实际任务。组合根已安装运行所有者，依次排空 ingress、dispatcher、授权 reader，再关闭 Actor 和数据库；服务端是否启用仍由下述部署开关控制。
 
@@ -239,7 +239,7 @@ App 的实际房间订阅由 `V2RoomSubscriptionCoordinator` 和页面内的 `V2
 
 注册表仅允许在首次连接注册尝试之前安装一次开放的 ingress，不能在认证连接已经运行后热替换。dispatcher 的可选连接名额用尽时仍允许正常聊天认证、订阅与心跳，该连接依靠可见资料的批量 HTTP 回退，不因头像补充容量不足断开。回退仍受原有请求准入、合批与退避约束；节点容量及公平性需要负载验收。
 
-[`V2AuthorPresentationRuntime`](../../IMV2Server/Sources/IMV2Server/Resources/Application/V2AuthorPresentationRuntime.swift) 持有完整依赖关闭顺序。正常停机、运行失败和装配中途失败均先等待 ingress 实际消费结束，再等待 dispatcher 的实际读取/写出结束，最后关闭 reader；并发关闭和已取消的关闭调用共同等待同一个任务。TLS、Actor 和数据库不能提前销毁。装配已构造 TLS 后若后续启动步骤失败，也会关闭该 TLS 实例。超过配置的 shutdown grace 后进程以失败状态退出，避免继续释放仍被使用的依赖。这些生命周期保证不等同于真实部署的端到端验收。
+[`V2AuthorPresentationRuntime`](../../IMV2Server/Sources/IMV2ServerApplication/Resources/Application/V2AuthorPresentationRuntime.swift) 持有完整依赖关闭顺序。正常停机、运行失败和装配中途失败均先等待 ingress 实际消费结束，再等待 dispatcher 的实际读取/写出结束，最后关闭 reader；并发关闭和已取消的关闭调用共同等待同一个任务。TLS、Actor 和数据库不能提前销毁。装配已构造 TLS 后若后续启动步骤失败，也会关闭该 TLS 实例。超过配置的 shutdown grace 后进程以失败状态退出，避免继续释放仍被使用的依赖。这些生命周期保证不等同于真实部署的端到端验收。
 
 ## 日志拉取后的附件与历史作者补充
 
@@ -329,7 +329,7 @@ ClientKit 的 `conversationLookupContexts` 在一个 SQLite 读取快照内最�
 
 [`V2PublicIdentityResolution`](../../IMV2Core/Sources/IMV2Core/PublicIdentityResolution.swift) 为一次明确的精确 handle 发现定义独立结果：公开身份、查询账户、设备、观察时间、截止时间和响应时间。最长 60 秒，不包含头像、对象地址或可复用到其他资料上下文的授权。它没有加入批量 profile context；不能通过任意 UUID 批量发现陌生人。原有单条精确匹配、每用户查询预算和目标屏蔽查询者时的统一不可用语义保持不变；自己已屏蔽的目标仍可按原策略解析，以支持解除屏蔽。
 
-[`V2PublicIdentityResolutionService`](../../IMV2Server/Sources/IMV2Server/V2PublicIdentityResolutionService.swift) 在目录 I/O 前后读取认证结果，拒绝账户替换、撤销、截止已过或 handle 不匹配的结果。期限从第一次认证之前计时，并取两次认证截止与 60 秒上限的最小值；查询与排队不会延长有效期。它只依赖认证与目录端口，不依赖 storage/delivery，也不签发资源字节能力。该短期结果允许有界的旧观察窗口，不保证已经交付的名称在远端拉黑瞬间消失。
+[`V2PublicIdentityResolutionService`](../../IMV2Server/Sources/IMV2ServerApplication/V2PublicIdentityResolutionService.swift) 在目录 I/O 前后读取认证结果，拒绝账户替换、撤销、截止已过或 handle 不匹配的结果。期限从第一次认证之前计时，并取两次认证截止与 60 秒上限的最小值；查询与排队不会延长有效期。它只依赖认证与目录端口，不依赖 storage/delivery，也不签发资源字节能力。该短期结果允许有界的旧观察窗口，不保证已经交付的名称在远端拉黑瞬间消失。
 
 `GET /v2/public-identities/resolve` 现在返回上述带期限的 Core 合同，成功及统一 not-found 响应为 `no-store`；`/me` 保持本人资料接口。ClientKit 验证账户、请求设备、规范化 handle、时间关系、60 秒上限及 8 KiB 响应上限，并从剩余期限扣除整个请求的单调耗时。裸旧响应明确拒绝。`resolve(handle:)` 继续仅供私聊、建群、添加成员、提及与屏蔽等命令解析目标；发现页面必须使用 `resolveForPresentation` 返回的内存快照，不能持久保存期限或拿它替代关系/群资料授权。
 
@@ -359,7 +359,7 @@ HTTP 申请响应和内部 Actor profile proof 的 `permissionRevision` 字段�
 
 成功读取 `GET /v2/profile/me` 直接返回 Core `V2ProfileView`；提交返回 `V2ProfileUpdateResult`，其中 `receipt` 与 `currentSnapshot` 分开。原回执绑定 actor、operation ID、fingerprint、终态和解决时间；`committed` 保存本次产生的 profile/visibility revision。后来 B 更新成功后重放 A，A 的原回执保持不变，而当前快照可以是 B 的较新版本。客户端独立保护快照 revision，不从 A 的成功回执回退当前资料。版本冲突、头像不可用和首次未受理过期也保存 `.rejected` 原回执，通过 HTTP 200 的明确业务结果返回；同 ID 不同指纹是冲突错误，不能据此创建替代。
 
-`POST /v2/profile/me/operations/recover` 接收 `operation_id`、`fingerprint`、`action = query | closeIfAbsent`，请求体最多 2 KiB，响应按 Core `V2ProfileOperationRecoveryResult` 编码。查询返回原 `receipt` 和可用的独立当前快照、`unresolved` 或 `fingerprintConflict`；无法取得当前 active 快照时可以只返回最小原回执。`unresolved`、404/403 或传输错误都不是未执行证明。关闭和提交在 [`PostgresV2ProfileUpdateStore`](../../IMV2Server/Sources/IMV2Server/PostgresV2ProfileUpdateStore.swift) 内获取相同 actor/operation 咨询锁：已有终态返回原回执；不存在则原子记录 `closed`，迟到提交只能取得该关闭回执，不能修改资料。
+`POST /v2/profile/me/operations/recover` 接收 `operation_id`、`fingerprint`、`action = query | closeIfAbsent`，请求体最多 2 KiB，响应按 Core `V2ProfileOperationRecoveryResult` 编码。查询返回原 `receipt` 和可用的独立当前快照、`unresolved` 或 `fingerprintConflict`；无法取得当前 active 快照时可以只返回最小原回执。`unresolved`、404/403 或传输错误都不是未执行证明。关闭和提交在 [`PostgresV2ProfileUpdateStore`](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ProfileUpdateStore.swift) 内获取相同 actor/operation 咨询锁：已有终态返回原回执；不存在则原子记录 `closed`，迟到提交只能取得该关闭回执，不能修改资料。
 
 上述路由都经当前账户/设备鉴权，响应 `no-store`。生产 AccountServer 将恢复路由装配到已有 PostgreSQL 已认证请求限流 owner，使用独立 `profile-recovery` scope、cost 3；键绑定 user/device/scope，额度跨进程保留。该独立速率预算限制随机 ID 查询与墓碑写入，不另设无界内存计数。当前没有新增永久回执的 lifetime 总量 quota，不将速率保护宣称为总存储容量验收。
 

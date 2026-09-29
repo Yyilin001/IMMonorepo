@@ -56,7 +56,7 @@
 
 10项 App 成员目录/变更专项通过，包括6种失效/网络参数及3种异常分页参数，见[页面证据](verification-records.md#20260919-member-directory)。这是注入读取器的 App 状态测试，不等同生产名录裁剪或跨分片实测。
 
-成员名录由房间 Actor 提供：[房间查询执行器](../../IMV2Server/Sources/IMV2Server/RoomDomain/Queries/V2ActorRoomQueryExecutor.swift)在激活围栏读事务内调用 [`PostgresV2RoomMembershipDirectoryStore.list`](../../IMV2Server/Sources/IMV2Server/PostgresV2RoomMembershipDirectoryStore.swift)，房间归属由激活租约保证。
+成员名录由房间 Actor 提供：[房间查询执行器](../../IMV2Server/Sources/IMV2ServerInfrastructure/Room/Queries/V2ActorRoomQueryExecutor.swift)在激活围栏读事务内调用 [`PostgresV2RoomMembershipDirectoryStore.list`](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomMembershipDirectoryStore.swift)，房间归属由激活租约保证。
 
 2026-09-24：此前由控制面目录选 owner、从控制库批量读取公开身份、再复核 shard/epoch 的成员名录路由实现（`V2RoutedRoomMembershipDirectoryStore` 及 owner 候选分页 API）在生产中已无调用路径，已删除。
 

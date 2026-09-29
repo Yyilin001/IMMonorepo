@@ -1,8 +1,11 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import NIOCore
 import NIOEmbedded
 import Synchronization
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
 
 @Suite("V2 timeout nanosecond boundaries")

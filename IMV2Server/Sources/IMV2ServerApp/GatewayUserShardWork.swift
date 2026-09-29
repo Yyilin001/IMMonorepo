@@ -1,5 +1,8 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import IMV2Server
+import IMV2ServerInfrastructure
 
 /// 同一物理用户分片上的投影、维护与指标来源只组装一次。
 struct GatewayUserShardWork {

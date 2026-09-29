@@ -1,7 +1,11 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2Core
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
+@testable import IMV2ServerGateway
 
 struct V2PreparedGroupResponseBoundsTests {
     @Test(arguments: [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max], [false, true])

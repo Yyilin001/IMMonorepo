@@ -1,9 +1,12 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import FluentKit
 import Foundation
 import IMV2ActorContracts
 import IMV2Core
 import Synchronization
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 /// Grants a fresh activation for one room turn, runs `body` under its token,
 /// then releases the lease. An activation still held by another in-flight

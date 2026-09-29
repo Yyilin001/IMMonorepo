@@ -1,8 +1,12 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2Core
 import Synchronization
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
+@testable import IMV2ServerGateway
 
 @Suite("V2 Hybrid group wake relay")
 struct V2GroupEventWakeRelayTests {

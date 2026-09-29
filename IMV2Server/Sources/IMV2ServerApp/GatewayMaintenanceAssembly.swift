@@ -1,9 +1,12 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import FluentKit
 import Foundation
 import IMV2ActorApplication
 import IMV2ActorContracts
 import IMV2ActorRuntime
 import IMV2Server
+import IMV2ServerInfrastructure
 
 /// 构造定时维护、撤销清理和可选推送处理器，不启动轮询。
 /// 两个撤销 Worker 的启动游标由组合根在监听器绑定前初始化。

@@ -1,8 +1,11 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Logging
 import IMV2ActorApplication
 import IMV2ServerHTTP
 import Vapor
 import IMV2Server
+import IMV2ServerInfrastructure
 
 /// Actor 启动前所需的依赖快照；包含数据库拓扑、投影、前台连接和房间归属资源。
 /// 此阶段只准备依赖并配置指标地址，不启动房间 Actor 或 Broker。

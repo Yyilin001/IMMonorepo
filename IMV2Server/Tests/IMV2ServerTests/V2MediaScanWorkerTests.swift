@@ -1,6 +1,9 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2Core
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
 
 @Suite("V2 media scanner worker")

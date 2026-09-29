@@ -1,7 +1,11 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2Core
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
+@testable import IMV2ServerGateway
 
 @Suite("Account room gateway protocol", .timeLimit(.minutes(1)))
 struct V2AccountRoomGatewayTests {

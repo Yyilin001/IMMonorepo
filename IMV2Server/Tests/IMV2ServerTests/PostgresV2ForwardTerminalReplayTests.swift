@@ -1,8 +1,11 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import FluentKit
 import FluentPostgresDriver
 import IMV2Core
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import SQLKit
 import Testing
 
@@ -35,7 +38,7 @@ struct PostgresV2ForwardTerminalReplayTests {
             }
             let receipts = PostgresV2ForwardReceiptStore(database: resources.database(.psql))
             let service = try V2CrossOwnerForwardService(sources: ["source": .init(
-                exports: .init(database: resources.database(.psql)), receipts: receipts, jobs: .init(database: resources.database(.psql)))])
+                exports: PostgresV2ForwardExportStore(database: resources.database(.psql)), receipts: receipts, jobs: PostgresV2ForwardDeliveryStore(database: resources.database(.psql)))])
             for scenario in 0..<3 {
                 let rejected = scenario == 1
                 let actor = UserID(uuid: UUID()), operation = MessageForwardOperationID(uuid: UUID())

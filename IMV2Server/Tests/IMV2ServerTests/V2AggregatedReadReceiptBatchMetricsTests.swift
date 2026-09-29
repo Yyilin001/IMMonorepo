@@ -1,5 +1,8 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
 
 @Suite("Read receipt metrics aggregation")
@@ -48,10 +51,10 @@ struct V2AggregatedReadReceiptBatchMetricsTests {
 }
 
 private struct ReceiptMetricsProbe: V2ReadReceiptBatchMetricsReading {
-    let value: V2ReadReceiptBatcher.Snapshot
+    let value: V2ReadReceiptBatchMetricsSnapshot
     var tracker: ReceiptMetricsConcurrencyTracker?
 
-    func snapshot() async -> V2ReadReceiptBatcher.Snapshot {
+    func snapshot() async -> V2ReadReceiptBatchMetricsSnapshot {
         if let tracker {
             await tracker.enter()
             try? await Task.sleep(for: .milliseconds(5))

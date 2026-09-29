@@ -49,7 +49,7 @@
 | 入口 | 基线行数 | 审核目的 |
 | --- | ---: | --- |
 | [GRDBV2LocalSyncStore](../../IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2LocalSyncStore.swift) | 5,261 | 投影归并、事务与恢复职责是否清楚 |
-| [PostgresV2RoomWriteStore](../../IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteStore.swift) | 4,051 | 权限、准入、幂等和事务的组合是否可追踪 |
+| [PostgresV2RoomWriteStore](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomWriteStore.swift) | 4,051 | 权限、准入、幂等和事务的组合是否可追踪 |
 | [V2ConversationUI](../../IMApp/IMApp/V2/V2ConversationUI.swift) | 2,580 | 页面渲染与业务编排边界 |
 | [V2ProtobufSyncTransport](../../IMV2ClientKit/Sources/IMV2ClientKit/V2ProtobufSyncTransport.swift) | 2,068 | 请求生命周期、映射与错误传播 |
 | [ServerApp main](../../IMV2Server/Sources/IMV2ServerApp/main.swift) | 1,837 | 依赖组装、任务所有权与停机顺序 |

@@ -8,11 +8,24 @@
 | 组件 | 职责 | 不承担的职责 |
 | --- | --- | --- |
 | `IMV2Core` | 领域 ID、帧/命令、准入与同步规则 | 网络、数据库、UI、密钥存储 |
-| `IMV2Server` | V2 TLS gateway、PostgreSQL store、房间日志与个人事件 outbox、账户/设备服务、operator 控制面 | 将 broker 作为业务真相 |
+| 服务端 Swift package | Contracts、Application、Infrastructure、Gateway、HTTP 与 Server 组装模块；覆盖房间日志、账户/设备和 operator 控制面 | 将 broker 作为业务真相 |
 | `IMV2ActorContracts/Runtime/Cluster/Application` | 房间逻辑引用、租约激活、FIFO/回收、认证集群调用与应用生命周期 | 把内存 Actor 或 membership 当持久完成事实 |
 | `IMV2ClientKit` | Keychain 会话、独立 SQLite 同步投影、持久领域意图与公共 operation work、专属安全 journal、TLS/HTTPS 适配器 | SwiftUI 展示、直接访问服务端数据库 |
 | `IMApp` | SwiftUI 状态与用户交互、依赖注入、iOS Push/文件导入边界 | 直接持有 bearer token、直接操作协议或数据库 |
 | `IMV2` | PostgreSQL 当前 canonical schema、隔离测试 Compose、本机账户栈、Prometheus 规则与运行文档 | 生产编排或容量批准 |
+
+## 服务端模块边界
+
+服务端正在按 SwiftPM target 收拢依赖，实施及验证状态见[解耦记录](proposals/server-decoupling-progress.md)。
+
+- `IMV2ServerContracts`：领域请求/结果、错误与能力接口，不暴露数据库连接或传输框架类型。
+- `IMV2ServerApplication`：资源、房间及恢复编排、纯策略和指标聚合，通过能力接口访问持久化与外部服务。
+- `IMV2ServerInfrastructure`：PostgreSQL、事务围栏、存储/消息适配器及数据库 worker。主体已迁入独立 target，验证状态见实施记录。
+- `IMV2ServerGateway`：TLS/NIO 会话、公共 protobuf 映射、命令分派与帧预算。
+- `IMV2ServerHTTP`：认证提取、输入解码、业务接口调用及 HTTP 响应/文件流映射。
+- `IMV2Server` 与 `IMV2ActorApplication`：进程配置、具体能力接线、共享资源及启动/关闭。旧 Server 已收敛为 15 个配置和组装文件。
+
+传输层和基础设施依赖内层契约及应用逻辑；内层不依赖旧 Server。RoomWrite 的事务内路径借用连接，事务、提交结果分类及提交后额度/缓存处理由明确的所有者管理。源码边界检查与依赖图辅助检查这些约束，行为及事务正确性仍由构建和定向运行验证。
 
 ## 账户网络与专属安全恢复
 

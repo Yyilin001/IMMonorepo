@@ -1,5 +1,9 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
+@testable import IMV2ServerGateway
 
 @Suite("V2 runtime latency metrics")
 struct V2RuntimeLatencyMetricsTests {

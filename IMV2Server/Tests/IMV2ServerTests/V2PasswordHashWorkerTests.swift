@@ -1,7 +1,10 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import CIMV2Argon2
 import Foundation
 import Testing
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 @Suite("V2 Argon2id password work", .serialized)
 struct V2PasswordHashWorkerTests {

@@ -51,18 +51,18 @@
 
 以下是设计开始前的代码级发现；部分问题已在工作分支修复，当前进度与运行证据见[实施记录](resource-system-implementation.md)，不要把此清单当作最新缺陷状态：
 
-1. **头像保留遗漏。** [Profile 更新](../../IMV2Server/Sources/IMV2Server/PostgresV2ProfileUpdateStore.swift)写入 `avatar_media_id`，而 [retention](../../IMV2Server/Sources/IMV2Server/PostgresV2MediaRetentionStore.swift)的候选判断保护消息引用和转发工作，没有保护头像引用。完整资源系统应使所有业务引用对 GC 可见。
-2. **上传意图幂等不足以恢复传输。** [当前上传会话](../../IMV2Server/Sources/IMV2Server/Resources/Infrastructure/PostgresV2ResourceLifecycleStore.swift)持久保存目标与代次，目标签发可重复进行；签发成功但响应丢失时，仍须为同一会话取得新目标，不消费一次性的上传 grant。
-3. **完成通知不等于对象验证。** [当前 complete](../../IMV2Server/Sources/IMV2Server/PostgresV2MediaStore.swift)根据 grant 和数据库状态进入 scanning；生产还需要核验存储里的精确对象版本、大小和摘要。
-4. **普通上传与多 owner 存在拓扑缺口。** [Account 装配](../../IMV2Server/Sources/IMV2AccountServerApp/main.swift)将上传 metadata 写入 control/default database；[消息接受](../../IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteMediaAcceptance.swift)检查 room owner 本地 `media_objects`。已查路径没有普通上传到异库房间的导入协议；已有跨库导入属于转发流程。
+1. **头像保留遗漏。** [Profile 更新](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ProfileUpdateStore.swift)写入 `avatar_media_id`，而 [retention](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MediaRetentionStore.swift)的候选判断保护消息引用和转发工作，没有保护头像引用。完整资源系统应使所有业务引用对 GC 可见。
+2. **上传意图幂等不足以恢复传输。** [当前上传会话](../../IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/PostgresV2ResourceLifecycleStore.swift)持久保存目标与代次，目标签发可重复进行；签发成功但响应丢失时，仍须为同一会话取得新目标，不消费一次性的上传 grant。
+3. **完成通知不等于对象验证。** [当前 complete](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MediaStore.swift)根据 grant 和数据库状态进入 scanning；生产还需要核验存储里的精确对象版本、大小和摘要。
+4. **普通上传与多 owner 存在拓扑缺口。** [Account 装配](../../IMV2Server/Sources/IMV2AccountServerApp/main.swift)将上传 metadata 写入 control/default database；[消息接受](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomWriteMediaAcceptance.swift)检查 room owner 本地 `media_objects`。已查路径没有普通上传到异库房间的导入协议；已有跨库导入属于转发流程。
 5. **临时寿命与资源寿命混用。** `expires_at` 既用于临时资源又参与再次引用检查；已有消息的下载与保留另有条件。应拆成上传到期、未绑定清理期限、绑定保留期限。
 6. **客户端任务尚不持久。** [附件服务](../../IMApp/IMApp/V2/V2ConversationAttachmentService.swift)重试生成新 ID，重启会清理没有持久记录的 staging；[传输器](../../IMV2ClientKit/Sources/IMV2ClientKit/V2MediaTransfer.swift)明确只支持前台。现有消息 outbox 不覆盖上传之前的任务。
 7. **缓存没有形成完整命中路径。** [下载服务](../../IMApp/IMApp/V2/V2ConversationMediaDownloadService.swift)重新授权后仍下载文件；[展示模型](../../IMV2Core/Sources/IMV2Core/MediaReference.swift)只有类别、MIME 和大小，缺尺寸、时长、内容摘要和 variants。
 8. **聊天展示尚未接入作者资料。** [消息 UI 转换](../../IMApp/IMApp/V2/V2ConversationDataSource.swift)只用 sender ID 判断是否自己发送；消息气泡、会话列表头像仍需实现。群名册每页最多 100 人，只包含公开名称等基础身份。
-9. **草案基线中的资料变化仅覆盖部分私聊受众。** [公开资料 worker](../../IMV2Server/Sources/IMV2Server/V2DirectRoomProfilePropagationWorker.swift)枚举已有消息的私聊对端，不做全群分发；草案基线的群昵称写入没有对应群日志变更事件。当前工作区已补充仅含主体与版本的失效事件及客户端持久版本下界，验证与剩余边界见[实施记录](resource-system-implementation.md)。
+9. **草案基线中的资料变化仅覆盖部分私聊受众。** [公开资料 worker](../../IMV2Server/Sources/IMV2ServerInfrastructure/V2DirectRoomProfilePropagationWorker.swift)枚举已有消息的私聊对端，不做全群分发；草案基线的群昵称写入没有对应群日志变更事件。当前工作区已补充仅含主体与版本的失效事件及客户端持久版本下界，验证与剩余边界见[实施记录](resource-system-implementation.md)。
 10. **客户端资料缓存缺少上下文。** [资料仓储](../../IMV2ClientKit/Sources/IMV2ClientKit/V2ProfileRepository.swift)尚无跨调用合并、TTL 或 in-flight 共享；本地资料按 user ID 存储，不能作为所有上下文的访问资格。
-11. **资料查询的跨库授权要补齐。** [profile batch](../../IMV2Server/Sources/IMV2Server/PostgresV2ProfileViewStore.swift)在 control 库查询本地房间成员关系；真实 room owner 分库后需要明确路由。当前 100-key batch 是同一 actor 查多个目标，不是 100 个不同接收者合批授权。
-12. **已有 provider 接口尚不足以隔离运营商。** [下载 provider](../../IMV2Server/Sources/IMV2Server/V2MediaProviderSessionService.swift)按 MediaID 签目标，通用头策略包含厂商前缀；[客户端传输](../../IMV2ClientKit/Sources/IMV2ClientKit/V2MediaTransfer.swift)固定 PUT/GET。需要补精确 blob placement、后端绑定及声明式传输计划，保证切换默认后端不影响旧对象与进行中的会话。
+11. **资料查询的跨库授权要补齐。** [profile batch](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ProfileViewStore.swift)在 control 库查询本地房间成员关系；真实 room owner 分库后需要明确路由。当前 100-key batch 是同一 actor 查多个目标，不是 100 个不同接收者合批授权。
+12. **已有 provider 接口尚不足以隔离运营商。** [下载 provider](../../IMV2Server/Sources/IMV2ServerApplication/V2MediaProviderSessionService.swift)按 MediaID 签目标，通用头策略包含厂商前缀；[客户端传输](../../IMV2ClientKit/Sources/IMV2ClientKit/V2MediaTransfer.swift)固定 PUT/GET。需要补精确 blob placement、后端绑定及声明式传输计划，保证切换默认后端不影响旧对象与进行中的会话。
 
 这些发现指导工作优先级。当前纯消息发送/恢复容量证据不能证明头像、资料查询和 CDN 的组合容量。
 

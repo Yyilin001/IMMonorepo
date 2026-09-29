@@ -650,6 +650,8 @@ def main() -> int:
     docker = ["docker", "--context", args.context]
     private = run / "private"
     private.mkdir(mode=0o700)
+    account_start_barrier = private / "account-start-barrier"
+    account_start_barrier.mkdir(mode=0o700)
     cross_entry_barrier = private / "cross-entry-barrier"
     if args.cross_entry_disable:
         cross_entry_barrier.mkdir(mode=0o700)
@@ -775,6 +777,17 @@ def main() -> int:
             for port in service.get("ports", []):
                 port["published"] = "0"
                 port["host_ip"] = "127.0.0.1"
+        # Caddy needs the Account container's network namespace to issue its
+        # private CA. Keep that container running, but defer its Actor join until
+        # the configured Host and Gateway have registered their Compose names.
+        account = document["services"]["account"]
+        account["volumes"].append({"type": "bind", "source": str(account_start_barrier),
+            "target": "/run/im-v2-account-start", "read_only": True})
+        account["command"] = ["sh", "-c",
+            "trap 'exit 143' TERM; trap 'exit 130' INT; "
+            "i=0; while [ ! -f /run/im-v2-account-start/ready ]; do "
+            "if [ \"$$i\" -ge 120 ]; then exit 1; fi; i=$$((i + 1)); sleep 1; "
+            "done; exec /workspace/IMV2Server/.build/release/IMV2AccountServerApp"]
         if args.remote_gateway:
             actor_host = copy.deepcopy(document["services"]["gateway"])
             actor_host["ports"] = []
@@ -810,7 +823,11 @@ def main() -> int:
             time.sleep(1)
         execute(compose + ["exec", "-T", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-U", "im_v2", "-d", "im_v2"],
                 "seed.log", input_text="INSERT INTO im_v2.shard_admission_pools (room_shard_id,capacity_profile_id,lease_id,generation,valid_until,command_window_limit) VALUES ('rooms-primary','standard','" + str(uuid.uuid4()) + "',1,CURRENT_TIMESTAMP + INTERVAL '24 hours',1000);\n")
-        execute(compose + ["up", "-d", "--wait", "--wait-timeout", "120", "account", "caddy", "operator"], "startup.log")
+        execute(compose + ["up", "-d", "account", "caddy", "operator"], "startup.log")
+        account_container = subprocess.check_output(compose + ["ps", "-q", "account"],
+            env=environment, text=True, timeout=15).strip()
+        if not account_container:
+            raise RuntimeError("Account network namespace did not start")
         ca = private / "root.crt"
         expires = time.monotonic() + 60
         while True:
@@ -822,8 +839,15 @@ def main() -> int:
                 raise RuntimeError("Caddy did not initialize its private CA")
             time.sleep(1)
         if args.remote_gateway:
-            execute(compose + ["up", "-d", "--wait", "--wait-timeout", "120", "actor-host"], "startup.log")
-        execute(compose + ["up", "-d", "--wait", "--wait-timeout", "120", "gateway"], "startup.log")
+            execute(compose + ["up", "-d", "--no-deps", "--wait", "--wait-timeout", "120", "actor-host"], "startup.log")
+        # Dependencies are already running. Waiting on them here would also wait
+        # for the Account healthcheck before its startup barrier can be released.
+        execute(compose + ["up", "-d", "--no-deps", "--wait", "--wait-timeout", "120", "gateway"], "startup.log")
+        (account_start_barrier / "ready").write_text("ready\n")
+        execute(compose + ["up", "-d", "--wait", "--wait-timeout", "120", "account", "operator"], "startup.log")
+        if subprocess.check_output(compose + ["ps", "-q", "account"],
+                env=environment, text=True, timeout=15).strip() != account_container:
+            raise RuntimeError("Account network namespace was replaced during startup")
         if args.remote_gateway:
             topology = json.loads((private / "local-room-actors" / "topology.json").read_text())
             expected_host = topology["hostIDs"]["actor-host"]
@@ -858,6 +882,7 @@ def main() -> int:
         environment.update({"V2_LOCAL_COMPOSE_PROJECT": project, "V2_LOCAL_COMPOSE_FILE": str(compose_file),
                             "V2_LOCAL_ENV_FILE": str(env_file), "V2_LOCAL_CA_PATH": str(ca),
                             "V2_LOCAL_HTTP_BASE_URL": "https://localhost:" + port("account", 8443),
+                            "V2_LOCAL_GATEWAY_PROBE_ACCOUNT_BASE_URL": "https://account:8443",
                             "V2_LOCAL_GATEWAY_TLS_ADDRESS": "localhost:" + port("gateway", 7443),
                             "V2_LOCAL_REGISTRATION_RECOVERY_DIRECTORY": str(private / "registration-recovery")})
         if args.busy_sigterm:

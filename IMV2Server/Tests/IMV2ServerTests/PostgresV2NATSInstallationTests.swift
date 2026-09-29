@@ -1,9 +1,13 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import FluentKit
 import IMV2Core
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import SQLKit
 import Testing
+@testable import IMV2ServerGateway
 
 @Suite("PostgreSQL state during real NATS installation", .timeLimit(.minutes(1)))
 struct PostgresV2NATSInstallationTests {

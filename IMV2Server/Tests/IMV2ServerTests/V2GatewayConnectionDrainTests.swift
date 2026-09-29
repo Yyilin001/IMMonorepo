@@ -1,9 +1,13 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2Core
 import NIOCore
 import NIOEmbedded
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
+@testable import IMV2ServerGateway
 
 @Suite("V2 gateway connection drain", .timeLimit(.minutes(1)))
 struct V2GatewayConnectionDrainTests {

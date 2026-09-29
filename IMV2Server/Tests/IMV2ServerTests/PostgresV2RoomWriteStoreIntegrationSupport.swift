@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Crypto
 import FluentKit
 import FluentPostgresDriver
@@ -10,6 +12,7 @@ import IMV2Core
 import IMV2ServerHTTP
 import PostgresNIO
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import SQLKit
 import Synchronization
 import Testing

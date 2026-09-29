@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Crypto
 import FluentKit
 import FluentPostgresDriver
@@ -10,6 +12,7 @@ import IMV2Core
 import IMV2ServerHTTP
 import PostgresNIO
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import SQLKit
 import Synchronization
 import Testing
@@ -1530,7 +1533,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         let userID: UUID
                         let kind: String
                         let payload: String
-                        let createdAt: V2PostgresTimestamp
+                        let createdAt: V2PersistenceTimestamp
                     }
                     let candidates = try await sql.raw("SELECT user_id AS \"userID\", projection_kind AS kind, payload::text AS payload, created_at AS \"createdAt\" FROM im_v2.user_state_event_outbox WHERE source_event_id = \(bind: operation)").all(decoding: Candidate.self)
                     #expect(candidates.count == (advancing ? 2 : 0))

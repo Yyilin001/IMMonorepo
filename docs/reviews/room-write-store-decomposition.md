@@ -21,7 +21,7 @@ reviewable without changing their persistence contract or public store API.
 - Named prepared-statement SQL and names move unchanged. Changing SQL later
   requires a statement-name revision and separate behavior/performance review.
 
-## Extraction order
+## Extraction order used
 
 1. Keep the serialized integration suite and move its reusable database and
    room-seed fixtures to a dedicated test-support file. Do not enable test
@@ -84,7 +84,7 @@ part of this refactor.
   after the Store validates input ordering and direct memberships on the same
   transaction connection. Its SQL and cardinality checks are unchanged.
 - Scalar persistence (group event, rich direct room-log, and plain direct
-  adapter) is in a same-module extension that receives the Store's transaction
+  adapter) is in an Infrastructure extension that receives the Store's transaction
   connection. Scalar replay, authorization, denial, and final shard reservation
   now execute in a dedicated acceptance-path extension on that borrowed
   transaction. The Store retains transaction creation, authorization receipt
@@ -143,3 +143,59 @@ test-only assertion rows and doubles remain beside their specific scenarios.
 The complete PostgreSQL suite and local reproduction of the CI Linux release
 build both pass. No compile-time or hot-path latency improvement is claimed:
 those measurements were not part of this behavior-neutral extraction.
+
+## Current module layout and remaining acceptance
+
+The physical module move places the [Store](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomWriteStore.swift)
+and its SQL paths in `IMV2ServerInfrastructure`. The Store still selects the
+owner and activation scope, owns the acceptance transaction and authorization
+receipt, and returns committed results. The
+[transaction coordinator](../../IMV2Server/Sources/IMV2ServerInfrastructure/RoomWrite/V2RoomWriteTransactionCoordinator.swift)
+uses the Store's connection and finishes authorization proofs before commit;
+the [commit-effects component](../../IMV2Server/Sources/IMV2ServerInfrastructure/RoomWrite/V2RoomWriteCommitEffects.swift)
+publishes caches and command credits only after a Store-owned commit.
+
+The [direct batch path](../../IMV2Server/Sources/IMV2ServerInfrastructure/RoomWrite/V2RoomWriteDirectBatchPath.swift)
+now performs locked policy, message, and projection writes on that borrowed
+connection for both the batch and warm direct path. Its
+[policy context](../../IMV2Server/Sources/IMV2ServerInfrastructure/RoomWrite/V2RoomWriteDirectPolicyContext.swift)
+maps the locked control and local policy facts. The
+[forward inbox path](../../IMV2Server/Sources/IMV2ServerInfrastructure/RoomWrite/V2RoomWriteForwardInboxPath.swift)
+keeps inbox, operation, then room lock order across preflight, acceptance, and
+completion. Scalar and hybrid paths remain separate Infrastructure units.
+
+[Owner selection](../../IMV2Server/Sources/IMV2ServerInfrastructure/RoomWrite/V2RoomWriteOwnerSelection.swift)
+now keeps routes, activation and forward source together with restricted
+construction. Same-room forwarding and activation without an explicit route
+remain supported. [Control resolution](../../IMV2Server/Sources/IMV2ServerInfrastructure/RoomWrite/V2RoomWriteControlResolution.swift)
+distinguishes unresolved reservations from prepared results, including an empty
+grant set. The Store retains the transaction and receipt ownership boundaries.
+
+The module move and focused checks do not close the outstanding lifecycle
+and performance fault acceptance. The scoped rich/direct batch failure
+matrix, multi-owner fault cases, and measured hot-path latency and compile-time
+comparison still need their dedicated verification before any performance or
+fault-tolerance claim is made for this layout. The PostgreSQL and Linux results
+above describe the earlier extraction checkpoints.
+
+## Scalar transaction boundary completion (2026-09-29)
+
+The Store's scalar entry now only unwraps the borrowed SQL connection and
+calls `V2RoomWriteScalarAcceptancePath`. This concrete component receives owner
+and control selections, the direct policy context, stranger and review policies,
+and a Boolean indicating whether to report admission heat. It has no Store,
+cache publisher or command-credit pool reference. Its result still carries the
+cache updates and heat observation for the existing post-commit owner.
+
+`V2RoomWriteScalarPersistencePath` performs scalar persistence with explicit SQL
+and review-mode inputs. Single-message direct projections use the same borrowed-
+connection component as batch projections. `V2RoomWriteSelectedOwnerGuard`
+centralizes the existing operation-lock, authorization-proof and owner/activation
+checks for both Store and scalar callers. The unused `acceptHotDirectRoomLog`
+entry has been removed; live fast and batch paths remain unchanged.
+
+The complete Infrastructure source retains the same multiset of 743 multiline
+SQL literals as candidate `c1944b1a103b121cc73b36beceb5348cc465fc88`.
+This source comparison supports a code-movement review; it does not prove
+runtime equivalence. Per the user's current scope, this step compiles products
+and test targets without running database, process-fault or performance tests.

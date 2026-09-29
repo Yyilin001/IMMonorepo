@@ -1,33 +1,34 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import HTTPTypes
 import IMV2Core
-import IMV2Server
 import Vapor
 
 public struct V2VaporGroupCreationOperationRoutes: Sendable {
     private let authenticator: any V2GatewayAuthenticator
-    private let store: PostgresV2GroupCreationOperationStore
-    public init(authenticator: any V2GatewayAuthenticator, store: PostgresV2GroupCreationOperationStore) { self.authenticator = authenticator; self.store = store }
+    private let store: any V2GroupCreationOperationHandling
+    public init(authenticator: any V2GatewayAuthenticator, store: any V2GroupCreationOperationHandling) { self.authenticator = authenticator; self.store = store }
     public func register(on routes: RoutesBuilder) {
         routes.on(.post,"v2","group-creation-operations","begin",maxBodySize:"4kb") { request async throws -> Response in
             let intent: V2GroupCreationIntent = try await decode(request)
             try await authorize(request, intent: intent)
-            return try await respond { try await store.begin(intent) }
+            return try await respond { try await store.begin(intent, now: Date()) }
         }
         routes.on(.post,"v2","group-creation-operations","append",maxBodySize:"32kb") { request async throws -> Response in
             let input: V2GroupCreationAppendRequest = try await decode(request)
             try await authorize(request, intent: input.intent)
-            return try await respond { try await store.append(input) }
+            return try await respond { try await store.append(input, now: Date()) }
         }
         routes.on(.post,"v2","group-creation-operations","finalize",maxBodySize:"4kb") { request async throws -> Response in
             let intent: V2GroupCreationIntent = try await decode(request)
             try await authorize(request, intent: intent)
-            return try await respond { try await store.finalize(intent, deadline: ContinuousClock.now.advanced(by: .seconds(12))) }
+            return try await respond { try await store.finalize(intent, now: Date(), deadline: ContinuousClock.now.advanced(by: .seconds(12))) }
         }
         routes.on(.post,"v2","group-creation-operations","operations","recover",maxBodySize:"4kb") { request async throws -> Response in
             let input: V2GroupCreationRecoveryRequest = try await decode(request)
             try await authorize(request, intent: input.intent)
-            return try await respond { try await store.recover(input) }
+            return try await respond { try await store.recover(input, now: Date()) }
         }
     }
     private func decode<T: Decodable>(_ request: Request) async throws -> T {

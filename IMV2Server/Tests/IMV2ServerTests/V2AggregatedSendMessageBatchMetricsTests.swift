@@ -1,5 +1,8 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
 
 @Suite("Physical-owner send metrics")
@@ -57,9 +60,9 @@ struct V2AggregatedSendMessageBatchMetricsTests {
 }
 
 private struct SendMetricsValue: V2SendMessageBatchMetricsReading {
-    let value: V2SendMessageAdmissionBatcher.Snapshot
-    init(snapshot: V2SendMessageAdmissionBatcher.Snapshot) { value = snapshot }
-    func snapshot() -> V2SendMessageAdmissionBatcher.Snapshot { value }
+    let value: V2SendMessageBatchMetricsSnapshot
+    init(snapshot: V2SendMessageBatchMetricsSnapshot) { value = snapshot }
+    func snapshot() -> V2SendMessageBatchMetricsSnapshot { value }
 }
 
 private actor SendMetricsConcurrencyProbe {
@@ -81,7 +84,7 @@ private actor SendMetricsConcurrencyProbe {
 
 private struct SendMetricsDelayed: V2SendMessageBatchMetricsReading {
     let probe: SendMetricsConcurrencyProbe
-    func snapshot() async -> V2SendMessageAdmissionBatcher.Snapshot {
+    func snapshot() async -> V2SendMessageBatchMetricsSnapshot {
         await probe.enter()
         try? await Task.sleep(for: .milliseconds(5))
         await probe.leave()

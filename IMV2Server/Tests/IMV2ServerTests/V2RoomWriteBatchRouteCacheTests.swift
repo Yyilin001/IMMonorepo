@@ -1,6 +1,9 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import Testing
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 @Suite("Room write batch route cache")
 struct V2RoomWriteBatchRouteCacheTests {

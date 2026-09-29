@@ -1,7 +1,10 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import IMV2ActorApplication
 import IMV2ActorContracts
 import IMV2Server
+import IMV2ServerInfrastructure
 
 /// Actor 已启动后，为房间创建、查询、事件读取和消息转发构造调用入口。
 /// 所有房间调用使用同一 Actor 目录和配置的调用期限。
@@ -35,7 +38,7 @@ struct GatewayRoomServicesAssembly {
             directRoomLogEventCache: projection.directRoomLogEventCache)
         let forwardPort = V2RoomRefForwardPort(directory: actorDirectory)
         let forwardSources = topology.roomShardDatabases.mapValues {
-            V2ActorForwardSourceEndpoint(receipts: .init(database: $0), jobs: .init(database: $0))
+            V2ActorForwardSourceEndpoint(receipts: PostgresV2ForwardReceiptStore(database: $0), jobs: PostgresV2ForwardDeliveryStore(database: $0))
         }
         let importRouting = V2ResourceForwardImportRouting(sources: topology.roomShardDatabases)
         // 资源跨房间复制与跨归属方转发都通过 Actor 命令和持久作业完成。

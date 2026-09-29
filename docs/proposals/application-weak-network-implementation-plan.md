@@ -158,7 +158,7 @@ B/C/D/E 可以按文件所有权分工；Core/schema 和 App 装配分别由固�
 - [IMV2Core](../../IMV2Core/Sources/IMV2Core)：新增 operation 身份/结果/恢复合同、确定性指纹编码、策略强类型。
 - [协议](../../Protocol/im_realtime/v2/im_v2.proto)：登记修改后的 command/result/recovery shape；同次更新 protocol version 与两端生成代码。
 - [schema.sql](../../IMV2/sql/schema.sql)、[V2LocalSchema](../../IMV2ClientKit/Sources/IMV2ClientKit/V2LocalSchema.swift)：画出目标字段/约束与去除项，先完成实际 schema diff。
-- [V2SchemaReadiness](../../IMV2Server/Sources/IMV2Server/V2SchemaReadiness.swift)：为新增表、索引、函数及不变量登记 readiness。
+- [V2SchemaReadiness](../../IMV2Server/Sources/IMV2ServerInfrastructure/V2SchemaReadiness.swift)：为新增表、索引、函数及不变量登记 readiness。
 
 ### 必须产出的端点登记清单
 
@@ -219,7 +219,7 @@ retry预算 / recovery入口 / 终态证明 / 资源上限
 - [V2PublicIdentitySettingsUI](../../IMApp/IMApp/V2/V2PublicIdentitySettingsUI.swift)：store 只维护编辑草稿、观察保存 intent；生成 operation 的逻辑移到持久化 Service。
 - [V2HTTPOwnProfileClient](../../IMV2ClientKit/Sources/IMV2ClientKit/V2HTTPOwnProfileClient.swift)：字段 patch、原回执/当前快照分离、recover/close，统一错误。
 - 新 `V2ProfileIntent`/`V2ProfileIntentEngine`/GRDB payload：原子保存意图、附件引用及公共 work；同 profile 顺序。
-- [V2VaporProfileUpdateRoutes](../../IMV2Server/Sources/IMV2ServerHTTP/V2VaporProfileUpdateRoutes.swift)、[PostgresV2ProfileUpdateStore](../../IMV2Server/Sources/IMV2Server/PostgresV2ProfileUpdateStore.swift)：提交与关闭共享锁，写不可变原回执和确定终态；保持资源绑定/GC 事务。
+- [V2VaporProfileUpdateRoutes](../../IMV2Server/Sources/IMV2ServerHTTP/V2VaporProfileUpdateRoutes.swift)、[PostgresV2ProfileUpdateStore](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ProfileUpdateStore.swift)：提交与关闭共享锁，写不可变原回执和确定终态；保持资源绑定/GC 事务。
 - 现有 resource journal：个人头像消费者加入文件保护/释放谓词，不能仅在消息和群头像完成时判断文件可删。
 
 ### UI 完成状态
@@ -245,7 +245,7 @@ retry预算 / recovery入口 / 终态证明 / 资源上限
 
 ### 本地存储与执行
 
-改造 [GRDBV2LocalCommandStore](../../IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2LocalCommandStore.swift)、[GRDBV2CommandRetrySchedule](../../IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2CommandRetrySchedule.swift) 和各 `V2*Outbox`：
+以 [GRDBV2OperationWorkStore](../../IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2OperationWorkStore.swift) 的持久执行状态、claim 与 `operationWorkRetrySchedule`，以及 [V2CommandRetryScheduler](../../IMV2ClientKit/Sources/IMV2ClientKit/V2CommandRetryScheduler.swift) 的订阅后查询唤醒为当前落点，继续核对各领域 `V2*Outbox`：
 
 - 公共执行状态/claim/计数/nextActionAt 同源，领域 engine 改为单步执行器。
 - 所有剩余旧 lane 及独立业务入口全部接调度；HTTP profile/群头像/邀请/备注/群昵称等写入也登记。
@@ -329,7 +329,7 @@ retry预算 / recovery入口 / 终态证明 / 资源上限
 下列替代路径须在生产装配中消失；保留测试 fixture 不代表可以保留双运行模式。
 
 - AppStore 自有指数重连循环 → 账户 runtime 重连调度。
-- `V2FairDurableCommandScheduler` 的逐条等待总循环 → 公共并发 scheduler；文件可删除或改为新实现，不保留两套入口。
+- 已退役的 `V2FairDurableCommandScheduler` 逐条等待总循环 → 当前 `V2OperationWorkDispatcher` 有界并发执行；不恢复两套入口。
 - 各 outbox 的固定重试算法/重复调度状态 → 公共 policy/work；领域特有结果逻辑保留。
 - 个人资料页面临时 operationID 与上传后直接 PUT → durable profile intent。
 - 固定五秒资源恢复扫描及占槽轮询 → 持久 nextActionAt + DB wake + 单步执行。

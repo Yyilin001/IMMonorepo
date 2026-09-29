@@ -1,3 +1,5 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import FluentPostgresDriver
 import Foundation
 import FluentKit
@@ -8,6 +10,7 @@ import Darwin
 import Glibc
 #endif
 import IMV2Server
+import IMV2ServerInfrastructure
 import IMV2ServerHTTP
 import NIOPosix
 import Vapor
@@ -20,7 +23,7 @@ enum IMV2OperatorServerApp {
     static func main() async {
         do { try V2ServiceLogging.bootstrap() }
         catch {
-            fputs("Invalid IM_V2_LOG_LEVEL; expected a swift-log level.\n", stderr)
+            FileHandle.standardError.write(Data("Invalid IM_V2_LOG_LEVEL; expected a swift-log level.\n".utf8))
             exit(EXIT_FAILURE)
         }
         let logger = Logger(label: "imv2.operator")

@@ -1,8 +1,12 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2Core
 import Synchronization
 import Testing
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
+@testable import IMV2ServerGateway
 
 @Suite("Server clock integer boundaries")
 struct V2ServerClockBoundaryTests {

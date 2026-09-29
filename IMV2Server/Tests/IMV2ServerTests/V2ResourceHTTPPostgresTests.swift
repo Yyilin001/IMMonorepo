@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Crypto
 import FluentKit
 import FluentPostgresDriver
@@ -11,6 +13,7 @@ import Testing
 import Vapor
 import VaporTesting
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 struct V2ResourceHTTPPostgresTests {
     @Test(.enabled(if:ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil), arguments: [V2ResourceTransferMode.httpPut, .httpPartPut])
@@ -28,7 +31,7 @@ struct V2ResourceHTTPPostgresTests {
             let provider=try V2LocalFilesystemMediaProvider(rootDirectory:root.appendingPathComponent("uploads"),targetBaseURL:URL(string:"https://resource.test")!,signingKey:Data(repeating:1,count:32))
             try await provider.prepare()
             let registry=try V2ResourceStorageRegistry(storages:[storage],defaultBinding:binding)
-            let service=try V2ResourceService(resolve:{_,_,_,_ in .init(database:database,authorize:{_ in})},registry:registry,
+            let service=try V2ResourceService(resolve:{_,_,_,_ in PostgresV2ResourceLifecycleStore(database:database,authorize:{_ in})},registry:registry,
                 transports:[V2LocalResourceUploadTransport(binding:binding,provider:provider)],maximumBytes:1_000_000,allocate:{_ in try storage.allocate()})
             V2VaporResourceRoutes(authenticator:ResourceHTTPAuthentication(user:user),service:service).register(on:app)
             let byteDelivery=try V2LocalResourceDelivery(registry:registry,baseURL:URL(string:"https://resource.test")!,keyID:"test",keys:["test":Data(repeating:4,count:32)])
@@ -48,7 +51,7 @@ struct V2ResourceHTTPPostgresTests {
             let secondStorage=try V2LocalResourceStorage(root:root.appendingPathComponent("second-sealed"),binding:secondBinding)
             let switchedRegistry=try V2ResourceStorageRegistry(storages:[storage,secondStorage],defaultBinding:secondBinding)
             let transports:[any V2UploadTransport]=[V2LocalResourceUploadTransport(binding:binding,provider:provider),V2LocalResourceUploadTransport(binding:secondBinding,provider:provider)]
-            let switched=try V2ResourceService(resolve:{_,_,_,_ in .init(database:database,authorize:{_ in})},registry:switchedRegistry,
+            let switched=try V2ResourceService(resolve:{_,_,_,_ in PostgresV2ResourceLifecycleStore(database:database,authorize:{_ in})},registry:switchedRegistry,
                 transports:transports,maximumBytes:1,allocate:{_ in try secondStorage.allocate()})
             #expect(try await switched.create(request,actor:user,device:device).locator==session.locator)
             let newRequest=try V2ResourceUploadRequest(operationID:.init(uuid:UUID()),mediaID:.init(uuid:UUID()),usage:request.usage,
@@ -118,7 +121,7 @@ struct V2ResourceHTTPPostgresTests {
                 guard case .messageVisibility(let value)=query else { return .notVisible }
                 return .visible(.init(roomID:value.roomID,messageID:value.messageID,mediaID:value.mediaID,membershipRevision:1,contentRevision:1,mediaUpdatedAt:sourceTime,uploadSessionID:session.locator.sessionID.uuidValue!))
             }
-            let imports=V2ResourceImportService(resources:service,resolve:{_,_,_,_ in .init(database:database,authorize:{_ in})},
+            let imports=V2ResourceImportService(resources:service,resolve:{_,_,_,_ in PostgresV2ResourceLifecycleStore(database:database,authorize:{_ in})},
                 sources:.init(controlDatabase:database,rooms:ResourceHTTPRoomRouter(),ownerDatabases:["test":database],authorization:port,
                     avatarAuthorization:{_,_,_,_,_ in throw V2ResourceProviderError.unsupportedCapability}),
                 registry:registry,transports:[V2LocalResourceUploadTransport(binding:binding,provider:provider)])

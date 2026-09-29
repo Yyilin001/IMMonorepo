@@ -1,8 +1,12 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import FluentKit
 import Foundation
 import IMV2ActorContracts
 import IMV2Server
+import IMV2ServerInfrastructure
 import Logging
+import IMV2ServerGateway
 
 /// 后台工作所需的依赖集合，按投递、投影、维护三类组织。
 /// `assemble` 只连接依赖；`start` 才在同一个监督器内登记可取消的任务。

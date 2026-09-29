@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import FluentKit
 import Foundation
 import IMV2ActorContracts
@@ -5,6 +7,7 @@ import IMV2Core
 import SQLKit
 import Testing
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 /// Observes authority and freezes the immutable owner gate once. Replay callers
 /// retain the returned command; they never prepare another gate for that ID.

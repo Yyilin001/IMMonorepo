@@ -25,11 +25,11 @@ flowchart LR
 
 | 接口 | 文件 | 适配器必须提供的保证 |
 | --- | --- | --- |
-| `V2ObjectStorage` | [存储端口](../../IMV2Server/Sources/IMV2Server/Resources/Ports/V2ObjectStorage.swift) | inspect/read/write/delete 都作用于精确的不可变对象身份；写入核验全文大小与 SHA-256；读取使用最多 64 KiB 的背压块；删除不得伤及另一版本 |
-| `V2UploadTransport` | [上传端口](../../IMV2Server/Sources/IMV2Server/Resources/Ports/V2UploadTransport.swift) | 声明有限模式和大小；签发临时计划；提供已上传字节；支持导入及取消暂存；不得自行把业务资源标记为 ready |
-| `V2ResourceDelivery` | [分发端口](../../IMV2Server/Sources/IMV2Server/Resources/Ports/V2ResourceDelivery.swift) | 只接受上层已授权的精确事实及截止时间；返回 GET 计划，不延长期限或替换内容；缓存命中也要鉴权 |
-| `V2ResourceScanner` | [扫描端口](../../IMV2Server/Sources/IMV2Server/Resources/Ports/V2ResourceScanner.swift) | 返回绑定原输入的结果，以及可追踪的 policy/engine version；构造器对外公开，外部模块无需 `@testable` |
-| `V2ResourceTransformer` | [处理端口](../../IMV2Server/Sources/IMV2Server/Resources/Ports/V2ResourceTransformer.swift) | 只执行受支持配方，写入预分配的输出身份；回执与输出一一对应；业务发布仍由 owner 事务完成 |
+| `V2ObjectStorage` | [存储端口](../../IMV2Server/Sources/IMV2ServerApplication/Resources/Ports/V2ObjectStorage.swift) | inspect/read/write/delete 都作用于精确的不可变对象身份；写入核验全文大小与 SHA-256；读取使用最多 64 KiB 的背压块；删除不得伤及另一版本 |
+| `V2UploadTransport` | [上传端口](../../IMV2Server/Sources/IMV2ServerApplication/Resources/Ports/V2UploadTransport.swift) | 声明有限模式和大小；签发临时计划；提供已上传字节；支持导入及取消暂存；不得自行把业务资源标记为 ready |
+| `V2ResourceDelivery` | [分发端口](../../IMV2Server/Sources/IMV2ServerApplication/Resources/Ports/V2ResourceDelivery.swift) | 只接受上层已授权的精确事实及截止时间；返回 GET 计划，不延长期限或替换内容；缓存命中也要鉴权 |
+| `V2ResourceScanner` | [扫描端口](../../IMV2Server/Sources/IMV2ServerApplication/Resources/Ports/V2ResourceScanner.swift) | 返回绑定原输入的结果，以及可追踪的 policy/engine version；构造器对外公开，外部模块无需 `@testable` |
+| `V2ResourceTransformer` | [处理端口](../../IMV2Server/Sources/IMV2ServerApplication/Resources/Ports/V2ResourceTransformer.swift) | 只执行受支持配方，写入预分配的输出身份；回执与输出一一对应；业务发布仍由 owner 事务完成 |
 
 `V2ResourceService`、`V2ResourceVariantProcessor`、`V2ResourceForwardMediaCopier`、`V2BoundMediaProvider` 接收上述协议或窄闭包。新增适配器应放在独立实现目录；云 SDK、原生签名、原生错误解释只存在于该目录及应用装配入口。当前无需为了扩展而拆出新的服务进程或增加全局 service locator。
 
@@ -71,11 +71,11 @@ flowchart LR
 
 [本地文件下载路由](../../IMV2Server/Sources/IMV2ServerHTTP/V2VaporLocalFilesystemMediaRoutes.swift)现使用全文 SHA-256 的强 ETag。在 FileIO 解析 Range 前比较 `If-Range`；不匹配（含弱验证器或日期形式）时移除 Range，返回完整 `200`，避免旧偏移超出新对象长度而误报 `416`。该路由禁用 FileIO 的 `If-None-Match` 捷径，鉴权后的响应仍为 `no-store`。这是 `/v2/local-media/download/:mediaID` 的明确行为；新资源事实入口的实现和顺序读取成本见下文，外部 CDN 仍须独立兑现合同。
 
-当前 [strongETag](../../IMV2Server/Sources/IMV2Server/V2LocalFilesystemMediaProvider.swift)每次请求都扫描全文，使用 128 KiB 块及可取消的独立 utility 任务；取消后等待该任务结束。内存有界，但一次小 Range 请求也承担 O(对象大小) 的磁盘读取和 SHA-256 成本，多个分片请求会重复扫描。尚无持久摘要缓存，也没有吞吐或延迟测量。真实部署应在不可变对象写入校验时保存可信内容摘要，按精确对象版本返回验证器，并单独验证代理/CDN 的 Range、撤权和缓存行为；不能以文件时间或原生 multipart ETag 替代全文内容事实。
+当前 [strongETag](../../IMV2Server/Sources/IMV2ServerInfrastructure/V2LocalFilesystemMediaProvider.swift)每次请求都扫描全文，使用 128 KiB 块及可取消的独立 utility 任务；取消后等待该任务结束。内存有界，但一次小 Range 请求也承担 O(对象大小) 的磁盘读取和 SHA-256 成本，多个分片请求会重复扫描。尚无持久摘要缓存，也没有吞吐或延迟测量。真实部署应在不可变对象写入校验时保存可信内容摘要，按精确对象版本返回验证器，并单独验证代理/CDN 的 Range、撤权和缓存行为；不能以文件时间或原生 multipart ETag 替代全文内容事实。
 
 [资源事实字节入口](../../IMV2Server/Sources/IMV2ServerHTTP/V2VaporResourceByteRoutes.swift) `/v2/resource-bytes/:placementID` 是当前头像和附件 delivery plan 实际签发的 URL。它先验证能力期限，并将签名声明与不可变对象的 `inspect` 大小及 SHA-256 事实核对，再返回该全文摘要的强 ETag 和 `Accept-Ranges: bytes`。支持单个闭区间、起点到末尾及后缀 Range；有效范围返回 `206` 与精确 `Content-Range`/长度，无可选字节的范围返回 `416` 与 `bytes */总长`。不支持的单位、多段及格式错误 Range 按完整 `200` 处理；`If-Range` 必须精确匹配强 ETag，弱验证器、日期或其他不匹配值返回完整 `200`，不触发偏移越界 `416`。该入口不走 `304` 或公开缓存捷径，仍为 `private, no-store`。
 
-此入口沿 [顺序 storage read 端口](../../IMV2Server/Sources/IMV2Server/Resources/Adapters/Local/V2LocalResourceDelivery.swift)读取，没有高效 seek：每次 Range 都丢弃前缀，输出交集，并继续排空尾部到 EOF，通过现有全文 SHA-256/大小校验后才正常结束。大对象每块最多 64 KiB；16 个物理流许可在 EOF、错误、取消或响应放弃时释放，显式关闭等待正在进行的读取结束，`416` 返回前关闭已打开但未读取的流。每次读取前后检查能力期限，超期中止响应；失败或取消的部分响应不代表完整校验通过，客户端仍须最终校验全文才发布缓存。小对象缓存仅保存先前完整校验过的最多 512 KiB 内容，按相同期限与范围输出。一次小范围请求仍可能读取并校验整个源对象，具体 `inspect` 也可能扫描全文；不能据此宣称 Range 降低本地磁盘或 hash 成本。此实现尚待统一回归，未声称真实 CDN 或平台测量已完成。
+此入口沿 [顺序 storage read 端口](../../IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Adapters/Local/V2LocalResourceDelivery.swift)读取，没有高效 seek：每次 Range 都丢弃前缀，输出交集，并继续排空尾部到 EOF，通过现有全文 SHA-256/大小校验后才正常结束。大对象每块最多 64 KiB；16 个物理流许可在 EOF、错误、取消或响应放弃时释放，显式关闭等待正在进行的读取结束，`416` 返回前关闭已打开但未读取的流。每次读取前后检查能力期限，超期中止响应；失败或取消的部分响应不代表完整校验通过，客户端仍须最终校验全文才发布缓存。小对象缓存仅保存先前完整校验过的最多 512 KiB 内容，按相同期限与范围输出。一次小范围请求仍可能读取并校验整个源对象，具体 `inspect` 也可能扫描全文；不能据此宣称 Range 降低本地磁盘或 hash 成本。此实现尚待统一回归，未声称真实 CDN 或平台测量已完成。
 
 ## 默认后端切换与存量解析
 
@@ -87,7 +87,7 @@ flowchart LR
 
 显式导入的 active hold 已纳入上述检查。hold 保存精确引用、字节数、摘要和媒体类型，恢复读取原快照，不重新跟随逻辑资源的当前位置；只有新操作解析新位置。持久快照从创建时完整保存，不依赖旧记录回填。
 
-同 home 的[迁移服务](../../IMV2Server/Sources/IMV2Server/Resources/Application/V2ResourceMigrationService.swift)也只调用 storage 协议：预分配身份先经[owner 存储](../../IMV2Server/Sources/IMV2Server/Resources/Infrastructure/PostgresV2ResourceMigrationStore.swift)入库，再复制并核验精确事实；未知写入结果先 inspect 原目标，不能另开对象。claim、源 generation 和完整引用均参与发布检查，迁移不改变 MediaID、逻辑 VariantID 或业务 home。维护调用者须注入并在事务内执行 operator/owner 授权，不能将该接口直接作为用户上传 API。
+同 home 的[迁移服务](../../IMV2Server/Sources/IMV2ServerApplication/Resources/Application/V2ResourceMigrationService.swift)也只调用 storage 协议：预分配身份先经[owner 存储](../../IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/PostgresV2ResourceMigrationStore.swift)入库，再复制并核验精确事实；未知写入结果先 inspect 原目标，不能另开对象。claim、源 generation 和完整引用均参与发布检查，迁移不改变 MediaID、逻辑 VariantID 或业务 home。维护调用者须注入并在事务内执行 operator/owner 授权，不能将该接口直接作为用户上传 API。
 
 当前迁移内核保留所有尚未释放的源/目标引用，readiness 和 GC 已接入这份保护。没有部署入口、定时恢复装配或旧位置释放 API；`switched` 不代表退役完成。旧适配器删除、迁移取消后的输出清理、晚签发/在途读取排空及生产维护验收仍须补齐，不能通过手动写入 `source_released_at` 绕过这些证明。
 

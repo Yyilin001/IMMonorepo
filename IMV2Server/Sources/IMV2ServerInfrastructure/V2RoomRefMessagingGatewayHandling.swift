@@ -1,0 +1,5 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
+import Foundation
+
+extension V2RoomRefMessagingClient: V2GatewayMessageSendOperationHandling {}

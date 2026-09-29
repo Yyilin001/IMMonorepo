@@ -1,20 +1,21 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import HTTPTypes
 import IMV2Core
-import IMV2Server
 import Vapor
 
 public struct V2VaporSocialOperationRoutes:Sendable {
     private let authenticator:any V2GatewayAuthenticator
-    private let store:PostgresV2SocialRelationshipStore
+    private let store:any V2SocialOperationHandling
     private let now:@Sendable ()->Date
-    public init(authenticator:any V2GatewayAuthenticator,store:PostgresV2SocialRelationshipStore,now:@escaping @Sendable ()->Date=Date.init) { self.authenticator=authenticator;self.store=store;self.now=now }
+    public init(authenticator:any V2GatewayAuthenticator,store:any V2SocialOperationHandling,now:@escaping @Sendable ()->Date=Date.init) { self.authenticator=authenticator;self.store=store;self.now=now }
     public func register(on routes:RoutesBuilder) {
         routes.get("v2","social","targets",":targetUserID","baseline") { request async throws -> Response in
             let actor=try await request.v2AuthenticatedAccountIdentity(using:authenticator)
             guard let raw=request.parameters.get("targetUserID"),let uuid=UUID(uuidString:raw),actor.userID != UserID(uuid:uuid) else { throw Abort(.badRequest,headers:[.cacheControl:"no-store"]) }
-            do { return try encoded(await store.socialOperationSnapshot(actorUserID:actor.userID,targetUserID:.init(uuid:uuid))) }
-            catch V2SocialRelationshipStoreError.actorInactive { throw Abort(.forbidden,headers:[.cacheControl:"no-store"]) }
+            do { return try encoded(await store.loadSocialOperationSnapshot(actorUserID:actor.userID,targetUserID:.init(uuid:uuid))) }
+            catch V2HTTPOperationError.actorInactive { throw Abort(.forbidden,headers:[.cacheControl:"no-store"]) }
             catch is CancellationError { throw CancellationError() }
             catch { throw Abort(.serviceUnavailable,headers:[.cacheControl:"no-store"]) }
         }

@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Crypto
 import FluentKit
 import FluentPostgresDriver
@@ -11,6 +13,7 @@ import IMV2Core
 import IMV2ServerHTTP
 import PostgresNIO
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import SQLKit
 import Synchronization
 import Testing
@@ -956,7 +959,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                       let messageID = message.messageID.uuidValue else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 var buffer = ByteBuffer()
                 buffer.writeInteger(offset)
-                let timestamp = try V2PostgresTimestamp(from: &buffer, type: .timestamptz, format: .binary, context: .default)
+                let timestamp = try V2PersistenceTimestamp(from: &buffer, type: .timestamptz, format: .binary, context: .default)
                 try await sql.raw("DELETE FROM im_v2.message_projection_states WHERE message_id = \(bind: messageID)").run()
                 try await sql.raw("UPDATE im_v2.messages SET created_at = \(bind: timestamp) WHERE message_id = \(bind: messageID)").run()
                 for _ in 0..<2 {

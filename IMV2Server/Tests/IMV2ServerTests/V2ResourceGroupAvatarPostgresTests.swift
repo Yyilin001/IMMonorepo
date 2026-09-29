@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import FluentKit
 import FluentPostgresDriver
 import Foundation
@@ -11,6 +13,7 @@ import Testing
 import Vapor
 import VaporTesting
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 @Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil))
 struct V2ResourceGroupAvatarPostgresTests {

@@ -1,0 +1,5 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
+import Foundation
+
+extension PostgresV2LiveActivityStore: V2LivePresenceLeaseManaging {}

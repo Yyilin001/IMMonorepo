@@ -1,5 +1,8 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import IMV2Core
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
 
 struct V2UserShardRouterTests {

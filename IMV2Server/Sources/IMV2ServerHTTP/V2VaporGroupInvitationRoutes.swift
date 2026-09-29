@@ -1,12 +1,13 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import IMV2Core
-import IMV2Server
 import Vapor
 import HTTPTypes
 
 /// 群邀请与入群申请的 HTTP 路由入口。
 ///
-/// 提供创建/查询/撤销邀请、预览邀请链接、提交入群申请以及审批决策等接口。
+/// 提供邀请列表、邀请预览及待审批申请列表；写操作由 invitation-operations 路由承接。
 /// 所有操作都要求已鉴权身份，返回值默认走 `no-store`，避免会话级邀请信息被缓存。
 public struct V2VaporGroupInvitationRoutes: Sendable {
     private let authenticator: any V2GatewayAuthenticator
@@ -16,7 +17,7 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
     ///
     /// - Parameters:
     ///   - authenticator: 鉴权组件，解析并校验 `Request` 身份上下文。
-    ///   - invitations: 邀请服务（命令执行与状态机）。
+    ///   - invitations: 邀请与入群申请查询能力。
     public init(authenticator: any V2GatewayAuthenticator, invitations: any V2GroupInvitationHandling) {
         self.authenticator = authenticator
         self.invitations = invitations
@@ -24,25 +25,19 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
 
     /// 挂载以下端点：
     ///
-    /// - `POST /v2/group-invites`：创建群邀请链接。
     /// - `GET /v2/group-invites`：分页读取当前用户在某个 room 的有效邀请。
-    /// - `POST /v2/group-invites/:inviteID/revoke`：撤销邀请。
     /// - `POST /v2/group-invites/preview`：根据 token 预览邀请。
-    /// - `POST /v2/group-join-requests`：提交入群申请。
     /// - `GET /v2/group-join-requests`：分页读取待审批的入群申请。
-    /// - `POST /v2/group-join-requests/:requestID/decision`：对申请进行审批。
+    ///
+    /// 创建、撤销、申请和审批写入由 invitation-operations 入口处理。
     ///
     /// 错误策略由 `mapErrors` 与顶层错误转换统一处理，常见映射到 400/403/404/409/422/429/503。
     public func register(on routes: RoutesBuilder) {
-
-
         routes.get("v2", "group-invites") { request async throws -> Response in
             let actor = try await authenticate(request)
             guard let rawRoom = request.query[String.self, at: "room_id"], let room = try? RoomID(rawRoom) else { throw Abort(.badRequest) }
             return try response(LinksResponse(items: try await mapErrors { try await invitations.activeInvites(roomID: room, actorUserID: actor.userID) }.map(LinkResponse.init)))
         }
-
-
 
         routes.post("v2", "group-invites", "preview") { request async throws -> Response in
             let actor = try await authenticate(request)
@@ -51,8 +46,6 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
             guard let preview = try await mapErrors({ try await invitations.preview(secret: secret, applicantUserID: actor.userID) }) else { throw Abort(.notFound) }
             return try response(PreviewResponse(preview))
         }
-
-
 
         routes.get("v2", "group-join-requests") { request async throws -> Response in
             let actor = try await authenticate(request)
@@ -72,10 +65,6 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
             let items = try page.requests.map { try RequestResponse($0) }
             return try response(RequestPageResponse(items: items, nextCursor: page.nextCursor))
         }
-
-
-
-
     }
 
     private func authenticate(_ request: Request) async throws -> V2AuthenticatedConnection {
@@ -83,24 +72,8 @@ public struct V2VaporGroupInvitationRoutes: Sendable {
     }
 }
 
-/// 创建邀请时的入参。
-/// - `lifetimeSeconds`：邀请有效期秒数。
-/// - `maximumApprovedUses`：最大审批通过次数。
-private struct CreateBody: Content { let roomID: String; let operationID: String; let lifetimeSeconds: Int; let maximumApprovedUses: Int; enum CodingKeys: String, CodingKey { case roomID = "room_id", operationID = "operation_id", lifetimeSeconds = "lifetime_seconds", maximumApprovedUses = "maximum_approved_uses" } }
-
-/// 撤销邀请时的入参。
-private struct RevokeBody: Content { let roomID: String; let operationID: String; enum CodingKeys: String, CodingKey { case roomID = "room_id", operationID = "operation_id" } }
-
 /// 预览邀请链接时的入参。
 private struct TokenBody: Content { let token: String }
-
-/// 提交入群申请时的入参。
-private struct SubmitBody: Content { let token: String; let operationID: String; let note: String?; enum CodingKeys: String, CodingKey { case token, operationID = "operation_id", note } }
-
-/// 申请人取消时仅需房间身份，申请人来自认证。
-private struct CancelBody: Content { let roomID: String; enum CodingKeys: String, CodingKey { case roomID = "room_id" } }
-/// 审批入群申请时的入参。
-private struct DecisionBody: Content { let roomID: String; let operationID: String; let decision: String; enum CodingKeys: String, CodingKey { case roomID = "room_id", operationID = "operation_id", decision } }
 
 /// 邀请列表响应分页容器。
 private struct LinksResponse: Content { let items: [LinkResponse] }
@@ -122,10 +95,8 @@ private struct PreviewResponse: Content {
     let requestState: String?, requestID: String?
     let isAlreadyMember: Bool
     init(_ value: V2GroupInvitePreview) throws { inviteID = value.inviteID.rawValue; roomID = value.roomID.rawValue; roomTitle = value.roomTitle; expiresAtMilliseconds = try value.expiresAt.millisecondsSince1970; requestState = value.requestState?.rawValue; requestID = value.requestID?.rawValue; isAlreadyMember = value.isAlreadyMember }
-    init(_ value: V2GroupInvitePreviewRecord) throws { inviteID = value.inviteID.rawValue; roomID = value.roomID.rawValue; roomTitle = value.roomTitle; expiresAtMilliseconds = try value.expiresAt.millisecondsSince1970; requestState = value.requestState?.rawValue; requestID = value.requestID?.rawValue; isAlreadyMember = value.isAlreadyMember }
     enum CodingKeys: String, CodingKey { case inviteID = "invite_id", roomID = "room_id", roomTitle = "room_title", expiresAtMilliseconds = "expires_at_ms", requestState = "request_state", requestID = "request_id", isAlreadyMember = "is_already_member" }
 }
-
 
 /// 入群申请单条返回模型。
 private struct RequestResponse: Content {
@@ -134,18 +105,11 @@ private struct RequestResponse: Content {
     let note: String?, state: String
     let createdAtMilliseconds: Int64, decidedAtMilliseconds: Int64?
     init(_ value: V2GroupJoinRequest) throws { requestID = value.requestID.rawValue; inviteID = value.inviteID.rawValue; roomID = value.roomID.rawValue; applicantUserID = value.applicant.userID.rawValue; note = value.note; state = value.state.rawValue; createdAtMilliseconds = try value.createdAt.millisecondsSince1970; decidedAtMilliseconds = try value.decidedAt?.millisecondsSince1970 }
-    init(_ value: V2GroupJoinRequestRecord) throws { requestID = value.requestID.rawValue; inviteID = value.inviteID.rawValue; roomID = value.roomID.rawValue; applicantUserID = value.applicant.userID.rawValue; note = value.note; state = value.state.rawValue; createdAtMilliseconds = try value.createdAt.millisecondsSince1970; decidedAtMilliseconds = try value.decidedAt?.millisecondsSince1970 }
     enum CodingKeys: String, CodingKey { case requestID = "request_id", inviteID = "invite_id", roomID = "room_id", applicantUserID = "applicant_user_id", note, state, createdAtMilliseconds = "created_at_ms", decidedAtMilliseconds = "decided_at_ms" }
 }
 
-/// 入群申请提交的统一返回模型，包含分支状态。
-private struct SubmissionResponse: Content { let kind: String; let request: RequestResponse?; let preview: PreviewResponse? }
-
 /// 分页返回容器：申请列表与下一页游标。
 private struct RequestPageResponse: Content { let items: [RequestResponse]; let nextCursor: String?; enum CodingKeys: String, CodingKey { case items, nextCursor = "next_cursor" } }
-
-/// 申请审批返回模型。
-private struct DecisionResponse: Content { let kind: String; let request: RequestResponse }
 
 /// 统一 JSON 编码 helper，统一加 no-store 响应头。
 private func response<T: Encodable>(_ value: T) throws -> Response {
@@ -153,12 +117,6 @@ private func response<T: Encodable>(_ value: T) throws -> Response {
     var headers = HTTPFields(); headers[.contentType] = "application/json"; headers[.cacheControl] = "no-store"; headers[.v2Pragma] = "no-cache"
     return .init(status: .ok, headers: headers, body: .init(data: data))
 }
-
-/// 无内容响应，使用 no-store 禁止缓存。
-private func noContentResponse() -> Response { var headers = HTTPFields(); headers[.cacheControl] = "no-store"; return .init(status: .noContent, headers: headers) }
-
-/// 限流响应。
-private func retryAfter(_ seconds: Int) -> Response { var headers = HTTPFields(); headers[.cacheControl] = "no-store"; headers[.retryAfter] = String(max(1, seconds)); return .init(status: .tooManyRequests, headers: headers) }
 
 /// 统一错误映射工具，隐藏底层实现差异，确保异常码边界稳定。
 private func mapErrors<T>(_ operation: () async throws -> T) async throws -> T {

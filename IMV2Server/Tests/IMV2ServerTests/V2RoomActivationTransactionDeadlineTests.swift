@@ -1,8 +1,11 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import FluentKit
 import FluentPostgresDriver
 import Foundation
 import IMV2ActorContracts
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import SQLKit
 import Synchronization
 import Testing

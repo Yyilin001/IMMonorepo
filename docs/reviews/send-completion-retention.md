@@ -33,7 +33,7 @@ v3 指纹，保留原文本、媒体/提及/实体顺序、回复及转发源修
 
 ## 接受记录同时承担授权依据
 
-接受记录不只是重复请求缓存。[来源可见性](../../IMV2Server/Sources/IMV2Server/PostgresV2ForwardSourceAuthorization.swift)
+接受记录不只是重复请求缓存。[来源可见性](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ForwardSourceAuthorization.swift)
 从它读取 accepted_membership_revision，并同时核对房间、发送者、客户端标识、消息标识和接受序号。
 转发、引用及相关媒体访问需要该事实来证明接受时的成员资格。
 

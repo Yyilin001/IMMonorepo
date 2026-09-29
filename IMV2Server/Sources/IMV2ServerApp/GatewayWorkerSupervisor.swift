@@ -1,5 +1,8 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import IMV2Server
+import IMV2ServerInfrastructure
 
 /// 统一登记网关后台任务，使启动集合与关停排空集合保持一致。
 /// 此对象仅由服务生命周期任务访问；工作任务不会修改登记表。

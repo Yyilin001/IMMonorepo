@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Crypto
 import FluentKit
 import FluentPostgresDriver
@@ -11,6 +13,7 @@ import IMV2Core
 import IMV2ServerHTTP
 import PostgresNIO
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import SQLKit
 import Synchronization
 import Testing
@@ -1561,7 +1564,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             for (index, offset) in offsets.enumerated() {
                 var buffer = ByteBuffer()
                 buffer.writeInteger(offset)
-                let timestamp = try V2PostgresTimestamp(from: &buffer, type: .timestamptz, format: .binary, context: .default)
+                let timestamp = try V2PersistenceTimestamp(from: &buffer, type: .timestamptz, format: .binary, context: .default)
                 let operation = UUID()
                 let event: UUID
                 let outbox: String
@@ -1598,7 +1601,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         struct Candidate: Decodable {
                             let userID: UUID
                             let payload: String
-                            let createdAt: V2PostgresTimestamp
+                            let createdAt: V2PersistenceTimestamp
                         }
                         let candidates = try await sql.raw("SELECT user_id AS \"userID\", payload::text AS payload, created_at AS \"createdAt\" FROM im_v2.user_state_event_outbox WHERE source_event_id = \(bind: event)").all(decoding: Candidate.self)
                         #expect(candidates.count == 2)
@@ -1892,7 +1895,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 for (index, offset) in offsets.enumerated() {
                     var buffer = ByteBuffer()
                     buffer.writeInteger(offset)
-                    let timestamp = try V2PostgresTimestamp(from: &buffer, type: .timestamptz, format: .binary, context: .default)
+                    let timestamp = try V2PersistenceTimestamp(from: &buffer, type: .timestamptz, format: .binary, context: .default)
                     var requests: [V2UserShardProjectionDeliveryRequest] = []
                     for item in 0..<2 {
                         let event = UUID()

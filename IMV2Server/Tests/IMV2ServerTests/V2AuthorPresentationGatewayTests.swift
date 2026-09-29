@@ -1,10 +1,14 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2Core
 import NIOCore
 import NIOEmbedded
 import Synchronization
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
+@testable import IMV2ServerGateway
 
 @Suite("Negotiated author supplements through Gateway", .timeLimit(.minutes(1)))
 struct V2AuthorPresentationGatewayTests {

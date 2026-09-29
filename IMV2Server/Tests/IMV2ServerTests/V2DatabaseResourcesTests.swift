@@ -1,5 +1,8 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Dispatch
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Logging
 import NIOCore
 import NIOPosix

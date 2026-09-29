@@ -1,8 +1,12 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2Core
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import SwiftProtobuf
 import Testing
+@testable import IMV2ServerGateway
 
 struct V2ProtobufFrameCodecTests {
     @Test("recipient-specific author TCP payload retains private alias and its original revision")

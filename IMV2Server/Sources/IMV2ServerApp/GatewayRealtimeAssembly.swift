@@ -1,5 +1,9 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import IMV2Server
+import IMV2ServerInfrastructure
+import IMV2ServerGateway
 
 /// 将前台唤醒接到本地或 NATS，并把提示观察者安装到已提交事件流。
 /// 返回的 Broker 和兴趣管理器由组合根持有，供失败回滚和正常停机使用。

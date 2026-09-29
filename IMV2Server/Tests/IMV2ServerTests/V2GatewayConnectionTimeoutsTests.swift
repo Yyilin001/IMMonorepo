@@ -1,7 +1,11 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2Core
 import Testing
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
+@testable import IMV2ServerGateway
 
 struct V2GatewayConnectionTimeoutsTests {
     @Test("Public transport constructors reject unrepresentable timeouts before allocating TLS resources",

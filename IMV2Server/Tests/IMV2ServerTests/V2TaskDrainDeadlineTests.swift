@@ -1,4 +1,7 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
 
 struct V2TaskDrainDeadlineTests {

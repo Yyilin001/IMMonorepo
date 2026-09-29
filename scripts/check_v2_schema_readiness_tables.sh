@@ -8,7 +8,7 @@ set -Eeuo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 sql_dir="${root_dir}/IMV2/sql"
-readiness_source="${root_dir}/IMV2Server/Sources/IMV2Server/V2SchemaReadiness.swift"
+readiness_source="${root_dir}/IMV2Server/Sources/IMV2ServerInfrastructure/V2SchemaReadiness.swift"
 
 command -v rg >/dev/null 2>&1 || {
   printf 'ripgrep (rg) is required to validate V2 schema-readiness coverage.\n' >&2

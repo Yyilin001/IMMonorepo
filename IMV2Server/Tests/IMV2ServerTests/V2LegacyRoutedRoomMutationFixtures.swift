@@ -1,7 +1,10 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import FluentKit
 import Foundation
 import IMV2Core
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import SQLKit
 
 /// 按房间归属路由群能力变更的存储。

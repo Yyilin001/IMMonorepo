@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Crypto
 import FluentKit
 import FluentPostgresDriver
@@ -7,6 +9,7 @@ import IMV2Core
 import SQLKit
 import Testing
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 @Suite(.serialized)
 struct V2ResourceLogicalIdentityPostgresTests {
@@ -212,7 +215,7 @@ struct ResourcePlacementTestFixture: Sendable {
             targetBaseURL: #require(URL(string: "https://identity.test")), signingKey: Data(repeating: 1, count: 32))
         try await provider.prepare()
         let transport = V2LocalResourceUploadTransport(binding: target.binding, provider: provider)
-        let service = try V2ResourceService(resolve: { _,_,_,_ in .init(database: database, authorize: { _ in }) },
+        let service = try V2ResourceService(resolve: { _,_,_,_ in PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in }) },
             registry: registry, transports: [transport], maximumBytes: 1_000_000, allocate: { _ in try target.allocate() })
         let observed = Date(), session = UUID()
         let authorization = V2ActorRoomMediaAuthorizationPort { query, _ in
@@ -220,7 +223,7 @@ struct ResourcePlacementTestFixture: Sendable {
             return .visible(.init(roomID: value.roomID, messageID: value.messageID, mediaID: value.mediaID,
                 membershipRevision: 1, contentRevision: 1, mediaUpdatedAt: observed, uploadSessionID: session))
         }
-        return .init(resources: service, resolve: { _,_,_,_ in .init(database: database, authorize: { _ in }) },
+        return .init(resources: service, resolve: { _,_,_,_ in PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in }) },
             sources: .init(controlDatabase: database, rooms: IdentityRouter(), ownerDatabases: ["identity": database],
                 authorization: authorization, avatarAuthorization: { _,_,_,_,_ in }), registry: registry, transports: [transport])
     }

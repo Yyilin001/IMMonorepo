@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import FluentKit
 import Foundation
 import IMV2ActorContracts
@@ -6,6 +8,7 @@ import PostgresNIO
 import SQLKit
 import Testing
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 extension V2ResourceGroupAvatarPostgresTests {
     @Test("a new structural owner can retain or replace the bound avatar, but cannot adopt the former owner's unused upload")

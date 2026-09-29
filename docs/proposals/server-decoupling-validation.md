@@ -1,0 +1,163 @@
+# 服务端解耦 P6 验收矩阵
+
+## 本轮范围（2026-09-29）
+
+用户要求先完成代码改造并保证编译，完整验证暂缓。本轮只运行 Swift 产品与测试目标的编译、脚本语法和架构静态检查；下方未执行的 PostgreSQL、独立进程、Linux 运行与性能项目保持未验收，不自动启动。2026-09-28 暂停时的原生排空/媒体崩溃验证在编译阶段中断（退出 130），测试未运行，两个临时库已清理。G4 与批量 Release 测试构建也被停止，均不计为通过；专用虚拟机已恢复临时 DNS 并停止。
+
+
+本文记录可复用的验收入口及其执行条件。下方命令是可复用入口，是否已执行以表格与实施记录为准；不能仅因命令存在就视为通过。分批结果见[实施进度](server-decoupling-progress.md)和[Virtual Actor 证据目录](../reviews/virtual-actor/README.md)；源码继续变化后，旧结果不能代替最终验收。每次运行需保存源码 SHA、命令、环境开关、实际 started/passed/skipped 数、退出码和日志。
+
+## 环境与执行层次
+
+2026-09-28 当前环境：Apple Swift 6.4（arm64 macOS）及本地 PostgreSQL 可用；测试专属 `colima-imv2-va-capacity` 已启动，固定 4 CPU / 16 GiB，默认 Docker context 保持原状。该 profile 初始为停止状态。容器和 VM 的 DNS 临时调整为 `1.1.1.1`，原配置均已备份，验收结束需恢复并停止 profile。环境记录在 `~/.codex/virtual-actor-builds/server-decoupling-20260928-runs/`。
+
+当前 macOS 构建和分批定向测试已通过，最新 worker 回归为 4 suites / 14 tests（含 6 个真实 SIGKILL 参数场景）。最终候选 `c1944b1a103b121cc73b36beceb5348cc465fc88` 的六个 Linux Release 产品已构建成功；可比基线 `b01bb09338ddde61374af9d19f031173bab06b07` 的 Gateway/LoadGenerator 也已构建成功。旧的容器 probe 端口接线失败保留为历史证据；新本地应用栈运行的 general smoke 已通过，但 Actor HTTP 在群昵称写入和读取阶段失败，整体 `passed=false`。根因仍在定位，P6 未完成。
+
+| 层次 | 当前批次最小回归 | 最终 P6 仍需 |
+| --- | --- | --- |
+| 源码边界与模块 | `python3 scripts/check_v2_server_boundaries.py`；受影响 Server suite | 六个候选 Linux Release 产品已构建；仍需最终源码对应的全量边界、生成协议、schema 与运行配置检查 |
+| HTTP、认证、运维和 Gateway | 下方定向 filter；只数实际执行测试 | 独立本地/远端 Host 的真实 Account/Gateway/Operator 栈，caller-only 入口与跨入口禁号 |
+| 房间事务和恢复 | 下方真 PostgreSQL 精筛；独立 COMMIT ACK 丢失库 | 全部受影响 Server 集成测试、跨库故障、G4/G6 独立进程与 SIGKILL |
+| 性能 | 不在每次源码编辑后运行容量负载 | P0 对照与最终源码采用同一 Linux Release 构建模式、fixture、机器、连接池和负载，各至少三次 |
+
+日常定向回归不需要运行完整 ClientKit；最终全量检查仍用 `bash scripts/run_v2_swift_tests.sh`。该脚本运行 Core、ClientKit、Server（后两者串行）及边界、protobuf、schema、配置和文档检查。CI 的 [verify.yml](../../.github/workflows/verify.yml) 还构建 `IMV2AccountServerApp`、`IMV2OperatorServerApp`、`IMV2ServerApp`、`IMV2LocalGatewayProbe`、`IMV2GatewayLoadGenerator` 的 Linux Release 产品，并在 PostgreSQL 服务下运行 Server 全量测试。最终必须核对本轮源码对应的实跑结果；进度文档中的定向通过只覆盖当时稳定点。
+
+### 当前批次最小回归
+
+从仓库根目录执行。`--filter` 为正则；过滤器匹配零项不能视为通过。第一条针对 HTTP/认证/指标，第二条针对 Gateway/Actor 接线。两条均不需要外部数据库：
+
+```sh
+swift test --disable-automatic-resolution --no-parallel --package-path IMV2Server \
+  --filter 'V2PasswordAccountRoutesTests|V2PasswordLifecycleRoutesTests|V2AccountAssertionTests|V2VaporDeviceCredentialRoutesTests|V2VaporDeviceSessionRoutesTests|V2VaporAccountDisableOperatorRoutesTests|V2VaporDeviceSnapshotResetOperatorRoutesTests|V2VaporDurableWorkOperatorReplayRoutesTests|V2VaporMetricsRoutesTests|V2CachedDurableWorkMetricsSourceTests|V2VaporMediaEdgeRoutesTests'
+
+swift test --disable-automatic-resolution --no-parallel --package-path IMV2Server \
+  --filter 'V2GatewaySessionTests|V2GatewayDomainCommandHandlerTests|V2ProtobufFrameCodecTests|V2PreparedGroupEventPageCacheTests|V2GatewayRoomActorCompositionTests|V2AccountRoomGatewayTests'
+```
+
+Actor cluster 的现有 `V2RoomClusterBridgeTests`、`V2RoomLocalCapabilityIntegrationTests`、`V2RoomClusterDiscoveryTests` 位于 `IMV2ActorClusterTests`，最终 Actor 接线复验时单独执行：
+
+```sh
+swift test --disable-automatic-resolution --no-parallel --package-path IMV2Server \
+  --filter 'V2RoomClusterBridgeTests|V2RoomLocalCapabilityIntegrationTests|V2RoomClusterDiscoveryTests'
+```
+
+## PostgreSQL 与故障 opt-in
+
+[原生数据库脚本](../../scripts/test_v2_server_native_postgres.sh)需要可创建数据库的 PostgreSQL 用户；它创建并清理五个独立库，设置 primary、secondary、control、disposable、cross-store，以及取消/过载专项开关。它不自动启用 CI 的全部故障测试。先用受影响 filter，再在最终阶段执行完整 Server 集成矩阵；安装/删除共享 schema 的测试须串行。
+
+```sh
+PGHOST=127.0.0.1 PGPORT=5432 PGUSER=im_v2_test \
+  bash scripts/test_v2_server_native_postgres.sh \
+  --filter 'V2ActorRoomQueryExecutorIntegrationTests|V2RoomHostPostgresLifecycleTests|V2RoomHostPostgresDrainTests|V2RoomHostPostgresOverloadDrainTests|PostgresV2RoomWriteStoreIntegrationTests'
+```
+
+按本机账号配置 `PGPASSWORD`；不要把密码写入证据。此 filter 中某些 Host suite 仍会因独立开关缺失而 skipped，必须另用专属空库复跑。下表给出关键 opt-in；所有 URL 都必须指向**由本次运行独占、允许重装 schema 的空库**。
+
+| 场景 | filter / 入口 | 必要环境 | 已有结果与本轮状态 |
+| --- | --- | --- | --- |
+| 单房间成功 COMMIT 丢 ACK | `V2RoomActivationCommitAckLossTests` | `IMV2_ACTOR_ACK_LOSS_DATABASE_URL`、`IMV2_ACTOR_ACK_LOSS_TEST_DATABASE_IS_DISPOSABLE=1` | 本轮原生 PostgreSQL 已执行通过，见下方证据 |
+| 双房间成功 COMMIT 丢 ACK | `V2SharedRoomSendCommitAckLossTests` | `IMV2_SHARED_SEND_ACK_LOSS_DATABASE_URL`、`IMV2_SHARED_SEND_ACK_LOSS_TEST_DATABASE_IS_DISPOSABLE=1` | 本轮原生 PostgreSQL 已执行通过，见下方证据 |
+| Host 排空与过载 | `V2RoomHostPostgresDrainTests` / `V2RoomHostPostgresOverloadDrainTests` | 分别 `IMV2_ACTOR_HOST_DRAIN_DATABASE_URL` / `IMV2_ACTOR_HOST_OVERLOAD_DATABASE_URL`，各自 `_IS_DISPOSABLE=1` | CI 已 opt-in；本轮未执行 |
+| 授权及配额进程 SIGKILL（仅 macOS 编译） | `PostgresV2RoomWriteStoreIntegrationTests` 中 `directAuthorizationProcessCrash`、`groupJoinQuotaKilledRecovery` | primary/secondary **不同**；`IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE=1`；子进程 stage 由测试设置 | 本轮 macOS 实际执行授权 8 个与配额 6 个 SIGKILL 参数场景，通过；Linux CI 不会执行 |
+| 本地媒体清理 SIGKILL（仅 macOS 编译） | `V2LocalMediaPurgeCrashTests` | 父测试无外部 opt-in；测试自行传 `IMV2_MEDIA_CRASH_*` 给子进程 | Linux CI 不会执行；本轮未执行 |
+
+本轮原生故障回归：`/tmp/imv2-scope-fault-tests.log`，退出码 0，测试编译 182.75 秒，执行 33.801 秒。运行器报告 6 个 suite、19 项测试；其中 18 项实际通过，1 项仅供子进程调用的授权 crash 入口在父进程按设计 skipped。父测试实际启动并验证了 8 个授权与 6 个配额 SIGKILL 参数场景，不能将这个辅助入口的跳过误读为崩溃场景未执行。单房间/双房间 COMMIT ACK-loss 各 1 项、G2 Host 恢复 3 项、作用域构造 4 项及选定 owner fence/receipt/forward 场景均通过。所有数据库由本轮脚本创建并清理：通用五库之外，ACK、shared ACK 与 G2 各使用一个独占空库并显式设置对应 opt-in。
+
+单、双房间 ACK 丢失可分别这样执行；每次将 `OWNED_EMPTY_PG_URL` 换为不同的可丢弃空库：
+
+```sh
+IMV2_ACTOR_ACK_LOSS_DATABASE_URL="$OWNED_EMPTY_PG_URL" \
+IMV2_ACTOR_ACK_LOSS_TEST_DATABASE_IS_DISPOSABLE=1 \
+swift test --disable-automatic-resolution --no-parallel --package-path IMV2Server \
+  --filter V2RoomActivationCommitAckLossTests
+
+IMV2_SHARED_SEND_ACK_LOSS_DATABASE_URL="$OWNED_EMPTY_PG_URL" \
+IMV2_SHARED_SEND_ACK_LOSS_TEST_DATABASE_IS_DISPOSABLE=1 \
+swift test --disable-automatic-resolution --no-parallel --package-path IMV2Server \
+  --filter V2SharedRoomSendCommitAckLossTests
+```
+
+CI 另外显式配置 `IMV2_ACTOR_TRANSACTION_*`、`ACTOR_HOST_G2_*`、`ACTOR_PAIR_INTERLEAVE_*`、`ACTOR_CANCEL_MAINT_*`、`ACTOR_CREDIT_FENCE_*`、`ACTOR_D2_*`、`ACTOR_D4_*`、`ACTOR_D5_*` 及各自 disposable 标志，详见 [verify.yml](../../.github/workflows/verify.yml)。`IMV2_ACTOR_HOST_SHARED_ACK_LOSS_*` 也在 CI 配置中，但当前测试/生产源码没有读取它；不能据此声称该专项被执行。最终全量 Server 运行需记录每个 opt-in suite 实际执行数。
+
+## 真实进程与服务入口
+
+候选 Linux Release 证据：`~/.codex/virtual-actor-builds/server-decoupling-20260928-candidate-release/result.json` 记录源码 SHA `c1944b1a103b121cc73b36beceb5348cc465fc88`、固定 Swift 6.4 Jammy 镜像、lockfile SHA-256 `3af1e16190f46bdd8fad3de86c6b386dc196443291463355bf36edb62b7fd15c`、退出码 0，以及 Account、Gateway、Operator、LocalGatewayProbe、GatewayLoadGenerator、ResourceImageWorker 六个产品的 SHA-256。`~/.codex/virtual-actor-builds/server-decoupling-20260928-baseline-compatible-release/result.json` 记录相同镜像与 lockfile 下基线 `b01bb09338ddde61374af9d19f031173bab06b07` 的 Gateway/LoadGenerator 成功构建。两份构建成功不构成服务或性能验收。
+
+本地应用栈 `~/.codex/virtual-actor-builds/server-decoupling-20260928-runs/run-ac2ea47bf02f435da43eaf1403cdf6a7/` 使用核验过的候选预编译产品；`result.json` 记录 `mode=local-gateway-host`、`productSource=verified-prebuilt`、候选源码 SHA 与 `passed=false`。`smoke.log` 的 general smoke 已通过账户 HTTPS/凭据、Gateway direct chat、密码限流、Push 端点、Operator 禁号、TLS 1.3 和私有指标；`actor-http-smoke.log` 记录 `ACTOR_HTTP_SMOKE_FAILED phase=group nickname write and read kind=SmokeFailure`，但未给出根因。所用 harness 的唯一改动路径和补丁 SHA-256 见 `~/.codex/virtual-actor-builds/server-decoupling-20260928-app-harness/provenance-v2.json`。当前定位昵称阶段失败，**本地应用栈整体未通过，P6 仍未完成**。
+
+### P6 worker 与共享资源静态归属审查
+
+下表只记录源码能证明的构造、启动与关闭关系；实际进程故障验证仍按本节下方的独立入口执行。
+
+| 能力 | 实现与启动所有者 | 关闭及资源顺序证据 |
+| --- | --- | --- |
+| 同步与个人状态 | `IMV2Server/Sources/IMV2ServerApplication/V2SyncService.swift` 处理同步用例；`IMV2Server/Sources/IMV2ServerApp/GatewayCommandAssembly.swift` 76–86 行注入 `V2RoutedSyncStore`。`GatewayUserShardWork.swift` 21–64 行按物理分片去重构造投影、压缩和同步清理 worker；`GatewayProjectionWorkers.swift` 20–74、130–151 行及 `GatewayMaintenanceWorkers.swift` 93–134、208–215 行注册轮询。 | `GatewayRuntime.swift` 111–116 行在 HTTP 监听器绑定后启动统一监督器；215–225 行取消并排空任务，随后 132–136 行关闭辅助服务、TLS 与 Actor，`GatewayInfrastructure.swift` 35–39 行最后关闭应用、数据库和事件循环。 |
+| 账户与邀请恢复 | `IMV2Server/Sources/IMV2AccountServerApp/main.swift` 51–67 行创建账户专属数据库资源、任务监督器、密码哈希 worker；132–147 行登记边缘限流清理，191–198 行登记授权恢复，236–243 行登记转发计划恢复，456–488 行登记邀请创建及入群配额恢复。 | 同文件 513–525 行先 `runtimeTasks.cancelAndWait`、关闭密码 worker 和 HTTP，再关闭资源资料服务与房间 Actor，最后关闭数据库和事件循环；526–547 行异常路径同样排空。`RuntimeTaskSupervisor` 588–602 行持有所有已登记任务，取消后等待，超时直接退出以保留底层资源。 |
+| 推送与内容审核 | `GatewayMaintenanceAssembly.swift` 85–108 行只在 APNS 配置下构造推送 worker；`GatewayCommandAssembly.swift` 29–61 行只在审核启用且配置安全身份时按房间归属库构造审核 worker。`GatewayDeliveryWorkers.swift` 52–106 行为二者各登记独立循环。Account 的推送端点路由在 `IMV2Server/Sources/IMV2AccountServerApp/main.swift` 412–418 行登记，不持有发送循环。 | 二者都由同一个 `GatewayWorkerSupervisor` 管理，走上述 Gateway 停机排空路径；禁用配置下对应循环立即返回。 |
+| 媒体与资源恢复 | `IMV2Server/Sources/IMV2AccountServerApp/main.swift` 244–250、370–400 行只在本地媒体配置存在时，为每个物理归属构造资源恢复、导入、扫描、保留和清理 worker，并登记一个可取消循环。`IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/V2ResourceRecoveryWorker.swift` 执行过期事务并读取候选；`IMV2Server/Sources/IMV2ServerApplication/Resources/Application/V2ResourceRecoveryWorker.swift` 逐项重试 finalize。 | 这些循环登记在账户 `RuntimeTaskSupervisor`，因此在数据库资源关闭前按 513–525 或 526–547 行排空；资源资料服务也在 517/532 行显式关闭。 |
+| Gateway 共享资源 | `GatewayComposition.swift` 51–58 行记录逐阶段已创建的 broker、共享唤醒兴趣、账号房间变更服务、Actor 与作者资料运行时；65–82 行准备资源并启动 Actor，185–197 行把唯一实例装入组合结果。 | 装配失败由 199–211 行逆序回滚；正常关闭由 `GatewayRuntime.swift` 121–136 行排空连接和 worker，再关闭共享服务及 Actor；`GatewayComposition.swift` 215–227 行显式关闭 broker、兴趣与账号变更服务。底层数据库/事件循环由 `GatewayInfrastructure.swift` 35–45 行统一关闭。 |
+
+**模块归属。** 推送、审核、同步维护、邀请创建、入群配额及资源 finalize 恢复的协议和业务编排现位于 `IMV2Server/Sources/IMV2ServerApplication/`；对应的 PostgreSQL store、审核任务事务、资源过期事务和具体 Actor 构造入口保留在 `IMV2Server/Sources/IMV2ServerInfrastructure/`。资源恢复的基础设施端口先在同一事务中过期会话，再读取待恢复项；应用层随后调用 `V2ResourceService.status/finalize`。这是源码层职责核查，尚不能代替下方独立进程故障验收。
+
+以下专项入口会自行建立临时 PostgreSQL、网络和身份；Linux 模式需要可用 Docker context，scratch 与证据目录须为源码外不同目录。测试 Docker context 已可用，以下 G4/G6 仍待实际执行并记录结果。CI 已有 G4/G6 Linux job；真实应用栈目前不在 required CI gate 中。
+
+```sh
+# G4：caller 先起，独立 Host SIGKILL、租约到期、替代 Host 接管与幂等重放。
+mkdir -p "$HOME/.cache/imv2-g4/swiftpm" "$HOME/.cache/imv2-g4/evidence"
+DOCKER_CONTEXT=default VA_G4_MODE=linux VA_G4_LINUX_CLIENT_FIRST=1 \
+VA_G4_LINUX_SCRATCH_DIR="$HOME/.cache/imv2-g4/swiftpm" \
+VA_G4_LINUX_RUN_ROOT="$HOME/.cache/imv2-g4/evidence" \
+bash IMV2/scripts/test_v2_virtual_actor_business_probe.sh
+
+# G6：双 Host、peer-only 网络分区和旧 token 围栏。
+mkdir -p "$HOME/.cache/imv2-g6/swiftpm" "$HOME/.cache/imv2-g6/evidence"
+DOCKER_CONTEXT=default VA_G6_MODE=linux \
+VA_G6_LINUX_SCRATCH_DIR="$HOME/.cache/imv2-g6/swiftpm" \
+VA_G6_LINUX_RUN_ROOT="$HOME/.cache/imv2-g6/evidence" \
+python3 IMV2/scripts/test_v2_virtual_actor_multihost_probe.py
+```
+
+[应用栈 runner](../../IMV2/scripts/test_v2_virtual_actor_application_stack.py)使用 Linux Release 产品和独立 Compose project，包含 Account HTTPS、Gateway TLS/protobuf、Operator 与房间 HTTP 冒烟。`--scratch-dir` 为源码外独占目录；如使用预编译产品，需同时传 `--products-dir`、`--products-metadata`，runner 会核对源码、lockfile 和各产品 SHA-256。
+
+```sh
+# 真实本地 Host / Gateway / Account / Operator。
+python3 IMV2/scripts/test_v2_virtual_actor_application_stack.py \
+  --context default --scratch-dir "$HOME/.cache/imv2-app/swiftpm"
+
+# 独立远端 Host；Gateway 与 Account 只作为 caller。
+python3 IMV2/scripts/test_v2_virtual_actor_application_stack.py \
+  --context default --scratch-dir "$HOME/.cache/imv2-app/swiftpm" --remote-gateway
+
+# 两条已认证 Gateway 会话跨 Operator 禁号，验证旧连接关闭及零新持久效果。
+python3 IMV2/scripts/test_v2_virtual_actor_application_stack.py \
+  --context default --scratch-dir "$HOME/.cache/imv2-app/swiftpm" \
+  --remote-gateway --cross-entry-disable
+
+# 繁忙 Host 的真实 SIGTERM、退出、接管和同 ID 重放；与上一模式互斥。
+python3 IMV2/scripts/test_v2_virtual_actor_application_stack.py \
+  --context default --scratch-dir "$HOME/.cache/imv2-app/swiftpm" \
+  --remote-gateway --busy-sigterm
+```
+
+应用栈当前脚本没有 `--remote-batch`：它属于已退役的 TCP 发送入口，其[历史记录](../reviews/virtual-actor/g3-remote-batch-evidence.md)不能作为现行发送路径验收。跨入口禁号 runner 验证两条会话、独立 Host、Operator 提交及 SQL 无新效果；它不等同于多数据库控制链路分区。最终需要在当前源码上重跑并保存 `result.json`、服务日志与清理结果。
+
+## 性能对照
+
+可复用入口为 [容量 runner](../../IMV2/scripts/test_v2_virtual_actor_capacity_canary.py)、[固定 fixture](../../IMV2/scripts/prepare_v2_virtual_actor_capacity_fixture.py)、[评估器](../../IMV2/scripts/assess_v2_virtual_actor_capacity.py)和[历史协议](../reviews/virtual-actor/v1-baseline-protocol.md)。容量 runner **不负责构建产品**：需两份干净源码 checkout 与各自独立 Linux Release 产品/`result.json`，另用同一份经验证的 corrected Release loader、固定 fixture、非 `default` 的显式 Docker context，以及源码外全新 artifact 目录。先对两版输入分别做只读预检：
+
+```sh
+python3 IMV2/scripts/test_v2_virtual_actor_capacity_canary.py \
+  --source-checkout "$CHECKOUT" --source-sha "$SHA" \
+  --release-dir "$RELEASE_DIR" --build-result "$BUILD_RESULT" \
+  --loader-products-dir "$COMMON_LOADER_DIR" \
+  --loader-build-result "$COMMON_LOADER_RESULT" \
+  --fixture-dir "$FROZEN_FIXTURE_DIR" --layout hot \
+  --docker-context "$NONDEFAULT_DOCKER_CONTEXT" \
+  --artifact-dir "$NEW_ARTIFACT_DIR" --preflight-only
+```
+
+正式运行增加 `--measurement-workload hot --measurement-connections <固定值>`；候选再传 `--measurement-freeze-file <main-calibration-freeze.json>`。其他 workload 为 `same-owner`、`mixed`、`cold`、`fault`，其中 fault 使用 mixed layout。每次运行固定 120 秒预热、300 秒稳态、60 秒冷却；同机、同镜像、同 PostgreSQL 版本/数据/连接池/负载，以 `main,candidate,candidate,main,main,candidate` 顺序各取至少三次，执行评估器 `freeze` 与 `assess`。观察 accepted throughput、P95/P99、SQL/ACK、CPU/ACK、RSS、批次和队列。实施方案建议先调查吞吐下降超过 5% 或 P95/P99 上升超过 10%；最终预算须先按 P0 噪声与容量要求冻结。
+
+**当前性能准备状态**：原仓库容量 runner 仍绑定历史 SHA `f1cdd78d6a21bf0ae23da627c0710c65115236aa`，不直接用于本轮对照。独立干净 harness 已生成真实 snapshot `a8dcae1faf999a94d24b5451ff94e184bf6a88c6`，绑定 `524716ef` 加相同三入口 stderr 兼容补丁后的实际基线 `b01bb093`，保留校准、产物及来源检查，并要求两版均有 Actor 指标。该 harness 的 100 连接、1 个热点房间、125 次发送/秒配置已通过只读预检；尚未运行三次基线校准或候选测量。新 fixture 为 `~/.codex/virtual-actor-builds/server-decoupling-20260928-performance-hot-fixture`，独立 harness 及 provenance 位于同级目录。性能结论仍待真实样本；热点单条负载另外配合 direct atomic batch 测量，不能相互替代。
+
+`V2GatewaySlowFanoutBenchmarkTests` 可用 `IMV2_RUN_SLOW_FANOUT_BENCHMARK=1` 单独观测 10k 连接慢读者传输，但只覆盖局部传输；`IMV2/scripts/run_v2_gateway_load_guarded.sh` 使用 macOS `caffeinate`，不是 Linux 容量入口。

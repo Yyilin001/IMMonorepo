@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2Core
 @preconcurrency import NIOCore
@@ -5,6 +7,7 @@ import IMV2Core
 import Synchronization
 import SwiftProtobuf
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
 
 @Suite("V2 Core NATS group wake broker")

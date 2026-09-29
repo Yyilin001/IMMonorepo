@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import HTTPTypes
 import IMV2ServerHTTP
@@ -9,6 +11,7 @@ import SQLKit
 import Synchronization
 import Testing
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("member administration authenticated HTTP uses fenced room authority")

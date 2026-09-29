@@ -1,9 +1,13 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import FluentKit
 import Foundation
 import IMV2Core
 import IMV2ActorContracts
 import Synchronization
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
+@testable import IMV2ServerGateway
 
 final class V2TelemetryTestClock: Sendable {
     private let wall = Mutex(Date(timeIntervalSince1970: 1_750_000_000))

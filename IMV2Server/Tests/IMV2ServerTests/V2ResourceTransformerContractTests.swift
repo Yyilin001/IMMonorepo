@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 #if canImport(ImageIO) && canImport(CoreGraphics)
 import Crypto
 import CoreGraphics
@@ -6,6 +8,7 @@ import ImageIO
 import Testing
 import UniformTypeIdentifiers
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 struct V2ResourceTransformerContractTests {
     @Test func isolatedAvatarProcessorProducesFixedMetadataFreePNGs() async throws {

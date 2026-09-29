@@ -1,14 +1,15 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import HTTPTypes
 import IMV2Core
-import IMV2Server
 import Vapor
 
 public struct V2VaporDirectRoomOperationRoutes:Sendable {
     private let authenticator:any V2GatewayAuthenticator
-    private let store:PostgresV2DirectRoomOperationStore
+    private let store:any V2DirectRoomOperationHandling
     private let now:@Sendable ()->Date
-    public init(authenticator:any V2GatewayAuthenticator,store:PostgresV2DirectRoomOperationStore,now:@escaping @Sendable ()->Date=Date.init) { self.authenticator=authenticator;self.store=store;self.now=now }
+    public init(authenticator:any V2GatewayAuthenticator,store:any V2DirectRoomOperationHandling,now:@escaping @Sendable ()->Date=Date.init) { self.authenticator=authenticator;self.store=store;self.now=now }
     public func register(on routes:RoutesBuilder) {
         routes.on(.post,"v2","direct-room-operations","submit",maxBodySize:"4kb") { request async throws -> Response in
             let actor=try await request.v2AuthenticatedAccountIdentity(using:authenticator)

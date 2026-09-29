@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Crypto
 import FluentKit
 import FluentPostgresDriver
@@ -8,6 +10,7 @@ import PostgresNIO
 import SQLKit
 import Testing
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 @Suite(.serialized)
 struct V2ResourceForwardPostgresTests {

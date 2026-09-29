@@ -1,6 +1,10 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import IMV2ActorApplication
 import IMV2Server
+import IMV2ServerInfrastructure
+import IMV2ServerGateway
 
 /// 装配登录后命令处理器及可选内容审核 Worker。
 /// 账号房间变更服务由组合根先登记，避免此阶段抛错时遗漏关闭。
@@ -84,8 +88,7 @@ struct GatewayCommandAssembly {
             databaseWorkAdmission: configuration.databaseWorkAdmissionEnabled
                 ? frontdoor.databaseWorkAdmission
                 : nil,
-            controlWriteAdmissionEnabled:
-                configuration.foregroundControlWriteDatabaseWorkLimit > 0,
+            databaseFailureIsTransient: v2PostgresGatewayFailureIsTransient,
             maximumGroupEventPagePayloadBytes: max(
                 1,
                 configuration.frameLimits.maximumPayloadBytes - 4_096

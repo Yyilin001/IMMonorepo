@@ -1,8 +1,11 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import FluentKit
 import Foundation
 import IMV2ActorContracts
 import IMV2Core
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 /// Runs the current control manifest and fixed owner bootstrap against actual
 /// stores; no legacy creation coordinator or draft table is reproduced.

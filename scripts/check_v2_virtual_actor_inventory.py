@@ -31,7 +31,20 @@ def main() -> int:
 
     paths: dict[str, str] = {}
     valid_owners = {"C0", "R1", "R2", "R3", "D1", "D2", "D3", "D4", "D5", "D6", "V1", "I1"}
+    retired_paths: set[str] = set()
     for item in owners["files"]:
+        if "retiredPath" in item:
+            retired = item["retiredPath"]
+            if retired in retired_paths or retired in paths:
+                errors.append(f"duplicate retired owner: {retired}")
+            retired_paths.add(retired)
+            if (ROOT / retired).exists():
+                errors.append(f"retired owned source still exists: {retired}")
+            if item["owner"] not in valid_owners:
+                errors.append(f"unknown retired owner: {retired}: {item['owner']}")
+            if not item.get("replacedBy"):
+                errors.append(f"retired owner lacks replacements: {retired}")
+            continue
         path, owner = item["path"], item["owner"]
         if path in paths:
             errors.append(f"duplicate owner: {path}: {paths[path]} and {owner}")
@@ -40,6 +53,13 @@ def main() -> int:
             errors.append(f"unknown owner: {path}: {owner}")
         if not (ROOT / path).is_file():
             errors.append(f"missing owned source: {path}")
+    for item in owners["files"]:
+        if "retiredPath" in item:
+            for replacement in item["replacedBy"]:
+                if replacement not in paths:
+                    errors.append(f"retired owner replacement lacks ownership: {item['retiredPath']} -> {replacement}")
+                elif not (ROOT / replacement).is_file():
+                    errors.append(f"missing retired owner replacement: {replacement}")
 
     ledger = (INVENTORY / "writer-ledger.md").read_text(encoding="utf-8")
     catalog = (INVENTORY / "capability-catalog.md").read_text(encoding="utf-8")
@@ -75,11 +95,22 @@ def main() -> int:
         re.findall(r"\b(?:V2|IMV2)[A-Za-z0-9_]+\b|\b[A-Z][A-Za-z0-9_]*ID\b", signatures)
     )
     dto_names: set[str] = set()
+    active_dto_names: set[str] = set()
     for item in dto_index["types"]:
         name, path = item["name"], item["path"]
         if name in dto_names:
             errors.append(f"duplicate DTO type: {name}")
         dto_names.add(name)
+        if item.get("status") == "retired":
+            if (ROOT / path).is_file() and re.search(
+                rf"\b(?:struct|enum|actor|class|protocol|typealias)\s+{re.escape(name)}\b",
+                (ROOT / path).read_text(encoding="utf-8"),
+            ):
+                errors.append(f"retired DTO still declared: {name}: {path}")
+            if not item.get("replacedBy"):
+                errors.append(f"retired DTO lacks replacements: {name}")
+            continue
+        active_dto_names.add(name)
         source = ROOT / path
         if not source.is_file():
             errors.append(f"missing DTO source: {path}")
@@ -87,12 +118,17 @@ def main() -> int:
         if source.parts[-2] != item["target"] and item["target"] not in source.parts:
             errors.append(f"DTO target mismatch: {name}: {path}")
         if not re.search(
-            rf"(?m)^(?:public |internal |package )?(?:nonisolated )?"
+            rf"(?m)^(?:public |internal |package |nonisolated |indirect |final )*"
             rf"(?:struct|enum|actor|class|protocol|typealias)\s+{re.escape(name)}\b",
             source.read_text(encoding="utf-8"),
         ):
             errors.append(f"missing DTO declaration: {name}: {path}")
-    for name in sorted(signature_types - dto_names):
+    for item in dto_index["types"]:
+        if item.get("status") == "retired":
+            for replacement in item["replacedBy"]:
+                if replacement not in active_dto_names:
+                    errors.append(f"retired DTO replacement absent from index: {item['name']} -> {replacement}")
+    for name in sorted(signature_types - active_dto_names):
         errors.append(f"signature type absent from DTO index: {name}")
 
     if errors:

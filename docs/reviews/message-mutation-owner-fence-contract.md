@@ -4,7 +4,7 @@
 
 普通编辑和撤回使用 [MessageMutationOperation](../../IMV2Core/Sources/IMV2Core/MessageMutationOperation.swift) 的冻结执行 envelope，必填首次提交截止、稳定原操作身份和 expected revision。POST `/v2/rooms/:room/message-mutations/edit`、`/withdraw` 返回绑定 identity/fingerprint 的最小原回执；POST 同前缀 `/operations/recover` 执行 query 或 closeIfAbsent。正文不进入永久回执，也不由回执获得展示 lease。
 
-[永久执行器](../../IMV2Server/Sources/IMV2Server/PostgresV2MessageMutationOperationStore.swift) 在 operation advisory lock 与 RoomRef activation fence 内先查原回执，再验证不存在的新操作截止与当前领域权限。首次窗口最多十分钟。领域 revision、事件、outbox 与 `message_mutation_receipts` 在同一事务提交；关闭共锁，永久拒绝／关闭不能被迟到原请求越过。内层领域写显式复用已绑定事务，不能另发 BEGIN/COMMIT。新操作的 admission rateLimited/unavailable 返回绑定原 identity/fingerprint 的 deferred 调度提示；HTTP 分别使用 429/503，存在 retryAfterMilliseconds 时同时返回向上取整秒数的 Retry-After。提示不是执行、拒绝或关闭证明。
+[永久执行器](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageMutationOperationStore.swift) 在 operation advisory lock 与 RoomRef activation fence 内先查原回执，再验证不存在的新操作截止与当前领域权限。首次窗口最多十分钟。领域 revision、事件、outbox 与 `message_mutation_receipts` 在同一事务提交；关闭共锁，永久拒绝／关闭不能被迟到原请求越过。内层领域写显式复用已绑定事务，不能另发 BEGIN/COMMIT。新操作的 admission rateLimited/unavailable 返回绑定原 identity/fingerprint 的 deferred 调度提示；HTTP 分别使用 429/503，存在 retryAfterMilliseconds 时同时返回向上取整秒数的 Retry-After。提示不是执行、拒绝或关闭证明。
 
 旧 `message_edit_operations`／`message_withdrawal_operations` 和 housekeeping 删除路径已移除；永久结果仅含消息 ID、结果 revision、room sequence、event ID、解决时间及 typed rejection。成功原回执不以当前成员资格或当前正文覆盖。HTTP 限 edit 1 MiB、withdraw/recover 4 KiB，no-store，持久账号边缘预算 cost 3。无冻结截止的旧 TLS mutation 入口不再执行。以下为迁移前 owner fence 背景。
 
@@ -43,7 +43,7 @@
 
 ## Reaction own-key operation
 
-current58 / protocol36 将 reaction 写入改为 [V2MessageReactionOperationCommand](../../IMV2Core/Sources/IMV2Core/MessageReactionOperation.swift) 与 [永久执行器](../../IMV2Server/Sources/IMV2Server/PostgresV2MessageReactionOperationStore.swift)。原 identity、规范化 reaction、明确 present/absent 目标、expectedReactionRevision 与首次截止共同绑定 fingerprint；首次窗口最多 24 小时，不从消息内容 revision 或聚合 count 推算自己的版本。
+current58 / protocol36 将 reaction 写入改为 [V2MessageReactionOperationCommand](../../IMV2Core/Sources/IMV2Core/MessageReactionOperation.swift) 与 [永久执行器](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageReactionOperationStore.swift)。原 identity、规范化 reaction、明确 present/absent 目标、expectedReactionRevision 与首次截止共同绑定 fingerprint；首次窗口最多 24 小时，不从消息内容 revision 或聚合 count 推算自己的版本。
 
 `GET /v2/rooms/{room}/message-reactions/{message}?reaction=...` 返回当前授权的 own-key snapshot；新提交仍验证当前成员及消息接受时的成员权限，历史 query 仅返回自己的最小原回执。`POST /v2/rooms/{room}/message-reactions/change` 和 `/operations/recover` 经过 RoomRef、body 上限、持久账号限流与 no-store。每个新 committed operation（包括已满足目标的 no-op）使 key revision 加一，重放不增加。实际集合变化的 commit 带事件序号／身份；no-op 不伪造事件。原回执不是当前集合证明，后续反向变更不会改写历史结果。
 

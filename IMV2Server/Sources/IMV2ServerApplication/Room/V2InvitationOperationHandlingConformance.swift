@@ -1,0 +1,3 @@
+import IMV2ServerContracts
+
+extension V2ActorInvitationCoordinator: V2GroupInvitationOperationHandling {}

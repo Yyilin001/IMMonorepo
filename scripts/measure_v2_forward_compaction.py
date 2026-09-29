@@ -17,8 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 NOW = "TIMESTAMPTZ '2026-09-19 00:00:00+00'"
 CUTOFF = "TIMESTAMPTZ '2026-09-12 00:00:00+00'"
 SOURCES = {
-    "source": ROOT / "IMV2Server/Sources/IMV2Server/PostgresV2ForwardExportCompactor.swift",
-    "target": ROOT / "IMV2Server/Sources/IMV2Server/PostgresV2ForwardInboxCompactor.swift",
+    "source": ROOT / "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ForwardExportCompactor.swift",
+    "target": ROOT / "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ForwardInboxCompactor.swift",
 }
 
 

@@ -1,13 +1,14 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import HTTPTypes
 import IMV2Core
-import IMV2Server
 import Vapor
 
 public struct V2VaporMessageReactionOperationRoutes:Sendable {
     private let authenticator:any V2GatewayAuthenticator
-    private let messages:V2RoomRefMessagingClient
-    public init(authenticator:any V2GatewayAuthenticator,messages:V2RoomRefMessagingClient) { self.authenticator=authenticator;self.messages=messages }
+    private let messages:any V2MessageReactionOperationHandling
+    public init(authenticator:any V2GatewayAuthenticator,messages:any V2MessageReactionOperationHandling) { self.authenticator=authenticator;self.messages=messages }
     public func register(on routes:RoutesBuilder) {
         routes.on(.post,"v2","rooms",":roomID","message-reactions","change",maxBodySize:"4kb") { request async throws -> Response in
             let actor=try await request.v2AuthenticatedAccountIdentity(using:authenticator)

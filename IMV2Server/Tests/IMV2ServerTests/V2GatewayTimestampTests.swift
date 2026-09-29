@@ -1,6 +1,10 @@
+@testable import IMV2ServerGateway
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import Testing
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 struct V2GatewayTimestampTests {
     @Test("Wire timestamp boundaries preserve signed milliseconds and reject overflow")

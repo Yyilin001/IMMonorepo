@@ -27,12 +27,12 @@
 
 | 控制事实 | 当前应用写者 | 锁与持久排空 |
 | --- | --- | --- |
-| 拉黑、好友关系 | [PostgresV2SocialRelationshipStore](../../IMV2Server/Sources/IMV2Server/PostgresV2SocialRelationshipStore.swift) 的 changeUserBlock / changeRelationship | 用户对排他锁内 drain(pair)，再变更关系/拉黑；Gateway 注入协调器 |
-| 陌生人权限 | [PostgresV2DirectMessagingStore](../../IMV2Server/Sources/IMV2Server/PostgresV2DirectMessagingStore.swift) 的 setStrangerMessagePermission | 偏好排他锁内 drain(user)，再写偏好；分片路由交 controlStore，不交 owner store |
-| 账号停用与 profile.state | [V2AccountDisableService](../../IMV2Server/Sources/IMV2Server/V2AccountDisableService.swift) | account-state 排他锁内 drain(user)，再写停用记录、暂停资料及吊销凭据；Operator 注入协调器 |
-| 新账号资料 | [V2PasswordAccountStore](../../IMV2Server/Sources/IMV2Server/V2PasswordAccountStore.swift) | 服务端生成新 UUID 并插入资料；不是既有账号权限撤销入口 |
-| 展示资料更新 | [PostgresV2ProfileUpdateStore](../../IMV2Server/Sources/IMV2Server/PostgresV2ProfileUpdateStore.swift)、[V2PublicIdentityAccountStore](../../IMV2Server/Sources/IMV2Server/V2PublicIdentityAccountStore.swift) | 修改名字/头像/资料修订，不修改 state、special 状态或收发权限，无需为展示变更撤销发送授权 |
-| 特殊账号类型、状态及收发开关 | 当前应用无写入 special_accounts 的入口；[V2SpecialAccountMessagingService](../../IMV2Server/Sources/IMV2Server/V2SpecialAccountMessagingService.swift) 读取设置、写消息操作与审计 | 不能把“当前没有应用写者”解释成该表不可变或支持管理员在线直接修改 |
+| 拉黑、好友关系 | [PostgresV2SocialRelationshipStore](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2SocialRelationshipStore.swift) 的 changeUserBlock / changeRelationship | 用户对排他锁内 drain(pair)，再变更关系/拉黑；Gateway 注入协调器 |
+| 陌生人权限 | [PostgresV2DirectMessagingStore](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2DirectMessagingStore.swift) 的 setStrangerMessagePermission | 偏好排他锁内 drain(user)，再写偏好；分片路由交 controlStore，不交 owner store |
+| 账号停用与 profile.state | [V2AccountDisableService](../../IMV2Server/Sources/IMV2ServerInfrastructure/V2AccountDisableService.swift) | account-state 排他锁内 drain(user)，再写停用记录、暂停资料及吊销凭据；Operator 注入协调器 |
+| 新账号资料 | [V2PasswordAccountStore](../../IMV2Server/Sources/IMV2ServerInfrastructure/V2PasswordAccountStore.swift) | 服务端生成新 UUID 并插入资料；不是既有账号权限撤销入口 |
+| 展示资料更新 | [PostgresV2ProfileUpdateStore](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ProfileUpdateStore.swift)、[V2PublicIdentityAccountStore](../../IMV2Server/Sources/IMV2ServerInfrastructure/V2PublicIdentityAccountStore.swift) | 修改名字/头像/资料修订，不修改 state、special 状态或收发权限，无需为展示变更撤销发送授权 |
+| 特殊账号类型、状态及收发开关 | 当前应用无写入 special_accounts 的入口；[V2SpecialAccountMessagingService](../../IMV2Server/Sources/IMV2ServerInfrastructure/V2SpecialAccountMessagingService.swift) 读取设置、写消息操作与审计 | 不能把“当前没有应用写者”解释成该表不可变或支持管理员在线直接修改 |
 
 上述应用撤权入口的实际排空/缺失协调器/owner 不可达测试见[写者证据](verification-records.md#20260920-direct-authorization-policy-writers)。特权 SQL、外部部署系统对特殊账号设置的修改不在这批证据内；若增加在线管理入口，必须先阻止对应账号的新授权登记、排空 held，再修改控制事实。当前部署的进程故障与恢复组合仍单独验收，不因写者清点完成而关闭 D07。
 

@@ -1,11 +1,12 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
-import IMV2Server
 import Vapor
 import HTTPTypes
 
 public struct V2VaporResourceByteRoutes: Sendable {
-    let delivery: V2LocalResourceDelivery
-    public init(delivery: V2LocalResourceDelivery) { self.delivery = delivery }
+    let delivery: any V2ResourceByteServing
+    public init(delivery: any V2ResourceByteServing) { self.delivery = delivery }
     public func register(on routes: RoutesBuilder) {
         routes.get("v2", "resource-bytes", ":placementID") { request async throws -> Response in
             guard let raw = request.parameters.get("placementID"), let id = UUID(uuidString: raw),

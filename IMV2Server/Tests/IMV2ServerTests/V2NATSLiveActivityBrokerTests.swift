@@ -1,9 +1,12 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2Core
 @preconcurrency import NIOCore
 @preconcurrency import NIOPosix
 import Synchronization
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
 
 @Suite("V2 Core NATS live activity broker")

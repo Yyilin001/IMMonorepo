@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2Compression
 import IMV2Core
@@ -5,7 +7,9 @@ import NIOCore
 import NIOEmbedded
 import Synchronization
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
+@testable import IMV2ServerGateway
 
 struct V2GatewayByteStreamTests {
     @Test("a slow send leaves heartbeat capacity and connection close drains it")

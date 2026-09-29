@@ -1,7 +1,10 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import FluentKit
 import Foundation
 import IMV2ActorContracts
 import IMV2Server
+import IMV2ServerInfrastructure
 import Logging
 
 /// 为各房间分片构造转发导入端点与投递 Worker；此阶段不启动轮询。
@@ -73,7 +76,7 @@ struct GatewayForwardDeliveryAssembly {
                         variants: variants))
             } else { mediaWorker = nil }
             forwardTargetEndpoints[storage.shardID] = V2ActorForwardImportEndpoint(
-                inbox: .init(database: ownerDatabase), media: mediaWorker,
+                inbox: PostgresV2ForwardInboxStore(database: ownerDatabase), media: mediaWorker,
                 roomCommand: { try await forwardPort.execute($0, deadline: $1) },
                 deadline: { .now + callTimeout.duration })
         }

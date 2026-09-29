@@ -1,7 +1,11 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2Core
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
+@testable import IMV2ServerGateway
 
 struct V2GatewaySessionTests {
     private let protocolVersion = UInt8(IMV2ProtocolVersion.current)
@@ -530,7 +534,7 @@ private actor PreparedGroupPageCommandFake:
         context: V2PreparedGroupEventCommandContext
     ) async throws -> V2PreparedGroupEventGatewayResponse {
         preparedCalls += 1
-        let key = V2PreparedGroupEventPageCache.PageKey(
+        let key = V2PreparedGroupEventPageKey(
             protocolVersion: context.frameVersion,
             roomID: request.roomID,
             firstEventID: "00000000-0000-0000-0000-000000000902",

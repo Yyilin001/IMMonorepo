@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Crypto
 import FluentKit
 import FluentPostgresDriver
@@ -8,6 +10,7 @@ import IMV2Core
 import IMV2ServerHTTP
 import PostgresNIO
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import SQLKit
 import Synchronization
 import Testing
@@ -601,8 +604,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                     try await limiter.recordRejectedAttempt(accountHandle: handle, userID: nil, deviceID: device)
                 }
             }
-            struct ObservedClock: Decodable { let value: V2PostgresTimestamp }
-            let releaseBoundary: V2PostgresTimestamp
+            struct ObservedClock: Decodable { let value: V2PersistenceTimestamp }
+            let releaseBoundary: V2PersistenceTimestamp
             do {
                 try await waitForAdvisoryWaiters(1, on: sql)
                 // No timed sleep: the worker is already waiting in its

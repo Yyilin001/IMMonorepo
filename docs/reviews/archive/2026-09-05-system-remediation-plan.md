@@ -119,7 +119,7 @@ Apple 的静默 Push 不保证投递，回调提供最多 30 秒处理时间；�
 
 **群邀请：同库原子审批，跨库仅保留必要的恢复协议（W5）**
 
-当前 [ADR-019](../../../IMV2/docs/00-foundation/ADR-019-group-invitation-and-approval.md) 选择 `prepare → membership.change → complete`，意图是复用成员准入。实现中的三次提交却制造了 revision 指纹与 approving 恢复问题。核对 [membership store](../../../IMV2Server/Sources/IMV2Server/PostgresV2RoomMembershipStore.swift) 后，成员变更本来就把 room revision、admission、operation 和 outbox 放在 owner 本地事务中；[当时的路由层（现为测试夹具）](../../../IMV2Server/Tests/IMV2ServerTests/V2LegacyRoutedRoomMutationFixtures.swift) 在事务外取得 control 身份事实。这提供了合并审批事务的条件。
+当前 [ADR-019](../../../IMV2/docs/00-foundation/ADR-019-group-invitation-and-approval.md) 选择 `prepare → membership.change → complete`，意图是复用成员准入。实现中的三次提交却制造了 revision 指纹与 approving 恢复问题。核对 [membership store](../../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomMembershipStore.swift) 后，成员变更本来就把 room revision、admission、operation 和 outbox 放在 owner 本地事务中；[当时的路由层（现为测试夹具）](../../../IMV2Server/Tests/IMV2ServerTests/V2LegacyRoutedRoomMutationFixtures.swift) 在事务外取得 control 身份事实。这提供了合并审批事务的条件。
 
 推荐提取内部 `applyMembershipChange(on: transaction, ...)`，让普通成员命令和邀请审批复用同一授权、准入与写入实现。审批调用方拥有外层事务；不可在事务里调用另一个自行开事务的 public service，也不可持锁访问 control DB、其他 owner、NATS 或 APNs。该取舍需更新 ADR-019；不是把 SQL 拼成一条巨大语句，也不是绕过已有 admission。
 

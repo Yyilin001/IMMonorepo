@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import HTTPTypes
 import IMV2ActorContracts
@@ -9,6 +11,7 @@ import Testing
 import Vapor
 import VaporTesting
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("account forward HTTP recovers original target proof across worker restart and closes only unexported pairs")

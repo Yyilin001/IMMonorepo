@@ -4,7 +4,7 @@
 
 [MessageSendOperation](../../IMV2Core/Sources/IMV2Core/MessageSendOperation.swift) 保留消息正文 domain fingerprint v3，用公共 v1 明确编码原身份、v3 digest 和冻结首次截止。clientMessageID 在提交前稳定；首次接受选定 messageID，永久 completion 和执行 receipt 固定原映射。accepted 仅表示服务端接受，不表示审核通过、送达或已读。
 
-POST `/v2/rooms/:room/message-operations/send` 接受 typed envelope（1 MiB）；`/recover` 接受 typed query/close 请求（4 KiB）。[执行器](../../IMV2Server/Sources/IMV2Server/PostgresV2MessageSendOperationStore.swift) 在原 domain operation lock 与 RoomRef activation fence 内先重放永久回执，再验证最多二十四小时的新操作受理窗口。领域 acceptance/completion 与最小 v1 execution receipt 同事务；永久 negative 结果同时写原 v3 closure fence，关闭与提交竞争只产生一个权威结果。原正文生命周期独立，receipt 不授予正文显示权限。
+POST `/v2/rooms/:room/message-operations/send` 接受 typed envelope（1 MiB）；`/recover` 接受 typed query/close 请求（4 KiB）。[执行器](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageSendOperationStore.swift) 在原 domain operation lock 与 RoomRef activation fence 内先重放永久回执，再验证最多二十四小时的新操作受理窗口。领域 acceptance/completion 与最小 v1 execution receipt 同事务；永久 negative 结果同时写原 v3 closure fence，关闭与提交竞争只产生一个权威结果。原正文生命周期独立，receipt 不授予正文显示权限。
 
 `message_send_operation_receipts` 与 `message_send_completions` 均防 UPDATE/DELETE，无 housekeeping 清理。恢复返回原 bound receipt/unresolved/fingerprintConflict；临时 admission 不生成永久 rejected。HTTP no-store 与独立持久 cost 3 预算覆盖查询、提交和随机 ID close。旧无冻结截止的普通 TLS send 批处理入口已拒绝执行，旧无绑定 HTTP recovery 未注册；以下批量路径描述属于原领域写原语与迁移前背景。
 

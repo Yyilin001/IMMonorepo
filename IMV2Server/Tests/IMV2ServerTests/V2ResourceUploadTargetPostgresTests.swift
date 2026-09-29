@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import FluentKit
 import FluentPostgresDriver
 import Foundation
@@ -5,6 +7,7 @@ import IMV2Core
 import SQLKit
 import Testing
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 struct V2ResourceUploadTargetPostgresTests {
     @Test("current upload targets preserve identity, validate adapters and recheck authority after signing",

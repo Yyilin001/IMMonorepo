@@ -335,9 +335,9 @@ floor(room) = MIN(read_through_room_sequence)
 ## 15. 依据
 
 - [恢复目标合同](client-owned-conversation-sync-plan.md) 与 [当前验收矩阵](client-owned-conversation-sync-acceptance.md)。
-- [目录及状态读取](../../IMV2Server/Sources/IMV2Server/PostgresV2RoomRecoveryStore.swift)。
-- [最新可见摘要](../../IMV2Server/Sources/IMV2Server/PostgresV2RoomLatestVisibleStore.swift)。
-- [目录游标](../../IMV2Server/Sources/IMV2Server/V2UserRoomDirectoryCursorCodec.swift)。
+- [目录及状态读取](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomRecoveryStore.swift)。
+- [最新可见摘要](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomLatestVisibleStore.swift)。
+- [目录游标](../../IMV2Server/Sources/IMV2ServerApplication/Room/V2UserRoomDirectoryCursorCodec.swift)。
 - [客户端恢复调度](../../IMV2ClientKit/Sources/IMV2ClientKit/V2RoomRecoveryRunner.swift)。
 - [状态事务及待办](../../IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2RoomRecoveryWork.swift)。
 - [schema](../../IMV2/sql/schema.sql) 与 [协议](../../Protocol/im_realtime/v2/im_v2.proto)。

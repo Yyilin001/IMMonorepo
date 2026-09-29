@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import FluentPostgresDriver
 import FluentKit
 import Foundation
@@ -8,6 +10,7 @@ import SQLKit
 import Synchronization
 import Testing
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 @Suite("Device service clock validation order")
 struct V2DeviceCredentialClockTests {
@@ -241,7 +244,7 @@ struct V2PasswordBudgetClockTests {
                 try await recordPasswordAuthenticationAudit(outcome: .registrationSucceeded, userID: nil,
                     deviceID: device, occurredAt: observed, on: database)
             }
-            let encoded = try V2PostgresTimestamp(date: observed)
+            let encoded = try V2PersistenceTimestamp(date: observed)
             #expect(database.timestampBindings.withLock { $0 } == [encoded.microseconds])
             #expect(database.writes.withLock { $0 } == 1)
         }
@@ -338,7 +341,7 @@ struct V2PasswordBudgetClockTests {
     func lockoutPrecision(seconds: Double, duration: Double) async throws {
         try await withClockDatabase { database in
             let current = Date(timeIntervalSince1970: seconds)
-            let nativeCurrent = try V2PostgresTimestamp(date: current)
+            let nativeCurrent = try V2PersistenceTimestamp(date: current)
             let row = ClockSQLRow(timestamps: ["current": nativeCurrent])
             database.rows.withLock { $0 = ["SELECT clock_timestamp() AS current": row] }
             database.afterDeviceLookup.withLock { $0 = {} }
@@ -360,7 +363,7 @@ struct V2PasswordBudgetClockTests {
                 try await valid.recordRejectedAttempt(accountHandle: "precision-budget", userID: nil, deviceID: device)
             }
             #expect(database.writes.withLock { $0 } == 1)
-            let deadline = try V2PostgresTimestamp(date: nativeCurrent.date.addingTimeInterval(0.5))
+            let deadline = try V2PersistenceTimestamp(date: nativeCurrent.date.addingTimeInterval(0.5))
             #expect(database.timestampBindings.withLock { $0 } == [nativeCurrent.microseconds, deadline.microseconds, nativeCurrent.microseconds])
         }
     }
@@ -567,8 +570,8 @@ private final class ClockDatabase: Database, SQLDatabase, Sendable {
         if !isRead {
             timestampBindings.withLock { values in
                 values.append(contentsOf: serializer.binds.compactMap { binding in
-                    if let timestamp = binding as? V2PostgresTimestamp { return timestamp.microseconds }
-                    if let date = binding as? Date { return (try? V2PostgresTimestamp(date: date))?.microseconds }
+                    if let timestamp = binding as? V2PersistenceTimestamp { return timestamp.microseconds }
+                    if let date = binding as? Date { return (try? V2PersistenceTimestamp(date: date))?.microseconds }
                     return nil
                 })
             }
@@ -618,8 +621,8 @@ private final class ClockDatabase: Database, SQLDatabase, Sendable {
 
 private struct ClockSQLRow: SQLRow {
     let columns: [String: Data]
-    let timestamps: [String: V2PostgresTimestamp]
-    init(columns: [String: Data] = [:], timestamps: [String: V2PostgresTimestamp] = [:]) {
+    let timestamps: [String: V2PersistenceTimestamp]
+    init(columns: [String: Data] = [:], timestamps: [String: V2PersistenceTimestamp] = [:]) {
         self.columns = columns
         self.timestamps = timestamps
     }
@@ -636,7 +639,7 @@ private struct ClockSQLRow: SQLRow {
     }
 }
 
-private func nativeClockTimestamp(_ microseconds: Int64) throws -> V2PostgresTimestamp {
+private func nativeClockTimestamp(_ microseconds: Int64) throws -> V2PersistenceTimestamp {
     var buffer = ByteBuffer()
     buffer.writeInteger(microseconds)
     return try .init(from: &buffer, type: .timestamptz, format: .binary, context: .default)

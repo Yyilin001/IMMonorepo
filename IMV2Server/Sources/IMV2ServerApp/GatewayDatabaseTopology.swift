@@ -1,6 +1,9 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import FluentKit
 import FluentPostgresDriver
 import IMV2Server
+import IMV2ServerInfrastructure
 import Logging
 
 /// 网关使用的数据库句柄和物理拓扑。构建完成后，所有连接池与 Schema 均已验证。

@@ -1,9 +1,13 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2ActorContracts
 import IMV2Core
 import SQLKit
 import Testing
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
+@testable import IMV2ServerGateway
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("send execution v1 wraps v3 and permanently resolves submission close races",arguments:[false,true])

@@ -1,7 +1,10 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import FluentKit
 import Foundation
 import IMV2ActorApplication
 import IMV2Server
+import IMV2ServerInfrastructure
 
 /// 将逻辑房间分片映射到物理归属方，复用同址写入 Store 和批处理器。
 /// 此阶段只构造依赖，不启动房间 Actor 或后台任务。

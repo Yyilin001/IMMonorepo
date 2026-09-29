@@ -13,6 +13,8 @@ output contains only phase names.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import http.client
 import json
 import os
@@ -33,9 +35,9 @@ class SmokeFailure(Exception):
     pass
 
 
-def checked(condition: bool) -> None:
+def checked(condition: bool, check: str = "unnamed_check") -> None:
     if not condition:
-        raise SmokeFailure()
+        raise SmokeFailure(check)
 
 
 def run_private(command: list[str], *, environment: dict[str, str] | None = None,
@@ -81,7 +83,8 @@ def main() -> int:
         def http_request(method: str, path: str, *, body: dict | bytes | None = None,
                          identity: tuple[str, str] | None = None,
                          extra_headers: dict[str, str] | None = None,
-                         expected: int = 200, signed_authority: str | None = None) -> dict | bytes:
+                         expected: int = 200, signed_authority: str | None = None,
+                         route_label: str = "unlabeled") -> dict | list | bytes:
             headers = dict(extra_headers or {})
             if identity is not None:
                 headers["Authorization"] = "Bearer " + identity[0]
@@ -99,8 +102,10 @@ def main() -> int:
                 connection.request(method, path, body=payload, headers=headers)
                 response = connection.getresponse()
                 data = response.read(2_000_000)
-                checked(response.status == expected)
-                checked("no-store" in (response.getheader("Cache-Control") or "").lower())
+                checked(response.status == expected,
+                        f"{method} {route_label} status={response.status} expected={expected}")
+                checked("no-store" in (response.getheader("Cache-Control") or "").lower(),
+                        f"{method} {route_label} cache_control")
                 if response.getheader("Content-Type", "").startswith("application/json"):
                     return json.loads(data)
                 return data
@@ -114,9 +119,17 @@ def main() -> int:
             checked(url.scheme == "https" and url.hostname == base.hostname)
             checked(url.username is None and url.password is None and not url.fragment)
             checked(url.path.startswith(expected_prefix) and url.port == 8443)
-            headers = target["headers"]
+            raw_headers = target["headers"]
+            if isinstance(raw_headers, list):
+                checked(all(isinstance(item, dict) and isinstance(item.get("name"), str)
+                            and isinstance(item.get("value"), str) for item in raw_headers),
+                        "signed_target_headers")
+                headers = {item["name"]: item["value"] for item in raw_headers}
+                checked(len(headers) == len(raw_headers), "signed_target_unique_headers")
+            else:
+                headers = raw_headers
             checked(isinstance(headers, dict) and all(isinstance(k, str) and isinstance(v, str)
-                                                      for k, v in headers.items()))
+                                                      for k, v in headers.items()), "signed_target_headers")
             return (url.path + ("?" + url.query if url.query else ""),
                     url.netloc, headers)
 
@@ -126,6 +139,69 @@ def main() -> int:
             raw = value.get("rawValue") if isinstance(value, dict) else value
             checked(isinstance(raw, str))
             return str(uuid.UUID(raw))
+
+        def page_has_nickname(page: object, user_id: str, nickname: str) -> bool:
+            if not isinstance(page, dict):
+                return False
+            batch = page.get("batch")
+            if not isinstance(batch, dict) or not isinstance(batch.get("results"), list):
+                return False
+            for item in batch["results"]:
+                if not isinstance(item, dict):
+                    continue
+                payload = item.get("presentation")
+                if not isinstance(payload, dict) or not isinstance(payload.get("_0"), dict):
+                    continue
+                member = payload["_0"].get("groupMember")
+                if isinstance(member, dict) and member.get("groupNickname") == nickname \
+                        and domain_id(member.get("userID")) == user_id:
+                    return True
+            return False
+
+        def invitation_intent(actor_id: str, action_name: str, action: dict,
+                              operation_kind: str) -> dict:
+            return {
+                "identity": {"accountID": {"rawValue": actor_id},
+                             "scope": {"room": {"_0": {"rawValue": room_id}}},
+                             "operation": {operation_kind: {"_0": {"rawValue": str(uuid.uuid4())}}}},
+                "action": {action_name: action},
+                "confirmedUntilMilliseconds": int(time.time() * 1000) + 60_000,
+            }
+
+        def invitation_submit(intent: dict, identity: tuple[str, str],
+                              secret: str | None = None) -> dict:
+            endpoint = f"/v2/rooms/{room_id}/invitation-operations"
+            label = "/v2/rooms/:room/invitation-operations"
+            authorization = {"rawValue": secret} if secret is not None else None
+            admission_result = http_request("POST", endpoint + "/admissions", identity=identity,
+                                            route_label=label + "/admissions",
+                                            body={"intent": intent, "secretAuthorization": authorization})
+            admitted = admission_result.get("admitted") if isinstance(admission_result, dict) else None
+            admission = admitted.get("_0") if isinstance(admitted, dict) else None
+            checked(isinstance(admission, dict) and isinstance(admission.get("id"), dict),
+                    "invitation_admitted")
+            result = http_request("POST", endpoint + "/submit", identity=identity,
+                                  route_label=label + "/submit",
+                                  body={"command": {"intent": intent, "admission": admission},
+                                        "secretAuthorization": authorization})
+            received = result.get("receipt") if isinstance(result, dict) else None
+            receipt = received.get("_0") if isinstance(received, dict) else None
+            checked(isinstance(receipt, dict), "invitation_receipt")
+            outcome = receipt.get("outcome")
+            checked(isinstance(outcome, dict), "invitation_receipt_outcome")
+            value = outcome.get("applied", outcome.get("alreadySatisfied"))
+            checked(isinstance(value, dict) and isinstance(value.get("_0"), dict),
+                    "invitation_applied")
+            return value["_0"]
+
+        def invitation_revision(identity: tuple[str, str]) -> int:
+            baseline = http_request("GET", f"/v2/rooms/{room_id}/invitation-operations/baseline",
+                                    identity=identity,
+                                    route_label="/v2/rooms/:room/invitation-operations/baseline")
+            checked(isinstance(baseline, dict) and domain_id(baseline.get("roomID")) == room_id
+                    and isinstance(baseline.get("membershipRevision"), int),
+                    "invitation_baseline")
+            return baseline["membershipRevision"]
 
         def account(label: str) -> tuple[str, tuple[str, str]]:
             device_id = str(uuid.uuid4())
@@ -180,64 +256,118 @@ COMMIT;
 
         phase = "group nickname write and read"
         nickname = "Actor HTTP " + suffix[:8]
+        nickname_operation_id = str(uuid.uuid4())
         updated = http_request("PUT", f"/v2/profile-presentations/groups/{room_id}/nickname",
-                               identity=owner, body={"operation_id": str(uuid.uuid4()), "nickname": nickname})
-        checked(isinstance(updated, dict) and updated["nickname"]["groupNickname"] == nickname)
+                               identity=owner, route_label="/v2/profile-presentations/groups/:room/nickname",
+                               body={"actorUserID": {"rawValue": owner_id},
+                                     "roomID": {"rawValue": room_id},
+                                     "operationID": {"rawValue": nickname_operation_id},
+                                     "nickname": nickname,
+                                     "firstSubmissionDeadlineMilliseconds": int(time.time() * 1000) + 60_000})
+        committed = updated.get("outcome", {}).get("committed", {}).get("_0") if isinstance(updated, dict) else None
+        checked(isinstance(committed, dict) and committed.get("groupNickname") == nickname,
+                "group_nickname_receipt_committed")
         listed = http_request("GET", f"/v2/profile-presentations/groups/{room_id}/nicknames?limit=20",
-                              identity=owner)
-        checked(isinstance(listed, dict) and any(
-            domain_id(item.get("userID")) == owner_id and item.get("groupNickname") == nickname
-            for item in listed["nicknames"]))
+                              identity=owner, route_label="/v2/profile-presentations/groups/:room/nicknames")
+        checked(page_has_nickname(listed, owner_id, nickname), "group_nickname_owner_list")
 
         phase = "invitation create preview apply approve"
-        invitation = http_request("POST", "/v2/group-invites", identity=owner, body={
-            "room_id": room_id, "operation_id": str(uuid.uuid4()),
-            "lifetime_seconds": 3600, "maximum_approved_uses": 1,
-        })
-        checked(isinstance(invitation, dict) and invitation["room_id"].lower() == room_id)
-        checked(isinstance(invitation.get("token"), str))
+        created = invitation_submit(invitation_intent(owner_id, "create", {
+            "lifetimeSeconds": 3600, "maximumApprovedUses": 1,
+            "expectedMembershipRevision": invitation_revision(owner),
+        }, "groupInvite"), owner)
+        invite = created.get("inviteCreated")
+        checked(isinstance(invite, dict), "invite_create_receipt")
+        invite_id = domain_id(invite.get("inviteID"))
+        links = http_request("GET", f"/v2/group-invites?{urllib.parse.urlencode({'room_id': room_id})}",
+                             identity=owner, route_label="/v2/group-invites")
+        checked(isinstance(links, dict) and isinstance(links.get("items"), list),
+                "invite_directory_list")
+        invitation = next((item for item in links["items"] if isinstance(item, dict)
+                           and item.get("invite_id", "").lower() == invite_id), None)
+        checked(isinstance(invitation, dict) and invitation.get("room_id", "").lower() == room_id
+                and isinstance(invitation.get("token"), str), "invite_directory_created")
         preview = http_request("POST", "/v2/group-invites/preview", identity=peer,
-                               body={"token": invitation["token"]})
-        checked(isinstance(preview, dict) and preview["room_id"].lower() == room_id)
-        checked(preview["is_already_member"] is False)
-        submission = http_request("POST", "/v2/group-join-requests", identity=peer, body={
-            "token": invitation["token"], "operation_id": str(uuid.uuid4()), "note": "Actor smoke",
-        })
-        checked(isinstance(submission, dict) and submission["kind"] == "submitted")
-        checked(submission["request"]["applicant"]["user_id"].lower() == peer_id)
-        request_id = str(uuid.UUID(submission["request"]["request_id"]))
-        decision = http_request("POST", f"/v2/group-join-requests/{request_id}/decision",
-                                identity=owner, body={"room_id": room_id,
-                                                      "operation_id": str(uuid.uuid4()),
-                                                      "decision": "approve"})
-        checked(isinstance(decision, dict) and decision["kind"] == "approved")
+                               body={"token": invitation["token"]},
+                               route_label="/v2/group-invites/preview")
+        checked(isinstance(preview, dict) and preview.get("room_id", "").lower() == room_id,
+                "invite_preview_room")
+        checked(preview.get("is_already_member") is False, "invite_preview_nonmember")
+        token_digest = base64.b64encode(hashlib.sha256(invitation["token"].encode()).digest()).decode()
+        submitted = invitation_submit(invitation_intent(peer_id, "submit", {
+            "inviteID": {"rawValue": invite_id}, "tokenDigest": token_digest,
+            "note": "Actor smoke",
+        }, "groupJoinRequest"), peer, invitation["token"])
+        submission = submitted.get("requestSubmitted")
+        checked(isinstance(submission, dict)
+                and domain_id(submission.get("inviteID")) == invite_id,
+                "join_request_submitted")
+        request_id = domain_id(submission.get("requestID"))
+        requests = http_request("GET", f"/v2/group-join-requests?{urllib.parse.urlencode({'room_id': room_id})}",
+                                identity=owner, route_label="/v2/group-join-requests")
+        checked(isinstance(requests, dict) and isinstance(requests.get("items"), list)
+                and any(isinstance(item, dict) and item.get("request_id", "").lower() == request_id
+                        and item.get("applicant_user_id", "").lower() == peer_id
+                        for item in requests["items"]), "join_request_owner_list")
+        decided = invitation_submit(invitation_intent(owner_id, "decide", {
+            "requestID": {"rawValue": request_id}, "decision": "approve",
+            "expectedMembershipRevision": invitation_revision(owner),
+        }, "groupJoinDecision"), owner)
+        decision = decided.get("requestDecided")
+        checked(isinstance(decision, dict) and domain_id(decision.get("requestID")) == request_id
+                and decision.get("decision") == "approve", "join_request_approved")
         peer_view = http_request("GET", f"/v2/profile-presentations/groups/{room_id}/nicknames?limit=20",
-                                 identity=peer)
-        checked(isinstance(peer_view, dict) and any(
-            domain_id(item.get("userID")) == owner_id and item.get("groupNickname") == nickname
-            for item in peer_view["nicknames"]))
+                                 identity=peer, route_label="/v2/profile-presentations/groups/:room/nicknames")
+        checked(page_has_nickname(peer_view, owner_id, nickname), "group_nickname_peer_list")
 
         phase = "media upload target and signed object PUT"
         media_id = str(uuid.uuid4())
         payload = ("actor-http-media-" + suffix).encode()
-        upload = http_request("POST", "/v2/media/uploads", identity=owner, body={
-            "operationID": str(uuid.uuid4()), "mediaID": media_id,
+        digest = hashlib.sha256(payload).hexdigest()
+        session = http_request("POST", "/v2/resource-uploads", identity=owner,
+                               route_label="/v2/resource-uploads", body={
+            "operationID": {"rawValue": str(uuid.uuid4())},
+            "mediaID": {"rawValue": media_id},
+            "usage": {"messageAttachment": {"_0": {"rawValue": room_id}}},
             "contentType": "text/plain", "byteCount": len(payload),
+            "checksum": {"algorithm": "sha256", "value": digest},
+            "clientModes": ["http_put"],
         })
-        checked(isinstance(upload, dict) and upload["expectedByteCount"] == len(payload))
-        upload_path, upload_authority, upload_headers = signed_path(upload, "/v2/local-media/upload/")
+        checked(isinstance(session, dict) and domain_id(session.get("mediaID")) == media_id
+                and isinstance(session.get("locator"), dict)
+                and isinstance(session.get("generation"), int), "resource_upload_session")
+        locator = session["locator"]
+        generation = session["generation"]
+        plans = http_request("POST", "/v2/resource-uploads/targets", identity=owner,
+                             route_label="/v2/resource-uploads/targets",
+                             body={"locator": locator, "generation": generation,
+                                   "partNumbers": [], "background": False})
+        checked(isinstance(plans, list) and len(plans) == 1 and isinstance(plans[0], dict)
+                and plans[0].get("mode") == "http_put"
+                and plans[0].get("expectedByteCount") == len(payload)
+                and plans[0].get("checksum") == {"algorithm": "sha256", "value": digest},
+                "resource_upload_target")
+        upload_path, upload_authority, upload_headers = signed_path(plans[0], "/v2/local-media/upload/")
         upload_headers.setdefault("Content-Type", "text/plain")
         upload_headers["Content-Length"] = str(len(payload))
         http_request("PUT", upload_path, body=payload, extra_headers=upload_headers,
-                     signed_authority=upload_authority, expected=204)
-        http_request("POST", f"/v2/media/{media_id}/complete", identity=owner, expected=204)
+                     signed_authority=upload_authority, expected=204,
+                     route_label="/v2/local-media/upload/:media")
+        finalized = http_request("POST", "/v2/resource-uploads/finalize", identity=owner,
+                                 route_label="/v2/resource-uploads/finalize",
+                                 body={"locator": locator, "generation": generation, "parts": []})
+        checked(isinstance(finalized, dict) and finalized.get("state") == "completed",
+                "resource_upload_finalized")
         deadline = time.monotonic() + 30
         while True:
-            state = http_request("GET", f"/v2/media/{media_id}/upload-status", identity=owner)
-            checked(isinstance(state, dict))
-            if state["state"] == "available":
+            state = http_request("POST", "/v2/resource-uploads/status", identity=owner,
+                                 route_label="/v2/resource-uploads/status", body=locator)
+            checked(isinstance(state, dict) and state.get("state") == "completed",
+                    "resource_upload_status_completed")
+            if state.get("resourceState") == "ready":
                 break
-            checked(state["state"] in ("pendingUpload", "scanning") and time.monotonic() < deadline)
+            checked(state.get("resourceState") in ("scanning", "processing")
+                    and time.monotonic() < deadline, "resource_upload_ready")
             time.sleep(0.25)
 
         phase = "authenticated gateway media send"
@@ -289,17 +419,24 @@ SELECT (SELECT count(*) FROM im_v2.messages
 
         phase = "RoomRef media authorization and signed download"
         query = urllib.parse.urlencode({"room_id": room_id, "message_id": message_id})
-        download = http_request("GET", f"/v2/media/{media_id}?{query}", identity=owner)
-        checked(isinstance(download, dict) and download["expectedByteCount"] == len(payload))
-        download_path, download_authority, download_headers = signed_path(download, "/v2/local-media/download/")
+        download = http_request("GET", f"/v2/media/{media_id}?{query}", identity=owner,
+                                route_label="/v2/media/:media")
+        download_plan = download.get("plan") if isinstance(download, dict) else None
+        checked(isinstance(download_plan, dict) and download_plan.get("mode") == "http_get"
+                and download_plan.get("expectedByteCount") == len(payload)
+                and download_plan.get("checksum") == {"algorithm": "sha256", "value": digest},
+                "media_download_target")
+        download_path, download_authority, download_headers = signed_path(download_plan, "/v2/local-media/download/")
         downloaded = http_request("GET", download_path, extra_headers=download_headers,
-                                  signed_authority=download_authority)
-        checked(downloaded == payload)
+                                  signed_authority=download_authority,
+                                  route_label="/v2/local-media/download/:media")
+        checked(downloaded == payload, "media_download_bytes")
         print("ACTOR_HTTP_SMOKE_OK nickname invitation media_send_download")
         return 0
     except Exception as error:
         # Never emit an exception, request body, signed URL, or subprocess output.
-        print(f"ACTOR_HTTP_SMOKE_FAILED phase={phase} kind={type(error).__name__}", file=sys.stderr)
+        check = f" check={error}" if isinstance(error, SmokeFailure) else ""
+        print(f"ACTOR_HTTP_SMOKE_FAILED phase={phase} kind={type(error).__name__}{check}", file=sys.stderr)
         return 1
 
 

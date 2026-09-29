@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Crypto
 import FluentKit
 import FluentPostgresDriver
@@ -11,6 +13,7 @@ import IMV2Core
 import IMV2ServerHTTP
 import PostgresNIO
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import SQLKit
 import Synchronization
 import Testing
@@ -89,7 +92,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 registry: registry, maximumBytes: 1024, allocate: { _ in try storage.allocate() }, now: { now })
             let scanner = V2PlacementMediaScanner(database: targetDB, registry: registry, scanner: V2LocalResourceScanner())
             let mediaWorker = try V2ForwardMediaImportWorker(store: importer, copier: copier, scanner: scanner, now: { now })
-            let endpoint = V2ForwardImportEndpoint(inbox: inbox, write: .init(database: targetDB), media: mediaWorker, capacityProfile: profile, limits: limits, now: { now })
+            let endpoint = V2ForwardImportEndpoint(inbox: inbox, write: PostgresV2RoomWriteStore(database: targetDB), media: mediaWorker, capacityProfile: profile, limits: limits, now: { now })
             let probe = ForwardDeliveryTestTarget(target: endpoint, mode: scenario)
             let transport = try V2ConfiguredForwardExportDelivery(targets: ["room-b": probe])
             let jobs = PostgresV2ForwardDeliveryStore(database: sourceDB), receipts = PostgresV2ForwardReceiptStore(database: sourceDB)
@@ -636,16 +639,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let send = V2SendMessageService(store: writeA, capacityProfile: profile, limits: limits, now: { now })
             guard case .accepted(let source) = try await send.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "routed runtime")) else { throw V2ForwardInboxError.corruptPersistenceState }
             let cross = try V2CrossOwnerForwardService(sources: [
-                "room-a": .init(exports: .init(database: sourceDB), receipts: .init(database: sourceDB), jobs: .init(database: sourceDB)),
-                "room-b": .init(exports: .init(database: targetDB), receipts: .init(database: targetDB), jobs: .init(database: targetDB))
+                "room-a": .init(exports: PostgresV2ForwardExportStore(database: sourceDB), receipts: PostgresV2ForwardReceiptStore(database: sourceDB), jobs: PostgresV2ForwardDeliveryStore(database: sourceDB)),
+                "room-b": .init(exports: PostgresV2ForwardExportStore(database: targetDB), receipts: PostgresV2ForwardReceiptStore(database: targetDB), jobs: PostgresV2ForwardDeliveryStore(database: targetDB))
             ], now: { now })
             let router = try V2RoutedForwardMessagesService(router: V2PostgresRoomShardRouter(database: sourceDB), owners: [
                 "room-a": V2ForwardMessagesService(database: sourceDB, writeStore: writeA, capacityProfile: profile, limits: limits, now: { now }),
                 "room-b": V2ForwardMessagesService(database: targetDB, writeStore: writeB, capacityProfile: profile, limits: limits, now: { now })
             ], crossOwner: cross)
-            let target = V2ForwardImportEndpoint(inbox: .init(database: targetDB), write: writeB.usingWorkloadDatabase(targetDB), capacityProfile: profile, limits: limits, now: { now })
+            let target = V2ForwardImportEndpoint(inbox: PostgresV2ForwardInboxStore(database: targetDB), write: writeB.usingWorkloadDatabase(targetDB), capacityProfile: profile, limits: limits, now: { now })
             let transport = try V2ConfiguredForwardExportDelivery(targets: ["room-b": target])
-            let worker = try V2ForwardDeliveryWorker(store: .init(database: sourceDB), receipts: .init(database: sourceDB), target: transport, sourceCommand: forwardSourceCommand(database: sourceDB, now: { now }), deadline: { .now + .seconds(10) }, now: { now })
+            let worker = try V2ForwardDeliveryWorker(store: .init(database: sourceDB), receipts: PostgresV2ForwardReceiptStore(database: sourceDB), target: transport, sourceCommand: forwardSourceCommand(database: sourceDB, now: { now }), deadline: { .now + .seconds(10) }, now: { now })
             let runtime = try V2ForwardDeliveryRuntime(workers: ["room-a": worker], minimumPollMilliseconds: 10)
             let reference = try V2ForwardMessageReference(roomID: roomID, messageID: source.messageID, revision: .init(1))
             let commands = try (0..<3).map { _ in try V2ForwardMessagesCommand(operationID: .init(uuid: UUID()), sources: [reference], targetRoomIDs: [roomID, targetRoom]) }

@@ -1,5 +1,8 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import IMV2Server
+import IMV2ServerInfrastructure
 
 /// 按物理存储分组构造房间恢复目录；不启动后台任务或持有额外连接池。
 /// 目录按房间归属读取，客户端仍按有效活动事实自行排序。

@@ -1,0 +1,9 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
+
+extension PostgresV2ForwardReceiptStore: V2ForwardReceiptReading {}
+extension PostgresV2ForwardDeliveryStore: V2ForwardDeliveryStatusReading {}
+extension PostgresV2ForwardExportStore: V2ForwardExportPreparing {}
+extension PostgresV2ForwardInboxStore: V2ForwardTerminalReceiptReading {}
+extension V2ForwardMediaImportWorker: V2ForwardMediaImportRunning {}
+extension PostgresV2RoomWriteStore: V2ForwardExportImporting {}

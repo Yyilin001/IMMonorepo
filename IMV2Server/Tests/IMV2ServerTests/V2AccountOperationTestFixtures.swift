@@ -1,7 +1,10 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import FluentKit
 import Foundation
 import IMV2Core
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 extension PostgresV2SocialRelationshipStore {
     /// Freezes a freshly observed baseline for a new fixture operation. Tests

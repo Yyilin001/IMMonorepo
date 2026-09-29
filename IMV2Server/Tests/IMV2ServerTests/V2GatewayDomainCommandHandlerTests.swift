@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import AsyncKit
 import Foundation
 import HTTPTypes
@@ -5,10 +7,12 @@ import IMV2ActorContracts
 import IMV2Core
 import IMV2ServerHTTP
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Synchronization
 import Testing
 import Vapor
 import VaporTesting
+@testable import IMV2ServerGateway
 
 @Suite("V2 gateway domain command handler")
 struct V2GatewayDomainCommandHandlerTests {

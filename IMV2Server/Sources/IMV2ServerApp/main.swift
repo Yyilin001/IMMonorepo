@@ -1,5 +1,9 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
+import Foundation
 import Logging
 import IMV2Server
+import IMV2ServerInfrastructure
 #if canImport(Darwin)
 import Darwin
 #else
@@ -11,7 +15,7 @@ enum IMV2ServerApp {
     static func main() async {
         do { try V2ServiceLogging.bootstrap() }
         catch {
-            fputs("Invalid IM_V2_LOG_LEVEL; expected a swift-log level.\n", stderr)
+            FileHandle.standardError.write(Data("Invalid IM_V2_LOG_LEVEL; expected a swift-log level.\n".utf8))
             exit(EXIT_FAILURE)
         }
         let logger = Logger(label: "imv2.gateway")

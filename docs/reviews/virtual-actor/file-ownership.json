@@ -151,6 +151,22 @@
       "owner": "C0"
     },
     {
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatar.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatarCommandResponse.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatarPresentation.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Core/Sources/IMV2Core/GroupAvatarRecovery.swift",
+      "owner": "C0"
+    },
+    {
       "path": "IMV2Core/Sources/IMV2Core/GroupCapabilities.swift",
       "owner": "C0"
     },
@@ -177,6 +193,10 @@
     {
       "path": "IMV2Core/Sources/IMV2Core/SendMessageAcceptance.swift",
       "owner": "C0"
+    },
+    {
+      "path": "IMV2Core/Tests/IMV2CoreTests/GroupAvatarContractTests.swift",
+      "owner": "V1"
     },
     {
       "path": "IMV2Server/Package.resolved",
@@ -253,6 +273,10 @@
     {
       "path": "IMV2Server/Sources/IMV2ActorContracts/V2RoomRuntimeConfiguration.swift",
       "owner": "C0"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ActorContracts/V2RoomRuntimeMetrics.swift",
+      "owner": "R2"
     },
     {
       "path": "IMV2Server/Sources/IMV2ActorContracts/Wire/Administration/V2ActorAdministrationFailureWire.swift",
@@ -343,10 +367,6 @@
       "owner": "R2"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ActorRuntime/Observability/V2RoomRuntimeMetrics.swift",
-      "owner": "R2"
-    },
-    {
       "path": "IMV2Server/Sources/IMV2ActorRuntime/Scheduling/V2RoomCommandBudget.swift",
       "owner": "R2"
     },
@@ -359,547 +379,43 @@
       "owner": "I1"
     },
     {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ContentWriteAuthorization.swift",
-      "owner": "D1"
+      "path": "IMV2Server/Sources/IMV2Server/Composition/Room/V2GatewayRoomActorServices.swift",
+      "owner": "I1"
     },
     {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2DirectAuthorizationIntentStore.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2DirectAuthorizationReceiptStore.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2DirectMessagingStore.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ForwardDeliveryStore.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ForwardExportCompactor.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ForwardExportStore.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ForwardInboxCompactor.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ForwardInboxStore.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ForwardMediaImportStore.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ForwardReceiptStore.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ForwardSourceAuthorization.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ForwardWorkReplayStore.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupCapabilitiesStore.swift",
-      "owner": "D2"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupEventLogStore.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupEventWakeStore.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupInvitationStore.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupInviteDirectory.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupJoinQuotaStore.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupMessagingStore.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2GroupPermissionResolution.swift",
-      "owner": "D2"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MediaDownloadSessionStore.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MediaVisibilityAuthorization.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MessageEditStore.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MessageProjectionStateBodyCompactionWorker.swift",
-      "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MessageProjectionStateGCWorker.swift",
-      "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MessageProjectionStateRepository.swift",
-      "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MessageReactionStore.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2MessageWithdrawalStore.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ModerationStore.swift",
-      "owner": "D2"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ProfilePresentationStore.swift",
+      "path": "IMV2Server/Sources/IMV2Server/Composition/Room/V2RoomServerActivationFactory.swift",
       "owner": "C0"
     },
     {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2ReadReceiptStore.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomActivationStore.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomLatestVisibleStore.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomMembershipDirectoryStore.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomMembershipStore.swift",
-      "owner": "D2"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomReadWatermark.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomRecoveryStore.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomRecoveryTopology.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteStore.swift",
-      "owner": "C0"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteScalarAcceptance.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteScalarPersistence.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2RoomWriteForwardAcceptance.swift",
+      "path": "IMV2Server/Sources/IMV2Server/Composition/V2ForwardDeliveryRuntime.swift",
       "owner": "D5"
     },
     {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2SendCompletion.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/PostgresV2UserStateEventGCWorker.swift",
-      "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomClients/V2ActorGroupInvitationClient.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomClients/V2GatewayRoomActorServices.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomClients/V2GatewayRoomCreationClients.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomClients/V2RoomRefAdministrationClient.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomClients/V2RoomRefGroupEventLogClient.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomClients/V2RoomRefMediaDownloadClient.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomClients/V2RoomRefMessagingClient.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomClients/V2RoomRefProfilePresentationClient.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomClients/V2RoomRefQueryClient.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Creation/V2ActorGroupCreationStore.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Creation/V2ActorRoomCreationCoordinator.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Creation/V2ActorRoomCreationErrorWireMapping.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Creation/V2ActorRoomCreationWireMapping.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Creation/V2RoomBootstrapDomainExecutor.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Forwarding/V2ActorCrossOwnerForwardService.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Forwarding/V2ActorForwardFailureMapping.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Forwarding/V2ActorForwardImportEndpoint.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Forwarding/V2ActorForwardPairDomainExecutor.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Forwarding/V2ActorForwardWireMapping.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Forwarding/V2ActorForwardingCoordinator.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Forwarding/V2RoomForwardDomainExecutor.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Forwarding/V2RoomRefForwardPorts.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Invitations/V2ActorInvitationCoordinator.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Invitations/V2ActorInvitationErrorWireMapping.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Invitations/V2ActorInvitationRoomRefPort.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Invitations/V2ActorRoomInvitationWireMapping.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/Invitations/V2RoomInvitationDomainExecutor.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/MediaAuthorization/V2ActorRoomMediaAuthorizationPort.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/MediaAuthorization/V2RoomMediaAuthorizationDomainExecutor.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomCoordination/MediaAuthorization/V2RoomRefMediaAuthorizationPort.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Administration/V2ActorAdministrationCommandMapper.swift",
-      "owner": "D2"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Administration/V2ActorAdministrationFailureMapping.swift",
-      "owner": "D2"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Administration/V2ActorAdministrationResultMapper.swift",
-      "owner": "D2"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Administration/V2RoomAdministrationDomainExecutor.swift",
-      "owner": "D2"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Messaging/V2ActorGrantedSendBatchAdapter.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Messaging/V2ActorMessagingErrorWireMapping.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Messaging/V2ActorMessagingMapper.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Messaging/V2ActorMessagingOutcomeMapper.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Messaging/V2ActorSpecialAccountAuditMapper.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Messaging/V2RoomMessagingExecutor.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Messaging/V2RoomSpecialAccountAuditExecutor.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Queries/V2ActorRoomDirectoryWireMapping.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Queries/V2ActorRoomLogWireMapping.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Queries/V2ActorRoomQueryExecutor.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Queries/V2ActorRoomRecoveryWireMapping.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Queries/V2HostRoomRecoveryQueryBatcher.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Receipts/V2ActorRoomReceiptExecutor.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Receipts/V2ActorRoomReceiptWireMapping.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Receipts/V2HostRoomReceiptBatcher.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/Shared/V2ActorAdmissionUnavailableMapping.swift",
-      "owner": "C0"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/V2RoomActivationTransaction.swift",
-      "owner": "R1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/V2RoomActivationWriteScope.swift",
-      "owner": "C0"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/V2RoomSQLDeadline.swift",
-      "owner": "R1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/V2RoomServerActivationFactory.swift",
-      "owner": "C0"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/V2RoomServerPlacement.swift",
-      "owner": "C0"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomDomain/V2RoomTransactionAttempt.swift",
-      "owner": "C0"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomMaintenance/PostgresV2RoomBookkeepingStore.swift",
-      "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomMaintenance/V2ActorRoomMaintenance.swift",
-      "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/RoomMaintenance/V2RoomRefMaintenanceInvoker.swift",
-      "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2AccountRoomChangeBuffer.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2AccountRoomChangeService.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2AccountRoomCoverageIndex.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2AccountRoomMembershipChange.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2AdmittedRoomDatabaseWork.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2AggregatedReadReceiptBatchMetrics.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2AggregatedSendMessageBatchMetrics.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2AuthenticatedGatewayAdmission.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2CachedRoomShardRouter.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ContentReviewWorker.swift",
-      "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ControlPlaneHousekeepingWorker.swift",
-      "owner": "C0"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2CrossOwnerForwardService.swift",
-      "owner": "D5"
+      "owner": "I1",
+      "retiredPath": "IMV2Server/Sources/IMV2Server/RoomClients/V2GatewayRoomCreationClients.swift",
+      "replacedBy": [
+        "IMV2Server/Sources/IMV2Server/Composition/Room/V2GatewayRoomActorServices.swift"
+      ]
+    },
+    {
+      "owner": "D4",
+      "retiredPath": "IMV2Server/Sources/IMV2Server/RoomCoordination/Creation/V2ActorRoomCreationCoordinator.swift",
+      "replacedBy": [
+        "IMV2Server/Sources/IMV2ServerApplication/Room/V2RoomBootstrapDomainExecutor.swift"
+      ]
+    },
+    {
+      "owner": "D6",
+      "retiredPath": "IMV2Server/Sources/IMV2Server/RoomMaintenance/V2ActorRoomMaintenance.swift",
+      "replacedBy": [
+        "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorRoomMaintenanceExecutor.swift",
+        "IMV2Server/Sources/IMV2ServerApplication/Room/V2RoomActorMaintenanceWorker.swift",
+        "IMV2Server/Sources/IMV2ServerInfrastructure/Room/Maintenance/PostgresV2RoomMaintenanceScanner.swift",
+        "IMV2Server/Sources/IMV2ServerContracts/V2RoomMaintenanceCapabilities.swift"
+      ]
     },
     {
       "path": "IMV2Server/Sources/IMV2Server/V2DatabaseResources.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2DirectAuthorizationCoordinator.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2DirectMessagingService.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2DirectReadReceiptPolicy.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2DirectRoomLogEventCache.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2DirectRoomLogFastAppendCache.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2DirectRoomLogPayloadCodec.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2DirectRoomProfilePropagationWorker.swift",
-      "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2DirectSendControlPolicyFence.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2DirectSendPolicyCache.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ForwardDeliveryRuntime.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ForwardDeliveryWorker.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ForwardExport.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ForwardImportEndpoint.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ForwardMediaImportWorker.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ForwardMessagesService.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ForwardTerminalReceipt.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ForwardWorkOperatorReplay.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2GatewayByteStream.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2GatewayDomainCommandHandler.swift",
       "owner": "I1"
     },
     {
@@ -907,299 +423,419 @@
       "owner": "C0"
     },
     {
-      "path": "IMV2Server/Sources/IMV2Server/V2GatewaySession.swift",
+      "owner": "D4",
+      "retiredPath": "IMV2Server/Sources/IMV2Server/V2GroupAudienceImportService.swift",
+      "replacedBy": [
+        "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2GroupCreationOperationStore.swift",
+        "IMV2Server/Sources/IMV2ServerContracts/V2HTTPOperationHandling.swift"
+      ]
+    },
+    {
+      "owner": "D3",
+      "retiredPath": "IMV2Server/Sources/IMV2Server/V2GroupEventWake.swift",
+      "replacedBy": [
+        "IMV2Server/Sources/IMV2ServerContracts/V2GroupEventWakeContracts.swift",
+        "IMV2Server/Sources/IMV2ServerApplication/V2GroupEventWakeApplication.swift"
+      ]
+    },
+    {
+      "owner": "I1",
+      "retiredPath": "IMV2Server/Sources/IMV2Server/V2RoomShardRouter.swift",
+      "replacedBy": [
+        "IMV2Server/Sources/IMV2ServerContracts/V2RoomShardRouting.swift",
+        "IMV2Server/Sources/IMV2ServerInfrastructure/V2PostgresRoomShardRouter.swift"
+      ]
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApp/GatewayAuthorPresentationAssembly.swift",
       "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2GroupAudienceImportService.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2GroupCapabilitiesService.swift",
-      "owner": "D2"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2GroupEventLogService.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2GroupEventWake.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2GroupInvitationIdentityReader.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2GroupInvitationService.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2GroupInviteCreationRecoveryWorker.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2GroupInviteDirectory.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2GroupJoinPageCursor.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2GroupJoinQuotaRecoveryWorker.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2GroupMessagingService.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2GroupRolePolicyBaseline.swift",
-      "owner": "D2"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2GroupRoomCreationIntent.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2GroupRoomCreationManifest.swift",
-      "owner": "D4"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2GroupRoomCreationSelection.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2HybridGroupShardCreditSnapshotCache.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/ForwardMediaFileIO.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2MediaEdgeDownloadService.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2MediaEdgeHTTPHandler.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2MediaProviderSessionService.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2MembershipIdentitySnapshotValidator.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2MessageAcceptanceFact.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2MessageEditReplacement.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2MessageEditService.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2MessageMediaOwner.swift",
-      "owner": "C0"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2MessageProjectionState.swift",
-      "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2MessageReactionService.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2MessageWithdrawalService.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ModerationAuditRetentionWorker.swift",
-      "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ModerationService.swift",
-      "owner": "D2"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2NIOGatewayChannelHandler.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2OwnerModerationAuditRetentionStore.swift",
-      "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2OwnerValidatedForwardMessages.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2OwnerValidatedGroupCapabilitiesStore.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2OwnerValidatedMessageMutationStores.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2OwnerValidatedModerationStore.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2OwnerValidatedReadReceiptStore.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2OwnerValidatedRoomWriteStore.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2PostgresTransientFailure.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2PreparedGroupEventPageCache.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ProfilePresentationService.swift",
-      "owner": "C0"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ReadReceiptBatcher.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ReadReceiptPreferencePropagationWorker.swift",
-      "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ReadReceiptService.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2RoomActorMetrics.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2RoomAdmissionCommandCreditPool.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2RoomKind.swift",
-      "owner": "C0"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2RoomLatestVisibleCommandService.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2RoomLogRetention.swift",
-      "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2RoomMembershipDirectoryService.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2RoomMembershipService.swift",
-      "owner": "D2"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2RoomOwnerTransactionFence.swift",
-      "owner": "R1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2RoomRecoveryCommandService.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2RoomRecoveryReading.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2RoomShardRouter.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2RoomShardStorageRegistry.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2RoomWriteBatchRouteCache.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2RoutedContentReviewWorker.swift",
-      "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2RoutedGroupEventWakeStore.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2RuntimePressureMetrics.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2SchemaReadiness.swift",
-      "owner": "R1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2SendMessageAdmissionBatcher.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2SendMessageService.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ShardAdmissionCommandCreditPool.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2ShardedSendMessageAdmissionBatcher.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2SharedGroupEventWakeInterests.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2SpecialAccountMessagingService.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2SyncHousekeepingWorker.swift",
-      "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2TLSGatewayServer.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2UserRoomDirectoryCursorCodec.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2UserRoomDirectoryService.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/V2UserSyncLogCompactionWorker.swift",
-      "owner": "D6"
     },
     {
       "path": "IMV2Server/Sources/IMV2ServerApp/main.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Resources/Application/V2AuthorPresentationIngress.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Resources/Application/V2AuthorPresentationRuntime.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Resources/Application/V2ResourceGroupAvatarCommandService.swift",
+      "owner": "D2"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Resources/Application/V2ResourceGroupAvatarPresentationService.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/Invitations/V2ActorGroupInvitationClient.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/Invitations/V2ActorInvitationCoordinator.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/Invitations/V2ActorRoomInvitationWireMapping.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/MediaAuthorization/V2ActorRoomMediaAuthorizationPort.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorAdministrationCommandMapper.swift",
+      "owner": "D2"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorAdministrationResultMapper.swift",
+      "owner": "D2"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorAdmissionUnavailableMapping.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorCrossOwnerForwardService.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorForwardFailureMapping.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorForwardImportEndpoint.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorForwardWireMapping.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorForwardingCoordinator.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorGroupCreationStore.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorMessagingErrorWireMapping.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorMessagingMapper.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorMessagingOutcomeMapper.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorRoomCreationErrorWireMapping.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorRoomCreationWireMapping.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorRoomDirectoryWireMapping.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorRoomLogWireMapping.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorRoomMaintenanceExecutor.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorRoomReceiptWireMapping.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2GroupRoomCreationManifest.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2RoomActorMaintenanceWorker.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2RoomAdministrationDomainExecutor.swift",
+      "owner": "D2"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2RoomBootstrapDomainExecutor.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2RoomMediaAuthorizationDomainExecutor.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2RoomMessagingExecutor.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2SendMessageService.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/Room/V2UserRoomDirectoryCursorCodec.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2AdmittedRoomDatabaseWork.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2AggregatedReadReceiptBatchMetrics.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2AggregatedSendMessageBatchMetrics.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2CachedRoomShardRouter.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2ContentReviewWorker.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2CrossOwnerForwardService.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2DirectMessagingService.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2DirectRoomLogPayloadCodec.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2ForwardImportEndpoint.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2ForwardMessagesService.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2ForwardWorkOperatorReplay.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2GroupCapabilitiesService.swift",
+      "owner": "D2"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2GroupEventLogService.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2GroupEventWakeApplication.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2GroupInvitationService.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2GroupInviteCreationRecoveryWorker.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2GroupInviteDirectory.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2GroupJoinQuotaRecoveryWorker.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2GroupMessagingService.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MediaEdgeDownloadService.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MediaProviderSessionService.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageEditService.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageReactionService.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageWithdrawalService.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2ModerationService.swift",
+      "owner": "D2"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2OwnerValidatedMessageMutationStores.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2ProfilePresentationService.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2ReadReceiptService.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2RoomActorMetrics.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2RoomMembershipDirectoryService.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2RoomMembershipService.swift",
+      "owner": "D2"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2RoutedContentReviewWorker.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2RuntimePressureMetrics.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2SharedGroupEventWakeInterests.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2SyncHousekeepingWorker.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2UserRoomDirectoryService.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerContracts/V2ForwardExport.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerContracts/V2ForwardTerminalReceipt.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerContracts/V2GroupEventWakeContracts.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerContracts/V2GroupRolePolicyBaseline.swift",
+      "owner": "D2"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerContracts/V2GroupRoomCreationIntent.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerContracts/V2GroupRoomCreationSelection.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerContracts/V2HTTPOperationHandling.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerContracts/V2MessageEditReplacement.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerContracts/V2MessageProjectionState.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerContracts/V2RoomKind.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerContracts/V2RoomMaintenanceCapabilities.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerContracts/V2RoomRecoveryReading.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerContracts/V2RoomShardRouting.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerGateway/Gateway/V2AccountRoomChangeBuffer.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerGateway/Gateway/V2AccountRoomChangeService.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerGateway/Gateway/V2AccountRoomCoverageIndex.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerGateway/Gateway/V2AccountRoomMembershipChange.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerGateway/V2AuthenticatedGatewayAdmission.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerGateway/V2GatewayByteStream.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerGateway/V2GatewayDomainCommandHandler.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerGateway/V2GatewaySession.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerGateway/V2NIOGatewayChannelHandler.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerGateway/V2PreparedGroupEventPageCache.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerGateway/V2RoomLatestVisibleCommandService.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerGateway/V2RoomRecoveryCommandService.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerGateway/V2TLSGatewayServer.swift",
       "owner": "I1"
     },
     {
@@ -1207,7 +843,23 @@
       "owner": "I1"
     },
     {
+      "path": "IMV2Server/Sources/IMV2ServerHTTP/V2MediaEdgeHTTPHandler.swift",
+      "owner": "D5"
+    },
+    {
       "path": "IMV2Server/Sources/IMV2ServerHTTP/V2VaporForwardWorkOperatorReplayRoutes.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerHTTP/V2VaporGroupAvatarCommandRoutes.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerHTTP/V2VaporGroupAvatarPresentationRoutes.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerHTTP/V2VaporGroupAvatarRecoveryRoutes.swift",
       "owner": "I1"
     },
     {
@@ -1221,6 +873,502 @@
     {
       "path": "IMV2Server/Sources/IMV2ServerHTTP/V2VaporProfilePresentationRoutes.swift",
       "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Forwarding/ForwardMediaFileIO.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Forwarding/PostgresV2ForwardPersistence.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ContentWriteAuthorization.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2DirectAuthorizationIntentStore.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2DirectAuthorizationReceiptStore.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2DirectMessagingStore.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ForwardDeliveryStore.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ForwardExportCompactor.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ForwardExportStore.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ForwardInboxCompactor.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ForwardInboxStore.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ForwardMediaImportStore.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ForwardReceiptStore.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ForwardSourceAuthorization.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ForwardWorkReplayStore.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2GroupCapabilitiesStore.swift",
+      "owner": "D2"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2GroupCapabilityOperationStore.swift",
+      "owner": "D2"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2GroupCreationOperationStore.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2GroupEventLogStore.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2GroupEventWakeStore.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2GroupInvitationStore.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2GroupInviteDirectory.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2GroupJoinQuotaStore.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2GroupMessagingStore.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2GroupPermissionResolution.swift",
+      "owner": "D2"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MediaDownloadSessionStore.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MediaVisibilityAuthorization.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageEditStore.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageMutationOperationStore.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageProjectionStateBodyCompactionWorker.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageProjectionStateGCWorker.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageProjectionStateRepository.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageReactionOperationStore.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageReactionStore.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageWithdrawalStore.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ModerationStore.swift",
+      "owner": "D2"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ProfilePresentationStore.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ReadReceiptStore.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomActivationStore.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomLatestVisibleStore.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomMembershipDirectoryStore.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomMembershipStore.swift",
+      "owner": "D2"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomReadWatermark.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomRecoveryStore.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomRecoveryTopology.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomWriteScalarAcceptance.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomWriteScalarPersistence.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomWriteStore.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2SendCompletion.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2UserStateEventGCWorker.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Room/Activation/V2RoomActivationTransaction.swift",
+      "owner": "R1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Room/Activation/V2RoomActivationWriteScope.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Room/Activation/V2RoomSQLDeadline.swift",
+      "owner": "R1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Room/Activation/V2RoomServerPlacement.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Room/Invitations/V2RoomInvitationDomainExecutor.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Room/Maintenance/PostgresV2RoomBookkeepingStore.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Room/Maintenance/PostgresV2RoomMaintenanceScanner.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Room/Queries/V2ActorRoomQueryExecutor.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Room/Receipts/V2ActorRoomReceiptExecutor.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomClients/V2RoomRefAdministrationClient.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomClients/V2RoomRefGroupEventLogClient.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomClients/V2RoomRefMediaDownloadClient.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomClients/V2RoomRefMessagingClient.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomClients/V2RoomRefProfilePresentationClient.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomClients/V2RoomRefQueryClient.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomCoordination/Forwarding/V2ActorForwardPairDomainExecutor.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomCoordination/Forwarding/V2RoomForwardDomainExecutor.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomCoordination/Forwarding/V2RoomRefForwardPorts.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomCoordination/Invitations/V2ActorInvitationErrorWireMapping.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomCoordination/Invitations/V2ActorInvitationRoomRefPort.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomCoordination/MediaAuthorization/V2RoomRefMediaAuthorizationPort.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomDomain/Administration/V2ActorAdministrationFailureMapping.swift",
+      "owner": "D2"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomDomain/Messaging/V2ActorGrantedSendBatchAdapter.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomDomain/Messaging/V2ActorSpecialAccountAuditMapper.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomDomain/Messaging/V2RoomSpecialAccountAuditExecutor.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomDomain/Queries/V2ActorRoomRecoveryWireMapping.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomDomain/Queries/V2HostRoomRecoveryQueryBatcher.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomDomain/Receipts/V2HostRoomReceiptBatcher.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomDomain/V2RoomTransactionAttempt.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomMaintenance/V2RoomRefMaintenanceInvoker.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomWrite/V2RoomWriteBatchRouteCache.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomWrite/V2RoomWriteForwardInboxPath.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2ContentReviewWorker.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2ControlPlaneHousekeepingWorker.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2DirectAuthorizationCoordinator.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2DirectReadReceiptPolicy.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2DirectRoomLogEventCache.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2DirectRoomLogFastAppendCache.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2DirectRoomProfilePropagationWorker.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2DirectSendControlPolicyFence.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2DirectSendPolicyCache.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2ForwardDeliveryWorker.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2ForwardMediaImportWorker.swift",
+      "owner": "D5"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2GroupInvitationIdentityReader.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2GroupInviteCreationRecoveryWorker+Actor.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2GroupJoinPageCursor.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2GroupJoinQuotaRecoveryWorker.swift",
+      "owner": "D4"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2HybridGroupShardCreditSnapshotCache.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2MembershipIdentitySnapshotValidator.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2MessageAcceptanceFact.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2MessageMediaOwner.swift",
+      "owner": "C0"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2ModerationAuditRetentionWorker.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2OwnerModerationAuditRetentionStore.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2OwnerValidatedForwardMessages.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2OwnerValidatedGroupCapabilitiesStore.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2OwnerValidatedModerationStore.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2OwnerValidatedReadReceiptStore.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2OwnerValidatedRoomWriteStore.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2PostgresRoomShardRouter.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2PostgresTransientFailure.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2ReadReceiptBatcher.swift",
+      "owner": "D3"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2ReadReceiptPreferencePropagationWorker.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2RoomAdmissionCommandCreditPool.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2RoomLogRetention.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2RoomOwnerTransactionFence.swift",
+      "owner": "R1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2RoomShardStorageRegistry.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2RoutedGroupEventWakeStore.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2SchemaReadiness.swift",
+      "owner": "R1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2SendMessageAdmissionBatcher.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2ShardAdmissionCommandCreditPool.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2ShardedSendMessageAdmissionBatcher.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2SpecialAccountMessagingService.swift",
+      "owner": "D1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2SyncHousekeepingWorker.swift",
+      "owner": "D6"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2UserSyncLogCompactionWorker.swift",
+      "owner": "D6"
     },
     {
       "path": "IMV2Server/Sources/VirtualActorBusinessProbe/DatabaseEdgeProbe.swift",
@@ -1395,6 +1543,14 @@
       "owner": "D1"
     },
     {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2AuthorPresentationIngressTests.swift",
+      "owner": "I1"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2AuthorPresentationRuntimeTests.swift",
+      "owner": "I1"
+    },
+    {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2GatewayRoomActorCompositionTests.swift",
       "owner": "I1"
     },
@@ -1412,6 +1568,10 @@
     },
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2PostgresCommitAckLossProxy.swift",
+      "owner": "V1"
+    },
+    {
+      "path": "IMV2Server/Tests/IMV2ServerTests/V2ResourceGroupAvatarPostgresTests.swift",
       "owner": "V1"
     },
     {
@@ -1487,8 +1647,11 @@
       "owner": "V1"
     },
     {
-      "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomHostSharedSendCommitAckLossTests.swift",
-      "owner": "V1"
+      "owner": "V1",
+      "retiredPath": "IMV2Server/Tests/IMV2ServerTests/V2RoomHostSharedSendCommitAckLossTests.swift",
+      "replacedBy": [
+        "IMV2Server/Tests/IMV2ServerTests/V2SharedRoomSendCommitAckLossTests.swift"
+      ]
     },
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomRecoveryBatcherLifecycleTests.swift",
@@ -1557,70 +1720,6 @@
     {
       "path": "scripts/generate_v2_protobuf.sh",
       "owner": "V1"
-    },
-    {
-      "path": "IMV2Core/Sources/IMV2Core/GroupAvatar.swift",
-      "owner": "C0"
-    },
-    {
-      "path": "IMV2Core/Sources/IMV2Core/GroupAvatarPresentation.swift",
-      "owner": "C0"
-    },
-    {
-      "path": "IMV2Core/Tests/IMV2CoreTests/GroupAvatarContractTests.swift",
-      "owner": "V1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/Resources/Application/V2ResourceGroupAvatarPresentationService.swift",
-      "owner": "D5"
-    },
-    {
-      "path": "IMV2Server/Tests/IMV2ServerTests/V2ResourceGroupAvatarPostgresTests.swift",
-      "owner": "V1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerHTTP/V2VaporGroupAvatarPresentationRoutes.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Core/Sources/IMV2Core/GroupAvatarCommandResponse.swift",
-      "owner": "C0"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/Resources/Application/V2ResourceGroupAvatarCommandService.swift",
-      "owner": "D2"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerHTTP/V2VaporGroupAvatarCommandRoutes.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Core/Sources/IMV2Core/GroupAvatarRecovery.swift",
-      "owner": "C0"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerHTTP/V2VaporGroupAvatarRecoveryRoutes.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/Resources/Application/V2AuthorPresentationIngress.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Tests/IMV2ServerTests/V2AuthorPresentationIngressTests.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2Server/Resources/Application/V2AuthorPresentationRuntime.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerApp/GatewayAuthorPresentationAssembly.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Tests/IMV2ServerTests/V2AuthorPresentationRuntimeTests.swift",
-      "owner": "I1"
     }
   ]
 }

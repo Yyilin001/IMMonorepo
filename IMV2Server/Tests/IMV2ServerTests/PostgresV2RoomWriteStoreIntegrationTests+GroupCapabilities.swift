@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Crypto
 import FluentKit
 import FluentPostgresDriver
@@ -11,6 +13,7 @@ import IMV2Core
 import IMV2ServerHTTP
 import PostgresNIO
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import SQLKit
 import Synchronization
 import Testing
@@ -358,8 +361,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     for try await result in tasks { #expect(try capabilityInvitationProof(result, intent: intent) == proof) }
                 }
                 let request = try v2GroupInvitationCreationRequest(submission.command, issuer: issuer, policy: .standard, now: now)
-                let storedCreated = try V2PostgresTimestamp(date: request.createdAt).date
-                let storedExpiry = try V2PostgresTimestamp(date: request.expiresAt).date
+                let storedCreated = try V2PersistenceTimestamp(date: request.createdAt).date
+                let storedExpiry = try V2PersistenceTimestamp(date: request.expiresAt).date
                 #expect(created == UInt64(try v2GatewayMilliseconds(storedCreated)))
                 #expect(expiry == UInt64(try v2GatewayMilliseconds(storedExpiry)))
                 #expect(storedExpiry.timeIntervalSince(storedCreated) == 3_600)

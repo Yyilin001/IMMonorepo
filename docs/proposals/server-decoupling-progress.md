@@ -1,0 +1,162 @@
+# 服务端解耦实施状态
+
+目标及完成条件见[实施方案](server-decoupling-plan.md)。代码改造与本轮编译已完成，完整运行与性能验收按用户要求暂缓。
+
+## 代码收尾结果（2026-09-29）
+
+- 标量接受和持久化改由 `V2RoomWriteScalarAcceptancePath`、`V2RoomWriteScalarPersistencePath` 承担，共享围栏与授权检查归 `V2RoomWriteSelectedOwnerGuard`。Store 保留事务及提交后责任；审核模式显式传入，热度观察仅传布尔值，事务内组件不持有 Store、缓存发布器或额度池。
+- 单条 direct projection 使用借连接组件；删除无调用的 `acceptHotDirectRoomLog`。当前 Infrastructure 与冻结候选的 743 段多行 SQL 文本哈希多重集一致。该源码对照不代替行为验证。
+- 清理 worker 自导入、冗余访问修饰符，以及邀请查询路由遗留的私有写入 DTO、响应辅助类型、未调用 helper 和过期说明；现行路由保持不变。
+- 昵称、邀请 operation admission/submit、resource upload/finalize/status 和下载 plan 冒烟脚本已适配现行合同；Python/Shell 语法检查通过，未运行脚本。
+
+最终执行 `swift build --build-tests --disable-automatic-resolution --jobs 4 --package-path IMV2Server`，在当前 macOS/Swift 6.4 工作区退出 0，耗时 81.07 秒，产品及测试目标均编译通过，未执行测试。日志为 `/tmp/imv2-decoupling-code-final-build-v2-20260929.log`。标量迁移首次增量编译发现审核模式参数遗漏，补齐显式参数后取得该通过结果。仍有既有依赖 identity、deprecated 和测试诊断警告，本轮未升级依赖。
+
+架构静态结果：576 个文件、1951 个唯一声明、1958 条符号边，零分类例外、零越层依赖、零跨 target 循环。Actor 台账通过：416 个归属文件、31 个 writer ID、46 条声明、36 个 catalog row、235 个 DTO；相关写入证据已随标量路径迁移更新。文档链接及结构检查通过。
+
+此前 Linux Release 产品对应 `c1944b1a`，不覆盖本轮标量收尾后的源码。本轮未启动 Docker、未执行 PostgreSQL/故障测试、未采集性能样本；如恢复整体验收，应从当前代码重新构建受影响的 Linux 产品。
+
+## 当前工作范围（2026-09-29）
+
+按用户最新要求，本轮完成代码收尾并确认编译，不恢复完整业务测试、独立进程故障测试或性能采样。2026-09-28 暂停时运行中的构建和测试已终止，本轮创建的临时数据库已清理，专用 Colima profile 的临时 DNS 已恢复且虚拟机已停止。下文按时间保留的启动、失败及通过记录均为历史证据。
+
+本轮复核资源、入口、房间执行、RoomWrite、SwiftPM 与 worker 的实际边界，并完成上述代码收尾。统一编译产品与测试目标，不执行测试；最终结果见上方记录。
+
+## 基线与验证环境
+
+- 开始源码版本：`524716ef2204992270bd0439984a97aab47dc5a5`。
+- 开始时业务源码无未提交修改；规划文档及 `.swiftpm/` 为已有工作区内容。
+- 工具链：Apple Swift 6.4，arm64 macOS；版本输出为 `swiftlang-6.4.0.34.1`。
+- 本地 PostgreSQL socket `/tmp:5432` 可连接；所有变更验证只使用脚本创建的独立可丢弃数据库。
+- 测试专用 Colima Docker 环境曾用于 Linux Release 构建及应用栈冒烟，结果见下方历史记录；暂停后已停止，本轮不启动。
+- 性能基线尚未采集，当前不宣称性能改善或 P6 完成。
+
+## 当前实现
+
+| 阶段 | 当前状态 | 剩余工作 |
+| --- | --- | --- |
+| P0 | 已增加源码层边界检查及基于开始版本的违规基线；已生成逐文件迁移清单 | 测试证据、性能基线与最终归属核对 |
+| P1 | 资源生命周期/导入/迁移/展示改为依赖接口和强类型快照；SQL 与数据库接线分离 | 已通过构建与定向资源测试；最终集成时复核接线 |
+| P2 | HTTP operation 和文件流入口依赖能力接口；Gateway 按命令族分派并明确准入所有者 | 本地 HTTP/Gateway 定向回归通过；独立进程角色接线验收待补 |
+| P3 | 房间 Messaging/Administration/MediaAuthorization 业务执行与 PostgreSQL 适配分离，五类能力由工厂组装 | 能力已落实到真实 target；激活/恢复相关最终验证待补 |
+| P4 | scalar/direct fast/rich batch/hybrid/forward 路径、授权与事务协调、提交后处理及组合状态已收拢 | 原生故障回归通过；Linux 独立进程与性能对照待验收 |
+| P5 | Contracts/Application/Infrastructure/Gateway/HTTP 已独立，基础设施主体迁移完成；旧 Server 收敛为 15 个组装/配置文件；全包构建通过 | 测试导入与访问级别已验证；生命周期/Linux 最终验收 |
+| P6 | 原生跨库、Host 恢复、COMMIT ACK-loss 与 SIGKILL 定向验收已通过；候选六个 Linux Release 产品已构建；本地应用栈 general smoke 已通过 | Actor HTTP 旧脚本与现行合同不符，适配收尾后暂不重跑；完整本地/远端角色、剩余生命周期矩阵与性能对照暂缓 |
+
+源码边界脚本 `scripts/check_v2_server_boundaries.py` 已接入 `run_v2_swift_tests.sh`。初始版本的 33 项资源应用层与 HTTP 具体 Store 依赖已消除，当前例外清单为空。该脚本是源码模式检查；它不替代编译器依赖约束、行为测试或事务一致性验证。
+
+## 实施与验证方式
+
+使用三个 GPT-6 Sol、medium 子任务分别实施资源层、传输入口、房间执行；主任务负责 RoomWrite、集成、模块迁移及统一验证。并行编辑期间各子任务只做语法/差异检查。统一构建前冻结生产源码编辑；类型诊断集中处理后再构建。
+
+早期两次构建遇到了并行文件拆分的中间状态，报缺失类型，未用作最终验证证据。冻结文件拆分后的 macOS 全包构建通过（32.92 秒）。
+
+首批针对性测试编译发现资源测试中旧的 `.init(database:)` 闭包无法推断协议返回类型，已改为明确的 PostgreSQL 实现。资源端鉴权错误映射、非法 UUID 的抛错行为及终态 session JSON 解码行为也已按原合同校正。
+
+第一轮筛选结果为 45 个测试、6 个 suite，通过，用时 24.612 秒（测试目标编译另计 159.11 秒）。其中 8 个资源数据库测试因使用独立 opt-in 配置而跳过，不计为资源数据库验证通过。实际运行的关键数据库场景包括：授权 ACK 失败 2 例、批量授权回滚 2 例、转发授权与终态恢复 18 例；同时运行 Gateway 命令测试、无数据库资源签名后 generation 重查、事务所有者缓存发布测试。
+
+资源数据库检查使用另外两个新建、安装当前 schema、运行结束后自动删除的独立数据库，显式配置 `IMV2_RESOURCE_TEST_DATABASE_URL` 和 `IMV2_RESOURCE_FORWARD_TARGET_DATABASE_URL` 后补跑受影响场景。补跑通过：5 个 suite 中的 8 个测试实际执行、无跳过，用时 1.880 秒。覆盖上传、生命周期回放与 generation、导入源持有、群头像命令与展示、资料签名后的权限重查。日志位于 `/tmp/imv2-decoupling-resource-tests.log`。
+
+验证遵循用户“不要过度测试”的要求：每一批稳定改动统一构建，按改动选择已有测试，只有新增独立边界或故障风险时补少量必要用例。相关检查通过后继续下一批，不重复跑无关全套测试。
+
+## 模块迁移前的第二批拆分
+
+资源媒体值、时间戳纯值与精确范围规则、房间执行能力陆续归入 Contracts；PostgreSQL 时间编解码留在 Infrastructure。事件日志值与服务分离，服务只依赖提交事实观察接口。预编码分页通过 Gateway 注入编码能力，日志缓存保持每次成员授权复核，命中编码缓存时仍不构造事件数组。
+
+这一批统一构建通过（30.37 秒，日志 `/tmp/imv2-decoupling-build-2.log`），修正了 package 协议实现与 PostgreSQL 时间编解码的访问级别。边界检查通过，例外为零；定向测试通过：6 个 suite、36 个测试，无跳过；执行 3.750 秒，测试目标编译 136.68 秒，日志 `/tmp/imv2-decoupling-tests-2.log`。覆盖缓存命中延迟物化、成员修订边界、帧限制、精确时间戳、提交后缓存发布及真实数据库公开消息日志写入。目录分层尚不代表 SwiftPM target 隔离；Package 迁移、剩余反向依赖与 RoomWrite 路径收敛仍在实施中。
+
+## 真实模块迁移（进行中）
+
+`Package.swift` 已建立 `IMV2ServerContracts` 和 `IMV2ServerApplication` 产品与 target，调用方显式声明依赖和 import。Contracts 保留必要的纯密码学验证；数据库和网络驱动不进入这两个新 target。初始 Contracts 与 Application 切片分别独立构建通过，随后扩大的当前全包迁移也已通过 macOS 构建（最后增量 6.76 秒，日志 `/tmp/imv2-modules-build.log`）；本批定向测试已通过，具体证据见下文。
+
+转发计划的业务编排已迁入 Application，具体 RoomRef 初始化接线留在组装层。GroupEvent wake 的值与接口归 Contracts，观察/relay 编排归 Application，连接分发归 Gateway。RoomWrite 新增 hybrid batch 事务内路径组件。编译暴露的 PostgreSQL 命名约束识别已移至基础设施，并新增逐项回退的定向测试；该测试已通过。
+
+首个真实 `IMV2ServerInfrastructure` target 已建立，当前包含 PostgreSQL 时间戳编解码并仅依赖 Contracts/PostgresNIO/NIOCore。其余基础设施仍待迁移。遥测值与接口移入 Contracts，计数与文本指标实现移入 Application，protobuf 映射留 Gateway；用户事件契约与恢复 worker 分离。单条发送的数据库错误翻译归具体 PostgreSQL Store，Application 不再识别驱动错误。当前静态依赖图为 488 文件、零候选逆向边、零候选跨层循环；这是静态迁移辅助结果，不替代全量模块拆分和运行验收。
+
+本批定向测试通过：5 个 suite、32 个测试，无跳过，执行 0.223 秒；测试目标最后一次编译 154.73 秒，日志 `/tmp/imv2-module-tests.log`。覆盖原子批次回退、约束错误识别、激活后续可用、数据库时间戳编解码、用户事件恢复和遥测并发。
+
+随后开始下一批并行编辑：完整 Gateway 会话与传输链迁入真实 target、剩余应用与契约归属、RoomWrite direct fast 路径拆分。上述证据对应下一批编辑前的稳定点，后续编辑需要重新统一构建。
+
+## Gateway 与应用层主体迁移
+
+27 个 Gateway 文件已迁入真实 target，覆盖公共 protobuf、会话/字节流、命令分派、连接管理、TLS 与事件编码缓存。账号边缘的 IP 地址解析构造移至 HTTP，纯限流值和摘要留 Contracts。应用层剩余准入、邀请、转发与恢复编排已内移；指标快照归 Contracts，Actor 运行指标纯值归 ActorContracts。RoomWrite direct fast 的准备与借用事务追加已抽出，形态和授权策略谓词由共享纯实现统一维护；原 SQL 文本、锁顺序与提交后结算保持。
+
+这批 macOS 全包构建通过（20.49 秒，`/tmp/imv2-gateway-build.log`）。定向 PostgreSQL/Gateway 测试通过：4 个 suite、17 个测试，无跳过，执行 2.103 秒，测试目标编译 163.56 秒（`/tmp/imv2-gateway-tests.log`）。真实可丢弃数据库中实际执行普通/Actor 两种模式的 reciprocal direct fast 缓存与修订围栏、分片额度不超卖；另覆盖 Gateway 会话/Actor 接线与运行指标。protobuf 生成及比对脚本已适配公共/内部协议的不同目录，使用现成 protoc 插件重新生成比对通过；schema readiness 检查路径修正后也通过。Actor 台账已更新并通过检查：412 个归属文件、31 个写者 ID、46 条源码证据、36 个目录行与 235 个 DTO 条目；该静态结果不替代运行时写者/fence 验证。
+
+下一批开始提取 HTTP 所需账户/设备/密码/运维契约与纯认证逻辑，四个 Invitations 纯编排/端口迁入 Application。随后重算清单，迁移 Infrastructure 主体；HTTP 的 RoomRef 与文件流具体类型依赖仍需独立处理。新的编辑不由前一稳定点的构建/测试结果背书。
+
+## HTTP 契约及事务内路径收口
+
+HTTP 的账户、设备、密码及运维 DTO/错误/能力接口已提取到 Contracts；HMAC assertion、operator 认证和指标聚合归 Application。RoomRef 命令入口改用按业务划分的窄接口。本地媒体上传通过关联类型约束暂存对象与提供方配对，资源字节流通过明确的读取/关闭接口暴露；HTTP 保留原有 range、ETag、取消和流关闭处理。
+
+RoomWrite 的 forward inbox 与 rich/hot direct batch 路径已提取：路径组件只借用事务连接，Store 继续拥有事务、锁顺序、提交分类及额度/缓存收尾。组合状态约束仍待下一批收敛。本批随后完成了下节记录的统一构建与定向回归。
+
+依赖分析脚本新增 HTTP target 覆盖；源码边界检查禁止 HTTP 导入旧 Server、Infrastructure 和数据库驱动，并验证注释/字面量不会误报。新增覆盖发现邀请查询协议仍与 Actor 客户端混放，已纳入本批迁移修正。
+
+
+## Infrastructure 主体与 HTTP 模块闭合
+
+268 个旧 Server 文件已迁到 Infrastructure（含内部 NATS protobuf）；激活恢复校验另抽为包内基础设施入口。当前扫描范围共 569 个文件：Server 15、Contracts 82、Application 126、Infrastructure 270、Gateway 27、HTTP 49。静态图零候选逆向边、零跨模块循环；HTTP 不再依赖旧 Server 或数据库 target。
+
+本批 macOS 全包构建通过（17.12 秒，`/tmp/imv2-infrastructure-build.log`）。源码边界、公共/内部 protobuf 重新生成比对、schema readiness 表覆盖检查均通过。Actor 台账同步后检查通过：412 个归属文件、31 个写者 ID、46 条证据和 235 个 DTO。首次测试编译发现部分测试仍通过旧 Server 的 `@testable` 读取已迁走的内部实现，已将测试访问同步至 Infrastructure；本批定向测试已通过：9 个 suite、44 个测试，执行 14.590 秒，无跳过（`/tmp/imv2-infrastructure-tests.log`）。覆盖媒体流上传/取消/range/ETag、邀请映射、密码/设备及消息 operation HTTP、指标缓存，以及真实 PostgreSQL direct 日志/批次和 forward inbox 接受、恢复及终态处理。
+
+最终验收的具体命令、故障 opt-in 和环境缺口见[验收矩阵](server-decoupling-validation.md)。本机 Docker daemon 当前不可连接；Linux、独立服务角色及性能对照仍未完成。
+
+
+本轮迁移造成的源码文档链接已修复（65 处，涉及 15 份文档），RoomWrite 拆分记录已更新到当前事务协调、路径和提交后职责。全仓文档链接检查仍报告弱网提案中的 4 个既有 ClientKit 断链；不计为本轮服务端验证通过。进一步只读检查确认默认 Docker 和现有 `imv2-va-capacity` Colima profile 均未运行。
+
+下一批实施 RoomWrite 归属与控制授权的显式组合状态，同时删除旧 Server 的冗余直接依赖；上一稳定点测试不自动覆盖这批编辑。
+
+
+## RoomWrite 组合状态与包依赖清理
+
+归属选择现由受控构造的 `V2RoomWriteOwnerSelection` 保存路由、activation 和 forward source；保留独立 activation 和同房间转发的合法输入。`V2RoomWriteControlResolution` 将未准备与已准备控制事实分开，已准备但无 grants 不会再次预留。事务所有权、SQL、锁、ACK 及提交后处理顺序维持原合同。
+
+旧 Server 已删除 Argon2、protobuf、Crypto、TLS 和部分数据库驱动的冗余直接依赖；HTTP 删除未用 ActorContracts 导入。macOS 全包构建通过（最后增量 8.79 秒，`/tmp/imv2-scope-build.log`）。更新后的边界/台账检查通过，静态图为 571 文件、零逆向边与零跨模块循环。本批定向故障回归通过（`/tmp/imv2-scope-fault-tests.log`，退出码 0）：编译 182.75 秒、执行 33.801 秒，6 个 suite。运行器报告 19 项测试，其中 18 项实际通过，1 项仅供子进程调用的 crash 入口在父进程按设计跳过。实际执行包括：单/双房间 COMMIT ACK-loss 各 1 项、Host 恢复 3 项、作用域构造 4 项，以及 owner fence、operation receipt、借用事务缓存、群批次与转发检查。授权 SIGKILL 8 个和入群配额 SIGKILL 6 个参数场景均实际执行通过；全部 8 个本轮创建的独立数据库已由脚本清理。
+
+文档结构检查另报告既有 `docs/reviews/message-send-dual-transport.md` 未列入 reviews 索引。未将该检查或仍有 4 处 ClientKit 断链的链接检查标为通过。Linux Release、G4/G6 独立 Host、真实 Account/Gateway/Operator 栈及性能基线对照仍待执行；本轮不宣称整体完成或性能改善。
+
+
+## Linux 验收启动
+
+2026-09-28 已启动此前停止的 `imv2-va-capacity` Colima profile，未切换默认 Docker context。该环境已有固定 Swift 6.4 Linux 镜像，现已开始应用栈 runner 的 Linux Release 构建，使用独占 scratch `~/.codex/virtual-actor-builds/server-decoupling-20260928-swiftpm`，源码只读挂载。此次运行仍在进行，尚无 Linux 通过结论。
+
+由于生产修改尚未提交，另保存了 1327 个源码及验证脚本文件的冻结快照与逐文件哈希；聚合 SHA-256 为 `c191d55f750912454c5d162fe66da948438207c6a6253898bdb428f5b4a8654f`，位于 `~/.codex/virtual-actor-builds/server-decoupling-20260928-runs/source-manifest.json`，同目录保留 `source-snapshot.tar.gz`。运行结果中的 HEAD 必须与此快照一并解释，不代表当前未提交代码已属于该 commit。
+
+文档收口：已依据实际 ClientKit 实现修正 4 个旧链接及对应表述，并补消息发送双通道审查索引；文档链接、结构及差异检查现在均通过。
+
+首次两次 Linux runner 都在依赖获取阶段结束：容器默认 DNS 不能解析 GitHub，未进入业务源码编译。测试 VM 的 Docker daemon 已临时配置 DNS `1.1.1.1`，默认容器 Git 请求验证成功，随后重新启动原应用栈流程。原配置备份为 `/tmp/imv2-decoupling-colima-before.yaml`，待验收结束恢复网络 DNS 与 Docker 配置并停止该 profile；不修改默认 Docker context。
+
+性能对照的基线工作树已由 Codex 管理：`~/.codex/worktrees/server-decoupling-baseline/IMMonorepo`，HEAD 为 `524716ef2204992270bd0439984a97aab47dc5a5`，创建后核实无修改。其 Gateway/LoadGenerator Linux Release 构建已启动，scratch 与候选隔离，使用同一固定镜像、2 CPU 与 6 GiB 容器上限。该构建只准备对照产物，不计为性能测量。已有 hot canary 的历史数据没有形成 direct atomic batch，因此另准备显式验证原子批次实际提交的补充测量，不能以单条发送负载替代批量路径验收。
+
+
+### Linux 入口兼容修复与第二版源码快照
+
+应用栈运行 `run-4bb857118402436aa5d9734fbba109f3` 在 Linux 编译阶段退出，未进入服务冒烟。Swift 6.4 拒绝 Account 入口对 C 全局 `stderr` 的并发不安全访问。只读基线确认三个服务入口均已有这种写法；本轮将三处错误输出改为 `FileHandle.standardError.write`，保持原错误字节、换行和失败退出行为。该修复只作用于无效日志级别的启动失败路径。
+
+修复后的源码已再次冻结并保存 `source-manifest-v2.json` 和 `source-snapshot-v2.tar.gz`，聚合哈希 `73ea6392e64ee01f7990040b7e98cbf5a5880ddcc9593032b6cbe9b33946027c`；逐文件比较确认仅三个 App 入口改变。新的应用栈 runner 使用原 scratch 增量构建，结果待确认。原失败记录继续保留，不计入通过证据。
+
+Caddy 镜像拉取还需要测试 VM 本身可解析镜像仓库，因此临时保存 VM `/etc/resolv.conf` 至 `/tmp/imv2-decoupling-resolv-before.conf` 并使用 `1.1.1.1`。`caddy:2.8-alpine` 已拉取成功；该 VM resolver 也须在最终环境清理时恢复。
+
+
+第二版运行 `run-0242e5685f8846f6b5a74b2f18042aeb` 已构建四个 Linux Release 产品（Account、Gateway、Operator、LocalGatewayProbe），真实服务均启动并健康。黑盒冒烟随后在容器内 probe 调用账户 HTTP 时连接被拒绝：验证脚本将宿主 `localhost:<动态端口>` 传进 Gateway 容器。此运行整体失败，不能计为应用栈通过；正在将宿主 HTTP 地址与容器内 probe 地址分开。该接线问题在起始版本也存在。
+
+原始性能基线构建已终止，失败原因同为 ServerApp 的 `stderr` 并发检查。独立基线工作树仅应用三个入口的兼容修复，形成真实本地 snapshot commit `b01bb09338ddde61374af9d19f031173bab06b07`（父提交为 `524716ef2204992270bd0439984a97aab47dc5a5`），已确认 clean，未推送。精确补丁 SHA-256 为 `61eddf937804b4027b08fcc87d7c79c5d35b1475511c1af97444ad8d21ba2def`，证据位于 `~/.codex/virtual-actor-builds/server-decoupling-20260928-baseline-stderr-compat/`。基线增量构建已重新启动；后续对照绑定此实际版本，不再将产物标作未经修复的原始 SHA。
+
+P6 静态复核还发现少数恢复/审核/推送 worker 的纯业务编排和 SQL 实现仍混放 Infrastructure；已开始最后的职责迁移。第二版 Linux 构建证据不自动覆盖随后源码改动。主工作区保持未提交；另建立候选工作树供最终冻结与性能产物溯源，目前尚未录入候选源码。
+
+
+### Worker 业务边界与可追溯候选
+
+PushWake、ContentReview、RoutedContentReview、SyncHousekeeping、邀请创建恢复、入群配额恢复及资源恢复的纯编排已迁入 Application。SQL、过期事务和具体 Actor 接线保留 Infrastructure；资源恢复的持久 JSON 解码留在适配器，并以每项强类型 Result 保持遇到坏行前已完成候选的行为。macOS 全包构建通过（37.44 秒）。随后的统一定向回归通过：4 suites、14 tests、无跳过，执行 7.218 秒（编译 151.42 秒），包括 6 个真实 SIGKILL 入群配额恢复参数场景；日志 `/tmp/imv2-worker-boundary-tests.log`，五个独立测试数据库正常清理。
+
+更新后的静态清单覆盖 576 个文件，1955 个唯一声明、1946 条依赖边，越层边/跨模块循环/归属 override 均为零。Actor 台账检查通过：416 个归属文件、31 个 writer ID、46 条证据、36 个目录行、235 个 DTO。文档链接与结构检查通过。创建隔离候选快照时将 29 处多余文件尾空行统一为单个换行，未改变语义；这是已运行测试之后唯一的 Swift 格式调整。
+
+独立候选工作树 `~/.codex/worktrees/server-decoupling-candidate/IMMonorepo` 已冻结为真实本地 snapshot commit `c1944b1a103b121cc73b36beceb5348cc465fc88`。1628 个源码、测试、配置及脚本文件均与主工作区逐文件 SHA-256 相符，记录在 `~/.codex/virtual-actor-builds/server-decoupling-20260928-candidate-snapshot/source-manifest.json`。主工作区保留未提交状态，快照未推送。当前 Linux runner 从此 clean 候选启动，以便后续产物复用可核验真实源码身份。
+
+可构建基线 `b01bb09338ddde61374af9d19f031173bab06b07` 的 Linux Gateway/LoadGenerator 已通过构建，证据 `~/.codex/virtual-actor-builds/server-decoupling-20260928-baseline-compatible-release/result.json`。独立性能 harness 已冻结为 `a8dcae1faf999a94d24b5451ff94e184bf6a88c6`，保留来源与校准检查，两版均要求 Actor 指标；新调查门槛为吞吐下降 5%、P95/P99 上升 10%。尚无实际性能样本或性能通过结论。临时的基线 harness 接线 commit `216cfd2d` 保留为单独分支证据，被测基线工作树已恢复至与产物一致的 `b01bb093`。
+
+### 候选 Linux Release 与本地应用栈现况
+
+候选 `c1944b1a103b121cc73b36beceb5348cc465fc88` 的 Linux Release 结果为 `passed=true`、退出码 0，固定镜像 `swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6`、lockfile SHA-256 `3af1e16190f46bdd8fad3de86c6b386dc196443291463355bf36edb62b7fd15c`。实际生成六个产品：`IMV2AccountServerApp`、`IMV2ServerApp`、`IMV2OperatorServerApp`、`IMV2LocalGatewayProbe`、`IMV2GatewayLoadGenerator`、`IMV2ResourceImageWorker`。逐产品 SHA-256 见 `~/.codex/virtual-actor-builds/server-decoupling-20260928-candidate-release/result.json`。可比基线 `b01bb09338ddde61374af9d19f031173bab06b07` 用同一镜像、lockfile、2 CPU/6 GiB 限额成功构建 Gateway 与 LoadGenerator；证据为 `~/.codex/virtual-actor-builds/server-decoupling-20260928-baseline-compatible-release/result.json`。这些是构建结果，尚无性能测量结论。
+
+应用栈使用已核验的候选预编译产品；harness 来源 `6237fa62c06dc86c37b732597ffc68df040dcb4d` 经唯一脚本 `IMV2/scripts/test_v2_virtual_actor_application_stack.py` 的补丁形成 `db5cd51705696f7052d2bc8c176fd27633037f5d`，补丁 SHA-256 为 `54743da122b701edbf3d9051d1cac07f307ec8c830a08636e9fc0f944e7ba39f`（`~/.codex/virtual-actor-builds/server-decoupling-20260928-app-harness/provenance-v2.json`）。本地模式 `run-ac2ea47bf02f435da43eaf1403cdf6a7` 的 general smoke 已记录账户 HTTPS、密码注册和设备凭据、Gateway direct chat、密码失败限流、Push 端点注册/移除、Operator 禁号、TLS 1.3 及私有指标检查通过；`smoke.log` 给出逐项结果。紧接着 Actor HTTP smoke 在 `group nickname write and read` 阶段失败，`actor-http-smoke.log` 只记录 `SmokeFailure`，不足以判定根因。该次 `result.json` 为 `passed=false`、`failureType=CalledProcessError`，整个应用栈不能标为通过，昵称阶段正在定位。证据位于 `~/.codex/virtual-actor-builds/server-decoupling-20260928-runs/run-ac2ea47bf02f435da43eaf1403cdf6a7/`；P6 仍未完成。

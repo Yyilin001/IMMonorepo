@@ -1,8 +1,12 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2Core
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Synchronization
 import Testing
+@testable import IMV2ServerGateway
 
 @Suite("V2 authenticated gateway admission")
 struct V2AuthenticatedGatewayAdmissionTests {

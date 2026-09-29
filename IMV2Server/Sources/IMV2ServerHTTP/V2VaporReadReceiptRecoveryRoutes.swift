@@ -1,13 +1,14 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import HTTPTypes
 import IMV2Core
-import IMV2Server
 import Vapor
 
 public struct V2VaporReadReceiptRecoveryRoutes:Sendable {
     private let authenticator:any V2GatewayAuthenticator
-    private let queries:V2RoomRefQueryClient
-    public init(authenticator:any V2GatewayAuthenticator,queries:V2RoomRefQueryClient) { self.authenticator=authenticator;self.queries=queries }
+    private let queries:any V2ReadReceiptRecovering
+    public init(authenticator:any V2GatewayAuthenticator,queries:any V2ReadReceiptRecovering) { self.authenticator=authenticator;self.queries=queries }
     public func register(on routes:RoutesBuilder) {
         routes.on(.post,"v2","rooms",":roomID","read-receipts","operations","recover",maxBodySize:"4kb") { request async throws -> Response in
             let identity = try await request.v2AuthenticatedAccountIdentity(using:authenticator)

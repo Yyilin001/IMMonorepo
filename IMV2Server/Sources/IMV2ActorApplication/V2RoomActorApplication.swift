@@ -1,8 +1,11 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import FluentKit
 import IMV2ActorCluster
 import IMV2ActorContracts
 import IMV2ActorRuntime
 import IMV2Server
+import IMV2ServerInfrastructure
 
 public enum V2RoomActorApplicationError: Error, Sendable {
     case invalidRole

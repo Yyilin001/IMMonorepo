@@ -1,6 +1,9 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import Testing
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 @Suite("Device service effective deadlines")
 struct V2DeviceCredentialDeadlinesTests {
@@ -14,9 +17,9 @@ struct V2DeviceCredentialDeadlinesTests {
         #expect(deadlines.accessExpiresAt == now.addingTimeInterval(5.25))
         #expect(deadlines.refreshExpiresAt == session)
         #expect(deadlines.replayExpiresAt == now.addingTimeInterval(10.75))
-        let encodedNow = try V2PostgresTimestamp(date: now)
+        let encodedNow = try V2PersistenceTimestamp(date: now)
         for date in [deadlines.accessExpiresAt, deadlines.refreshExpiresAt, deadlines.replayExpiresAt] {
-            let encoded = try V2PostgresTimestamp(date: date)
+            let encoded = try V2PersistenceTimestamp(date: date)
             #expect(encoded.microseconds > encodedNow.microseconds)
         }
     }

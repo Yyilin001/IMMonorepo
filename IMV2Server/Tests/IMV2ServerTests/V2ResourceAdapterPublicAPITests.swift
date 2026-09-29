@@ -1,9 +1,12 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Crypto
 import FluentKit
 import FluentPostgresDriver
 import Foundation
 import IMV2Core
 import IMV2Server
+import IMV2ServerInfrastructure
 import SQLKit
 import Testing
 
@@ -29,7 +32,7 @@ struct V2ResourceAdapterPublicAPITests {
             let storage = ReceiptBoundaryStorage(expected: facts, returned: try mutation.apply(to: facts), reconcile: reconcile)
             let registry = try V2ResourceStorageRegistry(storages: [storage], defaultBinding: binding)
             let transport = ExternalUploadTransport(binding: binding, payload: payload)
-            let service = try V2ResourceService(resolve: { _, _, _, _ in .init(database: database, authorize: { _ in }) },
+            let service = try V2ResourceService(resolve: { _, _, _, _ in PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in }) },
                 registry: registry, transports: [transport], maximumBytes: 1_024, allocate: { _ in reference })
             let request = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()),
                 usage: .messageAttachment(.init(uuid: UUID())), contentType: "application/octet-stream",
@@ -69,6 +72,33 @@ struct V2ResourceAdapterPublicAPITests {
             try? await resources.shutdown()
             throw error
         }
+    }
+
+    @Test func signingRechecksUploadGenerationWithoutDatabase() async throws {
+        let actor = UserID(uuid: UUID()), device = DeviceID(uuid: UUID())
+        let binding = try V2StorageBinding(id: "fake-authority", configurationRevision: 1)
+        let reference = try V2StoredObjectReference(placementID: UUID(), binding: binding,
+            formatVersion: 1, handle: Data("exact-object".utf8))
+        let payload = Data("bytes".utf8)
+        let request = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()),
+            usage: .messageAttachment(.init(uuid: UUID())), contentType: "application/octet-stream",
+            byteCount: Int64(payload.count), checksum: .init(value: Data(SHA256.hash(data: payload)).map { String(format: "%02x", $0) }.joined()),
+            clientModes: [.httpPut])
+        let home = request.usage.home(actorUserID: actor)
+        let snapshot = V2ResourceUploadSnapshot(sessionID: UUID(), mediaID: UUID(uuidString: request.mediaID.rawValue)!,
+            generation: 1, phase: .created, mediaPhase: .pendingUpload, request: request,
+            placement: reference, expiresAt: Date().addingTimeInterval(300), claimToken: nil)
+        let port = RevokingUploadPort(snapshot: snapshot)
+        let facts = try V2StoredObjectFacts(reference: reference, byteCount: Int64(payload.count), sha256: Data(SHA256.hash(data: payload)))
+        let registry = try V2ResourceStorageRegistry(storages: [PublicAPIStorage(facts: facts)], defaultBinding: binding)
+        let service = try V2ResourceService(resolve: { _, _, _, _ in port }, registry: registry,
+            transports: [ExternalUploadTransport(binding: binding, payload: payload)], maximumBytes: 1_024,
+            allocate: { _ in reference })
+        let locator = V2ResourceUploadLocator(home: home, sessionID: .init(uuid: snapshot.sessionID))
+        await #expect(throws: V2ResourceProviderError.preconditionFailed) {
+            _ = try await service.targets(.init(locator: locator, generation: 1), actor: actor, device: device)
+        }
+        #expect(await port.readCount == 3)
     }
 
     @Test func externalProcessorsCanConstructTheirReceipts() async throws {
@@ -199,4 +229,35 @@ private struct PublicAPIStorage: V2ObjectStorage {
     func read(_ reference: V2StoredObjectReference) async throws -> V2ResourceByteStream { throw V2ResourceProviderError.unsupportedCapability }
     func write(_ reference: V2StoredObjectReference, byteCount: Int64, sha256: Data, bytes: V2ResourceByteStream) async throws -> V2StoredObjectFacts { throw V2ResourceProviderError.unsupportedCapability }
     func delete(_ reference: V2StoredObjectReference) async throws { throw V2ResourceProviderError.unsupportedCapability }
+}
+
+private actor RevokingUploadPort: V2ResourceLifecyclePort {
+    let authorizationExpiresAt: Date? = nil
+    let backgroundDelegationExpiresAt: Date? = nil
+    let snapshot: V2ResourceUploadSnapshot
+    var readCount = 0
+    init(snapshot: V2ResourceUploadSnapshot) { self.snapshot = snapshot }
+    func create(request: V2ResourceUploadRequest, home: V2ResourceHome, actor: UserID, device: DeviceID,
+                allocate: @escaping @Sendable () throws -> V2StoredObjectReference,
+                expiresAt: Date, now: Date) async throws -> V2ResourceUploadSnapshot {
+        throw V2ResourceProviderError.unsupportedCapability
+    }
+    func upload(session: UUID, actor: UUID, device: UUID) async throws -> V2ResourceUploadSnapshot {
+        readCount += 1
+        if readCount == 3 {
+            return .init(sessionID: snapshot.sessionID, mediaID: snapshot.mediaID, generation: 2,
+                phase: snapshot.phase, mediaPhase: snapshot.mediaPhase, request: snapshot.request,
+                placement: snapshot.placement, expiresAt: snapshot.expiresAt, claimToken: nil)
+        }
+        return snapshot
+    }
+    func claimUploadFinalize(session: UUID, generation: Int64, actor: UUID, device: UUID, now: Date) async throws -> V2ResourceUploadSnapshot {
+        throw V2ResourceProviderError.unsupportedCapability
+    }
+    func publishUpload(_ claim: V2ResourceUploadSnapshot, facts: V2StoredObjectFacts, actor: UUID, device: UUID, now: Date) async throws {
+        throw V2ResourceProviderError.unsupportedCapability
+    }
+    func cancelUpload(session: UUID, generation: Int64, actor: UUID, device: UUID, now: Date) async throws -> V2ResourceUploadSnapshot {
+        throw V2ResourceProviderError.unsupportedCapability
+    }
 }

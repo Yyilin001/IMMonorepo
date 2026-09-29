@@ -1,7 +1,11 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import IMV2Core
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
+@testable import IMV2ServerGateway
 
 struct V2PreparedGroupEventPageCacheTests {
     @Test("early page-key hits never invoke the envelope producer")
@@ -11,7 +15,7 @@ struct V2PreparedGroupEventPageCacheTests {
             maximumBytes: 1_048_576,
             shardCount: 4
         ))
-        let key = V2PreparedGroupEventPageCache.PageKey(
+        let key = V2PreparedGroupEventPageKey(
             protocolVersion: 21,
             roomID: "group-early-key",
             firstEventID: "event-1",

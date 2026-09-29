@@ -1,6 +1,9 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import IMV2Core
 import IMV2Server
+import IMV2ServerInfrastructure
 import IMV2ServerHTTP
 
 // Fake issuer responses only. PostgreSQL tests use each real registration's

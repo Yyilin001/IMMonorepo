@@ -1,6 +1,7 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import IMV2Core
-import IMV2Server
 import Vapor
 import HTTPTypes
 import _NIOFileSystem
@@ -8,14 +9,14 @@ import _NIOFileSystem
 /// 本地文件系统媒体边缘接口（开发/测试用途）。
 /// 目标路径由签名能力派生，本适配器不接受裸文件路径、原始存储 key 或长期凭证。
 /// 生产环境建议改为对象存储原生边缘实现。
-public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
-    private let provider: V2LocalFilesystemMediaProvider
+public struct V2VaporLocalFilesystemMediaRoutes<Provider: V2LocalMediaByteServing>: Sendable {
+    private let provider: Provider
     private let fileIO: FileIO
     private let publicBaseURL: URL
     private let maximumUploadBytes: Int
 
     public init(
-        provider: V2LocalFilesystemMediaProvider,
+        provider: Provider,
         fileIO: FileIO,
         publicBaseURL: URL,
         maximumUploadBytes: Int64
@@ -53,7 +54,7 @@ public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
             guard contentLength <= Int64(maximumUploadBytes) else {
                 throw Abort(.contentTooLarge)
             }
-            let upload: V2LocalFilesystemStagedUpload
+            let upload: Provider.StagedUpload
             do {
                 upload = try await provider.beginUploadedObject(
                     mediaID: mediaID,
@@ -108,7 +109,7 @@ public struct V2VaporLocalFilesystemMediaRoutes: Sendable {
                   let mediaID = try? MediaID(rawMediaID),
                   let targetURL = targetURL(for: request)
             else { throw Abort(.notFound) }
-            let object: V2LocalFilesystemDownloadedObject
+            let object: Provider.DownloadedObject
             do {
                 object = try await provider.downloadedObject(mediaID: mediaID, targetURL: targetURL)
             } catch is V2LocalFilesystemMediaProviderError {

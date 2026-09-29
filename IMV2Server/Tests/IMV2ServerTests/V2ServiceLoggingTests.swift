@@ -1,5 +1,8 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Logging
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
 
 @Suite("服务端日志边界")

@@ -1,13 +1,14 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import HTTPTypes
 import IMV2Core
-import IMV2Server
 import Vapor
 
 public struct V2VaporGroupInvitationOperationRoutes: Sendable {
     private let authenticator:any V2GatewayAuthenticator
-    private let coordinator:V2ActorInvitationCoordinator
-    public init(authenticator:any V2GatewayAuthenticator,coordinator:V2ActorInvitationCoordinator) { self.authenticator=authenticator;self.coordinator=coordinator }
+    private let coordinator:any V2GroupInvitationOperationHandling
+    public init(authenticator:any V2GatewayAuthenticator,coordinator:any V2GroupInvitationOperationHandling) { self.authenticator=authenticator;self.coordinator=coordinator }
     public func register(on routes:RoutesBuilder) {
         routes.get("v2","rooms",":roomID","invitation-operations","baseline") { request async throws -> Response in
             let actor=try await request.v2AuthenticatedAccountIdentity(using:authenticator)

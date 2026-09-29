@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Foundation
 import HTTPTypes
 import IMV2ActorContracts
@@ -7,6 +9,7 @@ import Testing
 import Vapor
 import VaporTesting
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 struct V2VaporReadReceiptRecoveryRoutesTests {
     @Test("read recovery binds the room/actor and keeps current unavailability distinct from original rejection")

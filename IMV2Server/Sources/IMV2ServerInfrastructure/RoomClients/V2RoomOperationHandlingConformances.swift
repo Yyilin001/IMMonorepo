@@ -1,0 +1,7 @@
+import IMV2ServerContracts
+
+extension V2RoomRefMessagingClient: V2MessageMutationOperationHandling, V2MessageReactionOperationHandling {}
+extension V2RoomRefAdministrationClient: V2MemberAdministrationOperationHandling,
+    V2MembershipOperationHandling, V2GroupCapabilityOperationHandling,
+    V2MessageModerationOperationHandling, V2PersonalPreferenceRecovering {}
+extension V2RoomRefQueryClient: V2ReadReceiptRecovering {}

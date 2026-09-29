@@ -1,4 +1,7 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 /// Runs a controlled database/provider interleaving inside the real worker's
 /// outstanding copy call. Byte I/O still uses the actual local copier.

@@ -1,5 +1,8 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import Dispatch
 import Foundation
+@testable import IMV2ServerGateway
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -9,6 +12,7 @@ import Darwin
 @preconcurrency import NIOTLS
 import Synchronization
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 import Testing
 
 /// 手动容量实验：真实 TLS 套接字 + 生产前台写队列，不接入认证和数据库。

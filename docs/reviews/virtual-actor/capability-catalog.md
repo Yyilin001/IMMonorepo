@@ -36,8 +36,8 @@ The DTO register additionally includes the nine group-avatar intent, receipt, pr
 | Q7 room state/sync | `V2RoomStateReading.states([RoomID], UserID) → [RoomID: V2RoomStateReadResult]`; `V2RoomRecoveryCommandHandling.batch(IMV2RoomSyncStateBatch, UserID) → IMV2Envelope` | cursor/snapshot revision, no operation ID. | R; per-room membership/owner validation, partial unavailable distinct from empty. | D3; Server read result and protobuf boundary mapper. |
 | Q8 user room directory | `V2UserRoomDirectoryReading.rooms(UserID, RoomID?, Int) → V2UserRoomDirectorySlice` | pagination cursor. | R; user projection/control boundary with room topology lookup; do not activate every room just to enumerate. | D3; Server slice mapper. |
 | K1 direct open | `V2DirectMessagingStore.open(V2OpenDirectRoomCommand, V2CapacityProfile, String, RoomID, Date) → V2OpenDirectRoomOutcome` | `DirectRoomOperationID`; unordered user pair and preallocated stable room ID. | P; creation coordinator before activation, pair lock and bootstrap transaction; subsequent room writes require token. | D4; Core command, Server outcome. |
-| K2 group create | `V2GroupMessagingStore.create(V2CreateGroupRoomCommand, ..., RoomID, EventID, Date) → V2CreateGroupRoomOutcome` | `GroupRoomOperationID`; title/class/member set and allocated room ID. | P; creation bootstrap plus control intent/manifest; no ordinary missing-room activation. | D4; Core command, Server outcome. |
-| K3 staged group | `V2GroupAudienceImportStore.begin/append/freeze/complete/cancel/recoverableFinalizing` + `V2StagedGroupMessagingStore.createStaged` + creation intent `prepare/finalizeCommitted` | `GroupRoomOperationID`; frozen manifest/member pages and fixed room ID. | P; control draft/intent, room bootstrap and resume idempotently; append/freeze/cancel are coordinator operations. | D4; distinct stage wire cases and Server draft/import/outcome mappers. |
+| K2 group create | `V2GroupCreationOperationHandling.finalize(V2GroupCreationIntent, Date, deadline) → V2GroupCreationOperationResult` | `GroupRoomOperationID`; title/class/member set and allocated room ID. | P; creation bootstrap plus control intent/manifest; no ordinary missing-room activation. | D4; Core command, Server outcome. |
+| K3 staged group | `V2GroupCreationOperationHandling.begin/append/finalize/recover` + `V2GroupRoomBootstrapExecuting.stageControlValidatedAudience/createProvenGroup` | `GroupRoomOperationID`; frozen manifest/member pages and fixed room ID. | P; control draft/intent, room bootstrap and resume idempotently; append/freeze/cancel are coordinator operations. | D4; distinct stage wire cases and Server draft/import/outcome mappers. |
 | K4 invite create/revoke | `V2GroupInvitationStore.create/revoke` + `V2GroupInviteDirectory.prepare/finalize` | `GroupInviteOperationID`; token digest, room, policy/expiry. | P; global directory and room invite state coordinated, fresh room membership/role check. | D4; Server persistence DTO, Core invite result; never put secret token in logs. |
 | K5 invite preview/submit | `V2GroupInvitationStore.preview/submit` | submit token digest + applicant + durable request identity in persistence request; preview is read. | Preview R, submit P by stored request/receipt; control quota/identity and target room acceptance separated. | D4; Server request/outcome mapper. |
 | K6 join decide/cancel | `V2GroupInvitationStore.approve/reject/cancel/pendingRequests` | `GroupJoinDecisionOperationID` for approve/reject; cancel uses persistent request state. | P for decisions; reviewer role, global quota, membership/event and request state atomic where applicable; pending query R. | D4; Server outcome/record page mapper. |
@@ -54,7 +54,7 @@ Control/user-domain methods deliberately outside room command dispatch: `setStra
 
 ## Serialization and mapper rule
 
-The generic `V2Identifier<Tag>` and several Core leaves implement `Codable`, but **most enclosing command/outcome types do not**. Do not infer wire suitability from `Sendable` or from a Codable leaf. `IMV2Core` owns commands including `V2SendMessageCommand`, `V2EditMessageCommand`, `V2WithdrawMessageCommand`, `V2ChangeMessageReactionCommand`, `V2ChangeRoomMembershipCommand`, `V2ModerationCommand`, `V2RecordReadReceiptCommand`, `V2ForwardMessagesCommand`, `V2ForwardMessageResult`, `V2CreateGroupRoomCommand`; these are `Sendable` without `Codable`. `IMV2Server` owns authenticated façades and outcomes (`V2AuthenticatedSendMessage`, `V2SendMessageOutcome`, `V2MessageEditOutcome`, `V2RoomMembershipChangeOutcome`, `V2GroupNicknamePage`, invitation persistence DTOs, read/recovery pages); they also are generally `Sendable` only. Exceptions must be checked type by type: `V2GroupMemberPresentation`, `V2ContactAlias`, `V2ForwardMessageReference`, and `V2ProfileRevision` are Codable leaves. Contracts should define explicit versioned wire enums; the owning D package maps to/from its Core/Server types and maps each associated-value outcome/error. No DB connection, provider target, closure, control grant, or actor ID crosses RPC.
+The DTO index records each current declaration and its actual target. Core commands and operation values vary in serialization: `V2SendMessageCommand` and `V2GroupCreationIntent` are `Codable`, while `V2ForwardMessageResult` is only `Sendable`. Authenticated façades and outcomes live across `IMV2ServerContracts` and `IMV2ServerApplication`; check the indexed declaration before using a value as wire data. Actor wire types remain explicit and versioned, and the owning application layer maps associated-value outcomes and errors. No database connection, provider target, closure, control grant, or actor ID crosses RPC.
 
 `RoomID`/`UserID`/`MessageID`/`EventID` are `IMV2Core/Identifiers.swift` aliases of `V2Identifier<Tag>`; domain operation IDs are aliases there too. The [DTO type register](dto-types.json) resolves all **124 distinct named parameter/result types** in the exact signatures plus nested payload and façade types (231 entries total) to target, file and line. It also lists source member declarations/cases and records whether the type explicitly conforms to `Codable` (75 of 231 do; identifier aliases inherit generic conformance). Member extraction is a review aid: computed properties and nested type semantics still require reading source. Protobuf `IMV2*` types are generated in the Server target and are `Sendable`, not Swift `Codable`. A `false` flag means a mapper is required for Contracts JSON/binary Codable envelopes even if an existing protobuf serializer exists. The exact Swift signatures are preserved below so the C0 wire contract can be reviewed against the current API.
 
@@ -63,7 +63,7 @@ The generic `V2Identifier<Tag>` and several Core leaves implement `Codable`, but
 Source extraction lists declared methods, not extension defaults or runtime coverage. Line numbers are from the frozen source tree. Public service façades that construct IDs/time/limits and call these protocols remain owned by their D package. The owner-validated variants are infrastructure adapters, not additional user capabilities.
 ## V2RoomLatestVisibleReading (PostgresV2RoomLatestVisibleStore.swift:12)
 - `func latestVisible(roomIDs: [RoomID], actorUserID: UserID) async throws -> [RoomID: V2RoomLatestVisibleResult]`
-## V2ContentReviewStore (V2ContentReviewWorker.swift:152)
+## V2ContentReviewStore (IMV2ServerApplication/V2ContentReviewWorker.swift:152)
 - `func claimPending(now: Date, leaseDuration: TimeInterval, limit: Int) async throws -> [V2ContentReviewLease]`
 - `func validateAndRenew(_ lease: V2ContentReviewLease, now: Date, leaseDuration: TimeInterval) async throws -> V2ContentReviewLeaseValidation`
 - `func resolve(_ lease: V2ContentReviewLease, verdict: V2ContentReviewVerdict, now: Date) async throws -> Bool`
@@ -83,15 +83,11 @@ Source extraction lists declared methods, not extension defaults or runtime cove
 - `func forward(actorUserID: UserID, command: V2ForwardMessagesCommand) async throws -> [V2ForwardMessageResult]`
 ## V2ForwardWorkReplayStore (V2ForwardWorkOperatorReplay.swift:60)
 - `func replay(_ command: V2ForwardWorkReplayCommand, operatorPrincipal: String, now: Date) async throws -> V2DurableWorkReplayResult`
-## V2GroupAudienceImportStore (V2GroupAudienceImportService.swift:129)
-- `func begin(actorUserID: UserID, operationID: GroupRoomOperationID, title: String, policy: V2GroupAudienceImportPolicy, now: Date) async throws -> V2GroupAudienceDraft`
-- `func append(actorUserID: UserID, operationID: GroupRoomOperationID, memberUserIDs: [UserID], maximumMembers: Int, policy: V2GroupAudienceImportPolicy, now: Date) async throws -> V2GroupAudienceDraft`
-- `func freeze(actorUserID: UserID, operationID: GroupRoomOperationID, policy: V2GroupAudienceImportPolicy, now: Date) async throws -> V2GroupAudienceImport`
-- `func complete(actorUserID: UserID, operationID: GroupRoomOperationID, roomID: RoomID, policy: V2GroupAudienceImportPolicy, now: Date) async throws`
-- `func discardFrozen(actorUserID: UserID, operationID: GroupRoomOperationID, now: Date) async throws`
-- `func cancel(actorUserID: UserID, operationID: GroupRoomOperationID, now: Date) async throws`
-- `func purgeExpired(now: Date, limit: Int) async throws -> Int`
-- `func recoverableFinalizing(now: Date, staleAfter: TimeInterval, limit: Int) async throws -> [V2GroupAudienceRecoveryCandidate]`
+## V2GroupCreationOperationHandling (IMV2ServerContracts/V2HTTPOperationHandling.swift)
+- `func begin(_ intent: V2GroupCreationIntent, now: Date) async throws -> V2GroupCreationOperationResult`
+- `func append(_ request: V2GroupCreationAppendRequest, now: Date) async throws -> V2GroupCreationOperationResult`
+- `func finalize(_ intent: V2GroupCreationIntent, now: Date, deadline: ContinuousClock.Instant) async throws -> V2GroupCreationOperationResult`
+- `func recover(_ request: V2GroupCreationRecoveryRequest, now: Date) async throws -> V2GroupCreationOperationResult`
 ## V2GroupCapabilitiesStore (V2GroupCapabilitiesService.swift:8)
 - `func setPinnedMessage(actorUserID: UserID, command: V2PinnedMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage>`
 - `func setAnnouncement(actorUserID: UserID, command: V2GroupAnnouncementCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement>`
@@ -110,33 +106,21 @@ Source extraction lists declared methods, not extension defaults or runtime cove
 - `func approve(roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID, operationID: GroupJoinDecisionOperationID, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupJoinApprovalPersistenceOutcome`
 - `func cancel(roomID: RoomID, requestID: GroupJoinRequestID, applicantUserID: UserID, now: Date) async throws -> V2GroupJoinRequestRecord`
 - `func reject(roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID, operationID: GroupJoinDecisionOperationID, now: Date) async throws -> V2GroupJoinDecisionPreparationOutcome`
-## V2GroupInviteCreationRecoveryStoring (V2GroupInviteCreationRecoveryWorker.swift:30)
+## V2GroupInviteCreationRecoveryStoring (IMV2ServerApplication/V2GroupInviteCreationRecoveryWorker.swift:37)
 - `func claim(limit: Int, now: Date, lease: TimeInterval, maximumActiveInvitesPerRoom: Int) async throws -> [V2GroupInviteCreationRecoveryClaim]`
 - `func fail(_ claim: V2GroupInviteCreationRecoveryClaim, reason: V2GroupInviteCreationRecoveryFailure, retryAt: Date?, now: Date) async throws -> Bool`
-## V2GroupInviteCreationResuming (V2GroupInviteCreationRecoveryWorker.swift:58)
+## V2GroupInviteCreationResuming (IMV2ServerApplication/V2GroupInviteCreationRecoveryWorker.swift:65)
 - `func resumeCreation(_ intent: V2GroupInviteCreationIntent, now: Date) async throws`
 ## V2GroupInviteDirectory (V2GroupInviteDirectory.swift:36)
 - `func prepare(_ request: V2GroupInviteCreatePersistenceRequest) async throws -> V2GroupInviteCreationIntent`
 - `func finalize(_ intent: V2GroupInviteCreationIntent, now: Date) async throws`
 - `func resolve(tokenDigest: Data) async throws -> V2GroupInviteLocation?`
 - `func readyInvites(roomID: RoomID, inviteIDs: Set<GroupInviteID>) async throws -> Set<GroupInviteID>`
-## V2GroupMessagingStore (V2GroupMessagingService.swift:26)
-- `func create( command: V2CreateGroupRoomCommand, capacityProfile: V2CapacityProfile, roomShardID: String, roomID: RoomID, eventID: EventID, now: Date ) async throws -> V2CreateGroupRoomOutcome`
-## V2ControlValidatedGroupMessagingStore (V2GroupMessagingService.swift:52)
-- `func createControlValidated( command: V2CreateGroupRoomCommand, validatedMemberUserIDs: [UserID], capacityProfile: V2CapacityProfile, roomShardID: String, roomID: RoomID, eventID: EventID, now: Date ) async throws -> V2CreateGroupRoomOutcome`
-## V2StagedGroupMessagingStore (V2GroupMessagingService.swift:80)
-- `func createStaged( command: V2StagedGroupRoomCommand, capacityProfile: V2CapacityProfile, roomShardID: String, roomID: RoomID, eventID: EventID, now: Date ) async throws -> V2CreateGroupRoomOutcome`
-## V2GroupRolePolicyBaselineReading (V2GroupRolePolicyBaseline.swift:7)
+## V2GroupRoomBootstrapExecuting (IMV2ServerApplication/Room/V2RoomBootstrapExecutionPorts.swift)
+- `func stageControlValidatedAudience(intent: V2GroupRoomCreationIntent, page: V2GroupRoomCreationManifestPage, now: Date) async throws`
+- `func createProvenGroup(intent: V2GroupCreationIntent, placement: V2GroupRoomCreationIntent, capacityProfile: V2CapacityProfile, now: Date) async throws -> V2GroupCreationOperationResult`
+## V2GroupRolePolicyBaselineReading (IMV2ServerContracts/V2GroupRolePolicyBaseline.swift)
 - `func readRolePolicyBaseline(roomID: RoomID, actorUserID: UserID) async throws -> V2GroupRolePolicyBaseline`
-## V2GroupRoomCreationIntentStore (V2GroupRoomCreationIntent.swift:114)
-- `func prepare( _ candidate: V2GroupRoomCreationIntent, memberUserIDs: [UserID], now: Date ) async throws -> V2PrepareGroupRoomCreationIntentOutcome`
-- `func prepareStaged( _ candidate: V2GroupRoomCreationIntent, command: V2StagedGroupRoomCommand, now: Date ) async throws -> V2PrepareGroupRoomCreationIntentOutcome`
-- `func memberUserIDs( for intent: V2GroupRoomCreationIntent ) async throws -> [UserID]`
-- `func memberUserIDSlice( for intent: V2GroupRoomCreationIntent, afterUserID: UserID?, limit: Int ) async throws -> V2GroupRoomCreationManifestSlice`
-- `func finalizeCommitted( _ intent: V2GroupRoomCreationIntent, now: Date ) async throws -> V2GroupRoomCreationIntent`
-## V2ControlValidatedStagedGroupMessagingStore (V2GroupRoomCreationManifest.swift:98)
-- `func stageControlValidatedAudience( intent: V2GroupRoomCreationIntent, page: V2GroupRoomCreationManifestPage, now: Date ) async throws`
-- `func createControlValidatedStaged( command: V2StagedGroupRoomCommand, intent: V2GroupRoomCreationIntent, capacityProfile: V2CapacityProfile, now: Date ) async throws -> V2CreateGroupRoomOutcome`
 ## V2MediaDownloadTargetResolving (V2MediaEdgeDownloadService.swift:8)
 - `func downloadTarget(actorUserID: UserID, deviceID: DeviceID, mediaID: MediaID, message: V2MediaMessageLocation?) async throws -> V2ResourceTransferPlan`
 ## V2MediaDownloadSessionStore (V2MediaProviderSessionService.swift:74)
@@ -236,13 +220,13 @@ All are in target `IMV2Server`; DTO target and Codable details are in the type r
 | `V2ReadReceiptService.swift:331` | `public func record(_ request: V2AuthenticatedReadReceipt) async throws -> V2ReadReceiptOutcome` |
 | `V2DirectMessagingService.swift:236` | `public func open(actorUserID: UserID, operationID: DirectRoomOperationID, targetUserID: UserID) async throws -> V2OpenDirectRoomOutcome` |
 | `V2GroupMessagingService.swift:232,291` | `public func create(actorUserID: UserID, operationID: GroupRoomOperationID, title: String, initialMemberUserIDs: [UserID]) async throws -> V2CreateGroupRoomOutcome`; `public func createStaged(actorUserID: UserID, operationID: GroupRoomOperationID, title: String, stagedMemberCount: Int) async throws -> V2CreateGroupRoomOutcome` |
-| `V2GroupAudienceImportService.swift:165–225` | `public func begin(actorUserID: UserID, operationID: GroupRoomOperationID, title: String) async throws -> V2GroupAudienceDraft`; `public func append(actorUserID: UserID, operationID: GroupRoomOperationID, memberUserIDs: [UserID]) async throws -> V2GroupAudienceDraft`; `public func finalize(actorUserID: UserID, operationID: GroupRoomOperationID) async throws -> V2CreateGroupRoomOutcome`; `public func cancel(actorUserID: UserID, operationID: GroupRoomOperationID) async throws` |
+| `IMV2ServerContracts/V2HTTPOperationHandling.swift:26` | `V2GroupCreationOperationHandling.begin/append/finalize/recover` takes `V2GroupCreationIntent`, `V2GroupCreationAppendRequest`, or `V2GroupCreationRecoveryRequest` and returns `V2GroupCreationOperationResult`; implementation is `PostgresV2GroupCreationOperationStore`. |
 | `V2GroupInvitationService.swift:365–435` | `public func create(_ request: V2CreateGroupInviteRequest) async throws -> V2GroupInviteLink`; `public func revoke(inviteID: GroupInviteID, roomID: RoomID, actorUserID: UserID, operationID: GroupInviteOperationID) async throws`; `public func preview(secret: V2GroupInviteSecret, applicantUserID: UserID) async throws -> V2GroupInvitePreview?`; `public func submit(_ request: V2SubmitGroupJoinRequest) async throws -> V2GroupJoinSubmissionPersistenceOutcome`; `public func cancel(roomID: RoomID, requestID: GroupJoinRequestID, applicantUserID: UserID) async throws -> V2GroupJoinRequest`; `public func decide(_ input: V2DecideGroupJoinRequest) async throws -> V2GroupJoinDecisionOutcome` |
 | `V2MediaProviderSessionService.swift:127` | `public func exchangeDownload(actorUserID: UserID, deviceID: DeviceID, downloadSessionID: MediaDownloadSessionID) async throws -> V2ResourceTransferPlan` |
 | `V2ForwardDeliveryWorker.swift:94` | `public func runOnce(sourceShardID: String, limit: Int) async throws -> V2ForwardDeliveryReport` |
 | `V2ForwardMediaImportWorker.swift:131` | `public func runOnce(exportID: UUID) async throws -> V2ForwardMediaImportOutcome` |
-| `V2GroupInviteCreationRecoveryWorker.swift:113` | `public func runOnce(limit: Int = 8) async throws -> V2GroupInviteCreationRecoveryReport` |
-| `V2GroupJoinQuotaRecoveryWorker.swift:24` | `public func runOnce(limit: Int = 8) async throws -> V2GroupJoinQuotaRecoveryReport` |
-| `V2ContentReviewWorker.swift:244` | `public func runOnce(limit: Int) async throws -> V2ContentReviewReport` |
+| `IMV2ServerApplication/V2GroupInviteCreationRecoveryWorker.swift:120` | `public func runOnce(limit: Int = 8) async throws -> V2GroupInviteCreationRecoveryReport` |
+| `IMV2ServerApplication/V2GroupJoinQuotaRecoveryWorker.swift:31` | `public func runOnce(limit: Int = 8) async throws -> V2GroupJoinQuotaRecoveryReport` |
+| `IMV2ServerApplication/V2ContentReviewWorker.swift:278` | `public func runOnce(limit: Int) async throws -> V2ContentReviewReport` |
 | `V2RoomLogRetention.swift:262` | `public func runOnce(limit: Int) async throws -> V2RoomLogTrimReport` |
 | `V2ControlPlaneHousekeepingWorker.swift:102` | `public func runOnce(limit: Int) async throws -> V2ControlPlaneHousekeepingReport` |

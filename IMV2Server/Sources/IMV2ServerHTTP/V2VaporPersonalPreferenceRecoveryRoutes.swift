@@ -1,13 +1,14 @@
+import IMV2ServerApplication
+import IMV2ServerContracts
 import Foundation
 import HTTPTypes
 import IMV2Core
-import IMV2Server
 import Vapor
 
 public struct V2VaporPersonalPreferenceRecoveryRoutes: Sendable {
     private let authenticator: any V2GatewayAuthenticator
-    private let administration: V2RoomRefAdministrationClient
-    public init(authenticator: any V2GatewayAuthenticator, administration: V2RoomRefAdministrationClient) {
+    private let administration: any V2PersonalPreferenceRecovering
+    public init(authenticator: any V2GatewayAuthenticator, administration: any V2PersonalPreferenceRecovering) {
         self.authenticator = authenticator
         self.administration = administration
     }

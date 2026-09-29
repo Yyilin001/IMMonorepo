@@ -1,3 +1,5 @@
+@testable import IMV2ServerApplication
+@testable import IMV2ServerContracts
 import FluentKit
 import Foundation
 import IMV2Core
@@ -7,6 +9,7 @@ import Synchronization
 import SQLKit
 import Testing
 @testable import IMV2Server
+@testable import IMV2ServerInfrastructure
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("bounded mixed-source pages consume invisible windows without skipping later visible events", arguments: [1, 3, 5])
