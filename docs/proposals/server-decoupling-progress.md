@@ -17,6 +17,7 @@
 - 当前提交 `e209dbd313317e9ac6a456a7591b578f4e7642bb` 在干净源码 checkout 中完成六个 Linux Release 产品构建，`~/.codex/virtual-actor-builds/server-decoupling-20260930-current-six-release-r2/result.json` 为 `passed=true`，记录锁文件及每个产品哈希。首次使用空 SwiftPM scratch 的构建在依赖获取阶段因容器缓存目录缺失失败，未进入源码编译；复用已锁定依赖的 scratch 后通过。此构建不替代当前提交的运行与性能验收。
 - 同一 `e209dbd3` 源码与六产品构建在本机一次性独立 Host 应用栈通过，`~/.codex/virtual-actor-builds/server-decoupling-20260930-current-app-run/run-52a09bafb5b342388590a4877cec5802/result.json` 为 `passed=true`，模式为 `remote-gateway`。Gateway 仅作为 caller，直聊接受与收件方房间日志交付通过；Account HTTPS、Operator 禁号、TLS、私有指标及 Actor HTTP 昵称、邀请、媒体发送/下载均通过。该运行只覆盖当前源码的这一种模式，其他故障与性能结果仍按各自源码版本解释。
 - 启动后失败的资源归属修复见 `4a39bac9`：若 Host/caller 节点清理抛错或排空未完成，`V2RoomActorApplication.start` 统一返回 `incompleteShutdown`；Gateway/Account 在此情况下直接以失败状态退出进程，不会提前关闭节点仍可能使用的数据库和事件循环。两种受影响 macOS 产品编译通过，未执行该异常路径的进程级故障注入；先前应用栈结果不覆盖此提交。
+- 该修复的 Linux Release 编译已补齐：干净源码 `cffda8e53f8376e9992176084b7b9b022ff70dbf` 的 `IMV2AccountServerApp`、`IMV2ServerApp`、`VirtualActorBusinessProbe` 均通过，证据 `~/.codex/virtual-actor-builds/server-decoupling-20260930-startup-drain-release/result.json` 记录源码、锁文件、固定镜像与三个产物哈希。专用 Colima profile 在构建后停止；此结果只证明编译。
 - 真实远端服务器已停机，不属于本轮验证。性能基线对照与完整故障矩阵仍未执行，因此 P6 整体验收尚未完成。
 
 ## 代码收尾结果（2026-09-29）
