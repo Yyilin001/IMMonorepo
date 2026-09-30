@@ -2,7 +2,7 @@
 
 ## 当前范围（2026-09-30）
 
-代码改造、macOS 编译与受影响定向回归已通过；本机 Linux Release、四种一次性应用栈模式、G4/G6 及三数据库定向断链专项也已通过。真实远端服务器已停机，验证只使用本机隔离环境。PostgreSQL 整库重启、完整故障矩阵和性能对照仍待执行；不能用应用栈冒烟替代。此前 2026-09-28 暂停时中断的原生排空、媒体崩溃和 G4 构建不计为通过。
+代码改造、macOS 编译与受影响定向回归已通过；本机 Linux Release、四种一次性应用栈模式、G4/G6 及三数据库定向断链和 owner-a 整库重启专项也已通过。真实远端服务器已停机，验证只使用本机隔离环境。完整故障矩阵和性能对照仍待执行；不能用应用栈冒烟替代。此前 2026-09-28 暂停时中断的原生排空、媒体崩溃和 G4 构建不计为通过。
 
 
 本文记录可复用的验收入口及其执行条件。下方命令是可复用入口，是否已执行以表格与实施记录为准；不能仅因命令存在就视为通过。分批结果见[实施进度](server-decoupling-progress.md)和[Virtual Actor 证据目录](../reviews/virtual-actor/README.md)；源码继续变化后，旧结果不能代替最终验收。每次运行需保存源码 SHA、命令、环境开关、实际 started/passed/skipped 数、退出码和日志。
@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | 源码边界与模块 | `python3 scripts/check_v2_server_boundaries.py`；受影响 Server suite | 六个 Linux Release 产品、protobuf 生成比对、schema readiness 已通过；仍需运行配置与其余受影响检查 |
 | HTTP、认证、运维和 Gateway | 下方定向 filter；只数实际执行测试 | 本机四种 Account/Gateway/Operator 栈均已通过；仍需核对未覆盖的定向 suite |
-| 房间事务和恢复 | 下方真 PostgreSQL 精筛；独立 COMMIT ACK 丢失库 | G4/G6 与三库定向断链已通过；仍需整库重启及完整受影响矩阵 |
+| 房间事务和恢复 | 下方真 PostgreSQL 精筛；独立 COMMIT ACK 丢失库 | G4/G6、三库定向断链及 owner-a 整库重启已通过；仍需完整受影响矩阵 |
 | 性能 | 不在每次源码编辑后运行容量负载 | P0 对照与最终源码采用同一 Linux Release 构建模式、fixture、机器、连接池和负载，各至少三次 |
 
 日常定向回归不需要运行完整 ClientKit；最终全量检查仍用 `bash scripts/run_v2_swift_tests.sh`。该脚本运行 Core、ClientKit、Server（后两者串行）及边界、protobuf、schema、配置和文档检查。CI 的 [verify.yml](../../.github/workflows/verify.yml) 还构建 `IMV2AccountServerApp`、`IMV2OperatorServerApp`、`IMV2ServerApp`、`IMV2LocalGatewayProbe`、`IMV2GatewayLoadGenerator` 的 Linux Release 产品，并在 PostgreSQL 服务下运行 Server 全量测试。最终必须核对本轮源码对应的实跑结果；进度文档中的定向通过只覆盖当时稳定点。
@@ -117,7 +117,9 @@ CI 另外显式配置 `IMV2_ACTOR_TRANSACTION_*`、`ACTOR_HOST_G2_*`、`ACTOR_PA
 
 两项最终运行的 `source-sha.txt` 均为 `56e45bef53fc30a6e4a4a3e64e3af3d00e9a5f51`。G4 首次构建遇到 SwiftPM 依赖缓存获取错误，未进入业务场景；测试入口改为锁定依赖版本后构建通过。随后探针 Host 因缺少测试邀请密钥在启动前失败，修正后又发现调用 helper 将日志与订阅响应误判为发送回执；两项探针问题修正后重新运行，最终结果见表格。CI 已有 G4/G6 Linux job；真实应用栈目前不在 required CI gate 中。
 
-三数据库定向断链使用[DB-edge runner](../../IMV2/scripts/test_v2_virtual_actor_database_edges.py)及与源码提交 `f65b19cdcec33f3c2ca60567a56890151bc30ac7` 匹配的 Linux Release `VirtualActorBusinessProbe`。最终 `~/.codex/virtual-actor-builds/server-decoupling-20260930-db-edge-run-r4/result.json` 为 `passed=true`、`cleanupErrors=[]`，记录了 Host A 到 control、owner-a 的两次独立网络断开，并确认只终止目标链路上的 PostgreSQL 会话。runner 实际验证未受影响的 Host/数据库仍可用、故障期间无持久业务副作用、恢复后 edit 回执及 message/completion 各恰好一份，三个 Actor 进程均正常关闭。构建来源及产品哈希在 `~/.codex/virtual-actor-builds/server-decoupling-20260930-db-edge-probe-release-r4/result.json`。此前失败分别来自探针未提供隔离邀请密钥、查询已删除的编辑 operation 表、以及将安全退休后租约过期误判为 owner 数据库不可用；修正后重跑通过。runner 的 `--database-restart` 可选阶段未执行，不能将断链结果当成整库重启验收。
+三数据库定向断链使用[DB-edge runner](../../IMV2/scripts/test_v2_virtual_actor_database_edges.py)及与源码提交 `f65b19cdcec33f3c2ca60567a56890151bc30ac7` 匹配的 Linux Release `VirtualActorBusinessProbe`。首次通过的 `~/.codex/virtual-actor-builds/server-decoupling-20260930-db-edge-run-r4/result.json` 为 `passed=true`、`cleanupErrors=[]`，记录了 Host A 到 control、owner-a 的两次独立网络断开，并确认只终止目标链路上的 PostgreSQL 会话。runner 实际验证未受影响的 Host/数据库仍可用、故障期间无持久业务副作用、恢复后 edit 回执及 message/completion 各恰好一份，三个 Actor 进程均正常关闭。构建来源及产品哈希在 `~/.codex/virtual-actor-builds/server-decoupling-20260930-db-edge-probe-release-r4/result.json`。此前失败分别来自探针未提供隔离邀请密钥、查询已删除的编辑 operation 表、以及将安全退休后租约过期误判为 owner 数据库不可用；修正后重跑通过。首次通过时未启用 runner 的 `--database-restart` 可选阶段，整库重启证据来自下述复跑。
+
+随后使用同一源码和探针增加 `--database-restart` 复跑，证据 `~/.codex/virtual-actor-builds/server-decoupling-20260930-db-edge-restart-run/result.json` 为 `passed=true`、`cleanupErrors=[]`。owner-a PostgreSQL 容器在保留数据和三个 Actor 进程的条件下实际停止、重启，`pg_postmaster_start_time()` 改变；故障期间另一 owner 继续处理，恢复后的 caller 重放只有一份持久结果，原租约保持有效。该轮也重跑并通过 control/owner 两次断链。专用 Colima profile 在运行后关闭。
 
 ```sh
 # G4：caller 先起，独立 Host SIGKILL、租约到期、替代 Host 接管与幂等重放。
