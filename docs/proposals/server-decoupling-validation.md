@@ -6,6 +6,8 @@
 
 提交 `943697d7` 调整了 RoomWrite 提交后效果的结果校验顺序。该提交的 macOS 测试目标编译及 `V2RoomWriteCommitEffectsTests` 定向测试通过；当前提交 `e209dbd313317e9ac6a456a7591b578f4e7642bb` 的六个 Linux Release 产品及独立 Host 应用栈也已通过，证据分别为 `~/.codex/virtual-actor-builds/server-decoupling-20260930-current-six-release-r2/result.json` 和下述当前应用栈结果。此前其他模式及数据库故障证据对应更早源码，不能代替这处改动的完整运行验证。运行配置样例检查通过；Account/Gateway/Operator 配置测试 49 项通过，Actor 配置测试 3 项中 2 项通过、1 项因缺少生成的本地部署文件按条件跳过。
 
+提交 `4a39bac9` 修复 Actor 启动后失败且节点排空未完成时的资源释放边界：Host/caller 清理失败统一报 `incompleteShutdown`，Gateway/Account 先终止进程，再由操作系统回收资源。`IMV2AccountServerApp` 和 `IMV2ServerApp` 的 macOS 产品构建通过；尚未运行注入启动后故障并阻塞排空的进程级专项，因此旧的正常启动和 busy SIGTERM 结果不能证明该异常路径。
+
 
 本文记录可复用的验收入口及其执行条件。下方命令是可复用入口，是否已执行以表格与实施记录为准；不能仅因命令存在就视为通过。分批结果见[实施进度](server-decoupling-progress.md)和[Virtual Actor 证据目录](../reviews/virtual-actor/README.md)；源码继续变化后，旧结果不能代替最终验收。每次运行需保存源码 SHA、命令、环境开关、实际 started/passed/skipped 数、退出码和日志。
 

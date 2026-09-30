@@ -16,6 +16,7 @@
 - RoomWrite 提交后收尾现先校验单条或整批持久结果，再发布缓存、结算额度与记录热度；修复了结果转换或批量下标异常时先产生进程内效果、随后报告结果不明的顺序问题。提交 `943697d7` 的两条错误路径回归、`V2RoomWriteCommitEffectsTests` 定向测试及 macOS 全包测试目标编译通过。运行配置样例检查和 Account/Gateway/Operator/Actor 配置定向测试也通过；配置测试中一项需生成本地部署文件的用例按条件跳过。
 - 当前提交 `e209dbd313317e9ac6a456a7591b578f4e7642bb` 在干净源码 checkout 中完成六个 Linux Release 产品构建，`~/.codex/virtual-actor-builds/server-decoupling-20260930-current-six-release-r2/result.json` 为 `passed=true`，记录锁文件及每个产品哈希。首次使用空 SwiftPM scratch 的构建在依赖获取阶段因容器缓存目录缺失失败，未进入源码编译；复用已锁定依赖的 scratch 后通过。此构建不替代当前提交的运行与性能验收。
 - 同一 `e209dbd3` 源码与六产品构建在本机一次性独立 Host 应用栈通过，`~/.codex/virtual-actor-builds/server-decoupling-20260930-current-app-run/run-52a09bafb5b342388590a4877cec5802/result.json` 为 `passed=true`，模式为 `remote-gateway`。Gateway 仅作为 caller，直聊接受与收件方房间日志交付通过；Account HTTPS、Operator 禁号、TLS、私有指标及 Actor HTTP 昵称、邀请、媒体发送/下载均通过。该运行只覆盖当前源码的这一种模式，其他故障与性能结果仍按各自源码版本解释。
+- 启动后失败的资源归属修复见 `4a39bac9`：若 Host/caller 节点清理抛错或排空未完成，`V2RoomActorApplication.start` 统一返回 `incompleteShutdown`；Gateway/Account 在此情况下直接以失败状态退出进程，不会提前关闭节点仍可能使用的数据库和事件循环。两种受影响 macOS 产品编译通过，未执行该异常路径的进程级故障注入；先前应用栈结果不覆盖此提交。
 - 真实远端服务器已停机，不属于本轮验证。性能基线对照与完整故障矩阵仍未执行，因此 P6 整体验收尚未完成。
 
 ## 代码收尾结果（2026-09-29）
@@ -53,7 +54,7 @@
 | P0 | 源码边界检查、初始违规基线和逐文件迁移清单已建立 | 可比较的性能基线尚未实测 |
 | P1 | 资源生命周期/导入/迁移/展示依赖接口和强类型快照；SQL 与数据库接线分离；定向资源 PostgreSQL 回归通过 | 完整受影响矩阵仍待最终验收 |
 | P2 | HTTP operation 与文件流入口依赖能力接口；Gateway 按命令族分派；四种本机应用栈模式通过 | 其余受影响路由 suite 待最终验收 |
-| P3 | 房间业务执行与 PostgreSQL 适配分离，工厂组装五类能力；本机 G4/G6 接管与围栏通过 | 其余生命周期/取消矩阵待最终验收 |
+| P3 | 房间业务执行与 PostgreSQL 适配分离，工厂组装五类能力；本机 G4/G6 接管与围栏通过；启动失败后未排空的节点不会触发共享资源关闭 | 其余生命周期/取消矩阵及启动故障注入待最终验收 |
 | P4 | scalar/direct fast/rich batch/hybrid/forward 路径、授权与事务协调、提交后处理及组合状态已收拢；提交后效果先校验结果；原生故障定向回归通过 | 扩展故障矩阵与热点性能对照尚未完成 |
 | P5 | Contracts/Application/Infrastructure/Gateway/HTTP 已独立；旧 Server 收敛为 15 个组装/配置文件；当前源码的六个 Linux Release 产品和运行配置定向检查通过 | 完整受影响测试仍待最终验收 |
 | P6 | 原生跨库、Host 恢复、COMMIT ACK-loss、SIGKILL 定向场景，本机四种应用栈模式、G4/G6、独立 control/owner 链路断开及 owner-a PostgreSQL 重启已通过；当前源码另通过独立 Host 应用栈 | 完整故障矩阵与性能对照按此前要求暂缓，整体验收未完成 |

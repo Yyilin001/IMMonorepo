@@ -33,4 +33,6 @@ Account 与所有承载房间的 Gateway 必须从部署 secret 配置读取相�
 
 应用停止监听后先停止/排空工作器与连接，再等待 RoomDirectory 的实际 owner/lease 查询和 Cluster/Host 的实际请求结束，最后释放数据库池。排空超时会结束进程，不在活跃 SQL 下释放共享资源。本地 Compose 为这个关闭顺序保留 180 秒。
 
+启动过程中若 Cluster Host 或 caller 已部分启动、随后初始化失败，应用先尝试节点排空。排空抛错或超时时，Gateway/Account 直接退出进程，保留数据库及事件循环直到进程结束；启动后故障注入仍列在[验收矩阵](../../proposals/server-decoupling-validation.md)的未完成项。
+
 这些说明和生成器不是生产部署批准。本机应用栈及 G4/G6 多进程故障证据见[服务端验收矩阵](../../proposals/server-decoupling-validation.md)；完整故障矩阵与性能对照仍未完成。
