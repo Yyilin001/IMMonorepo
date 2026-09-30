@@ -136,7 +136,7 @@ struct V2ResourceProfilePresentationTests {
             guard case .acquired(let lease) = try await tokens.acquire(roomID: room, owner: identity.owner,
                 host: identity.host, duration: .init(30_000)) else { throw V2RoomActivationLeaseError.activationChanged }
             let executor = try V2RoomMediaAuthorizationDomainExecutor(database: database, token: lease.token)
-            let reader = V2ResourceProfilePresentationService(controlDatabase: database,
+            let reader = authorityService(database: database,
                 authorization: .init(query: { request, _ in try await executor.execute(request) }),
                 avatars: .init(delivery: NoProfileAvatarDelivery()))
             service = reader
@@ -427,6 +427,20 @@ struct V2ResourceProfilePresentationTests {
                   host: .init(hostID: .init("profile-host"), incarnationID: UUID()))
     }
 
+    private func authorityService(database: any Database, authorization: V2ActorRoomMediaAuthorizationPort,
+                                  avatars: V2ResourceAvatarDelivery) -> V2ResourceProfilePresentationService {
+        // These assertions exercise authorization through the real SQL reader.
+        // Skip coalescing delay so scheduler jitter cannot consume its 5 ms queue budget;
+        // batching, overload and admission retain their dedicated tests.
+        let reader = PostgresV2ProfileControlReader(database: database)
+        let control = V2ProfileControlBatcher(configuration: .init(delay: .zero), execute: {
+            try await reader.read($0, deadline: $1)
+        })
+        return .init(controlReads: control,
+            avatars: { try await avatars.authorizedAvatars(requests: $0, database: database) },
+            authorization: authorization)
+    }
+
     @Test("provider signing cannot hide a concurrent device, block, profile or membership change",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil),
           arguments: ["unchanged", "device", "block", "profile", "membership", "nickname", "nicknameCleared", "nicknameInserted"])
@@ -452,7 +466,7 @@ struct V2ResourceProfilePresentationTests {
             let proof = ProfileBatchProofState(.profilesVisible(.init(request: query, activation: token,
                 membershipRevision: 1, visibleTargetUserIDs: [target], observedAt: now, activationExpiresAt: now.addingTimeInterval(60),
                 groupMembers: scenario == "nicknameInserted" ? [] : [member])))
-            let service = V2ResourceProfilePresentationService(controlDatabase: database,
+            let service = authorityService(database: database,
                 authorization: .init(query: { _, _ in await proof.value() }),
                 avatars: .init(delivery: ChangingProfileAvatarDelivery {
                     switch scenario {
@@ -482,6 +496,7 @@ struct V2ResourceProfilePresentationTests {
                     #expect(value.groupMember?.groupNickname == "Before")
                 } else { #expect(result.results == [.retryable(key)]) }
             }
+            await service.close()
             try await resources.shutdown()
         } catch { try? await resources.shutdown(); throw error }
     }

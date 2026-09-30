@@ -40,6 +40,8 @@ public protocol V2ResourceImportPort: Sendable {
     func mark(_ locator: V2ResourceImportLocator, actor: UserID, device: DeviceID, state: V2ResourceImportState) async throws
     func releaseSource(_ request: V2ResourceImportRequest, actor: UserID) async throws
     func recoveryCandidates(ownerID: String, limit: Int) async throws -> [V2ResourceImportRecoveryItem]
+    /// Worker-only reconciliation of durable target closure; never grants client access or copies bytes.
+    func reconcileTargetClosure(_ item: V2ResourceImportRecoveryItem) async throws -> Bool
     func recordRecoveryFailure(_ item: V2ResourceImportRecoveryItem) async throws -> Bool
 }
 
@@ -71,8 +73,7 @@ public struct V2ResourceImportService: Sendable {
         if let session = snapshot.session {
             let current = try await resources.status(session.locator, actor: actor, device: device)
             if current.state == .completed {
-                let state: V2ResourceImportState = current.resourceState == .ready ? .ready
-                    : (current.resourceState == .rejected || current.resourceState == .deletionPending ? .failed : .processing)
+                let state = Self.importState(current)
                 try await persistence.mark(locator, actor: actor, device: device, state: state)
                 try await persistence.releaseSource(request, actor: actor)
                 return try .init(locator: locator, mediaID: request.targetMediaID, state: state,
@@ -100,11 +101,11 @@ public struct V2ResourceImportService: Sendable {
             byteCount: source.facts.byteCount, bytes: bytes)
         try await source.recheck()
         let completed = try await resources.finalize(.init(locator: session.locator, generation: session.generation), actor: actor, device: device)
-        try await persistence.mark(locator, actor: actor, device: device, state: .processing)
+        let state = Self.importState(completed)
+        try await persistence.mark(locator, actor: actor, device: device, state: state)
         try await persistence.releaseSource(request, actor: actor)
         return try .init(locator: locator, mediaID: request.targetMediaID,
-            state: completed.resourceState == .ready ? .ready : .processing,
-            bindableUntil: completed.resourceState == .ready ? completed.bindableUntil : nil)
+            state: state, bindableUntil: state == .ready ? completed.bindableUntil : nil)
     }
 
     public func status(_ locator: V2ResourceImportLocator, actor: UserID, device: DeviceID) async throws -> V2ResourceImportStatus {
@@ -113,9 +114,9 @@ public struct V2ResourceImportService: Sendable {
             return try outcome(snapshot, locator: locator)
         }
         let current = try await resources.status(session.locator, actor: actor, device: device)
+        let state = Self.importState(current)
         return try .init(locator: locator, mediaID: snapshot.request.targetMediaID,
-            state: current.resourceState == .ready ? .ready : ([.cancelled, .expired, .failed].contains(current.state) ? .failed : .processing),
-            bindableUntil: current.resourceState == .ready ? current.bindableUntil : nil)
+            state: state, bindableUntil: state == .ready ? current.bindableUntil : nil)
     }
 
     public func cancel(_ locator: V2ResourceImportLocator, actor: UserID, device: DeviceID) async throws -> V2ResourceImportStatus {
@@ -131,13 +132,25 @@ public struct V2ResourceImportService: Sendable {
     public func runOnce(ownerID: String, limit: Int = 16) async throws {
         for item in try await persistence.recoveryCandidates(ownerID: ownerID, limit: limit) {
             try Task.checkCancellation()
-            do { _ = try await resume(item.locator, actor: item.actor, device: item.device) }
+            do {
+                if try await persistence.reconcileTargetClosure(item) {
+                    try await persistence.releaseSource(item.request, actor: item.actor)
+                } else {
+                    _ = try await resume(item.locator, actor: item.actor, device: item.device)
+                }
+            }
             catch {
                 if try await persistence.recordRecoveryFailure(item) {
                     try await persistence.releaseSource(item.request, actor: item.actor)
                 }
             }
         }
+    }
+
+    private static func importState(_ session: V2ResourceUploadSession) -> V2ResourceImportState {
+        if [.cancelled, .expired, .failed].contains(session.state)
+            || [.rejected, .deletionPending].contains(session.resourceState) { return .failed }
+        return session.resourceState == .ready ? .ready : .processing
     }
 
     private func outcome(_ snapshot: V2ResourceImportSnapshot, locator: V2ResourceImportLocator) throws -> V2ResourceImportStatus {

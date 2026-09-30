@@ -9,6 +9,121 @@ import Testing
 
 @Suite("Latest visible room snapshots", .serialized)
 struct PostgresV2RoomLatestVisibleStoreTests {
+    @Test("summary restores only authorized content revisions across membership gaps", arguments: ["message_row", "room_event"], [false, true])
+    func contentRevisionMembership(storage: String, invisibleLatest: Bool) async throws {
+        try await withUserEventDatabase { db, sql, schema in
+            let user = UUID(), sender = UUID(), room = UUID(), message = UUID(), accepted = UUID()
+            try await sql.raw("""
+                INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id,membership_revision,room_sequence)
+                VALUES (\(bind: room),'room-a','standard',3,3)
+                """).run()
+            try await sql.raw("""
+                INSERT INTO \(unsafeRaw: schema).room_memberships(room_id,user_id,joined_revision,left_revision)
+                VALUES (\(bind: room),\(bind: user),1,2),(\(bind: room),\(bind: user),3,NULL)
+                """).run()
+            let acceptedID: UUID? = storage == "message_row" ? accepted : nil
+            let acceptedRevision: Int? = storage == "message_row" ? 1 : nil
+            try await sql.raw("""
+                INSERT INTO \(unsafeRaw: schema).messages
+                    (message_id,room_id,room_sequence,timeline_sequence,sender_user_id,client_message_id,
+                     text_body,created_at,accepted_event_storage,accepted_event_id,accepted_membership_revision)
+                VALUES (\(bind: message),\(bind: room),1,1,\(bind: sender),\(bind: UUID()),
+                        'original visible text',now(),\(bind: storage),\(bind: acceptedID),\(bind: acceptedRevision))
+                """).run()
+            if storage == "room_event" {
+                try await sql.raw("""
+                    INSERT INTO \(unsafeRaw: schema).room_events
+                        (event_id,room_id,room_sequence,event_type,payload,committed_membership_revision,created_at)
+                    VALUES (\(bind: accepted),\(bind: room),1,'message.accepted',
+                        jsonb_build_object('message_id',\(bind: message.uuidString)::text),1,now())
+                    """).run()
+            }
+            if invisibleLatest {
+                try await sql.raw("""
+                    INSERT INTO \(unsafeRaw: schema).messages
+                        (message_id,room_id,room_sequence,timeline_sequence,sender_user_id,client_message_id,
+                         text_body,created_at,accepted_event_storage,accepted_event_id,accepted_membership_revision)
+                    VALUES (\(bind: UUID()),\(bind: room),2,2,\(bind: sender),\(bind: UUID()),
+                            'invisible new message',now(),'message_row',\(bind: UUID()),2)
+                    """).run()
+            }
+            func edit(revision: Int, sequence: Int, membership: Int, text: String) async throws {
+                try await sql.raw("""
+                    UPDATE \(unsafeRaw: schema).messages SET text_body = \(bind: text), content_revision = \(bind: revision)
+                    WHERE message_id = \(bind: message)
+                    """).run()
+                try await sql.raw("""
+                    INSERT INTO \(unsafeRaw: schema).room_events
+                        (event_id,room_id,room_sequence,event_type,payload,committed_membership_revision,created_at)
+                    VALUES (\(bind: UUID()),\(bind: room),\(bind: sequence),'message.edited',
+                        jsonb_build_object('message_id',\(bind: message.uuidString)::text,
+                                           'room_id',\(bind: room.uuidString)::text,'message_revision',\(bind: revision)),
+                        \(bind: membership),now())
+                    """).run()
+                try await sql.raw("UPDATE \(unsafeRaw: schema).rooms SET room_sequence = \(bind: sequence) WHERE room_id = \(bind: room)").run()
+            }
+            let store = try PostgresV2RoomLatestVisibleStore(database: db, schema: schema)
+            let id = RoomID(uuid: room), actor = UserID(uuid: user)
+            func summary() async throws -> V2RoomLatestVisible {
+                guard case .snapshot(let snapshot)? = try await store.latestVisible(roomIDs: [id], actorUserID: actor)[id] else {
+                    throw V2RoomRecoveryReadError.corruptPersistence
+                }
+                return snapshot
+            }
+            try await edit(revision: 2, sequence: 3, membership: 2, text: "secret from first membership gap")
+            let original = try await summary()
+            #expect(original.latest?.id == .init(uuid: message))
+            #expect(original.latest?.revision == 1 && original.latest?.preview == "original visible text")
+            try await edit(revision: 3, sequence: 4, membership: 3, text: "visible replacement after rejoin")
+            let replacement = try await summary()
+            #expect(replacement.latest?.revision == 3 && replacement.latest?.preview == "visible replacement after rejoin")
+            try await sql.raw("UPDATE \(unsafeRaw: schema).room_memberships SET left_revision = 4 WHERE room_id = \(bind: room) AND joined_revision = 3").run()
+            try await sql.raw("INSERT INTO \(unsafeRaw: schema).room_memberships(room_id,user_id,joined_revision) VALUES (\(bind: room),\(bind: user),5)").run()
+            try await sql.raw("UPDATE \(unsafeRaw: schema).rooms SET membership_revision = 5 WHERE room_id = \(bind: room)").run()
+            try await edit(revision: 4, sequence: 5, membership: 4, text: "secret from second membership gap")
+            let retained = try await summary()
+            #expect(retained.head == 5 && retained.latest?.revision == 3)
+            #expect(retained.latest?.preview == "visible replacement after rejoin")
+            try await edit(revision: 5, sequence: 6, membership: 5, text: "second visible replacement")
+            // The body and authorization must belong to the same room-head snapshot.
+            try await sql.raw("UPDATE \(unsafeRaw: schema).rooms SET room_sequence = 5 WHERE room_id = \(bind: room)").run()
+            let olderHead = try await summary()
+            #expect(olderHead.latest?.revision == 3 && olderHead.latest?.preview == "visible replacement after rejoin")
+            try await sql.raw("UPDATE \(unsafeRaw: schema).rooms SET room_sequence = 6 WHERE room_id = \(bind: room)").run()
+            let newest = try await summary()
+            #expect(newest.latest?.revision == 5 && newest.latest?.preview == "second visible replacement")
+            if storage == "message_row" && !invisibleLatest {
+                // Version authorization must seek the chosen message, rather than scan
+                // the entire room's edit history for each summary in a batch.
+                try await sql.raw("""
+                    INSERT INTO \(unsafeRaw: schema).room_events
+                        (event_id,room_id,room_sequence,event_type,payload,committed_membership_revision,created_at)
+                    SELECT gen_random_uuid(),\(bind: room),n,'message.edited',
+                        jsonb_build_object('message_id',gen_random_uuid()::text,
+                                           'room_id',\(bind: room.uuidString)::text,'message_revision',2),5,now()
+                    FROM generate_series(7,10006) AS n
+                    """).run()
+                try await sql.raw("UPDATE \(unsafeRaw: schema).rooms SET room_sequence = 10006 WHERE room_id = \(bind: room)").run()
+                try await sql.raw("ANALYZE \(unsafeRaw: schema).room_events").run()
+                try await sql.raw("ANALYZE \(unsafeRaw: schema).message_edit_visibility").run()
+                let query = PostgresV2RoomLatestVisibleStore.latestVisibleQuery(schema: schema, ids: [room], actor: user)
+                let plan = try await sql.raw("EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) \(query)").all()
+                    .map { try $0.decode(column: "QUERY PLAN", as: String.self) }.joined(separator: "\n")
+                #expect(plan.contains("message_edit_visibility_latest_idx"))
+                #expect(!plan.contains("Seq Scan on message_edit_visibility content_event"))
+                print("ROOM_RECOVERY_CONTENT_VERSION_PLAN unrelated_edits=10000\n\(plan)")
+            }
+            try await sql.raw("UPDATE \(unsafeRaw: schema).rooms SET room_sequence = 5 WHERE room_id = \(bind: room)").run()
+            try await sql.raw("DELETE FROM \(unsafeRaw: schema).message_content_versions WHERE message_id = \(bind: message) AND message_revision = 3").run()
+            await #expect(throws: V2RoomRecoveryReadError.corruptPersistence) {
+                try await store.latestVisible(roomIDs: [id], actorUserID: actor)
+            }
+            // Current and edit-time membership cannot replace original acceptance-time membership.
+            try await sql.raw("DELETE FROM \(unsafeRaw: schema).room_memberships WHERE room_id = \(bind: room) AND joined_revision = 1").run()
+            #expect(try await summary().latest == nil)
+        }
+    }
+
     @Test("summary plans account for long histories outside the viewer membership interval", arguments: ["message_row", "room_event", "mixed"])
     func invisibleHistoryPlan(storage: String) async throws {
         try await withUserEventDatabase { db, sql, schema in

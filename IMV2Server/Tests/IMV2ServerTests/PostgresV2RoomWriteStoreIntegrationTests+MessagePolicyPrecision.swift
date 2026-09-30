@@ -87,11 +87,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 return result
             }
             let dates: [Double] = [946_684_800 - 0.00000075, 946_684_800 + 0.00000075, 946_684_800 + 0.00000125,
-                1_750_000_000 + 0.99999975, 946_684_800 - 211_813_488_000, 946_684_800 + 9_223_371_331_200 - 10]
+                1_750_000_000 + 0.99999975, 946_684_800 + 9_223_371_331_200 - 10]
             for seconds in dates {
                 guard case .accepted(let message) = try await send.send(.init(roomID: destination, actorUserID: senderID,
                     clientMessageID: .init(uuid: UUID()), text: "Original clock fixture")) else { throw CancellationError() }
                 let now = Date(timeIntervalSince1970: seconds)
+                let beforeInvalidClock = try await snapshot()
+                await #expect(throws: V2MessageOperationValidationError.invalidReceipt) {
+                    _ = try await invoke(UUID(), message: message.messageID, remove: false,
+                        now: Date(timeIntervalSince1970: 946_684_800 - 211_813_488_000), replay: false)
+                }
+                #expect(try await snapshot() == beforeInvalidClock)
                 for remove in kind == "reaction" ? [false, true] : [false] {
                     let operation = UUID()
                     let first = try await invoke(operation, message: message.messageID, remove: remove, now: now, replay: false)
@@ -123,8 +129,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let original = try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.messages WHERE message_id = \(bind: message.messageID.uuidValue!) AND created_at = \(bind: base)").first(decoding: CountRow.self)
                 #expect(original?.value == 1)
             }
-            #expect(try await count("im_v2." + table, on: sql) == (kind == "reaction" ? 12 : 6))
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.messages WHERE room_id = \(bind: destinationUUID)").first(decoding: CountRow.self)?.value == 6)
+            #expect(try await count("im_v2." + table, on: sql) == (kind == "reaction" ? 10 : 5))
+            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.messages WHERE room_id = \(bind: destinationUUID)").first(decoding: CountRow.self)?.value == 5)
             if kind == "reaction" { #expect(try await count("im_v2.message_reactions", on: sql) == 0) }
         }
     }
@@ -302,13 +308,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let outbox = try PostgresV2UserStateEventOutbox(database: database)
                 let projector = try PostgresV2UserStateEventProjector(database: deliveryDB)
                 let deliveryTime = max(base, now).addingTimeInterval(60)
-                let leases = try await outbox.claim(now: deliveryTime, leaseDuration: 1, limit: 100)
+                let leases = try await deliverUserStateEvents(outbox, projector: projector, now: deliveryTime, leaseDuration: 1, limit: 100)
                 #expect(leases.count == 1)
-                for lease in leases {
-                    let sequence = try await projector.project(lease.event)
-                    #expect(try await projector.project(lease.event) == sequence)
-                    #expect(try await outbox.acknowledge(lease, sequence: sequence, now: deliveryTime))
-                }
                 let roomTime = try await sql.raw("SELECT floor(extract(epoch FROM created_at)*1000)::bigint AS value FROM im_v2.rooms WHERE room_id=\(bind: newRoom.uuidValue!)").first(decoding: CountRow.self)
                 #expect(roomTime?.value == Int64(first.milliseconds))
             } else {
@@ -368,7 +369,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(try UInt64(v2GatewayMilliseconds(stored)) == first.resolvedAtMilliseconds)
                 let projection = try await sql.raw("SELECT (payload->>'updated_at_ms')::bigint AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: operation)").first(decoding: CountRow.self)
                 #expect(try projection?.value == v2GatewayMilliseconds(stored))
-                let timestamp = try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: operation) AND created_at = \(bind: stored)").first(decoding: CountRow.self)
+                // Compare exact persisted timestamps without rebinding a Date;
+                // its floating-point round trip can lose a PostgreSQL microsecond.
+                let timestamp = try await sql.raw("""
+                    SELECT COUNT(*) AS value FROM im_v2.user_sync_log AS event
+                    JOIN im_v2.\(unsafeRaw: stateTable) AS preference ON preference.user_id=event.user_id
+                    WHERE event.source_event_id=\(bind: operation) AND event.user_id=\(bind: senderUUID)
+                      AND event.created_at=preference.updated_at
+                    """).first(decoding: CountRow.self)
                 #expect(timestamp?.value == 1)
                 let before = try await snapshot()
                 // Even an invalid current clock cannot replace the saved proof.
@@ -460,13 +468,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let outbox = try PostgresV2UserStateEventOutbox(database: database)
                 let projector = try PostgresV2UserStateEventProjector(database: deliveryDB)
                 let deliveryTime = max(base, date)
-                let leases = try await outbox.claim(now: deliveryTime, leaseDuration: 1, limit: 100)
+                let leases = try await deliverUserStateEvents(outbox, projector: projector, now: deliveryTime, leaseDuration: 1, limit: 100)
                 #expect(leases.filter { $0.event.sourceEventID.uuidValue == eventID }.count == 2)
-                for lease in leases {
-                    let sequence = try await projector.project(lease.event)
-                    #expect(try await projector.project(lease.event) == sequence)
-                    #expect(try await outbox.acknowledge(lease, sequence: sequence, now: deliveryTime))
-                }
                 for (kind, field) in [("timeline_activity", "server_created_at_ms"), ("direct_sending_capability", "updated_at_ms")] {
                     #expect(try await deliverySQL.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: eventID) AND projection_kind = \(bind: kind) AND (payload->>\(bind: field))::bigint = \(bind: milliseconds) AND created_at = \(bind: date)::timestamptz").first(decoding: CountRow.self)?.value == 1)
                 }

@@ -1419,14 +1419,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 let projector = try V2RoutedUserStateEventProjector(routeFence: Fence(database: database),
                     registry: V2StaticUserShardStorageRegistry(locations: [.init(bucket: "user", database: userDatabase, schema: "im_v2")]))
                 let deliveryTime = now.addingTimeInterval(31)
-                let leases = try await outbox.claim(now: deliveryTime, leaseDuration: 30, limit: 100)
+                let leases = try await deliverUserStateEvents(outbox, projector: projector, now: deliveryTime, leaseDuration: 30, limit: 100)
                 let candidates = leases.filter { $0.event.kind == .directReadReceipt }
                 #expect(candidates.count == 4)
-                for lease in candidates {
-                    let sequence = try await projector.project(lease.event)
-                    #expect(try await projector.project(lease.event) == sequence)
-                    #expect(try await outbox.acknowledge(lease, sequence: sequence, now: deliveryTime))
-                }
                 #expect(try await count("im_v2.user_sync_log WHERE projection_kind = 'direct_read_receipt'", on: userSQL) == 4)
                 #expect(try await count("im_v2.user_sync_log WHERE projection_kind = 'direct_read_receipt' AND (payload->>'is_visible')::boolean = false AND (payload->>'read_through_room_sequence')::bigint = 0", on: userSQL) == 4)
                 #expect(try await count("im_v2.user_state_event_outbox WHERE projection_kind = 'direct_read_receipt' AND state = 'delivered'", on: sql) == 4)

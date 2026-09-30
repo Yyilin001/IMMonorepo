@@ -1359,13 +1359,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             func deliverReceiptCandidates() async throws -> Int {
                 let outbox = try PostgresV2UserStateEventOutbox(database: resources.database(.psql))
                 let eligible = try #require(try await sql.raw("SELECT MAX(next_attempt_at) AS value FROM im_v2.user_state_event_outbox WHERE state = 'pending'").first(decoding: ProjectionEligibleDate.self)).value
-                let leases = try await outbox.claim(now: eligible, leaseDuration: 30, limit: 1024)
+                let leases = try await deliverUserStateEvents(outbox, projector: receiptProjector, now: eligible)
                     .filter { $0.event.kind == .directReadReceipt }
-                for lease in leases {
-                    let sequence = try await receiptProjector.project(lease.event)
-                    #expect(try await receiptProjector.project(lease.event) == sequence)
-                    #expect(try await outbox.acknowledge(lease, sequence: sequence, now: eligible))
-                }
                 return leases.count
             }
             let beforePropagation = try #require(try await sql.raw("SELECT COUNT(*)::int AS value, COUNT(DISTINCT source_event_id)::int AS distinct_sources FROM im_v2.user_sync_log WHERE projection_kind = 'direct_read_receipt'").first(decoding: ReceiptTombstoneCountAssertionRow.self))
@@ -1497,10 +1492,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(targetURL != databaseURL)
                 try await withUserEventDatabase(databaseURL: targetURL) { targetDatabase, targetSQL, targetSchema in
                     let outbox = try PostgresV2UserStateEventOutbox(database: resources.database(.psql))
-                    let leases = try await outbox.claim(now: now, leaseDuration: 30, limit: 1024)
+                    let projector = try PostgresV2UserStateEventProjector(database: targetDatabase, schema: targetSchema)
+                    let leases = try await deliverUserStateEvents(outbox, projector: projector, now: now)
                         .filter { $0.event.sourceEventID == denial.sourceEventID }
                     #expect(leases.count == 2)
-                    let projector = try PostgresV2UserStateEventProjector(database: targetDatabase, schema: targetSchema)
                     var sequences = Set<UInt64>()
                     for lease in leases {
                         #expect(lease.event.userID == senderID)
@@ -1508,12 +1503,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         sequences.insert(sequence)
                         // A lost source ACK reuses the target receipt and sequence.
                         #expect(try await projector.project(lease.event) == sequence)
-                        #expect(try await outbox.acknowledge(lease, sequence: sequence, now: now))
                     }
-                    #expect(sequences == Set([1, 2]))
+                    // Earlier, unrelated stream heads must also be delivered. The
+                    // two denial effects remain consecutive and reuse their receipts.
+                    #expect(sequences.count == 2 && sequences.max() == sequences.min().map { $0 + 1 })
                     #expect(try await targetSQL.raw("""
                         SELECT count(*)::bigint AS value FROM \(unsafeRaw: targetSchema).user_sync_log
-                        WHERE user_id = \(bind: senderUUID)
+                        WHERE user_id = \(bind: senderUUID) AND source_event_id = \(bind: denialSource)
                         """).first(decoding: CountRow.self)?.value == 2)
                     #expect(try await targetSQL.raw("""
                         SELECT count(*)::bigint AS value FROM \(unsafeRaw: targetSchema).user_sync_log
@@ -1569,15 +1565,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             if let targetURL = Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL") {
                 try await withUserEventDatabase(databaseURL: targetURL) { targetDatabase, targetSQL, targetSchema in
                     let outbox = try PostgresV2UserStateEventOutbox(database: resources.database(.psql))
-                    let leases = try await outbox.claim(now: now.addingTimeInterval(60), leaseDuration: 30, limit: 1024)
+                    let projector = try PostgresV2UserStateEventProjector(database: targetDatabase, schema: targetSchema)
+                    let leases = try await deliverUserStateEvents(outbox, projector: projector, now: now.addingTimeInterval(60))
                         .filter { $0.event.kind == .directRoomProfile && $0.event.userID == recipient }
                     #expect(leases.count == 1)
-                    let projector = try PostgresV2UserStateEventProjector(database: targetDatabase, schema: targetSchema)
                     for lease in leases {
                         let sequence = try await projector.project(lease.event)
                         #expect(sequence == 1)
                         #expect(try await projector.project(lease.event) == sequence)
-                        #expect(try await outbox.acknowledge(lease, sequence: sequence, now: now.addingTimeInterval(60)))
                     }
                     #expect(try await targetSQL.raw("""
                         SELECT count(*)::bigint AS value FROM \(unsafeRaw: targetSchema).user_sync_log

@@ -1370,7 +1370,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             // The owner includes lock/identity-read elapsed time in creation.
             // Claim at the actual persisted eligibility boundary of every event.
             let deliveryTime = try #require(try await sql.raw("SELECT MAX(next_attempt_at) AS value FROM im_v2.user_state_event_outbox").first(decoding: RevocationClockDateRow.self)).value
-            let leases = try await outbox.claim(now: deliveryTime, leaseDuration: 1, limit: 100)
+            let leases = try await deliverUserStateEvents(outbox, projector: projector, now: deliveryTime, leaseDuration: 1, limit: 100)
             #expect(leases.count == 6)
             for lease in leases where lease.event.kind == .directRoomProfile {
                 let object = try #require(JSONSerialization.jsonObject(with: Data(lease.event.payloadJSON.utf8)) as? [String: Any])
@@ -1378,11 +1378,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let projectedRoomID = try #require(UUID(uuidString: rawRoom))
                 let committed = try #require(try await sql.raw("SELECT floor(extract(epoch FROM created_at)*1000)::bigint AS value FROM im_v2.rooms WHERE room_id = \(bind: projectedRoomID)").first(decoding: CountRow.self))
                 #expect((object["room_created_at_ms"] as? NSNumber)?.int64Value == committed.value)
-            }
-            for lease in leases {
-                let sequence = try await projector.project(lease.event)
-                #expect(try await projector.project(lease.event) == sequence)
-                #expect(try await outbox.acknowledge(lease, sequence: sequence, now: deliveryTime))
             }
             for (index, outcome) in outcomes.enumerated() {
                 guard case .accepted(let message) = outcome else { throw CancellationError() }

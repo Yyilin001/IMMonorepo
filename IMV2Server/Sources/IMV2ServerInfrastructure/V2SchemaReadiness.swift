@@ -10,18 +10,18 @@ public enum V2SchemaReadinessError: Error, Equatable, Sendable { case unavailabl
 /// 它把 schema 供应变为部署前置条件，避免在 TLS 监听已经开始接受已认证流量之后
 /// 才发现缺表。
 public enum V2SchemaReadiness {
-    public static let currentSchemaID = "im-v2-current-64"
+    public static let currentSchemaID = "im-v2-current-65"
     private static let requiredTables = [
         "direct_authorization_intents", "direct_authorization_receipts", "schema_contract", "control_housekeeping_cursor", "auth_devices", "device_access_tokens", "device_refresh_sessions", "device_refresh_token_history", "device_credential_operations", "device_revocation_events", "gateway_worker_cursors", "device_session_operations", "remote_device_revocation_baselines", "remote_device_revocation_receipts", "device_revocation_capabilities", "device_registration_cancellations", "device_registration_rate_limits", "account_password_credentials", "account_password_login_rate_limits", "account_password_authentication_audit", "account_edge_client_rate_limits", "account_disables", "public_user_profiles", "public_identity_lookup_rate_limits",
         "rooms", "room_activation_leases", "room_owner_routes", "direct_room_owner_routes", "group_room_creation_intents", "group_room_creation_intent_members", "group_room_creation_intent_pages", "direct_room_pairs", "direct_message_denials", "room_timeline_activities", "special_accounts", "support_conversation_sessions", "special_account_message_operations", "special_account_message_audit", "public_profile_update_outbox", "public_profile_update_operations", "user_contact_aliases", "contact_alias_operation_receipts", "room_member_nicknames", "group_nickname_operation_receipts", "group_rooms", "group_invitation_admissions", "group_invitation_receipts", "group_invitation_control_commands", "group_invite_links", "group_invite_directory", "group_invite_creation_recovery", "group_join_requests", "group_join_quota_intents",
         "group_join_quota_aliases", "group_join_submission_receipts", "user_relationships", "user_blocks", "user_stranger_message_preferences", "user_add_preferences", "stranger_message_windows", "user_direct_send_policy_versions", "room_memberships", "room_member_mutes", "room_membership_operations", "message_reactions", "message_reaction_key_revisions", "message_reaction_receipts", "room_read_receipts", "read_receipt_operations", "user_read_receipt_preferences", "read_receipt_preference_propagation_outbox", "user_live_activity_preferences", "user_live_presence_leases", "room_admission",
-        "shard_admission_pools", "messages", "message_send_completions", "message_mutation_receipts", "message_send_operation_receipts", "message_content_versions", "message_projection_states", "message_projection_state_values", "room_events", "group_event_wake_outbox", "durable_work_replay_audit", "forward_work_replay_audit",
+        "shard_admission_pools", "messages", "message_send_completions", "message_mutation_receipts", "message_send_operation_receipts", "message_content_versions", "message_edit_visibility", "message_projection_states", "message_projection_state_values", "room_events", "group_event_wake_outbox", "durable_work_replay_audit", "forward_work_replay_audit",
         "personal_preference_operation_receipts", "user_room_preferences", "user_message_favorites", "room_pinned_messages", "group_announcements", "group_role_permissions", "group_role_policies", "message_moderation_admissions", "message_moderation_receipts", "member_administration_admissions", "member_administration_receipts", "membership_operation_admissions", "membership_operation_receipts", "group_capability_admissions", "group_capability_receipts", "account_preference_receipts", "account_preference_revisions", "group_creation_operations", "group_creation_pages", "group_creation_owner_receipts", "direct_room_operation_handoffs", "direct_room_owner_receipts", "social_operation_receipts", "social_relationship_revisions", "social_block_revisions", "forward_plan_operations", "forward_preparation_rejections", "message_forward_operations", "message_forward_exports", "message_forward_inbox", "message_forward_inbox_media", "message_forward_media_imports", "message_forward_export_receipts", "message_forward_delivery_jobs",
         "user_state_event_outbox", "user_state_event_receipts", "user_sync_sequences", "user_sync_log", "user_projection_effects", "device_sync_cursors", "revoked_device_projection_tombstones",
         "user_projection_versions", "user_projection_checkpoints", "user_projection_ready", "user_sync_retention", "sync_snapshot_artifacts",
         "sync_snapshot_pages", "device_snapshot_resets", "sync_tokens", "sync_receipts", "push_campaigns",
         "push_device_budgets", "push_wake_outbox", "push_device_endpoints", "push_device_intents",
-        "resource_group_avatar_closures", "resource_group_avatars", "resource_group_avatar_operations", "resource_catalog", "resource_forward_outputs", "resource_upload_sessions", "resource_blob_placements", "resource_variants", "resource_imports", "resource_import_holds", "resource_storage_migrations", "message_operation_closures",
+        "resource_group_avatar_closures", "resource_group_avatars", "resource_group_avatar_operations", "resource_catalog", "resource_forward_outputs", "resource_upload_sessions", "resource_blob_placements", "resource_variants", "resource_imports", "resource_import_holds", "resource_import_source_closures", "resource_storage_migrations", "message_operation_closures",
         "media_objects", "media_scan_outbox", "media_download_grants", "media_purge_outbox", "message_media_references", "message_mentions", "moderation_operations", "moderation_audit_entries", "content_review_jobs", "content_review_decisions", "content_review_findings", "content_review_cases",
         "room_recovery_topology", "user_shard_router_configuration", "user_shard_route_overrides",
     ]
@@ -70,6 +70,69 @@ public enum V2SchemaReadiness {
             guard let row = try await sql.raw("SELECT to_regclass(\(bind: name)) IS NOT NULL AS exists").first(decoding: ExistsRow.self), row.exists else {
                 throw V2SchemaReadinessError.unavailableTable(name)
             }
+        }
+        // Both revocation consumers use an ID watermark. The database must
+        // serialize statements before allocating IDs and keep the lock through
+        // commit; sequence caching or a row trigger would break that contract.
+        guard let revocations = try await sql.raw("""
+            SELECT EXISTS (
+                SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+                JOIN pg_language l ON l.oid = p.prolang
+                WHERE t.tgrelid = to_regclass(\(bind: schema + ".device_revocation_events"))
+                  AND t.tgname = 'device_revocation_events_commit_order'
+                  AND t.tgtype = 6 AND t.tgenabled = 'O' AND NOT t.tgisinternal
+                  AND t.tgqual IS NULL AND t.tgnargs = 0
+                  AND p.pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = \(bind: schema))
+                  AND p.proname = 'serialize_device_revocation_events'
+                  AND p.provolatile = 'v' AND NOT p.prosecdef AND l.lanname = 'plpgsql'
+                  AND encode(sha256(convert_to(p.prosrc, 'UTF8')), 'hex') = 'e07c509b2a449890909eb9b8ba54622f477857fa3d49b949de7bc6b09726a107'
+            ) AND EXISTS (
+                SELECT 1 FROM pg_attribute a JOIN pg_depend d
+                  ON d.refobjid = a.attrelid AND d.refobjsubid = a.attnum
+                 AND d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass AND d.deptype = 'i'
+                JOIN pg_sequence s ON s.seqrelid = d.objid
+                WHERE a.attrelid = to_regclass(\(bind: schema + ".device_revocation_events"))
+                  AND a.attname = 'event_id' AND a.attidentity = 'a' AND a.attnotnull
+                  AND s.seqincrement = 1 AND s.seqcache = 1 AND NOT s.seqcycle
+            ) AS valid
+            """).first(decoding: ProfileOperationContractRow.self), revocations.valid else {
+            throw V2SchemaReadinessError.unavailableTable(schema + ".device_revocation_events.commit_order")
+        }
+        guard let editVisibility = try await sql.raw("""
+            SELECT (SELECT count(*) = 5 FROM information_schema.columns
+                WHERE table_schema = \(bind: schema) AND table_name = 'message_edit_visibility'
+                  AND (column_name, udt_name, is_nullable) IN (
+                    ('message_id','uuid','NO'), ('message_revision','int8','NO'), ('room_id','uuid','NO'),
+                    ('room_sequence','int8','NO'), ('committed_membership_revision','int8','NO')))
+            AND (SELECT count(*) = 5 FROM pg_constraint
+                WHERE conrelid = to_regclass(\(bind: schema + ".message_edit_visibility"))
+                  AND convalidated AND NOT condeferrable AND pg_get_constraintdef(oid) IN (
+                    'PRIMARY KEY (message_id, message_revision)', 'UNIQUE (room_id, room_sequence)',
+                    'CHECK ((message_revision > 1))', 'CHECK ((room_sequence > 0))',
+                    'CHECK ((committed_membership_revision >= 0))'))
+            AND EXISTS (SELECT 1 FROM pg_index WHERE indrelid = to_regclass(\(bind: schema + ".message_edit_visibility"))
+                AND indisvalid AND indisready AND replace(pg_get_indexdef(indexrelid), \(bind: schema + "."), 'im_v2.') =
+                  'CREATE INDEX message_edit_visibility_latest_idx ON im_v2.message_edit_visibility USING btree (message_id, room_sequence DESC) INCLUDE (message_revision, room_id, committed_membership_revision)')
+            AND EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+                WHERE t.tgrelid = to_regclass(\(bind: schema + ".room_events"))
+                  AND t.tgname = 'room_events_capture_message_edit_visibility' AND t.tgtype = 5
+                  AND t.tgenabled = 'O' AND NOT t.tgisinternal AND t.tgnargs = 0
+                  AND replace(pg_get_triggerdef(t.oid), \(bind: schema + "."), 'im_v2.') =
+                    'CREATE TRIGGER room_events_capture_message_edit_visibility AFTER INSERT ON im_v2.room_events FOR EACH ROW WHEN ((new.event_type = ''message.edited''::text)) EXECUTE FUNCTION im_v2.capture_message_edit_visibility()'
+                  AND p.pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = \(bind: schema))
+                  AND p.proname = 'capture_message_edit_visibility' AND p.provolatile = 'v'
+                  AND encode(sha256(convert_to(replace(p.prosrc, \(bind: schema + "."), 'im_v2.'), 'UTF8')), 'hex') =
+                    '31f73cd4bc6db861440e944de3612d5238588ded0c9b6517d6b5893ae27a65df')
+            AND EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+                WHERE t.tgrelid = to_regclass(\(bind: schema + ".message_edit_visibility"))
+                  AND t.tgname = 'message_edit_visibility_immutable' AND t.tgtype = 27
+                  AND t.tgenabled = 'O' AND NOT t.tgisinternal AND t.tgqual IS NULL AND t.tgnargs = 0
+                  AND p.pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = \(bind: schema))
+                  AND p.proname = 'reject_message_edit_visibility_mutation' AND p.provolatile = 'v'
+                  AND encode(sha256(convert_to(p.prosrc, 'UTF8')), 'hex') =
+                    '129858c982b37359241ca4bdabd9a403b7d4e6661989a2abfcebcec57bbf1c51') AS valid
+            """).first(decoding: ProfileOperationContractRow.self), editVisibility.valid else {
+            throw V2SchemaReadinessError.unavailableTable(schema + ".message_edit_visibility.retained_audience")
         }
         for retired in ["room_pinned_message_operations","group_announcement_operations","group_permission_operations","group_role_operations","user_relationship_operations","user_block_operations","user_stranger_message_preference_operations","user_add_preference_operations","user_read_receipt_preference_operations","user_live_activity_preference_operations","group_room_operations","group_room_creation_drafts","group_room_creation_draft_members","direct_room_operations"] {
             guard let row=try await sql.raw("SELECT to_regclass(\(bind:schema+"."+retired)) IS NULL AS exists").first(decoding:ExistsRow.self),row.exists else { throw V2SchemaReadinessError.unavailableTable(schema+"."+retired+".retired") }
@@ -375,11 +438,15 @@ public enum V2SchemaReadiness {
                   ('resource_imports','home_json','jsonb','NO'),
                   ('resource_imports','request_json','jsonb','NO'),
                   ('resource_imports','target_media_id','uuid','NO'),
+                  ('resource_imports','source_released_at','timestamptz','YES'),
                   ('resource_import_holds','reference_json','jsonb','NO'),
                   ('resource_import_holds','request_json','jsonb','NO'),
                   ('resource_import_holds','byte_count','int8','NO'),
                   ('resource_import_holds','sha256','bytea','NO'),
                   ('resource_import_holds','content_type','text','NO'),
+                  ('resource_import_source_closures','actor_user_id','uuid','NO'),
+                  ('resource_import_source_closures','operation_id','uuid','NO'),
+                  ('resource_import_source_closures','closed_at','timestamptz','NO'),
                   ('message_operation_closures','fingerprint_version','int2','NO'),
                   ('message_operation_closures','request_fingerprint','bytea','NO'),
                   ('message_operation_closures','closed_at','timestamptz','NO')
@@ -436,10 +503,13 @@ public enum V2SchemaReadiness {
                   ('resource_storage_migrations','CHECK (((source_released_at IS NULL) OR ((state = ''switched''::text) AND isfinite(source_released_at))))'),
                   ('resource_variants','CHECK (((state <> ''ready''::text) OR ((byte_count IS NOT NULL) AND (sha256 IS NOT NULL) AND (byte_count > 0) AND (octet_length(sha256) = 32))))'),
                   ('resource_imports','PRIMARY KEY (actor_user_id, operation_id)'),
+                  ('resource_imports','CHECK (((source_released_at IS NULL) OR ((state = ANY (ARRAY[''processing''::text, ''ready''::text, ''cancelled''::text, ''failed''::text])) AND isfinite(source_released_at))))'),
                   ('resource_import_holds','PRIMARY KEY (actor_user_id, operation_id)'),
                   ('resource_import_holds','CHECK ((byte_count > 0))'),
                   ('resource_import_holds','CHECK ((octet_length(sha256) = 32))'),
                   ('resource_import_holds','CHECK (((length(content_type) >= 1) AND (length(content_type) <= 127)))'),
+                  ('resource_import_source_closures','PRIMARY KEY (actor_user_id, operation_id)'),
+                  ('resource_import_source_closures','CHECK (isfinite(closed_at))'),
                   ('message_operation_closures','PRIMARY KEY (room_id, sender_user_id, client_message_id)'),
                   ('message_operation_closures','CHECK ((fingerprint_version = 3))'),
                   ('message_operation_closures','CHECK ((octet_length(request_fingerprint) = 32))'),
@@ -464,6 +534,17 @@ public enum V2SchemaReadiness {
                     'CREATE UNIQUE INDEX resource_storage_migrations_active_media_idx ON im_v2.resource_storage_migrations USING btree (media_id) WHERE (state = ANY (ARRAY[''pending''::text, ''copying''::text]))',
                     'CREATE INDEX resource_storage_migrations_recovery_idx ON im_v2.resource_storage_migrations USING btree (updated_at, operation_id) WHERE (state = ANY (ARRAY[''pending''::text, ''copying''::text]))',
                     'CREATE INDEX resource_storage_migrations_retained_idx ON im_v2.resource_storage_migrations USING btree (media_id) WHERE (source_released_at IS NULL)'))
+            AND EXISTS (SELECT 1 FROM pg_index
+                WHERE indrelid=to_regclass(\(bind: schema + ".resource_imports")) AND indisvalid AND indisready
+                  AND replace(pg_get_indexdef(indexrelid),\(bind: schema + "."),'im_v2.') =
+                    'CREATE INDEX resource_imports_pending_idx ON im_v2.resource_imports USING btree (updated_at, operation_id) WHERE ((state = ANY (ARRAY[''pending''::text, ''copying''::text, ''processing''::text])) OR (source_released_at IS NULL))')
+            AND EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+                WHERE t.tgrelid=to_regclass(\(bind: schema + ".resource_import_source_closures"))
+                  AND t.tgname='resource_import_source_closures_immutable' AND t.tgenabled='O'
+                  AND NOT t.tgisinternal AND t.tgtype=27 AND t.tgqual IS NULL
+                  AND p.pronamespace=(SELECT oid FROM pg_namespace WHERE nspname=\(bind: schema))
+                  AND p.proname='reject_resource_import_source_closure_mutation'
+                  AND encode(sha256(convert_to(replace(p.prosrc,\(bind: schema + "."),'im_v2.'),'UTF8')),'hex')='12ddbdfcf09ecb0d8a1b825f56786746463fc42ed7074494aa3c515bf85f7a3b')
             AS exists
             """).first(decoding: ExistsRow.self), resourceContract.exists else {
             throw V2SchemaReadinessError.unavailableTable("\(schema).resource_upload_sessions[lifecycle-contract]")

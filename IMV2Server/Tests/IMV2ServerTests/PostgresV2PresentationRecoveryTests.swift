@@ -64,12 +64,18 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await recovery(closed, revision: 2, name: "closed", close: true) == .closed)
             #expect(try await update(closed, revision: 2, name: "closed") == .closed)
             if alias {
-                let outbox = try PostgresV2UserStateEventOutbox(database: database)
-                let events = try await outbox.claim(now:Date().addingTimeInterval(1),leaseDuration:30,limit:100)
-                    .map(\.event).filter { $0.kind == .contactAlias }
+                let events = try await frozenUserStateEvents(on: sql, userID: senderUUID, kind: .contactAlias)
                 #expect(events.count == 2)
+                let deliveredRevisions = try events.map {
+                    let payload = try #require(JSONSerialization.jsonObject(with: Data($0.payloadJSON.utf8)) as? [String: Any])
+                    return try #require(payload["revision"] as? Int)
+                }
+                #expect(deliveredRevisions == [2, 1])
                 let projector = try PostgresV2UserStateEventProjector(database:userDatabase)
-                for event in events.sorted(by: { $0.payloadJSON > $1.payloadJSON }) { _ = try await projector.project(event) }
+                for event in events {
+                    let sequence = try await projector.project(event)
+                    #expect(try await projector.project(event) == sequence)
+                }
                 let report = try await PostgresV2UserProjectionWorker(database:userDatabase).runOnce(now:Date().addingTimeInterval(2))
                 #expect(report.failedRecordCount == 0)
                 let row = try #require(try await userSQL.raw("SELECT payload::text AS value FROM im_v2.user_projection_versions WHERE user_id=\(bind:senderUUID) AND projection_kind='contact_alias' AND valid_to_sequence IS NULL").first(decoding:PresentationPayload.self))

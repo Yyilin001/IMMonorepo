@@ -341,14 +341,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let projector = try V2RoutedUserStateEventProjector(routeFence: Fence(database: controlDB),
                     registry: V2StaticUserShardStorageRegistry(locations: [.init(bucket: "user", database: targetDB, schema: targetSchema)]))
                 let outbox = try PostgresV2UserStateEventOutbox(database: ownerDB)
-                let leases = try await outbox.claim(now: now.addingTimeInterval(1), leaseDuration: 30, limit: 100)
+                let leases = try await deliverUserStateEvents(outbox, projector: projector, now: now.addingTimeInterval(1), leaseDuration: 30, limit: 100)
                     .filter { $0.event.kind == .ownReadWatermark || $0.event.kind == .directReadReceipt }
                 #expect(leases.count == 2)
-                for lease in leases {
-                    let sequence = try await projector.project(lease.event)
-                    #expect(try await projector.project(lease.event) == sequence)
-                    #expect(try await outbox.acknowledge(lease, sequence: sequence, now: now.addingTimeInterval(2)))
-                }
                 #expect(try await targetSQL.raw("""
                     SELECT count(*) AS value FROM \(unsafeRaw: targetSchema).user_sync_log
                     WHERE projection_kind = 'direct_read_receipt' AND payload->>'is_visible' = 'false'
@@ -398,11 +393,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     registry: V2StaticUserShardStorageRegistry(locations: [.init(bucket: "user", database: targetDB, schema: targetSchema)]))
                 let outbox = try PostgresV2UserStateEventOutbox(database: controlDB)
                 let readyAt = try #require(try await controlSQL.raw("SELECT max(next_attempt_at) AS value FROM im_v2.user_state_event_outbox").first(decoding: RevocationClockDateRow.self)).value.addingTimeInterval(1)
-                let leases = try await outbox.claim(now: readyAt, leaseDuration: 30, limit: 10)
+                let leases = try await deliverUserStateEvents(outbox, projector: projector, now: readyAt, leaseDuration: 30, limit: 10)
                 #expect(leases.count == 4)
                 for lease in leases {
                     let sequence = try await projector.project(lease.event)
-                    #expect(try await outbox.acknowledge(lease, sequence: sequence, now: readyAt))
                 }
                 #expect(try await targetSQL.raw("""
                     SELECT count(*) AS value FROM \(unsafeRaw: targetSchema).user_sync_log
@@ -510,8 +504,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await sql.raw("UPDATE im_v2.public_user_profiles SET updated_at = \(bind: base) WHERE user_id = \(bind: memberTwoUUID)").run()
             }
             guard case .receipt(let proof) = try await open(operation), case .opened(let room, let createdAt) = proof.outcome else { throw CancellationError() }
-            let storedRoom = try #require(try await sql.raw("SELECT created_at AS value FROM im_v2.rooms WHERE room_id = \(bind: createdRoom.uuidValue!)").first(decoding: RevocationClockDateRow.self))
-            let expectedCreatedAt = UInt64(try v2GatewayMilliseconds(storedRoom.value))
+            // The proof derives milliseconds from the authoritative SQL timestamp,
+            // whose floating-point Date representation can cross a millisecond edge.
+            let storedRoom = try #require(try await sql.raw("SELECT floor(extract(epoch FROM created_at)*1000)::bigint AS value FROM im_v2.rooms WHERE room_id = \(bind: createdRoom.uuidValue!)").first(decoding: CountRow.self))
+            let expectedCreatedAt = UInt64(storedRoom.value)
             #expect(room == createdRoom && createdAt == expectedCreatedAt)
             #expect(try await open(operation) == .receipt(proof))
             #expect(try await count("im_v2.direct_room_pairs", on: sql) == 1)

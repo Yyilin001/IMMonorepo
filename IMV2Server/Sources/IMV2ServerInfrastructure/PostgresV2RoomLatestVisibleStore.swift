@@ -6,7 +6,8 @@ import IMV2Core
 import SQLKit
 
 /// 有界 ID 读取。单个 SQL 快照同时绑定消息版本、成员关系、所有者和头部；
-/// 较新的编辑不会泄漏到带有较旧头部的快照中。
+/// 只还原请求者在具体修订提交时有权查看的正文，不补发离群期间的编辑。
+/// 编辑受众事实独立于可裁剪的房间日志保留，裁剪不会让摘要退回旧修订。
 public struct PostgresV2RoomLatestVisibleStore: V2RoomLatestVisibleReading {
     private let database: any Database
     private let schema: String
@@ -87,8 +88,32 @@ public struct PostgresV2RoomLatestVisibleStore: V2RoomLatestVisibleReading {
                     ) AS fallback WHERE NOT EXISTS (SELECT 1 FROM fast)
                 )
                 SELECT message.message_id, message.sender_user_id, message.room_sequence,
-                       message.content_revision AS message_revision, left(message.text_body, 128) AS preview, message.created_at
+                       COALESCE(visible_edit.message_revision, 1) AS message_revision,
+                       left(CASE WHEN message.content_revision = COALESCE(visible_edit.message_revision, 1)
+                                 THEN message.text_body ELSE snapshot.text_body END, 128) AS preview,
+                       message.created_at
                 FROM chosen JOIN \(unsafeRaw: schema).messages AS message ON message.message_id = chosen.message_id
+                LEFT JOIN LATERAL (
+                    SELECT content_event.message_revision
+                    FROM \(unsafeRaw: schema).message_edit_visibility AS content_event
+                    WHERE message.content_revision > 1
+                      AND content_event.room_id = message.room_id
+                      AND content_event.message_id = message.message_id
+                      AND content_event.room_sequence <= room.room_sequence
+                      AND content_event.message_revision BETWEEN 2 AND message.content_revision
+                      AND EXISTS (
+                          SELECT 1 FROM \(unsafeRaw: schema).room_memberships AS content_membership
+                          WHERE content_membership.room_id = message.room_id
+                            AND content_membership.user_id = \(bind: actor)
+                            AND content_membership.joined_revision <= content_event.committed_membership_revision
+                            AND (content_membership.left_revision IS NULL
+                                 OR content_membership.left_revision > content_event.committed_membership_revision)
+                      )
+                    ORDER BY content_event.room_sequence DESC LIMIT 1
+                ) AS visible_edit ON TRUE
+                LEFT JOIN \(unsafeRaw: schema).message_content_versions AS snapshot
+                  ON snapshot.message_id = message.message_id
+                 AND snapshot.message_revision = COALESCE(visible_edit.message_revision, 1)
             ) AS latest ON TRUE
             WHERE room.room_id = ANY(\(bind: ids)::uuid[])
             """

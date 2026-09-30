@@ -335,8 +335,9 @@ public struct V2PostgresDeviceRevocationEventStore: V2DeviceRevocationEventStore
         }
         // 有意使用 `ON CONFLICT DO NOTHING`。若在此替换既有游标，
         // 两个意外重复的节点 ID 可能跳过仍需旧进程关闭的撤销事件。
-        // PostgreSQL 基于同一语句快照执行此插入：
-        // 快照后提交的事件仍高于水位，监听器绑定后会正常消费。
+        // 数据库的 BEFORE STATEMENT 吊销触发器在分配 identity 前获取事务锁，
+        // 保证已提交 ID 的顺序；readiness 同时强制 CACHE 1。因而此快照之后
+        // 才提交的事件一定高于水位，监听器绑定后会正常消费。
         try await sql.raw("""
             INSERT INTO im_v2.gateway_worker_cursors (worker_name, node_id, last_event_id, updated_at)
             SELECT \(bind: workerName), \(bind: nodeID), COALESCE(MAX(event_id), 0), \(bind: now)

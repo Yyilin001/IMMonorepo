@@ -576,6 +576,59 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
           AND conname='public_profile_update_operations_result_check' AND convalidated
           AND pg_get_constraintdef(oid) LIKE '%result_revision IS NOT NULL%')
    AND to_regclass('im_v2.message_send_completions') IS NOT NULL
+   AND (SELECT count(*) = 5 FROM information_schema.columns
+     WHERE table_schema = 'im_v2' AND table_name = 'message_edit_visibility'
+       AND (column_name, udt_name, is_nullable) IN (
+         ('message_id','uuid','NO'), ('message_revision','int8','NO'), ('room_id','uuid','NO'),
+         ('room_sequence','int8','NO'), ('committed_membership_revision','int8','NO')))
+   AND (SELECT count(*) = 5 FROM pg_constraint
+     WHERE conrelid = to_regclass('im_v2.message_edit_visibility')
+       AND convalidated AND NOT condeferrable AND pg_get_constraintdef(oid) IN (
+         'PRIMARY KEY (message_id, message_revision)', 'UNIQUE (room_id, room_sequence)',
+         'CHECK ((message_revision > 1))', 'CHECK ((room_sequence > 0))',
+         'CHECK ((committed_membership_revision >= 0))'))
+   AND EXISTS (SELECT 1 FROM pg_index WHERE indrelid = to_regclass('im_v2.message_edit_visibility')
+     AND indisvalid AND indisready AND pg_get_indexdef(indexrelid) =
+       'CREATE INDEX message_edit_visibility_latest_idx ON im_v2.message_edit_visibility USING btree (message_id, room_sequence DESC) INCLUDE (message_revision, room_id, committed_membership_revision)')
+   AND EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+     WHERE t.tgrelid = to_regclass('im_v2.room_events')
+       AND t.tgname = 'room_events_capture_message_edit_visibility' AND t.tgtype = 5
+       AND t.tgenabled = 'O' AND NOT t.tgisinternal AND t.tgnargs = 0
+       AND pg_get_triggerdef(t.oid) =
+         'CREATE TRIGGER room_events_capture_message_edit_visibility AFTER INSERT ON im_v2.room_events FOR EACH ROW WHEN ((new.event_type = ''message.edited''::text)) EXECUTE FUNCTION im_v2.capture_message_edit_visibility()'
+       AND p.pronamespace = to_regnamespace('im_v2')
+       AND p.proname = 'capture_message_edit_visibility' AND p.provolatile = 'v'
+       AND encode(sha256(convert_to(p.prosrc, 'UTF8')), 'hex') =
+         '31f73cd4bc6db861440e944de3612d5238588ded0c9b6517d6b5893ae27a65df')
+   AND EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+     WHERE t.tgrelid = to_regclass('im_v2.message_edit_visibility')
+       AND t.tgname = 'message_edit_visibility_immutable' AND t.tgtype = 27
+       AND t.tgenabled = 'O' AND NOT t.tgisinternal AND t.tgqual IS NULL AND t.tgnargs = 0
+       AND p.pronamespace = to_regnamespace('im_v2')
+       AND p.proname = 'reject_message_edit_visibility_mutation' AND p.provolatile = 'v'
+       AND encode(sha256(convert_to(p.prosrc, 'UTF8')), 'hex') =
+         '129858c982b37359241ca4bdabd9a403b7d4e6661989a2abfcebcec57bbf1c51')
+   AND EXISTS (
+     SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+     JOIN pg_language l ON l.oid = p.prolang
+     WHERE t.tgrelid = to_regclass('im_v2.device_revocation_events')
+       AND t.tgname = 'device_revocation_events_commit_order'
+       AND t.tgtype = 6 AND t.tgenabled = 'O' AND NOT t.tgisinternal
+       AND t.tgqual IS NULL AND t.tgnargs = 0
+       AND p.pronamespace = to_regnamespace('im_v2')
+       AND p.proname = 'serialize_device_revocation_events'
+       AND p.provolatile = 'v' AND NOT p.prosecdef AND l.lanname = 'plpgsql'
+       AND encode(sha256(convert_to(p.prosrc, 'UTF8')), 'hex') = 'e07c509b2a449890909eb9b8ba54622f477857fa3d49b949de7bc6b09726a107'
+   )
+   AND EXISTS (
+     SELECT 1 FROM pg_attribute a JOIN pg_depend d
+       ON d.refobjid = a.attrelid AND d.refobjsubid = a.attnum
+      AND d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass AND d.deptype = 'i'
+     JOIN pg_sequence s ON s.seqrelid = d.objid
+     WHERE a.attrelid = to_regclass('im_v2.device_revocation_events')
+       AND a.attname = 'event_id' AND a.attidentity = 'a' AND a.attnotnull
+       AND s.seqincrement = 1 AND s.seqcache = 1 AND NOT s.seqcycle
+   )
    AND EXISTS (
      SELECT 1
      FROM information_schema.columns
@@ -583,7 +636,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
        AND table_name = 'schema_contract'
        AND column_name = 'schema_id'
        AND is_nullable = 'NO'
-       AND column_default = '''im-v2-current-64''::text'
+       AND column_default = '''im-v2-current-65''::text'
    )
    AND EXISTS (
      SELECT 1
@@ -593,7 +646,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
      WHERE namespace.nspname = 'im_v2'
        AND relation.relname = 'schema_contract'
        AND constraint_record.contype = 'c'
-       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-64%'
+       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-65%'
    )
    AND EXISTS (
      SELECT 1 FROM information_schema.columns
@@ -856,11 +909,15 @@ AND (NOT EXISTS (
       ('resource_imports','home_json','jsonb','NO'),
       ('resource_imports','request_json','jsonb','NO'),
       ('resource_imports','target_media_id','uuid','NO'),
+      ('resource_imports','source_released_at','timestamptz','YES'),
       ('resource_import_holds','reference_json','jsonb','NO'),
       ('resource_import_holds','request_json','jsonb','NO'),
       ('resource_import_holds','byte_count','int8','NO'),
       ('resource_import_holds','sha256','bytea','NO'),
       ('resource_import_holds','content_type','text','NO'),
+      ('resource_import_source_closures','actor_user_id','uuid','NO'),
+      ('resource_import_source_closures','operation_id','uuid','NO'),
+      ('resource_import_source_closures','closed_at','timestamptz','NO'),
       ('message_operation_closures','fingerprint_version','int2','NO'),
       ('message_operation_closures','request_fingerprint','bytea','NO'),
       ('message_operation_closures','closed_at','timestamptz','NO')
@@ -917,10 +974,13 @@ AND (NOT EXISTS (
       ('resource_storage_migrations','CHECK (((source_released_at IS NULL) OR ((state = ''switched''::text) AND isfinite(source_released_at))))'),
       ('resource_variants','CHECK (((state <> ''ready''::text) OR ((byte_count IS NOT NULL) AND (sha256 IS NOT NULL) AND (byte_count > 0) AND (octet_length(sha256) = 32))))'),
       ('resource_imports','PRIMARY KEY (actor_user_id, operation_id)'),
+      ('resource_imports','CHECK (((source_released_at IS NULL) OR ((state = ANY (ARRAY[''processing''::text, ''ready''::text, ''cancelled''::text, ''failed''::text])) AND isfinite(source_released_at))))'),
       ('resource_import_holds','PRIMARY KEY (actor_user_id, operation_id)'),
       ('resource_import_holds','CHECK ((byte_count > 0))'),
       ('resource_import_holds','CHECK ((octet_length(sha256) = 32))'),
       ('resource_import_holds','CHECK (((length(content_type) >= 1) AND (length(content_type) <= 127)))'),
+      ('resource_import_source_closures','PRIMARY KEY (actor_user_id, operation_id)'),
+      ('resource_import_source_closures','CHECK (isfinite(closed_at))'),
       ('message_operation_closures','PRIMARY KEY (room_id, sender_user_id, client_message_id)'),
       ('message_operation_closures','CHECK ((fingerprint_version = 3))'),
       ('message_operation_closures','CHECK ((octet_length(request_fingerprint) = 32))'),
@@ -946,6 +1006,17 @@ AND (SELECT count(*)=3 FROM pg_index
         'CREATE UNIQUE INDEX resource_storage_migrations_active_media_idx ON im_v2.resource_storage_migrations USING btree (media_id) WHERE (state = ANY (ARRAY[''pending''::text, ''copying''::text]))',
         'CREATE INDEX resource_storage_migrations_recovery_idx ON im_v2.resource_storage_migrations USING btree (updated_at, operation_id) WHERE (state = ANY (ARRAY[''pending''::text, ''copying''::text]))',
         'CREATE INDEX resource_storage_migrations_retained_idx ON im_v2.resource_storage_migrations USING btree (media_id) WHERE (source_released_at IS NULL)'))
+AND EXISTS (SELECT 1 FROM pg_index
+    WHERE indrelid=to_regclass('im_v2.resource_imports') AND indisvalid AND indisready
+      AND pg_get_indexdef(indexrelid) =
+        'CREATE INDEX resource_imports_pending_idx ON im_v2.resource_imports USING btree (updated_at, operation_id) WHERE ((state = ANY (ARRAY[''pending''::text, ''copying''::text, ''processing''::text])) OR (source_released_at IS NULL))')
+AND EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+    WHERE t.tgrelid=to_regclass('im_v2.resource_import_source_closures')
+      AND t.tgname='resource_import_source_closures_immutable' AND t.tgenabled='O'
+      AND NOT t.tgisinternal AND t.tgtype=27 AND t.tgqual IS NULL
+      AND p.pronamespace=(SELECT oid FROM pg_namespace WHERE nspname='im_v2')
+      AND p.proname='reject_resource_import_source_closure_mutation'
+      AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='12ddbdfcf09ecb0d8a1b825f56786746463fc42ed7074494aa3c515bf85f7a3b')
 AND (current_setting('transaction_isolation') = 'read committed'
             AND EXISTS (
                 SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid

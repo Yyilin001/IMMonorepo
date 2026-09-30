@@ -1456,9 +1456,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await withUserEventDatabase(databaseURL: targetURL) { targetDatabase, targetSQL, targetSchema in
                     let outbox = try PostgresV2UserStateEventOutbox(database: resources.database(.psql))
                     let deliveryTime = now.addingTimeInterval(60)
-                    let leases = try await outbox.claim(now: deliveryTime, leaseDuration: 30, limit: 1024)
-                        .filter { $0.event.kind == .ownReadWatermark || $0.event.kind == .directReadReceipt }
-                    #expect(leases.count == 5)
                     struct Fence: V2UserShardRouteFencing {
                         let database: any Database
                         func withCurrentRoute<Result: Sendable>(for userID: UserID,
@@ -1470,11 +1467,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     }
                     let projector = try V2RoutedUserStateEventProjector(routeFence: Fence(database: resources.database(.psql)),
                         registry: V2StaticUserShardStorageRegistry(locations: [.init(bucket: "user", database: targetDatabase, schema: targetSchema)]))
-                    for lease in leases {
-                        let sequence = try await projector.project(lease.event)
-                        #expect(try await projector.project(lease.event) == sequence)
-                        #expect(try await outbox.acknowledge(lease, sequence: sequence, now: deliveryTime))
-                    }
+                    let leases = try await deliverUserStateEvents(outbox, projector: projector, now: deliveryTime)
+                        .filter { $0.event.kind == .ownReadWatermark || $0.event.kind == .directReadReceipt }
+                    #expect(leases.count == 5)
                     #expect(try await targetSQL.raw("""
                         SELECT count(*)::bigint AS value FROM \(unsafeRaw: targetSchema).user_sync_log
                         WHERE projection_kind = 'own_read_watermark'

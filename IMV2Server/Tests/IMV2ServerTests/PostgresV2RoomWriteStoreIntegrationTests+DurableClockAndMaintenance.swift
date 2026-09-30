@@ -1427,10 +1427,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                            room.owner_epoch, \(bind: now), \(bind: now)
                     FROM im_v2.direct_room_pairs AS pair JOIN im_v2.rooms AS room USING (room_id)
                     """).run()
-                try await userSQL.raw("INSERT INTO im_v2.user_sync_sequences(user_id, next_sequence) VALUES (\(bind: recipient), \(bind: Int64.max))").run()
-                let worker = V2ReadReceiptPreferencePropagationWorker(database: database, now: { now })
-                #expect(try await worker.runOnce(limit: 1) == .init(claimedOperationCount: 1, projectedRoomCount: 1, completedOperationCount: 1))
-                let event = receiptTombstoneSourceEventID(operationID: operation, roomID: try #require(room.roomID.uuidValue))
                 struct Fence: V2UserShardRouteFencing {
                     let database: any Database
                     func withCurrentRoute<Result: Sendable>(for userID: UserID,
@@ -1443,6 +1439,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let source = try PostgresV2UserStateEventOutbox(database: database)
                 let projector = try V2RoutedUserStateEventProjector(routeFence: Fence(database: database),
                     registry: V2StaticUserShardStorageRegistry(locations: [.init(bucket: "user", database: userDatabase, schema: "im_v2")]))
+                // Consume opening, message and preference stream heads with real
+                // delivery before testing the tombstone's allocation failure.
+                _ = try await deliverUserStateEvents(source, projector: projector,
+                    now: Date().addingTimeInterval(1), leaseDuration: 30, limit: 100)
+                #expect(try await count("im_v2.user_state_event_outbox WHERE state IN ('pending','leased')", on: sql) == 0)
+                let previousReceiptCount = try #require(try await userSQL.raw("SELECT COUNT(*) AS value FROM im_v2.user_state_event_receipts WHERE user_id = \(bind: recipient)").first(decoding: CountRow.self)).value
+                try await userSQL.raw("INSERT INTO im_v2.user_sync_sequences(user_id, next_sequence) VALUES (\(bind: recipient), \(bind: Int64.max)) ON CONFLICT (user_id) DO UPDATE SET next_sequence = EXCLUDED.next_sequence").run()
+                let worker = V2ReadReceiptPreferencePropagationWorker(database: database, now: { now })
+                #expect(try await worker.runOnce(limit: 1) == .init(claimedOperationCount: 1, projectedRoomCount: 1, completedOperationCount: 1))
+                let event = receiptTombstoneSourceEventID(operationID: operation, roomID: try #require(room.roomID.uuidValue))
                 // The typed producer samples its elapsed commit time. Candidate
                 // eligibility follows that persisted timestamp, not the earlier
                 // test clock used to start the preference operation.
@@ -1457,7 +1463,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                             await #expect(throws: V2UserStateEventError.corruptPersistenceState) { try await projector.project(lease.event) }
                         }
                         try await source.retry(lease, disposition: .pause)
-                        #expect(try await userSQL.raw("SELECT COUNT(*) AS value FROM im_v2.user_state_event_receipts WHERE user_id = \(bind: recipient)").first(decoding: CountRow.self)?.value == 0)
+                        #expect(try await userSQL.raw("SELECT COUNT(*) AS value FROM im_v2.user_state_event_receipts WHERE user_id = \(bind: recipient)").first(decoding: CountRow.self)?.value == previousReceiptCount)
                     } else {
                         let sequence = try await projector.project(lease.event)
                         #expect(try await source.acknowledge(lease, sequence: sequence, now: eligibleAt))

@@ -448,6 +448,22 @@ ALTER TABLE im_v2.device_revocation_events ALTER COLUMN event_id ADD GENERATED A
     CACHE 1
 );
 
+-- A cursor may advance past an ID only after all lower IDs have committed.
+-- Serialize BEFORE STATEMENT, before identity defaults are evaluated, and hold
+-- the lock until transaction end. A BEFORE ROW lock would be too late: another
+-- transaction could already have allocated its ID. CACHE 1 above is required.
+CREATE FUNCTION im_v2.serialize_device_revocation_events() RETURNS trigger
+    LANGUAGE plpgsql VOLATILE
+    AS $$
+BEGIN
+    PERFORM pg_catalog.pg_advisory_xact_lock(743204, 1);
+    RETURN NULL;
+END;
+$$;
+CREATE TRIGGER device_revocation_events_commit_order
+    BEFORE INSERT ON im_v2.device_revocation_events
+    FOR EACH STATEMENT EXECUTE FUNCTION im_v2.serialize_device_revocation_events();
+
 CREATE TABLE im_v2.device_session_operations (
     actor_user_id uuid NOT NULL,
     operation_id uuid NOT NULL,
@@ -1492,6 +1508,73 @@ CREATE TRIGGER messages_snapshot_content_before_revision_change
     BEFORE UPDATE OF text_body, rich_entities, content_revision ON im_v2.messages
     FOR EACH ROW EXECUTE FUNCTION im_v2.snapshot_message_content_before_revision_change();
 
+-- Authorization facts for each edited revision outlive room-log retention.
+-- They contain no message content and deliberately have no event/message FK:
+-- deleting transient history must not change a retained revision's audience.
+CREATE TABLE im_v2.message_edit_visibility (
+    message_id uuid NOT NULL,
+    message_revision bigint NOT NULL CHECK (message_revision > 1),
+    room_id uuid NOT NULL,
+    room_sequence bigint NOT NULL CHECK (room_sequence > 0),
+    committed_membership_revision bigint NOT NULL CHECK (committed_membership_revision >= 0),
+    PRIMARY KEY (message_id, message_revision),
+    UNIQUE (room_id, room_sequence)
+);
+CREATE INDEX message_edit_visibility_latest_idx ON im_v2.message_edit_visibility
+    (message_id, room_sequence DESC) INCLUDE (message_revision, room_id, committed_membership_revision);
+
+CREATE FUNCTION im_v2.capture_message_edit_visibility() RETURNS trigger
+    LANGUAGE plpgsql VOLATILE AS $$
+DECLARE
+    edited_message_id uuid;
+    edited_revision bigint;
+BEGIN
+    -- Bad legacy/test event payloads remain available to strict log decoders,
+    -- but cannot authorize a revision. Never depend on a mutable message row.
+    IF NEW.payload->>'message_id' IS NULL
+       OR NEW.payload->>'message_id' !~ '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+       OR NEW.payload->>'message_revision' IS NULL
+       OR NEW.payload->>'message_revision' !~ '^[0-9]+$'
+       OR lower(NEW.payload->>'room_id') IS DISTINCT FROM NEW.room_id::text THEN
+        RETURN NEW;
+    END IF;
+    BEGIN
+        edited_message_id := (NEW.payload->>'message_id')::uuid;
+        edited_revision := (NEW.payload->>'message_revision')::bigint;
+    EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+        RETURN NEW;
+    END;
+    IF edited_revision <= 1 THEN RETURN NEW; END IF;
+
+    INSERT INTO im_v2.message_edit_visibility
+        (message_id, message_revision, room_id, room_sequence, committed_membership_revision)
+    VALUES (edited_message_id, edited_revision, NEW.room_id, NEW.room_sequence, NEW.committed_membership_revision)
+    ON CONFLICT (message_id, message_revision) DO NOTHING;
+    IF NOT EXISTS (
+        SELECT 1 FROM im_v2.message_edit_visibility
+        WHERE message_id = edited_message_id AND message_revision = edited_revision
+          AND room_id = NEW.room_id AND room_sequence = NEW.room_sequence
+          AND committed_membership_revision = NEW.committed_membership_revision
+    ) THEN
+        RAISE EXCEPTION 'conflicting immutable message edit visibility' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER room_events_capture_message_edit_visibility
+    AFTER INSERT ON im_v2.room_events FOR EACH ROW WHEN (NEW.event_type = 'message.edited')
+    EXECUTE FUNCTION im_v2.capture_message_edit_visibility();
+
+CREATE FUNCTION im_v2.reject_message_edit_visibility_mutation() RETURNS trigger
+    LANGUAGE plpgsql VOLATILE AS $$
+BEGIN
+    RAISE EXCEPTION 'message edit visibility is immutable' USING ERRCODE='23514';
+END;
+$$;
+CREATE TRIGGER message_edit_visibility_immutable
+    BEFORE UPDATE OR DELETE ON im_v2.message_edit_visibility
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_edit_visibility_mutation();
+
 CREATE TABLE im_v2.moderation_audit_entries (
     actor_user_id uuid NOT NULL,
     operation_id uuid NOT NULL,
@@ -1997,14 +2080,14 @@ CREATE TABLE im_v2.control_housekeeping_cursor (
 INSERT INTO im_v2.control_housekeeping_cursor (singleton, rotation) VALUES (true, 0);
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-64'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-64'::text))
+    schema_id text DEFAULT 'im-v2-current-65'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-65'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-64');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-65');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
@@ -3571,11 +3654,15 @@ CREATE TABLE im_v2.resource_imports (
     target_media_id uuid NOT NULL,
     session_json jsonb,
     state text NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','copying','processing','ready','cancelled','failed')),
+    source_released_at timestamptz,
+    CONSTRAINT resource_imports_source_release_check CHECK (
+        source_released_at IS NULL OR (state IN ('processing','ready','cancelled','failed') AND isfinite(source_released_at))
+    ),
     created_at timestamptz NOT NULL,
     updated_at timestamptz NOT NULL,
     PRIMARY KEY(actor_user_id,operation_id)
 );
-CREATE INDEX resource_imports_pending_idx ON im_v2.resource_imports(updated_at,operation_id) WHERE state IN ('pending','copying','processing');
+CREATE INDEX resource_imports_pending_idx ON im_v2.resource_imports(updated_at,operation_id) WHERE state IN ('pending','copying','processing') OR source_released_at IS NULL;
 CREATE TABLE im_v2.resource_import_holds (
     actor_user_id uuid NOT NULL,
     operation_id uuid NOT NULL,
@@ -3590,6 +3677,26 @@ CREATE TABLE im_v2.resource_import_holds (
     PRIMARY KEY(actor_user_id,operation_id)
 );
 CREATE INDEX resource_import_holds_active_idx ON im_v2.resource_import_holds(media_id) WHERE released_at IS NULL;
+
+-- Closing an import before its first hold must still fence a delayed source
+-- acquisition. This operation tombstone is permanent, including when no hold
+-- row exists yet; source acquisition and closure share the operation lock.
+CREATE TABLE im_v2.resource_import_source_closures (
+    actor_user_id uuid NOT NULL,
+    operation_id uuid NOT NULL,
+    closed_at timestamptz NOT NULL,
+    CONSTRAINT resource_import_source_closures_finite_time CHECK (isfinite(closed_at)),
+    PRIMARY KEY(actor_user_id, operation_id)
+);
+CREATE FUNCTION im_v2.reject_resource_import_source_closure_mutation() RETURNS trigger
+    LANGUAGE plpgsql VOLATILE AS $$
+BEGIN
+    RAISE EXCEPTION 'resource import source closures are immutable' USING ERRCODE='23514';
+END;
+$$;
+CREATE TRIGGER resource_import_source_closures_immutable
+    BEFORE UPDATE OR DELETE ON im_v2.resource_import_source_closures
+    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_resource_import_source_closure_mutation();
 
 -- Same-home provider migration. Source/output references survive process failure.
 CREATE TABLE im_v2.resource_storage_migrations (

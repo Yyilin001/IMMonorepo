@@ -982,14 +982,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let coldOutbox = try PostgresV2UserStateEventOutbox(database: resources.database(.psql))
             let coldProjector = try PostgresV2UserStateEventProjector(database: resources.database(.psql))
             let deliveryTime = now.addingTimeInterval(60)
-            let coldLeases = try await coldOutbox.claim(now: deliveryTime, leaseDuration: 30, limit: 1024)
+            let coldLeases = try await deliverUserStateEvents(coldOutbox, projector: coldProjector, now: deliveryTime, leaseDuration: 30, limit: 1024)
                 .filter { coldSources.contains($0.event.sourceEventID.rawValue) }
             #expect(coldLeases.count == 4)
-            for lease in coldLeases {
-                let sequence = try await coldProjector.project(lease.event)
-                #expect(try await coldProjector.project(lease.event) == sequence)
-                #expect(try await coldOutbox.acknowledge(lease, sequence: sequence, now: deliveryTime))
-            }
             let coldProjectionRows = try await sql.raw("""
                 SELECT user_id, user_sync_sequence, source_event_id, projection_kind
                 FROM im_v2.user_sync_log

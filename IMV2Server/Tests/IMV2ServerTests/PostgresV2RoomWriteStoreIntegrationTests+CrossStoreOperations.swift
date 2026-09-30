@@ -94,6 +94,26 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     }
                 }
             }
+            struct Fence: V2UserShardRouteFencing {
+                let database: any Database
+                func withCurrentRoute<Result: Sendable>(for userID: UserID,
+                    _ operation: @escaping @Sendable (V2UserShardRoute, any Database) async throws -> Result) async throws -> Result {
+                    try await database.transaction { transaction in
+                        try await operation(.init(bucket: "user", observedRouterEpoch: 1), transaction)
+                    }
+                }
+            }
+            let outbox = try PostgresV2UserStateEventOutbox(database: database)
+            let projector = try V2RoutedUserStateEventProjector(routeFence: Fence(database: database),
+                registry: V2StaticUserShardStorageRegistry(locations: [.init(bucket: "user", database: userDatabase, schema: "im_v2")]))
+            if path == "direct-open" || path == "direct-receipt" {
+                // Room opening and the fixture message precede the operation under
+                // test. Deliver their stream heads before exhausting the counter.
+                _ = try await deliverUserStateEvents(outbox, projector: projector,
+                    now: Date().addingTimeInterval(1), leaseDuration: 30, limit: 100)
+                #expect(try await count("im_v2.user_state_event_outbox WHERE state IN ('pending','leased')", on: sql) == 0)
+            }
+            let previousUserSyncCount = try #require(try await userSQL.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE user_id = \(bind: senderUUID)").first(decoding: CountRow.self)).value
             let needed: Int64 = path == "block-remove" ? 2 : 1
             try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: senderUUID), \(bind: Int64.max - needed + 1)) ON CONFLICT (user_id) DO UPDATE SET next_sequence = EXCLUDED.next_sequence").run()
             func snapshot() async throws -> [String] {
@@ -105,19 +125,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 return result
             }
             if path == "direct-open" || path == "direct-receipt" {
-                struct Fence: V2UserShardRouteFencing {
-                    let database: any Database
-                    func withCurrentRoute<Result: Sendable>(for userID: UserID,
-                        _ operation: @escaping @Sendable (V2UserShardRoute, any Database) async throws -> Result) async throws -> Result {
-                        try await database.transaction { transaction in
-                            try await operation(.init(bucket: "user", observedRouterEpoch: 1), transaction)
-                        }
-                    }
-                }
-                let outbox = try PostgresV2UserStateEventOutbox(database: database)
-                let projector = try V2RoutedUserStateEventProjector(routeFence: Fence(database: database),
-                    registry: V2StaticUserShardStorageRegistry(locations: [.init(bucket: "user", database: userDatabase, schema: "im_v2")]))
-                try await userSQL.raw("INSERT INTO im_v2.user_sync_sequences(user_id, next_sequence) VALUES (\(bind: senderUUID), \(bind: Int64.max))").run()
+                try await userSQL.raw("INSERT INTO im_v2.user_sync_sequences(user_id, next_sequence) VALUES (\(bind: senderUUID), \(bind: Int64.max)) ON CONFLICT (user_id) DO UPDATE SET next_sequence = EXCLUDED.next_sequence").run()
                 let original = try await perform()
                 let sourceEventCount: Int64 = path == "direct-open" ? 1 : 2
                 #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_state_event_outbox WHERE source_event_id = \(bind: operation)").first(decoding: CountRow.self)?.value == sourceEventCount)
@@ -139,7 +147,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     }
                 }
                 #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_state_event_outbox WHERE source_event_id = \(bind: operation) AND state = 'paused'").first(decoding: CountRow.self)?.value == 1)
-                #expect(try await userSQL.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE user_id = \(bind: senderUUID)").first(decoding: CountRow.self)?.value == 0)
+                #expect(try await userSQL.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE user_id = \(bind: senderUUID)").first(decoding: CountRow.self)?.value == previousUserSyncCount)
                 try await userSQL.raw("UPDATE im_v2.user_sync_sequences SET next_sequence = \(bind: Int64.max - 1) WHERE user_id = \(bind: senderUUID)").run()
                 try await sql.raw("UPDATE im_v2.user_state_event_outbox SET state = 'pending', next_attempt_at = \(bind: now) WHERE source_event_id = \(bind: operation) AND state = 'paused'").run()
                 let recovery = try await outbox.claim(now: now.addingTimeInterval(60), leaseDuration: 30, limit: 100)

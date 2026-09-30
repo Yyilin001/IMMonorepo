@@ -108,15 +108,19 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.personal_preference_operation_receipts", on: sql) == 5)
             // Deliver later B before A to a distinct user database. The snapshot keeps B's
             // false state and revision, including after a reset rebuild.
-            let outbox = try PostgresV2UserStateEventOutbox(database: database)
-            let eventLeases = try await outbox.claim(now: Date().addingTimeInterval(1), leaseDuration: 30, limit: 100)
             let projector = try PostgresV2UserStateEventProjector(database: userDatabase)
             let desiredKind: V2UserStateEventKind = favorite ? .messageFavorite : .conversationState
-            let events = eventLeases.map(\.event).filter { $0.kind == desiredKind }.sorted {
-                $0.createdAt > $1.createdAt
-            }
+            let events = try await frozenUserStateEvents(on: sql, userID: senderUUID, kind: desiredKind)
             #expect(events.count == 2)
-            for event in events { _ = try await projector.project(event) }
+            let deliveredRevisions = try events.map {
+                let payload = try #require(JSONSerialization.jsonObject(with: Data($0.payloadJSON.utf8)) as? [String: Any])
+                return try #require(payload["revision"] as? Int)
+            }
+            #expect(deliveredRevisions == [2, 1])
+            for event in events {
+                let sequence = try await projector.project(event)
+                #expect(try await projector.project(event) == sequence)
+            }
             let worker = PostgresV2UserProjectionWorker(database: userDatabase)
             let report = try await worker.runOnce(now: Date().addingTimeInterval(2))
             #expect(report.failedRecordCount == 0)

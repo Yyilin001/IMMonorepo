@@ -173,12 +173,13 @@ struct ResourcePlacementTestFixture: Sendable {
     let database: any Database; let sql: any SQLDatabase; let root: URL
     let user = UserID(uuid: UUID()), device = DeviceID(uuid: UUID()), media = MediaID(uuid: UUID())
     let room = RoomID(uuid: UUID()), variant = ResourceVariantID(uuid: UUID())
-    let bytes = Data("immutable input snapshot".utf8)
+    let bytes: Data
     var digest: Data { Data(SHA256.hash(data: bytes)) }
     let localSource: V2LocalResourceStorage; let source: ResourcePlacementTestSource; let target: V2LocalResourceStorage
     let old: V2StoredObjectReference; let replacement: V2StoredObjectReference
     let registry: V2ResourceStorageRegistry
-    init(database: any Database, root: URL) async throws {
+    init(database: any Database, root: URL, bytes: Data = Data("immutable input snapshot".utf8)) async throws {
+        self.bytes = bytes
         self.database=database; self.sql=try #require(database as? any SQLDatabase); self.root=root
         let bindingA = try V2StorageBinding(id: "identity-a-" + UUID().uuidString, configurationRevision: 1)
         let bindingB = try V2StorageBinding(id: "identity-b-" + UUID().uuidString, configurationRevision: 2)
@@ -210,13 +211,14 @@ struct ResourcePlacementTestFixture: Sendable {
             : .message(location: .init(roomID: room, messageID: .init(uuid: UUID())), mediaID: media, variantID: nil),
             targetUsage: .messageAttachment(.init(uuid: UUID())), targetMediaID: .init(uuid: UUID()))
     }
-    func imports() async throws -> V2ResourceImportService {
+    func imports(supportsAvatars: Bool = false) async throws -> V2ResourceImportService {
         let provider = try V2LocalFilesystemMediaProvider(rootDirectory: root.appendingPathComponent("staging"),
             targetBaseURL: #require(URL(string: "https://identity.test")), signingKey: Data(repeating: 1, count: 32))
         try await provider.prepare()
         let transport = V2LocalResourceUploadTransport(binding: target.binding, provider: provider)
         let service = try V2ResourceService(resolve: { _,_,_,_ in PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in }) },
-            registry: registry, transports: [transport], maximumBytes: 1_000_000, allocate: { _ in try target.allocate() })
+            registry: registry, transports: [transport], maximumBytes: 1_000_000,
+            supportsAvatars: supportsAvatars, allocate: { _ in try target.allocate() })
         let observed = Date(), session = UUID()
         let authorization = V2ActorRoomMediaAuthorizationPort { query, _ in
             guard case .messageVisibility(let value) = query else { return .notVisible }

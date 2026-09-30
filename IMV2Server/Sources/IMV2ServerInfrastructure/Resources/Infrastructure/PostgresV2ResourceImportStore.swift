@@ -85,15 +85,36 @@ public struct PostgresV2ResourceImportStore: V2ResourceImportPort {
     }
 
     public func releaseSource(_ request: V2ResourceImportRequest, actor: UserID) async throws {
-        guard let sql = try await sources.database(for: request.source) as? any SQLDatabase else { throw V2ResourceProviderError.configurationInvalid }
-        try await sql.raw("UPDATE im_v2.resource_import_holds SET released_at=clock_timestamp() WHERE actor_user_id=\(bind: actor.uuidValue!) AND operation_id=\(bind: request.operationID.uuidValue!) AND released_at IS NULL").run()
+        let source = try await sources.database(for: request.source)
+        try await source.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else { throw V2ResourceProviderError.configurationInvalid }
+            try await lockSourceOperation(request, actor: actor, sql: sql)
+            // Closure survives even when cancellation wins before the first hold is inserted.
+            // A late acquire must never create fresh retained bytes after cleanup was acknowledged.
+            try await sql.raw("""
+                INSERT INTO im_v2.resource_import_source_closures(actor_user_id,operation_id,closed_at)
+                VALUES(\(bind: actor.uuidValue!),\(bind: request.operationID.uuidValue!),clock_timestamp())
+                ON CONFLICT DO NOTHING
+                """).run()
+            try await sql.raw("UPDATE im_v2.resource_import_holds SET released_at=clock_timestamp() WHERE actor_user_id=\(bind: actor.uuidValue!) AND operation_id=\(bind: request.operationID.uuidValue!) AND released_at IS NULL").run()
+        }
+        // Cross-home commits cannot be atomic. A missing acknowledgement keeps cleanup eligible;
+        // replaying the source UPDATE after either commit boundary is harmless.
+        guard let target = try await targetDatabase(for: request.targetUsage.home(actorUserID: actor)) as? any SQLDatabase else {
+            throw V2ResourceProviderError.configurationInvalid
+        }
+        guard try await target.raw("""
+            UPDATE im_v2.resource_imports SET source_released_at=COALESCE(source_released_at,clock_timestamp())
+            WHERE actor_user_id=\(bind: actor.uuidValue!) AND operation_id=\(bind: request.operationID.uuidValue!)
+              AND state IN ('processing','ready','cancelled','failed') RETURNING operation_id
+            """).first() != nil else { throw V2ResourceProviderError.preconditionFailed }
     }
 
     public func recoveryCandidates(ownerID: String, limit: Int) async throws -> [V2ResourceImportRecoveryItem] {
         guard (1...100).contains(limit), let sql = ownerDatabases[ownerID] as? any SQLDatabase else { throw V2ResourceProviderError.configurationInvalid }
         let rows = try await sql.raw("""
             SELECT actor_user_id,device_id,request_json::text AS request_text
-            FROM im_v2.resource_imports WHERE state IN ('pending','copying','processing')
+            FROM im_v2.resource_imports WHERE state IN ('pending','copying','processing') OR source_released_at IS NULL
             ORDER BY updated_at,operation_id LIMIT \(bind: limit)
             """).all(decoding: ImportRecoveryRow.self)
         return try rows.map { row in
@@ -101,6 +122,33 @@ public struct PostgresV2ResourceImportStore: V2ResourceImportPort {
             let actor = UserID(uuid: row.actorUserID), device = DeviceID(uuid: row.deviceID)
             return .init(ownerID: ownerID, request: request, locator: .init(home: request.targetUsage.home(actorUserID: actor), operationID: request.operationID), actor: actor, device: device)
         }
+    }
+
+    public func reconcileTargetClosure(_ item: V2ResourceImportRecoveryItem) async throws -> Bool {
+        guard let sql = ownerDatabases[item.ownerID] as? any SQLDatabase else { throw V2ResourceProviderError.configurationInvalid }
+        // Trusted recovery only observes uploads this exact import already committed. It never
+        // bypasses authorization for admission, source reads, upload, cancellation or client status.
+        return try await sql.raw("""
+            WITH closure AS (
+                SELECT i.actor_user_id,i.operation_id,
+                    CASE WHEN i.state IN ('cancelled','failed') THEN i.state
+                         WHEN s.state IN ('cancelled','expired','failed') OR m.state IN ('failed','expired') THEN 'failed'
+                         WHEN m.state='available' THEN 'ready'
+                         ELSE 'processing' END AS state
+                FROM im_v2.resource_imports i
+                LEFT JOIN im_v2.resource_upload_sessions s ON s.media_id=i.target_media_id
+                  AND s.actor_user_id=i.actor_user_id AND s.device_id=i.device_id
+                  AND s.operation_id=i.operation_id AND i.session_json IS NOT NULL
+                LEFT JOIN im_v2.media_objects m ON m.media_id=s.media_id
+                WHERE i.actor_user_id=\(bind: item.actor.uuidValue!) AND i.device_id=\(bind: item.device.uuidValue!)
+                  AND i.operation_id=\(bind: item.locator.operationID.uuidValue!)
+                  AND (i.state IN ('ready','cancelled','failed') OR s.state IN ('completed','cancelled','expired','failed'))
+                FOR UPDATE OF i
+            )
+            UPDATE im_v2.resource_imports i SET state=closure.state,updated_at=clock_timestamp()
+            FROM closure WHERE i.actor_user_id=closure.actor_user_id AND i.operation_id=closure.operation_id
+            RETURNING i.operation_id
+            """).first() != nil
     }
 
     public func recordRecoveryFailure(_ item: V2ResourceImportRecoveryItem) async throws -> Bool {
@@ -135,14 +183,27 @@ public struct PostgresV2ResourceImportStore: V2ResourceImportPort {
         return (try await resolveConcrete(locator.home, request.targetUsage, actor, device), row, request)
     }
 
+    private func targetDatabase(for home: V2ResourceHome) async throws -> any Database {
+        switch home {
+        case .account: return sources.control
+        case .room(let room):
+            let route = try await sources.rooms.route(for: room)
+            guard let database = ownerDatabases[route.shardID] else { throw V2ResourceProviderError.configurationInvalid }
+            return database
+        }
+    }
+
     private func load(_ locator: V2ResourceImportLocator, actor: UserID, device: DeviceID, sql: any SQLDatabase) async throws -> ResourceImportRow? {
         try await sql.raw("SELECT request_json::text AS request_text,session_json::text AS session_text,target_media_id,state FROM im_v2.resource_imports WHERE actor_user_id=\(bind: actor.uuidValue!) AND device_id=\(bind: device.uuidValue!) AND operation_id=\(bind: locator.operationID.uuidValue!)").first(decoding: ResourceImportRow.self)
     }
 
     private func hold(_ request: V2ResourceImportRequest, actor: UserID, database: any Database) async throws -> ImportSourceFacts {
         try await database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase,
-                  let media = try await sql.raw("SELECT content_type FROM im_v2.media_objects WHERE media_id=\(bind: request.source.mediaID.uuidValue!) AND state='available' FOR UPDATE").first(decoding: ImportContentType.self)
+            guard let sql = transaction as? any SQLDatabase else { throw V2ResourceProviderError.configurationInvalid }
+            try await lockSourceOperation(request, actor: actor, sql: sql)
+            guard try await sql.raw("SELECT 1 FROM im_v2.resource_import_source_closures WHERE actor_user_id=\(bind: actor.uuidValue!) AND operation_id=\(bind: request.operationID.uuidValue!)").first() == nil
+            else { throw V2ResourceProviderError.preconditionFailed }
+            guard let media = try await sql.raw("SELECT content_type FROM im_v2.media_objects WHERE media_id=\(bind: request.source.mediaID.uuidValue!) AND state='available' FOR UPDATE").first(decoding: ImportContentType.self)
             else { throw V2ResourceProviderError.notFound }
             if let previous = try await heldSource(request, actor: actor, sql: sql) { return previous }
             let variant: ResourceVariantID?
@@ -177,6 +238,10 @@ public struct PostgresV2ResourceImportStore: V2ResourceImportPort {
             guard let held = try await heldSource(request, actor: actor, sql: sql) else { throw V2ResourceProviderError.preconditionFailed }
             return held
         }
+    }
+
+    private func lockSourceOperation(_ request: V2ResourceImportRequest, actor: UserID, sql: any SQLDatabase) async throws {
+        try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "resource-import-source:\(actor.rawValue):\(request.operationID.rawValue)"),0))").run()
     }
 
     private func heldSource(_ request: V2ResourceImportRequest, actor: UserID, sql: any SQLDatabase) async throws -> ImportSourceFacts? {

@@ -90,21 +90,40 @@ assert_scalar() {
   fi
 }
 
-# Fresh current64 canonical schema, including permanent typed receipts and
+# Fresh current65 canonical schema, including permanent typed receipts and
 # remote-device security metadata. Counts include views and application-only
 # triggers; retired ledgers must remain absent rather than be recreated.
 assert_scalar 'im_v2 relation count' \
-  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '168'
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '170'
 assert_scalar 'im_v2 index count' \
-  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '359'
+  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '363'
 assert_scalar 'im_v2 application trigger count' \
-  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '60'
+  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '64'
 assert_scalar 'im_v2 function count' \
-  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '36'
+  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '40'
 
 # A same-named trigger function is not enough: replacing its body must fail
 # readiness, as must a nullable ready-variant constraint or a weakened replay key.
 for drift in \
+  "DROP TABLE im_v2.message_edit_visibility;" \
+  "ALTER TABLE im_v2.message_edit_visibility DROP CONSTRAINT message_edit_visibility_pkey;" \
+  "ALTER TABLE im_v2.message_edit_visibility ALTER COLUMN committed_membership_revision DROP NOT NULL;" \
+  "DROP INDEX im_v2.message_edit_visibility_latest_idx;" \
+  "DROP TRIGGER room_events_capture_message_edit_visibility ON im_v2.room_events;" \
+  "ALTER TABLE im_v2.room_events DISABLE TRIGGER room_events_capture_message_edit_visibility;" \
+  "DROP TRIGGER message_edit_visibility_immutable ON im_v2.message_edit_visibility;" \
+  'CREATE OR REPLACE FUNCTION im_v2.capture_message_edit_visibility() RETURNS trigger LANGUAGE plpgsql VOLATILE AS $$ BEGIN RETURN NEW; END; $$;' \
+  'CREATE OR REPLACE FUNCTION im_v2.reject_message_edit_visibility_mutation() RETURNS trigger LANGUAGE plpgsql VOLATILE AS $$ BEGIN RETURN OLD; END; $$;' \
+  "DROP TABLE im_v2.resource_import_source_closures;" \
+  "ALTER TABLE im_v2.resource_import_source_closures DROP CONSTRAINT resource_import_source_closures_pkey;" \
+  "ALTER TABLE im_v2.resource_import_source_closures DROP CONSTRAINT resource_import_source_closures_finite_time;" \
+  "DROP TRIGGER resource_import_source_closures_immutable ON im_v2.resource_import_source_closures;" \
+  'CREATE OR REPLACE FUNCTION im_v2.reject_resource_import_source_closure_mutation() RETURNS trigger LANGUAGE plpgsql VOLATILE AS $$ BEGIN RETURN OLD; END; $$;' \
+  "DROP TRIGGER device_revocation_events_commit_order ON im_v2.device_revocation_events;" \
+  "ALTER TABLE im_v2.device_revocation_events DISABLE TRIGGER device_revocation_events_commit_order;" \
+  "ALTER SEQUENCE im_v2.device_revocation_events_event_id_seq CACHE 8;" \
+  "ALTER SEQUENCE im_v2.device_revocation_events_event_id_seq INCREMENT BY -1 MINVALUE -9223372036854775808;" \
+  'CREATE OR REPLACE FUNCTION im_v2.serialize_device_revocation_events() RETURNS trigger LANGUAGE plpgsql VOLATILE AS $$ BEGIN RETURN NULL; END; $$;' \
   "DROP TRIGGER resource_group_avatar_operations_immutable ON im_v2.resource_group_avatar_operations;" \
   "DROP TRIGGER resource_group_avatar_closures_immutable ON im_v2.resource_group_avatar_closures;" \
   "DROP TRIGGER resource_group_avatar_operations_close_fence ON im_v2.resource_group_avatar_operations;" \

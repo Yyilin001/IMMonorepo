@@ -29,7 +29,7 @@
 ## 当前兼容与 Schema 政策
 
 - 按用户要求不考虑历史兼容；客户端和服务端仅支持当前协议，并显式协商 TCP 消息发送能力。HTTPS 发送保留为独立通道。数据库仍以当前 schema 和全新数据库为基线，不提供在线数据迁移。
-- protocol 45 已退役旧成员管理、群能力、社交、建群、私聊、消息审核以及 send/edit/withdraw/reaction/forward 写请求，原字段编号保留为 reserved，禁止复用；20/24/26/28/105 与无消费方的旧转发响应106已保留为 reserved；21/25/27/29 事实响应保留。该批源码和生成物收口后统一验证。新增在线状态发布抑制控制，后台连接默认抑制发布。当前 schema 为 current64，包含新领域 admission/永久回执与远程设备撤销专属恢复表。生产装配已有阶段编译记录；目前按用户要求先集中收口实现，本次消息发送升级新增完整操作合同而不复用退休字段；验证证据见[双通道实施记录](../../docs/reviews/message-send-dual-transport.md)，不以源码接线代替故障验收。
+- protocol 45 已退役旧成员管理、群能力、社交、建群、私聊、消息审核以及 send/edit/withdraw/reaction/forward 写请求，原字段编号保留为 reserved，禁止复用；20/24/26/28/105 与无消费方的旧转发响应106已保留为 reserved；21/25/27/29 事实响应保留。该批源码和生成物收口后统一验证。新增在线状态发布抑制控制，后台连接默认抑制发布。当前 schema 为 current65，包含新领域 admission/永久回执与远程设备撤销专属恢复表。生产装配已有阶段编译记录；目前按用户要求先集中收口实现，本次消息发送升级新增完整操作合同而不复用退休字段；验证证据见[双通道实施记录](../../docs/reviews/message-send-dual-transport.md)，不以源码接线代替故障验收。
 - wire contract 为 protobuf protocol 45；生成物必须与
   [`Protocol/im_realtime/v2/im_v2.proto`](../../Protocol/im_realtime/v2/im_v2.proto) 一致。
   protocol 45 包含显式协商的临时作者资料补充通道及按精确 nonce 结束补充的控制命令；资源读取、传输与页面消费已装配。服务端开关默认关闭，App 前台声明支持、后台不订阅；真实端到端及负载验收仍待完成，见[资源实施记录](../../docs/proposals/resource-system-implementation.md)。
@@ -37,8 +37,10 @@
   私聊与群聊的公共内容统一以房间日志为权威副本，不再提供 fanout 兼容模式；个人事件流保存个人状态与单侧提示。
   新编辑携带接受身份与显式完整状态以跨越合法版本缺口，见[完整编辑合同](../../docs/reviews/message-edit-replacement-contract.md)。
 - PostgreSQL 新环境从空数据库执行 [`IMV2/sql/schema.sql`](../sql/schema.sql)。当前结构为
-  `im-v2-current-64`；这是唯一新环境建库合同。个人状态事件 outbox 增加按用户 stream head 的扫描索引，避免同用户后续事件在前序事件仍待处理时提前领取。本人资料操作已分离原回执和当前快照，提交/关闭共锁，终态永久保留；字段与恢复路由见[本人资料合同](../../docs/proposals/resource-system-implementation.md#个人资料更新恢复与头像保留)。本轮仅为该领域已实现范围，不表示应用级弱网 W0–W6 全部完成。仅撤销凭据已随注册事务原子交付、与 access/refresh 同项保存，刷新保持原证明与期限，见[原子签发合同](../../docs/reviews/atomic-revocation-credential-issue-contract.md)。真实 HTTPS/App 链路已验证；[独立持久退出交接](../../docs/reviews/device-revocation-handoff-contract.md)已接入，原凭据删除前保留撤销任务，[独立执行器与本地退出](../../docs/reviews/device-revocation-runner-contract.md)已接通前台重试，[暂停反馈与恢复](../../docs/reviews/device-revocation-status-contract.md)已完成，完整生命周期交互验收仍待完成。设备会话保存默认 30 天绝对截止，刷新、认证及 Push/媒体授权不能越过期限；见[期限合同](../../docs/reviews/device-session-absolute-expiry-contract.md)。群角色的显式策略标记独立于可清理的操作回执。
+  `im-v2-current-65`；这是唯一新环境建库合同。个人状态事件 outbox 增加按用户 stream head 的扫描索引，避免同用户后续事件在前序事件仍待处理时提前领取。本人资料操作已分离原回执和当前快照，提交/关闭共锁，终态永久保留；字段与恢复路由见[本人资料合同](../../docs/proposals/resource-system-implementation.md#个人资料更新恢复与头像保留)。本轮仅为该领域已实现范围，不表示应用级弱网 W0–W6 全部完成。仅撤销凭据已随注册事务原子交付、与 access/refresh 同项保存，刷新保持原证明与期限，见[原子签发合同](../../docs/reviews/atomic-revocation-credential-issue-contract.md)。真实 HTTPS/App 链路已验证；[独立持久退出交接](../../docs/reviews/device-revocation-handoff-contract.md)已接入，原凭据删除前保留撤销任务，[独立执行器与本地退出](../../docs/reviews/device-revocation-runner-contract.md)已接通前台重试，[暂停反馈与恢复](../../docs/reviews/device-revocation-status-contract.md)已完成，完整生命周期交互验收仍待完成。设备会话保存默认 30 天绝对截止，刷新、认证及 Push/媒体授权不能越过期限；见[期限合同](../../docs/reviews/device-session-absolute-expiry-contract.md)。群角色的显式策略标记独立于可清理的操作回执。
   readiness 拒绝不符合当前结构的数据库；旧压测库须重建，不提供在线升级。
+  schema65 在撤销事件分配 identity 前通过语句级事务锁串行化写入，保证两个消费者推进水位时不会遗漏晚提交的小序号。资源导入独立保存源释放确认与不可变关闭记录：终态但释放未确认的操作继续恢复，首次保留之前的取消也会阻止晚到的保留；已提交目标的后台收尾不依赖原设备仍有客户端权限。
+  消息编辑的版本、序号和成员修订在同事务中保存至不可变 `message_edit_visibility`，独立于日志裁剪。摘要从有权查看的版本读取当前正文或历史正文，缺少必要历史正文时拒绝读取，不能回退到未授权的当前内容。
   schema 19→20 为群申请增加审核人＋决策操作唯一约束；新审批将成员、配额、事件、outbox 和
   申请记账放入一次事务。审批引用的成员操作回执已增加清理保留；旧 approving 及其恢复服务已删除，B27 原邀请静态 owner 路由缺陷已按当前 Actor 入口验证，见
   [原子审批合同](../../docs/reviews/atomic-group-approval-contract.md)。
