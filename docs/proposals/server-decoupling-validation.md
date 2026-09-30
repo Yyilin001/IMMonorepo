@@ -4,7 +4,7 @@
 
 代码改造、macOS 编译与受影响定向回归已通过；本机 Linux Release、四种一次性应用栈模式、G4/G6 及三数据库定向断链和 owner-a 整库重启专项也已通过。真实远端服务器已停机，验证只使用本机隔离环境。完整故障矩阵和性能对照仍待执行；不能用应用栈冒烟替代。此前 2026-09-28 暂停时中断的原生排空、媒体崩溃和 G4 构建不计为通过。
 
-提交 `943697d7` 调整了 RoomWrite 提交后效果的结果校验顺序。该提交的 macOS 测试目标编译及 `V2RoomWriteCommitEffectsTests` 定向测试通过；此前 Linux Release、应用栈和数据库故障证据对应的是更早源码，不能代替这处改动的最终候选验证。运行配置样例检查通过；Account/Gateway/Operator 配置测试 49 项通过，Actor 配置测试 3 项中 2 项通过、1 项因缺少生成的本地部署文件按条件跳过。
+提交 `943697d7` 调整了 RoomWrite 提交后效果的结果校验顺序。该提交的 macOS 测试目标编译及 `V2RoomWriteCommitEffectsTests` 定向测试通过；当前提交 `e209dbd313317e9ac6a456a7591b578f4e7642bb` 的六个 Linux Release 产品也已构建通过，证据为 `~/.codex/virtual-actor-builds/server-decoupling-20260930-current-six-release-r2/result.json`。此前应用栈和数据库故障证据对应更早源码，不能代替这处改动的运行验证。运行配置样例检查通过；Account/Gateway/Operator 配置测试 49 项通过，Actor 配置测试 3 项中 2 项通过、1 项因缺少生成的本地部署文件按条件跳过。
 
 
 本文记录可复用的验收入口及其执行条件。下方命令是可复用入口，是否已执行以表格与实施记录为准；不能仅因命令存在就视为通过。分批结果见[实施进度](server-decoupling-progress.md)和[Virtual Actor 证据目录](../reviews/virtual-actor/README.md)；源码继续变化后，旧结果不能代替最终验收。每次运行需保存源码 SHA、命令、环境开关、实际 started/passed/skipped 数、退出码和日志。
@@ -13,11 +13,11 @@
 
 当前环境：Apple Swift 6.4（arm64 macOS）及本地 PostgreSQL 可用。Linux 检查使用测试专属 `colima-imv2-va-capacity`（4 CPU / 16 GiB），不切换默认 Docker context；仅在本机专项运行期间启动，结束后停止。2026-09-28 的临时 DNS 改动已恢复，本轮未再修改 DNS。
 
-本轮生产源码收尾提交为 `a235be4c2fa0db5f3898358eb0228e27260f7ffa`，独立进程探针修复提交为 `56e45bef53fc30a6e4a4a3e64e3af3d00e9a5f51`。macOS 全包测试目标编译、标量/资源 PostgreSQL 定向回归及 Gateway 队列测试已通过，详见[实施进度](server-decoupling-progress.md)。Linux 应用栈使用冻结快照 `3af2cbc29aec29806fe11227e393b8f4c8249abd`，与 `a235be4c` 的 Swift 和冒烟脚本内容相同；两者只差文档。当前六产品 Release 矩阵的源码及产物哈希见 `~/.codex/virtual-actor-builds/server-decoupling-20260930-final-six-release/result.json`，源码为 `56e45bef`；四种应用栈模式使用的四产品构建另见 `~/.codex/virtual-actor-builds/server-decoupling-20260930-local-release-r3/result.json`。2026-09-28 的六产品候选与基线构建仍作为历史证据。
+本轮生产源码收尾提交为 `a235be4c2fa0db5f3898358eb0228e27260f7ffa`，独立进程探针修复提交为 `56e45bef53fc30a6e4a4a3e64e3af3d00e9a5f51`，提交后效果修复为 `943697d7`。macOS 全包测试目标编译、标量/资源 PostgreSQL 定向回归及 Gateway 队列测试已通过，详见[实施进度](server-decoupling-progress.md)。Linux 应用栈使用冻结快照 `3af2cbc29aec29806fe11227e393b8f4c8249abd`，与 `a235be4c` 的 Swift 和冒烟脚本内容相同；两者只差文档。当前六产品 Release 矩阵的源码及产物哈希见 `~/.codex/virtual-actor-builds/server-decoupling-20260930-current-six-release-r2/result.json`，源码为 `e209dbd3`；四种应用栈模式使用的四产品构建另见 `~/.codex/virtual-actor-builds/server-decoupling-20260930-local-release-r3/result.json`。2026-09-28 的六产品候选与基线构建仍作为历史证据。
 
 | 层次 | 当前批次最小回归 | 已有证据与剩余工作 |
 | --- | --- | --- |
-| 源码边界与模块 | `python3 scripts/check_v2_server_boundaries.py`；受影响 Server suite | 较早源码的六个 Linux Release 产品、protobuf 生成比对、schema readiness 已通过；当前源码运行配置定向检查通过，仍需其余受影响检查 |
+| 源码边界与模块 | `python3 scripts/check_v2_server_boundaries.py`；受影响 Server suite | 当前源码六个 Linux Release 产品及运行配置定向检查通过；protobuf 生成比对、schema readiness 在较早源码通过，仍需其余受影响检查 |
 | HTTP、认证、运维和 Gateway | 下方定向 filter；只数实际执行测试 | 本机四种 Account/Gateway/Operator 栈均已通过；仍需核对未覆盖的定向 suite |
 | 房间事务和恢复 | 下方真 PostgreSQL 精筛；独立 COMMIT ACK 丢失库 | G4/G6、三库定向断链及 owner-a 整库重启已通过；仍需完整受影响矩阵 |
 | 性能 | 不在每次源码编辑后运行容量负载 | P0 对照与最终源码采用同一 Linux Release 构建模式、fixture、机器、连接池和负载，各至少三次 |
@@ -180,6 +180,6 @@ python3 IMV2/scripts/test_v2_virtual_actor_capacity_canary.py \
 
 正式运行增加 `--measurement-workload hot --measurement-connections <固定值>`；候选再传 `--measurement-freeze-file <main-calibration-freeze.json>`。其他 workload 为 `same-owner`、`mixed`、`cold`、`fault`，其中 fault 使用 mixed layout。每次运行固定 120 秒预热、300 秒稳态、60 秒冷却；同机、同镜像、同 PostgreSQL 版本/数据/连接池/负载，以 `main,candidate,candidate,main,main,candidate` 顺序各取至少三次，执行评估器 `freeze` 与 `assess`。观察 accepted throughput、P95/P99、SQL/ACK、CPU/ACK、RSS、批次和队列。实施方案建议先调查吞吐下降超过 5% 或 P95/P99 上升超过 10%；最终预算须先按 P0 噪声与容量要求冻结。
 
-**当前性能准备状态**：原仓库容量 runner 仍绑定历史 SHA `f1cdd78d6a21bf0ae23da627c0710c65115236aa`，不直接用于本轮对照。独立干净 harness 已生成真实 snapshot `a8dcae1faf999a94d24b5451ff94e184bf6a88c6`，绑定 `524716ef` 加相同三入口 stderr 兼容补丁后的实际基线 `b01bb093`，保留校准、产物及来源检查，并要求两版均有 Actor 指标。该 harness 的 100 连接、1 个热点房间、125 次发送/秒配置已通过只读预检；尚未运行三次基线校准或候选测量。新 fixture 为 `~/.codex/virtual-actor-builds/server-decoupling-20260928-performance-hot-fixture`，独立 harness 及 provenance 位于同级目录。性能结论仍待真实样本；热点单条负载另外配合 direct atomic batch 测量，不能相互替代。
+**当前性能准备状态**：原仓库容量 runner 仍绑定历史 SHA `f1cdd78d6a21bf0ae23da627c0710c65115236aa`，不直接用于本轮对照。独立干净 harness 已生成真实 snapshot `a8dcae1faf999a94d24b5451ff94e184bf6a88c6`，绑定 `524716ef` 加相同三入口 stderr 兼容补丁后的实际基线 `b01bb093`，保留校准、产物及来源检查，并要求两版均有 Actor 指标。该 harness 的 100 连接、1 个热点房间、125 次发送/秒配置已通过只读预检；当前候选 `e209dbd3` 的匹配 Linux Release Gateway/LoadGenerator 已构建并通过 `VA_CAPACITY_CANARY_PREFLIGHT_OK` 的只读来源及 fixture 预检。尚未运行三次基线校准或候选测量。新 fixture 为 `~/.codex/virtual-actor-builds/server-decoupling-20260928-performance-hot-fixture`，独立 harness 及 provenance 位于同级目录。性能结论仍待真实样本；热点单条负载另外配合 direct atomic batch 测量，不能相互替代。
 
 `V2GatewaySlowFanoutBenchmarkTests` 可用 `IMV2_RUN_SLOW_FANOUT_BENCHMARK=1` 单独观测 10k 连接慢读者传输，但只覆盖局部传输；`IMV2/scripts/run_v2_gateway_load_guarded.sh` 使用 macOS `caffeinate`，不是 Linux 容量入口。
