@@ -9,11 +9,13 @@ public struct V2ResourceService: Sendable {
     private let transports: [V2StorageBinding: any V2UploadTransport]
     private let allocate: @Sendable (V2StorageBinding) throws -> V2StoredObjectReference
     private let maximumBytes: Int64
+    private let maximumImageBytes: Int64?
     private let supportsAvatars: Bool
     public init(resolve: @escaping V2ResourceStoreResolving, registry: V2ResourceStorageRegistry,
                 transports: [any V2UploadTransport], maximumBytes: Int64, supportsAvatars: Bool = false,
+                maximumImageBytes: Int64? = nil,
                 allocate: @escaping @Sendable (V2StorageBinding) throws -> V2StoredObjectReference) throws {
-        guard maximumBytes > 0 else { throw V2ResourceProviderError.configurationInvalid }
+        guard maximumBytes > 0, maximumImageBytes.map({ $0 > 0 }) ?? true else { throw V2ResourceProviderError.configurationInvalid }
         var values: [V2StorageBinding: any V2UploadTransport] = [:]
         for transport in transports {
             _ = try registry.storage(for: transport.binding)
@@ -27,13 +29,16 @@ public struct V2ResourceService: Sendable {
         guard values[registry.defaultBinding] != nil else { throw V2ResourceProviderError.configurationInvalid }
         self.resolve = resolve; self.registry = registry; self.transports = values
         self.maximumBytes = maximumBytes; self.allocate = allocate; self.supportsAvatars = supportsAvatars
+        self.maximumImageBytes = maximumImageBytes
     }
     public func capabilities() throws -> V2ResourceCapabilities {
         let transport = transports[registry.defaultBinding]!
         let supported = transport.capabilities
-        return try .init(version: 1, uploadModes: Self.sessionModes(transport), maximumBytes: min(maximumBytes,supported.maximumBytes),
+        let limit = min(maximumBytes, supported.maximumBytes)
+        return try .init(version: 1, uploadModes: Self.sessionModes(transport), maximumBytes: limit,
             allowedUsages: supportsAvatars ? [.messageAttachment,.userAvatar] : [.messageAttachment],
-            maximumParts: (transport as? any V2MultipartUploadTransport)?.maximumParts ?? 0, backgroundTransfer: transport is any V2BackgroundUploadTransport)
+            maximumParts: (transport as? any V2MultipartUploadTransport)?.maximumParts ?? 0, backgroundTransfer: transport is any V2BackgroundUploadTransport,
+            maximumImageBytes: maximumImageBytes.map { min($0, limit) })
     }
     public func create(_ request: V2ResourceUploadRequest, actor: UserID, device: DeviceID) async throws -> V2ResourceUploadSession {
         let home = request.usage.home(actorUserID: actor)
@@ -45,6 +50,9 @@ public struct V2ResourceService: Sendable {
                     guard case .messageAttachment = request.usage else { throw V2ResourceProviderError.unsupportedCapability }
                 }
                 if case .groupAvatar = request.usage { throw V2ResourceProviderError.unsupportedCapability }
+                if request.contentType.hasPrefix("image/"), let maximumImageBytes {
+                    guard request.byteCount <= maximumImageBytes else { throw V2ResourceProviderError.unsupportedCapability }
+                }
                 guard let transport = transports[registry.defaultBinding],
                       Self.sessionModes(transport).contains(where: request.clientModes.contains),
                       request.byteCount <= min(maximumBytes, transport.capabilities.maximumBytes)

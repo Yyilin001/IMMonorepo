@@ -57,15 +57,20 @@ public protocol V2RoomLogRetentionStore: Sendable {
 /// 这是保留裁剪，且被删事件序号必须已经低于房间的裁剪下界。
 public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
     private let database: any Database
+    /// 每个事务最多删除的事件数；多房间入口共享这个预算。
+    private let eventLimit: Int
     // 稳定主键轮转；事务成功后才推进。重启从头开始，不影响裁剪安全性。
     private var lastScannedRoomID: UUID?
     private var isTrimming = false
 
     /// 组合数据库。
     ///
-    /// - Parameter database: 存放房间、房间事件与已读线的数据库。
-    public init(database: any Database) {
+    /// - Parameters:
+    ///   - database: 存放房间、房间事件与已读线的数据库。
+    ///   - eventLimit: 每个事务的事件删除预算，需在 1...10_000 内。
+    public init(database: any Database, eventLimit: Int = 512) {
         self.database = database
+        self.eventLimit = eventLimit
     }
 
     /// 发现结果只是只读提示，不授予裁剪权限；
@@ -82,13 +87,19 @@ public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
         } else { "TRUE" }
         var rows = try await sql.raw("""
             SELECT room_id FROM im_v2.rooms WHERE \(cursorPredicate)
-              AND room_sequence > log_trimmed_through_room_sequence
+              AND (room_sequence > log_trimmed_through_room_sequence OR EXISTS (
+                  SELECT 1 FROM im_v2.room_events AS event
+                  WHERE event.room_id = rooms.room_id
+                    AND event.room_sequence < rooms.log_trimmed_through_room_sequence))
             ORDER BY room_id LIMIT \(bind: limit)
             """).all(decoding: RoomLogLockedRow.self)
         if rows.isEmpty, afterRoomID != nil {
             rows = try await sql.raw("""
                 SELECT room_id FROM im_v2.rooms
-                WHERE room_sequence > log_trimmed_through_room_sequence
+                WHERE room_sequence > log_trimmed_through_room_sequence OR EXISTS (
+                    SELECT 1 FROM im_v2.room_events AS event
+                    WHERE event.room_id = rooms.room_id
+                      AND event.room_sequence < rooms.log_trimmed_through_room_sequence)
                 ORDER BY room_id LIMIT \(bind: limit)
                 """).all(decoding: RoomLogLockedRow.self)
         }
@@ -104,11 +115,13 @@ public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
         window: TimeInterval, now: Date,
         timeouts: V2RoomActivationSQLTimeouts = .default
     ) async throws -> V2RoomLogTrimReport {
-        guard window.isFinite, window > 0, v2PostgresTimestampCanEncode(now),
+        guard (1...10_000).contains(eventLimit),
+              window.isFinite, window > 0, v2PostgresTimestampCanEncode(now),
               let activeSince = v2PostgresPastTimestamp(now: now, interval: window),
               let roomID = token.roomID.uuidValue else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
+        let eventLimit = self.eventLimit
         let attempt = V2RoomTransactionAttempt()
         do {
             return try await v2WithRoomScopedTransaction(database: database, timeouts: timeouts) { transaction in
@@ -122,7 +135,7 @@ public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
                     guard let candidate = candidates.first, candidates.count == 1 else {
                         throw V2RoomWriteStoreError.corruptPersistenceState
                     }
-                    let outcome = try await trimRoomLogCandidate(candidate, sql: sql)
+                    let outcome = try await trimRoomLogCandidate(candidate, eventLimit: eventLimit, sql: sql)
                     return .init(scannedRooms: 1, trimmedRooms: outcome.trimmed ? 1 : 0,
                         deletedEvents: outcome.deletedEvents)
                 }
@@ -145,7 +158,8 @@ public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
         now: Date,
         limit: Int
     ) async throws -> V2RoomLogTrimReport {
-        guard limit > 0, window > 0, v2PostgresTimestampCanEncode(now) else {
+        guard (1...1_000).contains(limit), (1...10_000).contains(eventLimit),
+              window > 0, v2PostgresTimestampCanEncode(now) else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
         guard let activeSince = v2PostgresPastTimestamp(now: now, interval: window) else {
@@ -155,6 +169,7 @@ public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
         guard !isTrimming else { return .init(scannedRooms: 0, trimmedRooms: 0, deletedEvents: 0) }
         isTrimming = true
         defer { isTrimming = false }
+        let eventLimit = self.eventLimit
         let afterRoomID = lastScannedRoomID
         let result = try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
@@ -168,7 +183,10 @@ public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
             var locked = try await sql.raw("""
                 SELECT room_id FROM im_v2.rooms
                 WHERE \(cursorPredicate)
-                  AND room_sequence > log_trimmed_through_room_sequence
+                  AND (room_sequence > log_trimmed_through_room_sequence OR EXISTS (
+                      SELECT 1 FROM im_v2.room_events AS event
+                      WHERE event.room_id = rooms.room_id
+                        AND event.room_sequence < rooms.log_trimmed_through_room_sequence))
 
                 ORDER BY room_id
                 LIMIT \(bind: limit)
@@ -177,7 +195,10 @@ public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
             if locked.isEmpty, afterRoomID != nil {
                 locked = try await sql.raw("""
                     SELECT room_id FROM im_v2.rooms
-                    WHERE room_sequence > log_trimmed_through_room_sequence
+                    WHERE room_sequence > log_trimmed_through_room_sequence OR EXISTS (
+                        SELECT 1 FROM im_v2.room_events AS event
+                        WHERE event.room_id = rooms.room_id
+                          AND event.room_sequence < rooms.log_trimmed_through_room_sequence)
 
                     ORDER BY room_id LIMIT \(bind: limit) FOR UPDATE SKIP LOCKED
                     """).all(decoding: RoomLogLockedRow.self)
@@ -190,12 +211,19 @@ public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
                 roomIDs: roomIDs, mode: mode, activeSince: activeSince, sql: sql)
             var trimmedRooms = 0
             var deletedEvents = 0
+            var scannedRooms = 0
+            var lastProcessedRoomID: UUID?
             for candidate in candidates {
-                let outcome = try await trimRoomLogCandidate(candidate, sql: sql)
+                guard deletedEvents < eventLimit else { break }
+                let outcome = try await trimRoomLogCandidate(candidate,
+                    eventLimit: eventLimit - deletedEvents, sql: sql)
+                scannedRooms += 1
+                lastProcessedRoomID = candidate.roomID
                 if outcome.trimmed { trimmedRooms += 1 }
                 deletedEvents += outcome.deletedEvents
             }
-            return (V2RoomLogTrimReport(scannedRooms: candidates.count, trimmedRooms: trimmedRooms, deletedEvents: deletedEvents), roomIDs.last)
+            return (V2RoomLogTrimReport(scannedRooms: scannedRooms, trimmedRooms: trimmedRooms,
+                deletedEvents: deletedEvents), lastProcessedRoomID)
         }
         lastScannedRoomID = result.1
         return result.0
@@ -220,6 +248,14 @@ private struct RoomLogTrimmedRow: Decodable {
     let count: Int64?
     let roomID: UUID?
     enum CodingKeys: String, CodingKey { case count, roomID = "room_id" }
+}
+
+private struct RoomLogDeletionCandidateRow: Decodable {
+    let eventID: UUID
+    let roomSequence: Int64
+    enum CodingKeys: String, CodingKey {
+        case eventID = "event_id", roomSequence = "room_sequence"
+    }
 }
 
 private func roomLogRetentionCandidates(
@@ -262,25 +298,41 @@ private func roomLogRetentionCandidates(
 }
 
 private func trimRoomLogCandidate(
-    _ candidate: RoomLogRetentionCandidateRow, sql: any SQLDatabase
+    _ candidate: RoomLogRetentionCandidateRow, eventLimit: Int, sql: any SQLDatabase
 ) async throws -> (trimmed: Bool, deletedEvents: Int) {
     // 序号从一开始；下界不大于一时不能删除真实事件。
-    guard candidate.floorSequence > 1,
-          candidate.floorSequence > candidate.trimmedThrough else { return (false, 0) }
+    // 已经宣布裁剪的历史不会因后续读者变化而重新承担送达义务。
+    let targetFloor = max(candidate.floorSequence, candidate.trimmedThrough)
+    guard targetFloor > 1 else { return (false, 0) }
+    // 先固定有界事件集，投影还原和删除共用这些 ID。
+    // 同一序号可有多个事件类型；若预算在该序号内耗尽，未删除的行由后续批次处理，
+    // 不能要求每轮都推进下界，否则同一序号的大批事件会永久停滞。
+    let events = try await sql.raw("""
+        SELECT event_id, room_sequence FROM im_v2.room_events
+        WHERE room_id = \(bind: candidate.roomID)
+          AND room_sequence < \(bind: targetFloor)
+        ORDER BY room_sequence, event_type LIMIT \(bind: eventLimit + 1)
+        """).all(decoding: RoomLogDeletionCandidateRow.self)
+    let selected = Array(events.prefix(eventLimit))
+    let batchFloor = events.count > eventLimit
+        ? selected[selected.count - 1].roomSequence + 1 : targetFloor
     let advanced = try await sql.raw("""
         UPDATE im_v2.rooms
         SET log_trimmed_through_room_sequence = GREATEST(
-                log_trimmed_through_room_sequence, \(bind: candidate.floorSequence))
+                log_trimmed_through_room_sequence, \(bind: batchFloor))
         WHERE room_id = \(bind: candidate.roomID)
-          AND log_trimmed_through_room_sequence < \(bind: candidate.floorSequence)
+          AND log_trimmed_through_room_sequence < \(bind: batchFloor)
         RETURNING room_id
         """).first(decoding: RoomLogTrimmedRow.self) != nil
-    guard advanced else { return (false, 0) }
+    guard !selected.isEmpty else { return (advanced, 0) }
+    let eventIDs = selected.map(\.eventID)
     // 锁定来源事件将被删除的每项状态，包括此语句快照中仍内联的状态。
     // 压缩器可能正并发地把内联状态改为 room_event；若只过滤 room_event，
     // 就可能跳过尚未提交的更新并删除事件。
     // 更新每条被引用的记录会等待该写入方，并在其提交后恢复内联载荷。
     // 后续压缩器会跳过我们锁定的记录，提交后也找不到已删除的源事件。
+    // schema 只允许 variant_key=0 使用 room_event；每事件至多匹配一项状态，
+    // 其他变体必定内联，无需更新，投影还原因此也受同一个事件预算约束。
     try await sql.raw("""
         UPDATE im_v2.message_projection_states AS state
         SET payload = CASE WHEN state.payload_storage = 'room_event'
@@ -288,9 +340,10 @@ private func trimRoomLogCandidate(
             payload_storage = 'inline'
         FROM im_v2.room_events AS event
         WHERE state.room_id = \(bind: candidate.roomID)
+          AND state.variant_key = 0
           AND state.state_event_id = event.event_id
           AND event.room_id = state.room_id
-          AND event.room_sequence < \(bind: candidate.floorSequence)
+          AND event.event_id = ANY(\(bind: eventIDs)::uuid[])
         """).run()
     // 触发器会独立检查，确保只删除低于下界的记录。
     try await sql.raw("SET LOCAL im_v2.retention_trim = 'on'").run()
@@ -298,13 +351,13 @@ private func trimRoomLogCandidate(
         WITH removed AS (
             DELETE FROM im_v2.room_events
             WHERE room_id = \(bind: candidate.roomID)
-              AND room_sequence < \(bind: candidate.floorSequence)
+              AND event_id = ANY(\(bind: eventIDs)::uuid[])
             RETURNING event_id
         )
         SELECT count(*)::bigint AS count FROM removed
         """).first(decoding: RoomLogTrimmedRow.self)
     try await sql.raw("SET LOCAL im_v2.retention_trim = 'off'").run()
-    return (true, Int(removed?.count ?? 0))
+    return (advanced, Int(removed?.count ?? 0))
 }
 
 /// 周期运行房间日志保留裁剪的工作器。

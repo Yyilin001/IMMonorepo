@@ -126,7 +126,7 @@ struct V2ResourceHTTPPostgresTests {
                 avatarAuthorization:{_,_,_,_,_ in throw V2ResourceProviderError.unsupportedCapability})
             let importStore=PostgresV2ResourceImportStore(resolve:{_,_,_,_ in
                 PostgresV2ResourceLifecycleStore(database:database,authorize:{_ in})
-            },sources:importSources,ownerDatabases:["test":database])
+            },sources:importSources,recoveryDatabases:["test":database])
             let imports=V2ResourceImportService(resources:service,resolve:{_,_,_,_ in
                 PostgresV2ResourceLifecycleStore(database:database,authorize:{_ in})
             },persistence:importStore,registry:registry,

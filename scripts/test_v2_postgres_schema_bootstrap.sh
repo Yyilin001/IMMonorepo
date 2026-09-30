@@ -90,13 +90,13 @@ assert_scalar() {
   fi
 }
 
-# Fresh current65 canonical schema, including permanent typed receipts and
+# Fresh current66 canonical schema, including permanent typed receipts and
 # remote-device security metadata. Counts include views and application-only
 # triggers; retired ledgers must remain absent rather than be recreated.
 assert_scalar 'im_v2 relation count' \
-  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '170'
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '172'
 assert_scalar 'im_v2 index count' \
-  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '363'
+  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '368'
 assert_scalar 'im_v2 application trigger count' \
   "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '64'
 assert_scalar 'im_v2 function count' \
@@ -105,6 +105,9 @@ assert_scalar 'im_v2 function count' \
 # A same-named trigger function is not enough: replacing its body must fail
 # readiness, as must a nullable ready-variant constraint or a weakened replay key.
 for drift in \
+  "DROP TABLE im_v2.mention_push_wake_intents;" \
+  "ALTER TABLE im_v2.push_wake_outbox ADD FOREIGN KEY (source_event_id) REFERENCES im_v2.room_events(event_id);" \
+  "DROP INDEX im_v2.account_password_login_rate_limits_cleanup_idx;" \
   "DROP TABLE im_v2.message_edit_visibility;" \
   "ALTER TABLE im_v2.message_edit_visibility DROP CONSTRAINT message_edit_visibility_pkey;" \
   "ALTER TABLE im_v2.message_edit_visibility ALTER COLUMN committed_membership_revision DROP NOT NULL;" \

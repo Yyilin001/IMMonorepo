@@ -400,6 +400,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 Issue.record("expected the mention to be accepted")
                 return
             }
+            #expect(try await count("im_v2.mention_push_wake_intents", on: sql) == 1)
+            #expect(try await PostgresV2MentionPushWakeRelay(owner: database, control: database)
+                .runOnce(now: base, limit: 10) == 1)
             #expect(try await count("im_v2.push_wake_outbox", on: sql) == 0)
 
             // 配置并启用通知活动后，被 @ 成员的**有效**设备各自收到一条唤醒通知；
@@ -412,6 +415,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 Issue.record("expected the mention to be accepted")
                 return
             }
+            #expect(try await PostgresV2MentionPushWakeRelay(owner: database, control: database)
+                .runOnce(now: base, limit: 10) == 1)
             let wakes = try await sql.raw("""
                 SELECT target_device_id, target_user_id, campaign_id, state
                 FROM im_v2.push_wake_outbox ORDER BY target_device_id

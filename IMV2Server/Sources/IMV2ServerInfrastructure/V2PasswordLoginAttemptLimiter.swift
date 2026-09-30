@@ -23,6 +23,42 @@ public struct V2PostgresPasswordLoginAttemptLimiter: V2PasswordLoginAttemptLimit
         self.policy = policy
     }
 
+    /// 由 Account 进程使用同一认证 policy 清理过期窗口；Gateway 不推断密码策略。
+    /// 默认读取数据库时钟，并与认证计数使用相同的微秒上取整窗口。
+    @discardableResult
+    public func purgeExpired(now: Date? = nil, limit: Int) async throws -> Int {
+        guard limit > 0 else { return 0 }
+        return try await database.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else {
+                throw V2PasswordLoginRateLimitError.unavailable
+            }
+            let observed: V2PersistenceTimestamp
+            if let now {
+                observed = try V2PersistenceTimestamp(date: now)
+            } else {
+                observed = try await databaseNow(on: sql)
+            }
+            guard let window = Int64(exactly: (policy.window * 1_000_000).rounded(.up)) else {
+                throw V2PasswordLoginRateLimitError.unavailable
+            }
+            let (cutoffMicroseconds, overflow) = observed.microseconds.subtractingReportingOverflow(window)
+            guard !overflow else { throw V2PasswordLoginRateLimitError.unavailable }
+            let cutoff = try V2PersistenceTimestamp(microseconds: cutoffMicroseconds)
+            return try await sql.raw("""
+                WITH candidates AS (
+                    SELECT account_handle FROM im_v2.account_password_login_rate_limits
+                    WHERE updated_at <= \(bind: cutoff) AND window_started_at <= \(bind: cutoff)
+                      AND (blocked_until IS NULL OR blocked_until <= \(bind: observed))
+                    ORDER BY updated_at, account_handle
+                    LIMIT \(bind: limit) FOR UPDATE SKIP LOCKED
+                )
+                DELETE FROM im_v2.account_password_login_rate_limits AS target
+                USING candidates WHERE target.account_handle = candidates.account_handle
+                RETURNING target.account_handle
+                """).all(decoding: PurgedPasswordAttemptRow.self).count
+        }
+    }
+
     public func consumeAttempt(accountHandle: String) async throws -> Int? {
         try await accountForAttempt(accountHandle: accountHandle, audit: nil)
     }
@@ -231,4 +267,9 @@ func v2LockPasswordAttempts(_ sql: any SQLDatabase, handle: String) async throws
     try await sql.raw(
         "SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))"
     ).run()
+}
+
+private struct PurgedPasswordAttemptRow: Decodable {
+    let accountHandle: String
+    enum CodingKeys: String, CodingKey { case accountHandle = "account_handle" }
 }

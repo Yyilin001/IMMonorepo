@@ -10,12 +10,13 @@ public struct PostgresV2ResourceImportStore: V2ResourceImportPort {
     let resolve: V2ResourceStoreResolving
     let sources: V2ResourceImportSourceResolver
     let resolveConcrete: @Sendable (V2ResourceHome, V2ResourceUsage?, UserID, DeviceID) async throws -> PostgresV2ResourceLifecycleStore
-    let ownerDatabases: [String: any Database]
+    // Recovery owners identify physical databases; room routing uses the shard-indexed source registry.
+    let recoveryDatabases: [String: any Database]
 
     public init(resolve: @escaping @Sendable (V2ResourceHome, V2ResourceUsage?, UserID, DeviceID) async throws -> PostgresV2ResourceLifecycleStore,
-                sources: V2ResourceImportSourceResolver, ownerDatabases: [String: any Database]) {
+                sources: V2ResourceImportSourceResolver, recoveryDatabases: [String: any Database]) {
         self.resolveConcrete = resolve; self.resolve = { home, usage, actor, device in try await resolve(home, usage, actor, device) }
-        self.sources = sources; self.ownerDatabases = ownerDatabases
+        self.sources = sources; self.recoveryDatabases = recoveryDatabases
     }
 
     public func create(_ request: V2ResourceImportRequest, actor: UserID, device: DeviceID) async throws {
@@ -111,7 +112,7 @@ public struct PostgresV2ResourceImportStore: V2ResourceImportPort {
     }
 
     public func recoveryCandidates(ownerID: String, limit: Int) async throws -> [V2ResourceImportRecoveryItem] {
-        guard (1...100).contains(limit), let sql = ownerDatabases[ownerID] as? any SQLDatabase else { throw V2ResourceProviderError.configurationInvalid }
+        guard (1...100).contains(limit), let sql = recoveryDatabases[ownerID] as? any SQLDatabase else { throw V2ResourceProviderError.configurationInvalid }
         let rows = try await sql.raw("""
             SELECT actor_user_id,device_id,request_json::text AS request_text
             FROM im_v2.resource_imports WHERE state IN ('pending','copying','processing') OR source_released_at IS NULL
@@ -125,7 +126,7 @@ public struct PostgresV2ResourceImportStore: V2ResourceImportPort {
     }
 
     public func reconcileTargetClosure(_ item: V2ResourceImportRecoveryItem) async throws -> Bool {
-        guard let sql = ownerDatabases[item.ownerID] as? any SQLDatabase else { throw V2ResourceProviderError.configurationInvalid }
+        guard let sql = recoveryDatabases[item.ownerID] as? any SQLDatabase else { throw V2ResourceProviderError.configurationInvalid }
         // Trusted recovery only observes uploads this exact import already committed. It never
         // bypasses authorization for admission, source reads, upload, cancellation or client status.
         return try await sql.raw("""
@@ -152,7 +153,7 @@ public struct PostgresV2ResourceImportStore: V2ResourceImportPort {
     }
 
     public func recordRecoveryFailure(_ item: V2ResourceImportRecoveryItem) async throws -> Bool {
-        guard let sql = ownerDatabases[item.ownerID] as? any SQLDatabase else { throw V2ResourceProviderError.configurationInvalid }
+        guard let sql = recoveryDatabases[item.ownerID] as? any SQLDatabase else { throw V2ResourceProviderError.configurationInvalid }
         let actorID = item.actor.uuidValue!, operationID = item.locator.operationID.uuidValue!
         let terminal = try await sql.raw("""
             UPDATE im_v2.resource_imports i SET state='failed',updated_at=clock_timestamp()
@@ -188,7 +189,7 @@ public struct PostgresV2ResourceImportStore: V2ResourceImportPort {
         case .account: return sources.control
         case .room(let room):
             let route = try await sources.rooms.route(for: room)
-            guard let database = ownerDatabases[route.shardID] else { throw V2ResourceProviderError.configurationInvalid }
+            guard let database = sources.owners[route.shardID] else { throw V2ResourceProviderError.configurationInvalid }
             return database
         }
     }

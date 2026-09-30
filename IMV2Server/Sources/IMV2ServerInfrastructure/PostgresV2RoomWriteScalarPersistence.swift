@@ -192,6 +192,7 @@ enum V2RoomWriteScalarPersistencePath {
         // @ 提及会唤醒客户端；内容从此房间事件恢复。
         try await v2EnqueueMentionPushWakes(
             sourceEventID: eventID,
+            roomID: roomID,
             mentionedUserIDs: mentionTargets,
             now: message.createdAt,
             sql: sql

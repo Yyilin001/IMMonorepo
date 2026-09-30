@@ -41,15 +41,37 @@ public struct PostgresV2MediaScanStore: V2MediaScanStore {
         let token = makeUUID()
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            // Terminal work is closed without provider I/O, including paused jobs and jobs
+            // waiting for backoff. Do not steal a live claim; its result/retry path also rechecks.
+            try await sql.raw("""
+                WITH terminal_candidates AS (
+                    SELECT outbox.media_id
+                    FROM im_v2.media_scan_outbox outbox
+                    JOIN im_v2.media_objects media USING (media_id)
+                    WHERE (outbox.state IN ('pending', 'paused')
+                           OR (outbox.state = 'claimed' AND outbox.lease_expires_at <= \(bind: now)))
+                      AND (media.state <> 'scanning' OR media.expires_at <= \(bind: now))
+                    ORDER BY outbox.created_at, outbox.media_id
+                    LIMIT \(bind: limit)
+                    FOR UPDATE OF outbox SKIP LOCKED
+                )
+                UPDATE im_v2.media_scan_outbox outbox
+                SET state = 'completed', completed_at = \(bind: now), claim_token = NULL,
+                    lease_expires_at = NULL, next_attempt_at = NULL, paused_at = NULL
+                FROM terminal_candidates
+                WHERE outbox.media_id = terminal_candidates.media_id
+                """).run()
             let rows = try await sql.raw("""
                 WITH candidates AS (
-                    SELECT media_id
-                    FROM im_v2.media_scan_outbox
-                    WHERE (state = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= \(bind: now)))
-                       OR (state = 'claimed' AND lease_expires_at <= \(bind: now))
-                    ORDER BY created_at, media_id
+                    SELECT outbox.media_id
+                    FROM im_v2.media_scan_outbox outbox
+                    JOIN im_v2.media_objects media USING (media_id)
+                    WHERE ((outbox.state = 'pending' AND (outbox.next_attempt_at IS NULL OR outbox.next_attempt_at <= \(bind: now)))
+                       OR (outbox.state = 'claimed' AND outbox.lease_expires_at <= \(bind: now)))
+                      AND media.state = 'scanning' AND media.expires_at > \(bind: now)
+                    ORDER BY outbox.created_at, outbox.media_id
                     LIMIT \(bind: limit)
-                    FOR UPDATE SKIP LOCKED
+                    FOR UPDATE OF outbox SKIP LOCKED
                 )
                 UPDATE im_v2.media_scan_outbox AS outbox
                 SET state = 'claimed', claim_token = \(bind: token), lease_expires_at = \(bind: leaseExpiresAt),
@@ -132,6 +154,16 @@ public struct PostgresV2MediaScanStore: V2MediaScanStore {
                 """).first(decoding: MediaScanClaimRow.self) else { return }
             let currentTime = try V2PersistenceTimestamp(date: now)
             guard scan.leaseExpiresAt.microseconds > currentTime.microseconds else { return }
+            guard let media = try await sql.raw("SELECT state, expires_at FROM im_v2.media_objects WHERE media_id = \(bind: mediaID) FOR UPDATE").first(decoding: MediaScanObjectRow.self),
+                  media.state == "scanning", media.expiresAt.microseconds > currentTime.microseconds else {
+                try await sql.raw("""
+                    UPDATE im_v2.media_scan_outbox
+                    SET state = 'completed', completed_at = \(bind: now), claim_token = NULL,
+                        lease_expires_at = NULL, next_attempt_at = NULL, paused_at = NULL
+                    WHERE media_id = \(bind: mediaID) AND state = 'claimed' AND claim_token = \(bind: lease.claimToken)
+                    """).run()
+                return
+            }
             switch disposition {
             case .retry(let retryAt):
                 guard v2PostgresTimestampCanEncode(retryAt) else { throw V2RoomWriteStoreError.corruptPersistenceState }

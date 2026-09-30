@@ -81,7 +81,7 @@ struct V2ResourceImportRecoveryPostgresTests {
                 ownerDatabases: ["identity": f.database], authorization: original.sources.authorization,
                 avatarAuthorization: { _, _, _, _, _ in await gate.pause() })
             let store = PostgresV2ResourceImportStore(resolve: original.resolveConcrete,
-                sources: sources, ownerDatabases: ["identity": f.database])
+                sources: sources, recoveryDatabases: ["identity": f.database])
             let service = withPersistence(healthy, store)
             let request = try f.request(variant: true)
             let create = Task { try await service.create(request, actor: f.user, device: f.device) }
@@ -107,7 +107,13 @@ struct V2ResourceImportRecoveryPostgresTests {
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil))
     func sourceReleasedBeforeAcknowledgement() async throws {
         try await withFixture { f in
-            let healthy = try await f.imports()
+            let originalService = try await f.imports()
+            let original = try #require(originalService.persistence as? PostgresV2ResourceImportStore)
+            // Deployment recovery uses physical database URLs, while room routing uses shard IDs.
+            let physicalOwner = "postgres://resource-recovery-owner"
+            let persistence = PostgresV2ResourceImportStore(resolve: original.resolveConcrete,
+                sources: original.sources, recoveryDatabases: [physicalOwner: f.database])
+            let healthy = withPersistence(originalService, persistence)
             let failing = withPersistence(healthy, ImportFailingRelease(delegate: healthy.persistence))
             let request = try f.request(variant: false)
             await #expect(throws: V2ResourceProviderError.temporarilyUnavailable) {
@@ -118,14 +124,14 @@ struct V2ResourceImportRecoveryPostgresTests {
             try await f.sql.raw("UPDATE im_v2.media_objects SET state='available' WHERE media_id=\(bind: request.targetMediaID.uuidValue!)").run()
             try await f.sql.raw("UPDATE im_v2.resource_imports SET state='ready' WHERE operation_id=\(bind: request.operationID.uuidValue!)").run()
             let before = try await f.hold(request)
-            try await healthy.runOnce(ownerID: "identity")
+            try await healthy.runOnce(ownerID: physicalOwner)
             async let firstReplay: Void = healthy.persistence.releaseSource(request, actor: f.user)
             async let secondReplay: Void = healthy.persistence.releaseSource(request, actor: f.user)
             _ = try await (firstReplay, secondReplay)
             #expect(try await f.hold(request).released == before.released)
             let row = try #require(try await f.sql.raw("SELECT state,source_released_at AS released FROM im_v2.resource_imports WHERE operation_id=\(bind: request.operationID.uuidValue!)").first(decoding: ImportRecoveryState.self))
             #expect(row.state == "ready" && row.released != nil)
-            #expect(try await healthy.persistence.recoveryCandidates(ownerID: "identity", limit: 100).contains { $0.request.operationID == request.operationID } == false)
+            #expect(try await healthy.persistence.recoveryCandidates(ownerID: physicalOwner, limit: 100).contains { $0.request.operationID == request.operationID } == false)
         }
     }
 
@@ -150,7 +156,7 @@ struct V2ResourceImportRecoveryPostgresTests {
                     throw V2MediaStoreError.uploadNotAuthorized
                 }
                 return PostgresV2ResourceLifecycleStore(database: f.database, authorize: { _ in })
-            }, sources: original.sources, ownerDatabases: ["identity": f.database])
+            }, sources: original.sources, recoveryDatabases: ["identity": f.database])
             let worker = withPersistence(healthy, denied)
             let locator = V2ResourceImportLocator(home: request.targetUsage.home(actorUserID: f.user), operationID: request.operationID)
             await #expect(throws: V2MediaStoreError.uploadNotAuthorized) {

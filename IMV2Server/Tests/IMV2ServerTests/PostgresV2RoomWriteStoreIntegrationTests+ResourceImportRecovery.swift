@@ -36,7 +36,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 authorization: fixtureStore.sources.authorization,
                 avatarAuthorization: { _, _, _, _, _ in throw V2MediaStoreError.downloadNotAuthorized })
             let persistence = PostgresV2ResourceImportStore(resolve: resolve, sources: sourceResolver,
-                ownerDatabases: ["identity": sourceDB, "target": targetDB])
+                recoveryDatabases: ["identity": sourceDB, "target": targetDB])
             let resources = try V2ResourceService(resolve: { home, usage, actor, device in
                 try await resolve(home, usage, actor, device)
             }, registry: f.registry, transports: Array(fixtureService.transports.values),

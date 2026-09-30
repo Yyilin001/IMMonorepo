@@ -145,6 +145,22 @@ enum IMV2AccountServerApp {
                     }
                 }
             }
+            let passwordAttemptLimiter = V2PostgresPasswordLoginAttemptLimiter(
+                database: database, policy: configuration.passwordLoginRateLimit
+            )
+            await runtimeTasks.start {
+                while !Task.isCancelled {
+                    do {
+                        _ = try await passwordAttemptLimiter.purgeExpired(limit: 1_000)
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        V2ServiceLogging.logWorkerFailure(logger,
+                            worker: "account_password_attempt_retention", error: error)
+                    }
+                    do { try await v2Sleep(for: .seconds(60)) } catch { break }
+                }
+            }
             // 每个物理归属方保留一个连接池，用于租约解析和限定范围的媒体授权；
             // 房间命令始终通过 RoomRef 执行。
             var accountStorageDatabases: [String: any Database] = [configuration.databaseURL: database]
@@ -318,6 +334,7 @@ enum IMV2AccountServerApp {
                 }, registry: resourceRegistry,
                     transports: configuredTransports,
                     maximumBytes: localMediaConfiguration.maximumBytes, supportsAvatars: transformer != nil,
+                    maximumImageBytes: transformer == nil ? nil : V2LocalResourceTransformer.maximumInputBytes,
                     allocate: { binding in
                         guard let storage = configuredStorages[binding] else { throw V2ResourceProviderError.configurationInvalid }
                         return try storage.allocate()
@@ -343,7 +360,7 @@ enum IMV2AccountServerApp {
                     })
                 let importStore = PostgresV2ResourceImportStore(resolve: { home, usage, user, device in
                     try await resourceRouter.resolve(home: home, usage: usage, actorUserID: user, deviceID: device)
-                }, sources: importSources, ownerDatabases: accountStorageDatabases)
+                }, sources: importSources, recoveryDatabases: accountStorageDatabases)
                 let resourceImports = V2ResourceImportService(resources: resourceService, resolve: { home, usage, user, device in
                     try await resourceRouter.resolve(home: home, usage: usage, actorUserID: user, deviceID: device)
                 }, persistence: importStore, registry: resourceRegistry, transports: configuredTransports)
@@ -493,16 +510,13 @@ enum IMV2AccountServerApp {
                 invitations: groupInvitations
             ).register(on: authenticatedAccountRoutes)
             V2PasswordLifecycleRoutes(service: V2PasswordLifecycleService(database: database, passwords: passwordWorker,
-                limiter: V2PostgresPasswordLoginAttemptLimiter(database: database, policy: configuration.passwordLoginRateLimit),
+                limiter: passwordAttemptLimiter,
                 recoveryKey: configuration.accessTokenKey)).register(on: app)
             V2PasswordAccountRoutes(
                 store: V2PostgresPasswordAccountStore(database: database),
                 assertionIssuer: assertionIssuer,
                 passwords: passwordWorker,
-                loginAttemptLimiter: V2PostgresPasswordLoginAttemptLimiter(
-                    database: database,
-                    policy: configuration.passwordLoginRateLimit
-                )
+                loginAttemptLimiter: passwordAttemptLimiter
             ).register(on: app)
             stage = "account_http_runtime"
             try await V2HTTPService.withRunning(app, logger: logger,

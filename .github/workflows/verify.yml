@@ -44,7 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install native verification dependencies
-        run: apt-get update && apt-get install --yes --no-install-recommends libsqlite3-dev ripgrep
+        run: apt-get update && apt-get install --yes --no-install-recommends libsqlite3-dev ripgrep postgresql-client python3 imagemagick
       - name: Run package tests
         env:
           # This job runs inside a Swift container and cannot launch sibling
@@ -54,7 +54,7 @@ jobs:
         run: bash ./scripts/run_v2_swift_tests.sh
       - name: Build Linux release products
         run: |
-          for product in IMV2AccountServerApp IMV2OperatorServerApp IMV2ServerApp IMV2LocalGatewayProbe IMV2GatewayLoadGenerator; do
+          for product in IMV2AccountServerApp IMV2OperatorServerApp IMV2ServerApp IMV2ResourceImageWorker IMV2LocalGatewayProbe IMV2GatewayLoadGenerator; do
             swift build --disable-automatic-resolution --jobs 4 -c release --package-path IMV2Server --product "$product"
           done
       - name: Run PostgreSQL integration tests
@@ -99,6 +99,16 @@ jobs:
           IMV2_ACTOR_D5_MEDIA_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
           IMV2_ACTOR_D5_MEDIA_TEST_DATABASE_IS_DISPOSABLE: "1"
         run: swift test --disable-automatic-resolution --no-parallel --package-path IMV2Server
+
+      - name: Run resource PostgreSQL integration tests
+        env:
+          PGHOST: postgres
+          PGPORT: "5432"
+          PGUSER: im_v2_test
+          PGPASSWORD: im_v2_test
+        # The helper requires connection settings, provisions canonical schemas,
+        # and enables both resource opt-ins using separate disposable databases.
+        run: bash ./scripts/test_v2_server_native_postgres.sh --skip-build --filter 'V2Resource|V2MediaScan'
 
   room-actor-process-recovery:
     name: Linux room actor process recovery

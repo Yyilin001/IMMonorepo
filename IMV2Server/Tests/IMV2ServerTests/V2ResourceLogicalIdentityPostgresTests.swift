@@ -230,7 +230,7 @@ struct ResourcePlacementTestFixture: Sendable {
             avatarAuthorization: { _,_,_,_,_ in })
         let persistence = PostgresV2ResourceImportStore(resolve: { _,_,_,_ in
             PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in })
-        }, sources: sources, ownerDatabases: ["identity": database])
+        }, sources: sources, recoveryDatabases: ["identity": database])
         return .init(resources: service, resolve: { _,_,_,_ in
             PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in })
         }, persistence: persistence, registry: registry, transports: [transport])

@@ -32,6 +32,29 @@ struct V2ResourceCapabilitiesTests {
         await cache.close()
         await #expect(throws:CancellationError.self) { try await cache.validateNewUpload(request) }
     }
+
+    @Test func imageInputLimitPreservesTheLargerNonImageBudget() async throws {
+        let capability = try V2ResourceCapabilities(uploadModes: [.httpPut], maximumBytes: 4096,
+            allowedUsages: [.messageAttachment], maximumParts: 0, backgroundTransfer: false,
+            maximumImageBytes: 2048)
+        #expect(try JSONDecoder().decode(V2ResourceCapabilities.self, from: JSONEncoder().encode(capability)) == capability)
+        let cache = V2ResourceCapabilitiesCache(reader: FixedCapabilityReader(value: capability))
+        try await cache.refreshIfNeeded()
+        func request(_ contentType: String) throws -> V2ResourceUploadRequest {
+            try .init(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()),
+                usage: .messageAttachment(.init(uuid: UUID())), contentType: contentType,
+                byteCount: 2049, checksum: .init(value: String(repeating: "a", count: 64)))
+        }
+        await #expect(throws: V2ResourceCapabilityError.fileTooLarge(maximumBytes: 2048)) {
+            try await cache.validateNewUpload(request("image/png"))
+        }
+        try await cache.validateNewUpload(request("application/octet-stream"))
+    }
+}
+
+private struct FixedCapabilityReader: V2ResourceCapabilityReading {
+    let value: V2ResourceCapabilities
+    func capabilities() async throws -> V2ResourceCapabilities { value }
 }
 
 private actor OfflineCapabilityReader:V2ResourceCapabilityReading {

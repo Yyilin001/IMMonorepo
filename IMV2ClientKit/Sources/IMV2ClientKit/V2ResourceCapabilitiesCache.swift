@@ -49,6 +49,9 @@ public actor V2ResourceCapabilitiesCache {
         }
         guard value.allowedUsages.contains(usage) else { throw V2ResourceCapabilityError.usageUnavailable }
         guard request.byteCount <= value.maximumBytes else { throw V2ResourceCapabilityError.fileTooLarge(maximumBytes: value.maximumBytes) }
+        if request.contentType.hasPrefix("image/"), let limit = value.maximumImageBytes {
+            guard request.byteCount <= limit else { throw V2ResourceCapabilityError.fileTooLarge(maximumBytes: limit) }
+        }
         guard value.uploadModes.contains(where: request.clientModes.contains) else { throw V2ResourceCapabilityError.uploadModeUnavailable }
     }
 

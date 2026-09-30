@@ -2,6 +2,9 @@ import IMV2ServerContracts
 import Foundation
 
 public enum V2ResourceRecipe: String, Codable, Sendable { case avatar, preview }
+/// The input cannot be decoded or exceeds the fixed image processing policy.
+/// Infrastructure failures continue to use provider errors and remain retryable.
+public enum V2ResourceTransformError: Error, Equatable, Sendable { case contentRejected }
 public struct V2ResourceTransformOutput: Sendable {
     public let size: Int
     public let facts: V2StoredObjectFacts

@@ -2,6 +2,8 @@ import IMV2ServerApplication
 import IMV2ServerContracts
 import FluentKit
 import Foundation
+import IMV2Core
+import SQLKit
 import IMV2ActorApplication
 import IMV2ActorContracts
 import IMV2ActorRuntime
@@ -20,6 +22,7 @@ struct GatewayMaintenanceAssembly {
     let roomMaintenanceWorkers: [V2RoomActorMaintenanceWorker]
     let controlPlaneHousekeepingWorker: V2ControlPlaneHousekeepingWorker
     let pushWakeWorker: V2PushWakeWorker?
+    let mentionPushWakeRelays: [PostgresV2MentionPushWakeRelay]
 
     /// 将维护库与房间归属库的处理器接到同一组后台依赖中。
     /// 构造 APNS 凭据或媒体保留策略失败时，错误交由组合根回滚。
@@ -83,10 +86,20 @@ struct GatewayMaintenanceAssembly {
             idempotencyRetention: TimeInterval(configuration.idempotencyRetentionSeconds)
         )
         let pushWakeWorker: V2PushWakeWorker?
+        let pushEnabled: Bool
+        let roomRouter = V2PostgresRoomShardRouter(database: maintenanceDatabase)
+        let preferenceOwners = try Dictionary(uniqueKeysWithValues: configuration.roomShardStorage.map { storage in
+            guard let database = topology.databaseForRole(for: .maintenance, url: storage.databaseURL) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            return (storage.shardID, database)
+        })
         switch configuration.push {
         case .disabled:
+            pushEnabled = false
             pushWakeWorker = nil
         case .apns(let pushConfiguration):
+            pushEnabled = true
             let authorizer = try V2APNSJWTAuthorizer(
                 teamID: pushConfiguration.teamID,
                 keyID: pushConfiguration.keyID,
@@ -102,7 +115,21 @@ struct GatewayMaintenanceAssembly {
                 topic: pushConfiguration.topic
             )
             pushWakeWorker = .init(
-                store: PostgresV2PushWakeStore(database: maintenanceDatabase),
+                store: PostgresV2PushWakeStore(
+                    database: maintenanceDatabase,
+                    conversationMuted: { roomID, userID, now in
+                        let route = try await roomRouter.route(for: RoomID(roomID.uuidString))
+                        guard let owner = preferenceOwners[route.shardID],
+                              let sql = owner as? any SQLDatabase else {
+                            throw V2RoomWriteStoreError.corruptPersistenceState
+                        }
+                        return try await sql.raw("""
+                            SELECT EXISTS (SELECT 1 FROM im_v2.user_room_preferences
+                                WHERE room_id = \(bind: roomID) AND user_id = \(bind: userID)
+                                  AND mute_until > \(bind: now)) AS muted
+                            """).first(decoding: GatewayPushMuteRow.self)?.muted == true
+                    }
+                ),
                 provider: provider
             )
         }
@@ -115,7 +142,12 @@ struct GatewayMaintenanceAssembly {
             mediaRetentionWorker: mediaRetentionWorker,
             roomMaintenanceWorkers: roomMaintenanceWorkers,
             controlPlaneHousekeepingWorker: controlPlaneHousekeepingWorker,
-            pushWakeWorker: pushWakeWorker
+            pushWakeWorker: pushWakeWorker,
+            mentionPushWakeRelays: roomOwnerMaintenanceDatabases.map {
+                PostgresV2MentionPushWakeRelay(owner: $0, control: maintenanceDatabase, enabled: pushEnabled)
+            }
         )
     }
 }
+
+private struct GatewayPushMuteRow: Decodable { let muted: Bool }

@@ -13,15 +13,21 @@ import SQLKit
 public struct PostgresV2PushWakeStore: V2PushWakeStore {
     private let database: any Database
     private let makeUUID: @Sendable () -> UUID
+    private let conversationMuted: (@Sendable (UUID, UUID, Date) async throws -> Bool)?
 
     /// 组合数据库与标识生成方式。
     ///
     /// - Parameters:
     ///   - database: 存放推送发件箱与预算窗口的数据库。
     ///   - makeUUID: 认领令牌生成方式。
-    public init(database: any Database, makeUUID: @escaping @Sendable () -> UUID = UUID.init) {
+    public init(
+        database: any Database,
+        makeUUID: @escaping @Sendable () -> UUID = UUID.init,
+        conversationMuted: (@Sendable (UUID, UUID, Date) async throws -> Bool)? = nil
+    ) {
         self.database = database
         self.makeUUID = makeUUID
+        self.conversationMuted = conversationMuted
     }
 
     /// 认领一批已准入的推送唤醒。
@@ -41,19 +47,41 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
         guard let expiry = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
+        // 远端房间偏好在取得控制库事务连接之前读取。候选发生变化时留给下一轮，
+        // 不对未经检查的通知进行预算准入。
+        var muteDecisions: [UUID: Bool] = [:]
+        if let conversationMuted {
+            guard let sql = database as? any SQLDatabase else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            let candidates = try await sql.raw("""
+                SELECT dispatch_id, source_room_id, target_user_id, created_at FROM im_v2.push_wake_outbox
+                WHERE state = 'pending' OR (state = 'claimed' AND lease_expires_at <= \(bind: now))
+                ORDER BY created_at, dispatch_id LIMIT \(bind: limit)
+                """).all(decoding: PushMuteCandidateRow.self)
+            for candidate in candidates {
+                if let roomID = candidate.sourceRoomID,
+                   candidate.createdAt > now.addingTimeInterval(-V2MentionPushWakeLimits.lifetime) {
+                    muteDecisions[candidate.dispatchID] = try await conversationMuted(
+                        roomID, candidate.targetUserID, now
+                    )
+                }
+            }
+        }
+        let checkedMutes = muteDecisions
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
             // 每批次在消耗任何预算前只清除一次静音工作。
             // 旧的逐行事务每轮最多重复执行 `limit` 次全局 UPDATE。
-            try await suppressMutedWakes(now: now, on: sql)
+            try await suppressMutedWakes(now: now, legacyOnly: conversationMuted != nil, on: sql)
 
             let candidates = try await claimCandidates(now: now, limit: limit, on: sql)
             var leases: [V2PushWakeLease] = []
             leases.reserveCapacity(candidates.count)
             for candidate in candidates {
-                if let lease = try await admit(candidate, now: now, expiry: expiry, on: sql) {
+                if let lease = try await admit(candidate, now: now, expiry: expiry, checkedMutes: checkedMutes, on: sql) {
                     leases.append(lease)
                 }
             }
@@ -124,7 +152,7 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
     ) async throws -> [PendingPushWakeRow] {
         try await sql.raw("""
                 SELECT dispatch_id, target_device_id, campaign_id, budget_window_started_at,
-                       requires_new_key_operation, admitted_at
+                       requires_new_key_operation, admitted_at, source_room_id, created_at
                 FROM im_v2.push_wake_outbox
                 WHERE state = 'pending'
                    OR (state = 'claimed' AND lease_expires_at <= \(bind: now))
@@ -138,8 +166,22 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
         _ pending: PendingPushWakeRow,
         now: Date,
         expiry: Date,
+        checkedMutes: [UUID: Bool],
         on sql: any SQLDatabase
     ) async throws -> V2PushWakeLease? {
+        if pending.sourceRoomID != nil {
+            if pending.createdAt <= now.addingTimeInterval(-V2MentionPushWakeLimits.lifetime) {
+                try await suppress(pending.dispatchID, reason: .endpointUnavailable, on: sql)
+                return nil
+            }
+            if conversationMuted != nil {
+                guard let muted = checkedMutes[pending.dispatchID] else { return nil }
+                if muted {
+                    try await suppress(pending.dispatchID, reason: .conversationMuted, on: sql)
+                    return nil
+                }
+            }
+        }
         let token = makeUUID()
         guard let campaign = try await sql.raw("""
                 SELECT state FROM im_v2.push_campaigns WHERE campaign_id = \(bind: pending.campaignID) FOR UPDATE
@@ -195,18 +237,19 @@ public struct PostgresV2PushWakeStore: V2PushWakeStore {
             )
     }
 
-    private func suppressMutedWakes(now: Date, on sql: any SQLDatabase) async throws {
+    private func suppressMutedWakes(now: Date, legacyOnly: Bool, on sql: any SQLDatabase) async throws {
         // 推送只携带通用唤醒提示，因此抑制它不会影响持久化用户同步正确性。
         // 已过期租约也纳入处理，因为对应的提供方工作已不再活动，可被回收。
         try await sql.raw("""
             UPDATE im_v2.push_wake_outbox AS wake
             SET state = 'suppressed', suppression_reason = 'conversation_muted',
                 claim_token = NULL, lease_expires_at = NULL
-            FROM im_v2.room_events AS event,
-                 im_v2.user_room_preferences AS preference
-            WHERE wake.source_event_id = event.event_id
-              AND preference.user_id = wake.target_user_id
-              AND preference.room_id = event.room_id
+            FROM im_v2.user_room_preferences AS preference
+            WHERE preference.user_id = wake.target_user_id
+              AND preference.room_id = COALESCE(wake.source_room_id,
+                  (SELECT event.room_id FROM im_v2.room_events AS event
+                   WHERE event.event_id = wake.source_event_id))
+              AND (NOT \(bind: legacyOnly) OR wake.source_room_id IS NULL)
               AND preference.mute_until > \(bind: now)
               AND (
                 wake.state = 'pending'
@@ -244,6 +287,8 @@ private struct PendingPushWakeRow: Decodable {
     let budgetWindowStartedAt: V2PersistenceTimestamp
     let requiresNewKeyOperation: Bool
     let admittedAt: Date?
+    let sourceRoomID: UUID?
+    let createdAt: Date
     enum CodingKeys: String, CodingKey {
         case dispatchID = "dispatch_id"
         case deviceID = "target_device_id"
@@ -251,6 +296,8 @@ private struct PendingPushWakeRow: Decodable {
         case budgetWindowStartedAt = "budget_window_started_at"
         case requiresNewKeyOperation = "requires_new_key_operation"
         case admittedAt = "admitted_at"
+        case sourceRoomID = "source_room_id"
+        case createdAt = "created_at"
     }
 }
 
@@ -266,5 +313,16 @@ private struct PushBudgetRow: Decodable {
         case usedWorkUnits = "used_work_units"
         case maxNewKeyOperations = "max_new_key_operations"
         case usedNewKeyOperations = "used_new_key_operations"
+    }
+}
+
+private struct PushMuteCandidateRow: Decodable {
+    let dispatchID: UUID
+    let sourceRoomID: UUID?
+    let targetUserID: UUID
+    let createdAt: Date
+    enum CodingKeys: String, CodingKey {
+        case dispatchID = "dispatch_id", sourceRoomID = "source_room_id", targetUserID = "target_user_id"
+        case createdAt = "created_at"
     }
 }

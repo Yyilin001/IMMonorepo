@@ -8,6 +8,7 @@ import Glibc
 #endif
 
 public struct V2LocalResourceTransformer: V2ResourceTransformer {
+    public static let maximumInputBytes: Int64 = 32 * 1_024 * 1_024
     private let executable: URL
     private let temporaryDirectory: URL
     public init(executable: URL, temporaryDirectory: URL) throws {
@@ -21,7 +22,8 @@ public struct V2LocalResourceTransformer: V2ResourceTransformer {
     public func transform(input: V2StoredObjectFacts, recipe: V2ResourceRecipe,
                           outputs: [Int: V2StoredObjectReference], registry: V2ResourceStorageRegistry) async throws -> [V2ResourceTransformOutput] {
         let sizes = recipe == .avatar ? [128,256] : [320,1280]
-        guard Set(outputs.keys) == Set(sizes), input.byteCount <= 32 * 1_024 * 1_024 else { throw V2ResourceProviderError.unsupportedCapability }
+        guard Set(outputs.keys) == Set(sizes) else { throw V2ResourceProviderError.configurationInvalid }
+        guard input.byteCount <= Self.maximumInputBytes else { throw V2ResourceTransformError.contentRejected }
         let directory=temporaryDirectory.appendingPathComponent(UUID().uuidString,isDirectory:true)
         let inputURL=directory.appendingPathComponent("input")
         try await Task.detached(priority:.utility) {
@@ -32,6 +34,7 @@ public struct V2LocalResourceTransformer: V2ResourceTransformer {
             let stream=try await source.read(input.reference)
             // A service-owned input is copied in bounded chunks. Decoder never receives storage credentials.
             let handle=try FileHandle(forWritingTo: createFile(inputURL))
+            defer { try? handle.close() }
             var total:Int64=0
             while let chunk=try await stream.next() {
                 total += Int64(chunk.count)
@@ -91,7 +94,13 @@ private final class ResourceImageProcess: @unchecked Sendable {
         try await withTaskCancellationHandler {
             await Task.detached(priority:.utility) { [self] in process.waitUntilExit() }.value
             try Task.checkCancellation()
-            guard process.terminationStatus == 0 else { throw V2ResourceProviderError.unsupportedCapability }
+            guard process.terminationReason == .exit else { throw V2ResourceProviderError.temporarilyUnavailable }
+            switch process.terminationStatus {
+            case 0: return
+            case 3, 4: throw V2ResourceTransformError.contentRejected
+            case 2, 78: throw V2ResourceProviderError.configurationInvalid
+            default: throw V2ResourceProviderError.temporarilyUnavailable
+            }
         } onCancel: { [self] in stop() }
     }
 }

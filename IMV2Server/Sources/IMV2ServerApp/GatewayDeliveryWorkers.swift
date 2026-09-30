@@ -77,6 +77,27 @@ extension GatewayBackgroundWorkers {
                 }
             }
         }
+        // 每个物理 owner 独立转交通知，故障不会推迟消息日志或其他 owner 的恢复。
+        for relay in delivery.mentionPushWakeRelays {
+            _ = workers.start {
+                var cadence = V2AdaptiveWorkerCadence(
+                    minimumIntervalMilliseconds: configuration.workerPollIntervalMilliseconds
+                )
+                while !Task.isCancelled {
+                    var didWork = false
+                    do {
+                        didWork = try await relay.runOnce(now: Date(), limit: configuration.workerBatchSize) > 0
+                    } catch is CancellationError {
+                        break
+                    } catch {
+                        V2ServiceLogging.logWorkerFailure(logger, worker: "mention_push_wake_relay", error: error)
+                    }
+                    do {
+                        try await v2Sleep(for: cadence.delayAfterPass(didWork: didWork))
+                    } catch { break }
+                }
+            }
+        }
         // Push 自行承担外部网络延迟和重试策略，不得串行阻塞撤销、
         // 传播或数据库维护任务。
         _ = workers.start {

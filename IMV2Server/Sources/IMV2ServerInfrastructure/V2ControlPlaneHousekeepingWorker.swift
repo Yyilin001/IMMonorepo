@@ -17,6 +17,8 @@ public struct V2ControlPlaneHousekeepingReport: Equatable, Sendable {
     public let purgedExpiredRefreshHistoryRows: Int
     /// 清理的过期连接租约行数。
     public let purgedExpiredConnectionLeaseRows: Int
+    /// 已关闭的过期通知；其终态记录随后按保留期删除。
+    public let expiredPushWakeRows: Int
 
     /// 保存维护统计；各项计数为负时按零处理。
     ///
@@ -26,21 +28,24 @@ public struct V2ControlPlaneHousekeepingReport: Equatable, Sendable {
     ///   - purgedExpiredCredentialReplayRows: 凭据重放记录行数。
     ///   - purgedExpiredRefreshHistoryRows: 刷新历史行数。
     ///   - purgedExpiredConnectionLeaseRows: 过期连接租约行数。
+    ///   - expiredPushWakeRows: 已关闭的过期通知数。
     public init(
         deletedRows: Int,
         purgedIdempotencyRows: Int = 0,
         purgedExpiredCredentialReplayRows: Int = 0,
         purgedExpiredRefreshHistoryRows: Int = 0,
-        purgedExpiredConnectionLeaseRows: Int = 0
+        purgedExpiredConnectionLeaseRows: Int = 0,
+        expiredPushWakeRows: Int = 0
     ) {
         self.deletedRows = max(0, deletedRows)
         self.purgedIdempotencyRows = max(0, purgedIdempotencyRows)
         self.purgedExpiredCredentialReplayRows = max(0, purgedExpiredCredentialReplayRows)
         self.purgedExpiredRefreshHistoryRows = max(0, purgedExpiredRefreshHistoryRows)
         self.purgedExpiredConnectionLeaseRows = max(0, purgedExpiredConnectionLeaseRows)
+        self.expiredPushWakeRows = max(0, expiredPushWakeRows)
     }
-    /// 本轮是否删除了任何终态簿记。
-    public var didWork: Bool { deletedRows > 0 }
+    /// 本轮是否删除了终态簿记或关闭了过期通知。
+    public var didWork: Bool { deletedRows > 0 || expiredPushWakeRows > 0 }
 }
 
 /// 控制面维护的持久化能力。
@@ -130,11 +135,13 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
     private let database: any Database
 
     // 供启动就绪检查与事务执行共用。
-    static var housekeepingRotationPeriod: Int64 { Int64(11 * idempotencyTables.count) }
+    private static let categoryCount = 12
+    static var housekeepingRotationPeriod: Int64 { Int64(categoryCount * idempotencyTables.count) }
 
     /// 组合数据库。
     ///
-    /// - Parameter database: 存放终态簿记与控制面状态的数据库。
+    /// - Parameters:
+    ///   - database: 存放终态簿记与控制面状态的数据库。
     public init(database: any Database) {
         self.database = database
     }
@@ -161,6 +168,8 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             throw V2ControlPlaneHousekeepingError.invalidLimit
         }
         guard let cutoff = v2PostgresPastTimestamp(now: now, interval: retention),
+              let notificationCutoff = v2PostgresPastTimestamp(now: now, interval: max(retention, 7 * 86_400)),
+              let notificationExpiry = v2PostgresPastTimestamp(now: now, interval: V2MentionPushWakeLimits.lifetime),
               let idempotencyCutoff = v2PostgresPastTimestamp(now: now, interval: idempotencyRetention) else {
             throw V2ControlPlaneHousekeepingError.corruptPersistenceState
         }
@@ -188,7 +197,7 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
             // 预算足以覆盖全部类别时，冷表也不会被持续繁忙的工作表饿死。
             var budget = ControlHousekeepingDeletionBudget(
                 total: limit,
-                categoryCount: 11,
+                categoryCount: Self.categoryCount,
                 rotation: rotation
             )
             var count = 0
@@ -202,8 +211,8 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 where: "state = 'completed' AND completed_at <= ", order: "completed_at, media_id",
                 cutoff: cutoff, limit: budget.take()
             )
-            // 审核任务归房间所有，由房间 Actor 清理。
-            // 保留其类别槽位，使预算份额和轮转周期保持固定。
+            // 审核任务归房间所有；密码窗口由持有实际认证策略的 Account 进程清理。
+            // 保留此预算槽，避免既有低预算维护轮转偏移。
             _ = budget.take()
             count += try await deleteSimple(
                 sql: sql, table: "public_profile_update_outbox", identity: "source_event_id",
@@ -226,10 +235,25 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                   AND outbox.operation_id = candidates.operation_id
                 RETURNING 1 AS value
                 """).all(decoding: ControlHousekeepingDeletedRow.self).count
+            let pushLimit = budget.take()
+            let expiredPushWakes = try await sql.raw("""
+                WITH candidates AS (
+                    SELECT ctid FROM im_v2.push_wake_outbox
+                    WHERE source_room_id IS NOT NULL AND created_at <= \(bind: notificationExpiry)
+                      AND (state = 'pending' OR (state = 'claimed' AND lease_expires_at <= \(bind: now)))
+                    ORDER BY created_at, dispatch_id LIMIT \(bind: pushLimit)
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE im_v2.push_wake_outbox AS wake
+                SET state = 'suppressed', suppression_reason = 'endpoint_unavailable',
+                    claim_token = NULL, lease_expires_at = NULL
+                FROM candidates WHERE wake.ctid = candidates.ctid
+                RETURNING 1 AS value
+                """).all(decoding: ControlHousekeepingDeletedRow.self).count
             count += try await deleteSimple(
                 sql: sql, table: "push_wake_outbox", identity: "dispatch_id",
                 where: "state IN ('sent', 'suppressed') AND created_at <= ", order: "created_at, dispatch_id",
-                cutoff: cutoff, limit: budget.take()
+                cutoff: cutoff, limit: pushLimit - expiredPushWakes
             )
 
             // 认证重放记录包含加密的持有者凭据材料；
@@ -260,8 +284,15 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 cutoff: idempotencyCutoff,
                 // 使用子类别预算时，每个外层周期只推进一次内部表轮转，
                 // 避免取模产生周期重合。
-                rotation: limit < 11 ? rotation / 11 : rotation,
+                rotation: limit < Self.categoryCount ? rotation / UInt(Self.categoryCount) : rotation,
                 limit: budget.take()
+            )
+            // Owner intents expire after 24 hours; retain control receipts longer so
+            // a lost acknowledgement cannot admit the same notification twice.
+            count += try await deleteSimple(
+                sql: sql, table: "mention_push_wake_receipts", identity: "ctid",
+                where: "recorded_at <= ", order: "recorded_at, ctid",
+                cutoff: notificationCutoff, limit: budget.take()
             )
             count += credentialReplays + refreshHistory + connectionLeases + remoteBaselines + idempotencyRows
             return .init(
@@ -269,7 +300,8 @@ public struct PostgresV2ControlPlaneHousekeepingStore: V2ControlPlaneHousekeepin
                 purgedIdempotencyRows: idempotencyRows,
                 purgedExpiredCredentialReplayRows: credentialReplays,
                 purgedExpiredRefreshHistoryRows: refreshHistory,
-                purgedExpiredConnectionLeaseRows: connectionLeases
+                purgedExpiredConnectionLeaseRows: connectionLeases,
+                expiredPushWakeRows: expiredPushWakes
             )
         }
     }

@@ -636,7 +636,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
        AND table_name = 'schema_contract'
        AND column_name = 'schema_id'
        AND is_nullable = 'NO'
-       AND column_default = '''im-v2-current-65''::text'
+       AND column_default = '''im-v2-current-66''::text'
    )
    AND EXISTS (
      SELECT 1
@@ -646,7 +646,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
      WHERE namespace.nspname = 'im_v2'
        AND relation.relname = 'schema_contract'
        AND constraint_record.contype = 'c'
-       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-65%'
+       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-66%'
    )
    AND EXISTS (
      SELECT 1 FROM information_schema.columns
@@ -1083,4 +1083,46 @@ AND (to_regclass('im_v2.forward_plan_operations') IS NOT NULL AND to_regclass('i
  AND (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema='im_v2' AND table_name='remote_device_revocation_baselines' AND is_nullable='NO' AND (column_name,udt_name) IN (('baseline_id','uuid'),('expires_at','timestamptz')))
  AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='im_v2' AND table_name='remote_device_revocation_receipts' AND column_name='operation_id' AND udt_name='uuid' AND is_nullable='NO')
  AND EXISTS(SELECT 1 FROM pg_index i JOIN pg_class idx ON idx.oid=i.indexrelid JOIN pg_am am ON am.oid=idx.relam WHERE i.indrelid=to_regclass('im_v2.remote_device_revocation_baselines') AND idx.relname='remote_device_revocation_baseline_expiry_idx' AND am.amname='btree' AND i.indisvalid AND i.indisready AND i.indpred IS NULL AND i.indexprs IS NULL AND pg_get_indexdef(i.indexrelid,1,TRUE)='expires_at')
+ AND (SELECT (SELECT count(*) = 3 FROM pg_indexes WHERE schemaname = 'im_v2' AND (
+                (indexname = 'mention_push_wake_intents_claim_idx' AND indexdef LIKE '%USING btree (created_at, source_event_id, target_user_id)')
+                OR (indexname = 'mention_push_wake_receipts_cleanup_idx' AND indexdef LIKE '%USING btree (recorded_at, source_event_id, target_user_id)')
+                OR (indexname = 'account_password_login_rate_limits_cleanup_idx' AND indexdef LIKE '%USING btree (updated_at, account_handle)')
+            )) AND NOT EXISTS (
+                SELECT 1 FROM (VALUES
+                    ('mention_push_wake_intents','source_event_id','uuid','NO'),
+                    ('mention_push_wake_intents','room_id','uuid','NO'),
+                    ('mention_push_wake_intents','target_user_id','uuid','NO'),
+                    ('mention_push_wake_intents','created_at','timestamptz','NO'),
+                    ('mention_push_wake_intents','claim_token','uuid','YES'),
+                    ('mention_push_wake_intents','lease_expires_at','timestamptz','YES'),
+                    ('mention_push_wake_receipts','source_event_id','uuid','NO'),
+                    ('mention_push_wake_receipts','target_user_id','uuid','NO'),
+                    ('mention_push_wake_receipts','recorded_at','timestamptz','NO'),
+                    ('push_wake_outbox','source_room_id','uuid','YES')
+                ) expected(table_name,column_name,udt_name,is_nullable)
+                WHERE NOT EXISTS (SELECT 1 FROM information_schema.columns c
+                    WHERE c.table_schema = 'im_v2' AND c.table_name = expected.table_name
+                      AND c.column_name = expected.column_name AND c.udt_name = expected.udt_name
+                      AND c.is_nullable = expected.is_nullable)
+            ) AND NOT EXISTS (
+                SELECT 1 FROM (VALUES
+                    ('mention_push_wake_intents','PRIMARY KEY (source_event_id, target_user_id)'),
+                    ('mention_push_wake_intents','CHECK (isfinite(created_at))'),
+                    ('mention_push_wake_intents','CHECK (((claim_token IS NULL) = (lease_expires_at IS NULL)))'),
+                    ('mention_push_wake_receipts','PRIMARY KEY (source_event_id, target_user_id)'),
+                    ('mention_push_wake_receipts','CHECK (isfinite(recorded_at))')
+                ) expected(table_name,definition)
+                WHERE NOT EXISTS (SELECT 1 FROM pg_constraint c
+                    WHERE c.conrelid = to_regclass('im_v2.' || expected.table_name)
+                      AND c.convalidated AND NOT c.condeferrable
+                      AND pg_get_constraintdef(c.oid) = expected.definition)
+            ) AND NOT EXISTS (
+                SELECT 1 FROM pg_constraint WHERE contype = 'f'
+                  AND conrelid IN (to_regclass('im_v2.mention_push_wake_intents'),
+                                   to_regclass('im_v2.mention_push_wake_receipts'))
+            ) AND NOT EXISTS (
+                SELECT 1 FROM pg_constraint WHERE contype = 'f'
+                  AND conrelid = to_regclass('im_v2.push_wake_outbox')
+                  AND confrelid = to_regclass('im_v2.room_events')
+            ) )
 FROM schema_visibility WHERE active_path = '';

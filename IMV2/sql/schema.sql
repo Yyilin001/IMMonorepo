@@ -1738,9 +1738,29 @@ CREATE TABLE im_v2.push_device_endpoints (
     CONSTRAINT push_device_endpoints_provider_check CHECK ((provider = 'apns'::text))
 );
 
+-- 房间通知意图不引用日志事件，裁剪不会等待可选推送。
+CREATE TABLE im_v2.mention_push_wake_intents (
+    source_event_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    target_user_id uuid NOT NULL,
+    created_at timestamp with time zone NOT NULL CHECK (isfinite(created_at)),
+    claim_token uuid,
+    lease_expires_at timestamp with time zone,
+    PRIMARY KEY (source_event_id, target_user_id),
+    CHECK ((claim_token IS NULL) = (lease_expires_at IS NULL))
+);
+
+CREATE TABLE im_v2.mention_push_wake_receipts (
+    source_event_id uuid NOT NULL,
+    target_user_id uuid NOT NULL,
+    recorded_at timestamp with time zone NOT NULL CHECK (isfinite(recorded_at)),
+    PRIMARY KEY (source_event_id, target_user_id)
+);
+
 CREATE TABLE im_v2.push_wake_outbox (
     dispatch_id uuid NOT NULL,
     source_event_id uuid NOT NULL,
+    source_room_id uuid,
     target_user_id uuid NOT NULL,
     target_device_id uuid NOT NULL,
     campaign_id text NOT NULL,
@@ -2080,14 +2100,14 @@ CREATE TABLE im_v2.control_housekeeping_cursor (
 INSERT INTO im_v2.control_housekeeping_cursor (singleton, rotation) VALUES (true, 0);
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-65'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-65'::text))
+    schema_id text DEFAULT 'im-v2-current-66'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-66'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-65');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-66');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
@@ -3010,6 +3030,12 @@ CREATE INDEX public_user_profiles_active_handle_idx ON im_v2.public_user_profile
 
 CREATE INDEX push_device_endpoints_active_idx ON im_v2.push_device_endpoints USING btree (device_id, updated_at DESC) WHERE (disabled_at IS NULL);
 
+CREATE INDEX mention_push_wake_intents_claim_idx ON im_v2.mention_push_wake_intents USING btree (created_at, source_event_id, target_user_id);
+
+CREATE INDEX mention_push_wake_receipts_cleanup_idx ON im_v2.mention_push_wake_receipts USING btree (recorded_at, source_event_id, target_user_id);
+
+CREATE INDEX account_password_login_rate_limits_cleanup_idx ON im_v2.account_password_login_rate_limits USING btree (updated_at, account_handle);
+
 CREATE INDEX push_wake_outbox_claim_idx ON im_v2.push_wake_outbox USING btree (state, lease_expires_at, created_at) WHERE (state = ANY (ARRAY['pending'::text, 'claimed'::text]));
 
 CREATE INDEX push_wake_outbox_reclaim_idx ON im_v2.push_wake_outbox USING btree (lease_expires_at, created_at) WHERE (state = 'claimed'::text);
@@ -3294,8 +3320,7 @@ ALTER TABLE ONLY im_v2.push_device_endpoints
 ALTER TABLE ONLY im_v2.push_wake_outbox
     ADD CONSTRAINT push_wake_outbox_campaign_id_fkey FOREIGN KEY (campaign_id) REFERENCES im_v2.push_campaigns(campaign_id);
 
-ALTER TABLE ONLY im_v2.push_wake_outbox
-    ADD CONSTRAINT push_wake_outbox_source_event_id_fkey FOREIGN KEY (source_event_id) REFERENCES im_v2.room_events(event_id);
+-- source_event_id is an immutable notification identity, not a retention dependency.
 
 ALTER TABLE ONLY im_v2.read_receipt_operations
     ADD CONSTRAINT read_receipt_operations_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);

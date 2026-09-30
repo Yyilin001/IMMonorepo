@@ -24,7 +24,10 @@ public struct V2PlacementMediaScanner: V2MediaScanProvider {
             let facts = try row.facts()
             let receipt = try await scanner.scan(facts, storage: registry.storage(for: facts.reference.binding))
             guard receipt.input == facts else { throw V2ResourceProviderError.integrityMismatch }
-            if receipt.result == .passed, let variants { try await variants.prepare(mediaID: id,input: facts) }
+            if receipt.result == .passed, let variants {
+                do { try await variants.prepare(mediaID: id,input: facts) }
+                catch V2ResourceTransformError.contentRejected { return .failed }
+            }
             return receipt.result
         }
         throw V2ResourceProviderError.notFound

@@ -23,6 +23,7 @@ struct GatewayBackgroundWorkers {
         let groupEventWakeRelay: V2GroupEventWakeRelay
         let contentReviewWorker: V2RoutedContentReviewWorker?
         let pushWakeWorker: V2PushWakeWorker?
+        let mentionPushWakeRelays: [PostgresV2MentionPushWakeRelay]
     }
 
     let delivery: Delivery
@@ -92,7 +93,8 @@ struct GatewayBackgroundWorkers {
                 userStateWorkers: projection.userStateWorkers,
                 groupEventWakeRelay: groupEventWakeRelay,
                 contentReviewWorker: commands.contentReviewWorker,
-                pushWakeWorker: maintenance.pushWakeWorker
+                pushWakeWorker: maintenance.pushWakeWorker,
+                mentionPushWakeRelays: maintenance.mentionPushWakeRelays
             ),
             projection: .init(
                 userProjectionWorkers: userShardWork.userProjectionWorkers,
