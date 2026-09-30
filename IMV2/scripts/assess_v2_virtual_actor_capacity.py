@@ -10,7 +10,10 @@ import math
 import statistics
 from pathlib import Path
 
-from virtual_actor_capacity_measurement import MeasurementFailure, freeze_calibrations, verify_freeze
+from virtual_actor_capacity_measurement import (
+    MEASUREMENT_SEMANTICS_VERSION, MeasurementFailure, freeze_calibrations,
+    resource_scope, verify_freeze,
+)
 
 
 MAIN = "f1cdd78d6a21bf0ae23da627c0710c65115236aa"
@@ -55,6 +58,11 @@ def read_run(directory: Path) -> dict:
     if not 290 <= seconds <= 310:
         raise MeasurementFailure("steady duration is outside the frozen window")
     workload = result["measurement"]["scenario"]["workload"]
+    scope = list(resource_scope(workload))
+    scenario = result["measurement"]["scenario"]
+    if (scenario.get("measurementSemanticsVersion") != MEASUREMENT_SEMANTICS_VERSION or
+            scenario.get("resourceScope") != scope):
+        raise MeasurementFailure("measurement resource scope or semantics changed")
     fault = workload == "fault"
     families = ("roomSyncStateBatch", "roomLatestVisibleBatch")
     units = (sum(number(load.get(key, {}).get("successfulRooms"), key) for key in families)
@@ -63,17 +71,23 @@ def read_run(directory: Path) -> dict:
     latency = ([load[key]["latency"] for key in families] if fault else [load["messageLatency"]])
     if any(number(row.get("count"), "latency sample count", positive=True) <= 0 for row in latency):
         raise MeasurementFailure("latency distribution has no samples")
-    gateway = phase["containers"]["gateway"]
-    loader = phase["containers"]["loader"]
+    containers = phase["containers"]
+    if not set(scope) <= containers.keys():
+        raise MeasurementFailure("scoped server container counters are missing")
+    loader = containers["loader"]
+    server_cpu = sum(number(containers[name].get("cpuUsageUsec"), name + " CPU")
+                     for name in scope)
+    server_rss = sum(number(containers[name].get("sampledPeakProcessRSSBytes"),
+                            name + " RSS", positive=True) for name in scope)
     measurements = {
         "acceptedUnitsPerSecond": units / seconds,
         "p95Milliseconds": max(number(row.get("p95"), "p95") for row in latency),
         "p99Milliseconds": max(number(row.get("p99"), "p99") for row in latency),
         "sqlCallsPerAcceptedUnit": sum(number(row.get("allStatementCalls"), "SQL calls")
                                        for row in phase["sql"].values()) / units,
-        "serverCPUSecondsPerAcceptedUnit": number(gateway.get("cpuUsageUsec"), "server CPU") / 1e6 / units,
+        "serverCPUSecondsPerAcceptedUnit": server_cpu / 1e6 / units,
         "loaderCPUSecondsPerAcceptedUnit": number(loader.get("cpuUsageUsec"), "loader CPU") / 1e6 / units,
-        "serverPeakRSSBytes": number(gateway.get("sampledPeakProcessRSSBytes"), "server RSS", positive=True),
+        "serverPeakRSSBytes": server_rss,
         "loaderPeakRSSBytes": number(loader.get("sampledPeakProcessRSSBytes"), "loader RSS", positive=True),
     }
     if workload in ("mixed", "fault"):
@@ -96,7 +110,8 @@ def read_run(directory: Path) -> dict:
         for suffix in ("peak_outstanding_commands", "peak_outstanding_bytes"):
             actor[suffix] = number(peaks.get("im_v2_room_actor_" + suffix), suffix)
     return {"directory": str(directory), "resultSHA256": sha(directory / "result.json"),
-            "result": result, "workload": workload, "measurements": measurements,
+            "result": result, "workload": workload, "resourceScope": scope,
+            "measurements": measurements,
             "acceptedUnit": "successful room query item" if fault else "acknowledged message",
             "meanPhysicalSendBatchSize": mean_batch, "actorOutstandingPeaks": actor}
 
@@ -178,7 +193,8 @@ def main() -> None:
             harness = result["harness"]
             if harness.get("trackedClean") is not True or any(
                 scenario.get(key) != frozen.get(key) for key in
-                ("loaderWorkers", "connectionsPerWorker", "latencyScope", "measurementSemanticsVersion")
+                ("loaderWorkers", "connectionsPerWorker", "latencyScope",
+                 "measurementSemanticsVersion", "resourceScope")
             ):
                 raise MeasurementFailure("assessed run changed harness or measurement topology")
             verify_freeze(args.freeze, workload=row["workload"], layout=result["layout"],
@@ -194,8 +210,9 @@ def main() -> None:
                   "notes": ["SQL counts include all captured database statements and observer/background work.",
                             "Mixed SQL/CPU are normalized by acknowledged messages; batch query rates are separate.",
                             "Actor outstanding peaks include executing and reconciling permits, not just waiting queues.",
-                            "Per-phase RSS is sampled PID 1 RSS; cgroup memory remains separately available in raw evidence.",
-                            "CPU is measured per container, including bounded observer exec work; it is not an instrumented function cost."]}
+                            "Server CPU sums the containers in resourceScope; it includes bounded observer exec work.",
+                            "Server RSS sums each scoped container's sampled PID 1 peak, a conservative upper bound rather than a simultaneous peak.",
+                            "Per-container CPU, RSS and cgroup memory remain in raw phase evidence."]}
     args.output.write_text(json.dumps(output, indent=2, sort_keys=True) + "\n")
 
 

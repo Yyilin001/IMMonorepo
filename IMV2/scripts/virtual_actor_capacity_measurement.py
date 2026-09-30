@@ -17,7 +17,9 @@ from typing import Any
 
 
 PHASES = ("warmup", "steady", "cooldown")
-MEASUREMENT_SEMANTICS_VERSION = "single-loader-phase-counters-v2"
+MEASUREMENT_SEMANTICS_VERSION = "single-loader-phase-counters-v3"
+SEND_RESOURCE_SCOPE = ("gateway", "account", "caddy")
+FAULT_RESOURCE_SCOPE = ("gateway",)
 HARNESS_FILE_KEYS = (
     "IMV2/scripts/test_v2_virtual_actor_capacity_canary.py",
     "IMV2/scripts/virtual_actor_capacity_measurement.py",
@@ -38,6 +40,12 @@ WORKLOADS = {
 
 class MeasurementFailure(Exception):
     pass
+
+
+def resource_scope(workload: str) -> tuple[str, ...]:
+    if workload not in WORKLOADS:
+        raise MeasurementFailure("unknown workload resource scope")
+    return FAULT_RESOURCE_SCOPE if workload == "fault" else SEND_RESOURCE_SCOPE
 
 
 def digest(path: Path) -> str:
@@ -106,8 +114,23 @@ def freeze_calibrations(runs: list[Path], thresholds: dict[str, float]) -> dict:
         latency_scope = scenario.get("latencyScope")
         if (workers != 1 or not isinstance(per_worker, int) or isinstance(per_worker, bool) or
                 not 1 <= per_worker <= 10_000 or latency_scope != "single-process-phase-samples" or
-                scenario.get("measurementSemanticsVersion") != MEASUREMENT_SEMANTICS_VERSION):
+                scenario.get("measurementSemanticsVersion") != MEASUREMENT_SEMANTICS_VERSION or
+                scenario.get("resourceScope") != list(resource_scope(workload))):
             raise MeasurementFailure("main calibration loader topology is missing or invalid")
+        containers = steady.get("containers", {})
+        if not isinstance(containers, dict) or not set(resource_scope(workload)) <= containers.keys():
+            raise MeasurementFailure("main calibration lacks scoped server containers")
+        for name in resource_scope(workload):
+            counters = containers[name]
+            if (not isinstance(counters, dict) or
+                    not isinstance(counters.get("cpuUsageUsec"), (int, float)) or
+                    isinstance(counters["cpuUsageUsec"], bool) or
+                    not math.isfinite(counters["cpuUsageUsec"]) or counters["cpuUsageUsec"] < 0 or
+                    not isinstance(counters.get("sampledPeakProcessRSSBytes"), (int, float)) or
+                    isinstance(counters["sampledPeakProcessRSSBytes"], bool) or
+                    not math.isfinite(counters["sampledPeakProcessRSSBytes"]) or
+                    counters["sampledPeakProcessRSSBytes"] <= 0):
+                raise MeasurementFailure("main calibration has invalid scoped server counters")
         if scenario.get("workload") == "mixed" and per_worker != 10_000:
             raise MeasurementFailure("mixed calibration requires one 10000-connection loader")
         if result.get("measurement", {}).get("nativeConnectionsAuthenticated") != per_worker:
@@ -125,7 +148,8 @@ def freeze_calibrations(runs: list[Path], thresholds: dict[str, float]) -> dict:
                     result.get("scenarioSHA256"),
                     result.get("productSHA256", {}).get("IMV2GatewayLoadGenerator"),
                     scenario.get("workload"), workers, per_worker, latency_scope,
-                    scenario.get("measurementSemanticsVersion"), harness_identity)
+                    scenario.get("measurementSemanticsVersion"),
+                    tuple(scenario["resourceScope"]), harness_identity)
         identities.append(identity)
         rates.append(acknowledged / duration)
         hashes.append(digest(result_file))
@@ -135,7 +159,7 @@ def freeze_calibrations(runs: list[Path], thresholds: dict[str, float]) -> dict:
     if cv > 0.10:
         raise MeasurementFailure("main calibration throughput coefficient of variation exceeds 10%")
     (layout, fixture_hash, scenario_hash, loader_hash, workload, workers, per_worker,
-     latency_scope, semantics_version, harness_identity) = identities[0]
+     latency_scope, semantics_version, scoped_services, harness_identity) = identities[0]
     unit = "successfulRecoveryRoomItemsPerSecond" if workload == "fault" else "messagesAcknowledgedPerSecond"
     return {"schemaVersion": 1, "mainRevision": "f1cdd78d6a21bf0ae23da627c0710c65115236aa",
             "workload": workload, "layout": layout, "fixtureManifestSHA256": fixture_hash,
@@ -143,6 +167,7 @@ def freeze_calibrations(runs: list[Path], thresholds: dict[str, float]) -> dict:
             "loaderWorkers": workers, "connectionsPerWorker": per_worker,
             "latencyScope": latency_scope,
             "measurementSemanticsVersion": semantics_version,
+            "resourceScope": list(scoped_services),
             "harnessRevision": harness_identity[0],
             "harnessFilesSHA256": dict(zip(HARNESS_FILE_KEYS, harness_identity[1])),
             "mainCalibrationResultSHA256": hashes,
@@ -161,6 +186,7 @@ def verify_freeze(path: Path, *, workload: str, layout: str, fixture_hash: str,
                 "loaderWorkers": 1, "connectionsPerWorker": connections_per_worker,
                 "latencyScope": "single-process-phase-samples",
                 "measurementSemanticsVersion": MEASUREMENT_SEMANTICS_VERSION,
+                "resourceScope": list(resource_scope(workload)),
                 "harnessRevision": harness_revision, "harnessFilesSHA256": harness_files}
     if any(freeze.get(key) != value for key, value in expected.items()):
         raise MeasurementFailure("freeze does not match workload, fixture, scenario or loader")
@@ -279,6 +305,7 @@ def create_scenario(source: Path, protocol: dict[str, Any], fixture: dict[str, A
               "loaderWorkers": 1, "connectionsPerWorker": connections,
               "latencyScope": "single-process-phase-samples",
               "measurementSemanticsVersion": MEASUREMENT_SEMANTICS_VERSION,
+              "resourceScope": list(resource_scope(workload)),
               "rateScale": rate_scale, "templatePath": relative,
               "templateSHA256": template_digest, "phaseDurationsSeconds": list(durations),
               "batchRecoveryQueriesRequired": workload in ("mixed", "fault"),

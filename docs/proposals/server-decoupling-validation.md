@@ -173,6 +173,8 @@ python3 IMV2/scripts/test_v2_virtual_actor_application_stack.py \
 
 ## 性能对照
 
+**用户最新范围（2026-09-30）**：不进行大规模性能测试，性能对照留待完整服务器组环境。本机只保留编译和必要定向检查；下列容量入口与校准规则作为后续环境准备说明，不属于本轮待执行命令。专用 Colima profile 已停止，无进行中的负载。没有有效性能样本、冻结预算或性能通过结论。
+
 可复用入口为 [容量 runner](../../IMV2/scripts/test_v2_virtual_actor_capacity_canary.py)、[固定 fixture](../../IMV2/scripts/prepare_v2_virtual_actor_capacity_fixture.py)、[评估器](../../IMV2/scripts/assess_v2_virtual_actor_capacity.py)和[历史协议](../reviews/virtual-actor/v1-baseline-protocol.md)。容量 runner **不负责构建产品**：需两份干净源码 checkout 与各自独立 Linux Release 产品/`result.json`，另用同一份经验证的 corrected Release loader、固定 fixture、非 `default` 的显式 Docker context，以及源码外全新 artifact 目录。先对两版输入分别做只读预检：
 
 ```sh
@@ -191,5 +193,7 @@ python3 IMV2/scripts/test_v2_virtual_actor_capacity_canary.py \
 **当前性能准备状态**：原仓库容量 runner 仍绑定历史 SHA `f1cdd78d6a21bf0ae23da627c0710c65115236aa`，不直接用于本轮对照。独立干净 harness 已生成真实 snapshot `a8dcae1faf999a94d24b5451ff94e184bf6a88c6`，绑定 `524716ef` 加相同三入口 stderr 兼容补丁后的实际基线 `b01bb093`，保留校准、产物及来源检查，并要求两版均有 Actor 指标。该 harness 的 100 连接、1 个热点房间、125 次发送/秒配置已通过只读预检；当前候选 `e209dbd3` 的匹配 Linux Release Gateway/LoadGenerator 已构建并通过 `VA_CAPACITY_CANARY_PREFLIGHT_OK` 的只读来源及 fixture 预检。尚未运行三次基线校准或候选测量。新 fixture 为 `~/.codex/virtual-actor-builds/server-decoupling-20260928-performance-hot-fixture`，独立 harness 及 provenance 位于同级目录。性能结论仍待真实样本；热点单条负载另外配合 direct atomic batch 测量，不能相互替代。
 
 **2026-09-30 实际校准发现**：最新被测产品已更新至干净源码 `cc6da289`（`~/.codex/virtual-actor-builds/server-decoupling-20260930-final-performance-release/result.json`），Gateway/LoadGenerator Linux Release 构建通过。第一次校准因默认 recovery workers 128 超过连接数 100 在启动时失败，runner 显式传入 `min(connections, 128)` 并保存清理前的启动日志；独立 harness 修复后提交为 `c0902f21`。第二次全部 100 个连接认证成功，但发送为 `ACCOUNT_HTTP_FAILURE`、0 ACK。当前 loader 经 Account HTTP 发送，旧 runner 仅启动 Gateway，缺少对应 Account HTTPS 入口。两次 `passed=false` 的证据分别位于 `~/.codex/virtual-actor-builds/server-decoupling-20260930-hot-baseline-calibration-1/` 和同级 `server-decoupling-20260930-hot-baseline-calibration-1-r2/`；没有有效稳态样本。正式采样前须加入匹配源码的 Account 产物、本地 HTTPS 路由和就绪检查，并将 Account 与 Gateway 同时纳入 CPU/RSS 统计；原只读预检只能证明来源与 fixture，不能证明发送路径完整。修正测量拓扑后重新校准和冻结预算。
+
+**发送接线已修复**：runner 现在要求匹配源码的 `IMV2AccountServerApp` 产品，生成 Account caller 与 Gateway Host 配置，Account 连接相同 fixture 路由；Caddy 在 Account 网络空间提供私有 CA 签发的 `https://account:8443`，loader 显式使用此地址。Account 连接总预算覆盖控制库与所有 owner，测试边缘限额显式记录，Caddy 镜像固定 digest。测量语义 v3 要求发送类资源范围为 Gateway+Account+Caddy，fault 查询仍为 Gateway，逐容器原始数据保留。独立 harness 提交 `cba1ba7c`；runner 7、measurement 7、assessment 2 项定向测试通过。基线 `b01bb093`、候选 `cc6da289` 的 Account/Gateway Linux Release 与两次小型发送冒烟均通过，证据见实施状态。热点校准 `~/.codex/virtual-actor-builds/server-decoupling-20260930-hot-baseline-http-calibration-1/result.json` 为 `passed=false`，未获得有效稳态样本；遵循最新范围不再复跑或扩展。小型冒烟不能替代完整服务器组性能验收。
 
 `V2GatewaySlowFanoutBenchmarkTests` 可用 `IMV2_RUN_SLOW_FANOUT_BENCHMARK=1` 单独观测 10k 连接慢读者传输，但只覆盖局部传输；`IMV2/scripts/run_v2_gateway_load_guarded.sh` 使用 macOS `caffeinate`，不是 Linux 容量入口。

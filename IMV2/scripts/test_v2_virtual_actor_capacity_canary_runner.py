@@ -17,7 +17,8 @@ from assess_v2_virtual_actor_capacity import read_run
 from virtual_actor_capacity_measurement import MeasurementFailure
 
 from test_v2_virtual_actor_capacity_canary import (
-    CAPACITY_NOFILE, CanaryFailure, capture_detached_loader_open_file_limits,
+    CAPACITY_NOFILE, CADDY_IMAGE, CanaryFailure, install_account_services,
+    capture_detached_loader_open_file_limits,
     capture_pid1_open_file_limits, capture_project_diagnostics,
     capture_runtime_provenance, measurement_service_settings,
     formal_sampling_eligible, parse_args, parse_pid1_open_file_limits, result_mode,
@@ -31,6 +32,39 @@ PREPARE = HERE / "prepare_v2_virtual_actor_capacity_fixture.py"
 
 
 class CanaryRunnerPreflightTests(unittest.TestCase):
+    def test_http_send_stack_shares_fixture_routes_and_keeps_account_private(self) -> None:
+        keys = ("IM_V2_DATABASE_URL", "IM_V2_ACCESS_TOKEN_HMAC_KEY_BASE64",
+                "IM_V2_CAPACITY_PROFILE_ID", "IM_V2_MAX_ELIGIBLE_MEMBERS",
+                "IM_V2_MAX_COMMANDS_PER_WINDOW", "IM_V2_USER_SHARD_BUCKET",
+                "IM_V2_DIRECT_ROOM_SHARD_ID", "IM_V2_GROUP_ROOM_SHARD_ID",
+                "IM_V2_USER_SHARD_STORES_JSON", "IM_V2_ROOM_SHARD_STORES_JSON")
+        gateway = {key: "fixture-" + key for key in keys}
+        original = {"services": {
+            "account": {"environment": {"edge-secret": "private", "IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS": "240"},
+                "ports": ["127.0.0.1:8443:8443"], "volumes": [], "restart": "on-failure"},
+            "caddy": {"environment": {"edge-secret": "private"}, "volumes": []}}}
+        services = {}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install_account_services(document=original, services=services, private=root,
+                runtime=root / "products", tls=root / "tls", gateway_environment=gateway,
+                database_names={"postgres": "control", "owner00": "owner"})
+            account, edge = services["account"], services["caddy"]
+            self.assertNotIn("ports", account)
+            self.assertNotIn("restart", account)
+            self.assertEqual(account["command"], ["/run/va-products/IMV2AccountServerApp"])
+            self.assertEqual({key: account["environment"][key] for key in keys}, gateway)
+            self.assertEqual(account["environment"]["IM_V2_ACCOUNT_LISTEN_HOST"], "127.0.0.1")
+            self.assertEqual(set(account["depends_on"]), {"postgres", "owner00"})
+            self.assertEqual(edge["image"], CADDY_IMAGE)
+            self.assertEqual(edge["network_mode"], "service:account")
+            config = (root / "Caddyfile").read_text()
+            self.assertIn("https://account:8443", config)
+            self.assertIn("reverse_proxy 127.0.0.1:8444", config)
+            self.assertIn("X-IM-V2-Account-Edge-Authorization", config)
+            self.assertEqual((root / "Caddyfile").stat().st_mode & 0o777, 0o600)
+            self.assertEqual(original["services"]["account"]["environment"]["IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS"], "240")
+
     def test_owner_fault_functional_cli_cannot_be_assessed_as_formal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -246,7 +280,7 @@ class CanaryRunnerPreflightTests(unittest.TestCase):
             release = root / "release"
             release.mkdir()
             products = {}
-            for name in ("IMV2ServerApp", "IMV2GatewayLoadGenerator"):
+            for name in ("IMV2ServerApp", "IMV2AccountServerApp", "IMV2GatewayLoadGenerator"):
                 path = release / name
                 path.write_bytes(b"\x7fELF" + name.encode())
                 path.chmod(0o700)

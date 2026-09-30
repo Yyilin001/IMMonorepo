@@ -11,7 +11,7 @@ import unittest
 from virtual_actor_capacity_measurement import (
     HARNESS_FILE_KEYS, MEASUREMENT_SEMANTICS_VERSION, MeasurementFailure,
     capture_runtime, create_scenario, freeze_calibrations, parse_cgroup,
-    parse_prometheus, phase_delta, supports_recovery_loader, verify_freeze,
+    parse_prometheus, phase_delta, resource_scope, supports_recovery_loader, verify_freeze,
 )
 
 
@@ -34,6 +34,7 @@ class MeasurementTests(unittest.TestCase):
             self.assertEqual(detail["connectionsPerWorker"], 10_000 if workload == "mixed" else 100)
             self.assertEqual(detail["latencyScope"], "single-process-phase-samples")
             self.assertEqual(detail["measurementSemanticsVersion"], MEASUREMENT_SEMANTICS_VERSION)
+            self.assertEqual(detail["resourceScope"], ["gateway", "account", "caddy"])
             self.assertEqual(scenario["phases"][0]["messagesPerSecond"],
                              scenario["phases"][1]["messagesPerSecond"])
             self.assertTrue(all(scenario["phases"][2].get(name, 0) == 0 for name in
@@ -88,6 +89,10 @@ class MeasurementTests(unittest.TestCase):
         after["postgres"]["postgres"]["statsReset"] = "changed"
         with self.assertRaises(MeasurementFailure):
             phase_delta(before, after, samples)
+
+    def test_resource_scopes_include_http_send_path(self) -> None:
+        self.assertEqual(resource_scope("hot"), ("gateway", "account", "caddy"))
+        self.assertEqual(resource_scope("fault"), ("gateway",))
 
     def test_cleanly_exited_loader_only_truncates_its_own_tail(self) -> None:
         exit_code = [0]
@@ -162,7 +167,10 @@ class MeasurementTests(unittest.TestCase):
             for index, messages in enumerate((3000, 3050, 2950)):
                 run = root / f"main-{index}"
                 run.mkdir()
-                steady = {"nativeLoader": {"completed": True, "workloadFailed": 0,
+                steady = {"containers": {name: {"cpuUsageUsec": 1_000_000,
+                                                 "sampledPeakProcessRSSBytes": 1024}
+                                         for name in resource_scope("hot")},
+                          "nativeLoader": {"completed": True, "workloadFailed": 0,
                                            "observedDurationSeconds": 300,
                                            "messagesAcknowledged": messages}}
                 content = json.dumps(steady)
@@ -177,6 +185,7 @@ class MeasurementTests(unittest.TestCase):
                                           "scenario": {"workload": "hot", "loaderWorkers": 1,
                                                        "connectionsPerWorker": 100,
                                                        "latencyScope": "single-process-phase-samples",
+                                                       "resourceScope": list(resource_scope("hot")),
                                                        "measurementSemanticsVersion": MEASUREMENT_SEMANTICS_VERSION},
                                           "phaseFiles": {"steady": hashlib.sha256(content.encode()).hexdigest()}}}
                 (run / "result.json").write_text(json.dumps(result))
@@ -190,6 +199,15 @@ class MeasurementTests(unittest.TestCase):
                           harness_files=harness_files)
             self.assertEqual(freeze["loaderWorkers"], 1)
             self.assertEqual(freeze["connectionsPerWorker"], 100)
+            self.assertEqual(freeze["resourceScope"], ["gateway", "account", "caddy"])
+            wrong_scope = dict(freeze, resourceScope=["gateway"])
+            output.write_text(json.dumps(wrong_scope))
+            with self.assertRaises(MeasurementFailure):
+                verify_freeze(output, workload="hot", layout="hot", fixture_hash="a" * 64,
+                              scenario_hash="b" * 64, loader_hash="c" * 64,
+                              connections_per_worker=100, harness_revision="e" * 40,
+                              harness_files=harness_files)
+            output.write_text(json.dumps(freeze))
             with self.assertRaises(MeasurementFailure):
                 verify_freeze(output, workload="mixed", layout="hot", fixture_hash="a" * 64,
                               scenario_hash="b" * 64, loader_hash="c" * 64,

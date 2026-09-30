@@ -4,7 +4,10 @@
 
 ## 本轮收尾与验证（2026-09-30）
 
-- 干净源码 `cc6da2894ce7a0f78e82af39780bc0a4109588e8` 的 Linux Release Gateway 与 LoadGenerator 构建通过，产物身份见 `~/.codex/virtual-actor-builds/server-decoupling-20260930-final-performance-release/result.json`。热点校准两次失败均不计为性能样本：首轮 loader 默认 128 个 recovery workers 超过 100 个连接，尚未预热；runner 已显式限至连接数，并在清理前保存 loader 启动日志，6 项定向脚本测试通过。独立干净 harness 修复提交为 `c0902f21`。复跑全部 100 个连接认证成功，发送报告为 `message:ACCOUNT_HTTP_FAILURE:terminal`、0 ACK；检查 loader 证实发送走 Account HTTP，而旧容量栈仅启动 Gateway，默认 Account 地址不可达。后续须补齐本地 Account/HTTPS 入口及 Account+Gateway CPU/RSS 统计，再重启三次基线校准；不能把当前 Gateway-only 指标用于发送路径性能验收。失败证据为 `server-decoupling-20260930-hot-baseline-calibration-1/` 与 `server-decoupling-20260930-hot-baseline-calibration-1-r2/`，专用测试栈已清理。
+- **最新验证范围**：用户明确不需要大规模性能测试，容量与性能验收应在完整服务器组环境执行。本轮停止本机热点校准，不再启动负载或冻结性能预算；保持编译及必要定向检查，性能未验收不作为继续本机压测的理由。所有一次性测试栈已清理，专用 `imv2-va-capacity` Colima profile 已停止。
+- 容量脚本的发送接线已修复：校验并复制匹配源码的 Account 二进制，生成 Account caller 身份，共享 fixture 的控制库/owner 路由；Account 保持回环监听，Caddy 用私有 CA、`DNS:account` 证书及鉴权头提供 HTTPS，loader 显式使用 `https://account:8443`。连接总预算按独立数据库数计算；测量限流预算、服务镜像与配置哈希记录在脱敏证据中。发送类资源统计包含 Gateway、Account、Caddy，fault 查询仍统计 Gateway；测量语义升至 v3，冻结和评估拒绝旧范围。
+- 本轮只运行相关脚本定向测试：runner 7 项、measurement 7 项、assessment 2 项，均通过。干净基线 `b01bb093` 与候选 `cc6da289` 的 Account/Gateway Linux Release 编译通过，证据分别为 `~/.codex/virtual-actor-builds/server-decoupling-20260930-baseline-http-release/result.json` 与 `server-decoupling-20260930-candidate-http-release/result.json`。两版的小型真实 HTTP 发送冒烟分别在 `server-decoupling-20260930-http-capacity-baseline-canary-r2/` 与 `server-decoupling-20260930-http-capacity-candidate-canary/` 通过，记录回执与 owner 持久化；这些仅证明测试接线。独立 harness 已提交为 `cba1ba7c`。此前首轮 Account 多库连接预算不足的启动失败保留在 `server-decoupling-20260930-http-capacity-baseline-canary/`；修正接线后的热点校准 `server-decoupling-20260930-hot-baseline-http-calibration-1/` 仍为 `passed=false`、无有效稳态样本，不再扩展或复跑。
+- 干净源码 `cc6da2894ce7a0f78e82af39780bc0a4109588e8` 的 Linux Release Gateway 与 LoadGenerator 构建通过，产物身份见 `~/.codex/virtual-actor-builds/server-decoupling-20260930-final-performance-release/result.json`。热点校准两次失败均不计为性能样本：首轮 loader 默认 128 个 recovery workers 超过 100 个连接，尚未预热；runner 已显式限至连接数，并在清理前保存 loader 启动日志，6 项定向脚本测试通过。独立干净 harness 修复提交为 `c0902f21`。复跑全部 100 个连接认证成功，发送报告为 `message:ACCOUNT_HTTP_FAILURE:terminal`、0 ACK；检查 loader 证实发送走 Account HTTP，而旧容量栈仅启动 Gateway，默认 Account 地址不可达。当时缺少本地 Account/HTTPS 入口及完整 CPU/RSS 统计；现已修复接线，后续性能采样按用户最新要求留待完整服务器组；不能把当前 Gateway-only 指标用于发送路径性能验收。失败证据为 `server-decoupling-20260930-hot-baseline-calibration-1/` 与 `server-decoupling-20260930-hot-baseline-calibration-1-r2/`，专用测试栈已清理。
 - Host PostgreSQL 排空定向验证实际通过三项：普通排空 1 项、过载及双房间共享批次排空 2 项。证据分别为 `~/.codex/virtual-actor-builds/server-decoupling-20260930-host-drain-r2/` 与 `server-decoupling-20260930-host-drain/`；运行后数据库均清理。首轮普通排空测试因共享 helper 的通用 disposable 开关缺失而提前返回，不计为通过；测试现要求该开关，补齐后重新执行 SQL 并通过。生产源码为 `22e05061`，复跑仅增加此测试守卫。启动失败且节点未排空的进程级注入仍未执行。
 - 混合群批次的提交后额度结算与保序结果映射移入 `V2RoomWriteCommitEffects.finalizeHybridBatch`，Store 继续拥有 SQL 事务、回滚/结果不明分类及失败时额度退役。保留 SQL 已提交后先结算持久预扣令牌、再转换响应的顺序；共用结果数量、下标及时间转换检查。macOS 产品和测试目标编译通过（`/tmp/imv2-hybrid-effects-build-20260930.log`）；跨房间和同一热房间的两项真实 PostgreSQL 原子批次测试通过、无跳过（`/tmp/imv2-hybrid-effects-tests-20260930.log`），本轮独占数据库已清理。
 - 删除只服务历史调用方式的资源导入构造器、Messaging 中被忽略的参数和 Gateway 的 `Data` 提交重载；生产接线及测试改用现行接口。RoomWrite 的三个事务闭包直接调用标量接受路径，移除仅作转发的 Store 包装。HTTP 冒烟脚本只接受现行资源下载 header 数组结构。
@@ -55,13 +58,13 @@
 
 | 阶段 | 当前状态 | 剩余工作 |
 | --- | --- | --- |
-| P0 | 源码边界检查、初始违规基线和逐文件迁移清单已建立 | 可比较的性能基线尚未实测 |
+| P0 | 源码边界检查、初始违规基线和逐文件迁移清单已建立 | 性能基线按用户要求留待完整服务器组 |
 | P1 | 资源生命周期/导入/迁移/展示依赖接口和强类型快照；SQL 与数据库接线分离；定向资源 PostgreSQL 回归通过 | 完整受影响矩阵仍待最终验收 |
 | P2 | HTTP operation 与文件流入口依赖能力接口；Gateway 按命令族分派；四种本机应用栈模式通过 | 其余受影响路由 suite 待最终验收 |
 | P3 | 房间业务执行与 PostgreSQL 适配分离，工厂组装五类能力；本机 G4/G6 接管与围栏通过；启动失败后未排空的节点不会触发共享资源关闭 | 其余生命周期/取消矩阵及启动故障注入待最终验收 |
-| P4 | scalar/direct fast/rich batch/hybrid/forward 路径、授权与事务协调、提交后处理及组合状态已收拢；提交后效果先校验结果；原生故障定向回归通过 | 扩展故障矩阵与热点性能对照尚未完成 |
+| P4 | scalar/direct fast/rich batch/hybrid/forward 路径、授权与事务协调、提交后处理及组合状态已收拢；提交后效果先校验结果；原生故障定向回归通过 | 扩展故障矩阵尚未完成；性能对照留待完整服务器组 |
 | P5 | Contracts/Application/Infrastructure/Gateway/HTTP 已独立；旧 Server 收敛为 15 个组装/配置文件；当前源码的六个 Linux Release 产品和运行配置定向检查通过 | 完整受影响测试仍待最终验收 |
-| P6 | 原生跨库、Host 恢复、COMMIT ACK-loss、SIGKILL 定向场景，本机四种应用栈模式、G4/G6、独立 control/owner 链路断开及 owner-a PostgreSQL 重启已通过；当前源码另通过独立 Host 应用栈 | 完整故障矩阵与性能对照按此前要求暂缓，整体验收未完成 |
+| P6 | 原生跨库、Host 恢复、COMMIT ACK-loss、SIGKILL 定向场景，本机四种应用栈模式、G4/G6、独立 control/owner 链路断开及 owner-a PostgreSQL 重启已通过；当前源码另通过独立 Host 应用栈 | 完整故障矩阵暂缓；性能对照按最新要求不在本机执行，整体验收未完成 |
 
 源码边界脚本 `scripts/check_v2_server_boundaries.py` 已接入 `run_v2_swift_tests.sh`。初始版本的 33 项资源应用层与 HTTP 具体 Store 依赖已消除，当前例外清单为空。该脚本是源码模式检查；它不替代编译器依赖约束、行为测试或事务一致性验证。
 

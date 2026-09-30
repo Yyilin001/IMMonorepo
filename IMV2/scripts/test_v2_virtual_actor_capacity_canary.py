@@ -42,6 +42,7 @@ LAYOUTS = ("hot", "same-owner", "mixed", "cold")
 HEX64 = re.compile(r"[a-f0-9]{64}\Z")
 HEX40 = re.compile(r"[a-f0-9]{40}\Z")
 CAPACITY_NOFILE = 65_536
+CADDY_IMAGE = "caddy:2.8-alpine@sha256:af32e97399febea808609119bb21544d0265c58a02836576e32a2d082c262c17"
 
 
 class CanaryFailure(Exception):
@@ -345,7 +346,9 @@ def write_private(path: Path, contents: str) -> None:
 
 def set_capacity_open_file_limits(services: dict[str, dict]) -> None:
     """Match the production server override without changing database limits."""
-    for name in ("gateway", "loader"):
+    for name in ("gateway", "loader", "account"):
+        if name not in services:
+            continue
         services[name].setdefault("ulimits", {})["nofile"] = {
             "soft": CAPACITY_NOFILE, "hard": CAPACITY_NOFILE}
 
@@ -407,7 +410,8 @@ def capture_detached_loader_open_file_limits(*, run: Path, docker: list[str],
 
 def capture_runtime_provenance(*, docker: list[str], compose: list[str],
                                services: dict[str, str], manifest: dict,
-                               layout: str, execute: object, psql: object) -> dict:
+                               layout: str, execute: object, psql: object,
+                               application_services: tuple[str, ...] = ("gateway",)) -> dict:
     """Read only whitelisted machine, container and PostgreSQL settings."""
     template = '{"nCPU":{{json .NCPU}},"memTotal":{{json .MemTotal}},"kernelVersion":{{json .KernelVersion}}}'
     machine = json.loads(execute(docker + ["info", "--format", template],
@@ -422,7 +426,7 @@ def capture_runtime_provenance(*, docker: list[str], compose: list[str],
                       "provenance.log", 15, record_stdout=False).strip()
     checked_uuid(boot_id, "Docker host boot ID")
     started = {}
-    for service in (*services.keys(), "gateway"):
+    for service in (*services.keys(), *application_services):
         container_id = execute(compose + ["ps", "-q", service], "provenance.log", 15,
                                record_stdout=False).strip()
         if not re.fullmatch(r"[0-9a-f]{64}", container_id):
@@ -451,6 +455,85 @@ def capture_runtime_provenance(*, docker: list[str], compose: list[str],
                 "ownerMembershipCounts": manifest["layouts"][layout]["ownerMembershipCounts"]}}
 
 
+def install_account_services(*, document: dict, services: dict, private: Path,
+                             runtime: Path, tls: Path, gateway_environment: dict,
+                             database_names: dict) -> None:
+    """Route the common loader's HTTP sends through the local authenticated edge."""
+    account = deepcopy(document["services"]["account"])
+    account["image"] = IMAGE
+    account["command"] = ["/run/va-products/IMV2AccountServerApp"]
+    account.pop("restart", None)
+    account.pop("ports", None)
+    account["depends_on"] = {name: {"condition": "service_healthy", "required": True}
+                             for name in database_names}
+    account["volumes"] = [mount for mount in account.get("volumes", [])
+                          if mount["target"] != "/caddy"] + [
+        {"type": "bind", "source": str(runtime), "target": "/run/va-products", "read_only": True}]
+    inherited = ("IM_V2_DATABASE_URL", "IM_V2_ACCESS_TOKEN_HMAC_KEY_BASE64",
+                 "IM_V2_CAPACITY_PROFILE_ID", "IM_V2_MAX_ELIGIBLE_MEMBERS",
+                 "IM_V2_MAX_COMMANDS_PER_WINDOW", "IM_V2_USER_SHARD_BUCKET",
+                 "IM_V2_DIRECT_ROOM_SHARD_ID", "IM_V2_GROUP_ROOM_SHARD_ID",
+                 "IM_V2_USER_SHARD_STORES_JSON", "IM_V2_ROOM_SHARD_STORES_JSON")
+    account["environment"].update({key: gateway_environment[key] for key in inherited})
+    account["environment"].update({"IM_V2_ACCOUNT_LISTEN_HOST": "127.0.0.1",
+        "IM_V2_ACCOUNT_LISTEN_PORT": "8444", "IM_V2_CONTENT_REVIEW_MODE": "disabled",
+        "IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS": "1000000"})
+    pool = account["environment"]
+    pool["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = str(max(
+        int(pool.get("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS", "16")),
+        int(pool.get("IM_V2_DATABASE_EVENT_LOOP_THREADS", "2")) *
+        int(pool.get("IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP", "4")) * len(database_names)))
+    services["account"] = account
+    config = private / "Caddyfile"
+    write_private(config, """{
+    admin off
+    auto_https off
+}
+https://account:8443 {
+    tls /run/va-tls/gateway.pem /run/va-tls/gateway.key
+    reverse_proxy 127.0.0.1:8444 {
+        header_up X-IM-V2-Account-Edge-Authorization "{$IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64}"
+        header_up X-IM-V2-Account-Client-Address "{remote_host}"
+    }
+}
+""")
+    caddy = deepcopy(document["services"]["caddy"])
+    caddy["image"] = CADDY_IMAGE
+    caddy["network_mode"] = "service:account"
+    caddy["depends_on"] = {"account": {"condition": "service_healthy", "required": True}}
+    caddy["volumes"] = [
+        {"type": "bind", "source": str(config), "target": "/etc/caddy/Caddyfile", "read_only": True},
+        {"type": "bind", "source": str(tls), "target": "/run/va-tls", "read_only": True}]
+    caddy.pop("ports", None)
+    services["caddy"] = caddy
+
+
+def wait_for_account_https(*, compose: list[str], execute: object) -> None:
+    """Require CA/hostname-verified HTTPS and a reachable Account upstream."""
+    probe = """import ssl, urllib.request, urllib.error
+context = ssl.create_default_context(cafile='/run/va-tls/ca.pem')
+try:
+    response = urllib.request.urlopen('https://account:8443/health', context=context, timeout=5)
+    code = response.status
+    response.close()
+except urllib.error.HTTPError as error:
+    code = error.code
+    error.close()
+assert code not in (502, 503, 504), code
+print('ACCOUNT_HTTPS_READY status=' + str(code))
+"""
+    deadline = time.monotonic() + 60
+    while True:
+        try:
+            execute(compose + ["exec", "-T", "gateway", "python3", "-c", probe],
+                    "account-https-readiness.log", 10)
+            return
+        except subprocess.SubprocessError:
+            if time.monotonic() >= deadline:
+                raise CanaryFailure("Account HTTPS readiness timed out")
+            time.sleep(1)
+
+
 def make_tls(private: Path, execute: object) -> Path:
     tls = private / "tls"
     tls.mkdir(mode=0o700)
@@ -460,7 +543,7 @@ def make_tls(private: Path, execute: object) -> Path:
     execute(["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes", "-sha256",
              "-keyout", str(tls / "gateway.key"), "-out", str(tls / "gateway.csr"),
              "-subj", "/CN=localhost"], "tls.log", 30)
-    write_private(tls / "gateway.ext", "subjectAltName=DNS:localhost\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n")
+    write_private(tls / "gateway.ext", "subjectAltName=DNS:localhost,DNS:account\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n")
     execute(["openssl", "x509", "-req", "-in", str(tls / "gateway.csr"),
              "-CA", str(tls / "ca.pem"), "-CAkey", str(tls / "ca.key"), "-CAcreateserial",
              "-days", "2", "-sha256", "-extfile", str(tls / "gateway.ext"),
@@ -517,7 +600,9 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
         raise MeasurementFailure("detached loader ID unavailable")
     loader_open_file_limits_hash = capture_detached_loader_open_file_limits(
         run=run, docker=docker, loader_id=loader_id, execute=execute)
-    containers = {**{name: execute(compose + ["ps", "-q", name], "measurement.log", 10).strip()
+    application_containers = {name: execute(compose + ["ps", "-q", name], "measurement.log", 10).strip()
+                              for name in ("account", "caddy")}
+    containers = {**application_containers, **{name: execute(compose + ["ps", "-q", name], "measurement.log", 10).strip()
                      for name in services}, "gateway": gateway_id, "loader": loader_id}
     if any(not re.fullmatch(r"[a-f0-9]{64}", container) for container in containers.values()):
         raise MeasurementFailure("measurement container identity missing")
@@ -709,6 +794,8 @@ def main() -> int:
         raise CanaryFailure("Linux Release build result does not match source/lockfile/image")
     loader_build_result = read_build_result(args.loader_build_result)
     products = {
+        "IMV2AccountServerApp": verify_product(args.release_dir, "IMV2AccountServerApp",
+            build_result["products"]["IMV2AccountServerApp"]),
         "IMV2ServerApp": verify_product(args.release_dir, "IMV2ServerApp",
                                          build_result["products"]["IMV2ServerApp"]),
         "IMV2GatewayLoadGenerator": verify_product(args.loader_products_dir,
@@ -785,7 +872,7 @@ def main() -> int:
         "scenarioSHA256": sha256(scenario) if scenario_document is None else None,
         "mode": result_mode(args, scenario_document),
         "formalSamplingEligible": False,
-        "swiftImage": IMAGE, "postgresImage": POSTGRES_IMAGE,
+        "swiftImage": IMAGE, "postgresImage": POSTGRES_IMAGE, "caddyImage": CADDY_IMAGE,
         "legacyLoaderNETADMIN": args.legacy_loader_net_admin,
         "mainCalibrationFreezeSHA256": sha256(args.measurement_freeze_file)
         if args.measurement_freeze_file else None,
@@ -812,11 +899,12 @@ def main() -> int:
         phase = "image inspection"
         result["swiftImageID"] = execute(docker + ["image", "inspect", IMAGE, "--format", "{{.Id}}"], "image.log", 30).strip()
         result["postgresImageID"] = execute(docker + ["image", "inspect", POSTGRES_IMAGE, "--format", "{{.Id}}"], "image.log", 30).strip()
+        result["caddyImageID"] = execute(docker + ["image", "inspect", CADDY_IMAGE, "--format", "{{.Id}}"], "image.log", 30).strip()
         phase = "private configuration"
         runtime = private / "products"
         runtime.mkdir(mode=0o700)
         for product in products:
-            source_directory = (args.release_dir if product == "IMV2ServerApp"
+            source_directory = (args.release_dir if product != "IMV2GatewayLoadGenerator"
                                 else args.loader_products_dir)
             shutil.copy2(source_directory / product, runtime / product)
             if sha256(runtime / product) != products[product]:
@@ -847,10 +935,8 @@ def main() -> int:
             actor_tool = args.source_checkout / "IMV2/scripts/prepare_v2_room_actor_configuration.py"
             require_regular(actor_tool, "actor configuration generator")
             execute([sys.executable, str(actor_tool), "--output-dir", str(private / "local-room-actors"),
-                     "--host", "gateway=gateway:7337", "--shards", ",".join(shards),
+                     "--host", "gateway=gateway:7337", "--caller", "account=account:7338", "--shards", ",".join(shards),
                      "--mount-root", "/run/im-v2-room-actor"], "actor-configuration.log", 60)
-            # Compose normalization also resolves the unused Account mount.
-            (private / "local-room-actors/account").mkdir(mode=0o700)
         phase = "compose configuration"
         config_command = docker + ["compose", "--project-directory", str(private), "--env-file", str(env_file),
                                    "--file", str(args.source_checkout / "IMV2/docker-compose.local-account.yml"),
@@ -910,6 +996,11 @@ def main() -> int:
                 "database_url": f"postgres://im_v2:{password}@owner{index:02d}:5432/{db_names[f'owner{index:02d}']}",
                 "schema": "im_v2"} for index, shard in enumerate(shards)], separators=(",", ":")),
         })
+        install_account_services(document=document, services=services, private=private,
+                                 runtime=runtime, tls=tls, gateway_environment=gateway_env,
+                                 database_names=db_names)
+        result["accountEdgeConfigurationSHA256"] = sha256(private / "Caddyfile")
+        result["accountClientRateLimitMaxRequests"] = int(services["account"]["environment"]["IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS"])
         connections = (args.measurement_connections if scenario_document is not None else
                        args.canary_connections if args.canary_connections is not None else
                        min(manifest["users"], max(4, manifest["targetsPerConnection"] + 1)))
@@ -919,7 +1010,7 @@ def main() -> int:
             "image": IMAGE,
             "command": (["stdbuf", "-oL", "-eL"] if scenario_document is not None else []) +
                        ["/run/va-products/IMV2GatewayLoadGenerator", "--host", "gateway", "--port", "7443",
-                        "--server-name", "localhost", "--ca-path", "/run/va-tls/ca.pem",
+                        "--server-name", "localhost", "--account-base-url", "https://account:8443", "--ca-path", "/run/va-tls/ca.pem",
                         "--credentials", f"/run/va-fixture/{args.layout}/credentials.jsonl",
                         "--report", "/run/va-artifacts/load-report.json", "--revision", args.source_sha,
                         "--connections", str(connections), "--targets-per-connection", str(manifest["targetsPerConnection"]),
@@ -965,8 +1056,16 @@ def main() -> int:
                                             "IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"}}
             write_private(run / "measurement-compose-settings.json", json.dumps({
                 "project": project, "databaseNames": db_names, "gatewayEnvironment": safe_environment,
+                "accountEnvironment": {name: value for name, value in services["account"]["environment"].items()
+                    if name in {"IM_V2_DATABASE_EVENT_LOOP_THREADS", "IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP",
+                        "IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS", "IM_V2_DATABASE_CONNECT_TIMEOUT_MS",
+                        "IM_V2_DATABASE_POOL_TIMEOUT_MS", "IM_V2_DATABASE_STATEMENT_TIMEOUT_MS",
+                        "IM_V2_DATABASE_LOCK_TIMEOUT_MS", "IM_V2_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS",
+                        "IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS", "IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_WINDOW_SECONDS",
+                        "IM_V2_CAPACITY_PROFILE_ID", "IM_V2_MAX_ELIGIBLE_MEMBERS", "IM_V2_MAX_COMMANDS_PER_WINDOW"}},
                 "services": measurement_service_settings(services),
-                "swiftImageID": result["swiftImageID"], "postgresImageID": result["postgresImageID"]},
+                "swiftImageID": result["swiftImageID"], "postgresImageID": result["postgresImageID"],
+                "caddyImageID": result["caddyImageID"]},
                 indent=2, sort_keys=True) + "\n")
             result["measurementComposeSettingsSHA256"] = sha256(run / "measurement-compose-settings.json")
         phase = "database startup"
@@ -1001,17 +1100,26 @@ def main() -> int:
                 if installed.strip() != "1":
                     raise MeasurementFailure("pg_stat_statements not installed on disposable database")
         phase = "gateway startup"
-        execute(compose + ["up", "-d", "--wait", "--wait-timeout", "120", "gateway"], "startup.log", 180)
+        execute(compose + ["up", "-d", "--wait", "--wait-timeout", "120", "gateway", "account"], "startup.log", 180)
+        phase = "account HTTPS startup"
+        execute(compose + ["up", "-d", "caddy"], "startup.log", 60)
+        wait_for_account_https(compose=compose, execute=execute)
         phase = "runtime provenance"
         gateway_id = execute(compose + ["ps", "-q", "gateway"], "open-file-limits.log", 15,
                              record_stdout=False).strip()
         capture_pid1_open_file_limits(run=run, service="gateway",
             container_id=gateway_id, command=docker + ["exec", gateway_id], execute=execute)
+        account_id = execute(compose + ["ps", "-q", "account"], "open-file-limits.log", 15,
+                             record_stdout=False).strip()
+        capture_pid1_open_file_limits(run=run, service="account", container_id=account_id,
+            command=docker + ["exec", account_id], execute=execute)
         provenance = capture_runtime_provenance(
             docker=docker, compose=compose, services=db_names, manifest=manifest,
-            layout=args.layout, execute=execute, psql=psql)
-        if provenance["projectContainers"]["gateway"]["containerID"] != gateway_id:
-            raise CanaryFailure("Gateway changed after PID 1 open-file limit check")
+            layout=args.layout, execute=execute, psql=psql,
+            application_services=("gateway", "account", "caddy"))
+        if (provenance["projectContainers"]["gateway"]["containerID"] != gateway_id or
+                provenance["projectContainers"]["account"]["containerID"] != account_id):
+            raise CanaryFailure("application changed after PID 1 open-file limit check")
         write_private(run / "runtime-provenance.json", json.dumps(provenance, indent=2,
                       sort_keys=True) + "\n")
         result["runtimeProvenanceSHA256"] = sha256(run / "runtime-provenance.json")
@@ -1135,7 +1243,7 @@ def main() -> int:
         result["failureType"] = type(error).__name__
         result["failurePhase"] = phase
     finally:
-        for service in ("gateway", "loader"):
+        for service in ("gateway", "loader", "account"):
             limit_file = run / f"{service}-open-file-limits.json"
             if limit_file.is_file():
                 result.setdefault("pid1OpenFileLimitsSHA256", {})[service] = sha256(limit_file)

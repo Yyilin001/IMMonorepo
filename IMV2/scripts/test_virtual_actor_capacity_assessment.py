@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from assess_v2_virtual_actor_capacity import MAIN, MeasurementFailure, assess, budgets, read_run
+from virtual_actor_capacity_measurement import MEASUREMENT_SEMANTICS_VERSION
 
 
 class AssessmentTests(unittest.TestCase):
@@ -40,6 +41,10 @@ class AssessmentTests(unittest.TestCase):
                 "messageLatency": {"count": 30000, "p95": 10, "p99": 20}},
                 "containers": {"gateway": {"cpuUsageUsec": 30000000,
                                             "sampledPeakProcessRSSBytes": 1024},
+                               "account": {"cpuUsageUsec": 10000000,
+                                           "sampledPeakProcessRSSBytes": 4096},
+                               "caddy": {"cpuUsageUsec": 5000000,
+                                         "sampledPeakProcessRSSBytes": 512},
                                "loader": {"cpuUsageUsec": 10000000,
                                           "sampledPeakProcessRSSBytes": 2048}},
                 "sql": {"owner00": {"allStatementCalls": 60000}},
@@ -47,7 +52,9 @@ class AssessmentTests(unittest.TestCase):
             phase_path = root / "measurement-steady.json"
             result = {"passed": True, "mode": "measurement", "source": {"sourceSHA": MAIN},
                       "formalSamplingEligible": True,
-                      "measurement": {"scenario": {"workload": "hot"}, "phaseFiles": {}}}
+                      "measurement": {"scenario": {"workload": "hot",
+                         "measurementSemanticsVersion": MEASUREMENT_SEMANTICS_VERSION,
+                         "resourceScope": ["gateway", "account", "caddy"]}, "phaseFiles": {}}}
 
             def save():
                 phase_path.write_text(json.dumps(phase))
@@ -55,7 +62,10 @@ class AssessmentTests(unittest.TestCase):
                 (root / "result.json").write_text(json.dumps(result))
 
             save()
-            self.assertEqual(read_run(root)["measurements"]["acceptedUnitsPerSecond"], 100)
+            read = read_run(root)
+            self.assertEqual(read["measurements"]["acceptedUnitsPerSecond"], 100)
+            self.assertEqual(read["measurements"]["serverCPUSecondsPerAcceptedUnit"], 45 / 30000)
+            self.assertEqual(read["measurements"]["serverPeakRSSBytes"], 5632)
             self.assertIsNone(read_run(root)["meanPhysicalSendBatchSize"])
             result["formalSamplingEligible"] = False
             save()
@@ -66,7 +76,12 @@ class AssessmentTests(unittest.TestCase):
             phase_path.write_text(phase_path.read_text() + " ")
             with self.assertRaises(MeasurementFailure):
                 read_run(root)
-            phase["containers"]["gateway"].pop("sampledPeakProcessRSSBytes")
+            phase["containers"]["account"].pop("sampledPeakProcessRSSBytes")
+            save()
+            with self.assertRaises(MeasurementFailure):
+                read_run(root)
+            phase["containers"]["account"]["sampledPeakProcessRSSBytes"] = 4096
+            result["measurement"]["scenario"]["resourceScope"] = ["gateway"]
             save()
             with self.assertRaises(MeasurementFailure):
                 read_run(root)
