@@ -69,15 +69,12 @@ public struct V2RoomMessagingExecutor: Sendable {
             return (index, command)
         }
         guard !eligible.isEmpty else { return output.compactMap { $0 } }
-        do {
-            let results = try await persistence.executeSendOperationBatch(eligible.map(\.1))
-            guard results.count == eligible.count else { throw V2RoomCallFailure.outcomeUnknown }
-            for ((index, _), result) in zip(eligible, results) { output[index] = result }
-        } catch {
-            if let failure = V2ActorMessagingErrorWire(domainError: error) {
-                for (index, _) in eligible { output[index] = .failure(failure) }
-            } else { throw error }
-        }
+        // Persistence resolves command-level failures inside each savepoint.
+        // An escaped batch error cannot identify a failed command or replace
+        // any permanent receipt; preserve the host's transaction recovery path.
+        let results = try await persistence.executeSendOperationBatch(eligible.map(\.1))
+        guard results.count == eligible.count else { throw V2RoomCallFailure.outcomeUnknown }
+        for ((index, _), result) in zip(eligible, results) { output[index] = result }
         return try output.map { guard let result = $0 else { throw V2RoomCallFailure.outcomeUnknown }; return result }
     }
 

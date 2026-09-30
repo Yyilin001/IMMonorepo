@@ -194,10 +194,19 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
             return (.deferred(try .init(identity: identity, fingerprint: fingerprint, reason: .rateLimited,
                 retryAfterMilliseconds: await quotaRetryAfter(room: token.roomID, actor: identity.accountID,
                     now: resolvedAt, sql: sql))), nil, nil)
-        } catch V2RoomWriteStoreError.actorNotEligible, V2RoomWriteStoreError.actorMuted, V2RoomWriteStoreError.roomFrozen {
+        } catch V2RoomWriteStoreError.actorNotEligible, V2RoomWriteStoreError.actorMuted,
+                V2RoomWriteStoreError.roomFrozen, V2MentionValidationError.notAuthorized {
             try await rollbackBody(sql, savepoint: savepoint)
             return (.receipt(try await persist(identity: identity, fingerprint: fingerprint,
                 domain: command.command.fingerprint, outcome: .rejected(.permissionDenied), now: resolvedAt, sql: sql)), nil, nil)
+        } catch V2RoomWriteStoreError.replyTargetNotFound, V2MentionValidationError.invalidTargetSet,
+                V2MediaStoreError.mediaUnavailable, V2MediaStoreError.mediaExpired, V2MediaStoreError.invalidReferenceSet {
+            // These failures belong to this exact command. Roll back only its
+            // domain body and fence the rejection with the immutable receipt;
+            // neighbouring sends and existing replays retain their own results.
+            try await rollbackBody(sql, savepoint: savepoint)
+            return (.receipt(try await persist(identity: identity, fingerprint: fingerprint,
+                domain: command.command.fingerprint, outcome: .rejected(.invalidContent), now: resolvedAt, sql: sql)), nil, nil)
         } catch V2RoomWriteStoreError.roomNotFound {
             try await rollbackBody(sql, savepoint: savepoint)
             return (.receipt(try await persist(identity: identity, fingerprint: fingerprint,
