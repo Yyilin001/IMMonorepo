@@ -12,7 +12,9 @@ extension V2AppStore {
         #if DEBUG
         let arguments = ProcessInfo.processInfo.arguments
         let startupMode: StartupMode
-        if arguments.contains("-v2-ui-testing-live-local-account") {
+        if arguments.contains("-v2-mock-preview") {
+            startupMode = .uiTestingSignedOut
+        } else if arguments.contains("-v2-ui-testing-live-local-account") {
             startupMode = arguments.contains("-v2-ui-testing-cleanup-local-account")
                 ? .uiTestingLiveLocalAccountCleanup
                 : arguments.contains("-v2-ui-testing-restore-local-account")

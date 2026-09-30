@@ -26,7 +26,7 @@ final class V2ListViewport {
     @ObservationIgnored private var rows: [String: RowPosition] = [:]
     @ObservationIgnored private var rowOwners: [String: UUID] = [:]
     @ObservationIgnored private var allowedIDs = Set<String>()
-    @ObservationIgnored private var height: CGFloat = 0
+    @ObservationIgnored private var visibleBounds: CGRect = .zero
 
     func reconcile(ids: [String]) {
         allowedIDs = Set(ids)
@@ -37,7 +37,12 @@ final class V2ListViewport {
     }
 
     func resize(height: CGFloat) {
-        self.height = height
+        visibleBounds = CGRect(x: 0, y: 0, width: 0, height: height)
+        updateAnchor()
+    }
+
+    func resize(visibleBounds: CGRect) {
+        self.visibleBounds = visibleBounds
         updateAnchor()
     }
 
@@ -54,8 +59,8 @@ final class V2ListViewport {
     }
 
     func containsVisibleRow(_ id: String) -> Bool {
-        guard height > 0, let row = rows[id] else { return false }
-        return row.maxY > 0 && row.minY < height
+        guard visibleBounds.height > 0, let row = rows[id] else { return false }
+        return row.maxY > visibleBounds.minY && row.minY < visibleBounds.maxY
     }
 
     /// 在发布前立即解析读取结果，调用方提交之前不得发生挂起。
@@ -76,7 +81,7 @@ final class V2ListViewport {
 
     #if DEBUG
     func layoutDescription(for id: String) -> String {
-        "height=\(height), row=\(String(describing: rows[id])), cachedRows=\(rows.count)"
+        "visibleBounds=\(visibleBounds), row=\(String(describing: rows[id])), cachedRows=\(rows.count)"
     }
     #endif
 
@@ -119,8 +124,8 @@ final class V2ListViewport {
     func reset() { rows.removeAll(); rowOwners.removeAll(); allowedIDs.removeAll(); anchorID = nil; restoration = nil }
 
     private func updateAnchor() {
-        guard restoration == nil, height > 0 else { return }
-        let top = rows.filter { $0.value.maxY > 0 && $0.value.minY < height }
+        guard restoration == nil, visibleBounds.height > 0 else { return }
+        let top = rows.filter { $0.value.maxY > visibleBounds.minY && $0.value.minY < visibleBounds.maxY }
             .min { lhs, rhs in lhs.value.minY == rhs.value.minY ? lhs.key < rhs.key : lhs.value.minY < rhs.value.minY }
         if let top { anchorID = top.key }
     }
@@ -135,7 +140,7 @@ struct V2ListViewportRow: ViewModifier {
     func body(content: Content) -> some View {
         content
             .onGeometryChange(for: V2ListViewport.RowPosition.self) { proxy in
-                let frame = proxy.frame(in: .named(coordinateSpace))
+                let frame = proxy.frame(in: .global)
                 return .init(minY: frame.minY, maxY: frame.maxY)
             } action: { viewport.record(id: itemID, position: $0, ownerID: ownerID) }
             .background {
@@ -143,7 +148,7 @@ struct V2ListViewportRow: ViewModifier {
                     Color.clear.onAppear {
                         // A reused List row may reappear at the same geometry,
                         // so onGeometryChange alone need not emit again.
-                        let frame = proxy.frame(in: .named(coordinateSpace))
+                        let frame = proxy.frame(in: .global)
                         viewport.record(id: itemID, position: .init(minY: frame.minY, maxY: frame.maxY), ownerID: ownerID)
                     }
                 }
@@ -160,7 +165,7 @@ struct V2ListViewportContainer: ViewModifier {
         ScrollViewReader { proxy in
             content
                 .coordinateSpace(name: coordinateSpace)
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewport.resize(height: $0) }
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { viewport.resize(visibleBounds: $0) }
                 .onScrollPhaseChange { _, phase in
                     if phase == .tracking || phase == .interacting { viewport.userDidBeginScrolling() }
                 }

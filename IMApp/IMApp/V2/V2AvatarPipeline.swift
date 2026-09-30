@@ -139,6 +139,9 @@ private struct V2AuthorizedProfileView: View {
     let key: V2ProfileViewLookupKey
     let appearance: V2ProfileAppearance
     var placeholder = "用户"
+    #if DEBUG
+    @Environment(\.v2MockProfileNames) private var mockProfileNames
+    #endif
     @Environment(\.v2AvatarPipeline) private var pipeline
     @Environment(\.scenePhase) private var phase
     @Environment(\.displayScale) private var scale
@@ -208,7 +211,12 @@ private struct V2AuthorizedProfileView: View {
         .onScrollVisibilityChange(threshold: 0.1) { isVisible = $0; if !$0 { snapshot = nil } }
         .onDisappear { isVisible = false; snapshot = nil }
     }
-    private var displayName: String { canDisplay ? snapshot?.name ?? placeholder : placeholder }
+    private var displayName: String {
+        #if DEBUG
+        if let name = mockProfileNames[key.userID.rawValue] { return name }
+        #endif
+        return canDisplay ? snapshot?.name ?? placeholder : placeholder
+    }
     private func load(_ pipeline: V2AvatarPipeline) async {
         let activeGeneration = pipeline.generation, activeRefresh = refresh
         let page = sharedPage, pageRevision = page?.revision(for: key)

@@ -497,7 +497,7 @@ struct V2PrivacySettingsView: View {
                 )
                 Button("重试") { run { await store.refresh() } }
             case .loaded:
-                Section("陌生人消息") {
+                Section {
                     V2PrivacyToggleRow(
                         title: "接收非好友消息",
                         isOn: store.allowsStrangerMessages,
@@ -506,38 +506,43 @@ struct V2PrivacySettingsView: View {
                     ) { desiredValue in
                         run { await store.setAllowsStrangerMessages(desiredValue) }
                     }
+                } header: {
+                    Text("陌生人消息")
+                } footer: {
                     Text("关闭后，非好友无法向你发起新的陌生人消息。")
-                        .font(.body)
-                        .foregroundStyle(.secondary)
                 }
-                Section("添加权限") {
+                Section {
                     V2PrivacyToggleRow(title: "允许他人添加我", isOn: store.allowsBeingAdded, isDisabled: store.isSaving, identifier: "v2.privacy.allow-being-added") { value in
                         run { await store.setAllowsBeingAdded(value) }
                     }
+                } header: {
+                    Text("添加权限")
+                } footer: {
                     Text("关闭后，新的添加请求会被拒绝；已有好友和待处理请求不受影响。")
-                        .font(.body)
-                        .foregroundStyle(.secondary)
                 }
-                Section("已读回执") {
-                    V2PrivacyToggleRow(title: "在单聊中共享已读状态", isOn: store.allowsDirectReadReceipts, isDisabled: store.isSaving, identifier: "v2.privacy.share-direct-read-receipts") { value in
+                Section {
+                    V2PrivacyToggleRow(title: "单聊已读回执", isOn: store.allowsDirectReadReceipts, isDisabled: store.isSaving, identifier: "v2.privacy.share-direct-read-receipts") { value in
                         run { await store.setReadReceiptPermission(direct: value) }
                     }
-                    V2PrivacyToggleRow(title: "在群聊中共享已读状态", isOn: store.allowsGroupReadReceipts, isDisabled: store.isSaving, identifier: "v2.privacy.share-group-read-receipts") { value in
+                    V2PrivacyToggleRow(title: "群聊已读回执", isOn: store.allowsGroupReadReceipts, isDisabled: store.isSaving, identifier: "v2.privacy.share-group-read-receipts") { value in
                         run { await store.setReadReceiptPermission(group: value) }
                     }
+                } header: {
+                    Text("已读回执")
+                } footer: {
                     Text("关闭单聊共享后，双方都不会看到彼此的已读状态；群聊已读详情仅在需要时查询。")
-                        .font(.body).foregroundStyle(.secondary)
                 }
-                Section("在线与输入状态") {
-                    V2PrivacyToggleRow(title: "允许他人查看我的在线状态", isOn: store.allowsOnlinePresence, isDisabled: store.isSaving, identifier: "v2.privacy.share-online-presence") { value in
+                Section {
+                    V2PrivacyToggleRow(title: "在线状态", isOn: store.allowsOnlinePresence, isDisabled: store.isSaving, identifier: "v2.privacy.share-online-presence") { value in
                         run { await store.setLiveActivityPermission(online: value) }
                     }
-                    V2PrivacyToggleRow(title: "允许他人查看我正在输入", isOn: store.allowsTypingIndicators, isDisabled: store.isSaving, identifier: "v2.privacy.share-typing-indicators") { value in
+                    V2PrivacyToggleRow(title: "正在输入", isOn: store.allowsTypingIndicators, isDisabled: store.isSaving, identifier: "v2.privacy.share-typing-indicators") { value in
                         run { await store.setLiveActivityPermission(typing: value) }
                     }
+                } header: {
+                    Text("在线与输入状态")
+                } footer: {
                     Text("关闭后，不再向会话成员共享你的在线状态或正在输入提示；这些状态不会写入聊天记录。")
-                        .font(.body)
-                        .foregroundStyle(.secondary)
                 }
                 if let pushWakeSettingsStore {
                     V2PushWakeSettingsSection(store: pushWakeSettingsStore)
@@ -560,7 +565,8 @@ struct V2PrivacySettingsView: View {
                 }
             }
         }
-        .navigationTitle("消息接收设置")
+        .navigationTitle("消息与隐私")
+        .navigationBarTitleDisplayMode(.inline)
         .safeAreaInset(edge:.bottom) { VStack { ForEach(store.accountPreferenceDrafts,id:\.id) { draft in HStack { Text(draft.patch.confirmationDescription + (draft.paused ? "；等待重新确认。" : "；已保存，正在准备原版本。"))
                     if draft.paused { Button("重新确认") { Task {await store.reconfirmAccountPreferenceDraft(draft.id)} } }
                     Button("取消提案") { Task {await store.discardAccountPreferenceDraft(draft.id)} } } }
@@ -586,24 +592,14 @@ private struct V2PrivacyToggleRow: View {
     let setValue: @MainActor @Sendable (Bool) -> Void
 
     var body: some View {
-        Button { setValue(!isOn) } label: {
-            HStack(spacing: 12) {
-                Text(title)
-                Spacer(minLength: 8)
-                Text(isOn ? "已开启" : "已关闭")
-                    .font(.body)
-                    .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
-                Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
+        Toggle(title, isOn: Binding(
+            get: { isOn },
+            set: { desiredValue in setValue(desiredValue) }
+        ))
+        .tint(.green)
         .disabled(isDisabled)
         .accessibilityIdentifier(identifier)
-        .accessibilityLabel(title)
-        .accessibilityValue(isOn ? "已开启" : "已关闭")
-        .accessibilityHint("轻点以\(isOn ? "关闭" : "开启")")
+        .accessibilityHint("更改此设置后会同步到你的设备")
     }
 }
 

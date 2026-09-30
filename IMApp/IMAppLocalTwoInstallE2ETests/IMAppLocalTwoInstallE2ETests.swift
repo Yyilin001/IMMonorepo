@@ -25,15 +25,13 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 30),
             "接收端独立 App 安装必须通过真实密码注册、设备凭据和本地会话初始化。"
         )
-        let accountMenu = app.buttons["v2.account-menu"]
+        let accountMenu = app.tabBars.buttons["我的"]
         XCTAssertTrue(
             accountMenu.waitForExistence(timeout: 10),
-            "账户菜单必须作为会话列表导航栏的一部分出现。"
+            "我的入口必须作为底部导航的一部分出现。"
         )
         try auditOrdinaryChatSurface(in: app)
-        let newGroup = app.buttons["v2.conversation.new-group"]
-        XCTAssertTrue(newGroup.isHittable)
-        newGroup.tap()
+        tapConversationTool("v2.conversation.new-group", in: app, timeout: 10)
         let groupTitle = app.textFields["v2.conversation.group-title"]
         XCTAssertTrue(
             groupTitle.waitForExistence(timeout: 10) && groupTitle.isHittable,
@@ -62,8 +60,12 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             let cancel = app.buttons["v2.conversation.group-cancel"]
             XCTAssertTrue(cancel.waitForExistence(timeout: 5) && cancel.isHittable)
             cancel.tap()
-        } else if groupMembers.waitForExistence(timeout: 20) {
+        } else if app.buttons["v2.conversation.detail.tools"].waitForExistence(timeout: 20) {
             try auditOrdinaryChatSurface(in: app)
+            let detailTools = app.buttons["v2.conversation.detail.tools"]
+            XCTAssertTrue(detailTools.isHittable)
+            detailTools.tap()
+            XCTAssertTrue(groupMembers.waitForExistence(timeout: 5) && groupMembers.isHittable)
             groupMembers.tap()
             let groupMembersSheet = app.collectionViews["v2.group.members.sheet"]
             XCTAssertTrue(
@@ -73,7 +75,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             let closeGroupMembers = app.buttons["v2.group.members.close"]
             XCTAssertTrue(closeGroupMembers.isHittable)
             closeGroupMembers.tap()
-            XCTAssertTrue(groupMembers.waitForExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["v2.conversation.detail.tools"].waitForExistence(timeout: 5))
             // The system-owned navigation back button is the only control
             // here without an app identifier. The test otherwise uses stable
             // IDs.
@@ -99,27 +101,29 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertTrue(accountMenu.waitForExistence(timeout: 10))
         accountMenu.tap()
         let privacySettings = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label == %@", "消息接收设置")
+            NSPredicate(format: "identifier == %@", "v2.privacy.open")
         ).firstMatch
-        XCTAssertTrue(privacySettings.waitForExistence(timeout: 5))
+        XCTAssertTrue(privacySettings.waitForExistence(timeout: 10) && privacySettings.isHittable)
         privacySettings.tap()
+        XCTAssertTrue(app.navigationBars["消息与隐私"].waitForExistence(timeout: 10))
         XCTAssertTrue(
-            app.buttons["v2.privacy.allow-stranger-messages"].waitForExistence(timeout: 15),
-            "账户菜单必须能打开已认证的陌生人消息接收设置。"
+            app.switches["v2.privacy.allow-stranger-messages"].waitForExistence(timeout: 15),
+            "我的页面必须能打开已认证的陌生人消息接收设置。"
         )
         XCTAssertTrue(
-            app.buttons["v2.privacy.allow-stranger-messages"].isHittable,
+            app.switches["v2.privacy.allow-stranger-messages"].isHittable,
             "陌生人消息接收开关必须可由辅助技术定位并操作。"
         )
         try auditPrivacySettingsSurface(in: app)
         let done = app.buttons["v2.privacy.done"]
         XCTAssertTrue(done.exists)
         done.tap()
+        app.tabBars.buttons["消息"].tap()
         XCTAssertTrue(app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 5))
         XCTAssertTrue(accountMenu.waitForExistence(timeout: 10))
         accountMenu.tap()
         let publicIdentity = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label == %@", "我的资料")
+            NSPredicate(format: "identifier == %@", "v2.identity.open")
         ).firstMatch
         XCTAssertTrue(publicIdentity.waitForExistence(timeout: 5))
         publicIdentity.tap()
@@ -134,6 +138,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let identityDone = app.buttons["v2.identity.done"]
         XCTAssertTrue(identityDone.exists)
         identityDone.tap()
+        app.tabBars.buttons["消息"].tap()
         XCTAssertTrue(app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 5))
         app.terminate()
     }
@@ -159,11 +164,11 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertTrue(start.isEnabled)
         start.tap()
 
-        let draft = app.textViews["v2.message.draft"]
+        let draft = app.textFields["v2.message.draft"]
         XCTAssertTrue(draft.waitForExistence(timeout: 30))
         XCTAssertFalse((draft.value as? String ?? "").isEmpty)
         XCTAssertFalse(
-            app.buttons["v2.account-menu"].exists,
+            app.tabBars.buttons["我的"].exists,
             "账户菜单不能遗留在会话详情页并遮挡消息输入与发送操作。"
         )
         try auditOrdinaryChatSurface(in: app)
@@ -192,6 +197,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         )
         let messageID = messageRow.identifier.replacingOccurrences(of: "v2.message.row.", with: "")
         XCTAssertFalse(messageID.isEmpty)
+        messageRow.press(forDuration: 1)
         let reactionPicker = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier == %@", "v2.message.reaction-picker.\(messageID)")
         ).firstMatch
@@ -286,16 +292,14 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let app = XCUIApplication()
         app.activate()
 
-        let refresh = app.buttons["v2.conversation.refresh"]
-        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
-        refresh.tap()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
         let firstConversation = app.cells.firstMatch
         XCTAssertTrue(
             firstConversation.waitForExistence(timeout: 30),
             "接收端重启后必须通过自身 SQLite 同步投影看到发送端离线期间投递的会话。"
         )
         firstConversation.tap()
-        XCTAssertTrue(app.textViews["v2.message.draft"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.textFields["v2.message.draft"].waitForExistence(timeout: 15))
         let deliveredMessage = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.row.")
         ).firstMatch
@@ -318,6 +322,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let backToConversationList = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(backToConversationList.isHittable)
         backToConversationList.tap()
+        openConversationTools(in: app)
         let newGroup = app.buttons["v2.conversation.new-group"]
         XCTAssertTrue(newGroup.waitForExistence(timeout: 5))
         newGroup.tap()
@@ -334,12 +339,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let createGroup = app.buttons["v2.conversation.group-submit"]
         XCTAssertTrue(createGroup.isEnabled)
         createGroup.tap()
-        let openGroupMembers = app.buttons["v2.group.members"]
-        XCTAssertTrue(
-            openGroupMembers.waitForExistence(timeout: 30),
-            "接收端必须使用已注册的独立发送端账号创建真实群聊。"
-        )
-        openGroupMembers.tap()
+        tapConversationTool("v2.group.members", from: "v2.conversation.detail.tools", in: app, timeout: 30)
         let memberSheet = app.collectionViews["v2.group.members.sheet"]
         XCTAssertTrue(
             memberSheet.waitForExistence(timeout: 15),
@@ -361,15 +361,19 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let closeGroupMembers = app.buttons["v2.group.members.close"]
         XCTAssertTrue(closeGroupMembers.isHittable)
         closeGroupMembers.tap()
-        XCTAssertTrue(openGroupMembers.waitForExistence(timeout: 5))
-        let groupDraft = app.textViews["v2.message.draft"]
+        XCTAssertTrue(app.buttons["v2.conversation.detail.tools"].waitForExistence(timeout: 5))
+        let groupDraft = app.textFields["v2.message.draft"]
         XCTAssertTrue(groupDraft.exists)
         let groupDraftValue = groupDraft.value as? String ?? ""
         XCTAssertTrue(
             groupDraftValue.hasPrefix("two-install-group-"),
             "跨安装群消息只能由 Debug 夹具预填，仍须由普通消息发送 UI 提交；实际值：\(groupDraftValue.debugDescription)"
         )
-        let groupMentions = app.textViews["v2.message.mentions"]
+        app.buttons["v2.message.composer.options"].tap()
+        let mentionsToggle = app.buttons["v2.message.mentions.toggle"]
+        XCTAssertTrue(mentionsToggle.waitForExistence(timeout: 5) && mentionsToggle.isHittable)
+        mentionsToggle.tap()
+        let groupMentions = app.textFields["v2.message.mentions"]
         XCTAssertEqual(
             groupMentions.value as? String,
             "@all",
@@ -395,7 +399,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCUIDevice.shared.press(.home)
         app.activate()
         XCTAssertTrue(
-            app.textViews["v2.message.draft"].waitForExistence(timeout: 30),
+            app.textFields["v2.message.draft"].waitForExistence(timeout: 30),
             "群消息发送后从后台回到前台必须恢复原有会话详情，而不能丢失本地导航或会话状态。"
         )
         XCTAssertTrue(
@@ -410,9 +414,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let app = XCUIApplication()
         app.activate()
 
-        let refresh = app.buttons["v2.conversation.refresh"]
-        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
-        refresh.tap()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
         let directConversation = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "v2.conversation.direct.")
         ).firstMatch
@@ -421,7 +423,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             "实时端点不可用时，发送端仍必须从自身 SQLite 投影打开已有私聊。"
         )
         directConversation.tap()
-        let draft = app.textViews["v2.message.draft"]
+        let draft = app.textFields["v2.message.draft"]
         XCTAssertTrue(draft.waitForExistence(timeout: 15) && draft.isHittable)
         draft.tap()
         // A single character avoids the known simulator multi-character input
@@ -450,9 +452,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let app = XCUIApplication()
         app.activate()
 
-        let refresh = app.buttons["v2.conversation.refresh"]
-        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
-        refresh.tap()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
         let groupTitle = app.staticTexts.matching(
             NSPredicate(format: "label BEGINSWITH %@", "跨装群")
         ).firstMatch
@@ -461,7 +461,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             "作为初始成员的独立安装必须在自身同步投影中看到接收端创建的群聊。"
         )
         groupTitle.tap()
-        XCTAssertTrue(app.textViews["v2.message.draft"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.textFields["v2.message.draft"].waitForExistence(timeout: 15))
         let groupMessage = app.descendants(matching: .any).matching(
             NSPredicate(format: "label BEGINSWITH %@", "two-install-group-")
         ).firstMatch
@@ -476,7 +476,17 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             mentionSummary.waitForExistence(timeout: 30),
             "群成员的同步投影必须保留并呈现群主真实发送的 @all 提及语义。"
         )
-        let replyDraft = app.textViews["v2.message.draft"]
+        groupMessage.press(forDuration: 1)
+        let replyAction = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.reply.")
+        ).firstMatch
+        XCTAssertTrue(replyAction.waitForExistence(timeout: 10) && replyAction.isHittable)
+        replyAction.tap()
+        XCTAssertTrue(
+            app.buttons["v2.message.reply.cancel"].waitForExistence(timeout: 10),
+            "群回复必须先从长按消息打开真实回复上下文。"
+        )
+        let replyDraft = app.textFields["v2.message.draft"]
         replyDraft.tap()
         // This simulator runtime deterministically accepts the first typed
         // character. That is sufficient to prove the initial member sends
@@ -504,15 +514,13 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let app = XCUIApplication()
         app.activate()
 
-        let refresh = app.buttons["v2.conversation.refresh"]
-        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
-        refresh.tap()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
         let groupTitle = app.staticTexts.matching(
             NSPredicate(format: "label BEGINSWITH %@", "跨装群")
         ).firstMatch
         XCTAssertTrue(groupTitle.waitForExistence(timeout: 30) && groupTitle.isHittable)
         groupTitle.tap()
-        XCTAssertTrue(app.textViews["v2.message.draft"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.textFields["v2.message.draft"].waitForExistence(timeout: 15))
         let memberReply = app.descendants(matching: .any).matching(
             NSPredicate(format: "label == %@", "r")
         ).firstMatch
@@ -523,9 +531,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let backToConversationList = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(backToConversationList.isHittable)
         backToConversationList.tap()
-        let refreshDirectProjection = app.buttons["v2.conversation.refresh"]
-        XCTAssertTrue(refreshDirectProjection.waitForExistence(timeout: 15))
-        refreshDirectProjection.tap()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 15)
         let directConversation = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "v2.conversation.direct.")
         ).firstMatch
@@ -564,7 +570,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         submit.tap()
         XCTAssertTrue(app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 30))
 
-        app.buttons["v2.account-menu"].tap()
+        app.tabBars.buttons["我的"].tap()
         let devices = app.buttons["v2.device-sessions.open"]
         XCTAssertTrue(devices.waitForExistence(timeout: 10) && devices.isHittable)
         devices.tap()
@@ -580,15 +586,13 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertTrue(app.buttons["v2.device-sessions.done"].isHittable)
         app.buttons["v2.device-sessions.done"].tap()
 
-        let refresh = app.buttons["v2.conversation.refresh"]
-        XCTAssertTrue(refresh.waitForExistence(timeout: 10))
-        refresh.tap()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 10)
         let group = app.staticTexts.matching(
             NSPredicate(format: "label BEGINSWITH %@", "同账号群")
         ).firstMatch
         XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
         group.tap()
-        let draft = app.textViews["v2.message.draft"]
+        let draft = app.textFields["v2.message.draft"]
         XCTAssertTrue(draft.waitForExistence(timeout: 15) && draft.isHittable)
         draft.tap()
         draft.typeText("m")
@@ -604,9 +608,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
     func testSameAccountFirstInstallationProjectsEditsAndChangesPreference() throws {
         let app = XCUIApplication()
         app.activate()
-        let refresh = app.buttons["v2.conversation.refresh"]
-        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
-        refresh.tap()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
         let group = app.staticTexts.matching(
             NSPredicate(format: "label BEGINSWITH %@", "同账号群")
         ).firstMatch
@@ -635,29 +637,30 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let back = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(back.isHittable)
         back.tap()
-        let accountMenu = app.buttons["v2.account-menu"]
+        let accountMenu = app.tabBars.buttons["我的"]
         XCTAssertTrue(accountMenu.waitForExistence(timeout: 10) && accountMenu.isHittable)
         accountMenu.tap()
         let privacySettings = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label == %@", "消息接收设置")
+            NSPredicate(format: "identifier == %@", "v2.privacy.open")
         ).firstMatch
         XCTAssertTrue(privacySettings.waitForExistence(timeout: 10) && privacySettings.isHittable)
         privacySettings.tap()
-        let strangerMessages = app.buttons["v2.privacy.allow-stranger-messages"]
+        let strangerMessages = app.switches["v2.privacy.allow-stranger-messages"]
         XCTAssertTrue(strangerMessages.waitForExistence(timeout: 15) && strangerMessages.isHittable && strangerMessages.isEnabled)
         strangerMessages.tap()
-        let strangerDisabled = NSPredicate(format: "value == %@", "已关闭")
+        let strangerDisabled = NSPredicate(format: "value == %@", "0")
         expectation(for: strangerDisabled, evaluatedWith: strangerMessages, handler: nil)
         waitForExpectations(timeout: 45)
-        let groupReadReceipts = app.buttons["v2.privacy.share-group-read-receipts"]
+        let groupReadReceipts = app.switches["v2.privacy.share-group-read-receipts"]
         XCTAssertTrue(groupReadReceipts.waitForExistence(timeout: 15) && groupReadReceipts.isHittable && groupReadReceipts.isEnabled)
         groupReadReceipts.tap()
-        let groupReceiptsDisabled = NSPredicate(format: "value == %@", "已关闭")
+        let groupReceiptsDisabled = NSPredicate(format: "value == %@", "0")
         expectation(for: groupReceiptsDisabled, evaluatedWith: groupReadReceipts, handler: nil)
         waitForExpectations(timeout: 45)
         let done = app.buttons["v2.privacy.done"]
         XCTAssertTrue(done.isHittable)
         done.tap()
+        app.tabBars.buttons["消息"].tap()
         app.terminate()
     }
 
@@ -665,28 +668,27 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
     func testSameAccountSecondInstallationProjectsEditPreferenceAndWithdraws() throws {
         let app = XCUIApplication()
         app.activate()
-        let refresh = app.buttons["v2.conversation.refresh"]
-        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
-        refresh.tap()
-        let accountMenu = app.buttons["v2.account-menu"]
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        let accountMenu = app.tabBars.buttons["我的"]
         XCTAssertTrue(accountMenu.waitForExistence(timeout: 10) && accountMenu.isHittable)
         accountMenu.tap()
         let privacySettings = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label == %@", "消息接收设置")
+            NSPredicate(format: "identifier == %@", "v2.privacy.open")
         ).firstMatch
         XCTAssertTrue(privacySettings.waitForExistence(timeout: 10) && privacySettings.isHittable)
         privacySettings.tap()
-        let strangerMessages = app.buttons["v2.privacy.allow-stranger-messages"]
+        let strangerMessages = app.switches["v2.privacy.allow-stranger-messages"]
         XCTAssertTrue(strangerMessages.waitForExistence(timeout: 30))
-        let strangerDisabled = NSPredicate(format: "value == %@", "已关闭")
+        let strangerDisabled = NSPredicate(format: "value == %@", "0")
         expectation(for: strangerDisabled, evaluatedWith: strangerMessages, handler: nil)
         waitForExpectations(timeout: 30)
-        let groupReadReceipts = app.buttons["v2.privacy.share-group-read-receipts"]
+        let groupReadReceipts = app.switches["v2.privacy.share-group-read-receipts"]
         XCTAssertTrue(groupReadReceipts.waitForExistence(timeout: 30))
-        let groupReceiptsDisabled = NSPredicate(format: "value == %@", "已关闭")
+        let groupReceiptsDisabled = NSPredicate(format: "value == %@", "0")
         expectation(for: groupReceiptsDisabled, evaluatedWith: groupReadReceipts, handler: nil)
         waitForExpectations(timeout: 30)
         app.buttons["v2.privacy.done"].tap()
+        app.tabBars.buttons["消息"].tap()
         let group = app.staticTexts.matching(
             NSPredicate(format: "label BEGINSWITH %@", "同账号群")
         ).firstMatch
@@ -703,15 +705,13 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
     func testSameAccountSecondInstallationQueuesOfflineGroupMessage() throws {
         let app = XCUIApplication()
         app.activate()
-        let refresh = app.buttons["v2.conversation.refresh"]
-        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
-        refresh.tap()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
         let group = app.staticTexts.matching(
             NSPredicate(format: "label BEGINSWITH %@", "同账号群")
         ).firstMatch
         XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
         group.tap()
-        let draft = app.textViews["v2.message.draft"]
+        let draft = app.textFields["v2.message.draft"]
         XCTAssertTrue(draft.waitForExistence(timeout: 15) && draft.isHittable)
         draft.tap()
         draft.typeText("q")
@@ -731,9 +731,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
     func testSameAccountSecondInstallationReplaysOfflineGroupMessageAndWithdraws() throws {
         let app = XCUIApplication()
         app.activate()
-        let refresh = app.buttons["v2.conversation.refresh"]
-        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
-        refresh.tap()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
         let group = app.staticTexts.matching(
             NSPredicate(format: "label BEGINSWITH %@", "同账号群")
         ).firstMatch
@@ -763,9 +761,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
     func testSameAccountSecondInstallationProjectsSnapshotReset() throws {
         let app = XCUIApplication()
         app.activate()
-        let refresh = app.buttons["v2.conversation.refresh"]
-        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
-        refresh.tap()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
         let group = app.staticTexts.matching(
             NSPredicate(format: "label BEGINSWITH %@", "同账号群")
         ).firstMatch
@@ -786,9 +782,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
     func testSameAccountFirstInstallationProjectsWithdrawal() throws {
         let app = XCUIApplication()
         app.activate()
-        let refresh = app.buttons["v2.conversation.refresh"]
-        XCTAssertTrue(refresh.waitForExistence(timeout: 30))
-        refresh.tap()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
         let group = app.staticTexts.matching(
             NSPredicate(format: "label BEGINSWITH %@", "同账号群")
         ).firstMatch
@@ -817,6 +811,28 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             "跨安装回归结束后必须清理仅该随机 scope 的 Keychain 和 SQLite 工件。"
         )
         app.terminate()
+    }
+
+    @MainActor
+    private func openConversationTools(in app: XCUIApplication) {
+        let tools = app.buttons["v2.conversation.tools"]
+        XCTAssertTrue(tools.waitForExistence(timeout: 10) && tools.isHittable)
+        tools.tap()
+    }
+
+    @MainActor
+    private func tapConversationTool(
+        _ itemIdentifier: String,
+        from menuIdentifier: String = "v2.conversation.tools",
+        in app: XCUIApplication,
+        timeout: TimeInterval
+    ) {
+        let menu = app.buttons[menuIdentifier]
+        XCTAssertTrue(menu.waitForExistence(timeout: timeout) && menu.isHittable)
+        menu.tap()
+        let item = app.buttons[itemIdentifier]
+        XCTAssertTrue(item.waitForExistence(timeout: timeout) && item.isHittable)
+        item.tap()
     }
 
     @MainActor

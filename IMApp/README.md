@@ -209,3 +209,17 @@ docker compose -f IMV2/docker-compose.isolated-tests.yml \
 端到端回归，以及推送、媒体等 V2 产品界面。完整证据见
 [`IMV2/docs/implementation-status.md`](../IMV2/docs/implementation-status.md)；组件
 边界与真实投递链路见 [`docs/current-system-map.md`](../docs/current-system-map.md)。
+
+## 无后端界面预览（Debug）
+
+在 Xcode 的 Run → Arguments Passed On Launch 中添加 `-v2-mock-preview`，
+即可使用内存中的示例数据浏览实际 SwiftUI 页面。顶部“切换页面”提供会话列表、
+聊天详情、联系人、消息接收设置、登录和注册；会话列表还保留新建私聊、建群等正常入口。
+此模式跳过生产账户恢复，不打开常规 Keychain/SQLite，不发起真实账户或消息请求。
+它用于外观浏览，发送、好友操作和设置保存不代表完整业务流程；头像显示系统占位图。
+
+可加 `-v2-mock-screen messages|chat|contacts|me|privacy|login|register` 指定初始页面。
+Release 不包含此入口或夹具。
+
+液态玻璃界面采用系统 Tab Bar、工具栏和 `glassEffect` 输入区；列表和消息内容保持语义背景。
+可加 `-v2-mock-hide-controls` 隐藏预览切换栏。Mock 文本发送只更新内存中的消息，重启后恢复示例数据。

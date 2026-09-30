@@ -21,7 +21,10 @@ struct V2AuthorizedGroupAvatarView: View {
         Group {
             if visible, phase == .active, snapshotGeneration == pipeline?.generation, snapshotRefresh == refresh, let image = snapshot?.image {
                 Image(uiImage: image.image).resizable().scaledToFill()
-            } else { Image(systemName: "person.3.fill").resizable().scaledToFit().foregroundStyle(.secondary).padding(5) }
+            } else {
+                Circle().fill(Color(.tertiarySystemFill))
+                    .overlay { Image(systemName: "person.2.fill").font(.system(size: size * 0.42)).foregroundStyle(.secondary) }
+            }
         }
         .frame(width: size, height: size).clipShape(Circle())
         .accessibilityLabel("群头像")

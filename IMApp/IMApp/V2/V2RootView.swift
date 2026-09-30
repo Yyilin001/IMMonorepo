@@ -207,10 +207,12 @@ struct V2RootView: View {
     }
 
     private var signInContent: some View {
-        V2SignInView(store: store, authenticationMessage: store.authenticationMessage,
-            initialPasswordMode: initialPasswordMode, initialAccountHandle: initialLocalE2ETestAccountHandle,
-            initialPassword: initialLocalE2ETestPassword, initialPublicHandle: initialLocalE2ETestPublicHandle,
-            initialDisplayName: initialLocalE2ETestDisplayName)
+        NavigationStack {
+            V2SignInView(store: store, authenticationMessage: store.authenticationMessage,
+                initialPasswordMode: initialPasswordMode, initialAccountHandle: initialLocalE2ETestAccountHandle,
+                initialPassword: initialLocalE2ETestPassword, initialPublicHandle: initialLocalE2ETestPublicHandle,
+                initialDisplayName: initialLocalE2ETestDisplayName)
+        }
     }
 
     private var revocationTypeSize: DynamicTypeSize {
@@ -269,7 +271,8 @@ private struct V2PrivacyShieldView: View {
     }
 }
 
-private struct V2SignInView: View {
+struct V2SignInView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Bindable var store: V2AppStore
     let authenticationMessage: String?
     @State private var accountHandle = ""
@@ -301,6 +304,33 @@ private struct V2SignInView: View {
 
     var body: some View {
         Form {
+            if !dynamicTypeSize.isAccessibilitySize {
+                Section {
+                    Image(systemName: "bubble.left.and.bubble.right.fill")
+                        .font(.system(size: 44))
+                        .foregroundStyle(.tint)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .accessibilityHidden(true)
+                }
+                .listRowBackground(Color.clear)
+            }
+            Section {
+                Picker("操作", selection: $mode) {
+                    Text("登录").tag(V2AppStore.PasswordMode.signIn)
+                    Text("注册").tag(V2AppStore.PasswordMode.register)
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("v2.password.mode")
+            }
+            if let feedbackMessage {
+                Section {
+                    Text(feedbackMessage)
+                        .font(.body)
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("v2.authentication.message")
+                }
+            }
             Section("账号密码") {
                 TextField("账号", text: $accountHandle)
                     .textInputAutocapitalization(.never)
@@ -318,12 +348,6 @@ private struct V2SignInView: View {
                     TextField("显示名称", text: $displayName)
                         .accessibilityIdentifier("v2.identity.display-name")
                 }
-                Picker("操作", selection: $mode) {
-                    Text("登录").tag(V2AppStore.PasswordMode.signIn)
-                    Text("注册").tag(V2AppStore.PasswordMode.register)
-                }
-                .pickerStyle(.segmented)
-                .accessibilityIdentifier("v2.password.mode")
                 Button(mode == .register ? "注册" : "使用密码登录") {
                     guard canSubmitPasswordAction else {
                         inputValidationMessage = validationMessage
@@ -343,6 +367,9 @@ private struct V2SignInView: View {
                         )
                     }
                 }
+                .buttonStyle(.glassProminent)
+                .controlSize(.large)
+                .frame(maxWidth: .infinity)
                 .accessibilityIdentifier("v2.password.submit")
             }
 
@@ -350,17 +377,9 @@ private struct V2SignInView: View {
                 Button("找回账号与账号安全") { securityPresented = true }
                     .accessibilityIdentifier("v2.security.open")
             }
-            if let feedbackMessage {
-                Section {
-                    Text(feedbackMessage)
-                        .font(.body)
-                        .foregroundStyle(.red)
-                        .accessibilityIdentifier("v2.authentication.message")
-                }
-            }
         }
-        .scrollContentBackground(.hidden)
-        .navigationTitle("登录")
+        .formStyle(.grouped)
+        .navigationTitle(mode == .register ? "注册" : "登录")
         .sheet(isPresented: $securityPresented) {
             if let client = store.passwordLifecycleClient() {
                 NavigationStack { V2AccountSecurityView(client: client, initialAction: .recover) }
@@ -404,13 +423,14 @@ private struct V2SignInView: View {
     }
 }
 
-private struct V2SignedInRootView: View {
+struct V2SignedInRootView: View {
     private enum PresentedSettingsSheet: String, Identifiable {
         case accountSecurity
         case privacy
         case publicIdentity
         case deviceSessions
         case pendingGroupAvatars
+        case favorites
 
         var id: String { rawValue }
     }
@@ -429,7 +449,7 @@ private struct V2SignedInRootView: View {
     let signOut: @MainActor @Sendable () async -> Void
     @State private var signOutTask: Task<Void, Never>?
     @State private var presentedSettingsSheet: PresentedSettingsSheet?
-    @State private var rootNavigation = V2RootNavigationStore()
+    @State var rootNavigation = V2RootNavigationStore()
 
     var body: some View {
         @Bindable var rootNavigation = rootNavigation
@@ -437,24 +457,6 @@ private struct V2SignedInRootView: View {
             V2ConversationListView(
                 store: conversationStore,
                 localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
-                accountMenu: V2ConversationAccountMenu(
-                    canOpenPublicIdentity: publicIdentitySettingsStore != nil,
-                    canOpenDeviceSessions: deviceSessionsStore != nil,
-                    canOpenPendingGroupAvatars: pendingGroupAvatarsStore != nil,
-                    openPublicIdentity: { presentedSettingsSheet = .publicIdentity },
-                    openDeviceSessions: { presentedSettingsSheet = .deviceSessions },
-                    openPendingGroupAvatars: { presentedSettingsSheet = .pendingGroupAvatars },
-                    openPrivacySettings: { presentedSettingsSheet = .privacy },
-                    openAccountSecurity: { presentedSettingsSheet = .accountSecurity },
-                    signOut: {
-                        guard signOutTask == nil else { return }
-                        signOutTask = Task {
-                            await signOut()
-                            guard !Task.isCancelled else { return }
-                            signOutTask = nil
-                        }
-                    }
-                ),
                 rootNavigation: rootNavigation,
                 groupInvitationStore: groupInvitationStore
             )
@@ -465,10 +467,42 @@ private struct V2SignedInRootView: View {
                 .tabItem { Label("联系人", systemImage: "person.2") }
                 .badge(contactsStore.incomingRequestCount)
                 .tag(V2RootNavigationStore.Tab.contacts)
+            V2AccountHomeView(
+                displayName: publicIdentitySettingsStore?.displayName ?? "我的资料",
+                handle: publicIdentitySettingsStore?.handle ?? "",
+                canOpenPublicIdentity: publicIdentitySettingsStore != nil,
+                canOpenDevices: deviceSessionsStore != nil,
+                canOpenSecurity: passwordLifecycleClient != nil,
+                canOpenPendingAvatars: pendingGroupAvatarsStore != nil,
+                openPublicIdentity: { presentedSettingsSheet = .publicIdentity },
+                openDevices: { presentedSettingsSheet = .deviceSessions },
+                openPrivacy: { presentedSettingsSheet = .privacy },
+                openSecurity: { presentedSettingsSheet = .accountSecurity },
+                openPendingAvatars: { presentedSettingsSheet = .pendingGroupAvatars },
+                openFavorites: { presentedSettingsSheet = .favorites },
+                signOut: {
+                    guard signOutTask == nil else { return }
+                    signOutTask = Task {
+                        await signOut()
+                        guard !Task.isCancelled else { return }
+                        signOutTask = nil
+                    }
+                }
+            )
+            .task { await publicIdentitySettingsStore?.load() }
+            .tabItem { Label("我的", systemImage: "person.crop.circle") }
+            .tag(V2RootNavigationStore.Tab.account)
+
         }
             .onDisappear { signOutTask?.cancel() }
             .sheet(item: $presentedSettingsSheet) { sheet in
                 switch sheet {
+                case .favorites:
+                    V2FavoriteMessagesSheet(store: conversationStore) { item in
+                        presentedSettingsSheet = nil
+                        rootNavigation.showConversation(roomID: item.roomID, messageID: item.id)
+                    }
+
                 case .pendingGroupAvatars:
                     if let pendingGroupAvatarsStore { V2PendingGroupAvatarsView(store: pendingGroupAvatarsStore) }
                 case .accountSecurity:

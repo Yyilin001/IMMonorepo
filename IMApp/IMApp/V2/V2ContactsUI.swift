@@ -1008,20 +1008,22 @@ final class V2RootNavigationStore {
     enum Tab: Hashable {
         case conversations
         case contacts
+        case account
     }
 
     struct ConversationRequest: Identifiable, Hashable {
         let id: UUID
         let roomID: String
+        let messageID: String?
     }
 
     var selectedTab: Tab = .conversations
     private(set) var conversationRequest: ConversationRequest?
 
-    func showConversation(roomID: String) {
+    func showConversation(roomID: String, messageID: String? = nil) {
         guard (try? RoomID(roomID)) != nil else { return }
         selectedTab = .conversations
-        conversationRequest = .init(id: UUID(), roomID: roomID)
+        conversationRequest = .init(id: UUID(), roomID: roomID, messageID: messageID)
     }
 
     func consumeConversationRequest(id: UUID) {
@@ -1062,12 +1064,7 @@ struct V2ContactsRootView: View {
                     }
                     .accessibilityIdentifier("v2.contacts.add")
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("刷新", systemImage: "arrow.clockwise") {
-                        Task { await store.refresh(revalidateProfiles: true) }
-                    }
-                    .accessibilityIdentifier("v2.contacts.refresh")
-                }
+
             }
             .navigationDestination(for: V2ContactsRoute.self) { route in
                 switch route {
@@ -1128,7 +1125,9 @@ struct V2ContactsRootView: View {
                 }
             }
         }
-        .searchable(text: $store.searchQuery, prompt: "搜索好友")
+        .listStyle(.insetGrouped)
+        .modifier(V2ListViewportContainer(viewport: store.friendsViewport, coordinateSpace: "v2.contacts.friends.viewport"))
+        .searchable(text: $store.searchQuery, placement: .navigationBarDrawer(displayMode: .always), prompt: "搜索好友")
         .task(id: store.searchQuery) {
             guard !store.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 await store.refreshFriendSearch()
@@ -1140,7 +1139,6 @@ struct V2ContactsRootView: View {
         }
         .accessibilityIdentifier("v2.contacts.list")
         .authorPresentationPage(context: .list(profilePageID))
-        .modifier(V2ListViewportContainer(viewport: store.friendsViewport, coordinateSpace: "v2.contacts.friends.viewport"))
     }
 
     private func contactLoadMoreButton(
@@ -1443,6 +1441,12 @@ private struct V2ContactRow: View {
     let item: V2ContactListItem
 
     var body: some View {
-        V2AuthorizedAvatarView(key: .init(userID: item.userID, context: .relationship), showsName: true)
+        let key = V2ProfileViewLookupKey(userID: item.userID, context: .relationship)
+        HStack(spacing: 14) {
+            V2AuthorizedAvatarView(key: key, size: 44)
+            V2AuthorizedProfileNameView(key: key, placeholder: "资料暂不可用")
+                .font(.body)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }

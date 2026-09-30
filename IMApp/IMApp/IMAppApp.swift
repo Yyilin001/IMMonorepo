@@ -16,7 +16,15 @@ struct IMAppApp: App {
 
     var body: some Scene {
         WindowGroup {
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-v2-mock-preview") {
+                V2MockPreview()
+            } else {
+                V2RootView(appPushDelegate: appPushDelegate)
+            }
+            #else
             V2RootView(appPushDelegate: appPushDelegate)
+            #endif
         }
     }
 }

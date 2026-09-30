@@ -1,0 +1,147 @@
+#if DEBUG
+import SwiftUI
+import IMV2ClientKit
+import IMV2Core
+
+/// Explicit, memory-only visual fixtures. No credentials or production storage are opened.
+@MainActor
+struct V2MockPreview: View {
+    @State private var conversations: V2ConversationListStore
+    @State private var contacts: V2ContactsStore
+    @State private var privacy: V2PrivacySettingsStore
+    @State private var navigation = V2RootNavigationStore()
+    @State private var screen = "messages"
+
+    init() {
+        let source = V2MockPreviewSource()
+        _conversations = State(initialValue: .init(environment: .init(userID: source.user.rawValue, projections: .init(dataSource: source), messages: .init(sender: source))))
+        _contacts = State(initialValue: .init(dataSource: source, identityResolver: source, relationshipChanger: source,
+            userBlockChanger: source, directConversationOpener: source, currentUserID: source.user))
+        _privacy = State(initialValue: .init(reader: source, updater: source))
+        let navigation = V2RootNavigationStore()
+        let args = ProcessInfo.processInfo.arguments
+        if let i = args.firstIndex(of: "-v2-mock-screen"), i + 1 < args.count {
+            let value = args[i + 1]
+            _screen = State(initialValue: value)
+            navigation.selectedTab = value == "contacts" ? .contacts : value == "me" ? .account : .conversations
+        }
+        _navigation = State(initialValue: navigation)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if !ProcessInfo.processInfo.arguments.contains("-v2-mock-hide-controls") {
+            HStack {
+                Text("Mock 界面预览").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Menu("切换页面") {
+                    ForEach(["messages", "chat", "contacts", "me", "privacy", "login", "register"], id: \.self) { item in
+                        Button(title(item)) {
+                            navigation.selectedTab = item == "contacts" ? .contacts : item == "me" ? .account : .conversations
+                            screen = item
+                        }
+                    }
+                }.accessibilityIdentifier("mock.screens")
+            }.padding(.horizontal).padding(.vertical, 8)
+            }
+            Group {
+                switch screen {
+                case "chat":
+                    if conversations.state == .loaded {
+                        NavigationStack { V2ConversationDetailView(store: conversations.detailStore(for: V2MockPreviewSource.room)) }
+                    } else { ProgressView("正在载入示例消息…") }
+                case "privacy": NavigationStack { V2PrivacySettingsView(store: privacy, pushWakeSettingsStore: nil, userBlockSettingsStore: nil) }
+                case "login", "register":
+                    NavigationStack {
+                        V2SignInView(store: V2AppStore(startupMode: .uiTestingSignedOut), authenticationMessage: nil,
+                            initialPasswordMode: screen == "register" ? .register : .signIn,
+                            initialAccountHandle: nil, initialPassword: nil, initialPublicHandle: nil, initialDisplayName: nil)
+                    }
+                default:
+                    V2SignedInRootView(
+                        conversationStore: conversations,
+                        contactsStore: contacts,
+                        privacySettingsStore: privacy,
+                        userBlockSettingsStore: nil,
+                        publicIdentitySettingsStore: nil,
+                        pushWakeSettingsStore: nil,
+                        deviceSessionsStore: nil,
+                        groupInvitationStore: nil,
+                        pendingGroupAvatarsStore: nil,
+                        localE2EConversationLaunchFixture: nil,
+                        passwordLifecycleClient: nil,
+                        signOut: { screen = "login" },
+                        rootNavigation: navigation
+                    )
+                }
+
+            }
+        }
+        .environment(\.v2MockProfileNames, Dictionary(uniqueKeysWithValues: [201: "小林", 202: "陈晨", 203: "阿青", 211: "李晓", 221: "周宁"].map { (String(format: "00000000-0000-0000-0000-%012d", $0.key), $0.value) }))
+        .task { await conversations.refresh() }
+    }
+    private func title(_ value: String) -> String {
+        switch value { case "me": "我的"; case "chat": "聊天详情"; case "contacts": "联系人"; case "privacy": "消息接收设置"; case "login": "登录"; case "register": "注册"; default: "会话列表" }
+    }
+}
+
+private struct V2MockProfileNamesKey: EnvironmentKey {
+    static let defaultValue: [String: String] = [:]
+}
+extension EnvironmentValues {
+    var v2MockProfileNames: [String: String] {
+        get { self[V2MockProfileNamesKey.self] }
+        set { self[V2MockProfileNamesKey.self] = newValue }
+    }
+}
+
+private actor V2MockPreviewSource: V2ConversationDataSource, V2ContactsReading, V2PublicIdentityPresentationResolving,
+    V2RelationshipChanging, V2UserBlockChanging, V2DirectConversationOpening, V2StrangerMessagePreferenceReading, V2StrangerMessagePreferenceUpdating, V2GroupRolePolicyAccessing, V2ConversationSending {
+    let user = try! UserID("00000000-0000-0000-0000-000000000001")
+    private var sentMessages: [String: [V2ConversationMessageItem]] = [:]
+    static let room = "00000000-0000-0000-0000-000000000101"
+    func conversationSummaryPage(for userID: String, isArchived: Bool, before cursor: V2ClientConversationListCursor?, limit: Int) async throws -> V2ConversationListPage {
+        let names = ["产品设计讨论", "周末出行计划", "iOS 开发交流", "读书分享"]
+        let previews = ["新的界面方案已经整理好了，大家看看～", "周六上午十点集合，可以吗？", "这个版本的动画流畅了很多 👍", "推荐大家看看这本书"]
+        let items = names.indices.map { i in V2ConversationListItem(id: String(format: "00000000-0000-0000-0000-%012d", 101 + i), title: names[i], preview: previews[i], lastActivity: Date().addingTimeInterval(Double(-i * 1800)), isOutgoing: i == 2, kind: .group, isPinned: i == 0, unreadCount: i == 0 ? 3 : 0) }
+        return .init(items: isArchived || cursor != nil ? [] : items, nextCursor: nil)
+    }
+    func timelinePage(in roomID: String, for userID: String, before cursor: V2ConversationTimelineCursor?, limit: Int) async throws -> V2ConversationTimelinePage {
+        let texts = ["大家早上好！我们今天一起看一下新的界面。", "会话列表和联系人页面都已经完成了。", "收到，我觉得布局挺清楚的 👍", "晚点我再补充一下交互细节。", "好的，下午三点一起讨论～"]
+        return .init(items: cursor == nil ? texts.indices.map { i in .message(.init(id: "mock-message-\(i)", roomSequence: UInt64(i + 1), revision: 1, text: texts[i], createdAt: Date().addingTimeInterval(Double(i - 5) * 120), isOutgoing: i == 2 || i == 4, isWithdrawn: false, reactions: i == 1 ? [.init(reaction: "👍", count: 3, includesCurrentUser: true)] : [], senderUserID: try! UserID("00000000-0000-0000-0000-000000000201")), timelineSequence: UInt64(i + 1)) } + (sentMessages[roomID] ?? []).enumerated().map { .message($0.element, timelineSequence: UInt64($0.offset + 6)) } : [], olderCursor: nil)
+    }
+    func timelineWindow(in roomID: String, for userID: String, around messageID: String, before: Int, after: Int) async throws -> V2ConversationTimelineLocation { .found(page: try await timelinePage(in: roomID, for: userID, before: nil, limit: 50), newerBoundary: nil) }
+    func contactProjectionPage(scope: V2ContactProjectionPageScope, matching query: String?, before cursor: V2ClientRelationshipCursor?, limit: Int, includeTotalCount: Bool) async throws -> V2ContactProjectionPage {
+        let names = scope == .friends ? ["小林", "陈晨", "阿青"] : scope == .incomingRequests ? ["李晓"] : ["周宁"]
+        let items = try names.enumerated().map { i, name in
+            let identity = try V2PublicIdentity(userID: .init(String(format: "00000000-0000-0000-0000-%012d", (scope == .friends ? 201 : scope == .incomingRequests ? 211 : 221) + i)), handle: .init("friend\(i + 1)"), displayName: name, accountKind: .regular)
+            return V2ContactProjection(userID: identity.userID, state: scope == .friends ? .accepted : .pending, requestedByUserID: scope == .incomingRequests ? identity.userID : user, updatedAt: .now, publicIdentity: identity)
+        }
+        return .init(projections: cursor == nil ? items.filter { query == nil || query!.isEmpty || $0.publicIdentity!.displayName.contains(query!) } : [], nextCursor: nil, totalCount: items.count)
+    }
+    func hydrateRelationshipProfiles(for userIDs: [UserID]) async throws {}
+    func resolveForPresentation(handle: String) async throws -> V2PublicIdentityLookupSnapshot { throw V2PublicIdentityValidationError.invalidHandle }
+    func changeRelationship(targetUserID: String, action: V2RelationshipAction) async throws -> V2RelationshipChangeOutcome { .rejected(code: "mock-preview") }
+    func changeBlock(targetUserID: String, action: V2UserBlockAction) async throws -> V2UserBlockChangeOutcome { .rejected(code: "mock-preview") }
+    func openConversation(with publicIdentity: V2PublicIdentity) async throws -> String { Self.room }
+    func strangerMessagePreference() async throws -> Bool? { true }
+    func update(allowsStrangerMessages: Bool) async throws -> V2StrangerMessagePreferenceUpdateOutcome { .rejected(code: "mock-preview") }
+    func groupRolePolicyState(in roomID: String) async throws -> V2ClientGroupRolePolicyState { .init(policies: [], recovery: .ready) }
+    func retryGroupRolePolicyRecovery(in roomID: String) async throws -> V2ClientGroupRolePolicyState { .init(policies: [], recovery: .ready) }
+    func send(text: String, media: [V2MediaReference], in roomID: String) async throws -> V2ConversationSendOutcome {
+        try await send(text: text, media: media, mentions: [], in: roomID)
+    }
+    func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], in roomID: String) async throws -> V2ConversationSendOutcome {
+        try await send(text: text, media: media, mentions: mentions, entities: [], replyTo: nil, in: roomID)
+    }
+    func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?, in roomID: String) async throws -> V2ConversationSendOutcome {
+        guard media.isEmpty else { return .rejected(code: "mock-media-unavailable") }
+        let sequence = UInt64((sentMessages[roomID]?.count ?? 0) + 6)
+        sentMessages[roomID, default: []].append(.init(id: UUID().uuidString, roomSequence: sequence, revision: 1,
+            text: text, mentions: mentions, entities: entities, replyTo: replyTo, createdAt: .now,
+            isOutgoing: true, isWithdrawn: false, senderUserID: user))
+        return .accepted
+    }
+
+}
+#endif

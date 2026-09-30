@@ -33,13 +33,16 @@ final class IMAppLocalAuthenticationTerminationUITests: XCTestCase {
         let register = app.buttons["v2.password.submit"]
         guard register.waitForExistence(timeout: 15), register.isEnabled else { XCTFail("Registration unavailable"); return }
         register.tap()
+        let tools = app.buttons["v2.conversation.tools"]
+        guard tools.waitForExistence(timeout: 30), tools.isHittable else { XCTFail("Normal registration did not complete"); return }
+        tools.tap()
         let newGroup = app.buttons["v2.conversation.new-group"]
-        guard newGroup.waitForExistence(timeout: 30) else { XCTFail("Normal registration did not complete"); return }
+        guard newGroup.waitForExistence(timeout: 30), newGroup.isHittable else { XCTFail("Normal registration did not complete"); return }
         newGroup.tap()
         let create = app.buttons["v2.conversation.group-submit"]
         guard create.waitForExistence(timeout: 15), create.isEnabled else { XCTFail("Group creation unavailable"); return }
         create.tap()
-        let draft = app.textViews["v2.message.draft"]
+        let draft = app.textFields["v2.message.draft"]
         guard draft.waitForExistence(timeout: 30) else { XCTFail("Group did not open"); return }
         _ = try await post("__fixture__/b07/stop", body: [:], expectedStatus: 204)
         draft.tap()
@@ -118,7 +121,7 @@ final class IMAppLocalAuthenticationTerminationUITests: XCTestCase {
             "deviceID": otherDevice, "operationID": pending.operationID.uuidString], cancellation: pending.cancellation)
         let access = try XCTUnwrap(issued["accessToken"] as? String)
 
-        app.buttons["v2.account-menu"].tap()
+        app.tabBars.buttons["我的"].tap()
         let devices = app.buttons["v2.device-sessions.open"]
         XCTAssertTrue(devices.waitForExistence(timeout: 5))
         devices.tap()
@@ -134,7 +137,7 @@ final class IMAppLocalAuthenticationTerminationUITests: XCTestCase {
         try await revokeObservedDevice(target: DeviceID(currentDevice), access: access, device: otherDevice)
         let refresh = app.buttons["v2.device-sessions.refresh"]
         if !useGateway {
-            XCTAssertTrue(refresh.exists)
+            XCTAssertTrue(refresh.waitForExistence(timeout: 10) && refresh.isHittable)
             refresh.tap()
         }
         XCTAssertTrue(app.buttons["v2.password.submit"].waitForExistence(timeout: 20),

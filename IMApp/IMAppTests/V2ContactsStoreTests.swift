@@ -536,7 +536,12 @@ struct V2ContactsStoreTests {
         for _ in 0..<7 {
             let last = try #require(store.friends.last?.id)
             store.friendsViewport.restore(to: last)
-            try await waitForContactLayout { store.friendsViewport.restoration == nil && store.friendsViewport.containsVisibleRow(last) }
+            do {
+                try await waitForContactLayout { store.friendsViewport.restoration == nil && store.friendsViewport.containsVisibleRow(last) }
+            } catch {
+                Issue.record("friend restore target=\(last), pending=\(String(describing: store.friendsViewport.restoration)), current=\(String(describing: store.friendsViewport.anchorID)), layout=\(store.friendsViewport.layoutDescription(for: last))")
+                throw error
+            }
             await store.loadMoreFriends()
             try await waitForContactLayout { store.friendsViewport.restoration == nil }
         }
