@@ -182,6 +182,28 @@ struct V2RoomTurnLaneTests {
         try await fixture.waitForBudget(0)
     }
 
+    @Test("durable sends collect arrivals within one admission-based window")
+    func durableOperationCollectionWindow() async throws {
+        let fixture = try Fixture(configuration: .init(batchWaitMilliseconds: 1_000))
+        let first = fixture.submit(.init(id: 1, send: false, operationSend: true))
+        try await fixture.waitForQueue(1)
+        let second = fixture.submit(.init(id: 2, send: false, operationSend: true))
+        #expect(try await first.value == 1)
+        #expect(try await second.value == 2)
+        #expect(await fixture.executor.starts == [[1, 2]])
+        try await fixture.waitForBudget(0)
+    }
+
+    @Test("a durable send deadline ends collection and releases its permit")
+    func durableOperationDeadlineDuringCollection() async throws {
+        let fixture = try Fixture(configuration: .init(batchWaitMilliseconds: 1_000))
+        let expired = fixture.submit(.init(id: 1, send: false, operationSend: true),
+            deadline: .now + .milliseconds(50))
+        await expectFailure(.notAccepted(.deadlineExceeded), from: expired)
+        #expect(await fixture.executor.starts.isEmpty)
+        try await fixture.waitForBudget(0)
+    }
+
     @Test("a fresh send leaves its collection window to the shared owner batcher")
     func collectionWindowRemainsForOwnerBatcher() async throws {
         let fixture = try Fixture(configuration: .init(batchWaitMilliseconds: 1_000))

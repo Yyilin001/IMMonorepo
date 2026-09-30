@@ -4,7 +4,9 @@ import IMV2Core
 
 func roomWriteShardAdmissionReservation(
     from initial: ShardAdmissionState,
-    to next: ShardAdmissionState
+    to next: ShardAdmissionState,
+    roomShardID: String? = nil,
+    capacityProfileID: String? = nil
 ) throws -> ShardAdmissionReservation {
     guard let initialLease = initial.lease, let nextLease = next.lease,
           initialLease.id == nextLease.id,
@@ -18,7 +20,9 @@ func roomWriteShardAdmissionReservation(
     return try .init(
         leaseID: uuid(nextLease.id),
         generation: signed(nextLease.generation),
-        commandDelta: commandDelta
+        commandDelta: commandDelta,
+        roomShardID: roomShardID,
+        capacityProfileID: capacityProfileID
     )
 }
 

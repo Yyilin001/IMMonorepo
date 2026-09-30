@@ -26,6 +26,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     private let preparedGroupEventPageCache: V2PreparedGroupEventPageCache?
     private let connectionRegistry: V2DeviceConnectionRegistry?
     private let roomActors: (any V2RoomRuntimeMetricsReading)?
+    private let sendOperationMetrics: (any V2SendOperationBatchMetricsReading)?
 
     /// 连接指标来源，保存依赖而不立即采样。
     ///
@@ -61,7 +62,8 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         directRoomLogEventCache: V2DirectRoomLogEventCache? = nil,
         preparedGroupEventPageCache: V2PreparedGroupEventPageCache? = nil,
         connectionRegistry: V2DeviceConnectionRegistry? = nil,
-        roomActors: (any V2RoomRuntimeMetricsReading)? = nil
+        roomActors: (any V2RoomRuntimeMetricsReading)? = nil,
+        sendOperationMetrics: (any V2SendOperationBatchMetricsReading)? = nil
     ) {
         self.databaseWorkAdmission = databaseWorkAdmission
         self.databasePools = databasePools
@@ -78,6 +80,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         self.preparedGroupEventPageCache = preparedGroupEventPageCache
         self.connectionRegistry = connectionRegistry
         self.roomActors = roomActors
+        self.sendOperationMetrics = sendOperationMetrics
     }
 
     /// 采集一次基础压力与已注入组件的状态。
@@ -116,7 +119,8 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
             directRoomLogEventCache: eventCache,
             preparedGroupEventPageCache: preparedPageCache,
             livePresenceRenewals: livePresenceRenewals,
-            roomActors: actorMetrics
+            roomActors: actorMetrics,
+            sendOperationBatching: sendOperationMetrics?.sendOperationBatchMetricsSnapshot()
         )
     }
 }

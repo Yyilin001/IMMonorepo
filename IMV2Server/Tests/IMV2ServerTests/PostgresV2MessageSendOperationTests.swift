@@ -10,6 +10,127 @@ import Testing
 @testable import IMV2ServerGateway
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
+    @Test("durable sendOperation batch counts prior accepted shard reservations")
+    func durableSendBatchRespectsCumulativeShardCapacity() async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let profile = try forwardImportTestProfile()
+            try await sql.raw("""
+                UPDATE im_v2.shard_admission_pools
+                SET command_window_limit = 1, command_window_used = 0,
+                    valid_until = \(bind: now.addingTimeInterval(600))
+                WHERE room_shard_id = 'room-a'
+                  AND capacity_profile_id = (SELECT capacity_profile_id FROM im_v2.rooms WHERE room_id = \(bind: roomID.uuidValue!))
+                """).run()
+            let store = PostgresV2MessageSendOperationStore(database: database,
+                writes: PostgresV2RoomWriteStore(database: database,
+                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
+                    contentReviewMode: .disabled).usingControlDatabase(database), clock: { now })
+            let deadline = UInt64(now.timeIntervalSince1970 * 1000) + 60_000
+            func command(_ text: String) throws -> V2MessageSendOperationCommand {
+                try .init(command: .init(roomID: roomID, senderUserID: senderID,
+                    clientMessageID: .init(uuid: UUID()), text: text,
+                    limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: deadline)
+            }
+            let batch = try [command("capacity one"), command("capacity two")]
+            let results = try await withRoomActivation(database: database, roomID: roomID) { token in
+                try await store.sendBatch(batch, token: token, capacityProfile: profile,
+                    identifiers: .init(), now: { now })
+            }
+            #expect(results.count == 2)
+            guard case .sendOperation(.receipt(let accepted)) = results[0],
+                  case .accepted = accepted.outcome,
+                  case .sendOperation(.deferred(let deferred)) = results[1] else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            #expect(deferred.reason == .rateLimited)
+            let pool = try await sql.raw("""
+                SELECT command_window_used AS count FROM im_v2.shard_admission_pools
+                WHERE room_shard_id = 'room-a'
+                  AND capacity_profile_id = (SELECT capacity_profile_id FROM im_v2.rooms WHERE room_id = \(bind: roomID.uuidValue!))
+                """).first(decoding: SendRollbackCount.self)
+            #expect(pool?.count == 1)
+            for (index, item) in batch.enumerated() {
+                let completions = try await sql.raw("""
+                    SELECT count(*) AS count FROM im_v2.message_send_completions
+                    WHERE room_id = \(bind: roomID.uuidValue!) AND sender_user_id = \(bind: senderUUID)
+                      AND client_message_id = \(bind: item.command.clientMessageID.uuidValue!)
+                    """).first(decoding: SendRollbackCount.self)
+                #expect(completions?.count == (index == 0 ? 1 : 0))
+            }
+        }
+    }
+
+    @Test("durable sendOperation batch tail failure rolls back provisional acceptance")
+    func durableSendBatchTailFailureRollsBackAcceptedWrites() async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let profile = try forwardImportTestProfile()
+            try await sql.raw("""
+                UPDATE im_v2.shard_admission_pools
+                SET command_window_limit = 10, command_window_used = 0,
+                    valid_until = \(bind: now.addingTimeInterval(600))
+                WHERE room_shard_id = 'room-a'
+                  AND capacity_profile_id = (SELECT capacity_profile_id FROM im_v2.rooms WHERE room_id = \(bind: roomID.uuidValue!))
+                """).run()
+            try await sql.raw("""
+                CREATE FUNCTION im_v2.fixture_reject_shard_admission_tail() RETURNS trigger
+                LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$
+                """).run()
+            try await sql.raw("""
+                CREATE TRIGGER fixture_reject_shard_admission_tail
+                BEFORE UPDATE OF command_window_used ON im_v2.shard_admission_pools
+                FOR EACH ROW EXECUTE FUNCTION im_v2.fixture_reject_shard_admission_tail()
+                """).run()
+            let store = PostgresV2MessageSendOperationStore(database: database,
+                writes: PostgresV2RoomWriteStore(database: database,
+                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
+                    contentReviewMode: .disabled).usingControlDatabase(database), clock: { now })
+            let deadline = UInt64(now.timeIntervalSince1970 * 1000) + 60_000
+            let acceptedCandidate = try V2MessageSendOperationCommand(command: .init(roomID: roomID,
+                senderUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "tail rollback",
+                limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: deadline)
+            let expired = try V2MessageSendOperationCommand(command: .init(roomID: roomID,
+                senderUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "expired before body",
+                limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1)
+            let results = try await withRoomActivation(database: database, roomID: roomID) { token in
+                try await store.sendBatch([acceptedCandidate, acceptedCandidate, expired], token: token,
+                    capacityProfile: profile, identifiers: .init(), now: { now })
+            }
+            #expect(results.count == 3)
+            guard case .sendOperation(.deferred(let tailFailure)) = results[0],
+                  case .sendOperation(.deferred(let replayTailFailure)) = results[1] else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            #expect(tailFailure.reason == .rateLimited)
+            #expect(replayTailFailure.reason == .rateLimited)
+            guard case .sendOperation(.receipt(let expiredReceipt)) = results[2] else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            #expect(expiredReceipt.outcome == .rejected(.expiredUnsubmitted))
+            let messageCount = try await sql.raw("""
+                SELECT count(*) AS count FROM im_v2.message_send_completions
+                WHERE room_id = \(bind: roomID.uuidValue!) AND sender_user_id = \(bind: senderUUID)
+                  AND client_message_id = \(bind: acceptedCandidate.command.clientMessageID.uuidValue!)
+                """).first(decoding: SendRollbackCount.self)
+            #expect(messageCount?.count == 0)
+            let acceptedReceiptCount = try await sql.raw("""
+                SELECT count(*) AS count FROM im_v2.message_send_operation_receipts
+                WHERE room_id = \(bind: roomID.uuidValue!) AND actor_user_id = \(bind: senderUUID)
+                  AND operation_id = \(bind: acceptedCandidate.command.clientMessageID.uuidValue!)
+                """).first(decoding: SendRollbackCount.self)
+            #expect(acceptedReceiptCount?.count == 0)
+            let expiredReceiptCount = try await sql.raw("""
+                SELECT count(*) AS count FROM im_v2.message_send_operation_receipts
+                WHERE room_id = \(bind: roomID.uuidValue!) AND actor_user_id = \(bind: senderUUID)
+                  AND operation_id = \(bind: expired.command.clientMessageID.uuidValue!)
+                """).first(decoding: SendRollbackCount.self)
+            #expect(expiredReceiptCount?.count == 1)
+            try await sql.raw("DROP TRIGGER fixture_reject_shard_admission_tail ON im_v2.shard_admission_pools").run()
+            try await sql.raw("DROP FUNCTION im_v2.fixture_reject_shard_admission_tail()").run()
+        }
+    }
+
     @Test("send execution v1 wraps v3 and permanently resolves submission close races",arguments:[false,true])
     func permanentMessageSendReceipts(direct:Bool) async throws {
         try await withForwardOwnerDatabases(mode:.standard) { database,_,sql,_,_ in

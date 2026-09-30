@@ -1997,14 +1997,14 @@ CREATE TABLE im_v2.control_housekeeping_cursor (
 INSERT INTO im_v2.control_housekeeping_cursor (singleton, rotation) VALUES (true, 0);
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-63'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-63'::text))
+    schema_id text DEFAULT 'im-v2-current-64'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-64'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-63');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-64');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
@@ -2353,6 +2353,9 @@ CREATE INDEX user_state_event_outbox_source_room_idx
     WHERE source_room_id IS NOT NULL;
 CREATE INDEX user_state_event_outbox_due_idx
     ON im_v2.user_state_event_outbox (next_attempt_at, created_at, source_event_id, user_id, projection_kind)
+    WHERE state IN ('pending', 'leased');
+CREATE INDEX user_state_event_outbox_user_head_idx
+    ON im_v2.user_state_event_outbox (user_id, created_at, source_event_id, projection_kind)
     WHERE state IN ('pending', 'leased');
 
 CREATE INDEX user_state_event_outbox_delivered_idx

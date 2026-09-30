@@ -114,6 +114,8 @@ struct GatewayPreparedAssembly {
                 directRoomLogFastAppendCache: frontdoor.directRoomLogFastAppendCache,
                 directRoomLogEventCache: projection.directRoomLogEventCache,
                 preparedGroupEventPageCache: projection.preparedGroupEventPageCache,
-                connectionRegistry: frontdoor.connectionRegistry, roomActors: actors))
+                connectionRegistry: frontdoor.connectionRegistry, roomActors: actors,
+                sendOperationMetrics: V2AggregatedSendOperationBatchMetrics(
+                    owners: roomOwners.physicalResources.values.map(\.sendOperationMetrics))))
     }
 }

@@ -528,6 +528,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
      WHERE conrelid = to_regclass('im_v2.user_state_event_outbox')
        AND conname = 'user_state_event_outbox_room_binding' AND convalidated)
    AND to_regclass('im_v2.user_state_event_outbox_source_room_idx') IS NOT NULL
+   AND to_regclass('im_v2.user_state_event_outbox_user_head_idx') IS NOT NULL
    AND to_regclass('im_v2.user_state_event_receipts') IS NOT NULL
    AND (
      SELECT count(*) = 1 FROM information_schema.columns
@@ -582,7 +583,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
        AND table_name = 'schema_contract'
        AND column_name = 'schema_id'
        AND is_nullable = 'NO'
-       AND column_default = '''im-v2-current-63''::text'
+       AND column_default = '''im-v2-current-64''::text'
    )
    AND EXISTS (
      SELECT 1
@@ -592,7 +593,7 @@ AND (SELECT count(*) = 5 FROM pg_constraint WHERE conrelid = to_regclass('im_v2.
      WHERE namespace.nspname = 'im_v2'
        AND relation.relname = 'schema_contract'
        AND constraint_record.contype = 'c'
-       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-63%'
+       AND pg_get_constraintdef(constraint_record.oid) LIKE '%im-v2-current-64%'
    )
    AND EXISTS (
      SELECT 1 FROM information_schema.columns

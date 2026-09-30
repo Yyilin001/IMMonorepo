@@ -277,9 +277,9 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
     private func consume() async {
         while phase == .ready || phase == .draining {
             guard !queue.isEmpty else { break }
-            // 立即放行已排队的连续发送请求。共享的物理所有者批处理器
-            // 负责唯一的收集等待，且受首条请求原始准入时间限制。
-            // 若此处先等待，其他房间尚未加入时就会耗尽该窗口。
+            // Legacy sends collect in the physical-owner batcher. Durable send
+            // operations execute here, so this lane owns their single collection
+            // window, measured from the first request's original admission.
             guard phase == .ready || phase == .draining else { break }
             // 计时器回调可能尚未运行。不能只因执行器赢得调度竞争，
             // 就分发已过期的请求。
@@ -287,6 +287,17 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
                 await withdraw(entry.id, reason: .deadlineExceeded)
             }
             guard let head = queue.first else { continue }
+            if schedulingClass(head) == .sendOperation {
+                let collectionDeadline = min(head.admittedAt + configuration.batchWait.duration, head.deadline)
+                if clock.now < collectionDeadline {
+                    do { try await clock.sleep(until: collectionDeadline) }
+                    catch { break }
+                    // Cancellation, retirement and deadlines may change the head
+                    // while collection suspends. Re-evaluate before dispatching.
+                    guard phase == .ready || phase == .draining else { break }
+                    if queue.first?.id != head.id || head.deadline <= clock.now { continue }
+                }
+            }
             if let grant = head.reservationGrant {
                 var entry = queue.removeFirst()
                 let continuation = entry.reservationContinuation

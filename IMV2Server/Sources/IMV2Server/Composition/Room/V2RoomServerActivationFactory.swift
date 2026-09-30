@@ -26,6 +26,7 @@ public struct V2RoomServerOwnerResources: Sendable {
     let maximumEditBytes: Int
     let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
     let committedMessageObserver: (any V2CommittedMessageBatchObserving)?
+    public let sendOperationMetrics = V2SendOperationBatchMetrics()
 
     public init(database: any Database, writes: PostgresV2RoomWriteStore,
                 sendBatcher: any V2ActorGrantedSendBatching,
@@ -152,8 +153,17 @@ private actor V2RoomServerActivation {
             return .rolledBack(.deadlineExceeded)
         }
         let callDeadline = turn.items.map(\.deadline).min()!
+        let operationStartedAt: ContinuousClock.Instant? = isOperationSendTurn ? .now : nil
+        var operationOutcome: V2SendOperationBatchMetrics.Outcome = .outcomeUnknown
+        if isOperationSendTurn { resources.sendOperationMetrics.begin(commandCount: turn.items.count) }
+        defer {
+            if let operationStartedAt {
+                resources.sendOperationMetrics.finish(commandCount: turn.items.count,
+                    outcome: operationOutcome, duration: operationStartedAt.duration(to: .now))
+            }
+        }
         do {
-            return try await V2RoomSQLDeadline.withDeadline(callDeadline) {
+            let completion: V2RoomTransactionCompletion<[V2RoomResponse]> = try await V2RoomSQLDeadline.withDeadline(callDeadline) {
                 if isProfileTurn {
                     let requests = turn.items.compactMap { item -> V2ActorProfileVisibilityBatchWire? in
                         if case .mediaAuthorization(.profileVisibilityBatch(let request)) = item.request { return request }
@@ -195,8 +205,13 @@ private actor V2RoomServerActivation {
                 }
                 return .committed([response])
             }
+            if case .committed = completion { operationOutcome = .committed }
+            if case .rolledBack = completion { operationOutcome = .rolledBack }
+            return completion
         } catch {
-            return v2RoomDomainCompletion(error)
+            let completion: V2RoomTransactionCompletion<[V2RoomResponse]> = v2RoomDomainCompletion(error)
+            if case .rolledBack = completion { operationOutcome = .rolledBack }
+            return completion
         }
     }
 

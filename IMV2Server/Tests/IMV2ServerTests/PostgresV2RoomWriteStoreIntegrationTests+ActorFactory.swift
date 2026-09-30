@@ -45,7 +45,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let makeHost = { () throws -> V2RoomActivationHost<V2RoomRequest, V2RoomResponse> in
                 .init(identity: .init(hostID: try .init("factory-host"), incarnationID: UUID()),
                     leaseStore: leases, configuration: configuration, budget: .init(configuration: configuration),
-                    classify: { $0.canShareSendTurn ? .send : .barrier }, factory: factory)
+                    classify: { $0.turnSchedulingClass }, factory: factory)
             }
             let first = try makeHost(), next = try makeHost()
             await first.start()
@@ -67,6 +67,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let sendAdmission = await admission.snapshot()
                 #expect(sendAdmission.foregroundWrite.admittedRequests == 1)
                 #expect(sendAdmission.foregroundWrite.inFlight == 0)
+                let durableMetrics = ownerResources.sendOperationMetrics.sendOperationBatchMetricsSnapshot()
+                #expect(durableMetrics.attemptedBatches == 1 && durableMetrics.committedCommands == 1)
+                #expect(durableMetrics.inFlightBatches == 0)
                 let read = try V2ActorRecordReadReceiptWire(roomID: roomID, actorUserID: senderID,
                     operationID: .init(uuid: UUID()), readThroughRoomSequence: receipt.roomSequence)
                 let recorded = try await first.invoke(token: token,

@@ -107,6 +107,7 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     public let livePresenceRenewals: V2LivePresenceRenewalBatcherSnapshot?
 /// 本地 Actor 宿主与目录的负载指标；仅作调用方的节点不包含宿主字段。
     public let roomActors: V2RoomRuntimeMetricsSnapshot?
+    public let sendOperationBatching: V2SendOperationBatchMetricsSnapshot?
 
     /// 从各组件的观测构造聚合值，不执行采集、不清零计数，也不校验组件间的一致性。
     ///
@@ -140,7 +141,8 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         directRoomLogEventCache: V2DirectRoomLogEventCacheSnapshot? = nil,
         preparedGroupEventPageCache: V2PreparedGroupEventPageCacheSnapshot? = nil,
         livePresenceRenewals: V2LivePresenceRenewalBatcherSnapshot? = nil,
-        roomActors: V2RoomRuntimeMetricsSnapshot? = nil
+        roomActors: V2RoomRuntimeMetricsSnapshot? = nil,
+        sendOperationBatching: V2SendOperationBatchMetricsSnapshot? = nil
     ) {
         self.databaseWork = databaseWork
         self.databasePools = databasePools
@@ -157,6 +159,7 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         self.preparedGroupEventPageCache = preparedGroupEventPageCache
         self.livePresenceRenewals = livePresenceRenewals
         self.roomActors = roomActors
+        self.sendOperationBatching = sendOperationBatching
     }
 }
 

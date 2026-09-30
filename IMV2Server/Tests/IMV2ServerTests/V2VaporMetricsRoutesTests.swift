@@ -84,6 +84,9 @@ struct V2VaporMetricsRoutesTests {
         let app = try await Application(.testing)
         defer { Task { try? await app.shutdown() } }
         let telemetry = V2PrometheusTelemetrySink()
+        let operations = V2SendOperationBatchMetrics()
+        operations.begin(commandCount: 3)
+        operations.finish(commandCount: 3, outcome: .committed, duration: .milliseconds(12))
         let source = RuntimePressureMetricsProbe(snapshot: .init(
             databaseWork: .init(
                 foregroundWrite: .init(
@@ -201,7 +204,8 @@ struct V2VaporMetricsRoutesTests {
             livePresenceRenewals: .init(
                 pendingConnections: 4, submittedRequests: 1_001,
                 executedBatches: 42, failedBatches: 1, largestBatch: 64
-            )
+            ),
+            sendOperationBatching: operations.sendOperationBatchMetricsSnapshot()
         ))
         V2VaporMetricsRoutes.register(
             on: app, telemetry: telemetry, runtimePressureMetrics: source
@@ -211,6 +215,9 @@ struct V2VaporMetricsRoutesTests {
             let response = try await client.send(.get, to: "metrics")
             let body = (try await response.body.string() ?? "")
             #expect(body.contains("im_v2_database_work_in_flight{class=\"foreground_write\"} 4"))
+            #expect(body.contains("im_v2_send_operation_batches_total{outcome=\"committed\"} 1"))
+            #expect(body.contains("im_v2_send_operation_commands_total{outcome=\"committed\"} 3"))
+            #expect(body.contains("im_v2_send_operation_largest_batch 3"))
             #expect(body.contains("im_v2_database_work_in_flight{class=\"foreground_control_write\"} 0"))
             #expect(body.contains("im_v2_database_work_queued{class=\"interactive_read\"} 2"))
             #expect(body.contains("im_v2_direct_room_log_append_batch_lanes 1"))

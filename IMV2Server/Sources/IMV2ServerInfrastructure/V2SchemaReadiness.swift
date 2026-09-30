@@ -10,7 +10,7 @@ public enum V2SchemaReadinessError: Error, Equatable, Sendable { case unavailabl
 /// 它把 schema 供应变为部署前置条件，避免在 TLS 监听已经开始接受已认证流量之后
 /// 才发现缺表。
 public enum V2SchemaReadiness {
-    public static let currentSchemaID = "im-v2-current-63"
+    public static let currentSchemaID = "im-v2-current-64"
     private static let requiredTables = [
         "direct_authorization_intents", "direct_authorization_receipts", "schema_contract", "control_housekeeping_cursor", "auth_devices", "device_access_tokens", "device_refresh_sessions", "device_refresh_token_history", "device_credential_operations", "device_revocation_events", "gateway_worker_cursors", "device_session_operations", "remote_device_revocation_baselines", "remote_device_revocation_receipts", "device_revocation_capabilities", "device_registration_cancellations", "device_registration_rate_limits", "account_password_credentials", "account_password_login_rate_limits", "account_password_authentication_audit", "account_edge_client_rate_limits", "account_disables", "public_user_profiles", "public_identity_lookup_rate_limits",
         "rooms", "room_activation_leases", "room_owner_routes", "direct_room_owner_routes", "group_room_creation_intents", "group_room_creation_intent_members", "group_room_creation_intent_pages", "direct_room_pairs", "direct_message_denials", "room_timeline_activities", "special_accounts", "support_conversation_sessions", "special_account_message_operations", "special_account_message_audit", "public_profile_update_outbox", "public_profile_update_operations", "user_contact_aliases", "contact_alias_operation_receipts", "room_member_nicknames", "group_nickname_operation_receipts", "group_rooms", "group_invitation_admissions", "group_invitation_receipts", "group_invitation_control_commands", "group_invite_links", "group_invite_directory", "group_invite_creation_recovery", "group_join_requests", "group_join_quota_intents",
@@ -643,7 +643,8 @@ public enum V2SchemaReadiness {
                 AND udt_name = 'uuid' AND is_nullable = 'YES')
             AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(\(bind: "\(schema).user_state_event_outbox"))
                 AND conname = 'user_state_event_outbox_room_binding' AND convalidated)
-            AND to_regclass(\(bind: "\(schema).user_state_event_outbox_source_room_idx")) IS NOT NULL AS exists
+            AND to_regclass(\(bind: "\(schema).user_state_event_outbox_source_room_idx")) IS NOT NULL
+            AND to_regclass(\(bind: "\(schema).user_state_event_outbox_user_head_idx")) IS NOT NULL AS exists
             """).first(decoding: ExistsRow.self), ownership.exists else {
             throw V2SchemaReadinessError.unavailableTable("\(schema).user_state_event_outbox[source-room]")
         }

@@ -282,6 +282,38 @@ struct PostgresV2UserStateEventTests {
         }
     }
 
+    @Test("claims only the oldest outstanding event for each user")
+    func claimsOneStreamHeadPerUser() async throws {
+        try await withUserEventDatabase { database, sql, schema in
+            let outbox = try PostgresV2UserStateEventOutbox(database: database, schema: schema)
+            let user = UserID(uuid: UUID()), otherUser = UserID(uuid: UUID())
+            let base = Date(timeIntervalSince1970: 1_750_000_000)
+            let first = try V2UserStateEvent(sourceEventID: .init(uuid: UUID()), userID: user,
+                kind: .room, payload: Data("{\"room_id\":\"test-room\"}".utf8), createdAt: base)
+            let second = try V2UserStateEvent(sourceEventID: .init(uuid: UUID()), userID: user,
+                kind: .room, payload: Data("{\"room_id\":\"test-room\"}".utf8), createdAt: base.addingTimeInterval(1))
+            let other = try V2UserStateEvent(sourceEventID: .init(uuid: UUID()), userID: otherUser,
+                kind: .room, payload: Data("{\"room_id\":\"test-room\"}".utf8), createdAt: base)
+            for event in [first, second, other] { try await outbox.enqueue(event, in: sql) }
+
+            let now = base.addingTimeInterval(10)
+            let firstBatch = try await outbox.claim(now: now, leaseDuration: 30, limit: 8)
+            #expect(firstBatch.count == 2)
+            #expect(Set(firstBatch.map(\.event.userID)).count == 2)
+            let firstLease = try #require(firstBatch.first { $0.event.userID == user })
+            #expect(firstLease.event.sourceEventID == first.sourceEventID)
+            // A second worker must not skip a leased head and claim its successor.
+            #expect(try await outbox.claim(now: now, leaseDuration: 30, limit: 8).isEmpty)
+            for lease in firstBatch {
+                #expect(try await outbox.acknowledge(lease, sequence: 1, now: now))
+            }
+
+            let next = try #require(try await outbox.claim(now: now, leaseDuration: 30, limit: 8).first)
+            #expect(next.event.userID == user)
+            #expect(next.event.sourceEventID == second.sourceEventID)
+        }
+    }
+
     @Test("a received event is idempotent after log compaction and rejects identity reuse")
     func replayAfterCompaction() async throws {
         try await withUserEventDatabase { database, sql, schema in

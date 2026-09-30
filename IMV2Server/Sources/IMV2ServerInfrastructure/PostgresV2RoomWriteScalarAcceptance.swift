@@ -25,6 +25,8 @@ struct V2RoomWriteScalarAcceptancePath {
         cachedDirectPolicy: V2DirectSendPolicyCache.Entry?,
         importedForward: ForwardInboxAuthorization? = nil,
         fenceContext: V2ConfiguredRoomFenceContext? = nil,
+        deferShardAdmission: Bool = false,
+        priorShardAdmissionReservations: [ShardAdmissionReservation] = [],
         sql: any SQLDatabase
     ) async throws -> RoomWriteCommit {
             let clientMessageID = try scalarAcceptanceUUID(command.clientMessageID)
@@ -120,7 +122,10 @@ struct V2RoomWriteScalarAcceptancePath {
             // 若所有前台连接都在等待这次嵌套获取，就会死锁。
             // 已预热的普通发送在条件快速路径中于事务前预留额度；
             // 此未预热或复杂路径则将下方精确的条件 SQL 预留作为最后一条语句。
-            let shardStateForReduction = shardState
+            let shardStateForReduction = try addingShardAdmissionCommandDelta(
+                priorShardAdmissionReservations,
+                to: shardState
+            )
             let result: V2SendMessageAcceptanceResult
             // 房间日志是权威副本：不预留任何逐用户投递成本，被 @ 的成员只收到通知。
             result = try roomLogReduction(
@@ -190,7 +195,9 @@ struct V2RoomWriteScalarAcceptancePath {
             )
             let shardReservation = try roomWriteShardAdmissionReservation(
                 from: shardStateForReduction,
-                to: timelineWriteSet.nextShardState
+                to: timelineWriteSet.nextShardState,
+                roomShardID: room.roomShardID,
+                capacityProfileID: room.capacityProfileID
             )
             try await V2RoomWriteScalarPersistencePath.persist(
                 timelineWriteSet,
@@ -234,13 +241,15 @@ struct V2RoomWriteScalarAcceptancePath {
             // 若将这把锁并入大型数据修改 CTE，完整写入流程会等待九条共享分片记录之一，
             // 并成倍增加前台连接占用。拒绝仍在此事务内抛出，
             // 因而此前的消息与房间事件写入会原子回滚。
-            try await reserveShardAdmission(
-                shardReservation,
-                room: room,
-                retryAfterSeconds: capacityProfile.limits.retryAfterSeconds,
-                now: now,
-                sql: sql
-            )
+            if !deferShardAdmission {
+                try await reserveShardAdmission(
+                    shardReservation,
+                    room: room,
+                    retryAfterSeconds: capacityProfile.limits.retryAfterSeconds,
+                    now: now,
+                    sql: sql
+                )
+            }
             let fastAppendCacheUpdate: V2DirectRoomLogFastAppendCache.Entry?
             if usesDirectRoomLog,
                V2RoomWriteFastDirectEligibility.acceptsBatchShape(.init(
@@ -281,6 +290,7 @@ struct V2RoomWriteScalarAcceptancePath {
                 directRoomLogFastAppendCacheUpdate: fastAppendCacheUpdate,
                 reciprocalDirectReplyCacheUpdate: reciprocalReplyCacheUpdate,
                 shardAdmissionCommandCredit: nil,
+                shardAdmissionReservation: deferShardAdmission ? shardReservation : nil,
                 roomAdmissionHeatObservation: usesDirectRoomLog
                     && observesRoomAdmissionHeat
                     && directContext?.supportAccountID == nil
@@ -294,6 +304,30 @@ struct V2RoomWriteScalarAcceptancePath {
 }
 
 extension V2RoomWriteScalarAcceptancePath {
+    private func addingShardAdmissionCommandDelta(
+        _ reservations: [ShardAdmissionReservation],
+        to state: ShardAdmissionState
+    ) throws -> ShardAdmissionState {
+        guard let lease = state.lease else { return state }
+        let delta = try reservations
+            .filter { $0.leaseID == lease.id.uuidValue && $0.generation == Int64(exactly: lease.generation) }
+            .reduce(into: 0) { value, reservation in
+                guard reservation.commandDelta > 0 else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                let (sum, overflow) = value.addingReportingOverflow(reservation.commandDelta)
+                guard !overflow else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                value = sum
+            }
+        guard delta > 0 else { return state }
+        let (used, overflow) = lease.commandWindow.used.addingReportingOverflow(delta)
+        guard !overflow else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        return try .init(lease: .init(
+            id: lease.id,
+            generation: lease.generation,
+            validUntil: lease.validUntil,
+            commandWindow: .init(limit: lease.commandWindow.limit, used: used)
+        ))
+    }
+
     /// 把归并器算出的分片增量应用到当前行，而不是覆盖基于更早快照推导出的计数器。
     ///
     /// 这样并发房间可以并行完成全部昂贵工作，只在最后一次尾部更新时串行化。
@@ -309,11 +343,69 @@ extension V2RoomWriteScalarAcceptancePath {
         now: Date,
         sql: any SQLDatabase
     ) async throws {
+        try await applyShardAdmission(
+            reservation,
+            roomShardID: room.roomShardID,
+            capacityProfileID: room.capacityProfileID,
+            retryAfterSeconds: retryAfterSeconds,
+            now: now,
+            sql: sql
+        )
+    }
+
+    /// 把一个操作批次内所有接受项的分片成本归并为一次尾部更新。
+    ///
+    /// 每项归约已计入此前成功项的批次增量；此处再将成功项求和，
+    /// 与数据库当前值执行一次条件自增，以同时覆盖跨事务竞争并避免覆盖旧快照。
+    func reserveShardAdmissionBatch(
+        _ reservations: [ShardAdmissionReservation],
+        retryAfterSeconds: Int,
+        now: Date,
+        sql: any SQLDatabase
+    ) async throws {
+        guard !reservations.isEmpty else { return }
+        let first = reservations[0]
+        guard reservations.allSatisfy({ $0.commandDelta > 0 }) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        guard let roomShardID = first.roomShardID,
+              let capacityProfileID = first.capacityProfileID else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        guard reservations.allSatisfy({ $0.leaseID == first.leaseID && $0.generation == first.generation
+            && $0.roomShardID == roomShardID && $0.capacityProfileID == capacityProfileID }) else {
+            throw LateShardAdmissionRejection.unavailable(.missingShardLease)
+        }
+        let delta = try reservations.reduce(into: 0) { value, reservation in
+            let (sum, overflow) = value.addingReportingOverflow(reservation.commandDelta)
+            guard !overflow, sum >= 0 else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            value = sum
+        }
+        guard delta > 0 else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        try await applyShardAdmission(
+            .init(leaseID: first.leaseID, generation: first.generation, commandDelta: delta,
+                  roomShardID: roomShardID, capacityProfileID: capacityProfileID),
+            roomShardID: roomShardID,
+            capacityProfileID: capacityProfileID,
+            retryAfterSeconds: retryAfterSeconds,
+            now: now,
+            sql: sql
+        )
+    }
+
+    private func applyShardAdmission(
+        _ reservation: ShardAdmissionReservation,
+        roomShardID: String,
+        capacityProfileID: String,
+        retryAfterSeconds: Int,
+        now: Date,
+        sql: any SQLDatabase
+    ) async throws {
         let applied = try await sql.raw("""
             UPDATE im_v2.shard_admission_pools
             SET command_window_used = command_window_used + \(bind: reservation.commandDelta)
-            WHERE room_shard_id = \(bind: room.roomShardID)
-              AND capacity_profile_id = \(bind: room.capacityProfileID)
+            WHERE room_shard_id = \(bind: roomShardID)
+              AND capacity_profile_id = \(bind: capacityProfileID)
               AND lease_id = \(bind: reservation.leaseID)
               AND generation = \(bind: reservation.generation)
               AND valid_until > \(bind: now)
@@ -323,7 +415,8 @@ extension V2RoomWriteScalarAcceptancePath {
         guard applied != nil else {
             try await throwShardAdmissionRejection(
                 reservation,
-                room: room,
+                roomShardID: roomShardID,
+                capacityProfileID: capacityProfileID,
                 retryAfterSeconds: retryAfterSeconds,
                 now: now,
                 sql: sql
@@ -345,7 +438,8 @@ extension V2RoomWriteScalarAcceptancePath {
     /// - Throws: 租约缺失、过期或触发限流时抛出。
     private func throwShardAdmissionRejection(
         _ reservation: ShardAdmissionReservation,
-        room: RoomRow,
+        roomShardID: String,
+        capacityProfileID: String,
         retryAfterSeconds: Int,
         now: Date,
         sql: any SQLDatabase
@@ -353,8 +447,8 @@ extension V2RoomWriteScalarAcceptancePath {
         guard let current = try await sql.raw("""
             SELECT lease_id, generation, valid_until
             FROM im_v2.shard_admission_pools
-            WHERE room_shard_id = \(bind: room.roomShardID)
-              AND capacity_profile_id = \(bind: room.capacityProfileID)
+            WHERE room_shard_id = \(bind: roomShardID)
+              AND capacity_profile_id = \(bind: capacityProfileID)
             """).first(decoding: CurrentShardLeaseRow.self)
         else { throw LateShardAdmissionRejection.unavailable(.missingShardLease) }
         guard current.leaseID == reservation.leaseID,

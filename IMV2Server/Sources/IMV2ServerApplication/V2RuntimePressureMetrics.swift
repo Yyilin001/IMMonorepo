@@ -413,5 +413,34 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             "im_v2_live_presence_renewal_largest_batch \(renewals.largestBatch)",
         ])
     }
+    if let operations = snapshot.sendOperationBatching {
+        lines.append(contentsOf: [
+            "# HELP im_v2_send_operation_batches_in_flight Durable operation turns admitted or waiting for database admission.",
+            "# TYPE im_v2_send_operation_batches_in_flight gauge",
+            "im_v2_send_operation_batches_in_flight \(operations.inFlightBatches)",
+            "# HELP im_v2_send_operation_batches_total Durable sendOperation turn outcomes; independent of legacy append metrics.",
+            "# TYPE im_v2_send_operation_batches_total counter",
+            "im_v2_send_operation_batches_total{outcome=\"attempted\"} \(operations.attemptedBatches)",
+            "im_v2_send_operation_batches_total{outcome=\"committed\"} \(operations.committedBatches)",
+            "im_v2_send_operation_batches_total{outcome=\"rolled_back\"} \(operations.rolledBackBatches)",
+            "im_v2_send_operation_batches_total{outcome=\"unknown\"} \(operations.outcomeUnknownBatches)",
+            "# HELP im_v2_send_operation_commands_total Durable commands submitted and completed in committed turns, including replays and business rejections.",
+            "# TYPE im_v2_send_operation_commands_total counter",
+            "im_v2_send_operation_commands_total{outcome=\"submitted\"} \(operations.submittedCommands)",
+            "im_v2_send_operation_commands_total{outcome=\"committed\"} \(operations.committedCommands)",
+            "# HELP im_v2_send_operation_singleton_batches_total Durable turns containing exactly one command.",
+            "# TYPE im_v2_send_operation_singleton_batches_total counter",
+            "im_v2_send_operation_singleton_batches_total \(operations.singletonBatches)",
+            "# HELP im_v2_send_operation_largest_batch Largest durable turn submitted by this process.",
+            "# TYPE im_v2_send_operation_largest_batch gauge",
+            "im_v2_send_operation_largest_batch \(operations.largestBatch)",
+            "# HELP im_v2_send_operation_execution_milliseconds_sum Durable turn time including database admission, authorization and commit.",
+            "# TYPE im_v2_send_operation_execution_milliseconds_sum counter",
+            "im_v2_send_operation_execution_milliseconds_sum \(operations.executionMillisecondsTotal)",
+            "# HELP im_v2_send_operation_execution_milliseconds_max Longest durable turn observed by this process.",
+            "# TYPE im_v2_send_operation_execution_milliseconds_max gauge",
+            "im_v2_send_operation_execution_milliseconds_max \(operations.executionMillisecondsMax)",
+        ])
+    }
     return lines.joined(separator: "\n") + "\n"
 }

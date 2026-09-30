@@ -140,6 +140,49 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         return copy
     }
 
+    /// Prepares durable control authorization before an operation-owned room
+    /// transaction begins. The operation receipt/proof worker settles these
+    /// intents after the owner transaction commits or aborts.
+    func prepareOperationBatchAuthorization(command: V2SendMessageCommand, now: Date) async throws -> Self {
+        guard controlResolution.needsPreparation else { return self }
+        let prepared = try await V2RoomWriteAuthorizationCoordinator(database: database,
+            controlDatabase: controlDatabase, resolutionDatabase: authorizationResolutionDatabase)
+            .prepare(commands: [command], now: now)
+        return try operationBatchScopedStore(prepared, now: now)
+    }
+
+    func prepareOperationBatchAuthorizations(commands: [V2SendMessageCommand], now: Date) async throws -> Self {
+        guard controlResolution.needsPreparation else { return self }
+        let prepared = try await V2RoomWriteAuthorizationCoordinator(database: database,
+            controlDatabase: controlDatabase, resolutionDatabase: authorizationResolutionDatabase)
+            .prepare(commands: commands, now: now)
+        return try operationBatchScopedStore(prepared, now: now)
+    }
+
+    private func operationBatchScopedStore(_ prepared: V2RoomWriteAuthorizationCoordinator.Prepared, now: Date) throws -> Self {
+        var scoped = self
+        scoped.controlResolution = .preparedWithoutGrants(roomKinds: prepared.roomKinds)
+        if !prepared.grants.isEmpty {
+            scoped = try scoped.usingAuthorizationGrants(prepared.grants, now: now)
+        }
+        return scoped
+    }
+
+    func operationBatchScopedStore(for command: V2SendMessageCommand) throws -> Self {
+        let roomID = try uuid(command.roomID)
+        let senderID = try uuid(command.senderUserID)
+        let messageID = try uuid(command.clientMessageID)
+        var scoped = self
+        scoped.controlResolution = .preparedWithoutGrants(roomKinds: controlResolution.roomKinds ?? [:])
+        if let authorization = controlResolution.authorization {
+            let key = V2RoomWriteAuthorizationBatch.operationKey(roomID: roomID, senderID: senderID, clientMessageID: messageID)
+            if let grant = authorization.grants[key] {
+                scoped = try scoped.usingAuthorizationGrants([grant], now: authorization.recordedAt)
+            }
+        }
+        return scoped
+    }
+
     private var transactionCoordinator: V2RoomWriteTransactionCoordinator {
         .init(database: database, ownership: transactionOwnership,
               hasActivationScope: activationScope != nil, authorization: controlResolution.authorization)
@@ -647,7 +690,9 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
         now: Date,
         roomID: UUID,
         senderID: UUID,
-        cachedDirectPolicy: V2DirectSendPolicyCache.Entry?
+        cachedDirectPolicy: V2DirectSendPolicyCache.Entry?,
+        deferShardAdmission: Bool = false,
+        priorShardAdmissionReservations: [ShardAdmissionReservation] = []
     ) async throws -> RoomWriteCommit {
         do {
             return try await withRoomWriteTransactionWithFenceContext { transaction, fenceContext in
@@ -660,6 +705,8 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                     senderID: senderID,
                     cachedDirectPolicy: cachedDirectPolicy,
                     fenceContext: fenceContext,
+                    deferShardAdmission: deferShardAdmission,
+                    priorShardAdmissionReservations: priorShardAdmissionReservations,
                     sql: try sqlDatabase(from: transaction)
                 )
             }
@@ -673,6 +720,58 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                 return .init(outcome: .unavailable(reason))
             }
         }
+    }
+
+    /// Durable sendOperation 批次专用接受入口。
+    ///
+    /// 它沿用当前借用事务中的完整标量路径，但把分片计数器的条件更新延后，
+    /// 由调用方在批次所有逐项结果已计算后调用一次 `reserveShardAdmissionBatch`。
+    /// 只有外层操作事务提交后，调用方才能观察到该接受结果。
+    func acceptForOperationBatch(
+        command: V2SendMessageCommand,
+        capacityProfile: V2CapacityProfile,
+        identifiers: V2AcceptanceIdentifiers,
+        now: Date,
+        priorShardAdmissionReservations: [ShardAdmissionReservation] = []
+    ) async throws -> (outcome: V2SendMessageOutcome, shardAdmissionReservation: ShardAdmissionReservation?) {
+        guard transactionOwnership.borrowsTransaction,
+              v2PostgresTimestampCanEncode(now) else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        let roomID = try uuid(command.roomID)
+        let senderID = try uuid(command.senderUserID)
+        _ = try activationScope?.token(for: roomID)
+        try validateAuthorizationCommand(command)
+        let cacheKey = V2DirectSendPolicyCache.Key(roomID: roomID, senderID: senderID)
+        let cachedDirectPolicy = await directSendPolicyCache.value(for: cacheKey)
+        let commit = try await acceptanceCommit(
+            command: command,
+            capacityProfile: capacityProfile,
+            identifiers: identifiers,
+            now: now,
+            roomID: roomID,
+            senderID: senderID,
+            cachedDirectPolicy: cachedDirectPolicy,
+            deferShardAdmission: true,
+            priorShardAdmissionReservations: priorShardAdmissionReservations
+        )
+        let outcome = try await commitEffects.finalize(command: command, cacheKey: cacheKey, commit: commit)
+        return (outcome, commit.shardAdmissionReservation)
+    }
+
+    /// 对批次内已接受的项只执行一条分片准入条件更新。
+    func reserveShardAdmissionBatch(
+        _ reservations: [ShardAdmissionReservation],
+        retryAfterSeconds: Int,
+        now: Date,
+        sql: any SQLDatabase
+    ) async throws {
+        try await scalarAcceptancePath.reserveShardAdmissionBatch(
+            reservations,
+            retryAfterSeconds: retryAfterSeconds,
+            now: now,
+            sql: sql
+        )
     }
 
     /// 一起提交一具有界的普通单聊房间日志消息。
@@ -1598,6 +1697,17 @@ struct ShardAdmissionReservation: Sendable {
     let leaseID: UUID
     let generation: Int64
     let commandDelta: Int
+    let roomShardID: String?
+    let capacityProfileID: String?
+
+    init(leaseID: UUID, generation: Int64, commandDelta: Int,
+         roomShardID: String? = nil, capacityProfileID: String? = nil) {
+        self.leaseID = leaseID
+        self.generation = generation
+        self.commandDelta = commandDelta
+        self.roomShardID = roomShardID
+        self.capacityProfileID = capacityProfileID
+    }
 }
 
 struct CurrentShardLeaseRow: Decodable {
@@ -1878,6 +1988,9 @@ struct RoomWriteCommit {
     ///
     /// 所有非成功路径都会在重试闭包内部把它归还给本地池。
     let shardAdmissionCommandCredit: V2ShardAdmissionCommandCreditPool.Token?
+    /// 操作批次可在所有消息与回执写完后统一结算的分片成本。
+    /// 普通接受路径已在此提交对象返回前结算，因此此值为空。
+    let shardAdmissionReservation: ShardAdmissionReservation?
     /// 每房间命令额度在消息事务之前就已持久预扣，且只有在该事务提交时才被消耗。
     let roomAdmissionCommandCredit: V2RoomAdmissionCommandCreditPool.Token?
     /// 一次正常提交的追加会贡献证据，表明该房间在本地足够热，
@@ -1891,6 +2004,7 @@ struct RoomWriteCommit {
         directRoomLogFastAppendCacheUpdate: V2DirectRoomLogFastAppendCache.Entry? = nil,
         reciprocalDirectReplyCacheUpdate: DirectReplyCacheUpdate? = nil,
         shardAdmissionCommandCredit: V2ShardAdmissionCommandCreditPool.Token? = nil,
+        shardAdmissionReservation: ShardAdmissionReservation? = nil,
         roomAdmissionCommandCredit: V2RoomAdmissionCommandCreditPool.Token? = nil,
         roomAdmissionHeatObservation: UUID? = nil
     ) {
@@ -1899,6 +2013,7 @@ struct RoomWriteCommit {
         self.directRoomLogFastAppendCacheUpdate = directRoomLogFastAppendCacheUpdate
         self.reciprocalDirectReplyCacheUpdate = reciprocalDirectReplyCacheUpdate
         self.shardAdmissionCommandCredit = shardAdmissionCommandCredit
+        self.shardAdmissionReservation = shardAdmissionReservation
         self.roomAdmissionCommandCredit = roomAdmissionCommandCredit
         self.roomAdmissionHeatObservation = roomAdmissionHeatObservation
     }

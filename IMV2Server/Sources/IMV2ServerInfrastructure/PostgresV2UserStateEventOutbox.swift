@@ -57,6 +57,16 @@ public struct PostgresV2UserStateEventOutbox: V2UserStateEventOutbox {
                 FROM \(unsafeRaw: table) AS work
                 WHERE ((state = 'pending' AND next_attempt_at <= \(bind: now))
                    OR (state = 'leased' AND lease_until <= \(bind: now)))
+                  -- Process one user's stream head at a time. This both preserves
+                  -- per-user ordering across workers and avoids leasing rows that
+                  -- would wait behind another row with the same user in this batch.
+                  AND NOT EXISTS (
+                      SELECT 1 FROM \(unsafeRaw: table) AS earlier
+                      WHERE earlier.user_id = work.user_id
+                        AND earlier.state IN ('pending', 'leased')
+                        AND (earlier.created_at, earlier.source_event_id, earlier.projection_kind)
+                            < (work.created_at, work.source_event_id, work.projection_kind)
+                  )
                   AND \(sourceRoomWritable(skipLocked: true))
                 ORDER BY next_attempt_at, created_at, source_event_id, user_id, projection_kind
                 LIMIT \(bind: limit) FOR UPDATE OF work SKIP LOCKED
