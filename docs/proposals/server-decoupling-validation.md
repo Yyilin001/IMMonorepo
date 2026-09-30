@@ -173,6 +173,8 @@ python3 IMV2/scripts/test_v2_virtual_actor_application_stack.py \
 
 ## 性能对照
 
+最终代码交付的 Linux 编译证据为 `~/.codex/virtual-actor-builds/server-decoupling-20260930-delivery-six-release/result.json`：干净源码 `2b98177de0d0ed081c4928ae73623f7301ff564f`、六个现行产品全部通过、退出码 0。本轮新增修改只涉及测试脚本和文档，没有改动 Swift 生产源码；编译不构成运行或性能验收。
+
 **用户最新范围（2026-09-30）**：不进行大规模性能测试，性能对照留待完整服务器组环境。本机只保留编译和必要定向检查；下列容量入口与校准规则作为后续环境准备说明，不属于本轮待执行命令。专用 Colima profile 已停止，无进行中的负载。没有有效性能样本、冻结预算或性能通过结论。
 
 可复用入口为 [容量 runner](../../IMV2/scripts/test_v2_virtual_actor_capacity_canary.py)、[固定 fixture](../../IMV2/scripts/prepare_v2_virtual_actor_capacity_fixture.py)、[评估器](../../IMV2/scripts/assess_v2_virtual_actor_capacity.py)和[历史协议](../reviews/virtual-actor/v1-baseline-protocol.md)。容量 runner **不负责构建产品**：需两份干净源码 checkout 与各自独立 Linux Release 产品/`result.json`，另用同一份经验证的 corrected Release loader、固定 fixture、非 `default` 的显式 Docker context，以及源码外全新 artifact 目录。先对两版输入分别做只读预检：
