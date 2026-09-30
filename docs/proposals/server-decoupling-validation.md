@@ -4,6 +4,8 @@
 
 代码改造、macOS 编译与受影响定向回归已通过；本机 Linux Release、四种一次性应用栈模式、G4/G6 及三数据库定向断链和 owner-a 整库重启专项也已通过。真实远端服务器已停机，验证只使用本机隔离环境。完整故障矩阵和性能对照仍待执行；不能用应用栈冒烟替代。此前 2026-09-28 暂停时中断的原生排空、媒体崩溃和 G4 构建不计为通过。
 
+提交 `943697d7` 调整了 RoomWrite 提交后效果的结果校验顺序。该提交的 macOS 测试目标编译及 `V2RoomWriteCommitEffectsTests` 定向测试通过；此前 Linux Release、应用栈和数据库故障证据对应的是更早源码，不能代替这处改动的最终候选验证。运行配置样例检查通过；Account/Gateway/Operator 配置测试 49 项通过，Actor 配置测试 3 项中 2 项通过、1 项因缺少生成的本地部署文件按条件跳过。
+
 
 本文记录可复用的验收入口及其执行条件。下方命令是可复用入口，是否已执行以表格与实施记录为准；不能仅因命令存在就视为通过。分批结果见[实施进度](server-decoupling-progress.md)和[Virtual Actor 证据目录](../reviews/virtual-actor/README.md)；源码继续变化后，旧结果不能代替最终验收。每次运行需保存源码 SHA、命令、环境开关、实际 started/passed/skipped 数、退出码和日志。
 
@@ -15,7 +17,7 @@
 
 | 层次 | 当前批次最小回归 | 已有证据与剩余工作 |
 | --- | --- | --- |
-| 源码边界与模块 | `python3 scripts/check_v2_server_boundaries.py`；受影响 Server suite | 六个 Linux Release 产品、protobuf 生成比对、schema readiness 已通过；仍需运行配置与其余受影响检查 |
+| 源码边界与模块 | `python3 scripts/check_v2_server_boundaries.py`；受影响 Server suite | 较早源码的六个 Linux Release 产品、protobuf 生成比对、schema readiness 已通过；当前源码运行配置定向检查通过，仍需其余受影响检查 |
 | HTTP、认证、运维和 Gateway | 下方定向 filter；只数实际执行测试 | 本机四种 Account/Gateway/Operator 栈均已通过；仍需核对未覆盖的定向 suite |
 | 房间事务和恢复 | 下方真 PostgreSQL 精筛；独立 COMMIT ACK 丢失库 | G4/G6、三库定向断链及 owner-a 整库重启已通过；仍需完整受影响矩阵 |
 | 性能 | 不在每次源码编辑后运行容量负载 | P0 对照与最终源码采用同一 Linux Release 构建模式、fixture、机器、连接池和负载，各至少三次 |

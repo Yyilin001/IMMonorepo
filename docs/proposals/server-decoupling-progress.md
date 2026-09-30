@@ -13,6 +13,7 @@
 - 本机 Linux 独立进程 G4/G6 专项也已通过，并在测试代码提交 `56e45bef53fc30a6e4a4a3e64e3af3d00e9a5f51` 上各复跑一次。G4 的 caller 先启动、首 Host SIGKILL、租约后接管与同 ID 重放结果为单行消息、激活 epoch 从 1 到 2、旧业务写入被拒绝；G6 的双 Host/peer 分区与租约竞态结果为单行消息，旧 token 的续约、释放和业务写入均被拒绝。最终证据分别位于 `~/.codex/virtual-actor-builds/server-decoupling-20260930-g4/imv2-va-g4-1790729287-48034-evidence/` 与 `~/.codex/virtual-actor-builds/server-decoupling-20260930-g6/imv2-va-g6-48701-758f80f2-evidence/`，各自 `source-sha.txt` 与该提交一致。首轮 G4 构建因未锁定的 SwiftPM 缓存获取失败；修正后探针又暴露缺失的测试邀请密钥和将非发送响应误作发送回执的校验错误，均已修复并重跑通过。失败运行不计为业务通过。
 - 本机跨数据库断链专项在测试代码提交 `f65b19cdcec33f3c2ca60567a56890151bc30ac7` 上通过；证据 `~/.codex/virtual-actor-builds/server-decoupling-20260930-db-edge-run-r4/result.json` 记录三库、双 Host、一个 caller、control 与 owner-a 两次定向断链、`passed=true` 和 `cleanupErrors=[]`。脚本验证未受影响链路可用、失败操作无持久副作用、恢复后的编辑回执与消息完成各只有一份，以及三个 Actor 进程正常关闭。此前失败暴露测试探针缺少独立邀请密钥、使用已删除的编辑 operation 表、以及将安全退休后的租约过期误作 owner 数据库故障；修正后重新构建匹配源码的 Linux Release 探针并重跑。该次未启用可选的 owner-a PostgreSQL 整库重启阶段。
 - 同一源码及探针的本机三库复跑包含 `--database-restart`，`~/.codex/virtual-actor-builds/server-decoupling-20260930-db-edge-restart-run/result.json` 为 `passed=true`、`cleanupErrors=[]`。owner-a PostgreSQL 在保留数据和 Actor 进程的条件下实际停止并重启；另一 owner 在停机期间继续处理，恢复后的 caller 重放只产生一份结果，原 lease 仍有效。此结果覆盖该 runner 的三种定向数据库故障，不代表完整故障矩阵。
+- RoomWrite 提交后收尾现先校验单条或整批持久结果，再发布缓存、结算额度与记录热度；修复了结果转换或批量下标异常时先产生进程内效果、随后报告结果不明的顺序问题。提交 `943697d7` 的两条错误路径回归、`V2RoomWriteCommitEffectsTests` 定向测试及 macOS 全包测试目标编译通过。运行配置样例检查和 Account/Gateway/Operator/Actor 配置定向测试也通过；配置测试中一项需生成本地部署文件的用例按条件跳过。
 - 真实远端服务器已停机，不属于本轮验证。性能基线对照与完整故障矩阵仍未执行，因此 P6 整体验收尚未完成。
 
 ## 代码收尾结果（2026-09-29）
@@ -51,8 +52,8 @@
 | P1 | 资源生命周期/导入/迁移/展示依赖接口和强类型快照；SQL 与数据库接线分离；定向资源 PostgreSQL 回归通过 | 完整受影响矩阵仍待最终验收 |
 | P2 | HTTP operation 与文件流入口依赖能力接口；Gateway 按命令族分派；四种本机应用栈模式通过 | 其余受影响路由 suite 待最终验收 |
 | P3 | 房间业务执行与 PostgreSQL 适配分离，工厂组装五类能力；本机 G4/G6 接管与围栏通过 | 其余生命周期/取消矩阵待最终验收 |
-| P4 | scalar/direct fast/rich batch/hybrid/forward 路径、授权与事务协调、提交后处理及组合状态已收拢；原生故障定向回归通过 | 扩展故障矩阵与热点性能对照尚未完成 |
-| P5 | Contracts/Application/Infrastructure/Gateway/HTTP 已独立；旧 Server 收敛为 15 个组装/配置文件；六个 Linux Release 产品通过 | 完整受影响测试与运行配置检查仍待最终验收 |
+| P4 | scalar/direct fast/rich batch/hybrid/forward 路径、授权与事务协调、提交后处理及组合状态已收拢；提交后效果先校验结果；原生故障定向回归通过 | 扩展故障矩阵与热点性能对照尚未完成 |
+| P5 | Contracts/Application/Infrastructure/Gateway/HTTP 已独立；旧 Server 收敛为 15 个组装/配置文件；六个 Linux Release 产品和运行配置定向检查通过 | 完整受影响测试仍待最终验收 |
 | P6 | 原生跨库、Host 恢复、COMMIT ACK-loss、SIGKILL 定向场景，本机四种应用栈模式、G4/G6、独立 control/owner 链路断开及 owner-a PostgreSQL 重启已通过 | 完整故障矩阵与性能对照按此前要求暂缓，整体验收未完成 |
 
 源码边界脚本 `scripts/check_v2_server_boundaries.py` 已接入 `run_v2_swift_tests.sh`。初始版本的 33 项资源应用层与 HTTP 具体 Store 依赖已消除，当前例外清单为空。该脚本是源码模式检查；它不替代编译器依赖约束、行为测试或事务一致性验证。
