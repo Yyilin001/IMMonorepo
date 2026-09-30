@@ -1,23 +1,23 @@
 # 服务端解耦 P6 验收矩阵
 
-## 本轮范围（2026-09-29）
+## 当前范围（2026-09-30）
 
-用户要求先完成代码改造并保证编译，完整验证暂缓。本轮只运行 Swift 产品与测试目标的编译、脚本语法和架构静态检查；下方未执行的 PostgreSQL、独立进程、Linux 运行与性能项目保持未验收，不自动启动。2026-09-28 暂停时的原生排空/媒体崩溃验证在编译阶段中断（退出 130），测试未运行，两个临时库已清理。G4 与批量 Release 测试构建也被停止，均不计为通过；专用虚拟机已恢复临时 DNS 并停止。
+代码改造、macOS 编译与受影响定向回归已通过；本机 Linux Release、四种一次性应用栈模式及 G4/G6 独立进程专项也已通过。真实远端服务器已停机，验证只使用本机隔离环境。完整故障矩阵和性能对照仍待执行；不能用应用栈冒烟替代。此前 2026-09-28 暂停时中断的原生排空、媒体崩溃和 G4 构建不计为通过。
 
 
 本文记录可复用的验收入口及其执行条件。下方命令是可复用入口，是否已执行以表格与实施记录为准；不能仅因命令存在就视为通过。分批结果见[实施进度](server-decoupling-progress.md)和[Virtual Actor 证据目录](../reviews/virtual-actor/README.md)；源码继续变化后，旧结果不能代替最终验收。每次运行需保存源码 SHA、命令、环境开关、实际 started/passed/skipped 数、退出码和日志。
 
 ## 环境与执行层次
 
-2026-09-28 当前环境：Apple Swift 6.4（arm64 macOS）及本地 PostgreSQL 可用；测试专属 `colima-imv2-va-capacity` 已启动，固定 4 CPU / 16 GiB，默认 Docker context 保持原状。该 profile 初始为停止状态。容器和 VM 的 DNS 临时调整为 `1.1.1.1`，原配置均已备份，验收结束需恢复并停止 profile。环境记录在 `~/.codex/virtual-actor-builds/server-decoupling-20260928-runs/`。
+当前环境：Apple Swift 6.4（arm64 macOS）及本地 PostgreSQL 可用。Linux 检查使用测试专属 `colima-imv2-va-capacity`（4 CPU / 16 GiB），不切换默认 Docker context；仅在本机专项运行期间启动，结束后停止。2026-09-28 的临时 DNS 改动已恢复，本轮未再修改 DNS。
 
-当前 macOS 构建和分批定向测试已通过，最新 worker 回归为 4 suites / 14 tests（含 6 个真实 SIGKILL 参数场景）。最终候选 `c1944b1a103b121cc73b36beceb5348cc465fc88` 的六个 Linux Release 产品已构建成功；可比基线 `b01bb09338ddde61374af9d19f031173bab06b07` 的 Gateway/LoadGenerator 也已构建成功。旧的容器 probe 端口接线失败保留为历史证据；新本地应用栈运行的 general smoke 已通过，但 Actor HTTP 在群昵称写入和读取阶段失败，整体 `passed=false`。根因仍在定位，P6 未完成。
+本轮生产源码收尾提交为 `a235be4c2fa0db5f3898358eb0228e27260f7ffa`，独立进程探针修复提交为 `56e45bef53fc30a6e4a4a3e64e3af3d00e9a5f51`。macOS 全包测试目标编译、标量/资源 PostgreSQL 定向回归及 Gateway 队列测试已通过，详见[实施进度](server-decoupling-progress.md)。Linux 应用栈使用冻结快照 `3af2cbc29aec29806fe11227e393b8f4c8249abd`，与 `a235be4c` 的 Swift 和冒烟脚本内容相同；两者只差文档。当前六产品 Release 矩阵的源码及产物哈希见 `~/.codex/virtual-actor-builds/server-decoupling-20260930-final-six-release/result.json`，源码为 `56e45bef`；四种应用栈模式使用的四产品构建另见 `~/.codex/virtual-actor-builds/server-decoupling-20260930-local-release-r3/result.json`。2026-09-28 的六产品候选与基线构建仍作为历史证据。
 
-| 层次 | 当前批次最小回归 | 最终 P6 仍需 |
+| 层次 | 当前批次最小回归 | 已有证据与剩余工作 |
 | --- | --- | --- |
-| 源码边界与模块 | `python3 scripts/check_v2_server_boundaries.py`；受影响 Server suite | 六个候选 Linux Release 产品已构建；仍需最终源码对应的全量边界、生成协议、schema 与运行配置检查 |
-| HTTP、认证、运维和 Gateway | 下方定向 filter；只数实际执行测试 | 独立本地/远端 Host 的真实 Account/Gateway/Operator 栈，caller-only 入口与跨入口禁号 |
-| 房间事务和恢复 | 下方真 PostgreSQL 精筛；独立 COMMIT ACK 丢失库 | 全部受影响 Server 集成测试、跨库故障、G4/G6 独立进程与 SIGKILL |
+| 源码边界与模块 | `python3 scripts/check_v2_server_boundaries.py`；受影响 Server suite | 六个 Linux Release 产品、protobuf 生成比对、schema readiness 已通过；仍需运行配置与其余受影响检查 |
+| HTTP、认证、运维和 Gateway | 下方定向 filter；只数实际执行测试 | 本机四种 Account/Gateway/Operator 栈均已通过；仍需核对未覆盖的定向 suite |
+| 房间事务和恢复 | 下方真 PostgreSQL 精筛；独立 COMMIT ACK 丢失库 | G4/G6 已通过；仍需完整受影响 Server 集成和跨库故障矩阵 |
 | 性能 | 不在每次源码编辑后运行容量负载 | P0 对照与最终源码采用同一 Linux Release 构建模式、fixture、机器、连接池和负载，各至少三次 |
 
 日常定向回归不需要运行完整 ClientKit；最终全量检查仍用 `bash scripts/run_v2_swift_tests.sh`。该脚本运行 Core、ClientKit、Server（后两者串行）及边界、protobuf、schema、配置和文档检查。CI 的 [verify.yml](../../.github/workflows/verify.yml) 还构建 `IMV2AccountServerApp`、`IMV2OperatorServerApp`、`IMV2ServerApp`、`IMV2LocalGatewayProbe`、`IMV2GatewayLoadGenerator` 的 Linux Release 产品，并在 PostgreSQL 服务下运行 Server 全量测试。最终必须核对本轮源码对应的实跑结果；进度文档中的定向通过只覆盖当时稳定点。
@@ -81,9 +81,18 @@ CI 另外显式配置 `IMV2_ACTOR_TRANSACTION_*`、`ACTOR_HOST_G2_*`、`ACTOR_PA
 
 ## 真实进程与服务入口
 
-候选 Linux Release 证据：`~/.codex/virtual-actor-builds/server-decoupling-20260928-candidate-release/result.json` 记录源码 SHA `c1944b1a103b121cc73b36beceb5348cc465fc88`、固定 Swift 6.4 Jammy 镜像、lockfile SHA-256 `3af1e16190f46bdd8fad3de86c6b386dc196443291463355bf36edb62b7fd15c`、退出码 0，以及 Account、Gateway、Operator、LocalGatewayProbe、GatewayLoadGenerator、ResourceImageWorker 六个产品的 SHA-256。`~/.codex/virtual-actor-builds/server-decoupling-20260928-baseline-compatible-release/result.json` 记录相同镜像与 lockfile 下基线 `b01bb09338ddde61374af9d19f031173bab06b07` 的 Gateway/LoadGenerator 成功构建。两份构建成功不构成服务或性能验收。
+历史候选 Linux Release 证据：`~/.codex/virtual-actor-builds/server-decoupling-20260928-candidate-release/result.json` 记录源码 SHA `c1944b1a103b121cc73b36beceb5348cc465fc88`、固定 Swift 6.4 Jammy 镜像、lockfile SHA-256 `3af1e16190f46bdd8fad3de86c6b386dc196443291463355bf36edb62b7fd15c`、退出码 0，以及 Account、Gateway、Operator、LocalGatewayProbe、GatewayLoadGenerator、ResourceImageWorker 六个产品的 SHA-256。`~/.codex/virtual-actor-builds/server-decoupling-20260928-baseline-compatible-release/result.json` 记录相同镜像与 lockfile 下基线 `b01bb09338ddde61374af9d19f031173bab06b07` 的 Gateway/LoadGenerator 成功构建。两份构建成功不构成当前源码的服务或性能验收。
 
-本地应用栈 `~/.codex/virtual-actor-builds/server-decoupling-20260928-runs/run-ac2ea47bf02f435da43eaf1403cdf6a7/` 使用核验过的候选预编译产品；`result.json` 记录 `mode=local-gateway-host`、`productSource=verified-prebuilt`、候选源码 SHA 与 `passed=false`。`smoke.log` 的 general smoke 已通过账户 HTTPS/凭据、Gateway direct chat、密码限流、Push 端点、Operator 禁号、TLS 1.3 和私有指标；`actor-http-smoke.log` 记录 `ACTOR_HTTP_SMOKE_FAILED phase=group nickname write and read kind=SmokeFailure`，但未给出根因。所用 harness 的唯一改动路径和补丁 SHA-256 见 `~/.codex/virtual-actor-builds/server-decoupling-20260928-app-harness/provenance-v2.json`。当前定位昵称阶段失败，**本地应用栈整体未通过，P6 仍未完成**。
+当前本机应用栈证据位于 `~/.codex/virtual-actor-builds/server-decoupling-20260930-local-runs/`。以下四次 `result.json` 均为 `passed=true`，每次 `smoke.log` 覆盖账户 HTTPS/凭据、Gateway direct chat、密码限流、Push 端点、Operator 禁号、TLS 1.3 与私有指标，`actor-http-smoke.log` 均记录昵称、邀请、媒体发送及签名下载通过：
+
+| 模式 | 证据目录 |
+| --- | --- |
+| Gateway 内置 Host | `run-2263830457474205a37c587881435f8f` |
+| Gateway 调用独立 Host | `run-2582c665d3714d719c3ab381449a2f39` |
+| 独立 Host 阻塞写入时收到 SIGTERM | `run-d6669f25fdce4242bb1532754cae9219` |
+| 独立 Host、两条旧连接跨入口停用账号 | `run-4259400b5da549de8421ab4c4eb3ce96` |
+
+初次运行因冒烟脚本仍要求旧 `/v2/local-media/download/` 路径而失败。服务端签发现行 `/v2/resource-bytes/`，脚本修正后四种模式均重跑通过。该结果不代替 G4/G6 网络分区、全量故障矩阵或性能对照。
 
 ### P6 worker 与共享资源静态归属审查
 
@@ -99,7 +108,14 @@ CI 另外显式配置 `IMV2_ACTOR_TRANSACTION_*`、`ACTOR_HOST_G2_*`、`ACTOR_PA
 
 **模块归属。** 推送、审核、同步维护、邀请创建、入群配额及资源 finalize 恢复的协议和业务编排现位于 `IMV2Server/Sources/IMV2ServerApplication/`；对应的 PostgreSQL store、审核任务事务、资源过期事务和具体 Actor 构造入口保留在 `IMV2Server/Sources/IMV2ServerInfrastructure/`。资源恢复的基础设施端口先在同一事务中过期会话，再读取待恢复项；应用层随后调用 `V2ResourceService.status/finalize`。这是源码层职责核查，尚不能代替下方独立进程故障验收。
 
-以下专项入口会自行建立临时 PostgreSQL、网络和身份；Linux 模式需要可用 Docker context，scratch 与证据目录须为源码外不同目录。测试 Docker context 已可用，以下 G4/G6 仍待实际执行并记录结果。CI 已有 G4/G6 Linux job；真实应用栈目前不在 required CI gate 中。
+以下专项入口会自行建立临时 PostgreSQL、网络和身份；Linux 模式需要可用 Docker context，scratch 与证据目录须为源码外不同目录。当前源码的 G4/G6 已在本机固定 Swift 6.4 Linux 镜像下通过：
+
+| 专项 | 实际结果 | 证据目录 |
+| --- | --- | --- |
+| G4 caller 先启动、首 Host SIGKILL、租约后接管和同 ID 重放 | `G4_BUSINESS_PROBE_OK`；`result.json` 中 `messageRows=1`、`firstActivationEpoch=1`、`replacementActivationEpoch=2`、`staleBusinessWriteRejected=true` | `~/.codex/virtual-actor-builds/server-decoupling-20260930-g4/imv2-va-g4-1790729287-48034-evidence/` |
+| G6 双 Host、peer 分区、租约竞态和旧 token 围栏 | `G6_MULTIHOST_OK`；`result.json` 中 `uniqueMessageRows=1`，旧 token 的业务写入、续约和释放均被拒绝 | `~/.codex/virtual-actor-builds/server-decoupling-20260930-g6/imv2-va-g6-48701-758f80f2-evidence/` |
+
+两项最终运行的 `source-sha.txt` 均为 `56e45bef53fc30a6e4a4a3e64e3af3d00e9a5f51`。G4 首次构建遇到 SwiftPM 依赖缓存获取错误，未进入业务场景；测试入口改为锁定依赖版本后构建通过。随后探针 Host 因缺少测试邀请密钥在启动前失败，修正后又发现调用 helper 将日志与订阅响应误判为发送回执；两项探针问题修正后重新运行，最终结果见表格。CI 已有 G4/G6 Linux job；真实应用栈目前不在 required CI gate 中。
 
 ```sh
 # G4：caller 先起，独立 Host SIGKILL、租约到期、替代 Host 接管与幂等重放。
@@ -139,7 +155,7 @@ python3 IMV2/scripts/test_v2_virtual_actor_application_stack.py \
   --remote-gateway --busy-sigterm
 ```
 
-应用栈当前脚本没有 `--remote-batch`：它属于已退役的 TCP 发送入口，其[历史记录](../reviews/virtual-actor/g3-remote-batch-evidence.md)不能作为现行发送路径验收。跨入口禁号 runner 验证两条会话、独立 Host、Operator 提交及 SQL 无新效果；它不等同于多数据库控制链路分区。最终需要在当前源码上重跑并保存 `result.json`、服务日志与清理结果。
+应用栈当前脚本没有 `--remote-batch`：它属于已退役的 TCP 发送入口，其[历史记录](../reviews/virtual-actor/g3-remote-batch-evidence.md)不能作为现行发送路径验收。跨入口禁号 runner 验证两条会话、独立 Host、Operator 提交及 SQL 无新效果；它不等同于多数据库控制链路分区。
 
 ## 性能对照
 
