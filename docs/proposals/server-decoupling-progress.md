@@ -4,6 +4,7 @@
 
 ## 本轮收尾与验证（2026-09-30）
 
+- 干净源码 `cc6da2894ce7a0f78e82af39780bc0a4109588e8` 的 Linux Release Gateway 与 LoadGenerator 构建通过，产物身份见 `~/.codex/virtual-actor-builds/server-decoupling-20260930-final-performance-release/result.json`。热点校准两次失败均不计为性能样本：首轮 loader 默认 128 个 recovery workers 超过 100 个连接，尚未预热；runner 已显式限至连接数，并在清理前保存 loader 启动日志，6 项定向脚本测试通过。独立干净 harness 修复提交为 `c0902f21`。复跑全部 100 个连接认证成功，发送报告为 `message:ACCOUNT_HTTP_FAILURE:terminal`、0 ACK；检查 loader 证实发送走 Account HTTP，而旧容量栈仅启动 Gateway，默认 Account 地址不可达。后续须补齐本地 Account/HTTPS 入口及 Account+Gateway CPU/RSS 统计，再重启三次基线校准；不能把当前 Gateway-only 指标用于发送路径性能验收。失败证据为 `server-decoupling-20260930-hot-baseline-calibration-1/` 与 `server-decoupling-20260930-hot-baseline-calibration-1-r2/`，专用测试栈已清理。
 - Host PostgreSQL 排空定向验证实际通过三项：普通排空 1 项、过载及双房间共享批次排空 2 项。证据分别为 `~/.codex/virtual-actor-builds/server-decoupling-20260930-host-drain-r2/` 与 `server-decoupling-20260930-host-drain/`；运行后数据库均清理。首轮普通排空测试因共享 helper 的通用 disposable 开关缺失而提前返回，不计为通过；测试现要求该开关，补齐后重新执行 SQL 并通过。生产源码为 `22e05061`，复跑仅增加此测试守卫。启动失败且节点未排空的进程级注入仍未执行。
 - 混合群批次的提交后额度结算与保序结果映射移入 `V2RoomWriteCommitEffects.finalizeHybridBatch`，Store 继续拥有 SQL 事务、回滚/结果不明分类及失败时额度退役。保留 SQL 已提交后先结算持久预扣令牌、再转换响应的顺序；共用结果数量、下标及时间转换检查。macOS 产品和测试目标编译通过（`/tmp/imv2-hybrid-effects-build-20260930.log`）；跨房间和同一热房间的两项真实 PostgreSQL 原子批次测试通过、无跳过（`/tmp/imv2-hybrid-effects-tests-20260930.log`），本轮独占数据库已清理。
 - 删除只服务历史调用方式的资源导入构造器、Messaging 中被忽略的参数和 Gateway 的 `Data` 提交重载；生产接线及测试改用现行接口。RoomWrite 的三个事务闭包直接调用标量接受路径，移除仅作转发的 Store 包装。HTTP 冒烟脚本只接受现行资源下载 header 数组结构。

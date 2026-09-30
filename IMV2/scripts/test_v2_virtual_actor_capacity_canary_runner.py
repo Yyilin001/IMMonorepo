@@ -148,6 +148,7 @@ class CanaryRunnerPreflightTests(unittest.TestCase):
                 with self.assertRaises(CanaryFailure):
                     capture_detached_loader_open_file_limits(run=run, docker=["docker"],
                         loader_id=loader, execute=failing_execute)
+                self.assertEqual(commands[-2], ["docker", "logs", loader])
                 self.assertEqual(commands[-1], ["docker", "rm", "-f", loader])
             self.assertEqual(json.loads((run / "loader-open-file-limits.json").read_text())["soft"], 1024)
             self.assertEqual((run / "loader-open-file-limits.json").stat().st_mode & 0o777, 0o600)
@@ -160,6 +161,7 @@ class CanaryRunnerPreflightTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 capture_detached_loader_open_file_limits(run=run, docker=["docker"],
                     loader_id=loader, execute=failed_exec_and_cleanup)
+            self.assertEqual(commands[-2], ["docker", "logs", loader])
             self.assertEqual(commands[-1], ["docker", "rm", "-f", loader])
 
     def test_failure_artifacts_are_private_bounded_and_not_complete_phases(self) -> None:

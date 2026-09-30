@@ -395,6 +395,10 @@ def capture_detached_loader_open_file_limits(*, run: Path, docker: list[str],
             container_id=loader_id, command=docker + ["exec", loader_id], execute=execute)
     except (CanaryFailure, subprocess.SubprocessError, OSError):
         try:
+            execute(docker + ["logs", loader_id], "loader-startup-failure.log", 15)
+        except (CanaryFailure, subprocess.SubprocessError, OSError):
+            pass
+        try:
             execute(docker + ["rm", "-f", loader_id], "measurement-cleanup.log", 30)
         except (CanaryFailure, subprocess.SubprocessError, OSError):
             pass  # The enclosing project cleanup still runs.
@@ -922,6 +926,7 @@ def main() -> int:
                         "--peer-topology", "ring", "--ramp-per-second", str(min(connections, 1000)),
                         "--ramp-batch-size", str(min(connections, 1000)),
                         "--workload-ramp-per-second", str(min(connections, 1000)),
+                        "--recovery-burst-workers", str(min(connections, 128)),
                         "--sync-reads", "1" if args.measurement_workload == "mixed" else "0",
                         "--room-log-reads", "1" if args.measurement_workload == "mixed" else "0",
                         "--max-failure-percent", "0", "--recovery-batch-timeout-seconds",
