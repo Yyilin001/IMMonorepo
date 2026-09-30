@@ -70,10 +70,15 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
                 _ = try await hostNode.startDiscovery(client: client, configuration: configuration.discovery)
                 node = .host(hostNode)
             } catch {
-                guard try await hostNode.stop(deadline: .now + runtime.drainTimeout.duration).completed else {
+                let startupError = error
+                let stopped: Bool
+                do {
+                    stopped = try await hostNode.stop(deadline: .now + runtime.drainTimeout.duration).completed
+                } catch {
                     throw V2RoomActorApplicationError.incompleteShutdown
                 }
-                throw error
+                guard stopped else { throw V2RoomActorApplicationError.incompleteShutdown }
+                throw startupError
             }
         } else {
             runtimeHost = nil
@@ -88,10 +93,15 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
                 client = try await caller.start(discovery: configuration.discovery)
                 node = .caller(caller)
             } catch {
-                guard try await caller.stop(deadline: .now + configuration.runtime.drainTimeout.duration) else {
+                let startupError = error
+                let stopped: Bool
+                do {
+                    stopped = try await caller.stop(deadline: .now + configuration.runtime.drainTimeout.duration)
+                } catch {
                     throw V2RoomActorApplicationError.incompleteShutdown
                 }
-                throw error
+                guard stopped else { throw V2RoomActorApplicationError.incompleteShutdown }
+                throw startupError
             }
         }
         let directory = V2RoomDirectory(owners: V2RoomServerOwnerResolver(router: ownerRouter),

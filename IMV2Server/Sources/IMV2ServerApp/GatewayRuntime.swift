@@ -6,6 +6,7 @@ import IMV2ServerInfrastructure
 import IMV2ServerHTTP
 import Logging
 import IMV2ServerGateway
+import IMV2ActorApplication
 #if canImport(Darwin)
 import Darwin
 #else
@@ -52,6 +53,11 @@ enum GatewayRuntime {
             stage = "gateway_infrastructure_shutdown"
             try await infrastructure.shutdown(logger: logger)
         } catch {
+            if case V2RoomActorApplicationError.incompleteShutdown = error {
+                logger.critical("IM V2 room actor startup drain incomplete; retaining shared resources",
+                    metadata: V2SafeLogMetadata.failure(error, stage: "gateway_actor_startup_drain"))
+                exit(EXIT_FAILURE)
+            }
             // 失败时仍按上层组件到基础设施的顺序尽力清理，再保留阶段信息上抛。
             let stagedError = V2StagedOperationalError(stage: stage, error: error)
             logger.error("IM V2 gateway lifecycle failed; cleaning up", metadata:

@@ -524,6 +524,11 @@ enum IMV2AccountServerApp {
             try await resources.shutdown()
             try await applicationEventLoops.shutdownGracefully()
         } catch {
+            if case V2RoomActorApplicationError.incompleteShutdown = error {
+                logger.critical("IM V2 account room actor startup drain incomplete; retaining shared resources",
+                    metadata: V2SafeLogMetadata.failure(error, stage: "account_actor_startup_drain"))
+                exit(EXIT_FAILURE)
+            }
             logger.error("IM V2 account lifecycle failed; cleaning up", metadata:
                 V2SafeLogMetadata.failure(error, stage: stage))
             await runtimeTasks.cancelAndWait(logger: logger)
