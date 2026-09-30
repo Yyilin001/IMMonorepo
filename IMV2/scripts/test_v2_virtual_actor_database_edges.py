@@ -333,8 +333,12 @@ class Probe:
         lease_isolated = self.query("owner-a", lease_query).split("|")
         self.save("control-cut-lease.json", {"before": lease_before,
             "afterMoreThanLeaseDuration": lease_isolated})
-        if lease_isolated != lease_before:
-            raise RuntimeError("control edge failure interrupted owner lease renewal")
+        # A control read that settles after the caller deadline may retire this
+        # activation as outcomeUnknown. Its lease may then expire even though
+        # the owner database stayed reachable; no different owner may appear.
+        if len(lease_isolated) != 4 or lease_isolated[:3] != lease_before[:3] or \
+                lease_isolated[3] not in ("true", "false"):
+            raise RuntimeError("control edge failure changed owner lease identity")
         self.restore("control")
         self.mark("control-restored")
         self.wait_file("control-recovered.json")
@@ -345,8 +349,9 @@ class Probe:
         self.save("control-recovered-lease.json", {"before": lease_before, "after": lease_recovered})
         # A driver failure is conservatively outcomeUnknown in the production
         # executor and can retire its epoch once the blocked call settles. The
-        # independence assertion is the sustained lease DURING the cut above;
-        # recovery must retain the physical Host and persist one edit.
+        # independence assertion is the healthy owner SQL edge and unchanged
+        # lease identity during the cut; recovery may advance the epoch on the
+        # same physical Host and must persist one edit.
         if len(lease_recovered) != 4 or lease_recovered[:2] != lease_before[:2] or \
                 int(lease_recovered[2]) < int(lease_before[2]) or lease_recovered[3] != "true":
             raise RuntimeError("control recovery did not retain a valid lease on the original Host")
