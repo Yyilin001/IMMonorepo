@@ -63,11 +63,13 @@ PGHOST=127.0.0.1 PGPORT=5432 PGUSER=im_v2_test \
 | --- | --- | --- | --- |
 | 单房间成功 COMMIT 丢 ACK | `V2RoomActivationCommitAckLossTests` | `IMV2_ACTOR_ACK_LOSS_DATABASE_URL`、`IMV2_ACTOR_ACK_LOSS_TEST_DATABASE_IS_DISPOSABLE=1` | 本轮原生 PostgreSQL 已执行通过，见下方证据 |
 | 双房间成功 COMMIT 丢 ACK | `V2SharedRoomSendCommitAckLossTests` | `IMV2_SHARED_SEND_ACK_LOSS_DATABASE_URL`、`IMV2_SHARED_SEND_ACK_LOSS_TEST_DATABASE_IS_DISPOSABLE=1` | 本轮原生 PostgreSQL 已执行通过，见下方证据 |
-| Host 排空与过载 | `V2RoomHostPostgresDrainTests` / `V2RoomHostPostgresOverloadDrainTests` | 分别 `IMV2_ACTOR_HOST_DRAIN_DATABASE_URL` / `IMV2_ACTOR_HOST_OVERLOAD_DATABASE_URL`，各自 `_IS_DISPOSABLE=1` | CI 已 opt-in；本轮未执行 |
+| Host 排空与过载 | `V2RoomHostPostgresDrainTests` / `V2RoomHostPostgresOverloadDrainTests` | 分别 `IMV2_ACTOR_HOST_DRAIN_DATABASE_URL` / `IMV2_ACTOR_HOST_OVERLOAD_DATABASE_URL`，各自 `_IS_DISPOSABLE=1`；普通排空另需 `IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE=1` | 本轮普通排空 1 项、过载及双房间共享批次排空 2 项实际通过，见下方证据 |
 | 授权及配额进程 SIGKILL（仅 macOS 编译） | `PostgresV2RoomWriteStoreIntegrationTests` 中 `directAuthorizationProcessCrash`、`groupJoinQuotaKilledRecovery` | primary/secondary **不同**；`IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE=1`；子进程 stage 由测试设置 | 本轮 macOS 实际执行授权 8 个与配额 6 个 SIGKILL 参数场景，通过；Linux CI 不会执行 |
 | 本地媒体清理 SIGKILL（仅 macOS 编译） | `V2LocalMediaPurgeCrashTests` | 父测试无外部 opt-in；测试自行传 `IMV2_MEDIA_CRASH_*` 给子进程 | Linux CI 不会执行；本轮未执行 |
 
 本轮原生故障回归：`/tmp/imv2-scope-fault-tests.log`，退出码 0，测试编译 182.75 秒，执行 33.801 秒。运行器报告 6 个 suite、19 项测试；其中 18 项实际通过，1 项仅供子进程调用的授权 crash 入口在父进程按设计 skipped。父测试实际启动并验证了 8 个授权与 6 个配额 SIGKILL 参数场景，不能将这个辅助入口的跳过误读为崩溃场景未执行。单房间/双房间 COMMIT ACK-loss 各 1 项、G2 Host 恢复 3 项、作用域构造 4 项及选定 owner fence/receipt/forward 场景均通过。所有数据库由本轮脚本创建并清理：通用五库之外，ACK、shared ACK 与 G2 各使用一个独占空库并显式设置对应 opt-in。
+
+Host 排空补验使用独占本机 PostgreSQL：`~/.codex/virtual-actor-builds/server-decoupling-20260930-host-drain/tests.log` 的两项过载/共享批次测试实际通过；同轮普通排空因缺少共享 helper 的通用 disposable 开关提前返回，组合 `result.json` 已标记 `passed=false`，不计作普通排空证据。普通排空补齐开关后在 `server-decoupling-20260930-host-drain-r2/tests.log` 实际执行并通过，结果 `passed=true`、`executedPostgresTests=1`、`cleanupErrors=[]`。复跑的生产源码为 `22e05061`，工作树只新增防止该提前返回的测试守卫，并记录测试文件哈希。以上三项证明在途 fenced SQL 和共享批次排空时保留租约、拒绝新增工作并等待提交结束；不能替代启动后失败且节点排空未完成的进程级验证。
 
 单、双房间 ACK 丢失可分别这样执行；每次将 `OWNED_EMPTY_PG_URL` 换为不同的可丢弃空库：
 

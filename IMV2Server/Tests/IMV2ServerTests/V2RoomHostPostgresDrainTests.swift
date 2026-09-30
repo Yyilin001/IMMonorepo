@@ -16,6 +16,9 @@ struct V2RoomHostPostgresDrainTests {
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_HOST_DRAIN_DATABASE_IS_DISPOSABLE"] == "1"))
     func fencedTransactionOutlivesDrainDeadline() async throws {
         let url = try #require(ProcessInfo.processInfo.environment["IMV2_ACTOR_HOST_DRAIN_DATABASE_URL"])
+        // The shared schema helper also requires this switch. A Host-specific
+        // opt-in must fail visibly instead of returning before any SQL runs.
+        try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1")
         try await withUserEventDatabase(databaseURL: url) { database, sql, schema in
             let roomUUID = UUID()
             let room = RoomID(uuid: roomUUID)

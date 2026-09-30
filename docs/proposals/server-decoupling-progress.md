@@ -4,6 +4,7 @@
 
 ## 本轮收尾与验证（2026-09-30）
 
+- Host PostgreSQL 排空定向验证实际通过三项：普通排空 1 项、过载及双房间共享批次排空 2 项。证据分别为 `~/.codex/virtual-actor-builds/server-decoupling-20260930-host-drain-r2/` 与 `server-decoupling-20260930-host-drain/`；运行后数据库均清理。首轮普通排空测试因共享 helper 的通用 disposable 开关缺失而提前返回，不计为通过；测试现要求该开关，补齐后重新执行 SQL 并通过。生产源码为 `22e05061`，复跑仅增加此测试守卫。启动失败且节点未排空的进程级注入仍未执行。
 - 混合群批次的提交后额度结算与保序结果映射移入 `V2RoomWriteCommitEffects.finalizeHybridBatch`，Store 继续拥有 SQL 事务、回滚/结果不明分类及失败时额度退役。保留 SQL 已提交后先结算持久预扣令牌、再转换响应的顺序；共用结果数量、下标及时间转换检查。macOS 产品和测试目标编译通过（`/tmp/imv2-hybrid-effects-build-20260930.log`）；跨房间和同一热房间的两项真实 PostgreSQL 原子批次测试通过、无跳过（`/tmp/imv2-hybrid-effects-tests-20260930.log`），本轮独占数据库已清理。
 - 删除只服务历史调用方式的资源导入构造器、Messaging 中被忽略的参数和 Gateway 的 `Data` 提交重载；生产接线及测试改用现行接口。RoomWrite 的三个事务闭包直接调用标量接受路径，移除仅作转发的 Store 包装。HTTP 冒烟脚本只接受现行资源下载 header 数组结构。
 - macOS/Swift 6.4 下 `swift build --build-tests --disable-automatic-resolution --jobs 4 --package-path IMV2Server` 通过，产品和测试目标均编译成功（日志 `/tmp/imv2-no-legacy-native-build-20260930-r2.log`）。边界检查、Actor 台账与差异空白检查通过。
