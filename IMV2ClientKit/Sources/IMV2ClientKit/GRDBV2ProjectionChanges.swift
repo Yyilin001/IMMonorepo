@@ -20,6 +20,8 @@ extension GRDBV2LocalSyncStore {
 final class V2ProjectionTransactionObserver: TransactionObserver {
     private let hub: V2ProjectionChangeHub
     private var pending = V2ProjectionChange.none
+    private var roomRows: [String: Set<Int64>] = [:]
+    private var hasUnscopedRoomChange = false
     private var willCommit: ContinuousClock.Instant?
     /// 以变更中枢构造观察者。
     ///
@@ -37,7 +39,19 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
     ///
     /// - Parameter event: 数据库变更事件。
     func databaseDidChange(with event: DatabaseEvent) {
-        pending = pending.merging(Self.change(table: event.tableName, kind: event.kind))
+        let change = Self.change(table: event.tableName, kind: event.kind)
+        pending = pending.merging(change)
+        if change.scopes.contains(.conversationTimeline), Self.roomScopedTables.contains(event.tableName) {
+            if event.kind == .delete { hasUnscopedRoomChange = true }
+            else {
+                if !hasUnscopedRoomChange {
+                    roomRows[event.tableName, default: []].insert(event.rowID)
+                    if roomRows.values.reduce(0, { $0 + $1.count }) > 256 { hasUnscopedRoomChange = true; roomRows.removeAll() }
+                }
+            }
+        } else if change.scopes.contains(.conversationDetails) || change.scopes.contains(.conversationMetadata) {
+            hasUnscopedRoomChange = true
+        }
     }
     func databaseWillCommit() throws {
         willCommit = .now
@@ -47,8 +61,23 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
     /// - Parameter db: 已提交的数据库。
     func databaseDidCommit(_ db: Database) {
         let didCommit = ContinuousClock.now
-        let committed = pending
+        var committed = pending
+        if !roomRows.isEmpty, !hasUnscopedRoomChange {
+            var rooms = Set<String>()
+            for (table, rowIDs) in roomRows {
+                let placeholders = Array(repeating: "?", count: rowIDs.count).joined(separator: ",")
+                guard let roomIDs = try? String.fetchAll(db, sql: "SELECT DISTINCT room_id FROM \(table) WHERE rowid IN (\(placeholders))", arguments: StatementArguments(rowIDs.sorted())) else {
+                    hasUnscopedRoomChange = true; break
+                }
+                rooms.formUnion(roomIDs)
+                if rooms.count > 32 { hasUnscopedRoomChange = true; break }
+            }
+            if !hasUnscopedRoomChange { committed = .init(scopes: committed.scopes, requiresImmediateRefresh: committed.requiresImmediateRefresh, roomIDs: rooms) }
+        }
         pending = .none
+        roomRows.removeAll(keepingCapacity: true)
+        let unscoped = hasUnscopedRoomChange
+        hasUnscopedRoomChange = false
         let sink = hub.diagnosticSink()
         if !committed.scopes.isEmpty, let willCommit, let sink {
             let duration = willCommit.duration(to: didCommit).components
@@ -60,12 +89,15 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
         if committed.scopes.contains(.conversations), let sink {
             stamp = .init(committedAt: didCommit, diagnostics: sink)
         } else { stamp = nil }
-        hub.publish(.init(scopes: committed.scopes, requiresImmediateRefresh: committed.requiresImmediateRefresh, conversationCommit: stamp))
+        hub.publish(.init(scopes: committed.scopes, requiresImmediateRefresh: committed.requiresImmediateRefresh, conversationCommit: stamp,
+            roomIDs: unscoped ? nil : committed.roomIDs))
     }
     /// 事务回滚后丢弃累积的变更。
     ///
     /// - Parameter db: 已回滚的数据库。
-    func databaseDidRollback(_ db: Database) { pending = .none; willCommit = nil }
+    func databaseDidRollback(_ db: Database) { pending = .none; roomRows.removeAll(); hasUnscopedRoomChange = false; willCommit = nil }
+
+    private static let roomScopedTables: Set<String> = ["v2_message_projections", "v2_message_reactions", "v2_direct_read_receipt_projections", "v2_room_read_watermarks"]
 
     /// 把单张表的变更映射到可见作用域。
     ///
@@ -101,18 +133,20 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
         // message. Their source projection separately raises urgent changes.
         case "v2_conversation_list_entries", "v2_conversation_summaries":
             return .init(scopes: .conversations, requiresImmediateRefresh: false)
-        case "v2_message_projections", "v2_room_profile_projections", "v2_direct_room_profile_projections", "v2_direct_room_identities":
-            return .init(scopes: conversation, requiresImmediateRefresh: kind != .insert)
+        case "v2_message_projections":
+            return .init(scopes: [.conversations, .conversationTimeline], requiresImmediateRefresh: kind != .insert)
+        case "v2_room_profile_projections", "v2_direct_room_profile_projections", "v2_direct_room_identities":
+            return .init(scopes: [.conversations, .conversationDetails], requiresImmediateRefresh: kind != .insert)
         case "v2_profile_views":
             return .init(scopes: [.contacts, .conversations, .conversationDetails, .presentations], requiresImmediateRefresh: kind != .insert)
         case "v2_role_policy_recovery_requests":
-            return .init(scopes: .conversationDetails, requiresImmediateRefresh: false)
+            return .init(scopes: .conversationMetadata, requiresImmediateRefresh: false)
         case "v2_message_reactions", "v2_direct_read_receipt_projections", "v2_room_read_watermarks", "v2_message_reaction_intents", "v2_read_receipt_intents", "v2_read_receipt_operations":
-            return .init(scopes: .conversationDetails, requiresImmediateRefresh: false)
+            return .init(scopes: .conversationTimeline, requiresImmediateRefresh: false)
         case "v2_read_receipt_archives":
-            return .init(scopes: conversation, requiresImmediateRefresh: false)
+            return .init(scopes: [.conversations, .conversationTimeline], requiresImmediateRefresh: false)
         case "v2_send_intents", "v2_message_send_operations", "v2_forward_plan_operations":
-            return .init(scopes: conversation, requiresImmediateRefresh: false)
+            return .init(scopes: [.conversations, .conversationTimeline], requiresImmediateRefresh: false)
         case "v2_group_avatar_effects", "v2_group_nickname_effects": return .none
         case "v2_group_nickname_invalidations":
             return .init(scopes: .groupNicknames, requiresImmediateRefresh: true)
@@ -124,14 +158,15 @@ final class V2ProjectionTransactionObserver: TransactionObserver {
             return .init(scopes: .conversationDetails, requiresImmediateRefresh: true)
         case "v2_room_event_authorizations", "v2_group_member_roles", "v2_room_control_projections", "v2_group_avatar_invalidations":
             return .init(scopes: [.conversations, .conversationDetails, .presentations], requiresImmediateRefresh: true)
-        case "v2_conversation_states", "v2_message_favorites",
-             "v2_group_announcements", "v2_group_pinned_messages",
-             "v2_message_tombstones", "v2_moderation_projections",
+        case "v2_message_favorites", "v2_group_pinned_messages", "v2_timeline_activity_projections", "v2_message_mutation_operations":
+            return .init(scopes: [.conversations, .conversationTimeline], requiresImmediateRefresh: true)
+        case "v2_message_tombstones", "v2_moderation_projections", "v2_message_moderation_operations":
+            return .init(scopes: [.conversations, .conversationDetails], requiresImmediateRefresh: true)
+        case "v2_conversation_states", "v2_group_announcements",
              "v2_group_permission_revisions", "v2_group_role_policies", "v2_group_role_policy_baselines",
-             "v2_direct_sending_capabilities", "v2_timeline_activity_projections", "v2_message_mutation_operations",
-             "v2_message_moderation_operations", "v2_member_administration_intents",
+             "v2_direct_sending_capabilities", "v2_member_administration_intents",
              "v2_membership_intents", "v2_group_capability_intents":
-            return .init(scopes: conversation, requiresImmediateRefresh: true)
+            return .init(scopes: [.conversations, .conversationMetadata], requiresImmediateRefresh: true)
         case "v2_relationship_projections", "v2_social_operations", "v2_profile_invalidations":
             return .init(scopes: [.contacts, .conversations, .conversationDetails, .presentations], requiresImmediateRefresh: true)
         case "v2_account_preference_operations", "v2_read_receipt_preference", "v2_stranger_message_preference", "v2_user_add_preference":

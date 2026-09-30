@@ -8,22 +8,29 @@ import IMV2ClientKit
 /// 因而不会出现重叠读取、游离的刷新任务，也不会堆积无界的已取消任务。
 @MainActor
 final class V2ProjectionRefreshObserver {
-    private let refresh: @MainActor @Sendable () async -> Void
+    private let refresh: @MainActor @Sendable (V2ProjectionChangeNotifier.Request) async -> Void
     private var pending = false
-    private var pendingConversationCommit: V2ConversationCommitMeasurement?
+    private var pendingRequest: V2ProjectionChangeNotifier.Request?
+    private var activeRequest: V2ProjectionChangeNotifier.Request?
     private var active: Task<Void, Never>?
     private var waiter: (id: UUID, continuation: CheckedContinuation<Bool, Never>)?
 
     /// 以刷新闭包构造观察器。
     ///
     /// - Parameter refresh: 实际执行的刷新闭包。
-    init(refresh: @escaping @MainActor @Sendable () async -> Void) { self.refresh = refresh }
+    init(refresh: @escaping @MainActor @Sendable (V2ProjectionChangeNotifier.Request) async -> Void) { self.refresh = refresh }
+    convenience init(refresh: @escaping @MainActor @Sendable () async -> Void) { self.init { _ in await refresh() } }
 
     /// 以一次性观察器运行指定订阅。
     ///
     /// - Parameters:
     ///   - updates: 投影变更订阅。
     ///   - refresh: 实际执行的刷新闭包。
+    static func run(_ updates: V2ProjectionChangeNotifier.Subscription,
+                    refresh: @escaping @MainActor @Sendable (V2ProjectionChangeNotifier.Request) async -> Void) async {
+        await V2ProjectionRefreshObserver(refresh: refresh).run(updates)
+    }
+
     static func run(_ updates: V2ProjectionChangeNotifier.Subscription,
                     refresh: @escaping @MainActor @Sendable () async -> Void) async {
         await V2ProjectionRefreshObserver(refresh: refresh).run(updates)
@@ -60,7 +67,16 @@ final class V2ProjectionRefreshObserver {
     func submit(_ request: V2ProjectionChangeNotifier.Request) {
         guard !Task.isCancelled else { return }
         pending = true
-        pendingConversationCommit = V2ConversationCommitMeasurement.earliest(pendingConversationCommit, request.conversationCommit)
+        var next = request
+        if request.requiresImmediateRefresh, let activeRequest {
+            next = Self.merging(activeRequest, request)
+        }
+        if let old = pendingRequest {
+            pendingRequest = .init(generation: request.generation,
+                requiresImmediateRefresh: old.requiresImmediateRefresh || next.requiresImmediateRefresh,
+                conversationCommit: V2ConversationCommitMeasurement.earliest(old.conversationCommit, next.conversationCommit),
+                scopes: old.scopes.union(next.scopes), roomIDs: Self.mergeRoomIDs(old.roomIDs, next.roomIDs))
+        } else { pendingRequest = next }
         if request.requiresImmediateRefresh { active?.cancel() }
         if let waiter {
             self.waiter = nil
@@ -77,16 +93,30 @@ final class V2ProjectionRefreshObserver {
         while !Task.isCancelled, await takePending() {
             guard !Task.isCancelled else { return }
             let refresh = refresh
-            let conversationCommit = pendingConversationCommit
-            pendingConversationCommit = nil
+            let request = pendingRequest ?? .init(generation: 0, requiresImmediateRefresh: false)
+            pendingRequest = nil
+            activeRequest = request
             let task = Task { @MainActor in
                 guard !Task.isCancelled else { return }
-                await V2ProjectionVisibilityScope.$conversationCommit.withValue(conversationCommit) { await refresh() }
+                await V2ProjectionVisibilityScope.$conversationCommit.withValue(request.conversationCommit) { await refresh(request) }
             }
             active = task
             await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
             active = nil
+            activeRequest = nil
         }
+    }
+
+    private static func mergeRoomIDs(_ lhs: Set<String>?, _ rhs: Set<String>?) -> Set<String>? {
+        guard let lhs, let rhs else { return nil }
+        let merged = lhs.union(rhs)
+        return merged.count <= 32 ? merged : nil
+    }
+
+    private static func merging(_ lhs: V2ProjectionChangeNotifier.Request, _ rhs: V2ProjectionChangeNotifier.Request) -> V2ProjectionChangeNotifier.Request {
+        .init(generation: rhs.generation, requiresImmediateRefresh: lhs.requiresImmediateRefresh || rhs.requiresImmediateRefresh,
+              conversationCommit: V2ConversationCommitMeasurement.earliest(lhs.conversationCommit, rhs.conversationCommit),
+              scopes: lhs.scopes.union(rhs.scopes), roomIDs: mergeRoomIDs(lhs.roomIDs, rhs.roomIDs))
     }
 
     /// 等待并消费一次待处理标记。

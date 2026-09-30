@@ -356,77 +356,93 @@ final class V2ConversationDetailStore {
         return .init(searcher: messageSearcher, scope: .room(roomID), actorUserID: try? .init(userID))
     }
 
-    func refresh() async {
+    func refresh(scopes: V2ProjectionScopes = .all) async {
         if timelineLocationID != nil { refreshAfterTimelineLocation = true; return }
         refreshGeneration &+= 1
         let generation = refreshGeneration
-        if timeline.isEmpty { state = .loading }
+        let refreshTimeline = scopes.contains(.conversationDetails) || scopes.contains(.conversationTimeline)
+        let refreshMetadata = scopes.contains(.conversationDetails) || scopes.contains(.conversationMetadata)
+        if refreshTimeline, timeline.isEmpty { state = .loading }
         do {
             // Preserve only the window the user explicitly loaded. The normal
             // path remains a small page, while edits/withdrawals inside the
             // visible window are refreshed from one SQLite snapshot.
-            let page = try await dataSource.timelinePage(
-                in: roomID,
-                for: userID,
-                before: newerTimelineBoundary,
-                limit: min(
-                    Self.maximumRetainedTimelineItems,
-                    max(Self.initialTimelinePageSize, timeline.count)
+            let page: V2ConversationTimelinePage?
+            if refreshTimeline {
+                page = try await dataSource.timelinePage(
+                    in: roomID,
+                    for: userID,
+                    before: newerTimelineBoundary,
+                    limit: min(
+                        Self.maximumRetainedTimelineItems,
+                        max(Self.initialTimelinePageSize, timeline.count)
+                    )
                 )
-            )
+            } else { page = nil }
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
-            let refreshedHistoryIncomplete = (try? await dataSource.roomLogHistoryIsIncomplete(roomID: roomID)) ?? isHistoryIncomplete
+            let refreshedHistoryIncomplete = refreshTimeline ? ((try? await dataSource.roomLogHistoryIsIncomplete(roomID: roomID)) ?? isHistoryIncomplete) : isHistoryIncomplete
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
-            if let titles = dataSource as? any V2ConversationTitleReading,
+            if refreshMetadata, let titles = dataSource as? any V2ConversationTitleReading,
                let updatedTitle = try await titles.currentTitle(in: RoomID(roomID)) {
                 try Task.checkCancellation()
                 guard generation == refreshGeneration else { return }
                 title = updatedTitle
             }
-            let refreshedTimeline = page.items
-            let refreshedMessages = Self.messages(in: refreshedTimeline)
-            let refreshedCanSend: Bool? = if !isGroupConversation, let sendingCapabilityReader {
+            let refreshedTimeline = page?.items ?? timeline
+            let refreshedMessages = refreshTimeline ? Self.messages(in: refreshedTimeline) : messages
+            let refreshedCanSend: Bool? = if refreshMetadata, !isGroupConversation, let sendingCapabilityReader {
                 try await sendingCapabilityReader.directSendingCapability(in: roomID)
             } else {
-                nil
+                canSendInDirectConversation
             }
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
-            let refreshedAnnouncement: V2ClientGroupAnnouncement? = if isGroupConversation, let groupAnnouncementReader {
+            let refreshedAnnouncement: V2ClientGroupAnnouncement? = if refreshMetadata, isGroupConversation, let groupAnnouncementReader {
                 try await groupAnnouncementReader.groupAnnouncement(in: roomID)
             } else {
-                nil
+                groupAnnouncement
             }
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
-            rolePolicyReadGeneration &+= 1
+            if refreshMetadata { rolePolicyReadGeneration &+= 1 }
             let policyReadGeneration = rolePolicyReadGeneration
-            let refreshedPolicies: V2ClientGroupRolePolicyState = if isGroupConversation, let groupRolePolicyReader {
+            let refreshedPolicies: V2ClientGroupRolePolicyState? = if refreshMetadata, isGroupConversation, let groupRolePolicyReader {
                 try await groupRolePolicyReader.groupRolePolicyState(in: roomID)
-            } else { .init(policies: [], recovery: .unavailable) }
+            } else { nil }
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
-            await discardMediaRevokedByRedaction(previous: messages, refreshed: refreshedMessages)
+            if refreshTimeline { await discardMediaRevokedByRedaction(previous: messages, refreshed: refreshedMessages) }
             try Task.checkCancellation()
             guard generation == refreshGeneration else { return }
-            messages = refreshedMessages
-            timeline = refreshedTimeline
-            timelineRevision &+= 1
-            canLoadOlderTimeline = page.olderCursor != nil
+            let timelineChanged = refreshTimeline && refreshedTimeline != timeline
+            if refreshTimeline {
+                if timelineChanged {
+                    messages = refreshedMessages
+                    timeline = refreshedTimeline
+                    timelineRevision &+= 1
+                }
+                canLoadOlderTimeline = page?.olderCursor != nil
+            }
             // 标记只增不减：一旦确认缺过历史，就不因一次读失败或旧快照而"变完整"。
             isHistoryIncomplete = isHistoryIncomplete || refreshedHistoryIncomplete
             isBrowsingHistoricalTimeline = newerTimelineBoundary != nil
-            canSendInDirectConversation = refreshedCanSend
-            groupAnnouncement = refreshedAnnouncement
-            if policyReadGeneration == rolePolicyReadGeneration { updateGroupRolePolicyState(refreshedPolicies) }
-            let visibleMediaIDs = Set(refreshedMessages.lazy
-                .filter { !$0.isWithdrawn }
-                .flatMap(\.media)
-                .map(\.mediaID))
-            mediaDownloadStates = mediaDownloadStates.filter { visibleMediaIDs.contains($0.key) }
+            if refreshMetadata {
+                canSendInDirectConversation = refreshedCanSend
+                groupAnnouncement = refreshedAnnouncement
+                if policyReadGeneration == rolePolicyReadGeneration, let refreshedPolicies { updateGroupRolePolicyState(refreshedPolicies) }
+            }
+            if refreshTimeline {
+                let visibleMediaIDs = Set(refreshedMessages.lazy
+                    .filter { !$0.isWithdrawn }
+                    .flatMap(\.media)
+                    .map(\.mediaID))
+                mediaDownloadStates = mediaDownloadStates.filter { visibleMediaIDs.contains($0.key) }
+            }
             state = .loaded
+            // The applied room cursor can advance for invisible or metadata-only
+            // events even when the rendered timeline is unchanged.
             await advanceReadLineWhenAtLatestEnd()
         } catch is CancellationError {
             return
@@ -578,8 +594,10 @@ final class V2ConversationDetailStore {
             await refresh()
             return
         }
-        await V2ProjectionRefreshObserver.run(await projectionChangeNotifier.updates(scopes: .conversationDetails)) { [self] in
-            await refresh()
+        await V2ProjectionRefreshObserver.run(await projectionChangeNotifier.updates(
+            scopes: [.conversationDetails, .conversationTimeline, .conversationMetadata], roomID: roomID
+        )) { [self] request in
+            await refresh(scopes: request.scopes)
         }
     }
 

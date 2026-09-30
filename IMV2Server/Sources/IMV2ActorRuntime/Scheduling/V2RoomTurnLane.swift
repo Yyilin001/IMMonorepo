@@ -5,12 +5,14 @@ import IMV2ActorContracts
 /// 其余能力和预留都是屏障。处理器 await 期间不放入第二个轮次。
 public enum V2RoomTurnSchedulingClass: Equatable, Sendable {
     case send
+    case sendOperation
     case profileVisibility(targetCount: Int)
     case barrier
 }
 
 public extension V2RoomRequest {
     var turnSchedulingClass: V2RoomTurnSchedulingClass {
+        if case .messaging(.sendOperation(_)) = self { return .sendOperation }
         if canShareSendTurn { return .send }
         if let count = profileVisibilityTargetCount { return .profileVisibility(targetCount: count) }
         return .barrier
@@ -296,9 +298,9 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             let headClass = schedulingClass(head)
             var count = 1
             var bytes = head.permit.byteCount
-            if headClass == .send {
+            if headClass == .send || headClass == .sendOperation {
                 for entry in queue.dropFirst() {
-                    guard schedulingClass(entry) == .send,
+                    guard schedulingClass(entry) == headClass,
                           entry.deadline > clock.now,
                           count < configuration.maximumCommandsPerTurn,
                           entry.permit.byteCount <= configuration.maximumBytesPerTurn - bytes

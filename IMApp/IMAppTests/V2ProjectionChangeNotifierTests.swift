@@ -71,6 +71,26 @@ struct V2ProjectionChangeNotifierTests {
         await notifier.finish()
     }
 
+    @Test("room scopes filter detail subscribers and merge safely into global urgent changes")
+    func roomScopedRequests() async throws {
+        let clock = ProjectionNotificationClock()
+        let notifier = V2ProjectionChangeNotifier(sleep: { await clock.sleep($0) })
+        var roomA = await notifier.updates(scopes: .conversationTimeline, roomID: "room-a").makeAsyncIterator()
+        var roomB = await notifier.updates(scopes: .conversationTimeline, roomID: "room-b").makeAsyncIterator()
+        var global = await notifier.updates(scopes: .conversationTimeline).makeAsyncIterator()
+        _ = await roomA.next(); _ = await roomB.next(); _ = await global.next()
+        await notifier.publish(.init(scopes: .conversationTimeline, requiresImmediateRefresh: false, roomIDs: ["room-a"]))
+        await notifier.publish(.init(scopes: .conversationTimeline, requiresImmediateRefresh: true, roomIDs: ["room-b"]))
+        #expect((await roomA.next())?.roomIDs == ["room-a", "room-b"])
+        #expect((await roomB.next())?.requiresImmediateRefresh == true)
+        #expect((await global.next())?.requiresImmediateRefresh == true)
+
+        await notifier.publish(.init(scopes: .conversationTimeline, requiresImmediateRefresh: true))
+        #expect((await roomA.next())?.roomIDs == nil)
+        #expect((await roomB.next())?.roomIDs == nil)
+        await notifier.finish()
+    }
+
     @Test("real committed acceptance is coalesced but withdrawal wakes immediately")
     func productionSQLiteNotifications() async throws {
         let local = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory.appending(path: "im-notification-integration-\(UUID().uuidString).sqlite"), installationBinding: .init(value: UUID()))

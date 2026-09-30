@@ -56,6 +56,31 @@ public struct V2RoomMessagingExecutor: Sendable {
         }
     }
 
+    public func executeSendOperationBatch(_ commands: [V2MessageSendOperationCommand]) async throws -> [V2RoomMessagingResult] {
+        guard !commands.isEmpty, commands.allSatisfy({ $0.command.roomID == token.roomID }) else {
+            throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        }
+        var output = Array<V2RoomMessagingResult?>(repeating: nil, count: commands.count)
+        let eligible = commands.enumerated().compactMap { index, command -> (Int, V2MessageSendOperationCommand)? in
+            guard command.command.text.utf8.count <= limits.maxUTF8Bytes else {
+                output[index] = .failure(.sendValidation(.invalidTextLength))
+                return nil
+            }
+            return (index, command)
+        }
+        guard !eligible.isEmpty else { return output.compactMap { $0 } }
+        do {
+            let results = try await persistence.executeSendOperationBatch(eligible.map(\.1))
+            guard results.count == eligible.count else { throw V2RoomCallFailure.outcomeUnknown }
+            for ((index, _), result) in zip(eligible, results) { output[index] = result }
+        } catch {
+            if let failure = V2ActorMessagingErrorWire(domainError: error) {
+                for (index, _) in eligible { output[index] = .failure(failure) }
+            } else { throw error }
+        }
+        return try output.map { guard let result = $0 else { throw V2RoomCallFailure.outcomeUnknown }; return result }
+    }
+
     public func executePreparedSend(_ value: V2PreparedActorSend) async throws -> V2RoomMessagingResult {
         guard value.token == token, value.request.command.roomID == token.roomID else {
             throw V2RoomCallFailure.notAccepted(.invalidRequest)

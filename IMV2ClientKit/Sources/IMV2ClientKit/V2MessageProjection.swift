@@ -229,6 +229,8 @@ public struct V2ClientConversationTimelinePage: Equatable, Sendable {
     public let activities: [V2ClientTimelineActivityProjection]
     /// 本页涉及的表情记录。
     public let reactions: [V2ClientMessageReaction]
+    /// 展示查询的聚合结果；nil 表示调用者选择了原始表情记录。
+    public let reactionSummaries: [V2ClientMessageReactionSummary]?
     /// 本页涉及的置顶消息标识。
     public let pinnedMessageIDs: Set<MessageID>
     /// 本页涉及的收藏消息标识。
@@ -255,11 +257,13 @@ public struct V2ClientConversationTimelinePage: Equatable, Sendable {
         pinnedMessageIDs: Set<MessageID>,
         favoritedMessageIDs: Set<MessageID>,
         directReadReceipt: V2DirectReadReceiptProjection?,
-        olderCursor: V2ClientTimelineCursor?
+        olderCursor: V2ClientTimelineCursor?,
+        reactionSummaries: [V2ClientMessageReactionSummary]? = nil
     ) {
         self.messages = messages
         self.activities = activities
         self.reactions = reactions
+        self.reactionSummaries = reactionSummaries
         self.pinnedMessageIDs = pinnedMessageIDs
         self.favoritedMessageIDs = favoritedMessageIDs
         self.directReadReceipt = directReadReceipt
@@ -433,5 +437,20 @@ struct V2ClientMessageTombstone: Equatable, Sendable {
         guard record.projectionKind == "message", (payload.eventType == "message.withdrawn" || payload.eventType == "message.redacted"), payload.messageRevision > 1 else { throw V2ClientProjectionError.invalidMessagePayload }
         do { self.init(sourceEventID: record.sourceEventID, roomID: try .init(payload.roomID), messageID: try .init(payload.messageID), messageRevision: payload.messageRevision) }
         catch { throw V2ClientProjectionError.invalidMessagePayload }
+    }
+}
+
+/// A presentation needs counts and own participation, rather than all actor identities.
+public struct V2ClientMessageReactionSummary: Equatable, Sendable {
+    public let messageID: MessageID
+    public let reaction: String
+    public let count: Int
+    public let includesCurrentUser: Bool
+
+    public init(messageID: MessageID, reaction: String, count: Int, includesCurrentUser: Bool) {
+        self.messageID = messageID
+        self.reaction = reaction
+        self.count = count
+        self.includesCurrentUser = includesCurrentUser
     }
 }

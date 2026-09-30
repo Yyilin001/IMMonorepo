@@ -36,6 +36,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try first.fingerprint.version==1 && first.command.fingerprint.version==3)
             guard case .receipt(let original)=try await store.send(first,token:lease.token,capacityProfile:profile,identifiers:.init(messageID:.init(uuid:UUID()),eventID:.init(uuid:UUID()))) else { throw CancellationError() }
             guard case .accepted(let accepted)=original.outcome else { throw CancellationError() }
+            let batch = try [command("Batch one"), command("Batch two")]
+            let batchResults = try await store.sendBatch(batch, token: lease.token, capacityProfile: profile,
+                identifiers: .init(), now: { now })
+            #expect(batchResults.count == 2)
+            for (command, result) in zip(batch, batchResults) {
+                guard case .sendOperation(.receipt(let receipt)) = result else { throw CancellationError() }
+                #expect(receipt.identity == (try command.identity))
+                guard case .accepted = receipt.outcome else { throw CancellationError() }
+            }
+            #expect(try await store.sendBatch(batch, token: lease.token, capacityProfile: profile,
+                identifiers: .init(), now: { now }) == batchResults)
             // The protobuf Gateway command and JSON HTTP command must reach the
             // same durable operation key and return the original receipt.
             let gatewayCommand = try V2MessageSendOperationWireCodec.decode(
@@ -91,6 +102,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             await #expect(throws:(any Error).self) { _ = try await store.send(rolledBack,token:lease.token,capacityProfile:profile,identifiers:.init(messageID:.init(uuid:UUID()),eventID:.init(uuid:UUID()))) }
             let countRow=try await sql.raw("SELECT count(*) AS count FROM im_v2.message_send_completions WHERE client_message_id=\(bind:rolledBack.command.clientMessageID.uuidValue!)").first(decoding:SendRollbackCount.self)
             #expect(countRow?.count==0)
+            let batchRollback = try [command("Batch rollback one"), command("Batch rollback two")]
+            await #expect(throws: (any Error).self) {
+                _ = try await store.sendBatch(batchRollback, token: lease.token, capacityProfile: profile,
+                    identifiers: .init(), now: { now })
+            }
+            for item in batchRollback {
+                let batchCount = try await sql.raw("SELECT count(*) AS count FROM im_v2.message_send_operation_receipts WHERE operation_id=\(bind:item.command.clientMessageID.uuidValue!)").first(decoding: SendRollbackCount.self)
+                #expect(batchCount?.count == 0)
+                let completionCount = try await sql.raw("SELECT count(*) AS count FROM im_v2.message_send_completions WHERE client_message_id=\(bind:item.command.clientMessageID.uuidValue!)").first(decoding: SendRollbackCount.self)
+                #expect(completionCount?.count == 0)
+            }
             try await sql.raw("DROP TRIGGER fixture_receipt_failure ON im_v2.message_send_operation_receipts").run()
             try await sql.raw("DROP FUNCTION im_v2.fixture_receipt_failure()").run()
             await #expect(throws:(any Error).self) { try await sql.raw("DELETE FROM im_v2.message_send_operation_receipts WHERE actor_user_id=\(bind:senderUUID)").run() }

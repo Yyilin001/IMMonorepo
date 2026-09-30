@@ -189,36 +189,14 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
     private func performPending(in roomID: RoomID,page:Int) async throws -> PendingPage {
         try requireOpen()
         var result: [Pending] = []
-        let preparing:[V2SendIntent]
-        if page == 0 { preparing=try await store.preparingSendIntents(in:roomID,limit:200) } else { preparing=[] }
-        for intent in preparing {
-            try requireOpen()
-            var jobs: [V2ResourceTransferJob] = []
-            var imported: [V2ResourceImportJob] = []
-            for id in intent.attachmentJobIDs {
-                try requireOpen()
-                if let job = try await store.resourceTransfer(id: id) { jobs.append(job) }
-                else if let job = try await store.resourceImport(id: id) { imported.append(job) }
-            }
-            let handoffPaused = try await store.preparedSendRequiresAttention(intent.id)
-            let paused = handoffPaused || jobs.contains { $0.stage == .paused } || imported.contains { $0.attempts >= 5 }
-            let expired = jobs.contains { $0.stage == .expired || ($0.session?.bindableUntil.map { $0 <= Date() } ?? false) }
-            let rejected = jobs.contains { $0.stage == .rejected } || imported.contains { $0.status?.state == .failed }
-            let status = recoveryError ?? (expired ? "资源已过期，等待确认终态" : rejected ? "附件未通过安全处理" : paused ? "上传已暂停，可重试" : jobs.contains { $0.stage == .processing } ? "正在安全处理" : "正在准备附件")
-            result.append(.init(id: intent.id, text: intent.text, completed: jobs.filter { $0.stage == .ready }.count + imported.filter { $0.status?.state == .ready }.count, total: intent.attachmentJobIDs.count, status: status, canRetry: paused && !expired && !rejected, retryTitle:"重试准备", canCancel: true))
+        let snapshot = try await store.pendingResourceSendSnapshot(in: roomID, page: page)
+        for intent in snapshot.preparing {
+            let status = recoveryError ?? (intent.isExpired ? "资源已过期，等待确认终态" : intent.isRejected ? "附件未通过安全处理" : intent.isPaused ? "上传已暂停，可重试" : intent.isProcessing ? "正在安全处理" : "正在准备附件")
+            result.append(.init(id: intent.id, text: intent.text, completed: intent.completed, total: intent.total,
+                                status: status, canRetry: intent.isPaused && !intent.isExpired && !intent.isRejected,
+                                retryTitle: "重试准备", canCancel: true))
         }
-        try requireOpen()
-        let submittedPage=try await store.submittedSendIntents(in:roomID,limit:201,offset:page*200)
-        if !preparing.isEmpty {
-            // Attachment lookups above suspend. A draft may have handed off (and
-            // even converged its projection) before this final page is assembled.
-            // Recheck the bounded current preparation set, then let a submitted
-            // row for the same intent take its place in this result.
-            let stillPreparing=Set(try await store.preparingSendIntents(in:roomID,limit:200).map(\.id))
-            let submittedIDs=Set(submittedPage.prefix(200).map(\.id))
-            result.removeAll { !stillPreparing.contains($0.id) || submittedIDs.contains($0.id) }
-        }
-        for submitted in submittedPage.prefix(200) {
+        for submitted in snapshot.submitted {
             let status = switch submitted.status {
             case .pending: "正在发送，等待服务器确认"
             case .acceptedAwaitingProjection: "服务器已受理，等待消息同步"
@@ -231,7 +209,7 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
             result.append(.init(id: submitted.id,text: submitted.text,completed: 0,total: 0,status: status,
                 canRetry: submitted.status == .closed || submitted.status == .rejected || submitted.status == .expiredUnsubmitted || submitted.status == .needsAttention,retryTitle:submitted.status == .needsAttention ? "继续确认" : "重新发送",canCancel: submitted.status == .closed || submitted.status == .rejected || submitted.status == .expiredUnsubmitted))
         }
-        return .init(items:result,hasNext:submittedPage.count>200)
+        return .init(items:result,hasNext:snapshot.hasNext)
     }
     func retry(intentID: UUID) async throws {
         try requireOpen()

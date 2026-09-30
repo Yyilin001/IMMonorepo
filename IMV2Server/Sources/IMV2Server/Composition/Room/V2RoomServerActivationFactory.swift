@@ -142,7 +142,10 @@ private actor V2RoomServerActivation {
         let profileCounts = turn.items.compactMap { $0.request.profileVisibilityTargetCount }
         let isProfileTurn = profileCounts.count == turn.items.count
             && profileCounts.reduce(0, +) <= 100
-        guard turn.items.count == 1 || isProfileTurn || turn.items.allSatisfy({ $0.request.canShareSendTurn }) else {
+        let isOperationSendTurn = turn.items.allSatisfy({
+            if case .messaging(.sendOperation(_)) = $0.request { return true }; return false
+        })
+        guard turn.items.count == 1 || isProfileTurn || isOperationSendTurn || turn.items.allSatisfy({ $0.request.canShareSendTurn }) else {
             return .rolledBack(.invalidRequest)
         }
         guard turn.items.allSatisfy({ ContinuousClock.now < $0.deadline }) else {
@@ -162,6 +165,19 @@ private actor V2RoomServerActivation {
                     }
                     guard results.count == turn.items.count else { return .outcomeUnknown }
                     return .committed(results.map(V2RoomResponse.mediaAuthorization))
+                }
+                if isOperationSendTurn {
+                    let commands = turn.items.compactMap { item -> V2MessageSendOperationCommand? in
+                        if case .messaging(.sendOperation(let command)) = item.request { return command }
+                        return nil
+                    }
+                    guard commands.count == turn.items.count else { return .rolledBack(.invalidRequest) }
+                    let results = try await v2WithAdmittedRoomDatabaseWork(resources.databaseWorkAdmission,
+                        workClass: .foregroundWrite, callerDeadline: callDeadline) {
+                        try await handlers.messages.executeSendOperationBatch(commands)
+                    }
+                    guard results.count == turn.items.count else { return .outcomeUnknown }
+                    return .committed(results.map(V2RoomResponse.messaging))
                 }
                 let item = turn.items[0]
                 let response: V2RoomResponse

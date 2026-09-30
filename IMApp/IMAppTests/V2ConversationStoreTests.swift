@@ -8,6 +8,25 @@ import UIKit
 
 @MainActor
 struct V2ConversationStoreTests {
+    @Test func identicalTimelineRefreshDoesNotAdvanceRevisionAndMetadataRefreshSkipsTimelineRead() async {
+        let message = V2ConversationMessageItem(id: "stable-message", roomSequence: 1, revision: 1,
+            text: "hello", createdAt: .now, isOutgoing: false, isWithdrawn: false)
+        let source = V2ConversationDataSourceFake(summaries: [], messages: [message])
+        let store = makeConversationDetailStore(dataSource: source, sender: nil, userID: "current-user", roomID: "room-a")
+        await store.refresh()
+        let firstRevision = store.timelineRevision
+        let readsAfterInitialLoad = await source.messageRequestCount()
+
+        await store.refresh(scopes: .conversationTimeline)
+        #expect(store.timelineRevision == firstRevision)
+        #expect(await source.messageRequestCount() == readsAfterInitialLoad + 1)
+
+        let readsBeforeMetadata = await source.messageRequestCount()
+        await store.refresh(scopes: .conversationMetadata)
+        #expect(await source.messageRequestCount() == readsBeforeMetadata)
+        #expect(store.timelineRevision == firstRevision)
+    }
+
     @Test func conversationSnapshotMetricRequiresAnActualAppliedListRead() async {
         let source = V2ConversationDataSourceFake(summaries: [
             .init(id: "metric-room", title: "Room", preview: "Message", lastActivity: .now, isOutgoing: false, kind: .unknown)
@@ -1334,6 +1353,15 @@ struct V2ConversationStoreTests {
         await store.refresh()
 
         #expect(await reporter.requests() == [.init(roomID: "room-a", roomSequence: 11)])
+
+        let revision = store.timelineRevision
+        await source.setReadCheckpoint(.init(knownHead: 12, appliedRoomSequence: 12))
+        await store.refresh(scopes: .conversationTimeline)
+        #expect(store.timelineRevision == revision)
+        await source.setReadCheckpoint(.init(knownHead: 13, appliedRoomSequence: 13))
+        await store.refresh(scopes: .conversationMetadata)
+        #expect(store.timelineRevision == revision)
+        #expect(await reporter.requests().map(\.roomSequence) == [11, 12, 13])
     }
 
     @Test func roomEntryOnlyAdvancesToWhatTheDeviceAlreadyApplied() async {

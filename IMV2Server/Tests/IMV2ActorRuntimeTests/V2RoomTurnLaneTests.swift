@@ -159,6 +159,29 @@ struct V2RoomTurnLaneTests {
         try await fixture.waitForBudget(0)
     }
 
+    @Test("durable send operations batch together but remain separated from legacy sends")
+    func durableOperationSendBatchBoundaries() async throws {
+        let fixture = try Fixture()
+        let hold = fixture.submit(.init(id: 0, send: false, hold: true))
+        await fixture.executor.waitForStarts(1)
+        let first = fixture.submit(.init(id: 1, send: false, operationSend: true))
+        try await fixture.waitForQueue(1)
+        let second = fixture.submit(.init(id: 2, send: false, operationSend: true))
+        try await fixture.waitForQueue(2)
+        let legacy = fixture.submit(.init(id: 3, send: true))
+        try await fixture.waitForQueue(3)
+        let last = fixture.submit(.init(id: 4, send: false, operationSend: true))
+        try await fixture.waitForQueue(4)
+        await fixture.executor.release()
+        _ = try await hold.value
+        _ = try await first.value
+        _ = try await second.value
+        _ = try await legacy.value
+        _ = try await last.value
+        #expect(await fixture.executor.starts == [[0], [1, 2], [3], [4]])
+        try await fixture.waitForBudget(0)
+    }
+
     @Test("a fresh send leaves its collection window to the shared owner batcher")
     func collectionWindowRemainsForOwnerBatcher() async throws {
         let fixture = try Fixture(configuration: .init(batchWaitMilliseconds: 1_000))
@@ -370,6 +393,7 @@ struct V2RoomTurnLaneTests {
     private struct Command: Codable, Sendable {
         let id: Int
         let send: Bool
+        var operationSend = false
         var hold = false
         var unknown = false
         var profileTargets: Int? = nil
@@ -394,6 +418,7 @@ struct V2RoomTurnLaneTests {
                 ),
                 configuration: config, budget: budget,
                 classify: { command in
+                    if command.operationSend { return .sendOperation }
                     if command.send { return .send }
                     if let count = command.profileTargets { return .profileVisibility(targetCount: count) }
                     return .barrier

@@ -2030,12 +2030,13 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
     public func conversationTimelinePage(
         in roomID: RoomID,
         before cursor: V2ClientTimelineCursor? = nil,
-        limit: Int
+        limit: Int,
+        presentationUserID: UserID? = nil
     ) throws -> V2ClientConversationTimelinePage {
         guard (1 ... 10_000).contains(limit) else { throw V2ClientProjectionError.invalidMessagePayload }
         return try databasePool.read { db in
             let candidates = try Self.timelineCandidates(db: db, roomID: roomID, cursor: cursor, newer: false, limit: limit + 1)
-            return try Self.timelinePage(db: db, roomID: roomID, selected: Array(candidates.prefix(limit).reversed()), hasOlder: candidates.count > limit)
+            return try Self.timelinePage(db: db, roomID: roomID, selected: Array(candidates.prefix(limit).reversed()), hasOlder: candidates.count > limit, presentationUserID: presentationUserID)
         }
     }
 
@@ -2055,7 +2056,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         for userID: UserID,
         around messageID: MessageID,
         before: Int,
-        after: Int
+        after: Int,
+        aggregateReactions: Bool = false
     ) throws -> V2ClientTimelineLocation {
         guard (0..<800).contains(before), (0..<800).contains(after), before + after + 1 <= 800 else {
             throw V2ClientProjectionError.invalidMessagePayload
@@ -2079,7 +2081,7 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             let older = try Self.timelineCandidates(db: db, roomID: roomID, cursor: anchor.cursor, newer: false, limit: before + 1)
             let newer = try Self.timelineCandidates(db: db, roomID: roomID, cursor: anchor.cursor, newer: true, limit: after + 1)
             let selected = Array(older.prefix(before).reversed()) + [anchor] + Array(newer.prefix(after))
-            let page = try Self.timelinePage(db: db, roomID: roomID, selected: selected, hasOlder: older.count > before)
+            let page = try Self.timelinePage(db: db, roomID: roomID, selected: selected, hasOlder: older.count > before, presentationUserID: aggregateReactions ? userID : nil)
             return .found(.init(page: page, newerBoundary: newer.count > after ? newer[after].cursor : nil))
         }
     }
@@ -2105,32 +2107,49 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         return Array((messages + activities).sorted(by: newer ? TimelinePageCandidate.olderFirst : TimelinePageCandidate.newerFirst).prefix(limit))
     }
 
-    private static func timelinePage(db: Database, roomID: RoomID, selected: [TimelinePageCandidate], hasOlder: Bool) throws -> V2ClientConversationTimelinePage {
+    private static func timelinePage(db: Database, roomID: RoomID, selected: [TimelinePageCandidate], hasOlder: Bool, presentationUserID: UserID? = nil) throws -> V2ClientConversationTimelinePage {
         let messages = selected.compactMap(\.message)
         let activities = selected.compactMap(\.activity)
         let messageIDs = messages.map(\.messageID)
 
         let reactions: [V2ClientMessageReaction]
+        let reactionSummaries: [V2ClientMessageReactionSummary]?
         let pinnedMessageIDs: Set<MessageID>
         let favoritedMessageIDs: Set<MessageID>
         if messageIDs.isEmpty {
             reactions = []
+            reactionSummaries = presentationUserID == nil ? nil : []
             pinnedMessageIDs = []
             favoritedMessageIDs = []
         } else {
             let placeholders = Array(repeating: "?", count: messageIDs.count).joined(separator: ", ")
             let messageArguments = StatementArguments(messageIDs.map(\.rawValue))
-            reactions = try Row.fetchAll(
-                db,
-                sql: "SELECT room_id, message_id, actor_user_id, reaction FROM v2_message_reactions WHERE message_id IN (\(placeholders)) ORDER BY message_id, reaction, actor_user_id",
-                arguments: messageArguments
-            ).map { row in
-                try .init(
-                    roomID: .init(row["room_id"] as String),
-                    messageID: .init(row["message_id"] as String),
-                    actorUserID: .init(row["actor_user_id"] as String),
-                    reaction: row["reaction"]
-                )
+            if let presentationUserID {
+                reactions = []
+                reactionSummaries = try Row.fetchAll(db, sql: """
+                    SELECT message_id, reaction, COUNT(*) AS reaction_count,
+                        MAX(actor_user_id = ?) AS includes_current_user
+                    FROM v2_message_reactions
+                    WHERE message_id IN (\(placeholders))
+                    GROUP BY message_id, reaction ORDER BY message_id, reaction
+                    """, arguments: StatementArguments([presentationUserID.rawValue]) + messageArguments).map { row in
+                        .init(messageID: try .init(row["message_id"] as String), reaction: row["reaction"],
+                              count: row["reaction_count"], includesCurrentUser: row["includes_current_user"])
+                    }
+            } else {
+                reactionSummaries = nil
+                reactions = try Row.fetchAll(
+                    db,
+                    sql: "SELECT room_id, message_id, actor_user_id, reaction FROM v2_message_reactions WHERE message_id IN (\(placeholders)) ORDER BY message_id, reaction, actor_user_id",
+                    arguments: messageArguments
+                ).map { row in
+                    try .init(
+                        roomID: .init(row["room_id"] as String),
+                        messageID: .init(row["message_id"] as String),
+                        actorUserID: .init(row["actor_user_id"] as String),
+                        reaction: row["reaction"]
+                    )
+                }
             }
             pinnedMessageIDs = try Set(String.fetchAll(
                 db,
@@ -2169,7 +2188,8 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             pinnedMessageIDs: pinnedMessageIDs,
             favoritedMessageIDs: favoritedMessageIDs,
             directReadReceipt: directReadReceipt,
-            olderCursor: olderCursor
+            olderCursor: olderCursor,
+            reactionSummaries: reactionSummaries
         )
     }
 

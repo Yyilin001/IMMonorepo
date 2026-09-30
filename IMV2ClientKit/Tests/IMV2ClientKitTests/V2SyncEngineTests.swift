@@ -5014,7 +5014,7 @@ extension V2SyncEngineTests {
     func policyRecoveryNotificationScope() {
         for kind in [DatabaseEvent.Kind.insert, .update, .delete] {
             let change = V2ProjectionTransactionObserver.change(table: "v2_role_policy_recovery_requests", kind: kind)
-            #expect(change.scopes == .conversationDetails)
+            #expect(change.scopes == .conversationMetadata)
             #expect(change.requiresImmediateRefresh == false)
         }
     }

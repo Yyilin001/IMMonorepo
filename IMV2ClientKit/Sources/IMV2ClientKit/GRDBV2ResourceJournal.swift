@@ -166,24 +166,28 @@ extension GRDBV2LocalSyncStore {
         guard (1...256).contains(limit), offset >= 0, offset <= Int.max - limit else { throw V2ResourceJournalError.invalidRecord }
         return try databasePool.write { db in
             try Self.settleAcceptedSendPresentations(roomID: roomID.rawValue, db: db)
-            return try Row.fetchAll(db,sql:"""
-                SELECT i.intent_id,i.text,w.execution_state,w.scheduling_state FROM v2_send_intents i
-                JOIN v2_operation_work w ON w.work_id=i.work_id
-                JOIN v2_message_send_operations m ON m.work_id=w.work_id
-                WHERE i.stage='handedOff' AND i.room_id=? AND \(Self.submittedSendVisibilityPredicate)
-                ORDER BY CASE WHEN w.scheduling_state='finished' AND NOT (w.execution_state='committed' AND m.accepted_projection_observed=0) THEN 1 ELSE 0 END,
-                    CASE WHEN w.scheduling_state='finished' AND NOT (w.execution_state='committed' AND m.accepted_projection_observed=0) THEN -i.created_at ELSE i.created_at END,
-                    i.intent_id LIMIT ? OFFSET ?
-                """,arguments:[roomID.rawValue,limit,offset]).map { row in
-                    guard let id=UUID(uuidString:row["intent_id"]) else { throw V2ResourceJournalError.invalidRecord }
-                    let state:String=row["execution_state"],schedule:String=row["scheduling_state"]
-                    let status:V2SubmittedSendIntent.Status = state=="committed" ? .acceptedAwaitingProjection : schedule=="needsAttention" ? .needsAttention
-                        : state=="closed" ? .closed : state=="expiredUnsubmitted" ? .expiredUnsubmitted
-                        : state=="rejected" ? .rejected : state=="conflicted" ? .needsAttention
-                        : state=="awaitingConfirmation" || state=="submitting" || state=="processing" ? .confirmingOutcome : .pending
-                    return .init(id:id,text:row["text"],status:status)
-                }
+            return try Self.readSubmittedSendIntents(in: roomID, limit: limit, offset: offset, db: db)
         }
+    }
+
+    static func readSubmittedSendIntents(in roomID: RoomID, limit: Int, offset: Int, db: Database) throws -> [V2SubmittedSendIntent] {
+        return try Row.fetchAll(db,sql:"""
+            SELECT i.intent_id,i.text,w.execution_state,w.scheduling_state FROM v2_send_intents i
+            JOIN v2_operation_work w ON w.work_id=i.work_id
+            JOIN v2_message_send_operations m ON m.work_id=w.work_id
+            WHERE i.stage='handedOff' AND i.room_id=? AND \(Self.submittedSendVisibilityPredicate)
+            ORDER BY CASE WHEN w.scheduling_state='finished' AND NOT (w.execution_state='committed' AND m.accepted_projection_observed=0) THEN 1 ELSE 0 END,
+                CASE WHEN w.scheduling_state='finished' AND NOT (w.execution_state='committed' AND m.accepted_projection_observed=0) THEN -i.created_at ELSE i.created_at END,
+                i.intent_id LIMIT ? OFFSET ?
+            """,arguments:[roomID.rawValue,limit,offset]).map { row in
+                guard let id=UUID(uuidString:row["intent_id"]) else { throw V2ResourceJournalError.invalidRecord }
+                let state:String=row["execution_state"],schedule:String=row["scheduling_state"]
+                let status:V2SubmittedSendIntent.Status = state=="committed" ? .acceptedAwaitingProjection : schedule=="needsAttention" ? .needsAttention
+                    : state=="closed" ? .closed : state=="expiredUnsubmitted" ? .expiredUnsubmitted
+                    : state=="rejected" ? .rejected : state=="conflicted" ? .needsAttention
+                    : state=="awaitingConfirmation" || state=="submitting" || state=="processing" ? .confirmingOutcome : .pending
+                return .init(id:id,text:row["text"],status:status)
+            }
     }
 
     /// The ready preflight and outbox insert share one transaction. Once handed off,

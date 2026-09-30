@@ -23,6 +23,7 @@ public actor V2RoomRecoveryEngine {
     private let store: GRDBV2LocalSyncStore
     private let latestVisible: any V2ClientRoomLatestVisibleTransport
     private let groupEvents: V2GroupEventSyncEngine
+    private let contentRecoveryConcurrency: Int
     private let now: @Sendable () -> Date
     private var scope: V2RoomRecoveryScope?
     private var epoch: UUID?
@@ -36,8 +37,11 @@ public actor V2RoomRecoveryEngine {
     public private(set) var phase: V2RoomRecoveryPhase = .idle
 
     public init(transport: any V2ClientRoomRecoveryTransport, latestVisible: any V2ClientRoomLatestVisibleTransport, store: GRDBV2LocalSyncStore,
-                groupEvents: V2GroupEventSyncEngine, now: @escaping @Sendable () -> Date = Date.init) {
+                groupEvents: V2GroupEventSyncEngine, contentRecoveryConcurrency: Int = 4,
+                now: @escaping @Sendable () -> Date = Date.init) {
+        precondition((1...16).contains(contentRecoveryConcurrency), "contentRecoveryConcurrency must be between 1 and 16")
         self.transport = transport; self.latestVisible = latestVisible; self.store = store; self.groupEvents = groupEvents; self.now = now
+        self.contentRecoveryConcurrency = contentRecoveryConcurrency
     }
 
     /// Establishes the listener without reading a directory or processing old work.
@@ -262,26 +266,55 @@ public actor V2RoomRecoveryEngine {
         let ready = try await store.roomRecoveryWork(scope: scope, limit: rooms, oldestFirst: batches % 4 == 0, now: now())
         var processed = 0
         var appliedEvents = 0
+        var contentWork: [V2RoomRecoveryWork] = []
         for item in ready where !item.requiresState {
             try Task.checkCancellation()
             if try await store.finishRoomRecoveryWork(item) { processed += 1; continue }
+            contentWork.append(item)
+        }
+        if !contentWork.isEmpty {
             phase = .catchingUp
-            do {
-                let content = try await groupEvents.synchronizeOnePage(roomID: item.roomID) { [store] page in
-                    try await store.applyRoomRecoveryPage(page, work: item)
+            // A sliding window keeps independent rooms busy while bounding network
+            // and projection work. Per-room ordering remains owned by groupEvents.
+            try await withThrowingTaskGroup(of: ContentRecoveryResult.self) { group in
+                var next = contentWork.makeIterator()
+                func submit(_ item: V2RoomRecoveryWork) {
+                    group.addTask { [groupEvents, store] in
+                        do {
+                            let content = try await groupEvents.synchronizeOnePage(roomID: item.roomID) { [store] page in
+                                try await store.applyRoomRecoveryPage(page, work: item)
+                            }
+                            return .applied(content.appliedEventCount)
+                        } catch V2RealtimeTransportError.server(code: "FORBIDDEN", retryable: false, retryAfterSeconds: _, currentRevision: _) {
+                            try Task.checkCancellation()
+                            _ = try await store.commitRoomRecoveryUnavailable(item)
+                            return .denied
+                        }
+                    }
                 }
-                appliedEvents += content.appliedEventCount
-            } catch V2RealtimeTransportError.server(code: "FORBIDDEN", retryable: false, retryAfterSeconds: _, currentRevision: _) {
-                try Task.checkCancellation()
-                // A denial concerns this observation only. The transaction checks
-                // account, request, membership and state fences before revoking it.
-                _ = try await store.commitRoomRecoveryUnavailable(item)
+                for _ in 0..<min(contentRecoveryConcurrency, contentWork.count) {
+                    guard let item = next.next() else { break }
+                    submit(item)
+                }
+                while let result = try await group.next() {
+                    processed += 1
+                    switch result {
+                    case .applied(let count): appliedEvents += count
+                    case .denied: break
+                    }
+                    try Task.checkCancellation()
+                    if let item = next.next() { submit(item) }
+                }
             }
-            processed += 1
         }
         let scan = try await store.roomRecoveryScan(scope: scope)
         // Directory completion alone cannot establish live: the personal stream
         // and all delayed/unfinished work must also be proven complete.
         return .init(directoryPages: scanned, processedRooms: processed, directoryComplete: scan.directoryComplete, appliedEventCount: appliedEvents)
     }
+}
+
+private enum ContentRecoveryResult: Sendable {
+    case applied(Int)
+    case denied
 }

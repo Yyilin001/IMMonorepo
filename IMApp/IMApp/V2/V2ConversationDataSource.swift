@@ -192,13 +192,14 @@ actor V2GRDBConversationDataSource: V2ConversationTitleReading, V2ConversationDa
             before: cursor.map {
                 .init(timelineSequence: $0.timelineSequence, itemID: $0.itemID, kind: $0.kind)
             },
-            limit: limit
+            limit: limit,
+            presentationUserID: try .init(userID)
         )
         return Self.timelinePage(page, userID: userID)
     }
 
     func timelineWindow(in roomID: String, for userID: String, around messageID: String, before: Int, after: Int) async throws -> V2ConversationTimelineLocation {
-        let location = try await localStore.conversationTimelineWindow(in: RoomID(roomID), for: UserID(userID), around: MessageID(messageID), before: before, after: after)
+        let location = try await localStore.conversationTimelineWindow(in: RoomID(roomID), for: UserID(userID), around: MessageID(messageID), before: before, after: after, aggregateReactions: true)
         switch location {
         case .unavailable: return .unavailable
         case .withdrawn: return .withdrawn
@@ -211,6 +212,7 @@ actor V2GRDBConversationDataSource: V2ConversationTitleReading, V2ConversationDa
 
     private static func timelinePage(_ page: V2ClientConversationTimelinePage, userID: String) -> V2ConversationTimelinePage {
         let reactionsByMessageID = Dictionary(grouping: page.reactions, by: \.messageID)
+        let summariesByMessageID = page.reactionSummaries.map { Dictionary(grouping: $0, by: \.messageID) }
         let renderedMessages: [V2ConversationTimelineItem] = page.messages.map { message in
             .message(
                 Self.messageItem(
@@ -219,7 +221,8 @@ actor V2GRDBConversationDataSource: V2ConversationTitleReading, V2ConversationDa
                     reactions: reactionsByMessageID[message.messageID] ?? [],
                     pinnedMessageIDs: page.pinnedMessageIDs,
                     favoritedMessageIDs: page.favoritedMessageIDs,
-                    directReceipt: page.directReadReceipt
+                    directReceipt: page.directReadReceipt,
+                    reactionSummary: summariesByMessageID.map { $0[message.messageID] ?? [] }
                 ),
                 timelineSequence: message.timelineSequence
             )
@@ -317,7 +320,8 @@ actor V2GRDBConversationDataSource: V2ConversationTitleReading, V2ConversationDa
         reactions: [V2ClientMessageReaction],
         pinnedMessageIDs: Set<MessageID>,
         favoritedMessageIDs: Set<MessageID>,
-        directReceipt: V2DirectReadReceiptProjection?
+        directReceipt: V2DirectReadReceiptProjection?,
+        reactionSummary: [V2ClientMessageReactionSummary]? = nil
     ) -> V2ConversationMessageItem {
         .init(
             id: message.messageID.rawValue,
@@ -332,7 +336,9 @@ actor V2GRDBConversationDataSource: V2ConversationTitleReading, V2ConversationDa
             createdAt: message.createdAt,
             isOutgoing: message.senderUserID.rawValue == userID,
             isWithdrawn: message.isWithdrawn,
-            reactions: reactionSummaries(reactions, currentUserID: userID),
+            reactions: reactionSummary.map { summaries in
+                summaries.map { .init(reaction: $0.reaction, count: $0.count, includesCurrentUser: $0.includesCurrentUser) }
+            } ?? reactionSummaries(reactions, currentUserID: userID),
             isReadByPeer: message.senderUserID.rawValue == userID
                 && (directReceipt?.readThroughRoomSequence ?? 0) >= message.roomSequence,
             isFavorited: favoritedMessageIDs.contains(message.messageID),

@@ -74,6 +74,14 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
         }
     }
 
+    func executeSendOperationBatch(_ commands: [V2MessageSendOperationCommand]) async throws -> [V2RoomMessagingResult] {
+        guard let sendOperations else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+        do {
+            return try await sendOperations.sendBatch(commands, token: token,
+                capacityProfile: capacityProfile, identifiers: identifiers, now: now)
+        } catch { throw v2NormalizeMessageOperationClosed(error) }
+    }
+
     func accept(_ request: V2RoomWriteRequest) async throws -> V2RoomMessagingResult {
         do {
             return .send(.init(try await writes.accept(command: request.command,

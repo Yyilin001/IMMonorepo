@@ -6,12 +6,12 @@ import Synchronization
 /// 失效只是「请重新读取持久化投影」的提示，绝不是业务事件本身。
 public struct V2ProjectionScopes: OptionSet, Equatable, Sendable {
     /// 位掩码原始值。
-    public let rawValue: UInt8
+    public let rawValue: UInt16
 
     /// 以位掩码构造作用域集合。
     ///
     /// - Parameter rawValue: 位掩码。
-    public init(rawValue: UInt8) { self.rawValue = rawValue }
+    public init(rawValue: UInt16) { self.rawValue = rawValue }
     /// 会话列表。
     public static let conversations = Self(rawValue: 1 << 0)
     /// 会话详情。
@@ -26,8 +26,12 @@ public struct V2ProjectionScopes: OptionSet, Equatable, Sendable {
     public static let groupNicknames = Self(rawValue: 1 << 5)
     /// 联系人备注版本变化；核对当前关注对象的独立备注版本。
     public static let contactAliases = Self(rawValue: 1 << 6)
+    /// 时间线数据变化（消息、反应、回执与发送状态）。
+    public static let conversationTimeline = Self(rawValue: 1 << 7)
+    /// 会话详情元数据变化（标题、能力、公告、权限）。
+    public static let conversationMetadata = Self(rawValue: 1 << 8)
     /// 全部作用域。
-    public static let all: Self = [.conversations, .conversationDetails, .contacts, .privacy, .presentations, .groupNicknames, .contactAliases]
+    public static let all: Self = [.conversations, .conversationDetails, .contacts, .privacy, .presentations, .groupNicknames, .contactAliases, .conversationTimeline, .conversationMetadata]
 }
 
 /// 一次投影变更摘要。
@@ -37,19 +41,22 @@ public struct V2ProjectionChange: Equatable, Sendable {
     /// 是否要求立即刷新（相对可延迟的常规刷新）。
     public let requiresImmediateRefresh: Bool
     public let conversationCommit: V2ConversationCommitMeasurement?
+    /// 已确定受影响的房间；nil 表示全局或无法安全确定范围。
+    public let roomIDs: Set<String>?
 
     /// 保存变更摘要。
     ///
     /// - Parameters:
     ///   - scopes: 受影响的作用域。
     ///   - requiresImmediateRefresh: 是否要求立即刷新。
-    public init(scopes: V2ProjectionScopes, requiresImmediateRefresh: Bool, conversationCommit: V2ConversationCommitMeasurement? = nil) {
+    public init(scopes: V2ProjectionScopes, requiresImmediateRefresh: Bool, conversationCommit: V2ConversationCommitMeasurement? = nil, roomIDs: Set<String>? = nil) {
         self.conversationCommit = conversationCommit
+        self.roomIDs = roomIDs
         self.scopes = scopes
         self.requiresImmediateRefresh = requiresImmediateRefresh
     }
     public static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.scopes == rhs.scopes && lhs.requiresImmediateRefresh == rhs.requiresImmediateRefresh
+        lhs.scopes == rhs.scopes && lhs.requiresImmediateRefresh == rhs.requiresImmediateRefresh && lhs.roomIDs == rhs.roomIDs
     }
     /// 表示全部作用域且要求立即刷新的变更。
     public static let all = Self(scopes: .all, requiresImmediateRefresh: true)
@@ -61,9 +68,18 @@ public struct V2ProjectionChange: Equatable, Sendable {
     /// - Parameter other: 另一份摘要。
     /// - Returns: 合并后的摘要。
     public func merging(_ other: Self) -> Self {
-        .init(scopes: scopes.union(other.scopes),
+        if scopes.isEmpty { return other }
+        if other.scopes.isEmpty { return self }
+        return .init(scopes: scopes.union(other.scopes),
               requiresImmediateRefresh: requiresImmediateRefresh || other.requiresImmediateRefresh,
-              conversationCommit: V2ConversationCommitMeasurement.earliest(conversationCommit, other.conversationCommit))
+              conversationCommit: V2ConversationCommitMeasurement.earliest(conversationCommit, other.conversationCommit),
+              roomIDs: Self.mergedRoomIDs(roomIDs, other.roomIDs))
+    }
+
+    private static func mergedRoomIDs(_ lhs: Set<String>?, _ rhs: Set<String>?) -> Set<String>? {
+        guard let lhs, let rhs else { return nil }
+        let result = lhs.union(rhs)
+        return result.count <= 32 ? result : nil
     }
 }
 

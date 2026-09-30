@@ -64,6 +64,26 @@ struct V2ProjectionRefreshObserverTests {
         #expect(await probe.activeCount == 0)
         await notifier.finish()
     }
+
+    @Test("urgent replacement keeps scopes from the canceled request")
+    func urgentReplacementPreservesScopes() async throws {
+        let probe = ProjectionRefreshProbe()
+        let owner = V2ProjectionRefreshObserver { request in await probe.refresh(request) }
+        let notifier = V2ProjectionChangeNotifier()
+        let observation = Task { await owner.run(await notifier.updates()) }
+        await probe.waitForStarts(1)
+        await probe.release(1)
+        await probe.waitForFinishes(1)
+        owner.submit(.init(generation: 1, requiresImmediateRefresh: false, scopes: .conversationTimeline, roomIDs: ["room-a"]))
+        await probe.waitForStarts(2)
+        owner.submit(.init(generation: 2, requiresImmediateRefresh: true, scopes: .conversationMetadata, roomIDs: ["room-a"]))
+        await probe.waitForStarts(3)
+        #expect(await probe.requests.last?.scopes == [.conversationTimeline, .conversationMetadata])
+        #expect(await probe.requests.last?.roomIDs == ["room-a"])
+        observation.cancel()
+        await observation.value
+        await notifier.finish()
+    }
 }
 
 private actor ProjectionRefreshProbe {
@@ -72,6 +92,7 @@ private actor ProjectionRefreshProbe {
     private(set) var cancelled: [Int] = []
     private(set) var committed: [Int] = []
     private(set) var maximumActive = 0
+    private(set) var requests: [V2ProjectionChangeNotifier.Request] = []
     private var active = Set<Int>()
     private var gates: [Int: CheckedContinuation<Void, Never>] = [:]
     private var arrivals: [(Bool, Int, CheckedContinuation<Void, Never>)] = []
@@ -93,6 +114,10 @@ private actor ProjectionRefreshProbe {
         active.remove(id)
         finished.append(id)
         notifyArrivals()
+    }
+    func refresh(_ request: V2ProjectionChangeNotifier.Request) async {
+        requests.append(request)
+        await refresh()
     }
     func release(_ id: Int) { gates.removeValue(forKey: id)?.resume() }
     private func cancel(_ id: Int) {

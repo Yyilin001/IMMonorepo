@@ -326,6 +326,20 @@ struct V2RoomRecoveryEngineTests {
         await engine.stop()
     }
 
+    @Test func contentRecoveryRunsIndependentRoomsWithinConfiguredBound() async throws {
+        let (store, wire, engine, user) = try await fixture(contentConcurrency: 2)
+        await wire.pauseContent()
+        let run = Task { try await engine.runBudget(userID: user, maximumDirectoryPages: 2) }
+        await wire.waitForConcurrentContentPulls(2)
+        #expect(await wire.maximumConcurrentContentPulls == 2)
+        await wire.releaseContent()
+        let result = try await run.value
+        #expect(result.processedRooms == 2)
+        #expect(try await store.groupEventCursor(roomID: wire.rooms[0]) == 5)
+        #expect(try await store.groupEventCursor(roomID: wire.rooms[1]) == 5)
+        await engine.stop()
+    }
+
     @Test(arguments: ["FORBIDDEN", "UNAVAILABLE"])
     func retryableContentFailureNeverRevokesRoom(code: String) async throws {
         let (store, wire, engine, user) = try await fixture()
@@ -625,7 +639,7 @@ struct V2RoomRecoveryEngineTests {
         await engine.stop()
     }
 
-    private func fixture() async throws -> (GRDBV2LocalSyncStore, RecoveryDriverWire, V2RoomRecoveryEngine, UserID) {
+    private func fixture(contentConcurrency: Int = 4) async throws -> (GRDBV2LocalSyncStore, RecoveryDriverWire, V2RoomRecoveryEngine, UserID) {
         let user = UserID(uuid: UUID())
         let store = try GRDBV2LocalSyncStore(databaseURL: FileManager.default.temporaryDirectory.appending(path: "recovery-driver-\(UUID()).sqlite"),
             installationBinding: .init(value: UUID()), userID: user)
@@ -636,6 +650,7 @@ struct V2RoomRecoveryEngineTests {
         let wire = RecoveryDriverWire()
         let group = V2GroupEventSyncEngine(transport: wire, store: store)
         let engine = V2RoomRecoveryEngine(transport: wire, latestVisible: wire, store: store, groupEvents: group,
+            contentRecoveryConcurrency: contentConcurrency,
             now: { .init(timeIntervalSince1970: 10) })
         return (store, wire, engine, user)
     }
@@ -673,6 +688,23 @@ private actor RecoveryDriverWire: V2ClientRoomRecoveryTransport, V2ClientGroupEv
     nonisolated let rooms = [RoomID(uuid: UUID()), RoomID(uuid: UUID())]
     private(set) var starts = 0
     private(set) var contentPulls = 0
+    private(set) var activeContentPulls = 0
+    private(set) var maximumConcurrentContentPulls = 0
+    private var contentPaused = false
+    private var contentGates: [CheckedContinuation<Void, Never>] = []
+    func pauseContent() { contentPaused = true }
+    func waitForConcurrentContentPulls(_ count: Int) async {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while activeContentPulls < count, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
+    func releaseContent() {
+        contentPaused = false
+        let gates = contentGates
+        contentGates.removeAll()
+        gates.forEach { $0.resume() }
+    }
     private var contentFailure: V2RealtimeTransportError?
     private var contentFailureRoom: RoomID?
     func setContentFailure(_ error: V2RealtimeTransportError?, room: RoomID? = nil) {
@@ -725,6 +757,10 @@ private actor RecoveryDriverWire: V2ClientRoomRecoveryTransport, V2ClientGroupEv
     }
     func pullGroupEvents(roomID: RoomID, afterRoomSequence: UInt64, pageSize: Int) async throws -> V2ClientGroupEventPage {
         contentPulls += 1
+        activeContentPulls += 1
+        maximumConcurrentContentPulls = max(maximumConcurrentContentPulls, activeContentPulls)
+        if contentPaused { await withCheckedContinuation { contentGates.append($0) } }
+        defer { activeContentPulls -= 1 }
         if roomID == (contentFailureRoom ?? rooms[0]), let contentFailure { throw contentFailure }
         let head = roomHeads[roomID] ?? head
         let next = pageAdvance.map { min(head, afterRoomSequence + $0) } ?? head
