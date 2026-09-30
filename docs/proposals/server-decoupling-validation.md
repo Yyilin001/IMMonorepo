@@ -2,6 +2,8 @@
 
 ## 当前范围（2026-09-30）
 
+混合群批次的提交后收尾进一步收敛到 `V2RoomWriteCommitEffects`；这轮 macOS 全包测试目标编译和两项真实 PostgreSQL 原子批次测试通过，覆盖跨房间和同一热房间。日志分别为 `/tmp/imv2-hybrid-effects-build-20260930.log`、`/tmp/imv2-hybrid-effects-tests-20260930.log`。更早的 Linux 与应用栈证据不覆盖这次源码调整。
+
 代码改造、macOS 编译与受影响定向回归已通过；本机 Linux Release、四种一次性应用栈模式、G4/G6 及三数据库定向断链和 owner-a 整库重启专项也已通过。真实远端服务器已停机，验证只使用本机隔离环境。完整故障矩阵和性能对照仍待执行；不能用应用栈冒烟替代。此前 2026-09-28 暂停时中断的原生排空、媒体崩溃和 G4 构建不计为通过。
 
 提交 `943697d7` 调整了 RoomWrite 提交后效果的结果校验顺序。该提交的 macOS 测试目标编译及 `V2RoomWriteCommitEffectsTests` 定向测试通过；当前提交 `e209dbd313317e9ac6a456a7591b578f4e7642bb` 的六个 Linux Release 产品及独立 Host 应用栈也已通过，证据分别为 `~/.codex/virtual-actor-builds/server-decoupling-20260930-current-six-release-r2/result.json` 和下述当前应用栈结果。此前其他模式及数据库故障证据对应更早源码，不能代替这处改动的完整运行验证。运行配置样例检查通过；Account/Gateway/Operator 配置测试 49 项通过，Actor 配置测试 3 项中 2 项通过、1 项因缺少生成的本地部署文件按条件跳过。

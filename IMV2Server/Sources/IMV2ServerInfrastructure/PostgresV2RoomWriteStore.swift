@@ -944,22 +944,9 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
             }
             throw error
         }
-        await shardAdmissionCommandCreditPool.commit(grantedTokens)
         do {
-        var outcomes = Array<V2SendMessageOutcome?>(
-            repeating: nil,
-            count: requests.count
-        )
-        for item in committed {
-            guard outcomes.indices.contains(item.originalIndex) else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            outcomes[item.originalIndex] = try roomWritePersistedAcceptanceOutcome(item.commit.outcome)
-        }
-        guard outcomes.allSatisfy({ $0 != nil }) else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-        return outcomes.compactMap { $0 }
+            return try await commitEffects.finalizeHybridBatch(
+                requests: requests, committed: committed, shardTokens: grantedTokens)
         } catch {
             if activationScope != nil { throw V2RoomTransactionOutcomeUnknown() }
             throw error

@@ -151,6 +151,21 @@ struct V2RoomWriteCommitEffects: Sendable {
         return outcomes
     }
 
+    /// Hybrid batches have already consumed their durable shard reservation when
+    /// SQL commits. Retire those tokens even if response conversion later fails;
+    /// a malformed response must never make committed capacity reusable.
+    func finalizeHybridBatch(
+        requests: [V2RoomWriteRequest],
+        committed: [OrderedRoomWriteCommit],
+        shardTokens: [V2ShardAdmissionCommandCreditPool.Token]
+    ) async throws -> [V2SendMessageOutcome] {
+        guard !ownership.borrowsTransaction, let shardAdmissionCommandCreditPool else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        await shardAdmissionCommandCreditPool.commit(shardTokens)
+        return try orderedOutcomes(requests: requests, committed: committed)
+    }
+
     private func orderedOutcomes(requests: [V2RoomWriteRequest], committed: [OrderedRoomWriteCommit]) throws -> [V2SendMessageOutcome] {
         guard committed.count == requests.count else {
             throw V2RoomWriteStoreError.corruptPersistenceState
