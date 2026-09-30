@@ -331,9 +331,10 @@ class Probe:
         if self.query("owner-a", "SELECT content_revision FROM im_v2.messages") != "2":
             raise RuntimeError("failed control-dependent edit changed content")
         lease_isolated = self.query("owner-a", lease_query).split("|")
+        self.save("control-cut-lease.json", {"before": lease_before,
+            "afterMoreThanLeaseDuration": lease_isolated})
         if lease_isolated != lease_before:
             raise RuntimeError("control edge failure interrupted owner lease renewal")
-        self.save("control-cut-lease.json", {"before": lease_before, "afterMoreThanLeaseDuration": lease_isolated})
         self.restore("control")
         self.mark("control-restored")
         self.wait_file("control-recovered.json")
