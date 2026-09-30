@@ -207,6 +207,10 @@ enum VirtualActorBusinessProbe {
                   configuredShardIDs: ["room-a"])
     }
 
+    private static func invitationSecretIssuer() throws -> V2GroupInviteSecretIssuer {
+        try .init(rawKey: Data((0..<32).map { _ in UInt8.random(in: 0...255) }))
+    }
+
     private static func host() async throws {
         let (resources, database, sql) = try databaseResources()
         guard try await sql.raw("SELECT 1 AS value").first(decoding: CountRow.self)?.value == 1 else {
@@ -224,7 +228,7 @@ enum VirtualActorBusinessProbe {
             sendBatcher: sends,
             membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
             invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
-            invitationSecretIssuer: try .init(base64EncodedKey: required("IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64")),
+            invitationSecretIssuer: try invitationSecretIssuer(),
             receiptProjectionDelivery: NoopProjectionShadow(), capacityProfile: capacity,
             messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
             contentReviewMode: .disabled, queryBatchConfiguration: .init())
@@ -371,7 +375,7 @@ enum VirtualActorBusinessProbe {
             sendBatcher: sends,
             membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
             invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
-            invitationSecretIssuer: try .init(base64EncodedKey: required("IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64")),
+            invitationSecretIssuer: try invitationSecretIssuer(),
             receiptProjectionDelivery: NoopProjectionShadow(), capacityProfile: capacity,
             messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
             contentReviewMode: .disabled, queryBatchConfiguration: .init())
@@ -657,10 +661,12 @@ enum VirtualActorBusinessProbe {
             do {
                 let response = try await ref.call(request, principal: .user(senderID),
                                           deadline: min(deadline, .now + .seconds(12)))
-                guard case .messaging(.sendOperation(let command)) = request,
-                      case .messaging(.sendOperation(.receipt(let proof))) = response,
-                      proof.identity == (try command.identity), proof.fingerprint == (try command.fingerprint) else {
-                    throw ProbeError.unexpectedResponse("missing bound original send proof")
+                if case .messaging(.sendOperation(let command)) = request {
+                    guard case .messaging(.sendOperation(.receipt(let proof))) = response,
+                          proof.identity == (try command.identity),
+                          proof.fingerprint == (try command.fingerprint) else {
+                        throw ProbeError.unexpectedResponse("missing bound original send proof")
+                    }
                 }
                 return response
             } catch {

@@ -244,7 +244,7 @@ def build():
     if MODE == "native":
         scratch = Path(os.environ.get("VA_G6_NATIVE_SCRATCH_DIR", "/tmp/va-receipt-metrics-build"))
         binary = scratch / "debug/VirtualActorBusinessProbe"
-        command(["swift", "build", "--package-path", str(ROOT / "IMV2Server"),
+        command(["swift", "build", "--disable-automatic-resolution", "--package-path", str(ROOT / "IMV2Server"),
                  "--scratch-path", str(scratch), "-j", "2", "--product",
                  "VirtualActorBusinessProbe"], timeout=1200, output=EVIDENCE / "build.log")
     else:
@@ -256,6 +256,7 @@ def build():
         image = os.environ.get("VA_G6_SWIFT_IMAGE", "swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6")
         docker("run", "--rm", "-v", f"{ROOT}:/repo:ro", "-v", f"{scratch}:/build",
                "-w", "/repo/IMV2Server", image, "timeout", "2400", "swift", "build",
+               "--disable-automatic-resolution",
                "--scratch-path", "/build", "-c", "debug", "--product",
                "VirtualActorBusinessProbe", "-j", "2", timeout=2450,
                output=EVIDENCE / "build.log")

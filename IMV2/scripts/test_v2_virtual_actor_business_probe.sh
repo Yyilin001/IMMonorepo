@@ -235,7 +235,7 @@ if [[ "$mode" == linux ]]; then
   dc run --rm --name "$prefix-build" \
     -v "$repo_root:/repo:ro" -v "$VA_G4_LINUX_SCRATCH_DIR:/build" \
     -w /repo/IMV2Server "$swift_image" \
-    timeout 2400 swift build --scratch-path /build -c debug \
+    timeout 2400 swift build --disable-automatic-resolution --scratch-path /build -c debug \
       --product VirtualActorBusinessProbe -j 2 \
     > "$evidence_dir/linux-debug-build.log" 2>&1
   binary=/build/debug/VirtualActorBusinessProbe
@@ -252,7 +252,7 @@ import sys
 repository, output = sys.argv[1:]
 with open(output, "wb") as log:
     process = subprocess.Popen(
-        ["swift", "build", "--package-path", repository + "/IMV2Server",
+        ["swift", "build", "--disable-automatic-resolution", "--package-path", repository + "/IMV2Server",
          "--jobs", "2", "--product", "VirtualActorBusinessProbe"],
         stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     try:
