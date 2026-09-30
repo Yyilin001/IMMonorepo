@@ -4,7 +4,7 @@
 
 代码改造、macOS 编译与受影响定向回归已通过；本机 Linux Release、四种一次性应用栈模式、G4/G6 及三数据库定向断链和 owner-a 整库重启专项也已通过。真实远端服务器已停机，验证只使用本机隔离环境。完整故障矩阵和性能对照仍待执行；不能用应用栈冒烟替代。此前 2026-09-28 暂停时中断的原生排空、媒体崩溃和 G4 构建不计为通过。
 
-提交 `943697d7` 调整了 RoomWrite 提交后效果的结果校验顺序。该提交的 macOS 测试目标编译及 `V2RoomWriteCommitEffectsTests` 定向测试通过；当前提交 `e209dbd313317e9ac6a456a7591b578f4e7642bb` 的六个 Linux Release 产品也已构建通过，证据为 `~/.codex/virtual-actor-builds/server-decoupling-20260930-current-six-release-r2/result.json`。此前应用栈和数据库故障证据对应更早源码，不能代替这处改动的运行验证。运行配置样例检查通过；Account/Gateway/Operator 配置测试 49 项通过，Actor 配置测试 3 项中 2 项通过、1 项因缺少生成的本地部署文件按条件跳过。
+提交 `943697d7` 调整了 RoomWrite 提交后效果的结果校验顺序。该提交的 macOS 测试目标编译及 `V2RoomWriteCommitEffectsTests` 定向测试通过；当前提交 `e209dbd313317e9ac6a456a7591b578f4e7642bb` 的六个 Linux Release 产品及独立 Host 应用栈也已通过，证据分别为 `~/.codex/virtual-actor-builds/server-decoupling-20260930-current-six-release-r2/result.json` 和下述当前应用栈结果。此前其他模式及数据库故障证据对应更早源码，不能代替这处改动的完整运行验证。运行配置样例检查通过；Account/Gateway/Operator 配置测试 49 项通过，Actor 配置测试 3 项中 2 项通过、1 项因缺少生成的本地部署文件按条件跳过。
 
 
 本文记录可复用的验收入口及其执行条件。下方命令是可复用入口，是否已执行以表格与实施记录为准；不能仅因命令存在就视为通过。分批结果见[实施进度](server-decoupling-progress.md)和[Virtual Actor 证据目录](../reviews/virtual-actor/README.md)；源码继续变化后，旧结果不能代替最终验收。每次运行需保存源码 SHA、命令、环境开关、实际 started/passed/skipped 数、退出码和日志。
@@ -95,6 +95,8 @@ CI 另外显式配置 `IMV2_ACTOR_TRANSACTION_*`、`ACTOR_HOST_G2_*`、`ACTOR_PA
 | 独立 Host、两条旧连接跨入口停用账号 | `run-4259400b5da549de8421ab4c4eb3ce96` |
 
 初次运行因冒烟脚本仍要求旧 `/v2/local-media/download/` 路径而失败。服务端签发现行 `/v2/resource-bytes/`，脚本修正后四种模式均重跑通过。该结果不代替 G4/G6 网络分区、全量故障矩阵或性能对照。
+
+当前 `e209dbd3` 六产品构建又运行一次独立 Host 模式：`~/.codex/virtual-actor-builds/server-decoupling-20260930-current-app-run/run-52a09bafb5b342388590a4877cec5802/result.json` 为 `passed=true`，`revision` 与 `productSourceRevision` 均为 `e209dbd3`；`smoke.log` 确认 Gateway 直聊接受与收件方房间日志交付，`actor-http-smoke.log` 确认昵称、邀请、媒体发送及签名下载。Gateway 仅作为 caller，独立 Actor Host 持有实际房间 lease；本次未重复其余三种模式或 G4/G6。一次性容器已由 runner 清理，专用 Colima profile 已停止。
 
 ### P6 worker 与共享资源静态归属审查
 

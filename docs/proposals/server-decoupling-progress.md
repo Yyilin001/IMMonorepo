@@ -15,6 +15,7 @@
 - 同一源码及探针的本机三库复跑包含 `--database-restart`，`~/.codex/virtual-actor-builds/server-decoupling-20260930-db-edge-restart-run/result.json` 为 `passed=true`、`cleanupErrors=[]`。owner-a PostgreSQL 在保留数据和 Actor 进程的条件下实际停止并重启；另一 owner 在停机期间继续处理，恢复后的 caller 重放只产生一份结果，原 lease 仍有效。此结果覆盖该 runner 的三种定向数据库故障，不代表完整故障矩阵。
 - RoomWrite 提交后收尾现先校验单条或整批持久结果，再发布缓存、结算额度与记录热度；修复了结果转换或批量下标异常时先产生进程内效果、随后报告结果不明的顺序问题。提交 `943697d7` 的两条错误路径回归、`V2RoomWriteCommitEffectsTests` 定向测试及 macOS 全包测试目标编译通过。运行配置样例检查和 Account/Gateway/Operator/Actor 配置定向测试也通过；配置测试中一项需生成本地部署文件的用例按条件跳过。
 - 当前提交 `e209dbd313317e9ac6a456a7591b578f4e7642bb` 在干净源码 checkout 中完成六个 Linux Release 产品构建，`~/.codex/virtual-actor-builds/server-decoupling-20260930-current-six-release-r2/result.json` 为 `passed=true`，记录锁文件及每个产品哈希。首次使用空 SwiftPM scratch 的构建在依赖获取阶段因容器缓存目录缺失失败，未进入源码编译；复用已锁定依赖的 scratch 后通过。此构建不替代当前提交的运行与性能验收。
+- 同一 `e209dbd3` 源码与六产品构建在本机一次性独立 Host 应用栈通过，`~/.codex/virtual-actor-builds/server-decoupling-20260930-current-app-run/run-52a09bafb5b342388590a4877cec5802/result.json` 为 `passed=true`，模式为 `remote-gateway`。Gateway 仅作为 caller，直聊接受与收件方房间日志交付通过；Account HTTPS、Operator 禁号、TLS、私有指标及 Actor HTTP 昵称、邀请、媒体发送/下载均通过。该运行只覆盖当前源码的这一种模式，其他故障与性能结果仍按各自源码版本解释。
 - 真实远端服务器已停机，不属于本轮验证。性能基线对照与完整故障矩阵仍未执行，因此 P6 整体验收尚未完成。
 
 ## 代码收尾结果（2026-09-29）
@@ -55,7 +56,7 @@
 | P3 | 房间业务执行与 PostgreSQL 适配分离，工厂组装五类能力；本机 G4/G6 接管与围栏通过 | 其余生命周期/取消矩阵待最终验收 |
 | P4 | scalar/direct fast/rich batch/hybrid/forward 路径、授权与事务协调、提交后处理及组合状态已收拢；提交后效果先校验结果；原生故障定向回归通过 | 扩展故障矩阵与热点性能对照尚未完成 |
 | P5 | Contracts/Application/Infrastructure/Gateway/HTTP 已独立；旧 Server 收敛为 15 个组装/配置文件；当前源码的六个 Linux Release 产品和运行配置定向检查通过 | 完整受影响测试仍待最终验收 |
-| P6 | 原生跨库、Host 恢复、COMMIT ACK-loss、SIGKILL 定向场景，本机四种应用栈模式、G4/G6、独立 control/owner 链路断开及 owner-a PostgreSQL 重启已通过 | 完整故障矩阵与性能对照按此前要求暂缓，整体验收未完成 |
+| P6 | 原生跨库、Host 恢复、COMMIT ACK-loss、SIGKILL 定向场景，本机四种应用栈模式、G4/G6、独立 control/owner 链路断开及 owner-a PostgreSQL 重启已通过；当前源码另通过独立 Host 应用栈 | 完整故障矩阵与性能对照按此前要求暂缓，整体验收未完成 |
 
 源码边界脚本 `scripts/check_v2_server_boundaries.py` 已接入 `run_v2_swift_tests.sh`。初始版本的 33 项资源应用层与 HTTP 具体 Store 依赖已消除，当前例外清单为空。该脚本是源码模式检查；它不替代编译器依赖约束、行为测试或事务一致性验证。
 
