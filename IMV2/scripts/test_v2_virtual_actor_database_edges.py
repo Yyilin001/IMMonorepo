@@ -326,8 +326,8 @@ class Probe:
         self.cut("control", "control-cut")
         self.mark("control-cut-start")
         self.wait_file("control-cut-result.json")
-        self.hold_without_effect("owner-a", "SELECT count(*) FROM im_v2.message_edit_operations "
-            f"WHERE operation_id = '{identifier(301)}'")
+        self.hold_without_effect("owner-a", "SELECT count(*) FROM im_v2.message_mutation_receipts "
+            f"WHERE operation_id = '{identifier(301)}' AND kind = 'editMessage'")
         if self.query("owner-a", "SELECT content_revision FROM im_v2.messages") != "2":
             raise RuntimeError("failed control-dependent edit changed content")
         lease_isolated = self.query("owner-a", lease_query).split("|")
@@ -337,8 +337,8 @@ class Probe:
         self.restore("control")
         self.mark("control-restored")
         self.wait_file("control-recovered.json")
-        if self.query("owner-a", "SELECT count(*) FROM im_v2.message_edit_operations "
-                      f"WHERE operation_id = '{identifier(301)}'") != "1":
+        if self.query("owner-a", "SELECT count(*) FROM im_v2.message_mutation_receipts "
+                      f"WHERE operation_id = '{identifier(301)}' AND kind = 'editMessage'") != "1":
             raise RuntimeError("control recovery was not exactly once")
         lease_recovered = self.query("owner-a", lease_query).split("|")
         self.save("control-recovered-lease.json", {"before": lease_before, "after": lease_recovered})
