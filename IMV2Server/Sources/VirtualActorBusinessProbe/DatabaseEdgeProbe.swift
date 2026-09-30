@@ -64,6 +64,10 @@ enum DatabaseEdgeProbe {
         }
     }
 
+    private static func invitationSecretIssuer() throws -> V2GroupInviteSecretIssuer {
+        try .init(rawKey: Data((0..<32).map { _ in UInt8.random(in: 0...255) }))
+    }
+
     static func run(host: Bool) async throws {
         let name = try required("VA_DB_EDGE_NODE")
         let resources = V2DatabaseResources(eventLoopGroup: MultiThreadedEventLoopGroup(numberOfThreads: 1),
@@ -92,7 +96,7 @@ enum DatabaseEdgeProbe {
                     sendBatcher: batcher,
                     membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
                     invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: control),
-                    invitationSecretIssuer: try .init(base64EncodedKey: required("IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64")),
+                    invitationSecretIssuer: try invitationSecretIssuer(),
                     receiptProjectionDelivery: Shadow(),
                     capacityProfile: .init(id: "standard", limits: .init(
                         maxEligibleMembers: 10, maxCommandsPerWindow: 1000, retryAfterSeconds: 3)),
