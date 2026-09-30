@@ -199,3 +199,18 @@ SQL literals as candidate `c1944b1a103b121cc73b36beceb5348cc465fc88`.
 This source comparison supports a code-movement review; it does not prove
 runtime equivalence. Per the user's current scope, this step compiles products
 and test targets without running database, process-fault or performance tests.
+
+## Local follow-up evidence (2026-09-30)
+
+After the scalar path's thin Store forwarding entry was removed, the macOS
+package and test targets compiled. Focused PostgreSQL checks passed for the
+activation fence and replay, room cursor exhaustion, and direct projection
+sequence exhaustion. A pinned Swift 6.4 Linux image built all six release
+products from source commit `56e45bef53fc30a6e4a4a3e64e3af3d00e9a5f51`.
+The isolated application stack passed both local and separate-Host modes,
+busy-Host SIGTERM, and cross-entry account disable. G4 and G6 separately
+passed Host takeover, replay, multi-Host lease races, and rejection of stale
+business writes. Exact runs and their limits are recorded in the
+[server acceptance matrix](../proposals/server-decoupling-validation.md).
+The broader fault matrix and comparable hot-path performance samples remain
+outstanding, so this evidence does not establish performance parity.

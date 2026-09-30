@@ -16,16 +16,16 @@
 
 ## 服务端模块边界
 
-服务端正在按 SwiftPM target 收拢依赖，实施及验证状态见[解耦记录](proposals/server-decoupling-progress.md)。
+服务端已将 Contracts、Application、Infrastructure、Gateway、HTTP 拆为独立 SwiftPM target；实施及验证状态见[解耦记录](proposals/server-decoupling-progress.md)。
 
 - `IMV2ServerContracts`：领域请求/结果、错误与能力接口，不暴露数据库连接或传输框架类型。
 - `IMV2ServerApplication`：资源、房间及恢复编排、纯策略和指标聚合，通过能力接口访问持久化与外部服务。
-- `IMV2ServerInfrastructure`：PostgreSQL、事务围栏、存储/消息适配器及数据库 worker。主体已迁入独立 target，验证状态见实施记录。
+- `IMV2ServerInfrastructure`：PostgreSQL、事务围栏、存储/消息适配器及数据库 worker。
 - `IMV2ServerGateway`：TLS/NIO 会话、公共 protobuf 映射、命令分派与帧预算。
 - `IMV2ServerHTTP`：认证提取、输入解码、业务接口调用及 HTTP 响应/文件流映射。
 - `IMV2Server` 与 `IMV2ActorApplication`：进程配置、具体能力接线、共享资源及启动/关闭。旧 Server 已收敛为 15 个配置和组装文件。
 
-传输层和基础设施依赖内层契约及应用逻辑；内层不依赖旧 Server。RoomWrite 的事务内路径借用连接，事务、提交结果分类及提交后额度/缓存处理由明确的所有者管理。源码边界检查与依赖图辅助检查这些约束，行为及事务正确性仍由构建和定向运行验证。
+传输层和基础设施依赖内层契约及应用逻辑；内层不依赖旧 Server。RoomWrite 的事务内路径借用连接，事务、提交结果分类及提交后额度/缓存处理由明确的所有者管理。源码边界、macOS 编译、本机 Linux 六产品构建、四种应用栈模式及 G4/G6 独立进程故障验证已通过；完整故障矩阵和性能对照仍见[验收矩阵](proposals/server-decoupling-validation.md)。
 
 ## 账户网络与专属安全恢复
 

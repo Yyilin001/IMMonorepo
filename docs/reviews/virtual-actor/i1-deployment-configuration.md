@@ -1,6 +1,6 @@
 # Room Actor 应用配置
 
-Gateway 的生产入口已经使用 RoomRef；Account 接线仍在集成。每个需要调用或承载房间的进程都必须提供 `IMV2_ROOM_ACTOR_CONFIGURATION_FILE`。这个文件固定服务签名公钥、可信 hostID、节点 DNS 名与端口、允许访问的 shardID、容量上限及 PEM 文件路径。启动时缺少文件或信任映射不一致会失败，不会退回原房间 writer。
+Gateway 与 Account 的生产入口均使用 RoomRef；Gateway 可承载房间或只作为 caller，Account 为 caller。每个需要调用或承载房间的进程都必须提供 `IMV2_ROOM_ACTOR_CONFIGURATION_FILE`。这个文件固定服务签名公钥、可信 hostID、节点 DNS 名与端口、允许访问的 shardID、容量上限及 PEM 文件路径。启动时缺少文件或信任映射不一致会失败，不会退回原房间 writer。
 
 ## 本地生成
 
@@ -21,7 +21,7 @@ python3 IMV2/scripts/prepare_v2_room_actor_configuration.py \
 
 ## 邀请令牌密钥
 
-Account 与所有承载房间的 Gateway 必须从部署 secret 配置读取相同的 `IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64`，Base64 解码后至少 32 字节；缺失或无效会阻止启动。它与 Actor TLS、签名密钥及 access-token 密钥分开管理，普通重启不得重新生成。正式工具 `VirtualActorBusinessProbe` 也要求此环境变量。
+Account 与所有承载房间的 Gateway 必须从部署 secret 配置读取相同的 `IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64`，Base64 解码后至少 32 字节；缺失或无效会阻止启动。它与 Actor TLS、签名密钥及 access-token 密钥分开管理，普通重启不得重新生成。仅用于隔离故障验证的 `VirtualActorBusinessProbe` 在构造测试 Host 时生成临时密钥；探针不执行跨 Host 邀请流程，也不读取部署密钥。
 
 本地 Account/Gateway Compose 均读取同一个 `.env.local`；其示例与本地配置检查已包含该字段。部署模板位于 `IMV2Server/.env.example`，占位值须由部署 secret 注入替换，不能直接用于启动。
 
@@ -33,4 +33,4 @@ Account 与所有承载房间的 Gateway 必须从部署 secret 配置读取相�
 
 应用停止监听后先停止/排空工作器与连接，再等待 RoomDirectory 的实际 owner/lease 查询和 Cluster/Host 的实际请求结束，最后释放数据库池。排空超时会结束进程，不在活跃 SQL 下释放共享资源。本地 Compose 为这个关闭顺序保留 180 秒。
 
-这些说明和生成器不是运行部署的验收记录。当前运行证据见 [组合阶段证据](i1-composition-progress-evidence.md)；完整多进程业务与故障矩阵仍按计划验证。
+这些说明和生成器不是生产部署批准。本机应用栈及 G4/G6 多进程故障证据见[服务端验收矩阵](../../proposals/server-decoupling-validation.md)；完整故障矩阵与性能对照仍未完成。
