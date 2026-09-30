@@ -18,10 +18,11 @@ struct V2RoomWriteCommitEffects: Sendable {
         cacheKey: V2DirectSendPolicyCache.Key,
         commit: RoomWriteCommit
     ) async throws -> V2SendMessageOutcome {
+        let outcome = try roomWritePersistedAcceptanceOutcome(commit.outcome)
         // The bound operation still owns the surrounding transaction. Its receipt
         // insert can fail, so no process cache may observe this provisional write.
         if ownership.borrowsTransaction {
-            return try roomWritePersistedAcceptanceOutcome(commit.outcome)
+            return outcome
         }
         let cacheStartedAt = ContinuousClock.now
         if let entry = commit.directPolicyCacheUpdate {
@@ -61,18 +62,16 @@ struct V2RoomWriteCommitEffects: Sendable {
             .cacheFinalization,
             duration: cacheStartedAt.duration(to: .now)
         )
-        return try roomWritePersistedAcceptanceOutcome(commit.outcome)
+        return outcome
     }
 
     func finalize(
         requests: [V2RoomWriteRequest],
         committed: [OrderedRoomWriteCommit]
     ) async throws -> [V2SendMessageOutcome] {
-        guard committed.count == requests.count else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
+        let outcomes = try orderedOutcomes(requests: requests, committed: committed)
         if ownership.borrowsTransaction {
-            return try orderedOutcomes(requests: requests, committed: committed)
+            return outcomes
         }
         let cacheFinalizationStartedAt = ContinuousClock.now
 
@@ -149,10 +148,13 @@ struct V2RoomWriteCommitEffects: Sendable {
             duration: cacheFinalizationStartedAt.duration(to: .now)
         )
 
-        return try orderedOutcomes(requests: requests, committed: committed)
+        return outcomes
     }
 
     private func orderedOutcomes(requests: [V2RoomWriteRequest], committed: [OrderedRoomWriteCommit]) throws -> [V2SendMessageOutcome] {
+        guard committed.count == requests.count else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
         var outcomes = Array<V2SendMessageOutcome?>(repeating: nil, count: requests.count)
         for item in committed {
             guard requests.indices.contains(item.originalIndex) else {
